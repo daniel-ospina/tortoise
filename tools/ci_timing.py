@@ -3905,6 +3905,30 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
 
 # --- rendering --------------------------------------------------------------
 
+def _md_code_span(text: str) -> str:
+    """`text` as a CommonMark code span its own content cannot close.
+
+    A test NODEID is parametrize-controlled and may itself carry backticks —
+    `…guard[<lambda>-`_HOLD_NONE` (the clause is negated)]`. Wrapping that in a
+    single-backtick span closes the span at its first inner backtick, so the
+    remainder re-opens a span whose leading space is MD038 (`no-space-in-code`).
+    Measured on the 2026-11-23 render: **19 new MD038 findings, against ZERO on
+    the same file at the previous head**, which redded the REQUIRED `docs` check
+    on a data-only refresh — the renderer had simply never been fed a nodeid
+    containing a backtick (this week's flake list is mostly
+    `test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-…]`).
+
+    CommonMark: a span opened with N backticks is closed only by a run of
+    EXACTLY N, so N = (longest run in the content) + 1 always holds. Content
+    that begins or ends with a backtick is padded with one space on each side —
+    the documented way to embed an edge backtick, and the renderer strips it.
+    """
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
 def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
               run_id: str, history: list[dict], flakes: list[dict],
               summary_less_legs: list[dict] | None = None,
@@ -4015,7 +4039,12 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
             passed_run = f.get("passed_run_id")
             cell = (f"{f['passed_at']} (`{passed_run}`)" if passed_run
                     else f"{f['passed_at']}")
-            lines.append(f"| `{f['test']}` | `{f['run_id']}` | {cell} |")
+            # ⛔ `_md_code_span`, never a bare `…`: the nodeid is
+            # parametrize-controlled and can contain backticks, which a
+            # single-backtick span cannot hold (19 MD038 findings on the
+            # 2026-11-23 render, `docs` red). See the helper's docstring.
+            lines.append(
+                f"| {_md_code_span(f['test'])} | `{f['run_id']}` | {cell} |")
     else:
         # Asterisk, not underscore: MD049 (`consistent`) keys on the document's
         # FIRST emphasis, and the `*candidate flake*` blockquote above it is

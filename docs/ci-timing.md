@@ -18,7 +18,7 @@ subjects.team: epistemic-team
 - head_sha: `588cf7aeb61f94cc0b5871eee6b2ed8cf2275f1a`
 - created_at: `2026-11-22T21:18:50Z`
 - conclusion: `failure`
-- sample_time: `2026-11-23T04:38:02Z`
+- sample_time: `2026-11-23T05:12:36Z`
 - selection: `event=push&branch=main`, `exclude_pull_requests=true`, cancelled skipped; this sample IS run `45071394329` (created `2026-11-22T21:18:50Z`), and it is not re-labelled as a newer run
 - schema_version: `1`
 
@@ -820,35 +820,35 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 
 | Test | Failed (run) | Passed again (run) |
 |---|---|---|
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_HOLD_NONE` (the clause is negated)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_HOLD_NONE`'s tail lookahead (a qualifier after `hold none`)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (`re.escape` \u2014 the filename's `.` is a wildcard unescaped)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (a qualifier AFTER the name)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (a quantifier replaces the colon)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY`'s tail lookahead (a qualifier between the name and the clause)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-neighbour loop (a number on a line naming the ENTRY)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the `sentence_numbers` arm (a number with NO cite separator)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the `slow_files:` leak arm]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the `surfaces:`-above-`carve_out:` ordering arm]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the absent-or-empty `slow_files:` arm]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the basename comparison (a PATH-PREFIXED entry in `slow_files:`)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the different-capstone arm (`elif carve != [ENTRY]:`)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the doc-wide `_MANIFEST_CITE` arm (a YEAR-shaped number the other two refuse)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the duplicate-key refusal]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the empty-manifest refusal (`_parse_manifest` returns None)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the holds-one arm on the manifest side]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the non-list shape guard (a VALID mapping-shaped `slow_files:`)]` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_the_bundles_cites_resolve_where_the_bundle_says_they_do` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_measure.py::test_the_epic_bundle_cites_the_branch_rederived_resolve` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_verdict_check.py::test_the_probes_line_citations_resolve_too` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_7949_capstone_verdict_check.py::test_the_readmes_line_citations_resolve_to_the_symbols_they_name` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
-| `tests/test_demo_session_read_exclusion_8290.py::test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot` | `43792641690` | 2026-11-23T04:38:02Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_HOLD_NONE` (the clause is negated)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_HOLD_NONE`'s tail lookahead (a qualifier after `hold none`)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (`re.escape` \u2014 the filename's `.` is a wildcard unescaped)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (a qualifier AFTER the name)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (a quantifier replaces the colon)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY`'s tail lookahead (a qualifier between the name and the clause)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-neighbour loop (a number on a line naming the ENTRY)]` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the `sentence_numbers` arm (a number with NO cite separator)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the `slow_files:` leak arm]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the `surfaces:`-above-`carve_out:` ordering arm]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the absent-or-empty `slow_files:` arm]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the basename comparison (a PATH-PREFIXED entry in `slow_files:`)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the different-capstone arm (`elif carve != [ENTRY]:`)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the doc-wide `_MANIFEST_CITE` arm (a YEAR-shaped number the other two refuse)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the duplicate-key refusal]` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the empty-manifest refusal (`_parse_manifest` returns None)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| `tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the holds-one arm on the manifest side]` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-the non-list shape guard (a VALID mapping-shaped `slow_files:`)]`` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| `tests/test_7949_capstone_measure.py::test_the_bundles_cites_resolve_where_the_bundle_says_they_do` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| `tests/test_7949_capstone_measure.py::test_the_epic_bundle_cites_the_branch_rederived_resolve` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| `tests/test_7949_capstone_verdict_check.py::test_the_probes_line_citations_resolve_too` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| `tests/test_7949_capstone_verdict_check.py::test_the_readmes_line_citations_resolve_to_the_symbols_they_name` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
+| `tests/test_demo_session_read_exclusion_8290.py::test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot` | `43792641690` | 2026-11-23T05:12:36Z (`45071394329`) |
 
 ## History (bounded to last 52 samples)
 
 | Sample | Run | Conclusion | Passed | Failed | Error | Skipped | Steps max job (s) |
 |---|---|---|---|---|---|---|---|
-| 2026-11-23T04:38:02Z | 45071394329 | failure | 45904 | 27 | 10 | 324 | 1755 |
+| 2026-11-23T05:12:36Z | 45071394329 | failure | 45904 | 27 | 10 | 324 | 1755 |
 | 2026-11-16T04:44:19Z | 43792641690 | failure | 51282 | 23 | 0 | 257 | 1145 |
 | 2026-11-09T04:46:24Z | 42546828652 | success | 49358 | 0 | 0 | 239 | 1694 |
 | 2026-11-02T05:15:03Z | 41375596528 | success | 41514 | 0 | 0 | 185 | 893 |
