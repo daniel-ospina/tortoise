@@ -3684,8 +3684,8 @@ def _gfm_cells(line: str) -> list[str]:
     `re.split(r"(?<!\\)\|", line)`, which this test used until #14366 review P3-2 —
     cannot tell those apart: it reads a 4-cell row as 3, i.e. it models the failure to
     agree with the gate it stands in for. Same rule, same reason, as
-    `tests/test_attest_census.py::test_no_cell_is_injected`'s local `escaped()` (#10687
-    cycle 2), which was fixed for exactly this blind spot.
+    `tests/test_attest_census.py::test_a_pipe_in_a_record_field_cannot_break_the_table`'s
+    local `escaped()` (#10687 cycle 2), which was fixed for exactly this blind spot.
     """
 
     def escaped(text: str, i: int) -> bool:
@@ -3908,9 +3908,13 @@ def test_the_gfm_cell_model_agrees_with_cmark_on_even_backslash_runs() -> None:
     r"""#14366 review P3-2: the cell model must apply cmark-gfm's escape PARITY.
 
     `_gfm_cells` stands in for the pinned markdownlint gate in the row-count arm above, and
-    a model that disagrees with its gate certifies the wrong thing. The shapes that
-    discriminate it from a single-backslash lookbehind are the ODD-run cases: `\|` is one
-    escaped pipe (3 cells), `\\|` is an escaped backslash then a LIVE delimiter (4 cells).
+    a model that disagrees with its gate certifies the wrong thing. The shape that
+    discriminates it from a single-backslash lookbehind is the EVEN-run case: `\|` is one
+    escaped pipe (3 cells), while `\\|` is an escaped backslash then a LIVE delimiter
+    (4 cells) and the lookbehind reads it as 3. ⛔ The ODD run does NOT discriminate —
+    both models return 3 there (measured), and a fixture built on it alone leaves this
+    pin vacuous; the parity arm below asserts that the pre-fix regex mis-counts the
+    even-run row, which is what makes it bite.
 
     The even-run case is reachable only through the documented trade-away in
     `tools/ci_timing.py` (`_md_display_text` escapes the pipe and adds one more backslash,
