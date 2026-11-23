@@ -2228,6 +2228,20 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
             and "__builtins__" in _string_keys_of(node.args[0], consts)
             and _is_namespace_expr(node.func.value)):
         return True
+    # ⛔ AND THE SAME FETCH SPELLED WITH `getattr` (#14326 review cycle 27, EACH MEASURED GREEN
+    # **and LIVE**: `getattr(globals(), "get")("__builtins__")["exec"](<read>)` and its
+    # `__getitem__` / `pop` twins executed the read, while `globals().get("__builtins__")` is a
+    # REFUSED row and the same fetch over the builtins mapping is refused). `Call(func=Call(
+    # getattr, [receiver, literal]))` is already dispatched in this predicate for the copy
+    # family; here the member set is this axis' own and the receiver is the namespace
+    # expression — the KEY is what makes it this mapping.
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Call)
+            and isinstance(node.func.func, ast.Name) and node.func.func.id == "getattr"
+            and len(node.func.args) >= 2 and node.args
+            and (_string_keys_of(node.func.args[1], consts) & _BUILTINS_MAPPING_READS)
+            and "__builtins__" in _string_keys_of(node.args[0], consts)
+            and _is_namespace_expr(node.func.args[0])):
+        return True
     # ⛔ NO `getattr(<namespace>, "__builtins__")` ARM HERE, AND THE CLAIM THAT MADE ME WRITE ONE
     # WAS FALSE (#14326 review cycle 25, MEASURED: `getattr(globals(), "__builtins__")` raises
     # `AttributeError: 'dict' object has no attribute '__builtins__'` — a `getattr` reads an
@@ -3086,7 +3100,18 @@ def _namespace_rebind_names(node: ast.AST, consts: dict[str, frozenset[str]],
         # already owned — the fetch spelling is the only thing that was not.
         elif (isinstance(node.func, ast.Call) and node.func.args
                 and _callee_names_of(node.func.func) & {"getattr"}
-                and _string_keys_of(node.func.args[-1], consts) & _MAPPING_MUTATORS
+                # ⛔ AND `__setitem__`, THE ONE TOKEN THE SHARED SET DELIBERATELY OMITS
+                # (#14326 review cycle 27, EACH MEASURED GREEN **and LIVE**:
+                # `getattr(builtins.__dict__, "__setitem__")("print", getattr)` and its
+                # `globals()` / `vars()` / `globals()["__builtins__"]` / computed-key twins
+                # reinstated the callee, while `builtins.__dict__.__setitem__(…)`,
+                # `globals().__setitem__(…)` and `__builtins__.__setitem__(…)` are REFUSED rows
+                # — and cycle 26's own comment listed `__setitem__` among them, which was FALSE).
+                # It is added HERE, not to `_MAPPING_MUTATORS`: that set is also consulted with
+                # `_is_namespace_expr` where the single-key vocabulary is handled by its own arm
+                # eighteen lines below, and widening the shared set would move both.
+                and _string_keys_of(node.func.args[-1], consts)
+                & (_MAPPING_MUTATORS | {"__setitem__"})
                 and (_is_namespace_expr(node.func.args[0], namespaces)
                      or _is_builtins_mapping(node.func.args[0], frozenset(), frozenset(),
                                              frozenset(), consts))):
@@ -8170,6 +8195,14 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    _n.get("__builtins__").update({"print": getattr})\n'
             '    print(sdk, "_tortoise_fts_query")'
             '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
+        "a `__setitem__` fetched with `getattr`": (
+            '    import builtins\n'
+            '    getattr(builtins.__dict__, "__setitem__")("print", getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
+        "a KEYED READ through a `getattr`-fetched reader": (
+            '    getattr(globals(), "get")("__builtins__")["exec"]'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a MUTATOR fetched with `getattr`": (
             '    import builtins\n'
             '    getattr(builtins.__dict__, "update")({"print": getattr})\n'
