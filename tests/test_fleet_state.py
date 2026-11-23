@@ -3800,8 +3800,9 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: `poll_started`) plus FIVE inside the sample (`sample_started`, the duration read,
 #: `streak_started`, the span read, the error branch's deadline check) is SEVEN; this is
 #: deliberately BELOW the true count, so a step derived from it still carries the clock with one
-#: read of slack. ⛔ NOT A GUESS, BUT NOT A STATIC PIN EITHER (#12039 cycle 13, F1), in either
-#: direction — MEASURED on copies at this head, implementation unmutated, only this constant moved:
+#: read of slack. ⛔ NOT A GUESS, BUT NOT A STATIC PIN EITHER (#12039 cycle 13, F1) — for a TYPO
+#: in either direction. MEASURED on copies at this head, implementation unmutated, only this
+#: constant moved:
 #: `6 -> 7` leaves `184 passed`, `19` leaves `184 passed`, and `1` and `2` also leave `184 passed`
 #: (they DO move the `max()` below — `10/1 + 0.1 = 10.1` — and still red nothing, because the step
 #: has to pass `_CENSUS_SAMPLE_TIMEOUT_S = 30.0` to change a verdict, which this integer domain
@@ -3828,8 +3829,11 @@ _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 #: WHY the typo is NOT survivable: with the gate not yet qualified at the death sample the poll
 #: keeps going; a moved-below check then meets the already-dead child on that same sample and
 #: breaks to the same outside-signal SKIP the shipped order produces — both orderings agree, and
-#: the arm can no longer distinguish them. (Deleting instead leaves the streak to cross the bound
-#: a sample later and `HarnessDefect` fires, which is why the wrong mutant looked reassuring.)
+#: the arm can no longer distinguish them. (Deleting instead reds at EVERY K for a DIFFERENT reason:
+#: nothing observes the death, so the streak runs on and `HarnessDefect` fires. At the shipped
+#: `K = 5` that happens ON the death sample (`on 2 consecutive samples over 2.50s`); only from
+#: `K = 7` is it genuinely "a sample later" (`K = 8`: count 3, span 3.15 s). Either way it reds,
+#: which is why the wrong mutant looked reassuring.)
 #: SO: no static assertion can pin this constant, and the `death_after_streak` ROW pins it only at
 #: the shipped value. Say that here rather than claiming a pin that does not exist.
 _LONG_PATH_STREAK_TIME_CALLS = 5
