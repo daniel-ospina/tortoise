@@ -3164,7 +3164,23 @@ def _extra_bindings(tree: ast.AST, names: set[str]) -> list[str]:
     return out
 
 _NON_MUTATING = {"list", "tuple", "len", "sorted", "id", "str", "bool", "any", "all",
-                 "isinstance"}
+                 "isinstance",
+                 # ⛔ ITERATORS AND INDEX PAIRERS READ, THEY DO NOT MUTATE (#14326 round 35
+                 # review cycle 6, EACH MEASURED FALSE-RED at `42776e22`: with these absent,
+                 # `list(reversed(results))`, `[i for i, _r in enumerate(results)]`,
+                 # `iter(results)` and `list(zip(results, results))` each redded the pin with
+                 # "an in-place sort/clear" while mutating nothing). A false red is a false
+                 # diagnosis here — the message names a mutation that is not happening — and
+                 # this pin's whole claim is that it stops red-ing on inert edits.
+                 #
+                 # ⛔ `iter` IS DELIBERATELY ABSENT (#14326 round 35 review cycle 6, MEASURED:
+                 # exempting it made `_it = iter(results); _r = next(_it); _r["id"] = "X"`
+                 # PASS — 43 passed with the recorded page mutated). `iter` does not mutate,
+                 # but it HANDS THE SAME MUTABLE ELEMENTS to `next`, so exempting it is a
+                 # fail-open one hop out. `_it = iter(results)` therefore reds as an ACCEPTED
+                 # FALSE RED (named in `Accepted FALSE-REDs`): a false red costs an edit, a
+                 # false green ships a permuted page as `rank_identical: True`.
+                 "reversed", "enumerate", "zip"}
 
 #: Callees that only READ their argument, so a name handed to one is not handed to a
 #: mutation. `print(f"nhits={len(results)}")` is the natural next edit to `run()`'s
@@ -4486,7 +4502,14 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             return isinstance(arg, (ast.ListComp, ast.GeneratorExp, ast.SetComp,
                                     ast.DictComp))
 
-        handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
+        # ⛔ THE EXEMPTION MUST AGREE WITH THE ARM BELOW (#14326 round 35 review cycle 6,
+        # MEASURED FALSE-RED: `for _r in results: _i = _result_id(_r)` redded, while the
+        # COMPREHENSION spelling of the same call was GREEN — `_element_handed` exempts
+        # `_ID_MAPPERS` and this line tested `_PURE_READS`, which does not contain them, and
+        # `_aliases_of(loops=True)` puts the `for` target in `watched` so the two spellings
+        # diverge). `_PURE_CALLEES` is that union; using it here makes the one-hop and the
+        # `for`-target hop the same decision.
+        handed = isinstance(node, ast.Call) and callee not in _PURE_CALLEES and any(
             _names_handed(arg) & watched and not _element_only(arg) and not _derived(arg)
             for arg in list(node.args) + [k.value for k in node.keywords])
 
@@ -4554,6 +4577,23 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                 or _element_handed(node, callee)):
             hits.append(node.lineno)
     return hits
+
+
+def _own_body_nodes(fn: ast.AST):
+    """Every node in `fn`'s own body, NOT descending into nested function/class scopes.
+
+    The nested scopes are yielded THEMSELVES (so a `Def` is still visible) but their bodies
+    are not walked: a `return` inside a local helper belongs to that helper, not to `run()`
+    (#14326 round 35 review cycle 6).
+    """
+    nested = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+    stack = list(getattr(fn, "body", []))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, nested):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
 
 
 def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[int]:
@@ -8094,7 +8134,11 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     (``"order": _ids(results)``) or the leg table into a helper, hoisting the artifact dict
     to a local (``row = {…}; per_query.append(row)``), ``per_query.extend([{…}])``, and
     RENAMING the collected list (this pin hard-codes the collector's name ``per_query`` on
-    purpose — it is what stops ``_p = list(reversed(per_query)); return {"per_query": _p}``).
+    purpose — it is what stops ``_p = list(reversed(per_query)); return {"per_query": _p}``),
+    and
+    ``_it = iter(results)`` — ``iter`` only reads, but it hands the SAME mutable elements to
+    ``next``, and exempting it was measured to let ``_r = next(_it); _r["id"] = "X"`` PASS
+    (#14326 round 35 review cycle 6). A false red here is the cheap direction.
     A red there costs an edit to this pin, which is the cheap direction — the expensive
     direction is a sorted page reaching the verdict as ``rank_identical: True`` (measured
     green against earlier shapes of this check).
@@ -8373,7 +8417,13 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     # for, and the shape is statically visible, so it is not the declared "a name COMPUTED
     # at runtime" residual. `per_query[:-1]`, `list(reversed(per_query))` and
     # `_reordered(per_query)` are green the same way.
-    returns = [n for n in ast.walk(run_defs[0]) if isinstance(n, ast.Return)]
+    # ⛔ ONLY `run()`'s OWN RETURNS (#14326 round 35 review cycle 6, MEASURED FALSE-RED: a
+    # local helper with a `return` redded this clause with "`run()` has 2 `return`
+    # statements" while `run()` still had exactly one and the report dict was intact —
+    # `ast.walk` descends into the nested `FunctionDef`). The two controls that isolate it:
+    # the same helper with no `return` is GREEN, and at MODULE level it is GREEN. The clause
+    # exists to bind the ONE dict that carries the report, not to forbid local helpers.
+    returns = [n for n in _own_body_nodes(run_defs[0]) if isinstance(n, ast.Return)]
     assert len(returns) == 1, (
         f"`run()` has {len(returns)} `return` statements — this pin follows the ONE dict "
         "that carries the report")
