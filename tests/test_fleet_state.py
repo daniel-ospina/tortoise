@@ -3712,8 +3712,8 @@ def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
     assert argv[:2] == ["ps", "-ww"]
 
 
-def _row_for_pid(pid: int) -> str:
-    """The `command=` text a census would read for ONE pid — see the two callers for its role.
+def _row_for_pid(pid: int) -> str | None:
+    """The `command=` text a census would read for ONE pid — see the four callers for its role.
 
     ⚠️ IT IS NOT ONE THING. In caller 1 it is a DIAGNOSTIC interpolated into a failure message;
     in caller 2 it IS the assertion's subject (that test's verdict is `assert row`). Calling it
@@ -3739,24 +3739,37 @@ def _row_for_pid(pid: int) -> str:
     `assert row` at site 2.
 
     ⛔ AND IT MUST CARRY A TIMEOUT (#12039 cycle 14 P1). It had none, which made it the worst kind
-    of authority: a `ps` slower than `_ps_answers`'s 60 s budget answered HERE while the probe said
+    of authority: a `ps` slower than `_ps_answers`'s budget answered HERE while the probe said
     "cannot answer", and `assert answers is True` turned that into a required-shard FAIL produced by
     LOAD — the #5049 rule-1 inversion this PR exists to remove — while a `ps` that HUNG held the
-    shard open indefinitely (measured: `timeout -s KILL 45` → exit 137, zero output). A timeout, or
-    any `OSError`/`SubprocessError`, returns `""`, so an unreadable-in-time table lands on the
-    existing SKIP arm and can never be what reds the shard.
+    shard open indefinitely (measured: `timeout -s KILL 45` → exit 137, zero output).
 
-    `""` means the table has no row for the pid — or could not be read within the budget.
+    ⛔ AND THE TWO EMPTY FACTS ARE DISTINCT (#14394 Issue 1). Folding both into one `""` let the
+    WEAKEST fact make the STRONGEST claim at the one site where the row is the ASSERTION'S SUBJECT
+    (`test_child_exited_reads_the_status_without_reaping_the_row`): `_ps_answers()` answers inside
+    its own budget, so for a `ps` latency between this witness's budget and the probe's the gate
+    there does NOT fire, the witness gives up, and `assert row` declared "no `ps` row, so its status
+    was COLLECTED rather than observed" — a REQUIRED-SHARD FAIL produced by LOAD (#5049 rule 1,
+    inverted) whose diagnosis asserts the opposite of what happened. So the return is now:
+
+      * ``None`` — the table could not be READ within the budget (timeout / `OSError`);
+      * ``""``   — the table WAS read and holds no row for this pid.
+
+    `None` is never evidence about the property under test: the site that grades a row treats it as
+    a rule-1 expiry (`inconclusive`), and both GATE sites read it as "cannot answer" — which is
+    what `not _row_for_pid(...)` already does for either empty value, so their conjunction is
+    unchanged on purpose. Keep the budgets in step with `_PS_ANSWERS_TIMEOUT_S`: a witness that
+    gives up before the probe it witnesses re-creates exactly the asymmetry above.
     """
     import subprocess  # no module-level import in this file; the caller imports it too
 
     try:
         return subprocess.run(
             ["ps", "-ww", "-p", str(pid), "-o", "command="],
-            capture_output=True, text=True, timeout=_CENSUS_SAMPLE_TIMEOUT_S,
+            capture_output=True, text=True, timeout=_WITNESS_TIMEOUT_S,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):  # a `ps` that cannot answer in time
-        return ""
+        return None
 
 
 #: The signals a signal-death most often comes from OUTSIDE the fixture: SIGKILL/SIGTERM from
@@ -3803,6 +3816,20 @@ _CENSUS_ERROR_MIN_SPAN_S = 2.0
 #: EXPLICITLY at `pi_processes`'s own call (`_run(["ps", "-ww", …], timeout=30)`), not taken from
 #: `_run`'s default (`timeout: int = 60`), so it cannot be imported — keep the two in step.
 _CENSUS_SAMPLE_TIMEOUT_S = 30.0
+
+#: The budget `_ps_answers` asks its OWN pid on — the control's budget, one home for the number
+#: because `_WITNESS_TIMEOUT_S` is defined by it (`_row_for_pid`'s docstring: a witness that gives
+#: up before the probe it witnesses manufactures a FAIL from load, #14394 Issue 1).
+_PS_ANSWERS_TIMEOUT_S = 60.0
+
+#: The budget the capability WITNESS (`_row_for_pid`) gets (#14394 Issue 1). ⛔ NOT
+#: `_CENSUS_SAMPLE_TIMEOUT_S`: that constant's own comment scopes it to `pi_processes`'s
+#: `ps -ww -axo` sample, and this is a different invocation at a different moment. Its value is the
+#: PROBE's budget, so a `ps` the control can read is not reported unreadable by the witness first.
+#: The band two different budgets cannot close is closed by the `None` sentinel instead (a timed-out
+#: read is `could-not-read`, never "the table has no row"), which is why this is a number and not
+#: the fix.
+_WITNESS_TIMEOUT_S = _PS_ANSWERS_TIMEOUT_S
 
 #: The budget the long-path poll runs on — ONE home for the number, because the body's
 #: `deadline` and the arms' PREMISES must read the same value (#12039 review cycle 11, F1).
@@ -3940,7 +3967,7 @@ def _ps_answers() -> bool:
     try:
         out = subprocess.run(
             ["ps", "-p", str(os.getpid()), "-o", "command="],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=_PS_ANSWERS_TIMEOUT_S,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):  # `ps` absent/unusable — driven by its own test
         return False
@@ -5165,6 +5192,92 @@ def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
         "green")
 
 
+def test_row_for_pid_budgets_the_read_and_separates_the_two_empty_facts(monkeypatch) -> None:
+    """`_row_for_pid`'s budget and its could-not-read arm — the behaviour #14394 changed, unpinned.
+
+    ⛔ NOTHING DROVE IT (#14394 Issue 2, agent-infra#3442 rule 3). This PR's only new assertion was
+    the argv pin, which is green on the parent commit; the two `subprocess.run` stubs the census
+    arms use are kwargs-agnostic (`lambda *a, **k`), so all three mutants below left the file green:
+
+      * delete `timeout=_WITNESS_TIMEOUT_S,` → the witness is UNBOUNDED again (the measured hang:
+        `timeout -s KILL 45` on the `WNOWAIT` test → exit 137, zero output);
+      * delete the `try/except` → the first slow `ps` propagates `TimeoutExpired`;
+      * narrow to `except OSError` → a timeout is NOT an `OSError` (`TimeoutExpired` subclasses
+        `subprocess.SubprocessError` — Python docs, `subprocess`), so the exact hang this PR exists
+        to remove comes back with every row still green.
+
+    And the fourth mutant is the #14394 Issue 1 fix itself: folding the two empty facts back into
+    `""` re-arms the load-caused FAIL at the one site where a row is the assertion's subject.
+    Hermetic on purpose — same stubbing shape as `test_ps_answers_is_the_control_it_claims_to_be`,
+    so this needs neither a `ps` nor a loaded box.
+    """
+    import subprocess
+
+    class _Completed:
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    seen: list[dict] = []
+
+    def _answers(*_a, **kwargs):
+        seen.append(kwargs)
+        return _Completed("/bin/true\n")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", _answers)
+        assert _row_for_pid(os.getpid()) == "/bin/true", (
+            "a table that WAS read must hand back its row, stripped — this value is what both "
+            "live-`ps` sites grade, so folding a readable row into an empty answer retires them")
+
+    # ⛔ THE BUDGET, AND THE RELATION IS THE PROPERTY (not the number). Deleting `timeout=` is the
+    # mutant this exists for; a witness that gives up EARLIER than the probe it witnesses
+    # manufactures the asymmetry #14394 Issue 1 named (the control answers inside its budget while
+    # the witness reports nothing), and one tighter than the census's own sample budget skips a
+    # shard the census itself tolerates.
+    assert "timeout" in seen[-1], (
+        "`_row_for_pid` stopped passing `timeout=` to `subprocess.run`, so the capability witness "
+        "is unbounded: a hanging `ps` holds the shard open indefinitely and a loaded one answers "
+        "HERE while the probe says it cannot — the #5049 rule-1 inversion this line exists to "
+        f"remove. The call's kwargs were {seen[-1]!r}")
+    assert seen[-1]["timeout"] >= _PS_ANSWERS_TIMEOUT_S, (
+        "the witness's budget is TIGHTER than the control's, so a `ps` the control can still read "
+        "inside `_PS_ANSWERS_TIMEOUT_S` is already unreadable to the witness — a window in which "
+        "`_ps_answers()` answers (gate does not fire) and the row cannot be read (#14394 Issue 1)")
+    assert seen[-1]["timeout"] >= _CENSUS_SAMPLE_TIMEOUT_S, (
+        "the witness must not be tighter than the census's own sample budget: both invocations "
+        "run on the same box, so a shard the census tolerates is not one the witness may skip")
+
+    def _times_out(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="ps", timeout=_WITNESS_TIMEOUT_S)
+
+    def _unrunnable(*_a, **_k):
+        raise OSError(2, "No such file or directory")
+
+    for raise_it, why in (
+            (_times_out, "did not answer within the budget"),
+            (_unrunnable, "cannot be executed at all")):
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "run", raise_it)
+            got = _row_for_pid(os.getpid())
+            assert got is None, (
+                f"a `ps` that {why} must read as COULD-NOT-READ (`None`), not as 'the table has "
+                "no row for this pid' (`\"\"`): at "
+                "`test_child_exited_reads_the_status_without_reaping_the_row` the row is the "
+                "ASSERTION'S SUBJECT, so folding the two facts together reported 'its status was "
+                "COLLECTED rather than observed' about a read that never happened — a "
+                f"required-shard FAIL produced by load (#5049 rule 1). Got {got!r}")
+
+    # …and the OTHER empty fact must stay `""`. A table that WAS read with no row for the pid is
+    # real evidence about reaping, and it is what `assert row` grades; `None` there would silence
+    # the `WNOWAIT` regression the whole test exists for.
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", lambda *_a, **_k: _Completed(""))
+        assert _row_for_pid(4_000_001) == "", (
+            "an empty answer from a table that WAS read is `''` (no row for this pid), not "
+            "`None` (could not read). Collapsing it into `None` turns the `WNOWAIT` FAIL into a "
+            "skip and leaves a reaping `_child_exited` green forever")
+
+
 def test_the_outside_signal_set_is_exactly_the_signals_the_box_sends() -> None:
     """`_OUTSIDE_SIGNALS` is the rule-1/rule-4 boundary, so its MEMBERSHIP must be pinned.
 
@@ -5210,8 +5323,10 @@ def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
     # 12 P2, cycle 13 P1). Without a gate, a `ps` that exists but cannot answer turns the row
     # assertion below into a required-shard FAIL for a box reason — the inversion this PR removes
     # everywhere else. Keyed on `_ps_answers()` ALONE the gate is a fail-open: a broken control
-    # would skip this test too. `_row_for_pid` is the witness (same question with `-ww`, own
-    # budget), so only a box where BOTH invocations come back empty skips.
+    # would skip this test too. `_row_for_pid` is the witness (same question with `-ww`, its own
+    # budget, and `None` for "could not read" — which `not` already treats as "cannot answer", so
+    # this conjunction is deliberately unchanged by the #14394 Issue 1 sentinel), so only a box
+    # where BOTH invocations come back empty skips.
     if not _ps_answers() and not _row_for_pid(os.getpid()):
         # pragma: no cover — a `ps` that exists and cannot answer
         pytest.skip(
@@ -5241,6 +5356,22 @@ def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
                     "helper."),
             )
         row = _row_for_pid(proc.pid)
+        # ⛔ `None` IS NOT "NO ROW" (#14394 Issue 1). The witness folds a timeout into `None` —
+        # the table could not be READ — and that is a #5049 rule-1 expiry, not evidence that the
+        # status was collected. Without this arm, a `ps` slower than the witness's own budget but
+        # inside `_ps_answers`'s (which is why the gate above did not fire) redded a REQUIRED shard
+        # with "its status was COLLECTED rather than observed" about a read that never happened —
+        # the diagnosis asserting the opposite of the fact. `assert row` below keeps its full
+        # meaning for the one fact it grades: a table that WAS read with no row for the pid.
+        if row is None:
+            inconclusive(
+                "the exited child's `ps` row read within the witness budget",
+                deadline_s=_WITNESS_TIMEOUT_S,
+                diagnosis=(
+                    "`ps -ww -p <pid> -o command=` did not answer within its budget, so the row "
+                    "this test grades was never READ; that is a load observation, not evidence "
+                    "about `_child_exited`'s `WNOWAIT`."),
+            )
         assert row, (
             "the exited child has no `ps` row, so its status was COLLECTED rather than "
             "observed — the `HarnessDefect` message would lose the evidence it quotes "
@@ -5252,3 +5383,38 @@ def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
         if proc.poll() is None:  # pragma: no cover — child still alive on a slow box
             proc.kill()
         proc.wait(timeout=10)
+
+
+def test_child_exited_skips_when_the_row_could_not_be_read(monkeypatch) -> None:
+    """The `None` arm at the `WNOWAIT` test's assertion site (#14394 Issue 1) — pinned, not implied.
+
+    The sentinel alone decides nothing here: what closes the load-caused FAIL is that THIS site
+    turns `None` into a #5049 rule-1 `inconclusive` instead of letting `assert row` announce the
+    status was "COLLECTED rather than observed". Deleting that `if row is None:` block leaves every
+    other row green (the sentinel is still returned; only this reader drops it), so the arm needs
+    its own pin.
+
+    Driven the way the census arms drive their subject: call the real test body with the three
+    things it consults stubbed — the gate answered, `ps` "present", and the witness returning
+    `None` — so the arm is exercised hermetically, on a box with no `ps` and under no load. The
+    real child and the real `_child_exited` still run, which is what makes the site reachable.
+    """
+    import shutil
+
+    module = sys.modules[__name__]
+    with monkeypatch.context() as patch:
+        # The gate must not pre-empt the body: `_ps_answers()` is the control's own budget, and the
+        # whole point of this arm is the window where the control ANSWERS and the witness does not.
+        patch.setattr(module, "_ps_answers", lambda: True)
+        patch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+        patch.setattr(module, "_row_for_pid", lambda pid: None)
+        with pytest.raises(pytest.skip.Exception) as expiry:
+            test_child_exited_reads_the_status_without_reaping_the_row()
+    assert INCONCLUSIVE_PREFIX in str(expiry.value), (
+        "a row that could not be READ is a #5049 rule-1 expiry, so it must exit through "
+        "`inconclusive` and carry the declared family prefix; without this arm `assert row` "
+        "reports 'its status was COLLECTED rather than observed' about a read that never "
+        f"happened. The exit was: {expiry.value}")
+    assert "never READ" in str(expiry.value), (
+        "the skip must say the row was not READ — the diagnosis the ambiguous `\"\"` used to give "
+        f"asserted the opposite of the fact. The exit was: {expiry.value}")
