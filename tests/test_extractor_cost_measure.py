@@ -1484,3 +1484,81 @@ def test_the_arm_is_installed_once_per_batch_not_once_per_call(
     assert os.environ.get(m._TOGGLE) == "garbage", (
         "the ambient TORTOISE_S4_EMBED_JSON was not restored after the run — "
         "a measurement must not leave the lever armed for the next caller")
+
+
+# ── the table must SUMMARISE, and a share must name its denominator ───────────
+# Review cycle 9, two P3s, both real and both survived seven earlier cycles:
+# (a) the output table printed rows summing to 17,829 against a total of
+# 17,830 — the total was formatted from the UNROUNDED sum while each row came
+# from its own unrounded value, so banker's rounding split them (a column that
+# does not add up, in the one table whose stated rule is "a table that does not
+# sum is not evidence"); (b) the input table's `unattributed` row is a share of
+# the FITTED constant (2,994 / 45,503 = 6.6 %) while the column header says the
+# 42,509 composition, so the column read as 106.6 %. Pinned against the
+# artifact, so a correction to the data moves them and a silent edit reds them.
+
+def _committed_decomposition() -> dict:
+    return json.loads((_REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+                       / "decomposition.json").read_text(encoding="utf-8"))
+
+
+def _committed_markdown() -> str:
+    return (_REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+            / "decomposition.md").read_text(encoding="utf-8")
+
+
+def test_the_output_table_rows_sum_to_its_printed_total():
+    """A column that does not add up is the defect the bundle's rule forbids."""
+    dec = _committed_decomposition()
+    block = _committed_markdown().split(
+        "### The output constant, decomposed", 1)[1]
+    rows, total = [], None
+    for line in block.splitlines():
+        if not line.startswith("|"):
+            if total is not None:
+                break
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 3 or set(cells[0]) <= {"-"} or cells[0] == "stage":
+            continue
+        if "composition total" in cells[0]:
+            total = int(cells[1].replace(",", "").replace("*", ""))
+            break
+        if cells[0] in ("s1", "s2", "s4"):
+            rows.append(int(cells[1].replace(",", "")))
+    assert len(rows) == 3, f"the three stage rows must be present, got {rows}"
+    assert total is not None, "the printed composition total must be present"
+    assert sum(rows) == total, (
+        f"the printed stage rows sum to {sum(rows):,} but the printed total is "
+        f"{total:,} — a column that does not add up is the exact defect this "
+        f"bundle's own rule forbids")
+    # …and the total is the sum of the ROUNDED rows. Formatting the UNROUNDED
+    # sum is precisely how 17,829 became 17,830, so pin the derivation and not
+    # just today's arithmetic.
+    rounded = sum(round(out) for out in
+                  (dec["output"]["s1_tokens_per_doc"],
+                   dec["output"]["s2_tokens_per_doc"],
+                   dec["output"]["s4_tokens_per_doc"]))
+    assert total == rounded, (
+        f"the total must be derived from the rounded rows ({rounded:,}), not "
+        f"from the unrounded sum — that off-by-one is what this pin exists for")
+
+
+def test_the_unattributed_row_names_the_denominator_its_share_is_of():
+    """`unattributed` is the only row in that column on a second denominator."""
+    dec = _committed_decomposition()
+    ev = (_REPO_ROOT / "docs" / "evidence" / "14343-amplify" / "README.md"
+          ).read_text(encoding="utf-8")
+    fit_share = 100.0 * dec["unattributed"] / dec["fitted_constant"]
+    comp_share = 100.0 * dec["unattributed"] / dec["composition_total"]
+    assert f"{fit_share:.1f} %" in ev, (
+        f"the unattributed row is {fit_share:.1f} % of the FITTED constant")
+    assert comp_share > fit_share + 0.2, (
+        "the two denominators must genuinely differ, or this pin proves nothing")
+    assert "of the fitted constant" in ev, (
+        "the unattributed row must NAME its denominator: the column header says "
+        "the composition, and an unlabelled 6.6 % makes the column read as "
+        f"{100.0 + fit_share:.0f} %")
+    assert f"{comp_share:.1f} %" in ev, (
+        "the README must also state what the row would be against the "
+        "composition, so a reader can see the two denominators differ")

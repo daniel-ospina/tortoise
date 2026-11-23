@@ -2512,18 +2512,50 @@ def render_decompose(dec: dict) -> str:
                  f"**{solved['embed_list_tokens']:,.0f}** tokens — "
                  f"{solved['embed_over_emission']}× S2's own emission.")
     lines.append("")
+    # ⛔ THE TWO SOLVED ROWS ARE A UNIT DIFFERENCE, and leaving it unnamed is
+    # what lets a reader take them for a single tokenizer's numbers. `_per_call`
+    # returns the PROVIDER's own reported `prompt_tokens` (per call, minus the
+    # SOURCE-TRANSCRIPT tail), while `s2_sys`/`s4_sys`/`clause` are
+    # `tiktoken cl100k_base` on a local render — so `story` and `embed` mix two
+    # tokenizers, and the residual they feed (`unattributed`) absorbs the
+    # complement. The bundle measures that gap itself in §3
+    # (provider / offline render = 1.063, 1.035, 1.017 on three S1 prompts), so
+    # the disclosure names the rows that carry it rather than presenting the
+    # fit-vs-composition agreement as tokenizer-free.
+    lines.append(
+        "⚠️ **The two solved rows span TWO tokenizers.** `story` and `embed` "
+        "are `provider prompt_tokens − cl100k static render`: the per-call "
+        "prompt count is the provider's own reported usage "
+        "(`last_prompt_tokens`), while the static being removed is "
+        "`tiktoken cl100k_base` on a local render. The bundle measures that "
+        "gap directly in §3 (measured / offline render = 1.063, 1.035, 1.017 "
+        "on three S1 prompts), so these two rows carry it and `unattributed` "
+        "absorbs its complement — the fit-vs-composition agreement reported "
+        "below is therefore not a tokenizer-free comparison.")
+    lines.append("")
     out = dec.get("output") or {}
     if out:
         lines.append("### The output constant, decomposed")
         lines.append("")
         lines.append("| stage | completion tokens/doc | share of output |")
         lines.append("|---|---|---|")
-        for stage in ("s1", "s2", "s4"):
-            tokens = out.get(f"{stage}_tokens_per_doc", 0)
+        # ⛔ THE PRINTED ROWS AND THE PRINTED TOTAL MUST SUM. The total used to
+        # be formatted from the UNROUNDED sum while each row was formatted from
+        # its own unrounded value, so banker's rounding made the column read
+        # 2,798 + 11,677 + 3,354 = 17,830 — an off-by-one in the one table whose
+        # stated rule is "a table that does not sum is not evidence" (review
+        # cycle 9, P3). The total is now the SUM OF THE PRINTED ROWS, so the
+        # column reconciles by construction rather than by luck. The shares keep
+        # the unrounded total as their denominator, which is why they still sum
+        # to 100.0%.
+        stage_rows = [(stage, out.get(f"{stage}_tokens_per_doc", 0))
+                      for stage in ("s1", "s2", "s4")]
+        printed_total = sum(round(tokens) for _, tokens in stage_rows)
+        for stage, tokens in stage_rows:
             share = (100.0 * tokens / out["total_per_doc"]) \
                 if out.get("total_per_doc") else 0.0
-            lines.append(f"| {stage} | {tokens:,.0f} | {share:.1f}% |")
-        lines.append(f"| **composition total** | **{out['total_per_doc']:,.0f}** "
+            lines.append(f"| {stage} | {round(tokens):,} | {share:.1f}% |")
+        lines.append(f"| **composition total** | **{printed_total:,}** "
                      f"| 100.0% |")
         lines.append(f"| *fitted constant (this arm's own intercept)* | "
                      f"{out['fitted_constant']:,} | — |")

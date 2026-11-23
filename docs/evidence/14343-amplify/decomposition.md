@@ -43,6 +43,8 @@ The document itself is NOT in that table: it is the fit's slope, 8,754 tokens/do
 
 Solved dynamic regions: the S1 story is **2,110** tokens as the later stages see it, and S2's embed list is re-serialized into S4's prompt at **12,412** tokens — 1.23× S2's own emission.
 
+⚠️ **The two solved rows span TWO tokenizers.** `story` and `embed` are `provider prompt_tokens − cl100k static render`: the per-call prompt count is the provider's own reported usage (`last_prompt_tokens`), while the static being removed is `tiktoken cl100k_base` on a local render. The bundle measures that gap directly in §3 (measured / offline render = 1.063, 1.035, 1.017 on three S1 prompts), so these two rows carry it and `unattributed` absorbs its complement — the fit-vs-composition agreement reported below is therefore not a tokenizer-free comparison.
+
 ### The output constant, decomposed
 
 | stage | completion tokens/doc | share of output |
@@ -50,7 +52,7 @@ Solved dynamic regions: the S1 story is **2,110** tokens as the later stages see
 | s1 | 2,798 | 15.7% |
 | s2 | 11,677 | 65.5% |
 | s4 | 3,354 | 18.8% |
-| **composition total** | **17,830** | 100.0% |
+| **composition total** | **17,829** | 100.0% |
 | *fitted constant (this arm's own intercept)* | 22,802 | — |
 | **unattributed** | 4,972 | — |
 
