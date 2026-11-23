@@ -98,11 +98,11 @@ import math
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Collection, Protocol
+from typing import Any, Protocol
 
 # ── the measured unit (#14295 / #14343, the fact behind #14275's prior) ──────
 #: Measured tokens spent per MEDIAN document by the real ``extract_session_v2``
@@ -618,7 +618,18 @@ class BatchStore(Protocol):
         ...
 
     def pending_batches(self, org_id: str) -> list[str]:
-        """Batch ids with at least one non-terminal item — the resume input."""
+        """Batch ids that are unfinished — the resume input.
+
+        ⛔ **UNFINISHED IS EITHER HALF** (#14415 review round 2): a batch whose
+        items are all terminal but whose batch ROW is not (the settle write timed
+        out, or the process died between the last item write and the settle) is
+        unfinished too, and keying the selection on item state alone made that row
+        invisible to every path — including a fresh boot, because `recover()`
+        reads this list. The row then sat `accepted` with every item `indexed` and
+        charged, and the only call that would ever move it was `cancel()`, which
+        relabelled it `cancelled`. Select on the batch row as well; `recover()`
+        settles a lagging row in its all-items-terminal arm.
+        """
         ...
 
     def batch_counts(self, org_id: str, batch_ids: Sequence[str]
@@ -685,11 +696,14 @@ class InMemoryBatchStore:
 
     def pending_batches(self, org_id: str) -> list[str]:
         with self._lock:
-            out = []
+            out: list[str] = []
             for (org, bid), bucket in self._items.items():
-                if org != org_id:
+                if org != org_id or bid in out:
                     continue
                 if any(not i.terminal for i in bucket.values()):
+                    out.append(bid)
+            for (org, bid), batch in self._batches.items():
+                if org == org_id and bid not in out and batch.state not in TERMINAL_BATCH_STATES:
                     out.append(bid)
             return out
 
@@ -898,11 +912,19 @@ class GraphBatchStore:
             staged_path=(r[10] or "") if len(r) > 10 else "")
 
     def pending_batches(self, org_id: str) -> list[str]:
+        # ⛔ UNION, not just the item arm: a batch whose ROW is non-terminal is
+        # unfinished even when every item is terminal (see the Protocol's note).
+        # `UNION` dedupes; a batch can appear in both arms.
         rows = self._q(
+            f"MATCH (b:{BATCH_LABEL} {{org_id:$org}}) "
+            "WHERE NOT b.state IN $batch_terminal "
+            "RETURN DISTINCT b.id AS bid "
+            "UNION "
             f"MATCH (i:{ITEM_LABEL} {{org_id:$org}}) "
             "WHERE NOT i.state IN $terminal "
-            "RETURN DISTINCT i.batch_id",
-            {"org": org_id, "terminal": [str(s) for s in TERMINAL_ITEM_STATES]},
+            "RETURN DISTINCT i.batch_id AS bid",
+            {"org": org_id, "terminal": [str(s) for s in TERMINAL_ITEM_STATES],
+             "batch_terminal": [str(s) for s in TERMINAL_BATCH_STATES]},
         )
         return [r[0] for r in rows]
 
@@ -1311,9 +1333,10 @@ class BatchCoordinator:
                 # in its reason: terminal, visible, and actionable.
                 return self.advance(
                     org_id, fresh, BatchItemState.FAILED,
-                    reason=(f"gave up after {fresh.attempts} attempt(s) — the "
-                            "indexer kept reporting a retryable skip; "
-                            "re-submit this item to try again"))
+                    reason=(f"gave up after {fresh.attempts} attempt(s), each of "
+                            "which ended without settling the item (a "
+                            "retryable skip, or a process that stopped "
+                            "mid-item); re-submit this item to try again"))
             self.advance(org_id, fresh, BatchItemState.EXTRACTING, attempt=True)
         try:
             outcome = active(fresh)
@@ -1373,6 +1396,7 @@ class BatchCoordinator:
         batch = self._store.get_batch(org_id, batch_id)
         if batch is None:
             raise KeyError(batch_id)
+        items = self._store.items(org_id, batch_id)
         if batch.state in TERMINAL_BATCH_STATES:
             # ⛔ A SETTLED BATCH IS NOT REWRITTEN (#14415 review B3). Cancel used
             # to fall through unconditionally, so a cancel arriving after the
@@ -1383,9 +1407,18 @@ class BatchCoordinator:
             # "work stopped, not charged" over a batch they were charged for.
             # The record is the truth, so it is reported unchanged (and a repeat
             # cancel is idempotent rather than a rewrite).
-            return batch, self._store.items(org_id, batch_id)
+            return batch, items
+        if items and not any(not item.terminal for item in items):
+            # ⛔ THE GUARD IS ON REMAINING WORK, NOT ON THE BATCH ROW (#14415
+            # review round 2, B2). The row can LAG its items — `settle()`'s write
+            # timing out, or a process killed between the last item write and the
+            # settle — and then the row reads `accepted` over items that are all
+            # `indexed` and charged. Keying only on ``batch.state`` relabelled
+            # exactly that record `cancelled`: B3's wrong outcome, reached without
+            # any injected fault. There is nothing left to stop, so DERIVE the
+            # truth instead of inventing a cancel over it.
+            return self.settle(org_id, batch_id), items
         stamp = self._now()
-        items = self._store.items(org_id, batch_id)
         for item in items:
             if item.state is BatchItemState.QUEUED:
                 self.advance(org_id, item, BatchItemState.CANCELLED,
@@ -1404,7 +1437,7 @@ class BatchCoordinator:
         return batch, self._store.items(org_id, batch_id)
 
     # -- resume (brief item 4) -------------------------------------------
-    def recover(self, org_id: str, *, live_batches: Collection[str] = ()
+    def recover(self, org_id: str, *, live_batches: Collection[str] | Callable[[str], bool] = ()
                 ) -> list[str]:
         """Re-open every batch with unfinished items. Returns the batch ids.
 
@@ -1431,11 +1464,22 @@ class BatchCoordinator:
         void — they belong to a process that is still alive. They are skipped
         here and left to the live drain (whose leftovers are re-driven by
         ``hosted_api._drain_batch``).
+
+        ⛔ **It is asked PER BATCH, at the moment of the decislon, never as a
+        snapshot** (#14415 review round 2, NB4). A set captured before this
+        method's own graph reads left a window in which a drain could claim a
+        batch *after* the snapshot and still have that claim requeued — the
+        same discarded outcome, narrowed to one query's round trips. A callable
+        closes it; a collection is still accepted (and wrapped) so the seam
+        stays testable without a lock.
         """
+        is_live: Callable[[str], bool] = (
+            live_batches if callable(live_batches)
+            else (lambda batch_id, _live=live_batches: batch_id in _live))
         resumed: list[str] = []
         stamp = self._now()
         for batch_id in self._store.pending_batches(org_id):
-            if batch_id in live_batches:
+            if is_live(batch_id):
                 # A drain in THIS process owns this batch's claim; see the
                 # `live_batches` note above. Requeueing it would destroy the
                 # outcome of work that is still running.
@@ -1492,6 +1536,18 @@ class BatchCoordinator:
                 batch.updated_at = stamp
                 self._store.put_batch(batch)
                 resumed.append(batch_id)
+            elif items:
+                # ⛔ A LAGGING BATCH ROW IS REPAIRED HERE (#14415 review round 2,
+                # B1 arm 2 / B2's root). Every item is terminal but the batch row
+                # is not: `settle()`'s own write timed out, or the process died
+                # between the last item write and the settle. Nothing else ever
+                # re-derived it — `pending_batches()` selected on ITEM state, so
+                # such a row was invisible even to a fresh boot, and
+                # `cancel()` was the only call that would move it (which is how
+                # a charged, fully-indexed batch came to be relabelled
+                # `cancelled`). `settle()` is idempotent and derives the terminal
+                # state from the rows, so this is the repair.
+                self.settle(org_id, batch_id)
         return resumed
 
     # -- batch settlement -------------------------------------------------
