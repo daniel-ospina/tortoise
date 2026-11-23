@@ -24,6 +24,7 @@ count already in `#14295`'s `measurements.jsonl`.
 ```bash
 uv run python tools/extractor_cost_measure.py decompose \
     --evidence docs/evidence/14277-extractor-cost/measurements.jsonl \
+    --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
     --out docs/evidence/14343-amplify/decomposition.md \
     --json-out docs/evidence/14343-amplify/decomposition.json
 ```
