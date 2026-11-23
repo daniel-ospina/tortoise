@@ -377,11 +377,16 @@ def measure_saturated(sessions: int, drainers: int, rounds: int = 12,
     # later — must find nothing to do. Without it a run that filed everything and
     # a run that merely emptied this pass are indistinguishable in the receipt.
     passes = run_round(rounds + 1)
+    # MEASURED, not asserted: the receipt's other numbers are readings, so this one
+    # must be too — a hardcoded 0 would print "zero" in the very round that exists
+    # to prove it, even if a filed entry were left carrying attempts (review finding).
+    attempts = [((read_spool_meta(root, f"measured-{i:04d}") or {}).get("attempts", 0))
+                for i in range(sessions)]
     rounds_out.append({
         "round": rounds + 2,
         "server": "free (a further cycle — must find nothing to do)",
         "pending": count_pending_captures(root),
-        "max_attempts": 0,
+        "max_attempts": max(attempts) if attempts else 0,
         "passes": passes,
     })
     return {

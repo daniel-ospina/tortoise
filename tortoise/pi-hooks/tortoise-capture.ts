@@ -293,6 +293,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmdirSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -513,8 +514,15 @@ export const DRAIN_CLAIM_TTL_MS = 120_000;
  * value, because a format this build does not know must never be interpreted by
  * today's semantics (the whole point of a version field, and the trait that was
  * missing when review found it read nowhere).
+ *
+ * ⛔ v2 = the timestamps are MILLISECONDS, which is what THIS leg always wrote.
+ * v1 was written in SECONDS by the Python leg, so each leg read the other's live
+ * claim as long expired and STOLE it — two drainers, the exact defect the claim
+ * removes (found in review; measured across processes against the real
+ * predicate). Bumping the version is what makes a surviving v1 record SAFE: it is
+ * unattributable (rule 1) rather than misevaluated by a factor of 1000.
  */
-export const DRAIN_CLAIM_VERSION = 1;
+export const DRAIN_CLAIM_VERSION = 2;
 
 export interface DrainClaimRecord {
   version: number;
@@ -4489,11 +4497,24 @@ export async function flushSpool(
         `another drainer holds this spool${leg}: ${who} — nothing attempted`;
       return summary;
     }
-    // No claim AND no holder: the claim file could not be created (an unwritable
-    // or unlistable spool root). Run the pass UNCLAIMED and say so — a root that
-    // cannot hold a 60-byte claim file cannot hold a spool entry either, so the
-    // pass can only report the broken spool, and refusing to run would hide that
-    // report (the false-PASS direction is the worse error).
+    // ⛔ SOMETHING AT THE CLAIM PATH THAT WE COULD NOT READ IS NOT "NOBODY":
+    // a regular file that a transient error made unreadable (EMFILE, EIO, EACCES)
+    // belongs to a holder that may well be draining right now, and running the
+    // pass UNCLAIMED beside it is the two-drainer defect this mechanism removes.
+    // Fail CLOSED: report it as held, and let the next pass try the read again.
+    if (existsSync(drainClaimPathFor(dir))) {
+      const summary = emptyFlushSummary();
+      summary.heldByClaim = true;
+      summary.claimHolder =
+        "a claim file exists at this spool but could not be read " +
+        "(pid unknown) — nothing attempted";
+      return summary;
+    }
+    // No claim AND nothing at the path: the claim file could not be CREATED (an
+    // unwritable or unlistable spool root). Run the pass UNCLAIMED and say so — a
+    // root that cannot hold a 60-byte claim file cannot hold a spool entry either,
+    // so the pass can only report the broken spool, and refusing to run would hide
+    // that report (the false-PASS direction is the worse error).
     const summary = await flushSpoolPass(cfg, opts, undefined);
     summary.claimUnavailable = true;
     return summary;
@@ -4979,6 +5000,28 @@ export function quotaRefusal(res: {
   };
 }
 
+/** The server's machine-readable `detail.code`, or `undefined` (total). */
+function serverRefusalCode(detail: string): string | undefined {
+  if (!detail) return undefined;
+  // The transport detail is `HTTP <status> — <body>`, so the JSON is a SUFFIX.
+  const start = detail.indexOf("{");
+  if (start < 0) return undefined;
+  let node: unknown;
+  try {
+    node = JSON.parse(detail.slice(start));
+  } catch {
+    return undefined;
+  }
+  for (let depth = 0; depth < 2; depth += 1) {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return undefined;
+    const rec = node as Record<string, unknown>;
+    const code = rec.code;
+    if (typeof code === "string" && code !== "") return code;
+    node = rec.detail;
+  }
+  return undefined;
+}
+
 function statusPathFor(dir: string): string {
   return join(dir, SPOOL_STATUS_FILE);
 }
@@ -5015,7 +5058,15 @@ export function capacityRefusal(res: {
   const retryAfter = retryAfterSeconds(detail);
   return {
     status: status ?? 429,
-    code: CAPTURE_CAPACITY_CODE,
+    // ⛔ THE SERVER'S OWN CATEGORY WINS WHEN IT SENT ONE (mirrors
+    // `capture_spool._parsed_refusal_code`). The capture lane has a SECOND 429 —
+    // `ingest_rate_limited`, the per-ORG window — and relabelling it
+    // `capture_capacity_saturated` wrote a cause the server never sent into the
+    // SHARED `status.json`, overwriting the accurate record the Python leg had
+    // just written and telling the operator "wait for a slot" when the answer is
+    // "wait for the org's ingest window". The status still makes it BOX-level for
+    // the charging rule; the code only NAMES it.
+    code: serverRefusalCode(detail) ?? CAPTURE_CAPACITY_CODE,
     ...(retryAfter !== undefined ? { retry_after: retryAfter } : {}),
     ...(detail ? { detail } : {}),
   };
@@ -5090,9 +5141,15 @@ export function drainClaimPathFor(dir: string): string {
  * readable here.** Token-ness is the surface's business, not this reader's.
  */
 export function readDrainClaim(dir: string): DrainClaimRecord | undefined {
+  const claimPath = drainClaimPathFor(dir);
   let text: string;
   try {
-    text = readFileSync(drainClaimPathFor(dir), "utf8");
+    // ⛔ `lstatSync` FIRST: reading a FIFO or a socket BLOCKS until a writer
+    // appears, so a corrupt object at the claim path used to hang the drain,
+    // `renew`, the holder line and every health surface forever (measured on the
+    // Python twin; review finding). Only a REGULAR file is read.
+    if (!lstatSync(claimPath).isFile()) return undefined;
+    text = readFileSync(claimPath, "utf8");
   } catch {
     return undefined;
   }
@@ -5223,7 +5280,11 @@ export interface DrainClaim {
 function takedownClaim(
   path: string, token: string,
 ): { quarantine: string; raw: string } | undefined {
-  const quarantine = `${path}.take-${process.pid}-${token}`;
+  // ⚠️ The `.tmp-` INFIX is load-bearing: `sweepStaleTempFiles` collects
+  // abandoned `*.tmp-*` files by mtime, and a taker killed between the rename and
+  // the disposal would otherwise leave a file in the spool root nothing ever
+  // collects. The quarantine lives for microseconds; the sweep bound is minutes.
+  const quarantine = `${path}.tmp-take-${process.pid}-${token}`;
   try {
     renameSync(path, quarantine);
   } catch {
@@ -5258,6 +5319,33 @@ function disposeQuarantine(
   }
   try { unlinkSync(quarantine); } catch { /* best effort */ }
   return true;
+}
+
+/**
+ * Remove something at the claim path that is not a readable claim.
+ *
+ * A DIRECTORY, a socket or a dangling symlink there is corruption, not a holder:
+ * `linkSync` fails `EEXIST` at it, nothing reads it as a claim, and leaving it
+ * blocks every future drain forever — the "a stale claim is re-verifiable, not a
+ * permanent block" rule, failing in its worst direction.
+ *
+ * A symlink is removed WITHOUT following it, so this cannot reach outside the
+ * spool. A non-empty directory is left alone (`ENOTEMPTY`): deleting unknown
+ * content is the worse error, and the caller's answer is to run unclaimed and SAY
+ * so. Mirrors `drain_claim._clear_unusable_claim_path`.
+ */
+function clearUnusableClaimPath(path: string): boolean {
+  try {
+    const st = lstatSync(path);
+    if (st.isSymbolicLink() || st.isFile()) {
+      unlinkSync(path);
+      return true;
+    }
+    rmdirSync(path);  // an EMPTY directory; refuses ENOTEMPTY otherwise
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -5324,7 +5412,8 @@ export function acquireDrainClaim(
       try { unlinkSync(tmp); } catch { /* best effort */ }
       let raw: string | undefined;
       try {
-        raw = readFileSync(path, "utf8");
+        // Same `lstat` gate as `readDrainClaim` (a FIFO would block here too).
+        raw = lstatSync(path).isFile() ? readFileSync(path, "utf8") : undefined;
       } catch {
         raw = undefined;
       }
@@ -5335,7 +5424,27 @@ export function acquireDrainClaim(
         parsed = undefined;
       }
       if (!claimIsStale(parsed, { nowMs, host, bootId, alive })) return undefined;
-      if (raw === undefined) continue;
+      if (raw === undefined) {
+        // The read failed. ⛔ WHAT KIND OF OBJECT IS THERE decides whether we may
+        // delete it: a transient local error (EMFILE, EIO, EACCES after a mode
+        // drift) on a perfectly good REGULAR file is NOT evidence that the file is
+        // junk. The doctrine everywhere else here is "unprovable reads as ALIVE",
+        // so a regular claim we could not read is HONOURED (`undefined` = somebody
+        // holds it) and never unlinked — routing it to the clear path deleted a
+        // LIVE claim (review P0).
+        let mode: ReturnType<typeof lstatSync> | undefined;
+        try {
+          mode = lstatSync(path);
+        } catch {
+          mode = undefined;  // it vanished (a peer released); retry the link
+        }
+        if (!mode) continue;
+        if (mode.isFile()) return undefined;
+        // A directory, symlink, FIFO/socket or device: corruption, not a holder.
+        // Leaving it would `EEXIST` every future attempt — a permanent block.
+        if (!clearUnusableClaimPath(path)) return undefined;
+        continue;
+      }
       // ATOMIC TAKEDOWN, then verify in quarantine — see `takedownClaim`.
       const moved = takedownClaim(path, token);
       if (!moved) continue;  // a peer moved it first; the next attempt decides
@@ -5380,6 +5489,12 @@ export function acquireDrainClaim(
           const still = readDrainClaim(dir);
           return !!still && still.token === token;
         }
+        // ⛔ VERIFY AFTER WRITING (the Python twin states the reasoning): the write
+        // REPLACES the inode and the read above is not a compare, so a peer's
+        // takeover landing in that window would have its fresh claim overwritten
+        // while this returns `true` — two drainers (found in review).
+        const written = readDrainClaim(dir);
+        if (!written || written.token !== token) return false;
         renewedAt = at;
         return true;
       },
@@ -5950,8 +6065,9 @@ function reportFlush(
   }
   if (summary.claimUnavailable) {
     warn(
-      "spool flush: the drain claim could not be created (unwritable spool root) " +
-        "— this pass ran WITHOUT the one-drainer exclusion",
+      "spool flush: the drain claim is unavailable (the spool root is not writable, " +
+        "or holds an object at `drain.claim` that cannot be cleared) — this pass ran " +
+        "WITHOUT the one-drainer exclusion",
     );
   }
   if (summary.lostClaim) {
