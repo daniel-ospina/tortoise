@@ -1443,7 +1443,7 @@ def _output_structure(text: str) -> dict:
         return out
     try:
         parsed = _parse_json_robust(text)
-    except Exception:  # noqa: BLE001 — a narrative emission is not a defect
+    except Exception:  # a narrative emission is not a defect
         parsed = None
     if not isinstance(parsed, dict):
         # S1's narrative: report its shape rather than pretending it is JSON.
@@ -1593,10 +1593,7 @@ def _compose_model(*, live: bool, calls: list[dict]):
     only the transport for a canned emission, which is what makes the shape
     of the decomposition testable offline.
     """
-    if live:
-        inner = _build_model()
-    else:
-        inner = _StubModel()
+    inner = _build_model() if live else _StubModel()
 
     class _Recording:
         """Delegating wrapper with a ``max_tokens`` KWARG in its signature.
@@ -1850,7 +1847,6 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     if not docs:
         raise SystemExit(f"no usable `{arm}` document rows in the evidence")
     statics = _render_regions()
-    enc = _encoding()
 
     def _per_call(stage: str) -> tuple[float, float, float]:
         """(calls/doc, prompt tokens per call, completion tokens per call).
@@ -1875,7 +1871,6 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     c4, pc4, oc4 = _per_call("s4")
     t_med = statistics.median([r["item_tokens"] for r in docs])
 
-    s1_sys = sum(statics["s1"].values())
     s2_sys = sum(statics["s2"].values())
     s4_sys = sum(statics["s4"].values())
     clause = statics["envelope"]["clause"]
@@ -1984,7 +1979,7 @@ def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
                              "hits one drops the others — not "
                              "quality-neutral"),
         }
-    except Exception as exc:  # noqa: BLE001 - the lever's absence is a result
+    except Exception as exc:  # the lever's absence is a result
         out["compact_master_render"] = {"error": f"{type(exc).__name__}: {exc}"}
     out["s1_second_send"] = {
         "cause": (f"S1's narrative cap is {X._S1_MAX_TOKENS} tokens; a story "

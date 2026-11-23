@@ -660,8 +660,9 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
 # a region the prompt does not contain, would read as a result.
 
 def _evidence_rows() -> list[dict]:
-    from tools.extractor_cost_measure import build_report  # noqa: F401
     import json as _json
+
+    from tools.extractor_cost_measure import build_report  # noqa: F401
     path = (_REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
             / "measurements.jsonl")
     return [_json.loads(line) for line in path.read_text().splitlines()
@@ -714,8 +715,8 @@ def test_every_document_region_is_charged_once_per_call():
     dec = m.decompose(_evidence_rows())
     assert dec["calls_per_doc"]["s1"] > 1.0
     s1_slot = dec["statics"]["s1"]["memory_granularity"]
-    rounds = [v for k, v in dec["regions"].items()
-              if k.startswith("memory granularity")][0]
+    rounds = next(v for k, v in dec["regions"].items()
+                  if k.startswith("memory granularity"))
     assert rounds == pytest.approx(dec["calls_per_doc"]["s1"] * s1_slot,
                                    rel=0.02)
 

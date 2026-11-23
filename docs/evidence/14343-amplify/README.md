@@ -160,6 +160,7 @@ So S1's per-document input is `1.68 × (1,630 static + T)` and the mechanism tha
 | **Bound / shape S2's emission** (the 14,164-token re-read is `items × ~101 tokens`) | dominant by construction: −30 % of the record removes ~3,500 output + ~4,200 S4 input per document | **NO** — half of each record is E2/E3 provenance (`quote`, `search_keys`, `slots`); this is the `#7949` trade, and it is a measurement, not arithmetic |
 | compact kind render (`TORTOISE_EXTRACTOR_PROMPT=compact`) | **−1,960 tokens/doc** (master render 3,187 → 2,335 per call × 2.30 mapping calls) | **NO** — compact mode **story-filters** the pack kinds: a document that misses every trigger word falls back to all packs, one that hits a single trigger drops the other packs. That is a vocabulary-visibility change, i.e. exactly the class of change `#7949` arbitrates. It is also already-shipped, opt-in, and off. |
 | S1 truncation double-send | **−4,652 tokens/doc** (68 % × (T + 1,630)) | **NO** — a longer narrative is *more* content, but the story then grows inside both later prompts (6,109 tokens/doc today), so the net is a measurement, not arithmetic |
+
 **One lever was shipped, disarmed.** `TORTOISE_S4_EMBED_JSON=compact` switches S4's
 embed-list serialization from `indent=1` to compact separators — the one change whose *content*
 is provably identical. It is measured exactly below, and it ships **off**, because a prompt
