@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14220-seam-1795459894-p847279-0eabda8c",
+  "_sha": "fe167ce8ab68d98e412317d8b526fa944f9422ee",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14220-seam.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/14186-embedder-seam-batching"
+    },
+    {
+      "kind": "sha",
+      "value": "e796e002d6c96d2f2bf80e5906a0f0ee1e4653dc"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14220-seam"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 14667,
+  "ended_at": 1795474561,
+  "exit_code": 0,
+  "heartbeat_at": 1795474561,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14220-seam-1795459894-p847279-0eabda8c",
+  "lease_until": 1795511161,
+  "pid": 847279,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795459894,
+  "state": "DONE",
+  "tag": "14220-seam",
+  "worktree": "/home/cmux/tortoise/.worktrees/14220-seam"
+}
