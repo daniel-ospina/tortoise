@@ -335,9 +335,11 @@ is byte-identical across `89b2eff808cb`, `f56aac204ca6` and `0f41e95d3664`
 2026-11-23 sweep re-packed; quoting 721.3 against it would be the stale restatement this paragraph
 exists to forbid, and the sweep's own figures are re-derived below. The `+0.2 s` is ONE file: `git log --diff-filter=A
 --name-status 10e51693..0467ba32 -- 'tests/test_*.py'` names exactly one addition,
-`tests/test_extractor_cost_measure.py` (the `config/ci-surfaces.yml` `durations:` row naming it —
-named, not line-numbered: this refresh moved it, and re-naming the number is the rot
-`tools/ci_check_repair.py` argues against), and removing THAT row —
+`tests/test_extractor_cost_measure.py` (what removing it drops is its `config/ci-surfaces.yml`
+`surfaces: core:` LIST ENTRY — at `f56aac204ca6` the file had NO `durations:` row at all, and the
+18.2 s row that exists at THIS head was created by the same refresh; named, not line-numbered,
+because this refresh moved it, and re-naming the number is the rot `tools/ci_check_repair.py`
+argues against), and removing THAT entry —
 nothing else — drops the worst back to **721.1** (measured, then restored). So the reading is the
 same shape as every earlier one: NO ARITHMETIC ON THE TWO PARENTS' FIGURES WOULD HAVE PREDICTED IT
 (`721.1` on the parent that merged `10e51693`, `721.3` here). ⛔ **THAT SENTENCE IS HISTORY, AND SO
