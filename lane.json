@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14261-merge2-1795445908-p1971805-98a8774c",
+  "_sha": "e9851e8d785a3a5177a266231b32d60dc03d3fe7",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14261-merge2.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/14232-ingest-ack-async"
+    },
+    {
+      "kind": "sha",
+      "value": "05d8588e250e009ad976f1821bf7db6691321daa"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14261-merge2"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 2825,
+  "ended_at": 1795448733,
+  "exit_code": 0,
+  "heartbeat_at": 1795448733,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14261-merge2-1795445908-p1971805-98a8774c",
+  "lease_until": 1795485333,
+  "pid": 1971805,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795445908,
+  "state": "DONE",
+  "tag": "14261-merge2",
+  "worktree": "/home/cmux/tortoise/.worktrees/14261-merge2"
+}
