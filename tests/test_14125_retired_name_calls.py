@@ -5603,6 +5603,27 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a `ZipImportError` arm that DROPS swallows a zip-import seam exactly as "
         "`ImportError` and `ModuleNotFoundError` do"
     )
+    #: ⛔ AND THE `UnboundLocalError` CHARGE SIDE HAD NO ROW (review of #14287, mutation
+    #: attribution, finding 7): the two rows above pin the CHARGE for `ModuleNotFoundError` and
+    #: `ZipImportError`, and the ordering loop below reaches `UnboundLocalError` only through its
+    #: MASKING account — so deleting `"UnboundLocalError": "NameError"` from `_RAISED_ALIAS`
+    #: reddened `_covered` rows and no charge row at all, even though the charge really does flip
+    #: (`_swallows_everything` on the source below goes `True` → `False`, measured). The alias
+    #: map's docstring says it is normalised on the way IN (charging), so the charge side needs a
+    #: witness for this spelling too; without it the mirror of `_subclass_drop` was untested.
+    _unbound_drop = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                "try:\n    _probe = _make()\nexcept UnboundLocalError:\n    _probe = None\n"
+            )
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert _swallows_everything(_unbound_drop) is True, (
+        "an `UnboundLocalError` arm that DROPS swallows a renamed local exactly as "
+        "`NameError` does — the alias map's charge side must be normalised for it"
+    )
     _subclass_credit = [
         node
         for node in ast.walk(
