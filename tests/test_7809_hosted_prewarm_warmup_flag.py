@@ -76,6 +76,36 @@ def test_flag_zero_skips_the_hosted_prewarm(monkeypatch, embedder_get_spy):
     )
 
 
+def test_a_remote_backing_skips_the_hosted_prewarm(monkeypatch, embedder_get_spy):
+    """``worker``/``external`` → the lifespan starts no LOCAL embedder load.
+
+    #14186 (review P3): the gate is ``embed_seam.encodes_in_process()``. With the
+    encoder in another process the pre-warm buys nothing and costs exactly what
+    the migration exists to remove — a second 432 MB resident copy of the model
+    (3.66 GB with two overlapping loads, #13674).
+
+    ⛔ THIS ROW IS THE MUTANT'S OWN COUNTER-EXAMPLE. Reverting the gate to the
+    pre-fix ``if _embedder_warmup_enabled():`` leaves every OTHER suite green:
+    the flag-zero direction below still passes (the flag is still consulted),
+    and ``test_default_warms_the_embedder`` passes harder. Only a row that sets a
+    REMOTE backing and a WARM-ENABLED flag reddens it, which is why the lever is
+    set here and the flag is deleted rather than left at the suite's ``0``.
+    """
+    calls, called = embedder_get_spy
+    monkeypatch.delenv("TORTOISE_EMBEDDER_WARMUP", raising=False)
+    monkeypatch.setenv("TORTOISE_EMBED_BACKING", "worker")
+
+    with TestClient(ha.app):
+        # A buggy spawn reaches the stubbed get within ms; wait so a leak
+        # cannot hide behind thread scheduling.
+        called.wait(timeout=0.5)
+
+    assert calls == [], (
+        "the hosted lifespan pre-warmed a LOCAL embedder with the encoder "
+        f"served by a remote backing: calls={calls}"
+    )
+
+
 def test_default_warms_the_embedder(monkeypatch, embedder_get_spy):
     """An unset flag (the fail-safe default) still pre-warms the embedder."""
     calls, called = embedder_get_spy
