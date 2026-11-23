@@ -274,7 +274,7 @@ def _residue_block() -> str:
     merge had dropped WITHOUT a conflict marker (`THE BASE FIGURE IS THE BASE **TREE's**
     MEASUREMENT`) took it to 1607 — that block names `1b0db0489408`'s own pair, so its absence
     orphaned that `OWN_PINS` entry and the orphan arm redded; the figure is RE-MEASURED by this
-    function's walk on the RESOLVED file, never inherited, and 1741 is the figure above,
+    function's walk on the RESOLVED file, never inherited, and 1741 was the figure at that fold,
     — and this fold of `origin/main` `9aaaff10acd` kept BOTH sides again: `main`'s own blob read 1400
     there (its `#14283` zero-net re-pin rewrites measured 1328, and `#14284`'s merge of `main`
     `38f2ab7fc594` re-read 1363 on ITS tree), while the RESOLVED run here reads 1741, re-measured by
