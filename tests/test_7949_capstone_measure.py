@@ -7324,20 +7324,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to one
         # FILE and the consume pair was re-pointed in one document while the definition
-        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — `#13556` then added a further `+20` (`12116`/`12169` -> `12136`/`12189`), and four later `origin/main` merges took it on — `+24` (`12160`/`12213`, `#13610`), `+8` (`12168`/`12221`, `#11824`), `+7` (`12175`/`12228`, `#14011`) and `+31` (`12206`/`12259`, `#13971`) — with `#14111`'s `+21` landing on `12206`/`12259`, which is what the rows below carry; the `+32` -> `12168`/`12221` this comment used to name was `#13610`'s `+24` and `#11824`'s `+8` taken as one — each re-read by content at the head that moved it.
+        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — `#13556` then added a further `+20` (`12116`/`12169` -> `12136`/`12189`), and a later `origin/main` merge a further `+32` (`12136`/`12189` -> `12168`/`12221`), a further `+59` (`12168`/`12221` -> `12227`/`12280`), then `#14290` (`47e28b54`) reverts the 21 net lines `#14260` added at `sdk.py:5716` (`-21`: `12227`/`12280` -> `12206`/`12259`, which is what the rows below carry) — each re-read by content at the head that moved it. ⛔ AND `#14278` added +23 lines above the definition (`7582` -> `7605`) by expanding `beta_variance_sum_bound`'s docstring (net `+23` lines beginning at `search_engine.py:5813` — the hunk adds `5813`-`5837` and removes 2, one of them the reflow at `5837`; the `def` itself is at `:5796`), which is why both DEFINITION rows below carry `7605` and both documents' prose carries the `+23` hop: the `sdk.py` pair is below no such insert and keeps `12206`/`12259`.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
-            ("7582", "def subject_binding_available(graph) -> bool:"),
+            ("7605", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
             ("12206", "subject_binding_available,"),
             ("12259", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("7582", "def subject_binding_available(graph) -> bool:"),
+            ("7605", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
-        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12111`/`12164` -> `12116`/`12169` pair (`#13556` then added a further `+20` to `12136`/`12189`, four later merges took it to `12206`/`12259` (`+24` `#13610`, `+8` `#11824`, `+7` `#14011`, `+31` `#13971`), and `#14111`'s `+21` landed on `12206`/`12259`, the pair the rows below carry).
+        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12111`/`12164` -> `12116`/`12169` pair (`#13556` then added a further `+20` to `12136`/`12189`, and a later `origin/main` merge a further `+32` to `12168`/`12221` and a further `+59` to `12227`/`12280`, then `#14290`'s `-21` to the `12206`/`12259` the rows below carry).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("12206", "subject_binding_available,"),
             ("12259", "and not subject_binding_available(graph):"),
@@ -7590,7 +7590,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("12179", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
-            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, onto `12116`/`12169` — the `+1` between `#13486`'s `12110`/`12163` and that pair is `#13456`'s `from . import derived_embedding` (`sdk.py:45`), NOT `#12745`, which is an ancestor of `#13486` — and `#13556`'s own `+20` then took it to `12136`/`12189`, four later `origin/main` merges took it to `12206`/`12259` (`+24` `#13610`, `+8` `#11824`, `+7` `#14011`, `+31` `#13971`), and `#14111`'s `+21` took the live values to `12206`/`12259`.
+            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, onto `12116`/`12169` — the `+1` between `#13486`'s `12110`/`12163` and that pair is `#13456`'s `from . import derived_embedding` (`sdk.py:45`), NOT `#12745`, which is an ancestor of `#13486` — and `#13556`'s own `+20` then took it to `12136`/`12189`, and a later `origin/main` merge a further `+32` took it to `12168`/`12221`, and a further `+59` to `12227`/`12280`, then `#14290`'s `-21` to the live `12206`/`12259`.
             ("12206", "subject_binding_available,"),
             ("12259", "and not subject_binding_available(graph):"),
         ), "sdk"),

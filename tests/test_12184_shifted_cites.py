@@ -83,16 +83,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md (search_engine.py +3, cache_projection.py +2)
     (_AUDIT, "cache_projection.py:3841", _CP, 3841, 'if table == "point"'),
     (_AUDIT, "search_engine.py:4950-4954", _SE, 4954, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)"),
-    (_AUDIT, "search_engine.py:7170", _SE, 7170, "(op)-[r2:IMPL|hasPart]-(other:Point)"),
-    (_AUDIT, "search_engine.py:7577", _SE, 7577, "(n:Point)-[r:aboutSubject]->(:Subject)"),
-    (_AUDIT, "search_engine.py:7579", _SE, 7579, "(m:Event)-[r2:aboutSubject]->(:Subject)"),
+    (_AUDIT, "search_engine.py:7193", _SE, 7193, "(op)-[r2:IMPL|hasPart]-(other:Point)"),
+    (_AUDIT, "search_engine.py:7600", _SE, 7600, "(n:Point)-[r:aboutSubject]->(:Subject)"),
+    (_AUDIT, "search_engine.py:7602", _SE, 7602, "(m:Event)-[r2:aboutSubject]->(:Subject)"),
     # Row 149's TWO BARE range cites carry no `search_engine.py` prefix, so the token-level pins for
     # `6659`/`6661` above do not reach them — they are the only shifted mentions in this document the
     # first pin set missed. Both were already correct at the pre-fix head, so these two are
     # COMPLETENESS pins: they catch the re-point/double-shift that DID happen in this class (`:4549`
     # re-pointed to `:4552`), which is the failure the whole file exists for.
-    (_AUDIT, "`:7576-7579`", _SE, 7576, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
-    (_AUDIT, "`:7582-7621`", _SE, 7582, "def subject_binding_available"),
+    (_AUDIT, "`:7599-7602`", _SE, 7599, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
+    (_AUDIT, "`:7605-7644`", _SE, 7605, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3157", _SE, 3157, "CALL db.idx.fulltext.queryNodes"),
     (_AUDIT, "| `tortoise/search_engine.py:4878-4880` |", _SE, 4878, "MATCH (n:{label_str})"),
     # ⚠️ The token above carries its TABLE context on purpose. A bare `search_engine.py:4878-4880` is a
@@ -153,11 +153,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
-    # so the header counts it as drifted rather than compared, and it is one of the pairs the header
-    # enumerates as non-comparable at the pin — `_PIN_EOF_PAIRS` below is that split's per-pair
-    # form. ⛔ NO COUNT IS TYPED HERE (#14282 review, P3): the earlier form carried
-    # a figure that matched no published edition once the doc's split was re-derived, so the
-    # population is named by TEXT and its size comes from the graded source. ⛔ The
+    # so the header counts it as drifted rather than compared, and it is ONE OF THIRTEEN that are
+    # incomparable at the pin — measured at this head, and stated by the header itself: 221 comparable,
+    # 128 of them drifted, plus EIGHT of those thirteen = 136 of the 234. ⛔ THIS SENTENCE HAS NOW SHIPPED
+    # WRONG TWICE, both times with figures that were right about an EARLIER edition: `211 comparable, 119
+    # of them drifted, plus those three = 122 of the 214` (the pre-`#14246` corpus), then `223 / 130 /
+    # eight of eleven / 138` (the `#14246` corpus — still what this branch inherited, and no longer true
+    # of the document AFTER its own re-point moved two pairs past the pin's EOF and two more past
+    # `main`'s). Neither edition was graded: `_SPLIT_*` reads the DOCUMENT, and a comment beside a pin is
+    # prose to every arm in this file. The lesson this repetition states is the file's own: a figure
+    # quoted from a header rots the moment the header moves, so quote it at the level of "stated by the
+    # header" and let `_PIN_FILE_LENGTHS` grade the header instead of transcribing it here. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
@@ -240,7 +246,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
     (_AUDIT, "sdk.py:24626", _SDK, 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
-    (_AUDIT, "search_engine.py:7201", _SE, 7201, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
+    # ⛔ MERGE RESOLUTION (#14038 fold of `origin/main` `cc936d47db`): `search_engine.py` is NOT touched
+    # by this PR (`git diff --stat origin/main...HEAD -- tortoise/search_engine.py` prints nothing), so
+    # `main`'s `#14278` re-point is the measured one at the merged tree: `:7226` is
+    # `"RETURN op.id, type(r2) AS et, count(other)"` and this branch's pre-merge `:7201` now reads
+    # `# #2490: aligned has_ep gate …` (a COMMENT, measured with `sed -n '7201p'` on the resolved tree).
+    (_AUDIT, "search_engine.py:7226", _SE, 7226, "RETURN op.id, type(r2) AS et, count(other)"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3508", _SE, 3508, "``:Source``/``:Document`` row must not contribute"),
     (_SUBSTRATE, "`:3506`", _SE, 3506, "# #11682: the corpus join is PER FAMILY"),
@@ -367,7 +378,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⚠️ Widened from the bare `` `:6681` `` this pass first wrote (review cycle 6, F5): a bare `:NNNN`
     # is exactly the shape the comment above says is excluded — it is satisfied by any sibling spelling
     # of the same digits — and this row was the one of the four that carried it.
-    (_AUDIT, '`:7167` inside the same function', _SE, 7167, 'if expand_ops:'),
+    (_AUDIT, '`expand_ops` preview at `:7190`', _SE, 7190, 'if expand_ops:'),
     (_AUDIT, '`:3062` derives the label', _SE, 3062, 'label = "Source" if entity_type =='),
     # --- three re-derived addresses that had NO pin at all, so a `+1` mutation left 441 tests green
     # (review cycle 6, P2-2). `grep -rn '28008\|28372' tests/ tools/` returned nothing before these rows:
@@ -512,9 +523,14 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     # statement and `hosted_api.py:22919` is `if is_subject_kind(...)`, both executable. The pin is wrong for
     # all six; it is a comment for most, and unrelated CODE for the two that matter most here.
     ("sdk.py:24626", _SDK, 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
-    ("search_engine.py:7201", _SE, 7201, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
+    ("search_engine.py:7226", _SE, 7226, "RETURN op.id, type(r2) AS et, count(other)"),
     ("sdk.py:22267", _SDK, 22267, "s.summary=CASE WHEN $sum"),
     (":22390", _SDK, 22390, "s.summary, s.topics, s."),
+    # ⛔ MERGE RESOLUTION (#14038 fold of `origin/main` `cc936d47db`): `hosted_api.py` IS touched by this
+    # PR (+149/−35), so `main`'s pre-branch addresses are the ones that have moved. Measured on the
+    # resolved tree: `sed -n '23615p' tortoise/hosted_api.py` -> `"MERGE (s:Source {url:$did}) "` and
+    # `:23427` -> `def _execute_commit_writes(...)`, while `main`'s `23501`/`23313` read a prose comment
+    # and a docstring line. This is the same measurement the earlier fold (`73cf057865`) took.
     ("hosted_api.py:23615", "tortoise/hosted_api.py", 23615, "MERGE (s:Source {url:$did})"),
     (":23427", "tortoise/hosted_api.py", 23427, "def _execute_commit_writes"),
 )
@@ -558,11 +574,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:844`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:916`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4950-4954'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7170'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7577'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7579'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7576-7579`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7582-7621`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7193'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7600'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7602'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7599-7602`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7605-7644`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3157'): 5,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/search_engine.py:4878-4880` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4293'): 1,
@@ -613,7 +629,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24626'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7201'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7226'): 2,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3508'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3506`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37547'): 1,
@@ -658,7 +674,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51620`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7167` inside the same function'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`expand_ops` preview at `:7190`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
     ('docs/00_index.md', '`sdk.py:28581` at this head'): 1,
     # ⛔ #14087 review round 7: the pin row added for the SAME line's other present-tense address.
@@ -842,6 +858,11 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         # (`01a3c7072a`) restored the arrow rendering after the population
         # de-duplicated back to 227 pairs, so BOTH are asserted — a doc that
         # publishes one and not the other has lost a site, not just a phrase.
+        # ⛔ MERGE RESOLUTION (#14038 fold of `origin/main` `cc936d47db`): these are the BRANCH edition's
+        # figures, and they are re-MEASURED true of the resolved document (`_re_derived_drift` at this
+        # tree: `(227, 215, 155, 167, 229, 217, 157, 169)`), which is why `main`'s `234`/`136` pair — the
+        # figures its OWN edition of the header measured — is not carried here. A figure from another
+        # edition of the document is a carried number, which is the failure this arm exists to catch.
         "**The drift is 167 of those 227.**",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
@@ -1785,6 +1806,10 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
 #: consistent, and wrong — because nothing DERIVED it, and a self-consistent stale split cannot be caught
 #: by arithmetic on its own four figures (224 + 10 == 234 and 131 + 7 == 138 both held).
 _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
+    # ⛔ MERGE RESOLUTION (#14038 fold of `origin/main` `cc936d47db`): this pair is the DOCUMENT's own
+    # written address (`hosted_api.py`'s `:51620`, the `s.actor_user_id = $uid` condition, which this
+    # branch moves `+114` past `main`'s 51,521-line copy). `main`'s `50935` belonged to its own edition of
+    # the header, which the fold did not take; the derived set below is the grader either way.
     ("tortoise/hosted_api.py", 51620): 49851,
     ("tortoise/mcp_server.py", 11590): 11466,
     ("tortoise/sdk.py", 58099): 56415,
@@ -1793,10 +1818,38 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58966): 56415,
     ("tortoise/sdk.py", 61999): 56415,
     ("tortoise/sdk.py", 62019): 56415,
-    ("tortoise/search_engine.py", 7170): 7071,
-    ("tortoise/search_engine.py", 7201): 7071,
-    ("tortoise/search_engine.py", 7577): 7071,
-    ("tortoise/search_engine.py", 7579): 7071,
+    # ⛔ `#14278`'s re-point of §2.1's two `search_engine.py` adjacency rows DID add a pin-side fact: `:7193`
+    # and `:7226` are past this pin's 7,071-line copy (their predecessors `:6837`/`:6891` were not), so the
+    # split's denominators moved with them. Missing those two entries is how the table stayed
+    # self-consistent while the split published `223 / eleven / 130 / eight` about a document that measured
+    # `221 / thirteen / 128 / eight`: `expected_comparable` is derived FROM this table, so an
+    # under-enumerated table can never disagree with itself. `test_the_non_comparable_set_is_derived_from_the_pins_file_lengths`
+    # closes that by deriving membership from `_PIN_FILE_LENGTHS` instead.
+    # ⛔ MERGE RESOLUTION (#14038 fold of `origin/main` `cc936d47db`): main's four `search_engine.py` rows
+    # are the ones the resolved DOCUMENT writes (its body carries `:7193`/`:7226`/`:7600`/`:7602`), so the
+    # branch's four pre-merge addresses are dropped rather than kept beside them. The set is then GRADED by
+    # `test_the_non_comparable_set_is_derived_from_the_pins_file_lengths`, not trusted.
+    ("tortoise/search_engine.py", 7193): 7071,
+    ("tortoise/search_engine.py", 7226): 7071,
+    ("tortoise/search_engine.py", 7600): 7071,
+    ("tortoise/search_engine.py", 7602): 7071,
+}
+#: The pin's own file lengths — the MEMBERSHIP RULE behind the split, kept per FILE rather than transcribed
+#: per pair (`git show ccb49741b2ec:<path> | wc -l`). A pair is non-comparable exactly when its line is past
+#: its own file's length at the pin, which is a fact about the census and the pin and nothing else, so it can
+#: be DERIVED on every run instead of being copied into `_PIN_EOF_PAIRS` by whoever re-points a cite. That
+#: transcription is what shipped the split wrong twice (`#14246` review finding 1, then `#14278`'s own `+23`
+#: re-point): both editions were internally consistent, and the second one was consistent with a table that
+#: had stopped describing the document.
+_PIN_FILE_LENGTHS: dict[str, int] = {
+    "tortoise/sdk.py": 56415,
+    "tortoise/search_engine.py": 7071,
+    "tortoise/mcp_server.py": 11466,
+    "tortoise/hosted_api.py": 49851,
+    # Declared because the document cites it at `:22118`, i.e. above the ceiling below — it holds NO
+    # non-comparable pair (its pin copy is 22,857 lines), and that is the point: the ceiling arm asks for a
+    # declared length from every file cited high enough to hide an EOF crossing, not from every file.
+    "tortoise/projection/__init__.py": 22857,
 }
 #: The split's three published sentences. Each is matched on the header's emphasis-stripped body, like every
 #: other figure pattern in this file, and each group is graded as a NUMBER (`_as_int`), so an edition may
@@ -1869,7 +1922,7 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     # (2) every one of them is NAMED where the header promises to name them: the non-comparable enumeration,
     # the sentence between "that are NOT comparable" and "past the pin's copy of its file". Either spelling
     # form the document uses for a pair counts — `SDK/FILE:NNNN` (`sdk.py:57951`) or the bare `:NNNN`
-    # sibling behind an adjacent path (`search_engine.py`'s `:7579`).
+    # sibling behind an adjacent path (`search_engine.py`'s `:7600`).
     start = body.find("that are NOT comparable")
     end = body.find("past the pin's copy of its file")
     assert start != -1 and end > start, (
@@ -2179,6 +2232,11 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
         )
 
 
+# ⛔ MERGE RESOLUTION (#14038 fold of `origin/main` `cc936d47db`): BOTH sides of this hunk are different
+# tests and both are kept. The branch's `test_the_epic_bundles_i7_prose_cites_the_range_its_row_carries`
+# (#14038 cycle 13, P3) is not on `main`; `main`'s `test_the_non_comparable_set_is_derived_from_the_pins_
+# file_lengths` (`#14278`) is not on the branch. Neither supersedes the other — dropping either is a lost
+# guard, which is the defect class both exist for.
 def test_the_epic_bundles_i7_prose_cites_the_range_its_row_carries() -> None:
     """Prose that quotes a document's line range must be the range the document carries at THIS head.
 
@@ -2224,6 +2282,107 @@ def test_the_epic_bundles_i7_prose_cites_the_range_its_row_carries() -> None:
             f"I7 row carries `:{_start}-{_end}`. A citation labelled for this head that disagrees with the "
             "document is the re-derived-number-carried-instead-of-re-derived class: re-derive it from "
             "the row, or label it with the head it was actually taken at.")
+
+def test_the_non_comparable_set_is_derived_from_the_pins_file_lengths() -> None:
+    """MEMBERSHIP IS DERIVED, not transcribed — the arm the split was missing.
+
+    WHY THIS EXISTS. `_PIN_EOF_PAIRS` was the split's only source of membership, and the arm above derives
+    `expected_comparable = len(pairs) - len(_PIN_EOF_PAIRS)` FROM it — so an under-enumerated table agrees
+    with itself perfectly. That is not hypothetical: `#14278` re-pointed §2.1's three `search_engine.py`
+    adjacency rows and two of the new addresses (`:7193`, `:7226`) crossed this pin's 7,071-line copy,
+    while two addresses it re-pointed the other way (`:7600`/`:7602`) crossed `main`'s 7,441-line copy, so
+    the true split became 221 comparable / thirteen non-comparable / 128 drifters among the comparable /
+    eight of the thirteen / five at neither head — and the header went on publishing `223`/`eleven`/`130`/
+    `eight`/`three` over exactly that document, with every arm green (`138` too, which the same measurement
+    moves to `136`). The four figures were again internally consistent and again wrong: `223 + 11 == 234`
+    and `130 + 8 == 138` held, exactly as they did in the `#14246` edition this table was written to stop.
+
+    WHAT IT GRADES. A pair is non-comparable iff its line is past ITS OWN file's length at the pin — a fact
+    of the census and the pin, not of anyone's transcription. So the set is computed from `_PIN_FILE_LENGTHS`
+    and the table built from it must be that set, in both directions (a pair left out of the table cannot
+    hide, and a pin-side fact invented for a pair the document no longer writes cannot linger). The two
+    structures are also held to agree on the length each file states, so they cannot drift apart.
+
+    RESIDUAL, stated rather than claimed closed: a file NOT in `_PIN_FILE_LENGTHS` is checked by a CEILING —
+    no undeclared file may be cited at a line above the shortest declared length — because this file cannot
+    know its `wc -l` at the pin. Below that ceiling a short file's own EOF is invisible here; measured at
+    this head only `tortoise/projection/__init__.py` was cited above the ceiling without a declaration, it
+    was declared, and every census pair past its file's pin-EOF now lives in a declared file.
+
+    NON-VACUOUS: on `058f5555b4`'s edition of the document the derived set is 11 pairs while this table now
+    holds 13, so the first arm reds; and flipping one document number across an EOF (e.g. `:7193` ->
+    `:7050`, which IS comparable at 7,071 lines) removes it from the derived set and reds the same arm.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    _spellings, pairs = _resolved_pairs(text)
+
+    floor = min(_PIN_FILE_LENGTHS.values())
+    undeclared = sorted({path for path, line in pairs
+                         if line > floor and path not in _PIN_FILE_LENGTHS})
+    assert not undeclared, (
+        f"the document cites {undeclared} above the shortest declared pin length ({floor} lines), so a "
+        "pair in one of them could be past that file's own EOF and this arm could not see it. Declare the "
+        "file's `git show ccb49741b2ec:<path> | wc -l` in `_PIN_FILE_LENGTHS` — the ceiling is what makes "
+        "the undeclared-file residual finite rather than silent."
+    )
+
+    for (path, _line), pin_lines in _PIN_EOF_PAIRS.items():
+        assert _PIN_FILE_LENGTHS.get(path) == pin_lines, (
+            f"`_PIN_EOF_PAIRS` says `{path}` is {pin_lines} lines at the pin while `_PIN_FILE_LENGTHS` says "
+            f"{_PIN_FILE_LENGTHS.get(path)} — the two structures describe one pin, so they must agree; "
+            "otherwise membership is derived from one fact and published from another."
+        )
+
+    derived = {(path, line) for path, line in pairs
+               if path in _PIN_FILE_LENGTHS and line > _PIN_FILE_LENGTHS[path]}
+    missing = sorted(derived - set(_PIN_EOF_PAIRS))
+    stale = sorted(set(_PIN_EOF_PAIRS) - derived)
+    assert not missing and not stale, (
+        "the non-comparable split is not what the document's own cites measure at this pin — "
+        f"past-EOF pairs the table omits: {missing}; table entries the document no longer writes past its "
+        f"file's EOF: {stale}. `_PIN_EOF_PAIRS` is transcribed by hand while the census is derived, so a "
+        "re-point that crosses an EOF (or one that moves back under it) changes the split with nothing "
+        "red — which is how this header published `223 / eleven / 130 / eight / three` over a document "
+        "measuring `221 / thirteen / 128 / eight / five`. Re-derive the table AND the four published "
+        "figures from the measured split; do not adjust one to the other."
+    )
+
+    # ⛔ THE ONE NUMERAL THE ARMS ABOVE LEAVE UNGRADED: the split's comparable-drift numerator
+    # ("128 of the 221 comparable"). `_SPLIT_DRIFT`'s first group was read by NOBODY — the comparability
+    # arm grades its denominator, its non-comparable numerator and the absent-at-main count, and
+    # `_QUADRUPLE` grades the headline — so `130` sat beside a `138` that no longer decomposed into it for a
+    # whole edition (`130 + 8 == 138` was true of the corpus before this branch's re-point, and the pair of
+    # figures it left behind kept the relation while describing a different document). The identity is the
+    # grader: the two halves must add up to the headline, which is what makes the fourth figure derived
+    # rather than quoted.
+    body = _unbolded(text)
+    drift = _SPLIT_DRIFT.search(body)
+    quad = _QUADRUPLE.search(body)
+    absent = _SPLIT_ABSENT_AT_MAIN.search(body)
+    assert drift is not None and quad is not None and absent is not None, (
+        "the split's numerator relation needs all three published sentences (the `the drift is N of the M "
+        "comparable, plus S of those T pairs` restatement, its `the Z that does not exist at `main` either` "
+        "sibling, and the `S spellings → P pairs → C collisions → D drifters` headline); one of them no "
+        "longer parses, so re-point this arm at how it is written now"
+    )
+    comparable_drift = _as_int(drift.group(1))
+    # ⛔ MERGE RESOLUTION (#14038 fold of `origin/main` `cc936d47db`): the non-comparable DRIFTERS are the
+    # ones that drift at `main` PLUS the ones that exist at neither head — which is exactly the convention
+    # `_re_derived_drift` implements (`drifters = drifted comparable + every non-comparable pair`). The
+    # edition of this arm on `origin/main` summed only the drift sentence's third group, which was true of
+    # `main`'s own header because that header's headline (`136 = 128 + 8`) likewise excluded its five
+    # absent-at-neither pairs; this branch's header counts them (`155 + 11 + 1 = 167`), so the arm has to
+    # read the third term it published, or it grades a definition the measurement below does not use.
+    # `test_the_comparability_split_names_every_pair_past_the_pins_eof` asserts the same decomposition.
+    incomparable_drift = _as_int(drift.group(3)) + _as_int(absent.group(1))
+    headline = int(quad.group(4))
+    assert comparable_drift + incomparable_drift == headline, (
+        f"the split says {comparable_drift} of the comparable pairs drift and {incomparable_drift} of the "
+        f"non-comparable ones do (drift-at-`main` plus the ones at neither head), which is "
+        f"{comparable_drift + incomparable_drift} — but the headline says {headline} drifters of the "
+        f"{quad.group(5)}. The two halves are the whole population, so a re-point that moves a pair across "
+        "the pin's EOF must move all three figures together"
+    )
 
 
 def test_a_carried_forward_figure_is_reported() -> None:
@@ -3012,7 +3171,7 @@ def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
     shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37547, "``:Document`` node).")
     assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37547 must red"
     # A range token is accepted on any line INSIDE the range it names (the anchor convention).
-    inside = (_AUDIT, "`:7576-7579`", _SE, 7579, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
+    inside = (_AUDIT, "`:7599-7602`", _SE, 7602, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
     assert not _rows_outside_their_token((inside,)), "a line inside the named range must pass"
 
 
