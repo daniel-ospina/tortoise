@@ -1092,9 +1092,12 @@ def _argv0_stand_in_source() -> Path:
     python-build-standalone copy dies `No module named 'encodings'`, and a
     wrapper-script interpreter loses the custom `argv[0]` to its shebang exec.
 
-    Asserted, NOT skipped: this file's frozen manifest declares no `allow-skipped`
-    budget, so a box with no suitable shell must red here instead of passing
-    silently.
+    Asserted, NOT skipped ON ANY BOX THAT REACHES IT: this file's frozen manifest declares no
+    `allow-skipped` budget, so a box with no suitable shell reds here instead of passing
+    silently. ⚠️ ALL THREE of this helper's callers are platform-gated (each needs a plain-ELF
+    shell), so on a box whose platform gate excludes them — macOS ships Mach-O and no
+    `/bin/dash` — this refusal is not reached and those rows skip by design; the guarantee
+    above is about the boxes that DO run them, and is not a claim the gate contradicts.
 
     A candidate qualifies only if it resolves to a REAL SHELL and is a plain
     **ELF regular file**. The two checks exclude two DIFFERENT hazards, and an
@@ -1229,7 +1232,21 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     # still read out of the one-element `argv[0]` line.
     sockdir = tmp_path / "socket-dir"
     sockdir.mkdir()
-    line = f"{binary} unixsocket:{sockdir}/redis.socket"
+    # ⛔ THE FIRST TOKEN IS A LAUNCHER, NOT THE BINARY, ON PURPOSE (PR #14287
+    # review follow-up). This row must witness the KERNEL-NAME identity path, and
+    # the binary-first shape does not: `_split_one_arg_line` tokenises
+    # `<bin>/redis-server unixsocket:<dir>/…` into an `argv[0]` that still ENDS in
+    # `redis-server`, so `_redis_identity` answers `"argv[0]"` and never reaches
+    # `/proc/<pid>/comm`. Measured: with that shape, `_redis_identity`'s `comm`
+    # and `exe` fallbacks replaced by `return None` left this row GREEN — the
+    # kernel-name branch, which is what a wrapper-exec'd server relies on, was
+    # graded only by rows that STUB the `/proc` readers. A launcher-named first
+    # token cannot match `_IS_REDIS` (end-anchored), so the row below resolves
+    # through `comm` for real. Nothing else moves: the process is still exec'd as
+    # `binary`, the socket dir still EXISTS (the #14347 constraint above), and it
+    # is still read out of the split line.
+    launcher = tmp_path / "launcher"
+    line = f"{launcher} redis-server unixsocket:{sockdir}/redis.socket"
     child = subprocess.Popen(
         [line],
         executable=str(binary),
@@ -1282,6 +1299,15 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
             f"the pre-fix filter dropped it — inventory held {sorted(rows)}"
         )
         assert rows[child.pid]["socket_dir"] == str(sockdir)
+        # ⛔ THE RESOLUTION PATH, NOT JUST THE ROW (#14287 review). `comm` is what the
+        # kernel set at execve() from the executed file's name (proc(5)), so it is the
+        # one source a wrapper cannot disguise from its own argv; asserting it here is
+        # what makes the `comm`/`exe` fallbacks load-bearing in this fixture instead of
+        # unreachable behind the `argv[0]` fast path.
+        assert rows[child.pid]["identified_by"] == "comm", (
+            "identity must resolve from /proc/<pid>/comm — argv[0] here is a "
+            f"launcher name and must not match; got {rows[child.pid]['identified_by']!r}"
+        )
         # …and the fixture is not itself reapable litter. This is the half that
         # makes the fix above non-vacuous: drop the `sockdir.mkdir()` and this
         # row REDs with `REAP — socket dir … is gone`, i.e. it names the state
@@ -1294,6 +1320,85 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     finally:
         child.kill()
         child.wait(timeout=30)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="the stand-in must be a plain-ELF shell (macOS ships Mach-O, and has no /bin/dash)",
+)
+def test_argv0_stand_in_selection_rejects_both_hazards(monkeypatch, tmp_path):
+    """`_argv0_stand_in_source` skips the two hazards, and refuses when bereft.
+
+    ⛔ THIS TEST EXISTS BECAUSE THE GUARDS WERE UNPINNED (#14287 review). On a box
+    with a normal `/bin/bash`, BOTH guards in the helper are inert: every shipped
+    candidate is already a real ELF shell, so deleting either guard left the
+    suite at 58 passed. A guard that no row can redden is dead weight — the next
+    reader sees "the multicall hazard is handled" and no revert can contradict
+    it. Each hazard is therefore INJECTED here, so the row that pins it fails by
+    behaviour rather than by inspection.
+
+    Asserted, never skipped ON THE RUNNERS: this file's frozen manifest declares no
+    `allow-skipped` budget, and the point of the row is to be able to fail. ⚠️ The
+    decorator above gates it off non-Linux boxes — its real dependency is
+    `_argv0_stand_in_source()` requiring a plain-ELF shell, NOT `/proc` (this row
+    never reads `/proc`, unlike the two rows that carry the `/proc` reason), because
+    on macOS every candidate is Mach-O and the helper would refuse and red.
+    """
+    # An ELF regular file named `busybox` — accepted by the magic test alone, and
+    # the very binary #14335 is about. `comm` of a copy is `busybox`, not a shell.
+    multicall = tmp_path / "busybox"
+    multicall.write_bytes(b"\x7fELF" + b"\x00" * 60)
+    multicall.chmod(0o755)
+    # A `#!/bin/sh` shim NAMED bash: passes the basename guard, fails the magic
+    # test, and if accepted would lose the custom argv[0] to its shebang exec.
+    shim = tmp_path / "bash"
+    shim.write_text("#!/bin/sh\nexec /bin/dash \"$@\"\n")
+    shim.chmod(0o755)
+    # The control: a real shell, last in preference order, so both hazards must be
+    # stepped over before it is reached.
+    # ⛔ TAKE IT FROM THE BOX'S OWN ANSWER, NOT A HARDCODED PATH (#14287 review, P2).
+    # `Path("/bin/dash")` is Debian-only, and `_ARGV0_STAND_IN_SHELLS` itself treats
+    # dash as OPTIONAL — so on macOS or a dash-less Linux (Fedora/RHEL/Arch/NixOS)
+    # this row raised `FileNotFoundError` before pinning either guard, redding a
+    # required shard on a box the rest of this file deliberately supports. Deriving
+    # the control from `_argv0_stand_in_source()` keeps both guards discriminating:
+    # the basename guard still rejects the `busybox` fixture and the ELF guard still
+    # rejects the shim.
+    real = tmp_path / "dash"
+    real.write_bytes(_argv0_stand_in_source().read_bytes())
+    real.chmod(0o755)
+
+    hazard_order = (str(multicall), str(shim), str(real))
+    monkeypatch.setattr(
+        sys.modules[__name__], "_ARGV0_STAND_IN_SHELLS", hazard_order
+    )
+    assert _argv0_stand_in_source() == real.resolve(), (
+        "both guards must be stepped over: `busybox` is an ELF multicall applet "
+        "and `bash` here is a wrapper script — accepting either re-creates the "
+        "#14335 red this fixture exists to avoid"
+    )
+
+    # Delete the basename guard's effect: with `busybox` first and no control,
+    # accepting it is exactly what a revert of that guard does.
+    monkeypatch.setattr(
+        sys.modules[__name__], "_ARGV0_STAND_IN_SHELLS", (str(multicall),)
+    )
+    with pytest.raises(AssertionError, match=r"none of .* is a plain ELF binary"):
+        _argv0_stand_in_source()
+
+    # …and the ELF guard's effect, alone.
+    monkeypatch.setattr(
+        sys.modules[__name__], "_ARGV0_STAND_IN_SHELLS", (str(shim),)
+    )
+    with pytest.raises(AssertionError, match=r"none of .* is a plain ELF binary"):
+        _argv0_stand_in_source()
+
+    # The refusal is a RED on a box with no usable shell — never a skip.
+    monkeypatch.setattr(
+        sys.modules[__name__], "_ARGV0_STAND_IN_SHELLS", (str(tmp_path / "absent"),)
+    )
+    with pytest.raises(AssertionError, match="refusing here is deliberate"):
+        _argv0_stand_in_source()
 
 
 # ── the workflow shape: the blind, host-global reap must not come back ──────
