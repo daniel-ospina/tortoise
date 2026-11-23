@@ -1630,6 +1630,10 @@ def _is_sys_dict_mapping(node: ast.AST, ctx: _RegistryCtx) -> bool:
     if not isinstance(node, ast.Call):
         return False
     if (_callee_names_of(node.func) & ({"vars"} | ctx.builtin_aliases)
+            # ⛔ `== 1`, NOT `>= 1`, AND IT IS UNREACHABLE-BY-MUTANT (#14326 round 28,
+            # MEASURED: relaxing it left `41 passed`). The only 2-arg spelling it excludes is
+            # `vars(<obj>, <name>)`, which is a TypeError — red-ing it would be a false red on
+            # code that cannot run, so no row writes one and the arity stays exact.
             and len(node.args) == 1
             and _is_sys_ref(node.args[0], ctx.sys_names)):
         return True
@@ -7725,6 +7729,13 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
                     "`run()`'s deferred `from tortoise.sdk import …` resolves THROUGH a "
                     "swapped registry at CALL time"
                 )
+                # ⛔ UNREACHABLE-BY-MUTANT, AND SAID SO (#14326 round 28). Removing this
+                # `continue` leaves the file at `41 passed`: the `hit` test below needs a key
+                # from `_SHIPPED_MODULE`/`_SDK_CONSTRUCTOR`, and this arm enters only on the
+                # `modules` key. It stays because it makes the TWO MESSAGES mutually exclusive
+                # by construction (a mapping spelling both keys would otherwise be reported as
+                # REPLACES *and* as a keyed store for one node), which is the property rows
+                # assert with `any(…)` and so cannot pin.
                 continue
             hit = keys & ({_SHIPPED_MODULE} if registry else {_SDK_CONSTRUCTOR})
             if receiver and hit:
@@ -8457,6 +8468,45 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "`import builtins as _b` then `_b.vars`":
             'import builtins as _b\n_v = _b.vars\n'
             '_v(sys)["modules"]["tortoise.sdk"] = _Mirror\n',
+        # ⛔ AND THE `builtins` MODULE REACHED BY ASSIGNMENT, WHICH IS A DIFFERENT BIND FORM
+        # FROM AN IMPORT AND WAS UNPINNED (#14326 round 28, MEASURED: `builtins_names`'s
+        # `_aliases_of(… builtin_roots …)` union could be DELETED with the file at
+        # `41 passed` — the docstring above claims `_b = builtins` is resolved "the way `sys`
+        # already is", and no row exercised it). Both rows below are RED at the head and
+        # GREEN when that union is removed, so the resolve is pinned rather than asserted.
+        "`_b = builtins` (ASSIGNMENT) then `_b.getattr`":
+            '_b = builtins\n_g = _b.getattr\n'
+            '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`_b = builtins` (ASSIGNMENT) then `_b.vars`":
+            '_b = builtins\n_v = _b.vars\n'
+            '_v(sys)["modules"]["tortoise.sdk"] = _Mirror\n',
+        # ⛔ AND AN ALIAS OF AN ALIAS (#14326 round 28, MEASURED: collapsing
+        # `builtin_aliases`' `_aliases_of(…, loops=True)` to a SINGLE PASS left `41 passed`,
+        # so the fixpoint was unpinned and `_h = _g` — a statically visible one-hop alias of
+        # an aliased builtin — would have re-opened the fail-open the `getattr`/`vars` arms
+        # and the unbound-read shape arm all resolve through that set. Two hops, on the READ
+        # axis, which is the axis the arm reads it on.
+        "`_g = getattr` then `_h = _g` (ALIAS OF AN ALIAS)":
+            '_g = getattr\n_h = _g\n'
+            '_h(sys, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`_v = vars` then `_w = _v` (ALIAS OF AN ALIAS)":
+            '_v = vars\n_w = _v\n'
+            '_w(sys)["modules"]["tortoise.sdk"] = _Mirror\n',
+        # ⛔ AND THE LOOP-TARGET BIND OF A CALLEE ALIAS (#14326 round 28, MEASURED: the
+        # `loops=True` on `builtin_aliases`' `_aliases_of` could be relaxed to a single CENSUS
+        # with the file at `41 passed` — `loops` is what admits a `for` TARGET as a bind, and
+        # no row bound a builtin through one). The shape is RED at the head and GREEN once
+        # `loops` is off, so it is the clause's own row rather than a neighbouring spelling's.
+        "`for _g in (getattr,)` TARGET":
+            'for _g in (getattr,):\n'
+            '    _g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`for _v in (vars,)` TARGET":
+            'for _v in (vars,):\n'
+            '    _v(sys)["modules"]["tortoise.sdk"] = _Mirror\n',
+        "`async for _g in (getattr,)` TARGET":
+            'async def _f(it):\n'
+            '    async for _g in (getattr,):\n'
+            '        _g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
         "`builtins.getattr` CARRIED in a name":
             'import builtins\n_g = builtins.getattr\n'
             '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
@@ -8595,6 +8645,25 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "`_d = getattr` then `__d = _g(sys, \"__dict__\")` REPLACES":
             '_g = getattr\n__d = _g(sys, "__dict__")\n'
             '__d["modules"] = {"tortoise.sdk": _Mirror}\n',
+        # ⛔ AND THE TWO RESOLVE PATHS THE `builtins_names` UNION AND THE `builtin_aliases`
+        # FIXPOINT CARRY, ON THE STORE AXIS (#14326 round 28). The read axis pins them one
+        # test up; the replacement arm reaches the same alias set through
+        # `sys_dict_names`, so the union and the fixpoint are load-bearing on BOTH axes and
+        # the rows below red when either is removed.
+        "`_b = builtins` then `_g = _b.getattr` REPLACES":
+            '_b = builtins\n_g = _b.getattr\n__d = _g(sys, "__dict__")\n'
+            '__d["modules"] = {"tortoise.sdk": _Mirror}\n',
+        "`_g = getattr` then `_h = _g` REPLACES":
+            '_g = getattr\n_h = _g\n__d = _h(sys, "__dict__")\n'
+            '__d["modules"] = {"tortoise.sdk": _Mirror}\n',
+        # ⛔ AND A CALLEE ALIAS BOUND BY A LOOP TARGET, ON THE STORE AXIS (#14326 round 28):
+        # `sys_dict_names` reads the same `builtin_aliases`, so the `for`-target bind is
+        # load-bearing here too and reds when `loops` is off.
+        "`for _b in (builtins,)` TARGET then `_b.getattr` REPLACES":
+            'for _b in (builtins,):\n'
+            '    _g = _b.getattr\n'
+            '    __d = _g(sys, "__dict__")\n'
+            '    __d["modules"] = {"tortoise.sdk": _Mirror}\n',
     }
     for name, lever in registry_replacements.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
