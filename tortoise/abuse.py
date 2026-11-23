@@ -1819,9 +1819,12 @@ class AbuseEngine:
         self._last_notified: dict[tuple[str, str, str], datetime] = {}
         self._notify_lock = threading.Lock()
         # Episode ends whose incident resolution did not COMPLETE, awaiting a
-        # retry on a later clean window (#14407): the value is the attempt count,
-        # so a close that can never succeed is dropped instead of retried for
-        # ever. In-process and bounded — a hint, never an authority.
+        # retry on a later clean window (#14407): the value is the FIRST-SEEN
+        # instant (a TTL anchor, read by `_remember_pending_resolve`), and the
+        # entry is dropped once `_EPISODE_RESOLVE_RETRY_TTL_S` has elapsed — a
+        # close that can never succeed is dropped instead of retried for ever.
+        # In-process and bounded twice (that TTL, and
+        # `_MAX_PENDING_EPISODE_RESOLVES`) — a hint, never an authority.
         self._pending_episode_resolves: dict[tuple[str, str], datetime] = {}
         # Last retry instant per subject, so a failing close is retried at the
         # store's own backoff pace instead of once per clean evaluation (#14407).
