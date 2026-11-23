@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import inspect
 import json
 import os
 import signal
@@ -5032,11 +5033,27 @@ def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
 
     if shutil.which("ps") is None:  # pragma: no cover — no `ps` to ask
         pytest.skip("no `ps` on this box: the positive direction cannot be measured")
+    # ⛔ THE TEXTUAL PIN COMES FIRST (#12039 cycle 12, P2), because it needs no `ps` at all: the
+    # mistyped-argument direction this arm exists for must stay measurable on a box whose `ps`
+    # cannot answer. Reading the invocation's own SOURCE is what carries it.
+    invocation = inspect.getsource(_ps_answers)
+    assert '"-o"' in invocation and "command=" in invocation, (
+        "`_ps_answers` stopped asking `ps` for `-o command=`, so every census error would be "
+        "excused as the box's and the regression this file pins stays green forever. Its "
+        f"invocation is: {invocation!r}")
+    # ⛔ AN UNUSABLE TABLE IS THE BOX'S LIMITATION, NOT A REQUIRED-SHARD FAIL (#5049 rules 1/4).
+    # `shutil.which` was the whole gate, so a `ps` that EXISTS but cannot answer (uutils, a
+    # restricted `/proc`, a field rejection that exits non-zero with empty stdout — this file's own
+    # definition of "no usable `ps`") redded the shard for a box reason, while the subject test on
+    # the same box correctly SKIPPED. Measured with a `ps` that exits 1 with empty stdout:
+    # `2 failed, 181 passed, 1 skipped`.
+    if not _ps_answers():  # pragma: no cover — a `ps` that exists and cannot answer
+        pytest.skip(
+            "`ps` exists but cannot answer `-p <pid> -o command=`, so this box cannot measure the "
+            "positive direction; the invocation was pinned TEXTUALLY above")
     assert _ps_answers() is True, (
-        "`ps -p <our pid> -o command=` answered nothing on a box that HAS `ps`, so every census "
-        "error would be excused as the box's and the regression this file pins stays green "
-        "forever. Read the INVOCATION first: a mistyped field exits non-zero with empty stdout "
-        "and raises nothing, so the `except` arm never fires")
+        "`ps -p <our pid> -o command=` answered nothing on a box whose `ps` DID answer the "
+        "capability probe above, so every census error would be excused as the box's")
 
 
 def test_the_outside_signal_set_is_exactly_the_signals_the_box_sends() -> None:
@@ -5080,6 +5097,13 @@ def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
 
     if shutil.which("ps") is None:  # pragma: no cover — no `ps` to read a row with
         pytest.skip("no `ps` on this box: the row this test grades cannot be read")
+    # ⛔ AND THE SAME CAPABILITY GATE AS THE CONTROL (#12039 cycle 12, P2). Without it a `ps` that
+    # exists but cannot answer turns the row assertion below into a required-shard FAIL for a box
+    # reason — the inversion this PR removes everywhere else.
+    if not _ps_answers():  # pragma: no cover — a `ps` that exists and cannot answer
+        pytest.skip(
+            "`ps` exists but cannot answer `-p <pid> -o command=`, so the row this test grades "
+            "cannot be read on this box")
 
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     try:
