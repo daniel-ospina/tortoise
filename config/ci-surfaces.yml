@@ -15,13 +15,14 @@ version: 1
 # `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
 # S is chosen by that formula on the committed map. What is deliberately NOT
 # restated here is the S-choice ARITHMETIC — it moves with every re-cut, which is
-# how this block went stale twice. Three tests are authoritative, and every one of
-# them recomputes from the map rather than trusting a quoted number: the
-# balance-band test (`test_real_workflow_halves_are_consistent`), the lane-parity
-# superset test below, and the emission guard
+# how this block went stale twice. Two tests are authoritative, and both recompute
+# from the map rather than trusting a quoted number: the lane-parity superset test
+# below, and the emission guard
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), which grades
 # the per-shard `--emit-push-matrix` sentence further down in this block against
 # the LIVE emission, so the figures in it are a graded claim and not merely prose.
+# The balance-band arm (`test_real_workflow_halves_are_consistent`) that used to
+# sit beside them went with the durations-map arithmetic cut.
 #
 # S=11 is also what the lane-parity contract permits: main publishes
 # `test (a)`…`test (j)` and a PR may only ADD to that set, never remove from it
@@ -77,6 +78,10 @@ version: 1
 # moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
 # from the pre-suite terms (those are measurements and file facts).
+# is how this block went stale three times before (#14296).) ⛔ The cap was NOT
+# moved: raising it re-opens `#3239`'s stale-head exposure, and the SUM grew
+# from the POOL, not from the pre-suite terms (those are measurements and file
+# facts).
 #
 # The 1.25x balance band is enforced by `test_real_workflow_halves_are_
 # consistent`, which recomputes the ratio from the committed map. The old
@@ -149,11 +154,11 @@ carve_shards: 3
 # Absence means 2 — the shape this repo ran until now — so deleting this key
 # gives the leg count back. It is NOT, on its own, a complete rollback: the
 # wall-target guard recomputes from the map, and 2 legs project ~20.9m against
-# the 10m target, so removing the key reds it
-# (`tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_
-# the_wall_target`). A real rollback therefore moves the target/guard too — which
-# is what makes a growing slow file red HERE rather than silently restoring the
-# ceiling.
+# the 10m target, so removing the key reds that projection (`tools/ci_selection.py`'s
+# `slow_wall_projection` arm). A real rollback therefore moves the target/guard
+# too — which is what makes a growing slow file red HERE rather than silently
+# restoring the ceiling the key was added to raise. The red belongs to the
+# projection, not to a test.
 slow_shards: 5
 
 surfaces:
@@ -7175,7 +7180,7 @@ surfaces:
   # file's `test_s2_decision_record_5087.py` entry ("cites cases by NAME — never
   # by row ordinal, and never with a case count … both went one case stale inside
   # PR #10302 itself"), and it is not machine-checked for a `surfaces:` comment
-  # (`test_no_durations_row_states_a_stale_case_count` reads durations rows only).
+  # (the durations-row case-count arm reads durations rows only).
   - test_14357_fallback_thinking.py
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   # #10311: the S2/S4 prompt BODIES frame session text as untrusted DATA — the
@@ -9550,10 +9555,10 @@ surfaces:
   #     `tests/test_uri_requiring_selection.py`
   #     `::test_declared_list_matches_the_observation` re-derives the set by running
   #     pytest with an EMPTY URI and reds a declared/observed mismatch (#6884);
-  #   * the `durations:` row → the ENTRY RULE pin
-  #     (`tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`),
-  #     which sees ONLY the files named in `ROWED_BY_THIS_FOLD`; the coverage check is a
-  #     0.90 RATIO with headroom and is silent over one missing row.
+  #   * the `durations:` row → the REQUIRED `manifest-integrity` leg
+  #     (`python3 tools/ci_selection.py --integrity`), which names any fast-pool
+  #     file with no row; the separate coverage check is a 0.90 RATIO with
+  #     headroom and is silent over one missing row.
   # The three are added together because a lane that adds one and stops is red in a leg
   # it is not looking at — not because any one check reds the others.
   - test_evictor_invalidates_fallback_snapshot_13123.py
@@ -12204,8 +12209,8 @@ tier1:
 # is right. Matching that arithmetic is also why #9539's lever is the LEG COUNT
 # rather than a better cut of two: `slow_shards: 5` takes the critical leg from
 # 18.95m to 7.58m.
-# `test_slow_leg_bounds_clear_the_committed_work` re-derives the 40m watchdog's
-# headroom from the DERIVED legs against the 2.0x `WATCHDOG_HEADROOM` floor (5.3x
+# The 40m watchdog's headroom is the DERIVED legs against the 2.0x
+# `WATCHDOG_HEADROOM` floor (5.3x
 # at the 7.58m heavier leg of the pre-#10194 pool; 6.99x at today's 5.72m — the
 # ratio is DERIVED, so it moves with the pool and is not restated as a fixed
 # number), and the workflow's drift guard pins the union of the EXPANDED legs to
@@ -12463,8 +12468,8 @@ slow_files:
 # map's slow-pool rows are themselves only as fresh as the last sweep
 # (`tools/ci_timing.py --refresh-durations`, run by `ci-timing.yml`), so a stale
 # row mis-ranks the pack. The watchdog's headroom (recomputed from the
-# committed leg weights by `test_slow_leg_bounds_clear_the_committed_work`) is
-# what absorbs a ranking error; the durable fix is the scheduled refresh
+# committed leg weights) is what absorbs a ranking error; the durable fix is the
+# scheduled refresh
 # (`.github/workflows/ci-timing.yml` → `tools/ci_timing.py --refresh-durations`),
 # which ships on its own and is NOT half-fixed here.
 #
@@ -12478,8 +12483,8 @@ slow_files:
 # 10.5x at today's 5.72m leg — the multipliers are DERIVED, so re-derive them
 # rather than quoting these); deriving them from the leg
 # weight is the per-leg `matrix.watchdog_minutes` follow-up. The floor that
-# keeps the literals honest is
-# tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
+# keeps the literals honest is the 2.0x `WATCHDOG_HEADROOM` multiplier, applied
+# to the heavier derived leg.
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
 - eval/retrieval/test_run.py

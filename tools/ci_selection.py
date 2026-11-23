@@ -169,9 +169,9 @@ MAX_CARVE_SHARDS = 26
 # ABSENCE KEEPS THE HISTORICAL SHAPE (2 legs), exactly like `fast_shards`:
 # deleting the key gives the leg count back, but it is NOT by itself a complete
 # rollback — the wall guard recomputes from the map (2 legs project ~20.9m
-# against `SLOW_LEG_WALL_TARGET_MIN`), so removing the key reds
-# `test_slow_shards_are_duration_packed_and_meet_the_wall_target` as well. A real
-# rollback moves the target with it.
+# against `SLOW_LEG_WALL_TARGET_MIN`), so removing the key is a ceiling
+# regression that the wall projection names. A real rollback therefore moves the
+# target with it.
 # 1 is NOT legal here: an unsharded slow lane is 37.9m + setup, and a silent
 # drop to 1 would be a ceiling regression nothing else here would name.
 DEFAULT_SLOW_SHARDS = 2
@@ -2045,8 +2045,8 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # with every falsifier that catches those asleep — and the failure it would
              # ship is a RECORD VECTOR OVERWRITTEN, which no later run can undo. Pinned by
              # tests/test_13685_entity_vector_backfill.py::test_a_tools_only_diff_selects_this_pin
-             # and by
-             # tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row.
+             # and by the REQUIRED `manifest-integrity` leg's row check, which
+             # names any fast-pool file with no `durations:` row.
              "tools/entity_vector_backfill.py",
              # #13906: the dense-leg QUERY-parity harness
              # (`tools/vector_parity_13906.py`) owns
