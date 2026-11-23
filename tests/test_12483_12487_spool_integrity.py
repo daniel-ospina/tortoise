@@ -37,6 +37,7 @@ import pytest
 from tortoise.capture_spool import (
     Bounds,
     Snapshot,
+    _cheap_spool_scan,
     _entry_bytes,
     _entry_is_filed,
     _log_path,
@@ -623,13 +624,23 @@ def test_a_REFUSED_write_mutates_NOTHING_even_when_the_prior_is_unreadable(tmp_p
     turns the probe had just moved.
 
     MUTATION THAT REDS THIS: let the admission probe repair (``_scan_spool(...,
-    repair=True)`` from ``_admission_saturated``) -> an ``.orphan`` appears and
-    the live log is gone, on a write that was rejected.
+    repair=True)`` from ``_admission_saturated``) -> the corrupt entry's meta is
+    unlinked and its log renamed to ``.orphan``, on a write that was rejected.
+
+    ⛔ The spool carries a CORRUPT meta on purpose. An earlier version of this
+    test used only a ``chmod(0o000)``-unreadable entry, and the repairing scan
+    RETAINS that class — so the mutation measured GREEN and the pin could not
+    discriminate (cycle-4 P2). Corruption is the only class the repairing path
+    mutates: ``_scan_spool`` unlinks the meta and quarantines the log.
     """
     # A full spool of undelivered entries, so admission is refused.
     for sid in ("sess-a", "sess-b"):
         _write_meta(tmp_path, sid, capture_lane="hook")
         _write_turns(tmp_path, sid, TURNS)
+    corrupt = _meta_path(tmp_path, "sess-corrupt")
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_text("{ this is not json", encoding="utf-8")
+    _write_turns(tmp_path, "sess-corrupt", TURNS)
     locked = _write_meta(tmp_path, "sess-r")
     log = _write_turns(tmp_path, "sess-r",
                        [{"role": "user", "content": f"t{i}"} for i in range(6)])
@@ -646,6 +657,8 @@ def test_a_REFUSED_write_mutates_NOTHING_even_when_the_prior_is_unreadable(tmp_p
     assert log.read_bytes() == before, "…and byte-identical"
     assert not list(_entries(tmp_path).glob("*.orphan*")), (
         "a REFUSED write is not a mutation: nothing may be moved aside")
+    assert corrupt.exists(), (
+        "and the corrupt meta is still there — repairing it was not this call's job")
     assert read_spool_meta(tmp_path, "sess-a") is not None
     assert read_spool_meta(tmp_path, "sess-b") is not None
 
@@ -685,14 +698,20 @@ def test_the_writer_and_the_health_line_AGREE_at_the_count_ceiling(tmp_path):
     called SATURATED. The two readers must not disagree about one directory.
 
     MUTATION THAT REDS THIS: pass ``adds_entry=(prior is not None)`` (the F2 fix
-    applied to the count term too) -> the write is ADMITTED while the health line
-    says SATURATED.
+    applied to the count term too) -> ``parsed_count`` is exactly
+    ``max_entries`` (one readable meta + one unreadable one), so suppressing the
+    ``+1`` makes ``2 <= 2`` and the write is ADMITTED while the health line says
+    SATURATED. ⛔ The ceiling is 2, not 1, deliberately: at 1 the fixture is
+    already over the ceiling with or without the mutation, so the pinned
+    regression was caught only by the sibling
+    ``test_a_REFUSED_append_records_NOTHING_about_the_append_it_could_not_do``
+    and this test could not discriminate (cycle-4 P3).
     """
     _write_meta(tmp_path, "sess-ok", capture_lane="hook")
     _write_turns(tmp_path, "sess-ok", TURNS)
     locked = _write_meta(tmp_path, "sess-locked")
     _write_turns(tmp_path, "sess-locked", TURNS)
-    bounds = Bounds(max_entries=1)
+    bounds = Bounds(max_entries=2)
     _lock(locked)
     try:
         line = capture_health_line(tmp_path, bounds=bounds).line
@@ -864,9 +883,13 @@ def test_one_session_RECORDS_BOTH_its_append_and_its_later_quarantine(tmp_path):
     ledger returned the earlier "APPENDED … and overwrote nothing" about turns
     that had just left the live queue for an ``.orphan``.
 
-    MUTATION THAT REDS THIS: give both records the same
+    MUTATION THAT REDS THIS: give **both** records the same
     ``unusable-meta:<session>`` stamp -> the second is suppressed and the ledger
-    holds no QUARANTINED line.
+    holds no QUARANTINED line. ⛔ Moving only the DIVERGE stamp to
+    ``unusable-meta:<session>`` measures GREEN (the append still stamps
+    ``unusable-meta-append:<session>``, so nothing collides) — an earlier version
+    of this docstring named that edit, which is not the collision the test
+    describes (cycle-4 P3). The test has the power; the label was wrong.
     """
     locked = _write_meta(tmp_path, "sess-w")
     stored = [{"role": "user", "content": f"turn-{i}"} for i in range(6)]
@@ -975,3 +998,64 @@ def test_a_meta_less_turn_log_is_COUNTED_by_both_ceilings(tmp_path):
     count_bounds = Bounds(max_entries=1, max_total_bytes=1 << 20, max_entry_bytes=1 << 20)
     assert spool_saturated(tmp_path, count_bounds) is True, (
         "a lone turn log is an entry the COUNT ceiling cannot see without this")
+
+
+def test_the_WRITER_and_the_health_line_AGREE_on_a_META_LESS_turn_log(tmp_path):
+    """The admission fast path's count term must bound the real predicate's.
+
+    ``_scan_spool`` counts a byte-bearing ``.turns.jsonl`` with no meta, so a
+    lone log IS in ``parsed_count``. The fast path ``_cheap_spool_scan`` read its
+    count from ``*.meta.json`` NAMES only, so it could not see that class — and
+    its own docstring's guarantee ("both numbers here are UPPER BOUNDS … which
+    makes 'under both ceilings here' a proof of 'not saturated there'") was
+    false for the count term once cycle 3 introduced the class. Measured at the
+    cycle-4 head: one meta-less log with ``max_entries=1`` gives
+    ``spool_saturated == True`` and health ``saturated``, while
+    ``write_spool_entry`` returned ``written: True`` with ``discards: []``.
+
+    That is the same two-reader disagreement cycle-2 finding 4 fixed on the
+    BYTE axis, reopened on the COUNT axis by the shape an ENOSPC actually
+    produces — the writer stores the log BEFORE the meta.
+
+    MUTATION THAT REDS THIS: drop the ``log_stems - meta_stems`` exit from
+    ``_cheap_spool_scan`` (count ``*.meta.json`` names only) -> the cheap exit
+    answers "under both ceilings" and the write is ADMITTED while the health
+    line says SATURATED.
+    """
+    _write_turns(tmp_path, "sess-stray", [{"role": "user", "content": "y" * 10}])
+    bounds = Bounds(max_entries=1, max_total_bytes=1 << 20, max_entry_bytes=1 << 20)
+
+    assert spool_saturated(tmp_path, bounds) is True, (
+        "the premise: the FULL scan counts the lone turn log")
+    assert capture_health_line(tmp_path, bounds=bounds).state == "saturated", (
+        "the premise: so the health line says so too")
+
+    res = write_spool_entry(tmp_path, _snapshot("sess-fresh"), bounds)
+
+    assert res["written"] is False, (
+        "the writer must not admit what the health line calls saturated")
+    assert res["discards"][-1]["reason"] == "spool_saturated"
+
+
+def test_the_cheap_scan_DECLINES_when_a_log_has_no_meta(tmp_path):
+    """The fast path's contract is "None means do the full scan", not "guess".
+
+    Pinned directly, because the guarantee above is about the *shape of the
+    operand*, not about one writer call: a fast path that answers a number for
+    this directory cannot be an upper bound on ``_saturated_for_metas``, whatever
+    the caller then does with it.
+
+    MUTATION THAT REDS THIS: return ``(names, total)`` for this directory ->
+    ``(0, <bytes>)``, which is an UNDER-count of a spool holding one entry.
+    """
+    _write_turns(tmp_path, "sess-stray", TURNS)
+
+    assert _cheap_spool_scan(tmp_path) is None, (
+        "a log with no meta is an entry this scan cannot count — it must decline")
+
+    # …and it still answers, and answers USEFULLY, for the ordinary shape.
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    _write_meta(ordinary, "sess-ok", capture_lane="hook")
+    _write_turns(ordinary, "sess-ok", TURNS)
+    assert _cheap_spool_scan(ordinary) == (1, _entry_bytes(ordinary, "sess-ok"))

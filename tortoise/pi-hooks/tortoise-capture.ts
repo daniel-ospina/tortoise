@@ -1,4 +1,4 @@
-// tortoise-hook-version: 28
+// tortoise-hook-version: 29
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -2058,27 +2058,45 @@ function boundsStamp(bounds: SpoolBounds): string {
  * `turn_end` hook — and the real predicate `JSON.parse`s every meta (measured
  * 1.4 s at 20 000 entries, the ceiling this PR raises 20x). Both numbers here
  * are UPPER bounds on what `saturatedForMetas` computes (the count is read from
- * names alone, so it can only over-count a spool carrying corrupt metas, and the
- * byte total sums EVERY regular file in `entries/`, so it can only over-count
- * the live entries plus orphans), which makes "under both ceilings here" a proof
- * of "not saturated there".
+ * names alone, so it can only over-count a spool carrying corrupt or unreadable
+ * metas, and the byte total sums EVERY regular file in `entries/`, so it can
+ * only over-count the live entries plus orphans), which makes "under both
+ * ceilings here" a proof of "not saturated there".
  *
  * Returns `undefined` — never a guess — for anything it cannot bound: an
- * unreadable directory, a dirent whose stat fails, or a NON-REGULAR dirent (a
+ * unreadable directory, a dirent whose stat fails, a NON-REGULAR dirent (a
  * symlinked entry's own size is the length of a path while `spoolEntryBytes`
  * follows the link, so summing it would UNDER-count — the one direction that
- * could admit a write the real predicate refuses). `undefined` means "do the
- * full scan". Mirrors the Python leg's `_cheap_spool_scan`. */
+ * could admit a write the real predicate refuses), or a `*.turns.jsonl` with no
+ * sibling `*.meta.json`. That last one is not belt-and-braces: the real
+ * predicate counts a META-LESS turn log as an entry (`scanSpool`'s third
+ * element, the #14347 cycle-3 finding 3 class), and `names` counts
+ * `*.meta.json` stem names only — so a lone log is in the real count and NOT in
+ * this one, which would stop `names` being an upper bound. The writer stores the
+ * log BEFORE the meta, so an ENOSPC produces exactly that shape. `undefined`
+ * means "do the full scan". Mirrors the Python leg's `_cheap_spool_scan`. */
 export function cheapSpoolScan(dir: string): { names: number; total: number } | undefined {
   try {
     const base = entriesDir(dir);
     let names = 0;
     let total = 0;
+    const metaStems = new Set<string>();
+    const logStems = new Set<string>();
     for (const entry of readdirSync(base, { withFileTypes: true })) {
       if (!entry.isFile()) return undefined;
       total += lstatSync(join(base, entry.name)).size;
-      if (entry.name.endsWith(".meta.json")) names += 1;
+      if (entry.name.endsWith(".meta.json")) {
+        names += 1;
+        metaStems.add(entry.name.slice(0, -".meta.json".length));
+      } else if (entry.name.endsWith(".turns.jsonl")) {
+        logStems.add(entry.name.slice(0, -".turns.jsonl".length));
+      }
     }
+    // ⛔ A META-LESS TURN LOG IS AN ENTRY THIS COUNT CANNOT SEE (#14347 review,
+    // cycle 4, P1). Size is deliberately not consulted: the real predicate skips
+    // a ZERO-byte stray log too, but falling through to the full scan on one is
+    // only ever slower — never wrong.
+    for (const stem of logStems) if (!metaStems.has(stem)) return undefined;
     return { names, total };
   } catch {
     return undefined;

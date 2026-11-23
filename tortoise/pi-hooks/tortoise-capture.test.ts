@@ -7013,3 +7013,79 @@ test("a meta-less turn log is COUNTED by both ceilings (#14347 cyc3)", () => {
     "a lone turn log is an entry the COUNT ceiling cannot see without this",
   );
 });
+
+test("the WRITER and the health line AGREE on a meta-less turn log (#14347 cyc4 P1)", () => {
+  // `listSpoolEntries` counts a byte-bearing `.turns.jsonl` with no meta, so a
+  // lone log IS in the real count. The cheap admission listing read its count
+  // from `*.meta.json` NAMES only, so it could not see that class — and its own
+  // docstring's guarantee ("both numbers here are UPPER bounds … which makes
+  // 'under both ceilings here' a proof of 'not saturated there'") was false for
+  // the count term once cycle 3 introduced the class. Measured at the cycle-4
+  // head: one meta-less log with `maxEntries: 1` gives `spoolSaturated === true`
+  // and health `saturated`, while `writeSpoolEntry` returned `written: true` with
+  // `discards: []`.
+  //
+  // That is the same two-reader disagreement cycle-2 finding 4 fixed on the BYTE
+  // axis, reopened on the COUNT axis by the shape an ENOSPC actually produces —
+  // the writer stores the log BEFORE the meta.
+  //
+  // MUTATION THAT REDS THIS: drop the `logStems`/`metaStems` exit from
+  // `cheapSpoolScan` (count `*.meta.json` names only) -> the cheap exit answers
+  // "under both ceilings" and the write is ADMITTED while the health line says
+  // SATURATED.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  writeFileSync(
+    join(spool, "entries", `${entryKey("sess-stray")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y".repeat(10) })}\n`,
+  );
+  const bounds = { maxEntries: 1, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+
+  assert.equal(spoolSaturated(spool, bounds), true, "the premise: the FULL scan counts the lone log");
+  assert.equal(
+    captureHealthLine(spool, { bounds }).state,
+    "saturated",
+    "the premise: so the health line says so too",
+  );
+
+  const res = writeSpoolEntry(
+    spool,
+    { ...snapshot("sess-fresh"), turns: [{ role: "user", content: "n" }] },
+    bounds,
+  );
+
+  assert.equal(res.written, false, "the writer must not admit what the health line calls saturated");
+  assert.equal(res.discards[res.discards.length - 1].reason, "spool_saturated");
+});
+
+test("the cheap listing DECLINES when a log has no meta (#14347 cyc4 P1)", () => {
+  // The fast path's contract is "undefined means do the full scan", not "guess".
+  // Pinned directly, because the guarantee is about the SHAPE of the operand,
+  // not about one writer call: a fast path that answers a number for this
+  // directory cannot be an upper bound, whatever the caller then does with it.
+  //
+  // MUTATION THAT REDS THIS: return `{ names, total }` for this directory ->
+  // `{ names: 0, … }`, which is an UNDER-count of a spool holding one entry.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  writeFileSync(
+    join(spool, "entries", `${entryKey("sess-stray")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y" })}\n`,
+  );
+
+  assert.equal(
+    cheapSpoolScan(spool),
+    undefined,
+    "a log with no meta is an entry this listing cannot count — it must decline",
+  );
+
+  // …and it still answers, and answers USEFULLY, for the ordinary shape.
+  const ordinary = tmpSpool();
+  writeSpoolEntry(
+    ordinary,
+    { ...snapshot("sess-ok"), turns: [{ role: "user", content: "n" }] },
+    { maxEntries: 100, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 },
+  );
+  const listing = cheapSpoolScan(ordinary)!;
+  assert.equal(listing.names, 1, "one meta, one name");
+});

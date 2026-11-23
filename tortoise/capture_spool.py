@@ -1236,28 +1236,47 @@ def _cheap_spool_scan(root: Path) -> tuple[int, int] | None:
     That cost is only necessary once the spool is actually NEAR a ceiling, so
     this answers the common case first: both numbers here are UPPER BOUNDS on
     what ``_saturated_for_metas`` computes (the meta count is read from the
-    names alone, so it can only over-count a spool carrying corrupt metas, and
-    the byte total sums EVERY regular file in ``entries/``, so it can only
-    over-count the live entries plus orphans), which makes "under both ceilings
-    here" a proof of "not saturated there".
+    names alone, so it can only over-count a spool carrying corrupt or
+    unreadable metas, and the byte total sums EVERY regular file in
+    ``entries/``, so it can only over-count the live entries plus orphans),
+    which makes "under both ceilings here" a proof of "not saturated there".
 
     Returns ``None`` — never a guess — for anything this scan cannot bound: an
-    unreadable directory, a dirent whose stat fails, or a non-regular dirent
-    (a symlinked entry would make the byte total an UNDER-count, and an
+    unreadable directory, a dirent whose stat fails, a non-regular dirent (a
+    symlinked entry would make the byte total an UNDER-count, and an
     under-count is the one direction that could admit a write the real
-    predicate refuses). ``None`` simply means "do the full scan".
+    predicate refuses), or a ``*.turns.jsonl`` with no sibling ``*.meta.json``.
+    That last one is not belt-and-braces: the real predicate counts a
+    META-LESS turn log as an entry (``_scan_spool``'s third element, the
+    #14347 cycle-3 finding 3 class), and ``names`` counts ``*.meta.json`` stem
+    names only — so a lone log is in the real count and NOT in this one, which
+    would make ``names`` stop being an upper bound. The writer stores the log
+    BEFORE the meta, so an ENOSPC produces exactly that shape. ``None`` simply
+    means "do the full scan".
     """
     try:
         with os.scandir(_entries_dir(root)) as entries:
             names = 0
             total = 0
+            meta_stems: set[str] = set()
+            log_stems: set[str] = set()
             for entry in entries:
                 if not entry.is_file(follow_symlinks=False):
                     return None
                 total += entry.stat(follow_symlinks=False).st_size
                 if entry.name.endswith(".meta.json"):
                     names += 1
+                    meta_stems.add(entry.name[: -len(".meta.json")])
+                elif entry.name.endswith(".turns.jsonl"):
+                    log_stems.add(entry.name[: -len(".turns.jsonl")])
     except OSError:
+        return None
+    # ⛔ A META-LESS TURN LOG IS AN ENTRY THIS COUNT CANNOT SEE (#14347 review,
+    # cycle 4, P1). Size is deliberately not consulted: the real predicate skips
+    # a ZERO-byte stray log too, but falling through to the full scan on one is
+    # only ever slower — never wrong — and it keeps this exit free of a stat the
+    # loop above would have to thread through.
+    if log_stems - meta_stems:
         return None
     return names, total
 
