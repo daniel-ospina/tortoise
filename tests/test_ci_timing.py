@@ -3878,9 +3878,20 @@ def test_a_flake_id_with_a_pipe_or_control_byte_cannot_break_the_table_row() -> 
     )
     rows = [ln for ln in md.splitlines() if "test_hostile" in ln]
     assert len(rows) == 1, (
-        f"the flake row was split across {len(rows)} lines — a raw newline landed in "
-        "the markdown table cell, which breaks the row and reds the `docs` check")
+        f"the nodeid appears on {len(rows)} lines, not 1: {rows!r}")
     row = rows[0]
+    # ⛔ THE SPLIT GUARD MUST TEST COMPLETENESS, NOT TOKEN COUNT (#14366 review P2).
+    # The raw newline sits AFTER `test_hostile`, so an unescaped one still yields exactly
+    # ONE line containing the token: `len(rows) == 1` above passes over the very defect it
+    # names. Measured — with `nodeid` left raw, `[ln for ln in row.splitlines() if
+    # "test_hostile" in ln]` returns `['| `tests/test_attest_census.py::test_hostile[a']`,
+    # i.e. 1. The split was previously caught eight lines below by the `len(cells) == 3`
+    # arm, whose message blames "an unescaped `|` in the nodeid added a cell" — the wrong
+    # cause. A complete table row ends with a `|`; a row whose cell content spilled onto
+    # the next line does not.
+    assert row.rstrip().endswith("|"), (
+        "the flake row is not a complete table row — a raw newline landed in the "
+        f"markdown table cell, which breaks the row and reds the `docs` check: {row!r}")
     # ⛔ Count LIVE delimiters, not every `|`. `\\|` is an ESCAPED backslash followed by
     # a live delimiter, so "preceded by a backslash means escaped" is wrong (#14366 P3-2);
     # `_gfm_cells` applies cmark-gfm's parity rule and is itself pinned below.
