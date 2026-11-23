@@ -21,6 +21,22 @@ email fallback: a Telegram outage means a lost abuse alert. The billing email
 leg now reserves from that SAME shared budget (``email_notify.reserve_send_slot``,
 #3631) instead of bypassing it — abuse is the only kind with no Resend leg.
 
+Abuse DELIVERY (``notify_abuse``) is split into two registers (#14407), because
+"how a message reaches a human" and "what record it belongs to" were two
+different decisions and had drifted apart:
+
+* :data:`ABUSE_INCIDENT_KINDS` — a STATE CHANGE. The message belongs to the
+  incident lifecycle, so the store's create-once path files the issue AND emits
+  the single push, and the message names the issue. ONE message per episode; the
+  engine re-arms it at episode end and closes the incident then.
+* :data:`ABUSE_ACTIVITY_KINDS` — a MEASUREMENT (#10156's ACTIVITY register). It
+  files nothing **by design**, and every message says so; delivery is a bounded
+  digest rather than one message per detector window.
+
+When no incident channel can be built at all, an incident class is still
+delivered — bounded, and labelled with the reason. A missing tracker must never
+mute a security signal (#4872).
+
 Sender identity (#1136): the Resend sender comes from RESEND_FROM_EMAIL — the
 single managed sender identity shared with the transactional invite sender
 (email_notify.py) — so one domain/identity is managed in env
@@ -32,10 +48,13 @@ from __future__ import annotations  # noqa: I001
 
 import logging
 import os
+import threading
+import time
 from datetime import datetime, timezone
 
 import httpx
 from tortoise.incident_kinds import (
+    KIND_ABUSE_FLAG_RAISED,
     KIND_ABUSE_REVIEW_NEEDED,
     KIND_ABUSE_SUSPENDED,
     KIND_BILLING_SEND_FAILED,
@@ -72,7 +91,81 @@ KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "bill
 # dedup key.
 _BILLING_SEND_FAILED_KIND = KIND_BILLING_SEND_FAILED
 
+#: #14407 — the abuse classes whose human alert is a property of the
+#: INCIDENT, not of the detection. Each one files (or reuses) a durable,
+#: assignable incident, and the Telegram message is emitted by the store's
+#: create-once path — so ONE incident is ONE message for its whole lifecycle.
+#: Pre-#14407 the push was emitted per DETECTION here and ``abuse_flag`` filed
+#: nothing at all, which is how an alert arriving in the owner's chat could be
+#: attributed by no issue, no runbook and no search.
+ABUSE_INCIDENT_KINDS: frozenset[str] = frozenset({
+    "abuse_flag",
+    KIND_ABUSE_SUSPENDED,
+    KIND_ABUSE_REVIEW_NEEDED,
+})
+#: #14407 — the abuse classes that are MEASUREMENTS, not incidents.
+#:
+#: This is a DECLARED non-filing decision, not a gap: #10156 split the dashboard
+#: into two registers and put R3/R4/R8 in ``REGISTER_ACTIVITY`` — *"a detector
+#: OBSERVED a rate. It measured; it changed nothing. Informational, muted, no
+#: verb."* Filing a GitHub incident for a rate blip is the exact framing #10156
+#: removed, so these classes file nothing BY DESIGN and every message says so.
+#: Their delivery is a DIGEST (:data:`_ACTIVITY_DELIVERY_WINDOW_S`), because the
+#: detector windows are minutes wide — one message per window is what made the
+#: human channel "out of control" while the detector was working correctly.
+ABUSE_ACTIVITY_KINDS: frozenset[str] = frozenset({
+    "abuse_read_velocity",
+    "abuse_signup_velocity",
+    "abuse_recovery_velocity",
+    "abuse_new_ip",
+})
+
+#: notification-EVENT name → the INCIDENT kind it files (#14407).
+#:
+#: The two vocabularies are deliberately disjoint: :data:`KINDS` names the
+#: business EVENT whose detector fired, ``incident_kinds`` names the durable
+#: incident and is the R2 dedup key. Two members are shared spellings (the
+#: grandfathered ``abuse_*`` incident kinds); ``abuse_flag`` is not — its
+#: incident kind is the SCREAMING_CASE ``ABUSE_FLAG_RAISED`` added for this
+#: change, because the incident-kind convention (post-#4780) allows a new kind
+#: only in that form. Keeping the mapping explicit means a reader sees the event
+#: and the incident as the two things they are.
+_INCIDENT_KIND_OF_EVENT: dict[str, str] = {
+    "abuse_flag": KIND_ABUSE_FLAG_RAISED,
+    KIND_ABUSE_SUSPENDED: KIND_ABUSE_SUSPENDED,
+    KIND_ABUSE_REVIEW_NEEDED: KIND_ABUSE_REVIEW_NEEDED,
+}
+
+#: The incident kinds the episode-end resolver clears — one per filing class.
+_EPISODE_INCIDENT_KINDS: tuple[str, ...] = (
+    KIND_ABUSE_FLAG_RAISED, KIND_ABUSE_REVIEW_NEEDED)
+
+#: Delivery windows (#14407). One message per ``(kind, subject)`` per window.
+#:
+#: INCIDENT kinds: the normal path is gated by the store's create-once lifecycle
+#: and never reaches this bound — it applies only to the fallback below (no
+#: incident channel can be built), where 24h keeps a security class delivered
+#: while bounding an unattributable message to one a day, and the engine's
+#: episode-end release re-arms it for a genuinely new episode.
+#:
+#: ACTIVITY kinds: the collapse window for the digest. 6h is chosen against the
+#: detector cadence — R3 re-arms every 5 minutes (288 messages/day/scope at
+#: defaults) and R4/R8 are daily — so 6h bounds one scope to 4 messages/day while
+#: still surfacing a fresh burst immediately (the FIRST detection of a window is
+#: delivered at once; only the repeats are folded).
+_INCIDENT_DELIVERY_WINDOW_S = 86400.0
+_ACTIVITY_DELIVERY_WINDOW_S = 21600.0
+
 _skip_logged: set[str] = set()
+
+#: The delivery ledger: ``(kind, subject) -> (window_deadline, folded_count)``.
+#: In-process like the engine's own alert claim (#3631): the honest ceiling
+#: across replicas is one message per replica per window, and shared state for a
+#: cosmetic bound is deliberately out of scope. #14407.
+_delivery_lock = threading.Lock()
+_delivery: dict[tuple[str, str], tuple[float, int]] = {}
+_delivery_now = time.monotonic  # test seam (monotonic: no clock-jump aliasing)
+_MAX_DELIVERY_KEYS = 4096
 
 # Budget-skip billing incidents are informational and the budget stays exhausted
 # for the rest of the UTC day: file at most one per (kind, org) per process per
@@ -265,6 +358,282 @@ def notify_billing_event(kind: str, org: dict, details: dict | None = None) -> N
             logger.warning("billing notify: telegram failed (%s)", redact_safe(e))
 
 
+def _abuse_alert_store():
+    """The abuse path's incident channel: ``(store, reason-if-absent)``.
+
+    #4778's ALERT-only policy seam, never the sweep-gated raw chain: the abuse
+    path is a REQUEST-path decision with nothing to do with the backup sweep, so
+    gating on ``_backup_config_safe()`` (None whenever ``BACKUP_SWEEP_ENABLED``
+    is off — the production default) made abuse invisible on exactly the
+    deployments that do not run backups.
+
+    The REASON is returned because #14407's invariant is that a notification is
+    attributable — a filed incident, **or** an explicit reason the class could
+    not file one. A bare ``None`` (which is what every caller got before) is
+    exactly the silent asymmetry that made these messages unattributable.
+    Function-level import: notify must never import hosted_api at module level
+    (hosted_api imports notify).
+    """
+    try:
+        from tortoise import hosted_api as _ha
+        store = _ha._incident_alert_store()
+    except Exception as e:  # noqa: BLE001, RUF100
+        return None, f"alert channel unavailable ({redact_safe(e)})"
+    if store is None:
+        return None, "no alert channel configured (DR_ISSUES_PAT unset)"
+    return store, ""
+
+
+def _abuse_subject(org_id: str, rule: object) -> str:
+    """The incident subject for an abuse class — RULE-SCOPED.
+
+    #2313 established the shape (``{org}:{graph}``): a per-rule key, because the
+    incident BODY is create-once, so a subject shared between R1 and R2 would let
+    the first rule to fire own the record for the whole lifecycle of the second —
+    the same defect #4872 separated ``ABUSE_DECISION_FAULT`` from
+    ``ABUSE_ENFORCEMENT_FAULT`` to avoid. A caller with no rule keeps the org
+    alone (the operator-suspension path).
+    """
+    name = rule if isinstance(rule, str) and rule.strip() else ""
+    return f"{org_id}:{name}" if name else org_id
+
+
+def _claim_delivery(kind: str, subject: str, window_s: float,
+                    now: float | None = None) -> tuple[bool, int]:
+    """May this detection be DELIVERED? Returns ``(deliver, folded_count)``.
+
+    ``folded_count`` is how many detections the PREVIOUS window collapsed — the
+    digest's honest count, 0 on the first window of a key. The count is carried
+    rather than dropped because "12 more happened" is the information a rate
+    digest exists to convey.
+
+    The FIRST detection of a window is delivered at once (no timer, no batching
+    delay): only repeats are folded. On a key whose window never expires the
+    entry is bumped in place, so a sustained detector costs no allocation.
+    """
+    global _delivery
+    now = _delivery_now() if now is None else now
+    key = (kind, subject)
+    with _delivery_lock:
+        entry = _delivery.get(key)
+        if entry is not None:
+            deadline, folded = entry
+            if now < deadline:
+                _delivery[key] = (deadline, folded + 1)
+                return False, 0
+            _delivery[key] = (now + window_s, 0)
+            if len(_delivery) > _MAX_DELIVERY_KEYS:
+                _delivery = {k: v for k, v in _delivery.items() if v[0] > now}
+            return True, folded
+        _delivery[key] = (now + window_s, 0)
+        if len(_delivery) > _MAX_DELIVERY_KEYS:
+            _delivery = {k: v for k, v in _delivery.items() if v[0] > now}
+        return True, 0
+
+
+def release_abuse_delivery(kind: str, subject: str) -> None:
+    """Re-arm delivery for a ``(kind, subject)`` — the EPISODE ended (#14407).
+
+    The bound is the episode, never a wall-clock cooldown: a genuinely new
+    episode must alert at once, and only the engine knows a rule's window went
+    clean (``AbuseEngine._evaluate``). Without this release a long-lived fallback
+    window would mute the second episode — the direction a security signal must
+    never fail in (#4872).
+    """
+    with _delivery_lock:
+        _delivery.pop((kind, subject), None)
+
+
+def reset_abuse_delivery_for_tests() -> None:
+    """Clear the delivery ledger (test seam, #14407).
+
+    A process-wide ledger dedups ACROSS tests in one pytest process: a window
+    opened by one test would silently swallow an unrelated test's first message.
+    """
+    with _delivery_lock:
+        _delivery.clear()
+
+
+def resolve_abuse_episode(org_id: str, rule: str | None) -> None:
+    """Close + delete-to-resolve an abuse rule's incidents — EPISODE END (#14407).
+
+    Called by ``AbuseEngine._evaluate`` when a rule's window came back clean and
+    its durable ``flag_clear`` was persisted. Without it nothing ever resolved an
+    abuse incident: the sentinel and its issue stayed OPEN for the rest of time,
+    so the tracker showed a permanent incident for a condition that had recovered
+    (the shape #9944 sat in for a month) and the recurring-alert story could not
+    distinguish "still broken" from "long resolved".
+
+    Releasing the DELIVERY window happens even when no incident channel can be
+    built (the ledger is local), then the incident is resolved when there is one.
+
+    NEVER raises and never blocks the request path on a failure: ``abuse.py``'s
+    evaluation is best-effort by contract, and a failed close is already handled
+    by the store (``CloseCooldown`` / a re-raise that leaves the incident OPEN —
+    ADR-011's "a blip must not re-file; a permanent failure must not be silent").
+    A failure here costs this episode's resolution, never the poll.
+    """
+    subject = _abuse_subject(org_id, rule)
+    kinds = _EPISODE_INCIDENT_KINDS
+    for kind in kinds:
+        release_abuse_delivery(kind, subject)
+    store, reason = _abuse_alert_store()
+    if store is None:
+        logger.debug("abuse episode end: no incident channel (%s) — delivery "
+                     "re-armed only (%s/%s)", reason, org_id, rule)
+        return
+    for kind in kinds:
+        try:
+            store.resolve_incident_state(kind, subject)
+        except Exception as e:  # noqa: BLE001, RUF100
+            logger.warning("abuse episode end: %s (%s) did not resolve (%s) — "
+                           "the incident stays OPEN", kind, subject,
+                           redact_safe(e))
+
+
+def _abuse_message(kind: str, org_id: str, details: dict, *,
+                   attribution: str, folded: int = 0) -> str:
+    """The human text: what fired, for whom, and WHY it is attributable.
+
+    Every abuse message carries an ``attribution`` line — an issue number, the
+    declared non-filing decision, or the reason no incident could be filed. That
+    line is the invariant #14407 leaves behind: a human can always say what this
+    message is, and where to look it up.
+    """
+    parts = [f"🚨 Tortoise Security: {kind}", f"Team: {org_id}"]
+    if details.get("rule"):
+        parts.append(f"Rule: {details['rule']}")
+    if details.get("count") is not None:
+        parts.append(f"Count: {details['count']}")
+    if details.get("country"):
+        parts.append(f"Country: {details['country']}")
+    if details.get("ip"):
+        parts.append(f"IP: {details['ip']}")
+    parts.append(attribution)
+    if folded:
+        parts.append(f"Digest: {folded} further {kind} detection(s) in the "
+                     "previous window were folded into this message; all of them "
+                     "are recorded on the dashboard alert list.")
+    return "\n".join(parts)
+
+
+def _send_abuse(bot_token: str, chat_id: str, text: str) -> None:
+    try:
+        telegram_send(bot_token, chat_id, text)
+    except Exception as e:  # noqa: BLE001, RUF100
+        logger.warning("abuse notify: telegram failed (%s)", redact_safe(e))
+
+
+def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
+    """A state-change class: the INCIDENT owns the message (#14407).
+
+    One decision point for both channels — the store's create-once object files
+    the issue AND emits the single Telegram push for the lifecycle, so the human
+    and agent channels cannot disagree. Pre-fix they were two decisions: the
+    push here fired on every detection, the issue was deduped, and 4 of the 6
+    classes filed nothing at all.
+
+    ``DEDUP`` means the human was already told for this incident and the issue is
+    live; the store records the recurrence on the ISSUE (agent-visible, bounded
+    to one a day by #12243) rather than re-paging a human. ``SUPPRESSED`` means an
+    operator paused the kind in ``ops/suppression.json`` — an explicit decision,
+    which is honoured.
+
+    When no incident can be established at all the message is delivered ANYWAY,
+    bounded, and labelled with the reason: a missing tracker must never mute a
+    security signal (#4872), and an unattributable message must never look like
+    an attributable one.
+    """
+    subject = _abuse_subject(org_id, details.get("rule"))
+    incident_kind = _INCIDENT_KIND_OF_EVENT[kind]
+    store, reason = _abuse_alert_store()
+    if store is not None:
+        what = ("Suspended by an operator"
+                if kind == KIND_ABUSE_SUSPENDED
+                else "Human review needed — rate-limit, do not suspend"
+                if kind == KIND_ABUSE_REVIEW_NEEDED
+                else "Suspicious activity flagged")
+        detail = {
+            "detail": (f"{what}: {details.get('rule', '?')} "
+                       f"count={details.get('count', '?')}"),
+            # A bounded, message-free token: the store renders it into the alert
+            # text so the human keeps the rule + count they had before, while
+            # the issue body carries the whole detail.
+            "context": _abuse_context(details),
+        }
+        try:
+            store.open_incident_state(incident_kind, subject, detail)
+        except Exception as e:  # noqa: BLE001, RUF100
+            reason = f"incident filing failed ({redact_safe(e)})"
+        else:
+            return
+
+    deliver, folded = _claim_delivery(kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
+    if not deliver:
+        return
+    logger.warning(
+        "abuse notify: delivered %s (%s) with NO incident — %s. The message says "
+        "so; the class is bounded to one such message per %dh per subject until "
+        "the channel is repaired (#14407).",
+        kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600))
+    bot_token = _env("TELEGRAM_BOT_TOKEN")
+    chat_id = _env("TELEGRAM_CHAT_ID")
+    if _skip_channel("telegram", bot_token) or _skip_channel("telegram-chat", chat_id):
+        return
+    _send_abuse(bot_token, chat_id, _abuse_message(
+        kind, org_id, details,
+        attribution=f"Not attributable: no incident was filed — {reason}.",
+        folded=folded))
+
+
+def _abuse_context(details: dict) -> str:
+    """The message-free token the incident's Telegram push renders.
+
+    Built from a CLOSED vocabulary (a rule name and a count), never free text: the
+    alert text is a publication sink and an exception message is
+    attacker-influenceable (#3293).
+    """
+    bits = []
+    rule = details.get("rule")
+    if isinstance(rule, str) and rule.strip():
+        bits.append(f"rule={rule.strip()}")
+    count = details.get("count")
+    if isinstance(count, int):
+        bits.append(f"count={count}")
+    return " ".join(bits)
+
+
+def _notify_abuse_activity(kind: str, org_id: str, details: dict) -> None:
+    """A measurement class: a bounded DIGEST, and it says what it is (#14407).
+
+    R3/R4/R8 are ``REGISTER_ACTIVITY`` in #10156's split — a detector measured a
+    rate and changed nothing — so filing an incident for one would reverse that
+    recorded decision. They must still be DELIVERED (they are the only signal that
+    a rate moved), so two things make that delivery not "out of control":
+
+    * the rate is bounded per ``(kind, subject)`` per
+      :data:`_ACTIVITY_DELIVERY_WINDOW_S`, with the folded count carried into the
+      next message;
+    * every message states the declared non-filing decision and that nothing was
+      disabled, so a human never reads a measurement as an incident — the framing
+      defect #10156 fixed on the dashboard and this change fixes in the chat.
+    """
+    deliver, folded = _claim_delivery(kind, org_id, _ACTIVITY_DELIVERY_WINDOW_S)
+    if not deliver:
+        return
+    bot_token = _env("TELEGRAM_BOT_TOKEN")
+    chat_id = _env("TELEGRAM_CHAT_ID")
+    if _skip_channel("telegram", bot_token) or _skip_channel("telegram-chat", chat_id):
+        return
+    _send_abuse(bot_token, chat_id, _abuse_message(
+        kind, org_id, details,
+        attribution=("Activity, not an incident (#10156): a detector measured a "
+                     "rate. Nothing was disabled or restricted, and this class "
+                     "files no incident by design — the rows are on the "
+                     "dashboard's activity register."),
+        folded=folded))
+
+
 def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
     """Abuse notification — Telegram ONLY (#308, channel decision #3639).
 
@@ -277,6 +646,13 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
     is intentionally no longer sent, so abuse consumes no Resend slot at all
     and a Telegram failure loses the alert.
 
+    #14407 — TWO REGISTERS, ONE DECISION PER CLASS. The class decides whether the
+    message belongs to an INCIDENT (:data:`ABUSE_INCIDENT_KINDS` — filed, deduped
+    by the store's create-once lifecycle, one push per lifecycle) or is an
+    ACTIVITY measurement (:data:`ABUSE_ACTIVITY_KINDS` — declared non-filing,
+    delivered as a bounded digest). Both paths state their attribution in the
+    message itself.
+
     ``org`` is retained for the caller shape (``abuse.py`` passes org_id and
     email); the ``email`` key is no longer read. Callers in async contexts
     invoke via asyncio.to_thread (#310 pattern).
@@ -285,61 +661,13 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
         logger.warning("abuse notify: unknown kind %r ignored", kind)
         return
     details = details or {}
-
-    bot_token = _env("TELEGRAM_BOT_TOKEN")
-    chat_id = _env("TELEGRAM_CHAT_ID")
-    if not _skip_channel("telegram", bot_token) and not _skip_channel("telegram-chat", chat_id):
-        try:
-            parts = [f"🚨 Tortoise Security: {kind}",
-                     f"Team: {org.get('org_id', '?')}"]
-            if details.get("rule"):
-                parts.append(f"Rule: {details['rule']}")
-            if details.get("count") is not None:
-                parts.append(f"Count: {details['count']}")
-            if details.get("country"):
-                parts.append(f"Country: {details['country']}")
-            if details.get("ip"):
-                parts.append(f"IP: {details['ip']}")
-            telegram_send(bot_token, chat_id, "\n".join(parts))
-        except Exception as e:  # noqa: BLE001, RUF100
-            logger.warning("abuse notify: telegram failed (%s)", redact_safe(e))
-
-    if kind in (KIND_ABUSE_SUSPENDED, KIND_ABUSE_REVIEW_NEEDED):
-        # Ops incident alert (GH issue + Telegram) — best-effort: absence of the
-        # ALERT channel or any failure degrades to the Telegram leg above
-        # (there is no email leg since #3639).
-        #
-        # #5425: the engine no longer suspends, so ``abuse_review_needed`` is
-        # the branch that actually fires — a PERSISTENT breach is a request for
-        # a human DECISION, and an incident is the durable, assignable artifact
-        # that carries it. ``abuse_suspended`` is kept for a deliberate
-        # operator-initiated suspension.
-        # Function-level import: notify must never import hosted_api at
-        # module level (hosted_api imports notify).
-        try:
-            from tortoise import hosted_api as _ha
-            # #4778: the ALERT-only policy seam, not the sweep-gated raw chain.
-            # The abuse path is a REQUEST-path decision with nothing to do with
-            # the backup sweep, so gating the incident on `_backup_config_safe()`
-            # (None whenever `BACKUP_SWEEP_ENABLED` is off — the production
-            # default) made an abuse breach invisible on exactly the deployments
-            # that do not run backups.
-            store = _ha._incident_alert_store()
-            if store is not None:
-                # Round 7: this branch is the OPERATOR-initiated path now — the
-                # engine never suspends (that is what #5425 deleted), so
-                # "Auto-suspended" misattributed an out-of-band decision and read
-                # as the very behaviour this change removed.
-                what = ("Suspended by an operator"
-                        if kind == KIND_ABUSE_SUSPENDED
-                        else "Human review needed — rate-limit, do not suspend")
-                store.open_incident(
-                    kind, org.get("org_id") or "_",
-                    {"detail": (f"{what}: {details.get('rule', '?')} "
-                                f"count={details.get('count', '?')}")})
-        except Exception as e:  # noqa: BLE001, RUF100
-            logger.warning("abuse notify: alert_store incident failed (%s)",
-                           redact_safe(e))
+    org_id = org.get("org_id") or "_"
+    if kind in ABUSE_INCIDENT_KINDS:
+        _notify_abuse_incident(kind, org_id, details)
+    else:
+        # Every remaining abuse kind is a measurement. The default is the DIGEST
+        # path on purpose: an unrecognised class must be bounded, never a storm.
+        _notify_abuse_activity(kind, org_id, details)
 
 
 def redact_safe(e: BaseException) -> str:

@@ -447,10 +447,20 @@ class AlertStore:
     def _telegram_text(self, kind: str, org_id: str, detail: dict, issue_number: int | None) -> str:
         org = f" ({org_id})" if org_id else ""
         issue = f" — issue #{issue_number}" if issue_number else ""
+        # #14407: a caller may carry a SHORT, message-free context token into the
+        # human text (``detail["context"]`` — e.g. ``rule=point_create count=600``
+        # for an abuse incident). Before this, an alert routed through the store
+        # lost the one line a triager needs, so callers kept a second, per-
+        # detection push path alive to preserve it — the split that produced the
+        # unattributable alerts this issue is about. The vocabulary is the
+        # CALLER's obligation (a closed token set, never free text); this seam
+        # only guarantees the same publication boundary as every other sink.
+        context = detail.get("context")
+        context = f" — {context}" if isinstance(context, str) and context.strip() else ""
         # #3293: same boundary rule as ``_body``. No detail is carried TODAY —
         # the scrub is here so a future caller that adds one cannot publish it
         # unredacted through this sink.
-        return redact_for_publication(f"🚨 DR alert: {kind}{org}{issue}")
+        return redact_for_publication(f"🚨 DR alert: {kind}{org}{context}{issue}")
 
     # ── incident lifecycle ──────────────────────────────────────────────────
     def suppression_active(self, kind: str) -> bool:

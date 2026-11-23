@@ -1812,6 +1812,34 @@ class AbuseEngine:
                     if exp > now}
             return True
 
+    def _end_alert_episode(self, org_id: str, rule: str) -> None:
+        """A rule's flag episode ENDED: re-arm delivery and RESOLVE its incidents.
+
+        #14407. Two facts belong to the same event and are set here together, so
+        a caller cannot get one without the other:
+
+        * the DELIVERY window is re-armed, because the bound on a human alert is
+          the EPISODE — a new episode must page at once, and only the engine
+          knows the rule's window went clean;
+        * the incidents are closed + deleted-to-resolve, because nothing else ever
+          resolved an abuse incident: the sentinel outlived the condition and its
+          issue stayed OPEN for the rest of time, so the tracker reported a
+          permanent incident for a recovered one.
+
+        Deliberately called only on the ``ended`` branch — a clean window whose
+        durable ``flag_clear`` did NOT persist is not a confirmed episode end, and
+        a store failure must reduce alert volume, never increase it (#3631).
+
+        Best-effort by construction (``resolve_abuse_episode`` never raises): the
+        evaluation path must never be broken by the alert path.
+        """
+        try:
+            from tortoise.notify import resolve_abuse_episode
+            resolve_abuse_episode(org_id, rule)
+        except Exception:  # noqa: BLE001, RUF100 — never break the request path
+            logger.debug("abuse episode-end resolution failed (%s, %s)",
+                         org_id, rule)
+
     def _release_notify(self, org_id: str, rule: str, stage: str) -> None:
         """Re-arm the alert budget for a stage when its episode ENDS, so a
         genuinely NEW episode alerts again. The claim is per-EPISODE, not a
@@ -1899,6 +1927,7 @@ class AbuseEngine:
                 # increase it, so the claim is left to expire on its own.
                 self._release_notify(org_id, rule, EVENT_FLAG)
                 self._release_notify(org_id, rule, EVENT_REVIEW)
+                self._end_alert_episode(org_id, rule)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}

@@ -91,7 +91,10 @@ FROZEN_KIND_STRINGS = frozenset({
     # #13102: an armed allowance dimension with no usable reading — the stored-
     # bytes sibling of COHORT_CAP_UNENFORCEABLE (the pre-spend cap).
     "ALLOWANCE_CAP_UNENFORCEABLE",
-    "ABUSE_DECISION_FAULT", "ABUSE_ENFORCEMENT_FAULT", "abuse_review_needed",
+    "ABUSE_DECISION_FAULT", "ABUSE_ENFORCEMENT_FAULT",
+    # #14407: the stage-1 flag now FILES an incident, so the message the owner
+    # receives is attributable (the notification used to be the only trace).
+    "ABUSE_FLAG_RAISED", "abuse_review_needed",
     "abuse_suspended", "BILLING_NOTIFY_REFUSED", "PROVIDER_BILLING_EXHAUSTED",
     "BILLING_SEND_FAILED", "INVITE_SEND_FAILED",
 })
