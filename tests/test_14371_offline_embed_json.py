@@ -238,14 +238,28 @@ def clean_posture(monkeypatch):
     return monkeypatch
 
 
-def test_a_nonproduction_posture_is_refused_before_any_measurement(clean_posture):
+def test_a_nonproduction_posture_is_refused_before_any_measurement(
+        clean_posture, monkeypatch):
     """A switch that moves the static render makes the solve incomparable.
 
     The refusal must happen BEFORE the tokenizer loads (so a box in the wrong
     posture does not spend a network fetch to learn it is in the wrong posture),
     and it must be exit 2 — argparse's usage code, the one the tool already uses
     for "you invoked this wrongly" — not 1, which the tool uses for a failed run.
+
+    ⛔ The ORDERING is pinned, not just the exit code: without the `_encoding`
+    trap below, moving `_posture_problems()` under `serialization_lever` left
+    this test green while a mis-postured cold box paid the whole BPE fetch to
+    learn it was refused — the exact cost the guard exists to avoid. (The same
+    ordering is pinned for the ARM refusal by
+    `test_the_arm_refusal_costs_no_tokenizer_work`.)
     """
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "the tokenizer ran before the posture refusal — a mis-postured cold "
+            "box would fetch the BPE ranks to learn it is being refused")
+
+    monkeypatch.setattr(m, "_encoding", _boom)
     clean_posture.setenv("TORTOISE_S4_DELTA", "0")
     with pytest.raises(SystemExit) as exc:
         m.embed_json_measurement(_RECEIPTS, _EVIDENCE)
@@ -478,9 +492,16 @@ def test_the_offline_measurement_reproduces_the_recorded_cells(clean_posture):
     measured = m.embed_json_measurement(_RECEIPTS, _EVIDENCE)
 
     agg = measured["aggregate"]
-    assert measured["offline"] is True
-    assert measured["provider_calls"] == 0
+    #: ⛔ NOT `offline is True` / `provider_calls == 0`: those two fields are
+    #: LITERALS in the return dict (`tools/extractor_cost_measure.py`, the
+    #: `embed_json_measurement` result), so asserting them re-reads the constant
+    #: this verb writes and cannot fail for any behaviour — the vacuous-pin class
+    #: this same file pins elsewhere. The real evidence is the observation: no
+    #: tiktoken reader call, hence no fetch during this run. `provider_calls` is
+    #: guarded separately by `test_the_verb_makes_no_provider_call` (it drives the
+    #: verb and asserts none of the provider entry points was reached).
     assert measured["encoder_cache"]["network_used"] is False
+    assert measured["encoder_cache"]["fetched"] == []
     assert agg["emissions"] == _RECORDED["emissions"]
     assert agg["items"] == _RECORDED["items"]
     assert agg["indented_tokens"] == _RECORDED["indent_tokens"]
