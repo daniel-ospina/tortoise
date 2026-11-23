@@ -666,13 +666,21 @@ surfaces:
   - test_abuse.py
   - test_abuse_integration.py
   # #14407: the abuse NOTIFICATION delivery contract (attributable + rate-bounded).
-  # Dual-registered, one arm per half of the change: this `api` entry sits beside
-  # `test_abuse.py` (the abuse-ENGINE half, which is what this surface already
-  # exercises — the earlier wording claimed `tortoise/abuse.py` was an `api`
-  # source and it is not: it falls through to `core`), and the `core` entry beside
-  # `test_notify.py` covers the `notify.py` half, so a `notify.py`-only diff does
-  # not sleep the suite. Two DISTINCT surfaces are deliberate; a same-surface
-  # duplicate is not.
+  # Dual-registered, and the REASON is measured rather than asserted (#14407 review —
+  # the same class the branch already corrected once in `a9d04640e464`):
+  # `select(['tortoise/abuse.py'])` -> `['core']`, `select(['tortoise/notify.py'])` ->
+  # `['core']`, `select(['tortoise/alert_store.py'])` -> `['core']`, and this file is
+  # selected in all three — so the `core` row below is the arm that covers EVERY half
+  # of this change, and this `api` entry covers none of them (it sits beside
+  # `test_abuse.py` for lineage, not because the abuse ENGINE is an `api` source: it is
+  # not, it falls through to `core`).
+  # What this row DOES buy, stated so a reader does not remove it as a duplicate: it
+  # selects this suite on `api`-resolving diffs — `select(['tortoise/hosted_api.py'])`
+  # -> `['api', 'onboarding']`, where this file is selected only because of this row.
+  # That is the same idiom as `test_10156_alert_registers.py` below (the alert feed /
+  # ack routes are `api`), and the honest limit is that this suite monkeypatches the
+  # notify store seam, so an api-only diff runs it without exercising hosted_api
+  # itself. Two DISTINCT surfaces are deliberate; a same-surface duplicate is not.
   - test_14407_alert_delivery.py
   # #10156: the `api` arm of the dual registration. `tortoise/hosted_api.py` (the
   # `GET /v1/team/alerts` feed and the new `POST /v1/team/alerts/ack` route with
@@ -7974,8 +7982,12 @@ surfaces:
   - test_capture_fold_evidence_9437.py
   - test_no_tests_imports_in_production.py
   - test_notify.py
-  # #14407: the other half of the dual registration — `tortoise/notify.py` is the
-  # file that carries the delivery bound, and it is a `core` source.
+  # #14407: the `core` arm of the dual registration, and the arm measured to be the
+  # one that actually covers the change: every source file it pins —
+  # `tortoise/notify.py` (the delivery bound), `tortoise/abuse.py` (the episode end),
+  # `tortoise/alert_store.py` (lifecycle + migration), `tortoise/incident_kinds.py`
+  # (the declared kinds) — resolves to `core`, so a diff to any of them selects this
+  # file from here.
   - test_14407_alert_delivery.py
   - test_notify_offloop_4456.py  # #4456: billing notify off-loop + never-raise in webhooks_stripe (dual: api)
   - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)

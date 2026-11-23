@@ -867,11 +867,20 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
             # statement, the class this change removes (#14407 round 5).
             reason = f"incident filing failed ({redact_safe(e)})"
             # Best-effort: does an incident exist for this subject anyway?
+            # ⛔ A FAILED READ IS NOT AN ABSENT RECORD. `known` alone cannot tell
+            # "nothing was filed" from "the read that would have found it raised",
+            # and those two failures are CORRELATED (an R2 outage fails the write
+            # first, then the read) — so the arm that says "no incident was filed"
+            # must not be reachable on the second one. `record`/`read_failed` keep
+            # the facts apart, the same way `number_known` does in the branch below.
+            known = None
+            record: dict = {}
+            read_failed = False
             try:
-                known = store.incident_record(incident_kind, subject).get(
-                    "issue_number")
+                record = store.incident_record(incident_kind, subject) or {}
+                known = record.get("issue_number")
             except Exception:  # noqa: BLE001, RUF100 — the read itself may fail
-                known = None
+                read_failed = True
             if known:
                 deliver, folded, _ids, _over = _claim_delivery(
                     kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
@@ -879,6 +888,22 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                     _deliver_unattributed(
                         kind, org_id, subject, details, folded,
                         reason=reason, known_number=known)
+                return
+            if read_failed or record:
+                # Whether an incident is on record is UNKNOWN: the write raised (and
+                # may have filed + pushed first — see above) and either the read-back
+                # raised, or the record exists without an issue number (deferred
+                # filing). Deliver the labelled message bounded by the same window,
+                # and never claim the absence.
+                deliver, folded, _ids, _over = _claim_delivery(
+                    kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
+                if deliver:
+                    _deliver_unattributed(
+                        kind, org_id, subject, details, folded,
+                        reason=(f"{reason}"
+                                + (" and the read-back raised too" if read_failed
+                                   else " and the record carries no issue number")
+                                + " — whether an incident is on record is UNKNOWN"))
                 return
         else:
             # The bound is the EPISODE, with a bounded RE-ALARM, and both are the

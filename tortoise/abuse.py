@@ -2053,14 +2053,18 @@ class AbuseEngine:
             # Clean window → end any active flag episode for this rule, so a
             # later burst starts fresh (re-flag, never a stale-flag suspend).
             #
-            # `flagged` is what makes this an EPISODE end. The clean window is the
+            # `flagged` is what makes this an EPISODE end, and it gates only the
+            # INCIDENT-side work (`_end_alert_episode`). The clean window is the
             # overwhelmingly common evaluation — an org under its threshold — and
-            # for it there is no episode at all; firing the episode-end work on
-            # that branch anyway cost up to 8 R2 GETs per `record_point_create`
+            # for it there is no episode at all; firing that work on that branch
+            # anyway cost up to 8 R2 GETs per `record_point_create`
             # (2 rules × 2 incident kinds × 2 subject spellings,
             # `resolve_incident_state` → `_read_json` → `storage.download`), on the
             # 4-worker abuse pool whose documented cost profile is "microseconds of
             # accounting" (`monitoring.py` CONTROL_PLANE_ABUSE_*). Zero pre-#14407.
+            # The IN-PROCESS claim release below is NOT part of that gate: it is a
+            # dict `pop` with no I/O, and gating it muted out-of-band-cleared
+            # episodes (see the comment at the release).
             #
             # A `latest_flag_at` that RAISES still counts as not-ended: a store
             # failure must reduce alert volume, never increase it (#3631).
@@ -2074,14 +2078,31 @@ class AbuseEngine:
             except Exception as e:
                 report_abuse_decision_fault(
                     "clean_window_episode_end", org_id, rule, e)
-            if ended and flagged:
-                # Episode CONFIRMED over: re-arm the alert budget so a NEW
-                # episode alerts again (#3631 — per-episode, not a wall-clock
-                # cooldown). NOT released when the episode-end read/write
-                # FAILED — a store failure must reduce alert volume, never
-                # increase it, so the claim is left to expire on its own.
+            if ended:
+                # The ENGINE claim is released whenever the clean-window read/write
+                # SUCCEEDED — NOT only when a flag episode was observed to end.
+                # `_release_notify` is a dict `pop` under a lock (no I/O), so the
+                # `flagged` gate below — whose whole motive is up to 8 R2 GETs per
+                # clean window — does not apply to it. Gating it on `flagged` muted
+                # a re-breach after an episode was cleared OUT OF BAND
+                # (`abuse_unsuspend`, a manual `flag_clear`): that flag_clear makes
+                # the next clean window read `flagged=False`, so the claim survived
+                # and a new detection inside the original window was dropped at
+                # `_claim_notify` and never reached `notify_abuse` at all — not even
+                # folded into a digest — for R2's 86400 s. `_release_notify`'s own
+                # docstring states the behaviour this restores. The delivery bound
+                # is NOT weakened by the release: it lives in
+                # `notify._claim_delivery` / the store lifecycle, which stay
+                # episode-scoped and recovery-streak-gated (#3146).
                 self._release_notify(org_id, rule, EVENT_FLAG)
                 self._release_notify(org_id, rule, EVENT_REVIEW)
+            if ended and flagged:
+                # Episode CONFIRMED over: re-arm the DELIVERY budget and close the
+                # incidents so a NEW episode alerts again (#3631 — per-episode, not
+                # a wall-clock cooldown). NOT fired when the episode-end read/write
+                # FAILED — a store failure must reduce alert volume, never increase
+                # it, so the incident is left to expire on its own; and not fired on
+                # a clean window with no episode, which is where the R2 cost lives.
                 self._end_alert_episode(org_id, rule)
             elif (ended
                   and (org_id, rule) in self._pending_episode_resolves

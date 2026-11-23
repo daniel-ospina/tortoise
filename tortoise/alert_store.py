@@ -457,9 +457,12 @@ class AlertStore:
         # only guarantees the same publication boundary as every other sink.
         context = detail.get("context")
         context = f" — {context}" if isinstance(context, str) and context.strip() else ""
-        # #3293: same boundary rule as ``_body``. No detail is carried TODAY —
-        # the scrub is here so a future caller that adds one cannot publish it
-        # unredacted through this sink.
+        # #3293: same boundary rule as ``_body``. A detail IS carried today —
+        # the caller's short ``context`` token above — and it is carried INTO the
+        # scrub below, so a caller that puts something publication-unsafe in that
+        # token is redacted here rather than published. The obligation not to put
+        # free text there is the CALLER's (a closed vocabulary); this sink
+        # guarantees the boundary, not the vocabulary.
         return redact_for_publication(f"🚨 DR alert: {kind}{org}{context}{issue}")
 
     # ── incident lifecycle ──────────────────────────────────────────────────
@@ -592,6 +595,16 @@ class AlertStore:
                     self._storage.delete(legacy_key)
                 except Exception as e:  # noqa: BLE001, RUF100
                     raise RuntimeError(f"legacy release failed: {e}") from e
+                # THE SUCCESS PATH RELEASES THE CLAIM TOO (#14407 review). The claim
+                # has no expiry, so keeping it after a COMPLETED migration would leak
+                # one object per migrated issue AND permanently block any later
+                # migration of that issue number — the same permanent-#2844-alias
+                # state the two branches above were fixed to avoid, reachable the
+                # moment the legacy object reappears (an R2/DR restore brings back the
+                # pre-migration `{org}.json`). A second attempt now finds a scoped key
+                # already present and takes the "nothing of ours" branch above, which
+                # is the correct, idempotent outcome.
+                self._discard_migration(claim_key, kind, new_subject)
                 return True
             except Exception as e:  # noqa: BLE001, RUF100
                 # ROLL BACK everything this call created. Leaving the scoped key in
