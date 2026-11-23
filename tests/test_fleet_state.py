@@ -3879,8 +3879,11 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
 
       * the child stays **ALIVE** and unreported for the whole deadline (``rc is None``) — the
         `-ww` pin itself, and this test's primary assertion. ⛔ This is NOT one of the substrate
-        arms below: #5049 rule 1 is about a deadline expiring on a LIVE *subject*, never about
-        turning THIS arm into a skip;
+        arms below, and it is the ONE arm that deliberately DEPARTS from #5049 rule 1 (a
+        wall-clock expiry FAILS here): the census has already answered NEGATIVELY about a subject
+        the test can see is alive, so the expiry is the MEASUREMENT rather than a budget standing
+        in for an unmeasurable one, and rule 1's premise does not hold. Recorded as an
+        `OVERRIDES:` line on #12039 — never turn THIS arm into a skip;
       * the census **keeps** reporting an error while ``ps`` itself answers — `_CENSUS_ERROR_STREAK`
         CONSECUTIVE samples **spanning `_CENSUS_ERROR_MIN_SPAN_S`**. It is a CONJUNCTION: one
         lost ``ps`` under load is not the census (#5049 rule 1), and neither are TWO that are
@@ -4079,12 +4082,19 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                 time.sleep(0.1)
             if proc.pid not in pids:
                 # ⛔ FOUR EXITS, SPLIT ON WHAT ACTUALLY HAPPENED TO THE FIXTURE (#5049 rules 1
-                # and 4; measured on `pi-runner-cell3-x64-1` 2026-11-23). A wall-clock expiry
-                # must never fail on a LIVE subject — but it MUST fail when the FIXTURE died on
-                # its own, because the property was then never testable and a skip would be a
-                # permanent green. The pin's discriminating power is "a `-ww`-less census misses
-                # a LIVE child" — which the `rc is None` exit below still fails. Those are
-                # different facts, and before this split the test could not tell them apart:
+                # and 4; measured on `pi-runner-cell3-x64-1` 2026-11-23).
+                # ⛔ ONE OF THEM IS A DELIBERATE DEPARTURE FROM RULE 1, AND IT IS STATED AS ONE.
+                # Rule 1 forbids a fixed wall-clock budget from producing FAIL (`tests/_verdict.py`
+                # :4-8: *"never a product-defect FAIL"*), and the `rc is None` exit below DOES fail
+                # on a wall-clock expiry. Say that instead of pretending otherwise: the expiry there
+                # is not a budget standing in for an outcome nobody can observe — the census has
+                # already ANSWERED, negatively, about a subject the test can see is alive, so "not
+                # reported while alive" is the measurement and `-ww` is its subject. A skip would
+                # make that regression green forever. (Recorded as an `OVERRIDES:` line on #12039;
+                # a reader holding `tests/_verdict.py` should read it as RAISED, not overlooked.)
+                # A fixture that died on its own MUST fail as well, because the property was then
+                # never testable. Those are different facts, and before this split the test could
+                # not tell them apart:
                 #
                 #   FAILED … test_pi_processes_sees_a_real_long_path_lane — … invisible to the
                 #   census for 10s of polling (pids seen: [1104635]; the table's row for the
@@ -4102,11 +4112,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                 # The four arms, in order below:
                 #
                 #   rc is None                    → ALIVE and unreported → AssertionError. THE
-                #                                   `-ww` PIN. If a future reader is tempted to
-                #                                   turn this one into a skip "to satisfy #5049
-                #                                   rule 1", do not: rule 1 is about a deadline
-                #                                   expiring on a LIVE subject, and this arm is
-                #                                   the regression the pin exists to catch.
+                #                                   `-ww` PIN, and the one arm that deliberately
+                #                                   OVERRIDES #5049 rule 1 (see the block above and
+                #                                   the `OVERRIDES:` line on #12039). If a reader
+                #                                   is tempted to turn it into a skip "to satisfy
+                #                                   rule 1", that is the override being reverted: a
+                #                                   skip here makes the regression this pin exists
+                #                                   for green forever.
                 #                                   (Round 1 of this review caught exactly that
                 #                                   version — a `poll() is not None` skip that
                 #                                   sent a cleanly-exiting fixture green. Do not
@@ -4328,6 +4340,12 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
             "ONE isolated `ps` death is the load class (#5049 rule 1) and must not red the shard",
         ),
         (
+            "once_slow", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "ONE erroring sample that SPANS the bound by itself is still the load class, because "
+            "the COUNT half of the conjunction has not been reached — without it, a single slow "
+            "`ps` reds a required shard (cycle-7 finding: dropping the count left 175 passed)",
+        ),
+        (
             "late_pair", True, None, AssertionError, "was ALIVE and invisible to the census",
             "a burst that satisfies the ERROR COUNT but not the SPAN, arriving AFTER "
             "_CENSUS_ERROR_MIN_SPAN_S of healthy polling, is still the load class — the span "
@@ -4364,7 +4382,12 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     `ps` never runs, and the clock only advances when the code asks it.
     """
     module = sys.modules[__name__]
-    clock = _FakeClock(step_s=0.1)
+    # ⛔ NOT A GLOBAL STEP: `once_slow` exists because the COUNT half of the gate is otherwise
+    # unpinned (measured, #12039 cycle 7 — dropping `err_streak >= _CENSUS_ERROR_STREAK` from the
+    # gate left the whole file `175 passed`). To reach `err_streak == 1` with a span over the bound,
+    # the CLOCK has to be slow, not the census: this clock still returns exactly one counting
+    # sample, and its step is what makes that one sample's own `time()` pair span the bound.
+    clock = _FakeClock(step_s=2.5 if census_kind == "once_slow" else 0.1)
     child = _FakeChild(child_rc)
     err = "`ps -ww -axo pid=,ppid=,uid=,command=` produced nothing"
     calls = {"n": 0}
@@ -4384,6 +4407,11 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
         calls["n"] += 1
         if census_kind == "persistent":
             return [], err
+        if census_kind == "once_slow":
+            # ONE erroring sample — the same shape as `once`, ridden by a clock whose step is
+            # larger than the span bound. `err_streak` is 1, so the COUNT half is the only thing
+            # between this and a `HarnessDefect` raised on a single slow `ps` (load, rule 1).
+            return ([], err) if calls["n"] == 1 else ([], None)
         if census_kind == "late_pair":
             # Healthy samples first, then a burst of consecutive errors, then healthy again.
             # `late` places the burst's FIRST sample just after `_CENSUS_ERROR_MIN_SPAN_S` of
@@ -4481,6 +4509,15 @@ def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
     assert "_CENSUS_ERROR_MIN_SPAN_S" in doc, (
         "the header stopped naming the SPAN half of the census-error FAIL boundary, so the rule "
         "it publishes is the count-only gate the code does not implement (#12039)")
+    # And the ONE arm that deliberately fails against #5049 rule 1 must stay declared as an
+    # override, not left as three contradictory glosses (#12039 cycle 7). A reader holding
+    # `tests/_verdict.py` — which says a wall-clock expiry is *never* a product-defect FAIL — has
+    # nothing but this word to tell a raised departure from an oversight, and the "fix" for an
+    # oversight is exactly the skip that makes the `-ww` regression green forever.
+    assert "OVERRIDES" in doc, (
+        "the header stopped declaring that the ALIVE arm OVERRIDES #5049 rule 1, so a reader "
+        "holding `tests/_verdict.py` reads a FAILING wall-clock expiry as an oversight and "
+        "turns it into a skip — the permanent green this file's arms exist to prevent (#12039)")
 
 
 def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
