@@ -2248,6 +2248,15 @@ def write_spool_entry(
         and (not stored or not _log_has_complete_records(log_path)))
     quarantined = (_quarantine_log(log_path)
                    if not extends and unusable_bytes else None)
+    if unusable_bytes and quarantined is None:
+        discards.append(record_discard(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": meta["capture_key"],
+            "reason": DISCARD_WRITE_FAILED,
+            "detail": "could not preserve unusable turn-log bytes before rewrite",
+        }))
+        return {"written": False, "bytes": _entry_bytes(root, snapshot.session_id),
+                "discards": discards}
     try:
         if extends:
             fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -2451,18 +2460,6 @@ def spool_saturated(
 
     One spool directory, two legs: the Pi leg's ``spoolSaturated`` is the twin
     and states the same rule.
-
-    ⚠️ STATED RESIDUAL (#14359 review): the twins now differ on ONE input, the
-    one no writer produces — a hand-placed meta whose ``session_id`` field does
-    not match its own file name. This leg sums ``_entry_bytes`` per DISTINCT
-    session_id (and ``prune_spool`` does the same, so the two agree about one
-    spool); ``saturatedForMetas`` in ``tortoise/pi-hooks/tortoise-capture.ts``
-    still reduces per META, so on that input this leg can answer "not saturated"
-    where the Pi leg answers "saturated". It is recorded rather than mirrored
-    here because a behaviour change in the shipped TS seam moves the pi install
-    contract generation, which makes every installed copy read ``stale-artifact``
-    — a blast radius this arithmetic fix does not earn. The Pi half (this one and
-    the #14359 shape-1 quarantine, which that leg still lacks) is its own issue.
     """
     metas, _ = list_spool_metas(root, repair=repair)
     return _saturated_for_metas(

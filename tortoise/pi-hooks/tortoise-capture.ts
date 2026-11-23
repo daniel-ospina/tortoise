@@ -1732,6 +1732,16 @@ export function spoolEntryBytes(dir: string, sessionId: string): number {
   return total;
 }
 
+function entryBytesBySession(dir: string, metas: SpoolMeta[]): Map<string, number> {
+  const bytes = new Map<string, number>();
+  for (const meta of metas) {
+    if (!bytes.has(meta.session_id)) {
+      bytes.set(meta.session_id, spoolEntryBytes(dir, meta.session_id));
+    }
+  }
+  return bytes;
+}
+
 /** Whether the turn log exists with bytes — the gate between the TWO
  *  empty-transcript outcomes (#7708). An ABSENT/zero-byte log is
  *  `transcript_empty` (removed — provably nothing to keep); a log with bytes is
@@ -1746,17 +1756,17 @@ function turnLogHasContent(dir: string, sessionId: string): boolean {
 }
 
 /** Move a turn log ASIDE instead of unlinking it — kept FOR FORENSICS.
- *  Used when the META is corrupt and the transcript (which the corruption never
- *  touched, and which is the only copy) must survive (#7708). An empty/absent
- *  log is removed. A numeric suffix keeps an earlier orphan from being
- *  clobbered. Best-effort: a rename failure leaves the log in place.
+ *  Used when the META is corrupt (#7708) or a non-extending rewrite cannot use
+ *  its bytes (#14359). An empty/absent log is removed. A numeric suffix keeps
+ *  an earlier orphan from being clobbered. Returns the orphan path so a writer
+ *  can restore the original if the replacement fails.
  *
  *  NOT re-fileable — the honesty this owes a reader who finds an `.orphan`: the
  *  entry key is `sha256(session_id)[:32]` and the corrupt meta (the only copy of
  *  the session id) is REMOVED, so no verb can rebuild the session id the server
  *  needs. The bytes are kept FOR FORENSICS, not for a retry. (The wording here
  *  once said "recoverable", which overstated what the name can deliver.) */
-function quarantineLog(log: string): void {
+function quarantineLog(log: string): string | undefined {
   let size = 0;
   try {
     size = statSync(log).size;
@@ -1769,7 +1779,7 @@ function quarantineLog(log: string): void {
     } catch {
       // already gone
     }
-    return;
+    return undefined;
   }
   let target = `${log}.orphan`;
   let suffix = 1;
@@ -1779,14 +1789,15 @@ function quarantineLog(log: string): void {
   }
   try {
     renameSync(log, target);
+    return target;
   } catch {
-    // leave it in place — better than deleting it
+    return undefined;
   }
 }
 
 /** Quarantined turn logs in the entries dir, OLDEST first (#8531 review).
  *
- *  `quarantineLog` moves a corrupt-meta entry's transcript aside as
+ *  `quarantineLog` moves an unusable transcript aside as
  *  `<key>.turns.jsonl.orphan[N]`. Nothing else reads that name, so without this
  *  accounting the bytes are invisible to `spoolEntryBytes` and to the meta scan:
  *  the spool could grow past `maxTotalBytes` without bound the moment a meta was
@@ -2208,6 +2219,10 @@ export function writeSpoolEntry(
   dir: string,
   snapshot: SpoolSnapshot,
   bounds: SpoolBounds = DEFAULT_BOUNDS,
+  deps: {
+    atomicWrite?: (path: string, text: string) => void;
+    quarantine?: (log: string) => string | undefined;
+  } = {},
 ): { written: boolean; bytes: number; discards: DiscardRecord[] } {
   const discards: DiscardRecord[] = [];
   if (snapshot.turns.length === 0) {
@@ -2303,6 +2318,25 @@ export function writeSpoolEntry(
     stored.every(
       (t, i) => t.role === snapshot.turns[i].role && t.content === snapshot.turns[i].content,
     );
+
+  const unusableBytes =
+    !extendsStored &&
+    turnLogHasContent(dir, snapshot.sessionId) &&
+    (stored.length === 0 || !logHasCompleteRecords(logPath));
+  const quarantined = unusableBytes
+    ? (deps.quarantine ?? quarantineLog)(logPath)
+    : undefined;
+  if (unusableBytes && quarantined === undefined) {
+    discards.push(
+      recordDiscard(dir, {
+        session_id: snapshot.sessionId,
+        capture_key: captureKey(snapshot.sessionId, snapshot.turns),
+        reason: DISCARD_WRITE_FAILED,
+        detail: "could not preserve unusable turn-log bytes before rewrite",
+      }),
+    );
+    return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
+  }
 
   const logText = extendsStored
     ? snapshot.turns.slice(stored.length).map(serialiseTurn).join("")
@@ -2515,6 +2549,7 @@ export function writeSpoolEntry(
   }
 
   try {
+    const writeAtomic = deps.atomicWrite ?? atomicWrite;
     if (extendsStored) {
       // fsync the append: this is the path holding the MOST RECENT turns, and a
       // power loss (not just a process kill) must not drop them.
@@ -2526,11 +2561,18 @@ export function writeSpoolEntry(
         closeSync(fd);
       }
     } else {
-      atomicWrite(logPath, logText);
+      writeAtomic(logPath, logText);
     }
-    atomicWrite(metaPath, metaText);
+    writeAtomic(metaPath, metaText);
     sweepStaleTempFiles(dir);
   } catch (err) {
+    if (quarantined !== undefined && !turnLogHasContent(dir, snapshot.sessionId)) {
+      try {
+        renameSync(quarantined, logPath);
+      } catch {
+        // the orphan remains the only copy if restoration also fails
+      }
+    }
     // A filesystem failure (full disk, read-only home) is a LOSS — record it
     // with a reason rather than returning an empty discard list (the silent
     // drop this issue exists to remove).
@@ -2616,9 +2658,10 @@ export function pruneSpool(
   const discards: DiscardRecord[] = [];
   const { metas } = listSpoolEntries(dir);
   const orphans = orphanPaths(dir);
+  const entryBytes = entryBytesBySession(dir, metas);
   const ranked = metas
     .filter((m) => m.session_id !== keepSessionId)
-    .map((m) => ({ meta: m, bytes: spoolEntryBytes(dir, m.session_id) }))
+    .map((meta) => ({ meta }))
     .sort((a, b) => {
       // #6388: the SAFE loss goes first — `entryFiled` is the SAME predicate the
       // drain's skip clause uses, so "already on the wire" here means exactly
@@ -2631,7 +2674,7 @@ export function pruneSpool(
 
   let count = metas.length;
   let total =
-    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
+    [...entryBytes.values()].reduce((sum, bytes) => sum + bytes, 0) +
     orphans.reduce((sum, path) => sum + fileSize(path), 0);
   // The quarantined-log pass runs AFTER the filed-entry pass below, never before
   // it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on the
@@ -2642,8 +2685,10 @@ export function pruneSpool(
   // unfiled entry still has a surface that can deliver it — and an unfiled entry
   // is never evicted at all (capture-loss). The record names the class in the
   // same `loss` vocabulary the live entries use (#6388).
-  for (const { meta, bytes } of ranked.filter(({ meta: m }) => entryFiled(m))) {
+  for (const { meta } of ranked.filter(({ meta: m }) => entryFiled(m))) {
     if (count <= bounds.maxEntries && total <= bounds.maxTotalBytes) break;
+    const bytes = entryBytes.get(meta.session_id) ?? 0;
+    entryBytes.delete(meta.session_id);
     const reason =
       total > bounds.maxTotalBytes ? DISCARD_BYTES_EXCEEDED : DISCARD_COUNT_EXCEEDED;
     // #6388: name the CLASS of loss. The discard line is the only surface a cap
@@ -2818,7 +2863,7 @@ function saturatedForMetas(
   // orphan class is byte-evictable only (see below).
   const reclaimableOrphanBytes = orphanPaths(dir).reduce((sum, path) => sum + fileSize(path), 0);
   let total =
-    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
+    [...entryBytesBySession(dir, metas).values()].reduce((sum, bytes) => sum + bytes, 0) +
     reclaimableOrphanBytes;
   const { projectedBytes, replacesSessionId } = projection;
   if (projectedBytes === undefined && replacesSessionId === undefined) {

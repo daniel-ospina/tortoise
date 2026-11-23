@@ -6254,3 +6254,50 @@ test("#9599: a not-yet-created transcript under a symlink still keys like Python
   // A wholly non-existent path is still anchored (lexically) rather than throwing.
   assert.match(localSessionId(join(root, "a", "b", "c.jsonl"))!, /^c-[0-9a-f]{12}$/);
 });
+
+test("#14359: a failed rewrite restores unusable transcript bytes and refuses failed quarantine", () => {
+  const spool = tmpSpool();
+  const sid = "sess-preserve-rewrite";
+  writeSpoolEntry(spool, snapshot(sid));
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const original = "torn transcript bytes that cannot be parsed\n";
+  writeFileSync(log, original);
+
+  const failed = writeSpoolEntry(spool, {
+    ...snapshot(sid),
+    turns: [{ role: "user", content: "replacement" }],
+  }, undefined, {
+    atomicWrite(path, text) {
+      if (path === log) throw new Error("simulated full disk");
+      writeFileSync(path, text);
+    },
+  });
+  assert.equal(failed.written, false);
+  assert.equal(readFileSync(log, "utf8"), original, "old bytes are restored after replacement fails");
+  assert.equal(readdirSync(join(spool, "entries")).some((name) => name.includes(".orphan")), false);
+
+  const refused = writeSpoolEntry(spool, {
+    ...snapshot(sid),
+    turns: [{ role: "user", content: "replacement" }],
+  }, undefined, { quarantine: () => undefined });
+  assert.equal(refused.written, false);
+  assert.equal(readFileSync(log, "utf8"), original, "failed quarantine must not overwrite the source");
+  assert.ok(refused.discards.some((d) => d.reason === "spool_write_failed"));
+});
+
+test("#14359: duplicate metadata counts one physical entry in saturation and pruning", () => {
+  const spool = tmpSpool();
+  const sid = "sess-duplicate-meta";
+  writeSpoolEntry(spool, snapshot(sid));
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+  meta.filed_key = meta.capture_key;
+  writeFileSync(metaPath, JSON.stringify(meta));
+  writeFileSync(join(spool, "entries", `${entryKey(sid)}-duplicate.meta.json`), JSON.stringify(meta));
+  const size = spoolEntryBytes(spool, sid);
+  assert.equal(spoolSaturated(spool, { maxEntries: 10, maxTotalBytes: size + 1 }), false,
+    "duplicate metadata must not double-count bytes");
+  const pruned = pruneSpool(spool, null, { maxEntries: 1, maxTotalBytes: size + 1 });
+  assert.ok(pruned.length <= 1, "one physical entry must not be evicted twice");
+  assert.ok(!readSpoolEntry(spool, sid), "the count bound reclaims the filed physical entry");
+});
