@@ -13941,7 +13941,7 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         "the `fast_shards` header block quotes a `--emit-push-matrix` this tree does "
         f"not emit — stated {groups}, emitted {live_groups}. Re-run the verb and paste "
         "its figures; a carried emission is the class this block exists to warn "
-        "about (and that it has now gone stale on four times).")
+        "about — and the reason this guard grades it instead of trusting it.")
     assert (ceil_est, ceil_minutes) == (max(live_groups), live_minutes), (
         "the block's watchdog derivation disagrees with the emission — stated "
         f"`ceil({ceil_est}/60 x 2)` = {ceil_minutes} m, emitted worst "
