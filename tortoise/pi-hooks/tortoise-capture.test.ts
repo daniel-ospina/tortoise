@@ -6390,7 +6390,7 @@ test("#14359: a kill between the quarantine and the write keeps the entry (orpha
   //
   // A sibling orphan for the SAME key makes that arm unprovable, so it is read as
   // torn: recorded, terminal, KEPT (`--retry-terminal` reverses it). Mirrors
-  // `capture_spool._sibling_orphan_exists`; the asymmetry is the point — a stale
+  // `capture_spool._adopt_sibling_orphan`; the asymmetry is the point — a stale
   // orphan can only make an entry retained, never destroyed.
   //
   // MUTATION THAT REDS THIS: drop the `else if (siblingOrphanExists(...))` arm
@@ -6488,7 +6488,13 @@ test("#14359: a prune under byte pressure cannot spend the ONLY COPY of a captur
   // `UNREACHABLE` about the only copy it had just moved aside (measured: review
   // cycle 5, `orphans: []`, "THE ONLY COPY still anywhere on disk: False").
   //
-  // MUTATION THAT REDS THIS: drop the `orphanIsOnlyCopy` guard from the orphan pass.
+  // This drives the WRITE path's own orphan (`keepSessionId` = the session being
+  // written, with a live log beside it) — the witness the first version of this
+  // test missed entirely: it passed `null`, so only the meta-and-no-log witness
+  // was exercised and dropping the keep witness left the suite green (measured).
+  //
+  // MUTATION THAT REDS THIS: drop the `orphanIsOnlyCopy` guard from the orphan pass,
+  // or drop only its `keepSessionId` witness.
   const spool = tmpSpool();
   const sid = "only-copy";
   const other = "pressure-other";
@@ -6496,13 +6502,18 @@ test("#14359: a prune under byte pressure cannot spend the ONLY COPY of a captur
   writeSpoolEntry(spool, { ...snapshot(other), turns: [{ role: "user", content: "o".repeat(800) }] });
   const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
   const unusable = '{"note":"unparseable"}\n[1,2,3]\n';
-  writeFileSync(log, unusable);
+  // The state the WRITE leaves: the replacement is the LOG and the unusable bytes
+  // are the ORPHAN of the same key. The log must still be there, or the OTHER
+  // witness (meta and no log) protects the orphan and this test cannot see the keep
+  // witness at all — measured: with only the kill-window state, dropping the keep
+  // witness left the suite green.
   const orphan = `${log}.orphan`;
-  renameSync(log, orphan);   // the kill-window state: meta, no log, bytes in an orphan
+  writeFileSync(orphan, unusable);
+  writeFileSync(log, '{"role":"user","content":"the replacement turn"}\n');
 
   // A ceiling the live entries alone fit under, but which the orphan pushes past.
   const ceiling = spoolEntryBytes(spool, other) + spoolEntryBytes(spool, sid) + 16;
-  const discards = pruneSpool(spool, null, { maxEntries: 20_000, maxTotalBytes: ceiling, maxEntryBytes: 1 << 20 });
+  const discards = pruneSpool(spool, sid, { maxEntries: 20_000, maxTotalBytes: ceiling, maxEntryBytes: 1 << 20 });
 
   assert.deepEqual(
     discards.filter((d) => d.session_id.startsWith("orphan:")),
@@ -6510,4 +6521,38 @@ test("#14359: a prune under byte pressure cannot spend the ONLY COPY of a captur
     "the prune spent the only copy of a capture",
   );
   assert.equal(readFileSync(orphan, "utf8"), unusable, "the bytes are still on disk");
+});
+
+test("#14359: the adoption takes the NEWEST orphan and LINKS it, not copies", () => {
+  // Two properties the Python twin pins and this leg did not:
+  //   * newest-first — `sorted()` is lexicographic, so `.orphan` (the OLDEST) won
+  //     while the prune then spent `.orphan2` (the newest): the drain kept stale
+  //     bytes, lost fresh ones, and said they had been put back;
+  //   * linked, not copied — a copy can be half-written and doubles the disk cost.
+  //     The inode is the assertion, because a copy is byte-identical.
+  //
+  // MUTATION THAT REDS THIS: `names.sort()` (lexicographic), or
+  // `writeFileSync(log, readFileSync(orphan))` instead of `linkSync`.
+  const spool = tmpSpool();
+  const sid = "two-orphans";
+  writeSpoolEntry(spool, snapshot(sid));
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const older = `${log}.orphan`;
+  const newer = `${log}.orphan2`;
+  writeFileSync(older, '{"role":"user","content":"older capture"}\n');
+  writeFileSync(newer, '{"role":"user","content":"newer capture"}\n');
+  const base = 1_700_000_000;
+  utimesSync(older, base, base);
+  utimesSync(newer, base + 60, base + 60);
+  const newerBytes = readFileSync(newer);
+  const newerIno = statSync(newer).ino;
+  rmSync(log); // the kill: only the orphans hold bytes
+
+  const { fetchImpl } = mockFetch([{ ok: true }]);
+  return flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 }).then(() => {
+    assert.deepEqual(readFileSync(log), newerBytes,
+      "the drain adopted the OLDEST orphan — the newest capture is still evictable");
+    assert.equal(statSync(log).ino, newerIno,
+      "the adoption copied the bytes instead of linking them");
+  });
 });

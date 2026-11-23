@@ -1,4 +1,4 @@
-// tortoise-hook-version: 28
+// tortoise-hook-version: 29
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -1792,24 +1792,39 @@ function quarantineLog(log: string): string | undefined {
     }
     return undefined;
   }
+  // ⛔ `linkSync` INTO THE SUFFIX SLOT, never `existsSync`-then-`renameSync` — the
+  // same TOCTOU the failed-write restore had. Two quarantines for one key (the hook
+  // path and the meta scan, plus the Python leg on the same directory) can both pick
+  // `.orphan2`, and the second rename silently REPLACES the first one's bytes under
+  // a name that says they were preserved (#14359 review cycle 6). `link` is atomic
+  // and fails EEXIST, so the loop moves to the next suffix.
   let target = `${log}.orphan`;
   let suffix = 1;
-  while (existsSync(target)) {
-    suffix += 1;
-    target = `${log}.orphan${suffix}`;
+  for (;;) {
+    try {
+      linkSync(log, target);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        suffix += 1;
+        target = `${log}.orphan${suffix}`;
+        continue;
+      }
+      return undefined;
+    }
+    break;
   }
   try {
-    renameSync(log, target);
-    return target;
+    unlinkSync(log);
   } catch {
-    return undefined;
+    // the orphan name holds the bytes; the log name may linger too
   }
+  return target;
 }
 
 /** Does THIS entry key already have a quarantined log beside its meta?
  *
  *  The ordering witness for the drain's empty-transcript arm (#14359, the twin of
- *  `capture_spool._sibling_orphan_exists`): `writeSpoolEntry` moves an unusable
+ *  `capture_spool._adopt_sibling_orphan`): `writeSpoolEntry` moves an unusable
  *  log aside rather than deleting it, so "log absent, orphan for this key
  *  present" is the state a process killed between the quarantine and the
  *  replacement write leaves. A sibling orphan therefore makes the empty arm
@@ -1817,7 +1832,7 @@ function quarantineLog(log: string): string | undefined {
 /** Does THIS entry key already have a quarantined log beside its meta?
  *
  *  The ordering witness for the drain's empty-transcript arm (#14359, the twin of
- *  `capture_spool._sibling_orphan_exists`): `writeSpoolEntry` moves an unusable
+ *  `capture_spool._adopt_sibling_orphan`): `writeSpoolEntry` moves an unusable
  *  log aside rather than deleting it, so "log absent, orphan for this key
  *  present" is the state a process killed between the quarantine and the
  *  replacement write leaves.
@@ -1857,7 +1872,19 @@ function adoptSiblingOrphan(dir: string, sessionId: string): string | undefined 
   const prefix = `${entryKey(sessionId)}.turns.jsonl.orphan`;
   let names: string[];
   try {
-    names = readdirSync(entriesDir(dir)).filter((n) => n.startsWith(prefix)).sort();
+    // NEWEST first, not by name: a key can hold several orphans
+    // (`.orphan`, `.orphan2`, …), lexicographic order takes the OLDEST, and the
+    // prune then spends the newest — the drain keeps stale bytes and loses fresh
+    // ones under a ledger line saying they were put back. mtime is the
+    // transcript's own age (a rename preserves it).
+    names = readdirSync(entriesDir(dir))
+      .filter((n) => n.startsWith(prefix))
+      .sort((a, b) => {
+        const am = mtimeOf(join(entriesDir(dir), a));
+        const bm = mtimeOf(join(entriesDir(dir), b));
+        if (am !== bm) return bm - am;
+        return a < b ? -1 : a > b ? 1 : 0;
+      });
   } catch {
     return undefined;
   }
@@ -2704,6 +2731,17 @@ export function writeSpoolEntry(
   return { written: true, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
 }
 
+/** mtime in ms, or 0 when unreadable (the orphan is the OLDEST then — the safe
+ *  direction for newest-first adoption: an unreadable candidate loses to a
+ *  readable one, and the name tiebreak keeps the choice deterministic). */
+function mtimeOf(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 function fileSize(path: string): number {
   try {
     return statSync(path).size;
@@ -2777,10 +2815,14 @@ function compareAge(a: SpoolMeta, b: SpoolMeta): number {
  *  Everything else is #8531's cheap reclaim: a key whose log still exists is
  *  SUPERSEDED, and a key with no meta is undeliverable. Twin of
  *  `capture_spool._orphan_is_only_copy`. */
-function orphanIsOnlyCopy(dir: string, orphan: string, keepSessionId: string | null): boolean {
+function orphanIsOnlyCopy(dir: string, orphan: string, keepSessionId: string | null | undefined): boolean {
   const name = basename(orphan);
   const key = name.split(".turns.jsonl.orphan")[0];
-  if (keepSessionId !== null && key === entryKey(keepSessionId)) return true;
+  // ⚠️ `!= null` (loose) on purpose: `pruneSpool` passes `undefined` when there is
+  // no entry to keep, and `undefined !== null` is TRUE — which made this call
+  // `entryKey(undefined)` and throw a TypeError on the first orphan, unseen because
+  // nothing type-checks `tortoise/pi-hooks` and every test passed a string or null.
+  if (keepSessionId != null && key === entryKey(keepSessionId)) return true;
   if (!existsSync(join(entriesDir(dir), `${key}.meta.json`))) return false;
   return !existsSync(join(entriesDir(dir), `${key}.turns.jsonl`));
 }

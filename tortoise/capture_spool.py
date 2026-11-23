@@ -997,7 +997,7 @@ def _turn_log_has_content(root: Path, session_id: str) -> bool:
 def _adopt_sibling_orphan(root: Path, session_id: str) -> tuple[str, Path | None]:
     """Put a same-key orphan's bytes BACK as the turn log. Returns (outcome, log).
 
-    The outcome is a THREE-VALUE answer on purpose, so a ledger line can describe
+    The outcome is a FOUR-VALUE answer on purpose, so a ledger line can describe
     the arm that actually ran instead of guessing (#14359 review cycle 5). One
     ``None`` used to cover three unrelated states, and all three were reported as
     "an `.orphan` for this key exists — a writer moved the bytes aside":
@@ -1042,8 +1042,18 @@ def _adopt_sibling_orphan(root: Path, session_id: str) -> tuple[str, Path | None
         try:
             os.link(orphan, log)
         except FileExistsError:
-            # A log exists after all — the caller's "has content" arm owns it.
-            return "absent", None
+            # ⛔ "A LOG LANDED" IS NOT "PROVABLY EMPTY" (#14359 review cycle 6,
+            # measured P1). This used to return `"absent"`, whose only other
+            # meaning is "no orphan for this key" — so the drain took its
+            # PROVABLY-EMPTY arm and unlinked BOTH the meta and the turn log that
+            # the other leg had just written, recording `transcript_empty` ("there
+            # was nothing to keep"). Two legs on one directory is the normal case
+            # this module asserts everywhere else, and the caller already tested
+            # `_turn_log_has_content` before calling, so it cannot re-enter its
+            # "has content" arm: the just-landed capture was destroyed and the
+            # orphan then became class-(c) and was pruned. `"occupied"` keeps the
+            # entry and says why.
+            return "occupied", None
         except OSError:
             return "unrestorable", None
         with _ctx.suppress(OSError):
@@ -1114,15 +1124,29 @@ def _quarantine_log(log: Path) -> Path | None:
         with contextlib.suppress(OSError):
             log.unlink()
         return None
+    # ⛔ `os.link` INTO THE SUFFIX SLOT, never `exists()`-then-`os.replace`.
+    # The check-then-replace is the same TOCTOU the failed-write restore used to
+    # have: two quarantines for one key (the write path and the meta scan are both
+    # called synchronously from the turn hook, and the other leg writes the same
+    # directory) can both pick `.orphan2`, and the second `os.replace` silently
+    # REPLACES the first one's bytes — destroying a capture under a name that says
+    # it was preserved (#14359 review cycle 6). `link` creates the name atomically
+    # and fails `EEXIST`, so the loop retries the next suffix; the source is
+    # unlinked only after its bytes are reachable under the orphan name.
     target = log.with_name(log.name + ".orphan")
     suffix = 1
-    while target.exists():
-        suffix += 1
-        target = log.with_name(f"{log.name}.orphan{suffix}")
-    try:
-        os.replace(log, target)
-    except OSError:
-        return None
+    while True:
+        try:
+            os.link(log, target)
+        except FileExistsError:
+            suffix += 1
+            target = log.with_name(f"{log.name}.orphan{suffix}")
+            continue
+        except OSError:
+            return None
+        break
+    with contextlib.suppress(OSError):
+        log.unlink()
     return target
 
 
@@ -2606,15 +2630,20 @@ def _saturated_for_metas(
     only, so the two callers cannot drift apart.
     """
     orphans = _orphan_paths(root)
-    # Bytes prune may reclaim WITHOUT spending an undelivered entry: the orphan
-    # class is byte-evictable — EXCEPT the only-copy orphans, which the prune now
-    # refuses to spend (#14359 cycle 5, `_orphan_is_only_copy`). Counting those as
-    # reclaimable would ADMIT a write on bytes nothing may reclaim: the write would
-    # land, the prune would skip the orphan, the spool would sit over the ceiling
-    # with no record, and the same admit would repeat until the only-copy class
-    # filled the disk. The predicate and the prune must agree on what is spendable
-    # — that is the same rule as `_saturated_for_metas` vs `prune_spool` on the
-    # entry side.
+    # ⛔ USAGE AND CREDIT ARE TWO DIFFERENT NUMBERS, and collapsing them made the
+    # #14359 cycle-5 fix inert (measured by review: with the filter added to
+    # `total` AND subtracted in the ceiling test, the verdict was invariant — the
+    # filter could be reverted with the suite still green).
+    #
+    # USAGE is every byte on disk, the only-copy orphans included: they occupy the
+    # disk exactly like any other byte.
+    # CREDIT is only what the prune may actually SPEND: an orphan that is the only
+    # copy of a capture is skipped by `_orphan_is_only_copy`, so crediting it would
+    # admit a write on bytes nothing can reclaim — the write lands, the prune skips,
+    # the spool sits above the ceiling with no record, and the same admit repeats.
+    # The predicate and the prune must agree on what is spendable, exactly as
+    # `_saturated_for_metas` and `prune_spool` must agree on the entry side.
+    orphan_bytes = sum(_file_size(p) for p in orphans)
     reclaimable_orphan_bytes = sum(
         _file_size(p) for p in orphans if not _orphan_is_only_copy(root, p, None))
     # #14359: one count per DISTINCT session_id. Two metas naming the same
@@ -2623,7 +2652,7 @@ def _saturated_for_metas(
     # bound the admission fast path relies on.
     total = sum(_entry_bytes(root, sid)
                 for sid in {m["session_id"] for m in metas})
-    total += reclaimable_orphan_bytes
+    total += orphan_bytes
     if projected_bytes is None and replaces_session_id is None:
         # STRICT: the question is whether ADDING an entry would cross the ceiling,
         # so a spool exactly AT the count ceiling is already saturated.
@@ -2794,8 +2823,9 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     # before it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on
     # the wire), while an orphan's delivered-ness is unknowable — so the certain
     # option is spent FIRST. An orphan is, however, still preferable to an
-    # UNFILED live entry: an orphan whose entry still has a log is SUPERSEDED by
-    # that log (and one with no meta names nothing that can be filed), while an
+    # UNFILED live entry: an orphan whose entry has been REWRITTEN is not
+    # recoverable through that log (it holds the new turns, not these bytes) and is
+    # the only spendable orphan class besides the meta-less one, while an
     # unfiled entry still has a surface that can deliver it — and an unfiled entry
     # is never evicted at all (capture-loss). ⚠️ An orphan that IS the only copy
     # (its key has a readable meta and NO log) is skipped entirely by this pass,
@@ -2870,10 +2900,10 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
             "reason": DISCARD_BYTES_EXCEEDED,
             "detail": (
                 f"spool is {total} bytes > max_total_bytes={bounds.max_total_bytes}"
-                "; evicted a quarantined log (UNREACHABLE: its entry still holds a"
-                " turn log, so this copy is SUPERSEDED by it — or no meta names it"
-                " at all. Either way no drain can file it back; whether it was ever"
-                " delivered is unknown)"
+                "; evicted a quarantined log (UNREACHABLE: its entry was REWRITTEN"
+                " since — the log beside it holds the NEW turns, not these bytes —"
+                " or no meta names it at all. Either way no drain can file it back;"
+                " whether it was ever delivered is unknown)"
             ),
         }))
         with contextlib.suppress(OSError):
@@ -3602,10 +3632,13 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                         "unlistable": "no turn log, and the entries directory could"
                                       " not be read — cannot prove the log is empty;"
                                       " kept",
+                        "occupied": "no turn log when we looked, but one LANDED while"
+                                    " we asked — nothing can prove it is empty; kept",
                         "unrestorable": "no turn log, and an `.orphan` for this key"
                                         " could not be linked back (no hard links,"
-                                        " or ENOSPC) — its bytes stay in the EVICTABLE"
-                                        " orphan class; kept",
+                                        " or ENOSPC) — its bytes stay in the orphan"
+                                        " class, which is never evicted for a key"
+                                        " with a meta and no log; kept",
                     }[outcome],
                     now_ms,
                 ))

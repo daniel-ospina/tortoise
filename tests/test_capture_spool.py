@@ -5631,8 +5631,9 @@ def test_a_kill_between_the_quarantine_and_the_write_keeps_the_entry(tmp_path):
     not the recovery. What this arm does recover is the BYTES: it adopts the
     orphan back as the log, where an unfiled entry's log is never evicted.
 
-    MUTATION THAT REDS THIS: drop the ``elif _sibling_orphan_exists(...)`` arm —
-    the entry is unlinked and the ledger says ``transcript_empty``.
+    MUTATION THAT REDS THIS: drop the `_adopt_sibling_orphan` call from the drain's
+    empty arm (return the old "absent" unconditionally) — the entry is unlinked and
+    the ledger says ``transcript_empty``.
     """
     from tortoise.capture_spool import (
         DISCARD_TRANSCRIPT_TORN,
@@ -5839,3 +5840,123 @@ def test_a_kill_window_orphan_is_not_evicted_by_a_later_prune(tmp_path):
     assert [d for d in discards if d["session_id"].startswith("orphan:")] == [], (
         f"the prune spent the only copy of a capture: {discards}")
     assert [p.read_bytes() for p in _orphan_paths(root)] == [kept]
+
+
+def test_a_log_that_LANDS_mid_adoption_is_never_deleted(tmp_path, monkeypatch):
+    """#14359 review cycle 6 — P1: "a log landed" was read as "provably empty".
+
+    The drain tests `_turn_log_has_content` and then, when the log is absent, asks
+    `_adopt_sibling_orphan` to link the same-key orphan back. If a log appears in
+    between — the OTHER leg writing this one directory, which the module treats as
+    normal everywhere else — `os.link` raises `EEXIST`. That arm returned
+    `"absent"`, whose only other meaning is "no orphan for this key", so the drain
+    took its PROVABLY-EMPTY arm and unlinked BOTH files, recording
+    `transcript_empty` — "there was nothing to keep" — about a capture that had
+    just been written. Measured by review: `meta survives: False`, `log survives:
+    False`. The TS leg was safe in the identical state, so the two legs disagreed
+    about one directory state in the destructive direction.
+
+    MUTATION THAT REDS THIS: return `"absent"` (or `None`) from the
+    `FileExistsError` arm instead of `"occupied"`.
+    """
+    import tortoise.capture_spool as capture_spool
+    from tortoise.capture_spool import (
+        DISCARD_TRANSCRIPT_TORN,
+        _log_path,
+        _meta_path,
+        read_discards,
+    )
+
+    root = tmp_path / "landed-mid-adopt"
+    sid = "14359-occupied"
+    write_spool_entry(root, _snapshot(sid))
+    log = _log_path(root, sid)
+    # The kill-window state: bytes in an orphan, no log.
+    log.rename(log.with_name(log.name + ".orphan"))
+    assert not log.exists()
+    landed = b'{"role":"user","content":"the OTHER leg just wrote this"}\n'
+
+    real_adopt = capture_spool._adopt_sibling_orphan
+
+    def _racing_adopt(root_, sid_):
+        # The other leg lands its log inside the adoption's own attempt.
+        if not _log_path(root_, sid_).exists():
+            _log_path(root_, sid_).write_bytes(landed)
+        return real_adopt(root_, sid_)
+
+    monkeypatch.setattr(capture_spool, "_adopt_sibling_orphan", _racing_adopt)
+    flush_spool(root, _Server().post, now=1000.0)
+
+    assert _meta_path(root, sid).exists(), (
+        "the entry was unlinked although a turn log had just landed for it")
+    assert _log_path(root, sid).read_bytes() == landed, "the landed log was destroyed"
+    reasons = [d["reason"] for d in read_discards(root)]
+    assert DISCARD_TRANSCRIPT_TORN in reasons, reasons
+    assert "transcript_empty" not in reasons, (
+        "the drain recorded 'provably empty' about bytes another leg had just written")
+
+
+def test_saturation_counts_an_only_copy_orphan_as_USAGE_not_credit(tmp_path):
+    """#14359 review cycle 6 — usage and credit are two different numbers.
+
+    The cycle-5 fix added an only-copy filter to the orphan sum that is BOTH added
+    to the total AND subtracted in the ceiling test, so the verdict was invariant to
+    it: reverting the filter left the suite green (measured). The defect shows up
+    the moment a spool holds a MIX — one orphan the prune may spend and one it may
+    not: the predicate credits only the spendable one against the ceiling, so it
+    reports room for a write that could never land, the write is admitted, the prune
+    spends the spendable orphan, and the spool then sits ABOVE the ceiling with no
+    record — the silent growth #8531's pass exists to prevent.
+
+    USAGE is every byte on disk (an only-copy orphan occupies it exactly like any
+    other byte). CREDIT is only what the prune may actually spend. Nothing here is
+    FILED, so nothing but an orphan can make room: the correct verdict is SATURATED.
+
+    MUTATION THAT REDS THIS: add `reclaimable_orphan_bytes` to the total instead of
+    `orphan_bytes` (the inert cycle-5 form) — `spool_saturated` answers False.
+    """
+    from tortoise.capture_spool import (
+        _entries_dir,
+        _entry_bytes,
+        _log_path,
+        _meta_path,
+        prune_spool,
+        spool_saturated,
+    )
+
+    root = tmp_path / "usage-vs-credit"
+    live = "14359-live-unfiled"
+    killed = "14359-only-copy"
+    write_spool_entry(root, _snapshot(live, turns=[{"role": "user", "content": "l" * 200}]))
+    write_spool_entry(root, _snapshot(killed, turns=[{"role": "user", "content": "k" * 200}]))
+
+    # The kill-window state for `killed`: its bytes in an orphan, no log. This is the
+    # orphan the prune may NOT spend.
+    log = _log_path(root, killed)
+    only_copy = _entries_dir(root) / f"{log.name}.orphan"
+    log.rename(only_copy)
+    only_copy_bytes = only_copy.stat().st_size
+    # …plus one the prune MAY spend: no meta names it at all (corrupt-meta class).
+    spendable = _entries_dir(root) / "deadbeefdeadbeefdeadbeefdeadbeef.turns.jsonl.orphan"
+    spendable.write_bytes(b"spendable orphan bytes\n")
+
+    # The margin matters: `entries + both orphans` must cross the ceiling while
+    # `entries` alone stays clearly under it, or the assertion passes for the wrong
+    # reason (the first version did — measured: the count/entry total was already
+    # over, so the mutation survived).
+    entries = _entry_bytes(root, live) + _entry_bytes(root, killed)
+    ceiling = entries + 150
+    assert only_copy_bytes + spendable.stat().st_size > 150 + 10, (
+        f"fixture margin too thin: orphans are {only_copy_bytes}+{spendable.stat().st_size}")
+    bounds = Bounds(max_total_bytes=ceiling)
+    assert spool_saturated(root, bounds) is True, (
+        "the predicate credited an orphan against a ceiling the unspendable one"
+        " already crosses, so it reported room that does not exist")
+
+    discards = prune_spool(root, None, bounds)
+    assert [d for d in discards if d["session_id"].startswith("orphan:")] == [
+        d for d in discards if d["session_id"] == f"orphan:{spendable.name}"], (
+        f"the prune spent an orphan other than the spendable one: {discards}")
+    assert only_copy.exists(), "the only-copy orphan must survive the prune"
+    assert not spendable.exists(), "the spendable orphan is the class the prune pays with"
+    assert _meta_path(root, live).exists(), "an UNFILED entry is never evicted"
