@@ -16901,10 +16901,21 @@ def _batch_retry_once() -> int:
         pending = list(_BATCH_RETRY)
     handed = 0
     for org, batch_id in pending:
+        # ⛔ REMOVE BEFORE SUBMITTING (#14415 review round 5, P3). `submit`
+        # enqueues the work before it returns, so a worker can enter
+        # `_drain_batch` and take the "already draining" arm — which re-appends
+        # the entry precisely because the tick is about to remove it — BEFORE
+        # this loop's own `remove` ran. The entry was then dropped for good, and
+        # the batch waited out the tenant re-scan (900 s) instead of being
+        # re-driven: measured `_BATCH_RETRY == []` with the item still `queued`.
+        # Taking the entry out first, and putting it back only when the hand-off
+        # was refused (the ceiling), leaves the re-append authoritative.
+        with _BATCH_RETRY_LOCK, contextlib.suppress(ValueError):
+            _BATCH_RETRY.remove((org, batch_id))
         if _BATCH_WORKER.submit(_drain_batch, org, batch_id):
             handed += 1
-            with _BATCH_RETRY_LOCK, contextlib.suppress(ValueError):
-                _BATCH_RETRY.remove((org, batch_id))
+        else:
+            _batch_retry_enqueue(org, batch_id)
     return handed
 
 
@@ -17102,7 +17113,13 @@ def _drain_batch(org: dict, batch_id: str) -> None:
             # charged. The dead claim is settled instead (the boot path's rule),
             # so the row does not strand non-terminal either.
             cancelled_batch = True
-            coord.abandon_dead_claims(org["org_id"], batch_id)
+            # `stale_after_s=0`: THIS process just established that it is not
+            # draining the batch (`_BATCH_DRAINING`), so no runner here holds a
+            # claim — the age window exists for a PEER replica's claim, which this
+            # path cannot see. Without the explicit 0 a claim whose owner's
+            # terminal write failed would sit non-terminal until the window
+            # elapsed, and the retry tick that found it would find it again.
+            coord.abandon_dead_claims(org["org_id"], batch_id, stale_after_s=0)
             coord.settle(org["org_id"], batch_id)
             return
         corpus_name = batch.corpus_name if batch else ""
@@ -53439,7 +53456,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 205 tracked files (752 distinct
+# ABSOLUTE line number from 205 tracked files (753 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

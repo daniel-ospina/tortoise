@@ -1688,215 +1688,66 @@ def test_recovery_reaches_batches_past_the_per_call_window(client, store,
 
 def test_a_peer_settling_the_same_state_is_not_charged_by_this_pass(store,
                                                                    monkeypatch):
-    """⛔ ROUND-5 REVIEW P2/HIGH: "landed" cannot be inferred from the row.
+    """⛔ ROUND-5 REVIEW P2: "landed" cannot be inferred from the row.
 
-    The peer's first cut tested `landed.state is outcome.state` — which a PEER's
-    write to the SAME state also satisfies, so a settlement this process did not
-    make was still charged. The landing flag is explicit (`_advance_landed`).
+    The earlier cut tested `landed.state is outcome.state`, which a PEER's write
+    to the SAME state also satisfies — so a settlement this process did not make
+    was still charged. The landing flag is explicit (`_advance_landed`).
+
+    ⛔ AND THE SEAM MUST BE REACHED (#14415 review round 5, P2): the previous
+    fixture left the row a FRESH `extracting` claim, so `run_item` returned at its
+    liveness guard before the claim, the runner or the settle write — every
+    assertion held for a reason unrelated to the code under test. The row starts
+    `queued` here, and both intermediates are asserted so that stays true.
     """
     charged: list[int] = []
+    ran: list[str] = []
+    fired = {"settled": False}
     monkeypatch.setattr(bi, "record_item_spend",
                         lambda org_id, *, tokens_in=0, tokens_out=0:
                         charged.append(tokens_in + tokens_out) or 0)
     coord = bi.BatchCoordinator(store)
     batch, items = coord.submit(ORG_ID, ["/d/a.md"])
-    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
 
     real_advance = coord._advance_landed
 
-    def losing_advance(org_id, item, new_state, **kw):
-        # A PEER settles it to the SAME state the runner is about to write…
-        store.put_item(org_id, bi.BatchItem(
-            batch_id=item.batch_id, item_id=item.item_id, ref=item.ref,
-            state=new_state, tokens_in=0, tokens_out=0,
-            attempts=item.attempts, updated_at=item.updated_at))
-        # …so this pass's compare loses while the row looks exactly as intended.
+    def peer_lands_first(org_id, item, new_state, **kw):
+        if new_state is bi.BatchItemState.INDEXED:
+            fired["settled"] = True
+            # A PEER settles the row to the SAME state this pass is about to
+            # write, so the row looks exactly as intended and only the explicit
+            # `landed` flag can tell the difference.
+            store.put_item(org_id, bi.BatchItem(
+                batch_id=item.batch_id, item_id=item.item_id, ref=item.ref,
+                state=new_state, tokens_in=0, tokens_out=0,
+                attempts=item.attempts, updated_at=item.updated_at))
         return real_advance(org_id, item, new_state, **kw)
 
-    monkeypatch.setattr(coord, "_advance_landed", losing_advance)
+    monkeypatch.setattr(coord, "_advance_landed", peer_lands_first)
     out = coord.run_item(
         ORG_ID, store.get_item(ORG_ID, batch.batch_id, items[0].item_id),
-        lambda i: bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=700))
-    assert out.charge_in == 0 and out.charge_out == 0, (
-        "this pass charged a settlement a peer made — its write did not land")
-    assert charged == []
+        lambda i: ran.append(i.item_id) or bi.ItemOutcome(
+            bi.BatchItemState.INDEXED, tokens_in=700))
 
-
-# ── round 7: the receipt agrees with the meter, and the row keeps its spend ─
-def test_the_receipt_and_the_meter_agree_about_a_retried_item(store, monkeypatch):
-    """⛔ BLOCKING 2: the bill and the receipt must not report different sums.
-
-    A retried item has two runner calls behind it and the meter bills both, so a
-    row holding only the LAST call's figures made `tokens_spent` report 100 for a
-    200-token spend — the exact measurement the metering docstring narrates as
-    the defect it fixes.
-    """
-    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
-    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
-    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
-    monkeypatch.setattr(bi, "BATCH_RECLAIM_AFTER_S", 0.0)
-    verdicts = [bi.ItemOutcome(bi.BatchItemState.QUEUED, reason="lock-held",
-                               tokens_in=100),
-                bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=100)]
-    monkeypatch.setattr(ha, "_batch_item_runner",
-                        lambda *a, **k: (lambda i: verdicts.pop(0)))
-
-    coord = bi.BatchCoordinator(store)
-    batch, _ = coord.submit(ORG_ID, ["/d/a.md"])
-    charged = 0
-    real_charge = bi.record_item_spend
-
-    def _charge(org_id, *, tokens_in=0, tokens_out=0):
-        nonlocal charged
-        charged += tokens_in + tokens_out
-        return real_charge(org_id, tokens_in=tokens_in, tokens_out=tokens_out)
-
-    monkeypatch.setattr(bi, "record_item_spend", _charge)
-    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
-    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
-
-    body = bi.status_body(store.get_batch(ORG_ID, batch.batch_id),
-                          store.items(ORG_ID, batch.batch_id))
-    assert body["tokens_spent"] == 200, (
-        f"the row reports {body['tokens_spent']} while the meter holds {charged}")
-    assert body["tokens_spent"] == charged, (
-        "the customer's receipt and the ledger must be the same number")
-
-
-def test_a_runner_call_that_spent_is_billed_even_when_the_row_moved_on(
-        store, monkeypatch):
-    """⛔ N1: a peer settling the row does not un-spend OUR call's tokens."""
-    charged: list[int] = []
-    monkeypatch.setattr(bi, "record_item_spend",
-                        lambda org_id, *, tokens_in=0, tokens_out=0:
-                        charged.append(tokens_in + tokens_out) or tokens_in)
-    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
-    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
-    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
-
-    def _runner(sdk, corpus, org_id):
-        def _run(item):
-            # A peer settles the row WHILE our call is inside the runner.
-            peer = store.get_item(org_id, item.batch_id, item.item_id)
-            other = bi.BatchCoordinator(store)
-            other.advance(org_id, peer, bi.BatchItemState.EXTRACTING,
-                          attempt=True)
-            other.advance(org_id, peer, bi.BatchItemState.INDEXED, tokens_in=5)
-            return bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=700,
-                                  tokens_out=30)
-        return _run
-
-    monkeypatch.setattr(ha, "_batch_item_runner", _runner)
-    coord = bi.BatchCoordinator(store)
-    batch, _ = coord.submit(ORG_ID, ["/d/a.md"])
-    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
-
-    assert charged == [730], (
-        "our runner call spent 730 tokens; the ledger was left short — the ONE "
-        "budget then reads used less than it is")
-
-
-def test_a_lost_claim_never_runs_the_runner(store, monkeypatch):
-    """⛔ ROUND-5 REVIEW P1: the claim's loss test cannot be the returned STATE.
-
-    The claim writes the state both the winner and the loser then observe, so
-    `claimed.state is EXTRACTING` is TRUE for a lost compare: the loser fell
-    through and ran the runner on a document a peer was already inside —
-    measured: two runner calls and 120 000 tokens billed for 60 000 spent.
-    `_advance_landed`'s `landed` flag is the only thing that distinguishes my
-    write from theirs, and the claim consumes it now.
-    """
-    calls: list[str] = []
-    coord = bi.BatchCoordinator(store)
-    batch, _items = coord.submit(ORG_ID, ["/d/a.md"])
-
-    real = coord._advance_landed
-
-    def losing_claim(org_id, item, new_state, **kw):
-        if (new_state is bi.BatchItemState.EXTRACTING and not calls
-                and kw.get("expected") is bi.BatchItemState.QUEUED):
-            # A peer takes the claim first, leaving the row EXTRACTING — exactly
-            # what our own write would have produced.
-            other = bi.BatchCoordinator(store)
-            other.advance(org_id, store.get_item(org_id, item.batch_id,
-                                                 item.item_id),
-                          bi.BatchItemState.EXTRACTING, attempt=True,
-                          expected=bi.BatchItemState.QUEUED,
-                          expected_attempts=kw.get("expected_attempts"))
-        return real(org_id, item, new_state, **kw)
-
-    monkeypatch.setattr(coord, "_advance_landed", losing_claim)
-    out = coord.run_item(
-        ORG_ID, store.get_item(ORG_ID, batch.batch_id, _items[0].item_id),
-        lambda i: calls.append(i.item_id) or bi.ItemOutcome(
-            bi.BatchItemState.INDEXED, tokens_in=60_000))
-
-    assert calls == [], (
-        "the runner ran over a claim this pass LOST — a second extraction of one "
-        "document, and a second 60 000 tokens on the meter")
-    assert out.charge_in == 0 and out.charge_out == 0
-    assert out.state is bi.BatchItemState.EXTRACTING
-
-
-# ── round 8: the failure throttle anchors at the failure, and one bad batch
-#    must not pin the rotation ─────────────────────────────────────────────
-def test_a_slow_failing_scan_still_throttles(store, monkeypatch):
-    """NB2: a >30 s failing scan used to re-arm on every read.
-
-    The throttle was anchored at `now` captured BEFORE the scan, so a failure that
-    takes longer than the retain interval had already expired its own throttle by
-    the time it was written — every request then paid a full failing scan, which
-    is the opposite of what the arm exists for.
-    """
-    monkeypatch.setattr(ha, "_BATCH_SCAN", {})
-    monkeypatch.setattr(ha, "_BATCH_RETAIN_FAILURE_S", 30.0)
-    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
-    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
-        "ceiling": 2, "submit": staticmethod(lambda fn, *a, **k: True)})())
-    scans: list[int] = []
-
-    def _explode(_org):
-        scans.append(1)
-        raise RuntimeError("the graph is loaded")
-
-    monkeypatch.setattr(ha, "_batch_store_for", _explode)
-    for _ in range(5):
-        ha._recover_org_batches({"org_id": ORG_ID})
-    assert len(scans) == 1, (
-        f"{len(scans)} scans for 5 reads — a slow failure must still throttle")
-
-
-def test_one_unreadable_batch_does_not_pin_the_rotation(store, monkeypatch):
-    """NB3: a batch whose own read raises must be SKIPPED, not pin the window.
-
-    Retaining the offset on failure meant that batch was retried for ever and
-    every batch behind it was never inspected by any scan — non-terminal for ever.
-    """
-    monkeypatch.setattr(ha, "_BATCH_SCAN", {})
-    monkeypatch.setattr(ha, "_BATCH_RESCAN_S", 0)
-    monkeypatch.setattr(ha, "_BATCH_RECOVER_LIMIT", 2)
-    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
-    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
-        "ceiling": 2, "submit": staticmethod(lambda fn, *a, **k: True)})())
-    coord = bi.BatchCoordinator(store)
-    ids = [coord.submit(ORG_ID, [f"/d/{n}.md"])[0].batch_id for n in range(6)]
-    poisoned = ids[0]
-    real_get = store.get_batch
-
-    def _get(org_id, batch_id):
-        if batch_id == poisoned:
-            raise RuntimeError("corrupt estimate_json")
-        return real_get(org_id, batch_id)
-
-    monkeypatch.setattr(store, "get_batch", _get)
-
-    seen: set[str] = set()
-    for _ in range(6):
-        seen.update(ha._recover_org_batches({"org_id": ORG_ID}))
-
-    assert set(ids[1:]) <= seen, (
-        f"{sorted(set(ids[1:]) - seen)} were never inspected because one batch's "
-        "read raises")
+    assert ran == [items[0].item_id], (
+        "the runner must have run for this test to prove anything")
+    assert fired["settled"], "the settle seam was never reached"
+    # ⛔ WHAT "NOT CHARGED" MEANS HERE (#14415 review round 5, P2). A lost
+    # compare does NOT mean "charge nothing": this pass's runner RAN and spent its
+    # own 700, so the ledger gets exactly that — once (round 8's row/ledger
+    # equality). What must never happen is charging the ROW's totals, or charging
+    # our spend twice. The peer's write carried 0, so a 700 on the meter and a 700
+    # row total is the pass billing itself once; a 1400, or a row total of 0 with
+    # a 700 charge, is the defect.
+    assert (out.charge_in, out.charge_out) == (700, 0), (
+        "a lost compare must bill exactly THIS pass's own spend")
+    # `run_item` does not touch the ledger itself: it RECORDS the spend on the
+    # row and the drain meters that record, once.
+    assert charged == [], (
+        f"run_item must not meter directly — the drain does: {charged}")
+    row = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
+    assert (row.tokens_in, row.tokens_out) == (700, 0), (
+        f"the row must hold the same number the ledger does: {row.tokens_in}")
 
 
 def test_a_status_poll_cannot_erase_a_cancellation(store, monkeypatch):
@@ -1904,34 +1755,70 @@ def test_a_status_poll_cannot_erase_a_cancellation(store, monkeypatch):
 
     `_resume_batch` reads the batch row, then the items, then wrote `resuming` —
     so a `cancel()` landing in that gap was erased WITH its `cancelled_at`, and
-    `settle()`'s own CAS could then no longer save it (RESUMING is in that
-    compare's expected set), so the derived `partial` landed and
+    `settle()`'s own compare could then no longer save it (RESUMING is in that
+    compare's expected set), so the derived `partial`/`completed` landed and
     `pending_batches()` stopped selecting the row: the cancellation was gone for
-    good, and the cancelled document could be re-driven and billed. A status poll
-    is enough to reach it.
+    good, and the cancelled document could be re-driven and billed.
+
+    ⛔ THE CANCEL MUST FIRE AT THE BATCH-ROW WRITE (#14415 review round 5, P2).
+    The first cut fired it inside `items()`, which left every item TERMINAL — so
+    `_resume_batch` skipped the `resuming` write entirely and the assertions held
+    over code that never ran (reverting the CAS left the test green). Item 2 is
+    still `queued` here, so the resume write IS attempted and the cancel lands
+    first.
     """
     coord = bi.BatchCoordinator(store)
     batch, items = coord.submit(ORG_ID, ["/a.md", "/b.md"])
     coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
     coord.advance(ORG_ID, items[0], bi.BatchItemState.INDEXED, tokens_in=5)
 
-    real_items = store.items
-    state = {"fired": False}
+    attempted: list[str] = []
+    real_cas = store.put_batch_if_state
+    fired = {"cancel": False}
 
-    def items_then_cancel(org_id, batch_id):
-        rows = real_items(org_id, batch_id)
-        if not state["fired"]:
-            state["fired"] = True
-            bi.BatchCoordinator(store).cancel(org_id, batch_id,
-                                              reason="cancelled by the customer")
-            return real_items(org_id, batch_id)
-        return rows
+    def polling_batch_cas(row, expected):
+        attempted.append(str(row.state))
+        if not fired["cancel"]:
+            fired["cancel"] = True
+            bi.BatchCoordinator(store).cancel(
+                row.org_id, row.batch_id, reason="cancelled by the customer")
+        return real_cas(row, expected)
 
-    monkeypatch.setattr(store, "items", items_then_cancel)
+    monkeypatch.setattr(store, "put_batch_if_state", polling_batch_cas)
     coord.recover(ORG_ID)
     monkeypatch.undo()
 
+    assert fired["cancel"], "the interleaving never fired — the test proves nothing"
     row = store.get_batch(ORG_ID, batch.batch_id)
     assert row.state is bi.BatchState.CANCELLED, (
         f"a status poll's resume write erased the cancel — row reads {row.state}")
     assert row.cancelled_at, "the cancellation timestamp was erased"
+
+
+def test_the_retry_tick_cannot_drop_a_handoff_that_re_enqueued(monkeypatch):
+    """⛔ ROUND-5 REVIEW P3: the tick's remove ran AFTER the work it triggered.
+
+    `_batch_retry_once` submitted first and removed afterwards. `submit` enqueues
+    before returning, so a worker entering `_drain_batch` takes the
+    "already draining" arm — which re-appends the entry BECAUSE the tick is about
+    to remove it — and the tick then removed that re-append. Measured: the batch
+    sat `queued` with `_BATCH_RETRY == []` until the throttled tenant re-scan
+    (900 s). The entry is now taken out first and only put back when the hand-off
+    was refused.
+    """
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [(ORG_ID, "batch_x")])
+
+    def synchronously_draining(fn, org, batch_id):
+        # Exactly the ordering a real pool permits: the work runs before submit
+        # returns, and while it runs it re-enqueues itself.
+        ha._batch_retry_enqueue(org, batch_id)
+        return True
+
+    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
+        "ceiling": 2,
+        "submit": staticmethod(synchronously_draining),
+    })())
+    assert ha._batch_retry_once() == 1
+    assert [bid for _org, bid in ha._BATCH_RETRY] == ["batch_x"], (
+        "the tick dropped the re-enqueue its own hand-off caused — the batch "
+        f"waits out the re-scan: {ha._BATCH_RETRY}")

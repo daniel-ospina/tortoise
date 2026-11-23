@@ -396,7 +396,11 @@ def test_a_restart_settles_what_a_cancelled_batch_left_in_flight():
     coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
     coord.cancel(ORG, batch.batch_id)
     # …the process dies here, leaving /a.md mid-flight inside a cancelled batch.
-    assert BatchCoordinator(store).recover(ORG) == []
+    # `stale_after_s=0` states the boot case explicitly: this process is gone, so
+    # ITS claim is void no matter how young the stamp looks. (The default window
+    # is for a PEER's claim, which a status poll cannot prove dead — see
+    # `abandon_dead_claims`.)
+    assert BatchCoordinator(store).recover(ORG, stale_after_s=0) == []
     after = {i.ref: i for i in coord.status(ORG, batch.batch_id)[1]}
     assert after["/a.md"].state is BatchItemState.CANCELLED
     assert after["/a.md"].tokens_in == 0
