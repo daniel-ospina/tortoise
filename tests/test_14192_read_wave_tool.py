@@ -7351,17 +7351,22 @@ def test_the_ASYNC_for_arms_that_CARRY_the_class_are_pinned_and_the_redundant_on
     """The two `ast.AsyncFor` members that are LOAD-BEARING, and the four that are not.
 
     ⛔ MEASURED AT `45a7d205c7c4` BEFORE THIS ROW EXISTED (#14326 round 18). `ast.AsyncFor`
-    appears in EIGHT code arms of this harness (a ninth occurrence is prose). Dropping it
-    from each in turn and running the whole file:
+    appears in EIGHT code arms of this harness. Dropping it from each in turn and running the
+    whole file:
 
-        :491  `_str_constants` bind tuple          1 failed  (pinned, round 17)
-        :2500 `_aliases_of` loop arm               1 failed  (pinned, `45a7d205`)
-        :2155 `_in_loop`                           39 passed  <- pinned HERE
-        :2230 `_extra_bindings` target collection  39 passed  <- pinned HERE
-        :2970 holders fixpoint                     39 passed  redundant (measured below)
-        :3549 `_per_query_element_mutations` names 39 passed  redundant (measured below)
-        :3562 element-mutation gate                39 passed  redundant (measured below)
-        :3624 derived-element fixpoint             39 passed  redundant (measured below)
+        `_str_constants` bind tuple            1 failed  (pinned, round 17)
+        `_aliases_of` loop arm                 1 failed  (pinned, `45a7d205`)
+        `_in_loop`                             39 passed  <- pinned HERE
+        `_extra_bindings` target collection    39 passed  <- pinned HERE
+        holders fixpoint (in `_mutated_after`) 39 passed  redundant (measured below)
+        `_per_query_element_mutations`: names  39 passed  redundant (measured below)
+        `_per_query_element_mutations`: gate   39 passed  redundant (measured below)
+        `_per_query_element_mutations`: deriv. 39 passed  redundant (measured below)
+
+    ⛔ THE ARMS ARE NAMED, NOT NUMBERED, ON PURPOSE. A `:NNNN` in this docstring is the drift
+    class this file keeps being cured of: the numbers in this table were `45a7d205`'s, and a
+    peer commit (`9b48318e`, round 18) moved four of them before this row was even pushed. Read
+    the arm by the function it lives in; re-grep the arm before quoting a line.
 
     The two this row pins are not tidiness. `_in_loop` decides whether a read sits inside
     the measurement loop, and `_extra_bindings` finds a SECOND bind of the blessed id
@@ -7373,12 +7378,14 @@ def test_the_ASYNC_for_arms_that_CARRY_the_class_are_pinned_and_the_redundant_on
     ⛔ THE OTHER FOUR ARE REDUNDANCY, NOT COVERAGE, AND THAT IS MEASURED — not assumed. For
     the `async` element-mutation lever
     (`async for _pq in per_query: _pq["order"].sort()`), deleting `ast.AsyncFor` from ANY of
-    :2970 / :3549 / :3562 / :3624 leaves BOTH `_per_query_element_mutations` and
+    the four arms in `_mutated_after`'s holders fixpoint or
+    `_per_query_element_mutations` leaves BOTH `_per_query_element_mutations` and
     `_mutated_after` returning the same hit list (`[4]`) — the sibling arms still catch it.
-    So none of the four is individually reddenable, and pinning one would mean asserting
-    something already asserted. They stay (deleting a fail-closed arm narrows the guard for
-    no gain) and are NAMED here so the next round does not re-derive the same measurement or
-    mistake them for pinned clauses.
+    Re-measured at `9b48318e`: the same four deletions, the same `41 passed`. So none of the
+    four is individually reddenable, and pinning one would mean asserting something already
+    asserted. They stay (deleting a fail-closed arm narrows the guard for no gain) and are
+    NAMED here so the next round does not re-derive the same measurement or mistake them for
+    pinned clauses.
     """
     # ── `_in_loop`: an `async for` body IS inside a loop ──────────────────────────────
     async_run = (
