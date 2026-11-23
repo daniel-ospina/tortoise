@@ -363,10 +363,9 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 a `#` comment (`git diff origin/main...HEAD -- 'tortoise/*.py' | grep -E '^[+-]'` returns **sixteen** lines:
 four file headers (`--- a/` / `+++ b/`) plus six removed and six added comment lines — the
 twelve body lines are all `#`, so `grep -vE '^(\+\+\+|---) '` leaves nothing that is not a comment): each carries a count this PR re-derived
-(`162` distinct cites from `727` targets over `203` files, DOWN from `168` / `751` / `205` —
-`uv run python tools/hosted_api_cite_census.py` is the command. The sentence this replaced read
-`173` / `746` / `203`: every figure fell, and `203` is the citing-file count, the one that did
-not move), not a
+(`162` cites above the pivot from `728` distinct targets over `203` citing files, down from
+`168` / `752` / `205` — `uv run python tools/hosted_api_cite_census.py --json` prints every one
+of those four, so none of them is a hand count), not a
 change to what the code does.
 
 ---
