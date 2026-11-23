@@ -409,7 +409,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1607 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1678 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -431,7 +431,7 @@ def _residue_block() -> str:
     merge had dropped WITHOUT a conflict marker (`THE BASE FIGURE IS THE BASE **TREE's**
     MEASUREMENT`) took it to 1607 — that block names `1b0db0489408`'s own pair, so its absence
     orphaned that `OWN_PINS` entry and the orphan arm redded; the figure is RE-MEASURED by this
-    function's walk on the RESOLVED file, never inherited, and 1607 is the figure above,
+    function's walk on the RESOLVED file, never inherited, and 1678 is the figure above,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
