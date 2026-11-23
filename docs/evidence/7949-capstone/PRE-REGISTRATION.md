@@ -3333,13 +3333,14 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   "the owner's call" covers (a threshold or a control-arm definition changing).
 - **This entry is LIVE for this tree** — it has no successor, so it must not carry a supersede
   marker.
-- **§10.40's own status bullet is corrected in this same commit.** It was added reading
+- **§10.40's own status bullet is corrected in `c9a996dabf`.** It was added reading
   "*This entry is LIVE for this tree — it has no successor*" while the supersede marker above it
   already named §10.41, so the entry stated two mutually exclusive things about itself. It now uses
-  the historical form §10.36 and §10.37 carry. ⛔ **`§10.38` did NOT carry it either** — `:3158` read
-  "*This entry is LIVE for the merged tree — it has no successor*", which §10.39–§10.41 already
-  falsify, so **two** entries carried a present-tense live designation, not one. Its correction is
-  made in this same commit (**#14377**) rather than left filed: a frozen §10.x STATUS bullet is not a
+  the historical form §10.36 and §10.37 carry. ⛔ **`§10.38` did NOT carry it either** — its own
+  status bullet read "*This entry is LIVE for the merged tree — it has no successor*" (now quoted at
+  `:3160-:3161` inside the corrected bullet's own disclosure), which §10.39–§10.41 already falsify, so
+  **two** entries carried a present-tense live designation, not one. Its correction is made in the
+  peer commit `9f77e04562` (**#14377**) rather than left filed: a frozen §10.x STATUS bullet is not a
   cite, so a sentence that three successors had already falsified can be corrected without moving a
-  number — and the digest re-cut below is one this commit already owes. What a merge lane must not do
-  is re-point a frozen §10.x *cite*; this is the other case.
+  number — and the digest re-cut that edit carried in the same commit is the one it owed. What a merge
+  lane must not do is re-point a frozen §10.x *cite*; this is the other case.
