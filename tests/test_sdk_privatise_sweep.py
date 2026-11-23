@@ -1679,9 +1679,9 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     "ELEVEN" — and each went stale the moment `OWN_PINS` gained a key, because no arm grades the
     size restated in THIS sentence. ⛔ SCOPED TO THIS SENTENCE, DELIBERATELY (#14282 review, P3):
     an earlier cut of this clause said "no arm grades a size restated in prose", which is FALSE of
-    the tree and its wrong outcome is deletion of a live arm — `tools/sdk_privatise.py`'s counts
-    (`SIX`/`EIGHT`, the `RESIDUE_INTERVAL_COMMITS`/`RESIDUE_CARRIER_COUNT` constants) ARE graded,
-    by the arms in this file, because the numerals there are load-bearing. The rule is about a
+    the tree and its wrong outcome is deletion of a live arm — `tools/sdk_privatise.py`'s `SIX`/`EIGHT`
+    are graded through this file's `RESIDUE_INTERVAL_COMMITS`/`RESIDUE_CARRIER_COUNT` constants (they
+    are defined HERE, not in the tool), by the arms here, because the numerals there are load-bearing. The rule is about a
     figure published HERE without a grader, never about prose generally. A reader who needs the
     population's size reads `expected`.
 

@@ -147,9 +147,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
-    # so the header counts it as drifted rather than compared, and it is one of the ELEVEN that are
-    # incomparable at the pin — the header enumerates them, and `_PIN_EOF_PAIRS` below is that
-    # split's per-pair form. ⛔ NO COUNT IS TYPED HERE (#14282 review, P3): the earlier form carried
+    # so the header counts it as drifted rather than compared, and it is one of the pairs the header
+    # enumerates as non-comparable at the pin — `_PIN_EOF_PAIRS` below is that split's per-pair
+    # form. ⛔ NO COUNT IS TYPED HERE (#14282 review, P3): the earlier form carried
     # a figure that matched no published edition once the doc's split was re-derived, so the
     # population is named by TEXT and its size comes from the graded source. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
