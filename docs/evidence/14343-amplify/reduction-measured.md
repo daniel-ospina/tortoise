@@ -149,7 +149,7 @@ So the whitespace lever is **not** the ceiling of information-neutral rendering,
 headroom above it is **a quarter of the whitespace saving again** (6,318 of 25,215; 451
 tokens per emission), and it is **not** free of the model-facing risk: key names are no
 longer adjacent to their values, which is a *bigger* change to what the model reads than
-moving `\n ` to `,`. It is therefore **measured and NOT shipped** — a second lever needs its
+moving a newline-plus-space to `,`. It is therefore **measured and NOT shipped** — a second lever needs its
 own quality evidence, per this issue's rule. Per document it would be **5,752** tokens
 (`48,461 − 5,752 + 16,338 = 59,047` tokens/doc → 50 / 67 / 406 documents a month) against
 the shipped lever's 4,600.
