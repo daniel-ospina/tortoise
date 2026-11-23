@@ -244,7 +244,9 @@ uv run python tools/extractor_cost_measure.py compose \
 # 2. before → after on the SAME corpus. ⛔ The ARM IS A SETTING, NOT A LABEL:
 #    `run --arms before,after` installs TORTOISE_S4_EMBED_JSON=compact for the
 #    `after` batch and pins it OFF for the `before` batch, and every row records
-#    `s4_embed_json` so a mislabelled measurement cannot hide.
+#    `s4_embed_json` — the layout that row's render RESOLVED — so a mislabelled
+#    measurement cannot hide; a row whose observation disagrees with its batch is
+#    written FAILED rather than attributed to an arm.
 #    ⚠️ The flag is PROCESS-GLOBAL (`os.environ`), so the arms run as SEQUENTIAL
 #    BATCHES, not interleaved: the value is installed once per batch, before any
 #    worker thread starts, and restored after the batch joins. That matters at

@@ -19441,3 +19441,18 @@ def _embed_json_kwargs() -> dict:
     if mode == "compact":
         return {"separators": (",", ":")}
     return {"indent": 1}
+
+
+def _embed_json_mode() -> str:
+    """#14343: which layout :func:`_embed_json_kwargs` resolves to — OBSERVABLE.
+
+    Derived from ``_embed_json_kwargs()`` itself rather than re-reading the
+    environment, so there is ONE normalization rule (unset / blank / garbage all
+    resolve to today's bytes) and a caller can record the layout its own render
+    took instead of re-deriving a label from an arm's name.
+
+    That distinction is the point: `tools/extractor_cost_measure.py` records the
+    layout it MEASURED on every row, so a row whose render did not carry its
+    arm's setting is refused rather than mislabelled (`#14343` review cycle 10).
+    """
+    return "indent" if _embed_json_kwargs() == {"indent": 1} else "compact"

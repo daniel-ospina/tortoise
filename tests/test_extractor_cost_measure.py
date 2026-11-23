@@ -12,6 +12,7 @@ re-run without spending money to check itself.
 from __future__ import annotations
 
 import json
+import os
 import re
 import statistics
 import sys
@@ -1562,3 +1563,89 @@ def test_the_unattributed_row_names_the_denominator_its_share_is_of():
     assert f"{comp_share:.1f} %" in ev, (
         "the README must also state what the row would be against the "
         "composition, so a reader can see the two denominators differ")
+
+def test_a_row_whose_render_missed_its_arm_is_REFUSED_not_mislabelled(
+        monkeypatch, tmp_path):
+    """Recording the observation is not enough on its own.
+
+    Review cycle 10: a corrupted row was "indistinguishable from a good one".
+    Reading the flag back per row makes the corruption VISIBLE in the artifact,
+    but a row still written as a good measurement of its arm is evidence a
+    reader has to distrust rather than evidence the harness refused it. So the
+    two ways the observation can disagree with the arm RAISE, and `run` records
+    the row as FAILED — a row that cannot be attributed to an arm is not a
+    measurement of that arm.
+    """
+    def fake_measure(model, conversation, *, session_date):
+        return {"prompt_tokens": 1, "completion_tokens": 1}
+
+    monkeypatch.setattr(m, "_install_arm", lambda arm: None)   # installs nothing
+    monkeypatch.delenv(m._TOGGLE, raising=False)
+    monkeypatch.setattr(m, "pick_corpus",
+                        lambda limit, seed: [{"path": "README.md", "tokens": 10}])
+    monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
+    monkeypatch.setattr(m, "_build_model", lambda: object())
+    monkeypatch.setattr(m, "measure_one", fake_measure)
+
+    out = tmp_path / "measurements.jsonl"
+    m.run_measurement(out=out, docs_limit=1, sessions_limit=0, workers=1,
+                      seed=1, arms=("after",), arm_gap_s=0.0,
+                      long_split=False)
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line]
+    assert len(rows) == 1
+    assert rows[0]["failed"] is True, rows[0]
+    assert "cannot be attributed to an arm" in rows[0]["error"], rows[0]
+    assert "s4_embed_json" not in rows[0], (
+        "a refused row must not carry an arm's layout as if it had measured it")
+
+
+def test_a_lever_that_moves_mid_measurement_is_refused(monkeypatch, tmp_path):
+    """One layout per pipeline run, or the row describes neither."""
+    def flipping_measure(model, conversation, *, session_date):
+        os.environ[m._TOGGLE] = "compact"      # the leak, mid-run
+        return {"prompt_tokens": 1, "completion_tokens": 1}
+
+    monkeypatch.setattr(m, "_install_arm", lambda arm: None)
+    monkeypatch.delenv(m._TOGGLE, raising=False)
+    monkeypatch.setattr(m, "pick_corpus",
+                        lambda limit, seed: [{"path": "README.md", "tokens": 10}])
+    monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
+    monkeypatch.setattr(m, "_build_model", lambda: object())
+    monkeypatch.setattr(m, "measure_one", flipping_measure)
+
+    out = tmp_path / "measurements.jsonl"
+    m.run_measurement(out=out, docs_limit=1, sessions_limit=0, workers=1,
+                      seed=1, arms=("cold",), arm_gap_s=0.0,
+                      long_split=False)
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line]
+    assert rows[0]["failed"] is True, rows[0]
+    assert "moved mid-measurement" in rows[0]["error"], rows[0]
+
+
+def test_the_mode_is_productions_own_resolution_not_a_second_parser(monkeypatch):
+    """`_embed_mode` delegates to the helper the RENDER calls.
+
+    A hand-written copy of the rule (`.strip().lower() == "compact"`) agrees
+    today and is free to drift the first time the toggle grows a spelling — and
+    the drift would surface as a row recording a layout the render did not take.
+    Pinned structurally: whatever `_embed_json_kwargs` resolves to, the recorded
+    mode names it.
+    """
+    from tortoise import extractor_v2 as v2
+    for value in (None, "", "  ", "garbage", "indent", "compact", " COMPACT "):
+        if value is None:
+            monkeypatch.delenv(m._TOGGLE, raising=False)
+        else:
+            monkeypatch.setenv(m._TOGGLE, value)
+        compact = v2._embed_json_kwargs() == {"separators": (",", ":")}
+        assert m._embed_mode() == ("compact" if compact else "indent"), value
+
+    # THE DISCRIMINATOR: with the env armed, move the RENDER's own resolution to
+    # the other layout. A delegation follows it; a second hand-written parser
+    # keeps answering "compact" from the environment and the row would then
+    # record a layout the prompt did not have.
+    monkeypatch.setenv(m._TOGGLE, "compact")
+    monkeypatch.setattr(v2, "_embed_json_kwargs", lambda: {"indent": 1})
+    assert m._embed_mode() == "indent", (
+        "the recorded mode must follow the serialization the render passes to "
+        "json.dumps, not a re-parse of the environment")

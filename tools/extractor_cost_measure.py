@@ -316,21 +316,31 @@ def _existing_rows(path: Path) -> set[tuple[str, str, str]]:
 
 _TOGGLE = "TORTOISE_S4_EMBED_JSON"
 
+#: What each measurement ARM asks that lever to be. An arm absent from this map
+#: is not a lever arm (``cold``/``warm`` size the cache ladder), so it inherits
+#: the ambient value.
+_ARM_LAYOUT = {"after": "compact", "before": "indent"}
+
 
 def _embed_mode() -> str:
-    """The serialization `render_s4_prompt` will really use, resolved the SAME
-    way production resolves it (`extractor_v2._embed_json_kwargs`): only
-    ``compact`` arms it, case- and whitespace-insensitively; unset, blank and
-    garbage are all ``indent``.
+    """The serialization `render_s4_prompt` will really use — production's own
+    resolution, not a copy of its rule.
 
     ⛔ RECORDED PER ROW, AND RECORDED BY READING THE ENVIRONMENT — never by
     re-deriving it from the arm label. A value computed as
     ``"compact" if arm == "after" else "indent"`` is a function of the label, so
     it can never disagree with it and can never catch a mislabelled run — which
     is the one thing the field exists to make visible (review cycle 10, P2).
+
+    The resolution itself is delegated to ``extractor_v2._embed_json_mode``,
+    which derives it from the kwargs the render passes to ``json.dumps``. A
+    hand-written copy of that rule here (``.strip().lower() == "compact"``) is a
+    SECOND parser of the same predicate: it agrees today and is free to drift
+    the first time the toggle grows a spelling, and the drift would show up as a
+    row that records a layout the render did not take.
     """
-    return ("compact" if (os.environ.get(_TOGGLE) or "").strip().lower()
-            == "compact" else "indent")
+    from tortoise.extractor_v2 import _embed_json_mode
+    return _embed_json_mode()
 
 
 def _install_arm(arm: str) -> None:
@@ -344,6 +354,32 @@ def _install_arm(arm: str) -> None:
         os.environ[_TOGGLE] = "compact"
     elif arm == "before":
         os.environ.pop(_TOGGLE, None)
+
+
+def _assert_the_arm_is_what_rendered(arm: str, observed: str, *,
+                                     at_exit: str | None = None) -> None:
+    """Refuse a row whose render did not carry its arm's setting.
+
+    ⛔ Review cycle 10 called the corrupted row "indistinguishable from a good
+    one": recording the OBSERVED layout makes it visible in the artifact, but a
+    row that was still written as a good measurement of that arm is evidence a
+    reader has to distrust rather than evidence the harness refused. So the two
+    ways an observation can disagree — a lever that moved under the measurement,
+    or a batch that did not install what its arm asked for — RAISE, and the
+    caller's own failure path records the row as FAILED.
+    """
+    if at_exit is not None and at_exit != observed:
+        raise RuntimeError(
+            f"{_TOGGLE} resolved to {observed!r} at entry and {at_exit!r} at "
+            f"exit — the lever moved mid-measurement, so neither layout "
+            f"describes this item's whole pipeline run and the row cannot be "
+            f"labelled")
+    expected = _ARM_LAYOUT.get(arm)
+    if expected is not None and observed != expected:
+        raise RuntimeError(
+            f"the {arm!r} arm requests {expected!r} but the render resolved "
+            f"{observed!r} — the lever moved under the measurement, so this "
+            f"row cannot be attributed to an arm")
 
 
 def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
@@ -386,13 +422,18 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
                              "content": item["text"]}]
         else:
             conversation = item["turns"]
+        mode_before = _embed_mode()      # sampled BEFORE the pipeline: S4 renders
+                                        # late, so the label must bracket the run
         rec = measure_one(model, conversation,
                           session_date="2026-11-21T00:00:00+00:00")
         rec["arm"] = arm
-        #: the serialization the render ACTUALLY used — read back from the
-        #: environment at measure time, so a mislabelled row is VISIBLE instead
-        #: of self-consistent.
-        rec["s4_embed_json"] = _embed_mode()
+        #: the serialization the render ACTUALLY used — sampled at entry and at
+        #: exit, so a mislabelled row is VISIBLE instead of self-consistent and a
+        #: lever that moved under the measurement is REFUSED instead of written
+        #: as a good row.
+        rec["s4_embed_json"] = mode_before
+        _assert_the_arm_is_what_rendered(arm, mode_before,
+                                         at_exit=_embed_mode())
         rec["kind"] = kind
         rec["id"] = item["path"]
         rec["item_tokens"] = item["tokens"]
@@ -524,17 +565,22 @@ def _measure_long_split(out: Path, docs: list[dict], arms: tuple[str, ...],
         saved_embed = os.environ.get(_TOGGLE)
         try:
             _install_arm(arm)
+            mode_before = _embed_mode()
             rec = measure_one(model,
                               [{"role": "user", "content": t} for t in turns],
                               session_date="2026-11-21T00:00:00+00:00")
-            mode = _embed_mode()
+            mode_at_exit = _embed_mode()
         finally:
             if saved_embed is None:
                 os.environ.pop(_TOGGLE, None)
             else:
                 os.environ[_TOGGLE] = saved_embed
         rec["arm"] = arm
-        rec["s4_embed_json"] = mode
+        rec["s4_embed_json"] = mode_before
+        #: the same refusal the batch loop makes — the two paths must not
+        #: disagree about what an arm MEANS, only about how they install it.
+        _assert_the_arm_is_what_rendered(arm, mode_before,
+                                         at_exit=mode_at_exit)
         rec["kind"] = "doc_split"
         rec["id"] = f"{longest['path']}#{len(turns)}turns"
         rec["item_tokens"] = longest["tokens"]
