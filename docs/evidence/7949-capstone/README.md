@@ -136,7 +136,7 @@ the opposite.** The scored run at `9152448d7` (`# generated: 2026-11-02T12:16:06
 whose `document_sha256` was
 `sha256:5ff05906cf383f50a873dafeee12216d5eafc80b89ae9676c78a109f16714fbe` — what
 `PRE-REGISTRATION.md` hashed to *at that commit*. The record in this tree hashes to
-`sha256:85d1a3201dfc025a40746df9dc8f00e978d1a728036ece4d325a233a06c89dea`, and **do not trust
+`sha256:af7413e7f565c28f77c09d3d4a1fcae066f51657d3a453b5cd28af1afa4d27ef`, and **do not trust
 this line without re-deriving it** (`sha256sum docs/evidence/7949-capstone/PRE-REGISTRATION.md`):
 §8's change-control rule re-cuts the digest on *every* edit to the document, so a present-tense
 digest here is only ever as fresh as the last commit that touched it. `8bc2fbed1`
@@ -393,7 +393,7 @@ statement that the gate was open". It is not that: `enabled` is the FLAG, comput
 is reached. `vet_enabled` is computed at `extractor_v2.py:14788`, i.e. BEFORE the
 `if not edus:` early return (`:14792`), which emits literally
 `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:14823`), and
-each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:17967`), `if vet_enabled and
+each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:17970`), `if vet_enabled and
 complete_list:` (`:15372`). So a session with the flag ON and an empty list emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
 `{}` on its fail-open path, `:14512-14515`). Because `_witness_block` returns the first positive
@@ -1211,10 +1211,10 @@ the same lesson (cite the symbol, not the line).
 | step | call site | witness the probe reads | on the receipt? |
 |---|---|---|---|
 | S0 READ | `_edus_from_conversation` `:14791` | `stats["edus"]`, `stats["chunks"]` | ✅ |
-| S1 NARRATE | `run_s1` `:17882` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
-| S2.1 EXTRACT | `run_s2` `:17914` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:17968` | `result["vet"]` — built at `extractor_v2.py:15716-15720`, copied onto the receipt at the meta fold `sdk.py:22073` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
-| S2.3 CLASSIFY | `_apply_classify_kinds` `:15241` | `result["classify_later"]` — built at `extractor_v2.py:15706-15712`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
+| S1 NARRATE | `run_s1` `:17885` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
+| S2.1 EXTRACT | `run_s2` `:17917` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
+| S2.2 VET | `_run_vet_pass` `:17971` | `result["vet"]` — built at `extractor_v2.py:15716-15720`, copied onto the receipt at the meta fold `sdk.py:22073` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
+| S2.3 CLASSIFY | `_apply_classify_kinds` `:15246` | `result["classify_later"]` — built at `extractor_v2.py:15706-15712`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
 | S3 RESOLVE | `search_graph` `:15262` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
 | S5 CONNECT | `execute_embed` `:15620` (+ `run_s4` `:15283` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]`, copied as `stats["step_witness"]["commit"]` (payload_produced + the count the write loop RESOLVED — created or folded onto an existing canonical, so a fully-folded capture reports the folded count, never 0) | ✅ — `capstone_measure.py` additionally reads the committed `:Point` nodes and their `eventId` stamps off the live graph |

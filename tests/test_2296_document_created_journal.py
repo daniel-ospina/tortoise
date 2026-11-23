@@ -409,9 +409,8 @@ def test_a_caller_write_sink_prop_is_not_bound_as_the_internal_sink(env):
     ``write_sink.append(write)``, on the far side of ``live_write.write`` — the
     destination of the write is already decided when the sink is filled. So the
     harm an unreserved caller prop of that name does is REINTERPRETATION: the
-    prop binds the parameter at the splat, the emit delivers the chokepoint's
-    own ``LiveWrite`` into the CALLER's value, and the sink the caller actually
-    named is starved.
+    prop binds the parameter at the splat, so the emit delivers the chokepoint's
+    own ``LiveWrite`` into the CALLER's value instead of into its own sink.
 
     A LIST is the value that makes this observable: a forged scalar only makes
     it loud, because the door's ``except Exception`` swallows the resulting
