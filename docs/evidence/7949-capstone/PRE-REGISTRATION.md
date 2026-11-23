@@ -3155,8 +3155,11 @@ to answer.
   class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4 denominator are the
   ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for *any*
   edit to this file, and the bundle README's present-tense digest with it.
-- **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a supersede
-  marker.
+- **This entry was LIVE for the merged tree at the head it shipped at** — it now has successors
+  (§10.39–§10.41), and its own numbers are untouched by them. ⛔ Until this line was corrected it
+  read "*This entry is LIVE for the merged tree* — it has no successor, so it must not carry a
+  supersede marker", which §10.39's landing had already falsified while §10.39–§10.41 all follow it;
+  no test greps this phrase, which is why the suite stayed green over it (`#14377`).
 
 ### 10.39 — the sixth row's PRODUCER lands: `E6` is now measured, and no bar moved (`#11695`, 2026-11-20)
 
@@ -3286,9 +3289,10 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   `:15254` and `:15407`; the two fail-open `except` arms are `:15267` and `:15418`; the
   `_run_vet_pass` calls are `:18056` (S2) and `:15383` (union).
 - **⛔ The cites were re-derived, not `+10`-ed.** `git diff -U0 ff2218b6a7..HEAD --
-  tortoise/extractor_v2.py` (the pre-`#14357` tree, **19,396** lines — the base is NAMED, so a
-  re-measurer reproduces the comparison instead of guessing which tree the base was) was turned into
-  a line map and every cite was re-resolved through it; `19,385` of those `19,396` base lines land
+  tortoise/extractor_v2.py` (the parent of this branch's first `extractor_v2.py` commit; its file is
+  byte-identical to `ee0e460fb3`'s, so either ref reproduces the comparison) was turned into a line
+  map and every cite was re-resolved through it. The base is **19,396** lines, NAMED so a re-measurer
+  reproduces the comparison instead of guessing which tree the base was; `19,385` of those lines land
   on a byte-identical head line, and the **11** that do not are exactly the base lines a hunk EDITS:
   `:16092`–`:16097`, `:16157`, `:16158`, `:16184`, `:16233` — and `:16994`, the `_complete` docstring
   line `093d82ac97` appended its raise note to IN PLACE, a one-line REPLACEMENT whose net delta is
@@ -3297,8 +3301,9 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   re-measurer reproduces the pair rather than a near neighbour: for EVERY base line `n`, compare
   `base[n]` with `head[n + d]`, where `d` is the number of lines the change inserts or deletes ABOVE
   `n` — a pure insertion *after* `n` does not shift `n`, and a base line a hunk REPLACES is compared
-  with the replacement. ⛔ **The count moves with the tree, so it is stated per tree and never
-  inherited:** this paragraph reported `19,383`/`13` first, then `19,386`/`10`, and now
+  with the replacement. ⛔ **The count is a measurement of THIS change, not a perpetual census** —
+  a number belongs to the head it was opened on (§10.19/§10.22/§10.24) — **so it is stated per tree
+  and never inherited:** this paragraph reported `19,383`/`13` first, then `19,386`/`10`, and now
   `19,385`/`11`. The first charged the insertion *after* `:2435`, `:16200` and `:17092` to those
   lines (`base[2435] == head[2435]`, `base[16200] == head[16226]`, `base[17092] == head[17151]` —
   all three byte-identical at their own positions, a boundary off-by-one); the second was measured
@@ -3331,9 +3336,10 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
 - **§10.40's own status bullet is corrected in this same commit.** It was added reading
   "*This entry is LIVE for this tree — it has no successor*" while the supersede marker above it
   already named §10.41, so the entry stated two mutually exclusive things about itself. It now uses
-  the historical form §10.36 and §10.37 carry. ⛔ **`§10.38` does NOT carry it** — `:3158` still reads
-  "*This entry is LIVE for the merged tree — it has no successor*", which §10.39–§10.41 falsify — so
-  **two** entries still carry a present-tense live designation, not one. §10.38's correction is filed
-  as **#14377** rather than made here: frozen §10.x cites are never re-pointed by a merge lane, and a
-  status bullet re-cut inside this one would move `document_sha256` again for an unrelated change.
-  Naming that gap here, rather than claiming it was swept, is the point of the bullet.
+  the historical form §10.36 and §10.37 carry. ⛔ **`§10.38` did NOT carry it either** — `:3158` read
+  "*This entry is LIVE for the merged tree — it has no successor*", which §10.39–§10.41 already
+  falsify, so **two** entries carried a present-tense live designation, not one. Its correction is
+  made in this same commit (**#14377**) rather than left filed: a frozen §10.x STATUS bullet is not a
+  cite, so a sentence that three successors had already falsified can be corrected without moving a
+  number — and the digest re-cut below is one this commit already owes. What a merge lane must not do
+  is re-point a frozen §10.x *cite*; this is the other case.
