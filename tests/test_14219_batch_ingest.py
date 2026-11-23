@@ -1541,17 +1541,24 @@ def test_a_receipt_and_the_meter_agree_when_the_row_moved_on():
         if variant == "cas-lost":
             # The row moves BETWEEN the coordinator's `_fresh` and its write, so
             # the compare-and-set loses and the outcome cannot be applied.
-            real = coord.advance
+            #
+            # ⛔ THE PEER'S MOVE MUST CHANGE THE COMPARED STATE (#14415 review
+            # round 5, P2). The first cut advanced `EXTRACTING → EXTRACTING` — the
+            # very state the terminal compare expects — so the write LANDED and
+            # the lost-CAS arm (`_bill` on a lost compare) was never exercised:
+            # deleting it left the test green, in both variants. A customer
+            # cancel moves the row to `CANCELLED`, which genuinely loses the
+            # compare.
+            real = coord._advance_landed
 
             def _advance(org_id, item, new_state, _store=store, _real=real,
                          **kw):
                 if new_state is BatchItemState.INDEXED:
-                    peer = _store.get_item(org_id, item.batch_id, item.item_id)
-                    BatchCoordinator(_store).advance(
-                        org_id, peer, BatchItemState.EXTRACTING, attempt=True)
+                    BatchCoordinator(_store).cancel(
+                        org_id, item.batch_id, reason="cancelled by the customer")
                 return _real(org_id, item, new_state, **kw)
 
-            coord.advance = _advance  # type: ignore[method-assign]
+            coord._advance_landed = _advance  # type: ignore[method-assign]
 
         out = coord.run_item(ORG, items[0], runner)
         billed = out.charge_in + out.charge_out

@@ -899,7 +899,16 @@ def _finish_counts(raw: Mapping[str, Any]) -> dict[str, int]:
 
 
 def _copy_item(i: BatchItem) -> BatchItem:
-    return BatchItem(**{**i.__dict__})
+    """A copy carrying the ROW's facts — and NEVER the charge record.
+
+    ⛔ `charge_in`/`charge_out` are the "what THIS call spent" record, and their
+    whole point is that they cannot be re-read and charged again (#14415 review
+    round 5, P3). A store that round-tripped them let a re-read of a settled row
+    re-meter the same spend, in the very store the money tests drive; the graph
+    store never writes them, so zeroing here is what keeps the in-memory store
+    honest to the same Protocol promise.
+    """
+    return BatchItem(**{**i.__dict__, "charge_in": 0, "charge_out": 0})
 
 
 def _copy_batch(b: Batch) -> Batch:
@@ -1788,9 +1797,20 @@ class BatchCoordinator:
                             f"{twin.item_id} in this batch — no work done, no "
                             "tokens spent"))
             # The twin failed or is still running: this copy is NOT a duplicate
-            # of anything that exists, so it proceeds. Two different paths to
-            # the same bytes are then deduped by the indexer's own url+hash
-            # gate, which is the write-side authority.
+            # of anything that exists, so it proceeds.
+            # ⛔ WHAT THE INDEXER'S GATE DOES AND DOES NOT CATCH (#14415 review
+            # round 5, P3 — this comment used to claim the gate deduped any two
+            # paths to the same bytes). The gate compares a ``:Source``'s stored
+            # ``contentHash`` to the file's hash, and the ``:Source`` identity is
+            # derived from the PATH — so it dedupes a RE-SUBMITTED path and does
+            # NOT dedupe two different paths carrying identical bytes. Inline
+            # text is staged per batch (``<base>/_batches/<batch_id>/…``), so two
+            # batches uploading the same document are two sources: the
+            # content-key check above is the only cross-batch guard, and it is
+            # read-before-run, so two batches draining concurrently can both miss
+            # it. Content-addressed staging is the fix (``content_key`` is known
+            # at acceptance); until then the honest statement is "deduped within
+            # a batch and against already-settled items, serially".
         if fresh.content_key:
             prior = self._store.find_settled_by_content_key(org_id,
                                                             fresh.content_key)
@@ -2352,9 +2372,25 @@ class BatchCoordinator:
             # a 500-item batch. Return it (a later pass must revisit it) without
             # touching its state.
             if moved or any(i.state is BatchItemState.QUEUED for i in items):
+                # ⛔ THE RESUME WRITE IS A COMPARE-AND-SET TOO (#14415 review
+                # round 5, P1). This is the THIRD unconditional writer of the
+                # batch row, and it is the one a status poll reaches: `batch` was
+                # read before `items()`, so a `cancel()` landing in that gap was
+                # overwritten with `resuming` + EMPTY `cancelled_at`/
+                # `cancel_reason`. That also DEFEATS `settle()`'s own fix one
+                # window later: `RESUMING` is in the terminal compare's expected
+                # set, so the derived `partial`/`completed` then lands, the row
+                # stops being selected by `pending_batches()`, and the customer's
+                # cancellation is gone for good (measured: cancel → `resuming` →
+                # `partial`, nothing left to repair it).
                 batch.state = BatchState.RESUMING
                 batch.updated_at = stamp
-                self._store.put_batch(batch)
+                if not self._store.put_batch_if_state(
+                        batch, (BatchState.ACCEPTED, BatchState.RUNNING,
+                                BatchState.RESUMING)):
+                    # The row moved on (a cancel, or a peer's own settle). Leave
+                    # it alone: `_drain_batch` over a cancelled batch settles it.
+                    return True
             return True
         if items:
             # ⛔ A LAGGING BATCH ROW IS REPAIRED HERE (#14415 review round 2, B1
@@ -2434,7 +2470,14 @@ class BatchCoordinator:
                 batch.cancel_reason
                 or next((i.reason for i in items if i.reason), ""))
             batch.updated_at = self._now()
-            self._store.put_batch(batch)
+            # ⛔ Same window, same rule (#14415 review round 5, P1): a `cancel()`
+            # that landed between the row read and here already wrote its own
+            # `cancelled_at`/`cancel_reason`, and this derived write would replace
+            # them with a guessed stamp.
+            if not self._store.put_batch_if_state(
+                    batch, (BatchState.ACCEPTED, BatchState.RUNNING,
+                            BatchState.RESUMING, BatchState.CANCELLED)):
+                return self._store.get_batch(batch.org_id, batch.batch_id) or batch
             return batch
         derived = (BatchState.COMPLETED if ok == len(items)
                    else BatchState.PARTIAL)
