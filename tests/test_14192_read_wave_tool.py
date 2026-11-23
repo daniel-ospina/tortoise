@@ -3384,10 +3384,27 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # `dict.get` (executed: `is dict.get` → True), so this is the same read one receiver
         # spelling over. The `{"dict", "copy"}` union was already threaded for the Subscript
         # clause below and for the `_indirect_reads` arm, and NOT here.
+        # ⛔ AND THE ONE-HOP ALIAS OF THE MODULE IS A RECEIVER TOO (#14395 review P2, EACH
+        # MEASURED GREEN at `29fa4e295245` **and live** — `_dc.__dict__.get("get") is dict.get`
+        # → True, so each executes the read). `_dc = dict` is STATICALLY visible, and this
+        # clause's own next arm below already resolves the launderer; the union was the literal
+        # pair only, so the identical member one BIND away fell through:
+        #
+        #     _dc = dict; _g = _dc.__dict__.get; _f = _g("get"); _f(m, "exec")(<read>)   GREEN
+        #     _dc = dict; _g = _dc.__dict__["get"]; _f = …                                 GREEN
+        #     _dc = dict; _f = vars(_dc).get("get"); _f(m, "exec")(<read>)                 GREEN
+        #     _dc = dict; _f = getattr(_dc, "__dict__").get("get"); _f(m, …)               GREEN
+        #
+        # while `_dc.get(m, "exec")(<read>)` was already RED — the in-file asymmetry this file
+        # deletes on sight. Widening the union can only ADD reds; its only false-red surface is
+        # nonsense that cannot run (`_v.__dict__` for `_v = vars` — a builtin function has no
+        # `__dict__`).
         lambda n: (isinstance(n, ast.Attribute) and n.attr in _BUILTINS_MAPPING_READS
-                   and _is_builtins_mapping(n.value, _builtins_names | {"dict", "copy"},
-                                            _builtins_dict_names,
-                                            _builtins_launderers, consts))
+                   and _is_builtins_mapping(
+                       n.value,
+                       _builtins_names | {"dict", "copy"} | _builtins_launderers,
+                       _builtins_dict_names,
+                       _builtins_launderers, consts))
         or (isinstance(n, ast.Attribute) and n.attr in _BUILTINS_MAPPING_READS
             and isinstance(n.value, ast.Name)
             and n.value.id in {"dict"} | _builtins_launderers)
@@ -3399,8 +3416,8 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # `_f = getattr(dict, "__dict__").get("get")`. These receivers are COMPOSITIONS, so they
         # are resolved by `_builtins_dict_of`, which needs the module in `names` — the union
         # above supplies it for the Attribute clause, this one for the resolver's receiver arm.
-        or _builtin_lookup_name(n, _builtins_names | {"dict", "copy"}, consts,
-                                _builtins_dict_names,
+        or _builtin_lookup_name(n, _builtins_names | {"dict", "copy"} | _builtins_launderers,
+                                consts, _builtins_dict_names,
                                 _builtins_launderers,
                                 members=_BUILTINS_MAPPING_READS,
                                 getattr_fetchers=_getattr_fetchers) is not None
@@ -3413,6 +3430,13 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # module's namespace is the same method, so the NAMESPACE is asked for by
         # `_builtin_lookup_name` (its Subscript arm owns `__dict__`, `vars(...)`, `getattr(...)`
         # and the dotted receiver) instead of spelling the receivers again here.
+        # ⛔ THE SAME ONE-HOP ALIAS IS RESOLVED HERE TOO, AND THE UNION IS `{"dict", "copy"}`
+        # **ON PURPOSE** (#14395 review P2, MEASURED BOTH WAYS): widening it to include
+        # `_builtins_launderers` is a NO-OP — the resolver clause ABOVE already answers the
+        # launderer receiver for a Subscript node (`_builtin_lookup_name`'s own Subscript arm),
+        # so reverting the widened union here alone leaves all 44 tests green. This file deletes
+        # what no mutant can red, so the subscript spellings are pinned by that clause's mutant
+        # instead; the rows still exist in `test_EVERY_static_binding_form_is_a_READ_reach`.
         or (isinstance(n, ast.Subscript)
             and _builtin_lookup_name(n, _builtins_names | {"dict", "copy"}, consts,
                                      _builtins_dict_names, _builtins_launderers,
@@ -3493,7 +3517,16 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # form is REFUSED, because the raw `args` count the splice as one argument).
         _inline_positions = _spliced_positions(n.args)
         if (isinstance(n.func, ast.Subscript) and len(_inline_positions) >= 2
-                and _builtin_lookup_name(n.func, _builtins_names | {"dict", "copy"}, consts,
+                # ⛔ AND THE ONE-HOP ALIAS OF THE MODULE HERE TOO (#14395 review P2): the FIRST
+                # resolver asks which MEMBER this callee fetches, so its receiver set is the
+                # namespace one and it carries the launderers exactly as the alias closure now
+                # does — `dict.__dict__["get"](m, "exec")(<read>)` was RED while
+                # `_dc = dict; _dc.__dict__["get"](…)(<read>)` was GREEN (MEASURED at
+                # `29fa4e295245`). The SECOND predicate below is a different question — it is
+                # the MAPPING the read is applied TO, not the namespace it is fetched FROM —
+                # so it keeps `_builtins_names` alone.
+                and _builtin_lookup_name(n.func, _builtins_names | {"dict", "copy"}
+                                         | _builtins_launderers, consts,
                                          _builtins_dict_names, _builtins_launderers,
                                          members=_BUILTINS_MAPPING_READS) is not None
                 and _is_builtins_mapping(_inline_positions[0],
@@ -8069,6 +8102,55 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    _f = getattr(dict, "__dict__").get("get")\n'
             '    _f(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ AND THE ONE-HOP ALIAS OF THE MODULE, IN ALL THREE RECEIVER SPELLINGS (#14395 review
+        # P2, EACH MEASURED GREEN **and live** at `29fa4e295245` — `_dc.__dict__.get("get")`,
+        # `_dc.__dict__["get"]`, `vars(_dc)["get"]` and `getattr(_dc, "__dict__")["get"]` are
+        # each `is dict.get` → True, so each executed the read). `_dc = dict` is STATICALLY
+        # visible, which is what makes it the declared-residual table's opposite: the attribute
+        # arm one clause above already resolves a launderer (`_dc.get` was already RED), so the
+        # namespace receiver being the LITERAL pair only was the same asymmetry one BIND over.
+        # One row per clause, so each union is pinned by its own mutant.
+        "a READ METHOD fetched out of a NAMESPACE ALIAS's `get` (`_dc = dict`)": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    _g = _dc.__dict__.get\n'
+            '    _f = _g("get")\n'
+            '    _f(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD fetched out of `vars(<namespace alias>).get` (`_dc = dict`)": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    _f = vars(_dc).get("get")\n'
+            '    _f(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD fetched out of `getattr(<namespace alias>, \"__dict__\").get`": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    _f = getattr(_dc, "__dict__").get("get")\n'
+            '    _f(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD subscripted out of a NAMESPACE ALIAS (`_dc = dict`)": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    _g = _dc.__dict__["get"]\n'
+            '    _g(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD subscripted out of `vars(<namespace alias>)` (`_dc = dict`)": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    _g = vars(_dc)["get"]\n'
+            '    _g(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD subscripted out of `getattr(<namespace alias>, \"__dict__\")`": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    _g = getattr(_dc, "__dict__")["get"]\n'
+            '    _g(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ AND THE INLINE CALL SITE, which is the arm `_indirect_reads` owns (#14326 review
+        # cycle 13: "a CALL-SITE shape, not a resolver arm"). `dict.__dict__["get"](m, "exec")
+        # (<read>)` was already RED and its `getattr(dict, …)["get"]` twin too, while the same
+        # callee one BIND away (`_dc = dict`) was GREEN — the receiver spelling again, not the
+        # callee-composition residual (the `.get("get")(…)` spellings, which stay GREEN for
+        # both receivers and are declared in the residual table above).
+        "a READ METHOD subscripted out of a NAMESPACE ALIAS's `__dict__`, INLINE": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    _dc.__dict__["get"](builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
         # ⛔ AND THE ONE-BIND ALIAS OF THE NAMESPACE ITSELF (#14326 fail lane, EACH MEASURED
         # GREEN and LIVE: `_n = dict.__dict__; _n["copy"](m)["exec"] is exec` → True). The
         # one-bind alias of the MAPPING one module over (`_d = builtins.__dict__`) has been
@@ -12139,9 +12221,22 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # resolution does not follow. Statically enumerable, so it is named HERE rather than
         # filed under the non-enumerable sentence; closing it needs a two-step application in the
         # census, not another threaded set.
+        # ⛔ ONE STATEMENT, NOT THREE LINES (#14395 review P2, MEASURED at `29fa4e295245`):
+        # `body()` joins with "\n", so the three-line form was TWO statements — the resolved
+        # read was produced and DISCARDED, and the read name sat in a bare string expression.
+        # What that pinned is "an expression that cannot reach the read stays GREEN": the label,
+        # the `_indirect_reads` note above ("the read runs") and this test's docstring all claim
+        # the APPLICATION, so the row did not exercise the declared residual at all.
+        # ⛔ AND THE FIX'S GUARD IS STRUCTURAL, NOT THE `_key_at` MUTANT THE REVIEW PROPOSED —
+        # MEASURED, that mutant leaves this row GREEN: on one line the composition's INTERMEDIATE
+        # step resolves to `get`, a member of `_BUILTINS_MAPPING_READS`, never to a code-executing
+        # name, so an arm-level `_key_at` (as the `copies` arm uses) still answers `None`. Closing
+        # this residual is the TWO-STEP APPLICATION in the census that the note names as new
+        # machinery — which is why the row keeps its GREEN and the assertion below pins that the
+        # read is genuinely APPLIED, so reverting the row to several lines reds the table.
         "`vars(dict).get(\"get\")(m, \"exec\")` — a read APPLIED, then applied again": (
             'import builtins',
-            'vars(dict).get("get")(builtins.__dict__, "exec")',
+            'vars(dict).get("get")(builtins.__dict__, "exec")'
             f'("results = {read}")'),
     }
     for label, lines in declared_residual.items():
@@ -12149,6 +12244,25 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
             f"[{label}] is now REFUSED — this row pins it GREEN as the DECLARED callee-"
             "composition residual, so closing it must edit this table rather than leave the "
             "note in `_indirect_reads` contradicting the code")
+
+    # ⛔ AND THE CALLEE-COMPOSITION ROW MUST PIN THE SHAPE IT DECLARES (#14395 review P2).
+    # Its verdict (`not refused`) is the SAME for one statement and for three, so no mutant over
+    # the unions or the resolver can red a row that silently stops applying the read — MEASURED:
+    # the three-line form passes this test today. This is the guard for that: the declared shape
+    # is a read RESOLVED, APPLIED to the mapping, and the result APPLIED to the read, so the read
+    # literal must be the argument of a CALL whose callee is itself a CALL. It is vacuously true
+    # of the residual itself (that is the point — a row that stops applying the read is not the
+    # residual) and it reds the moment the row is split back over several `lines`.
+    _applied = [
+        n for n in ast.walk(_pin_source(body(*declared_residual[
+            "`vars(dict).get(\"get\")(m, \"exec\")` — a read APPLIED, then applied again"])))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Call)
+        and any(isinstance(a, ast.Constant) and read in str(a.value) for a in n.args)]
+    assert len(_applied) == 1, (
+        "the callee-composition row no longer APPLIES the read: it must be ONE statement whose "
+        f"callee is a call and whose argument is the read literal — found {len(_applied)} such "
+        "call(s). `body()` joins the row's `lines` with a newline, so a row spread over several "
+        "entries is several STATEMENTS, and the read is then produced and discarded (#14395)")
 
     # ⛔ THE OTHER DIRECTION, so the table cannot be satisfied by an arm that reds everything:
     # each RESOLVED spelling of the same callee must be RED. These mirror rows in
