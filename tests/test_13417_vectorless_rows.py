@@ -63,13 +63,25 @@ _BACKFILL = _REPO_ROOT / "graph-scripts" / "backfill_embeddings.py"
 
 _DIM = 384
 
-#: The four causes ``EmbeddingModel.await_write_ready_reason`` can return.
+#: The five causes ``EmbeddingModel.await_write_ready_reason`` can return.
 #: Spelled here AND asserted equal to the module's own constants
 #: (``test_the_metric_label_vocabulary_is_the_seam_s_own``), because the counter
 #: emits them into a Prometheus label: a silent rename forks the series and an
 #: operator's existing alert reads zero forever. A comment claiming that pin is
 #: not a pin — the assertion is.
-_CAUSES = ("not_installed", "fail_cooldown", "attempt_spent", "budget_expired")
+#:
+#: ⛔ FIVE, NOT FOUR, and the fifth arrived with #14186. ``backing_cold`` is the
+#: cause the seam returns when the encoder is served by ANOTHER process
+#: (``worker`` / ``external``) and that backing is mid-boot — it is emitted by
+#: the same counter as the other four, so a vocabulary that stops at four
+#: reports a rollout's declines under no label at all. The population is not
+#: extended one line at a time: this tuple and the set literal in the vocabulary
+#: test are ONE declaration in two places, and adding the tuple member alone reds
+#: that test (review P3 at ``3cc5d88b3c66``).
+_CAUSES = (
+    "not_installed", "fail_cooldown", "attempt_spent", "budget_expired",
+    "backing_cold",
+)
 
 #: ``"<leg>:<cause>"``, the counter's one label value (#13417). The two legs are
 #: never summed: they have different repairs.
@@ -246,18 +258,25 @@ def test_the_unbounded_default_never_consults_the_count(monkeypatch):
 
 
 def test_the_metric_label_vocabulary_is_the_seam_s_own():
-    """The four causes are the SEAM's constants, not a hand-copied literal.
+    """The five causes are the SEAM's constants, not a hand-copied literal.
 
     The counter emits them into a Prometheus label value. A silent rename forks
     the series, and an operator's existing alert on `reason="budget_expired"`
     then reads zero forever while the rows go unobserved — so the vocabulary is
     asserted against `tortoise.embeddings`, not merely spelled here.
+
+    ⛔ THE SET LITERAL MOVES WITH ``_CAUSES``, and it is the ONLY thing that
+    catches a missing member: a fifth constant in the module with no tuple
+    member is invisible to every other row (the parametrised counter test walks
+    the TUPLE, so it can never notice a cause the tuple omits). That is why
+    `backing_cold` is added in both places at once (#14186 review P3).
     """
     assert set(_CAUSES) == {
         embeddings._WRITE_DECLINE_NOT_INSTALLED,
         embeddings._WRITE_DECLINE_FAIL_COOLDOWN,
         embeddings._WRITE_DECLINE_ATTEMPT_SPENT,
         embeddings._WRITE_DECLINE_BUDGET_EXPIRED,
+        embeddings._WRITE_DECLINE_BACKING_COLD,
     }
 
 
