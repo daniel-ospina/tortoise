@@ -1774,6 +1774,16 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
         # `43 passed` and flipped 0 of 201 rows — a bare `copy(m)` is a TypeError, and the
         # `ImportFrom` spelling synthesizes the Attribute this disjunct already matches). The
         # file deletes a clause no mutant can red.
+        # ⛔ AND THE COPY MEMBER FETCHED OUT OF A MODULE NAMESPACE (#14326 review cycle 13,
+        # MEASURED GREEN **and LIVE**: `_f = builtins.dict.__dict__["copy"];
+        # _d = _f(builtins.__dict__)` executed the read while `_f = builtins.dict.copy` is a
+        # REFUSED row). The Subscript spelling is the same one-hop bind as the Attribute above,
+        # and `_builtin_lookup_name`'s Subscript arm already resolves every receiver
+        # composition — so this asks it for the one member instead of re-spelling receivers.
+        or (isinstance(n, ast.Subscript)
+            and _builtin_lookup_name(n, _module_names | {"dict", "copy"}, _bu_consts_,
+                                     frozenset({"__builtins__"}), frozenset(),
+                                     members=_COPY_CALLEES) is not None)
         or (isinstance(n, ast.Attribute) and n.attr in {"copy", "deepcopy"}
             and ((isinstance(n.value, ast.Name)
                   and n.value.id in ({"dict"} | _copy_module_names_))
@@ -1862,8 +1872,21 @@ def _is_builtins_dict_of(node: ast.AST, names: frozenset[str],
     parameter closes.
     """
     if isinstance(node, ast.Attribute):
-        return (node.attr == "__dict__" and isinstance(node.value, ast.Name)
-                and node.value.id in names)
+        if node.attr != "__dict__":
+            return False
+        if isinstance(node.value, ast.Name):
+            return node.value.id in names
+        # ⛔ AND THE DOTTED RECEIVER (#14326 review cycle 13, MEASURED GREEN **and LIVE**:
+        # `builtins.dict.__dict__["copy"]` and `builtins.dict.__dict__["get"]`, while
+        # `builtins.dict.copy` and `getattr(builtins.dict, "copy")` are REFUSED rows). The
+        # member is a NAME the caller passes for exactly this reason — the copy and
+        # read-method callers pass `{"dict", "copy"}` — and the module prefix is already in
+        # `names`, so the receiver set is the same set the Name arm reads. Spelling the dotted
+        # form in each caller would be the enumeration this predicate exists to prevent.
+        return (isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id in names
+                and node.value.attr in names)
     if not isinstance(node, ast.Call):
         return False
     if (isinstance(node.func, ast.Name)
@@ -2214,10 +2237,14 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                                      names, dict_names, launderers, consts)):
         keys = _string_keys_of(node.args[1], consts) & _members
         return sorted(keys)[0] if keys else None
-    # ⛔ NO SUBSCRIPT-CALLEE ARM HERE (#14326 review cycle 12, MEASURED DEAD: `dict.__dict__[
-    # "get"](m, "exec")` is refused through the ALIAS closure — `_mapping_read_aliases` collects
-    # a Subscript value — so an arm matching a Subscript `func` in this resolver flipped 0 of
-    # 223 rows when deleted. The file deletes a clause no mutant can red.)
+    # ⛔ NO SUBSCRIPT-CALLEE ARM HERE — AND THE EARLIER "MEASURED DEAD" READING OF THIS WAS
+    # WRONG (#14326 review cycle 13 falsified it). An arm matching `Call(func=Subscript)` here
+    # flipped 0 rows because THIS RESOLVER IS NEVER HANDED A `Call`: the census passes `n.func`,
+    # the Subscript node itself. So the shape was never covered, and the INLINE form
+    # `dict.__dict__["get"](m, "exec")(<read>)` was MEASURED GREEN **and LIVE** in cycle 13. It is
+    # closed at the CALL SITE in `_indirect_reads`, where the callee expression and the call's own
+    # argument positions are visible together — the split that made this arm dead is the reason
+    # the fix does not live here.
     # ⛔ AND THE MAPPING'S OWN METHODS, WHICH ARE THE SUBSCRIPT ONE SPELLING OVER (#14326
     # round 35, EACH MEASURED GREEN at `a12902a5d4` while the `m["exec"]` subscript of the
     # IDENTICAL mapping was RED):
@@ -3258,15 +3285,18 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
                                 members=_BUILTINS_MAPPING_READS,
                                 getattr_fetchers=_getattr_fetchers) is not None
         # ⛔ AND THE NAMESPACE-SUBSCRIPT SPELLING, BOUND TO A NAME (#14326 review cycle 12,
-        # MEASURED GREEN: `_g = dict.__dict__["get"]; _g(builtins.__dict__, "exec")(<read>)`
-        # executed the read while the INLINE form is REFUSED by the arm that reads a Subscript
-        # CALLEE). `dict.get` (an Attribute) has been collected here since round 7; the member
-        # fetched out of the module's OWN namespace is the same method, one spelling over.
+        # then cycle 13 for the receivers): `_g = dict.__dict__["get"]; _g(builtins.__dict__,
+        # "exec")(<read>)` executed the read, and so did `vars(dict)["get"]`,
+        # `getattr(dict, "__dict__")["get"]` and `builtins.dict.__dict__["copy"]` — the literal
+        # Name pair this clause first hard-coded resolved exactly ONE of them. `dict.get` (an
+        # Attribute) has been collected here since round 7; the member fetched out of the
+        # module's namespace is the same method, so the NAMESPACE is asked for by
+        # `_builtin_lookup_name` (its Subscript arm owns `__dict__`, `vars(...)`, `getattr(...)`
+        # and the dotted receiver) instead of spelling the receivers again here.
         or (isinstance(n, ast.Subscript)
-            and (_string_keys_of(n.slice, consts) & _BUILTINS_MAPPING_READS)
-            and isinstance(n.value, ast.Attribute) and n.value.attr == "__dict__"
-            and isinstance(n.value.value, ast.Name)
-            and n.value.value.id in {"dict", "copy"}),
+            and _builtin_lookup_name(n, _builtins_names | {"dict", "copy"}, consts,
+                                     _builtins_dict_names, _builtins_launderers,
+                                     members=_BUILTINS_MAPPING_READS) is not None),
         loops=True))
     _code_executing_names = _CODE_EXECUTING_CALLEES | frozenset(_aliases_of(
         tree,
@@ -3329,6 +3359,25 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # GREEN by `test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN` so a
         # later lane cannot read this arm as covering it. Closing one spelling of it would be
         # the half-arm the round-26 note rejects as worse than none.
+        # ⛔ THE INLINE NAMESPACE-SUBSCRIPT CALLEE (#14326 review cycle 13, MEASURED GREEN **and
+        # LIVE** with its direct twin RED): `dict.__dict__["get"](builtins.__dict__, "exec")(<read>)`
+        # — and its `vars(dict)["get"]`, `builtins.dict.__dict__["get"]`, `["
+        # __getitem__"]` twins. The alias closure below resolves the BOUND spelling; the inline one
+        # asks the resolver about a Subscript THE CENSUS ITSELF resolves to a mapping-read method,
+        # while the call's own positions say which mapping and which key — the split this arm
+        # repairs. ⛔ It is a CALL-SITE shape, not a resolver arm: an arm added to
+        # `_builtin_lookup_name` for `Call(func=Subscript)` flipped 0 rows, because the resolver is
+        # handed `n.func`, never the Call.
+        if (isinstance(n.func, ast.Subscript) and len(n.args) >= 2
+                and _builtin_lookup_name(n.func, _builtins_names | {"dict", "copy"}, consts,
+                                         _builtins_dict_names, _builtins_launderers,
+                                         members=_BUILTINS_MAPPING_READS) is not None
+                and _is_builtins_mapping(_single_star_argument(n.args[0]),
+                                         _builtins_names, _builtins_dict_names,
+                                         _builtins_launderers, consts)
+                and (_string_keys_of(n.args[1], consts) & _code_executing_names)):
+            out.append(n)
+            continue
         if _callee in _code_executing_names or \
                 _builtin_lookup_name(n.func, _builtins_names, consts, _builtins_dict_names,
                                      _builtins_launderers,
@@ -7750,6 +7799,24 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # fetched as a member of the module's OWN `__dict__` and called inline. `dict.get(m, k)`
         # and `dict.copy(m)` were already refused; the member fetched out of the namespace is
         # the same callable, one spelling over — so each is CLOSED, and its row reds the arm.
+        # ⛔ AND THE DOTTED-RECEIVER NAMESPACE (#14326 review cycle 13, EACH MEASURED GREEN
+        # **and LIVE**): everything above hard-coded a bare-name receiver, so the module reached
+        # as `builtins.dict` fell through every one of them while `builtins.dict.copy` was an
+        # already-REFUSED row. Three rows so each half (inline callee, bound copy alias, bound
+        # read method) is red-ed by its own clause.
+        "a COPY CALLEE fetched from `builtins.dict.__dict__`": (
+            '    import builtins\n'
+            '    _d = builtins.dict.__dict__["copy"](builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY ALIAS bound from `builtins.dict.__dict__`": (
+            '    import builtins\n'
+            '    _f = builtins.dict.__dict__["copy"]\n'
+            '    _d = _f(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD INLINE from `builtins.dict.__dict__`": (
+            '    import builtins\n'
+            '    builtins.dict.__dict__["get"](builtins.__dict__, "exec")'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a COPY CALLEE fetched from the module's `__dict__`": (
             '    import builtins\n'
             '    _d = dict.__dict__["copy"](builtins.__dict__)\n'
