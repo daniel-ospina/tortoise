@@ -914,7 +914,26 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
         if _last.exc is None:
             return True
         return not _raises_a_skip(_last.exc)
-    # A handler whose last statement is not a `Raise` re-raises nothing at all.
+    # ⛔ DECLARED RESIDUAL — A COMPOUND LAST STATEMENT THAT RE-RAISES IS NOT CREDITED.
+    # This function credits only a `Raise` in LAST-STATEMENT position, so a handler whose failure
+    # surfaces inside a compound statement is read as not re-raising at all:
+    #
+    #     except ImportError:
+    #         try: _log()
+    #         finally: raise          # <- surfaces the failure; NOT credited
+    #
+    # and the same for `with ctx: raise` and for a helper call that re-raises. The block is then
+    # charged as an unarmed swallow — a FALSE RED, the direction this file's docstrings promise
+    # never to charge. Measured with this module's own `_reraises`: `try/finally: raise` -> False,
+    # `with ...: raise` -> False, trailing bare `raise` -> True. (`for _ in (): pass` followed by
+    # `raise` IS credited, because that last statement is a `Raise` — the shape of the answer
+    # depends on the statement, not on whether the failure surfaces, which is the inconsistency.)
+    #
+    # POPULATION: 0 graded instances. Every graded block in the 70-row / 58-file population was
+    # scanned for a re-raising compound last statement and none exists, so this reds nothing today
+    # and is recorded here rather than left implicit (#14287 review, P3). The repair, when the
+    # first instance appears, is to read the compound statement's own tail (`Try.finalbody`,
+    # `With`, `If`) for the raise — NOT to widen the gate.
     # ⛔ THE OLD TAIL IS DELETED, NOT KEPT BESIDE THIS (review of #14287, P3): it read
     # `return bool(handler.body) and (isinstance(handler.body[-1], ast.Raise) and
     # handler.body[-1].exc is None)` — the BARE-`raise` arm — and `if _last.exc is None: return
