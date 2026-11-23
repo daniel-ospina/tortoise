@@ -4066,6 +4066,25 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                             f"{err!r} — `ps -p {os.getpid()} -o command=` answered, so the "
                             f"census's own invocation is what failed, which is this test's "
                             f"subject")
+                    # ⛔ THE ERROR BRANCH ALSO ANSWERS TO THE POLL DEADLINE (review cycle 5, P2).
+                    # It used to `continue` unconditionally, so on a continuously-erroring census
+                    # the loop's ONLY exit was the count+span gate — and the SPAN half is a tunable
+                    # constant. Raise that bound above the poll budget and the gate can never fire,
+                    # the healthy branch that checks `deadline` is never reached, and the REQUIRED
+                    # shard HANGS instead of reding: measured on a copy with
+                    # `_CENSUS_ERROR_MIN_SPAN_S = 1e9`, the `census_error` selection was killed at
+                    # 45 s having printed ZERO output. The poll has ONE budget and this branch now
+                    # spends it the same way the healthy branch does — `break`, so a spent budget
+                    # lands in the exits below and reaches a verdict.
+                    # ⛔ NOT `inconclusive()` HERE, DELIBERATELY (cycle-8, after the `once_slow`
+                    # arm landed): whether the expiry is the machine's or the census's is the
+                    # CONJUNCTION's decision, and this branch is upstream of it. A skip raised here
+                    # pre-empted `once_slow` — one erroring sample whose own `time()` pair spans the
+                    # bound, which must stay the ALIVE arm because the COUNT half was never reached
+                    # (measured: `1 failed` with the skip, `once_slow` receiving INCONCLUSIVE where
+                    # AssertionError is required). Breaking instead lets the arms classify.
+                    if time.time() >= deadline:
+                        break
                     time.sleep(0.1)
                     continue
                 err_streak = 0
@@ -4542,10 +4561,26 @@ def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
 
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     try:
-        deadline = time.time() + 10.0
+        deadline_s = 10.0
+        deadline = time.time() + deadline_s
         while not _child_exited(proc) and time.time() < deadline:
             time.sleep(0.05)
-        assert _child_exited(proc), "the child exited but `_child_exited` never reported it"
+        # ⛔ A WALL-CLOCK EXPIRY IS NOT A FAIL (#5049 rule 1, review cycle 5 P2). This used to be
+        # `assert _child_exited(proc), "the child exited but ..."`, so on a loaded box a
+        # `python -c pass` child that had not exited within 10 s redded a REQUIRED shard with a
+        # message asserting the helper was broken — the same rule-1 inversion this PR removes
+        # everywhere else (the outside-signal arm above converts the identical situation). The
+        # real pins below are untouched and still discriminate: mutating `_child_exited` back to
+        # `return proc.poll() is not None` reds this test on the missing `ps` row (measured).
+        if not _child_exited(proc):
+            inconclusive(
+                "a short-lived child's exit observed by `_child_exited` without reaping it",
+                deadline_s=deadline_s,
+                diagnosis=(
+                    "The child was still running when the budget expired, so the `WNOWAIT` "
+                    "probe was never exercised — a load observation, not evidence about the "
+                    "helper."),
+            )
         row = _row_for_pid(proc.pid)
         assert row, (
             "the exited child has no `ps` row, so its status was COLLECTED rather than "
