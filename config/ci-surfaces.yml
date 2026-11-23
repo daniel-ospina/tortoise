@@ -11042,6 +11042,15 @@ surfaces:
   - test_vocab_gating_callers_5163.py
   - test_kind_eval_set.py
   eval:
+  # #14357: the FAIL-CLOSED half of the reasoning-collapse contract —
+  # `_outcome_grade` must grade `reasoning_collapse` `hard`, not `recoverable`.
+  # Its subject is `tools/longmem_eval/report.py`, an EXACT `eval`
+  # SOURCE_PATTERN match, so a `report.py`-only diff selects `eval` and REPLACES
+  # the `core` fallback (#2938/#7951 idiom) — the `core` row above does NOT
+  # cover it. Without this dual row the pin never runs on the one edit it
+  # exists to catch (adding the class to `RECOVERABLE_CENSUS_CLASSES`), which
+  # is the same defect #10465/#13224 record on the rows below.
+  - test_14357_fallback_thinking.py
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #10465 (review P1): the `eval` arm of the #5090 DoD instrument. Its §12.2a
   # predicate pin and its `encode_for_row` seam enumeration guard

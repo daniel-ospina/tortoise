@@ -18,6 +18,8 @@ see the "the yield guard: an empty extraction never reads as no facts" heading.
 """
 from __future__ import annotations
 
+import inspect
+
 import pytest
 import requests
 
@@ -158,11 +160,16 @@ def test_the_lane_gate_cannot_be_re_defaulted_into_existence():
     """
     from tortoise.model_adapters import _build_single
 
+    # Both halves, pinned on the SIGNATURE: a call-site assertion cannot
+    # distinguish "keyword-only" from "too many positionals" (`max_tokens` and
+    # `temperature` already sit after the `*`), so a mutant that moves the flag
+    # before the star left the previous version of this test green.
+    param = inspect.signature(_build_single).parameters["suppress_reasoning"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY, param.kind
+    assert param.default is inspect.Parameter.empty, param.default
     with pytest.raises(TypeError):
         _build_single("openrouter", EXTRACT_MODEL, max_tokens=1,
                       temperature=0.0)
-    with pytest.raises(TypeError):
-        _build_single("openrouter", EXTRACT_MODEL, 1, 0.0, False, True)
 
 
 def test_the_family_gate_matches_the_family_not_one_literal():
