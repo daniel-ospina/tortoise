@@ -9130,12 +9130,13 @@ _ATTRIBUTION_PHRASES = (
     # ⛔ THE SPELLINGS THIS PR'S OWN DIFF INTRODUCED, ADDED SO THE NEXT ONE CANNOT REPEAT
     # THEM (#14386 review, P2 — the arm was ACTIVE at that head, `_may_attribute` was
     # `False` because the cite sets are IDENTICAL, and it stayed GREEN because neither
-    # spelling was in this tuple (the document carried it and NOTHING refused it; no count of
-    # that absence is stated here, because the literal below is IN this file three times and a
-    # `grep -c` would count the sentence that reports it — the self-count this file's own
-    # census comment refuses, #14386 review round 7 P2): `05-verify.md` carried
-    # `05-verify.md` and `0` here). The claim those two sentences make is exactly what
-    # `_basis` refuses, so the tuple has to know the words it was made of.
+    # spelling was in this tuple: `05-verify.md` carried it and NOTHING refused it. ⛔ NO
+    # `grep -c` FIGURE IS STATED FOR IT, and the reason is this file's own census rule
+    # (#14386 review rounds 7-8, P2): every literal below appears in this file TWICE — once in
+    # the tuple and once in the sentence that reports it — so any count taken here would count
+    # the sentence that states it, the self-count that rule refuses. The claim those two
+    # sentences make is exactly what `_basis` refuses, so the tuple has to know the words it
+    # was made of.
     "DO move at this head",
     "copy of the index carries the OLD pair",
     "re-pointing that row's `sdk.py` cite from",
