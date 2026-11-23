@@ -1202,6 +1202,30 @@ def _spread_elements(elements: list[ast.AST]) -> list[ast.AST]:
     return out
 
 
+def _single_star_argument(node: ast.AST | None) -> ast.AST | None:
+    """A call argument with a ONE-ELEMENT `*` spread over a LITERAL sequence unwrapped.
+
+    ⛔ THE SAME COUNTING RULE `_spread_elements` CARRIES, ONE POSITION OVER (#14326 review
+    round 9, EACH MEASURED GREEN with a third reach executing the read, at `cb87c7c8cb`):
+    `_f = dict; _d = _f(*(builtins.__dict__,))` IS `_f(builtins.__dict__)` — the shallow copy
+    of the builtins mapping whose `exec` is the real one — and the arm that REFUSES the
+    un-starred call read `node.args[0]`, saw a `Starred`, and answered False. Every spelling
+    of the star (`*(m,)`, `*[m]`, `*((m,))`, the same through an aliased/`:name`-fetched
+    `dict`) was GREEN on BOTH axes: the copy family (`dict`/`copy.copy`/`copy.deepcopy`/
+    `dict.copy`/`{}.__or__`) and the fetch family (`_g = dict.get; _g(*(m,), "exec")`).
+
+    Only a LITERAL operand can be spliced (`_f(*(_rest))` is the declared residual, and it
+    comes back unchanged), and only a spread of EXACTLY ONE element is the same call:
+    `_f(*(m, {}))` is `_f(m, {})` — two arguments, a TypeError for every callee in this
+    family — so it must stay GREEN rather than be red-ed by over-application.
+    """
+    if isinstance(node, ast.Starred):
+        spliced = _spread_elements([node])
+        if len(spliced) == 1:
+            return spliced[0]
+    return node
+
+
 def _indexed_values(values: list, index: ast.AST) -> list:
     """Apply ONE index step to every statically possible value of the container.
 
@@ -1683,9 +1707,12 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
     fixpoint either: that function takes its alias sets as PARAMETERS and never calls back into
     this one, so these pass the LITERAL empty registry sets on purpose — they ask only
     "is this expression a member fetched out of a mapping / a `getattr` fetch", which needs
-    no aliases. What they cannot resolve is a mapping reached through `__builtins__` (its name
-    set is being built by our caller), and that residual is closed at the inline call site
-    instead.
+    no aliases. ⛔ CORRECTED (#14326 review cycle 10): this note used to say the mapping
+    reached through `__builtins__` "is being built by our caller", which is FALSE —
+    `__builtins__` is a hard-coded literal root, not something derived from
+    `_builtin_name_aliases`, so passing it is not a fixpoint. It IS passed now, because
+    without it the BOUND spelling `_dd = __builtins__["dict"]; _dd(mapping)` was GREEN while
+    the INLINE spelling is a pinned RED row.
 
     ⛔ OVER-MATCHING ACROSS THE MEMBERS IS HARMLESS, as `_REGISTRY_BUILTINS`' own note argues,
     BUT THE BOUND IS WIDER THAN THE REGISTRY ARMS' ONE (#14326 review cycle 7, CORRECTED: this
@@ -1721,7 +1748,15 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
         # executed the read while the INLINE `vars(builtins)["dict"](…)` was REFUSED). The
         # mapping-key spelling is the sibling half of the module-attribute one above and
         # `_builtin_lookup_name` resolves it — so the bind, not only the inline call, resolves.
-        or _builtin_lookup_name(n, _module_names, _bu_consts_, frozenset(),
+        # ⛔ THE ROOT IS PASSED AS `dict_names`, NOT `frozenset()` (#14326 review cycle 10,
+        # MEASURED GREEN: `_dd = __builtins__["dict"]; _d = _dd(builtins.__dict__)` was not
+        # refused while its INLINE twin `__builtins__["dict"](__builtins__)` is a pinned RED
+        # row). `__builtins__` is a HARD-CODED literal root — injected by CPython, never
+        # bound — so handing it over is NOT a fixpoint, and leaving it out blinded the one
+        # root that needs no import. `launderers` stays empty: the no-fixpoint argument above
+        # still holds for the ALIAS sets.
+        or _builtin_lookup_name(n, _module_names, _bu_consts_,
+                                frozenset({"__builtins__"}),
                                 frozenset(), members=_REGISTRY_BUILTINS,
                                 getattr_fetchers=frozenset({"getattr"})) is not None
         # ⛔ AND AN ALIAS OF A COPY CALLEE (#14326 review cycles 6-7, MEASURED GREEN:
@@ -1881,7 +1916,8 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                  or _builtin_lookup_name(node.func, names, consts, dict_names, launderers,
                                          members=frozenset({"dict"})) == "dict")
             and ((len(node.args) == 1
-                  and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts))
+                  and _is_builtins_mapping(_single_star_argument(node.args[0]),
+                                           names, dict_names, launderers, consts))
                  or any(kw.arg is None
                         and _is_builtins_mapping(kw.value, names, dict_names, launderers, consts)
                         for kw in node.keywords))):
@@ -1895,8 +1931,13 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
             (node.func.attr == "copy"
              and _is_builtins_mapping(node.func.value, names, dict_names, launderers, consts))
             or (node.func.attr == "__or__" and any(
-                _is_builtins_mapping(part, names, dict_names, launderers, consts)
+                _is_builtins_mapping(_single_star_argument(part), names, dict_names,
+                                     launderers, consts)
                 for part in (node.func.value, *node.args)))):
+        # ⛔ AND THE ONE-ELEMENT `*` SPREAD HERE TOO (#14326 review round 9, MEASURED GREEN
+        # and LIVE at `cb87c7c8cb`: `_d = {}.__or__(*(builtins.__dict__,))` executed the read
+        # while `{}.__or__(builtins.__dict__)` was REFUSED). The `__or__` dunder reads its
+        # operands from `node.args`, so it needs the same unwrap the constructor arms got.
         return True
     # ⛔ A COPY CALLEE FETCHED WITH `getattr`, INLINE (#14326 review cycle 9, MEASURED GREEN:
     # `getattr(_z, "copy")(builtins.__dict__)` and its `deepcopy` twin executed the read while
@@ -1931,7 +1972,14 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                  # two-positional-argument forms are TypeErrors.
                  or (isinstance(node.func, ast.Name) and node.func.id in launderers
                      and len(node.args) >= 1))
-            and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
+            # ⛔ AND THE ONE-ELEMENT `*` SPREAD OF THE SAME ARGUMENT (#14326 review round 9,
+            # EACH MEASURED GREEN and LIVE at `cb87c7c8cb`: `_f = dict; _d =
+            # _f(*(builtins.__dict__,))` / `copy.copy(*[m])` / `dict.copy(*((m,)))` /
+            # `{}.__or__(*(m,))` all yielded the mapping, `_d["exec"]` the real `exec`, and
+            # the read executed — while the un-starred twin was REFUSED). One owner for the
+            # unwrap, so the arity and the argument are read the same way.
+            and _is_builtins_mapping(_single_star_argument(node.args[0]),
+                                     names, dict_names, launderers, consts)):
         # the UNBOUND `dict.copy(m)` / `copy.deepcopy(m)` — the callee is a constructor here,
         # so `node.func.value` is that constructor and the mapping is argument ONE.
         # ⛔ `deepcopy` IS THE SAME LEVER (#14326 review cycle 5, MEASURED GREEN: `_x =
@@ -2116,7 +2164,8 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     if (isinstance(node.func, ast.Attribute)
             and node.func.attr in _BUILTINS_MAPPING_READS
             and len(node.args) >= 2
-            and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
+            and _is_builtins_mapping(_single_star_argument(node.args[0]),
+                                     names, dict_names, launderers, consts)):
         keys = _string_keys_of(node.args[1], consts) & _members
         return sorted(keys)[0] if keys else None
     # ⛔ AND THE MAPPING'S OWN METHODS, WHICH ARE THE SUBSCRIPT ONE SPELLING OVER (#14326
@@ -2165,7 +2214,8 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
         return sorted(keys)[0] if keys else None
     if isinstance(node.func, ast.Name) and node.func.id in copies and node.args:
         _key_at = 1 if (len(node.args) >= 2
-                        and _is_builtins_mapping(node.args[0], names, dict_names,
+                        and _is_builtins_mapping(_single_star_argument(node.args[0]),
+                                                 names, dict_names,
                                                  launderers, consts)) else 0
         keys = _string_keys_of(node.args[_key_at], consts) & _members
         return sorted(keys)[0] if keys else None
@@ -3531,6 +3581,28 @@ _PURE_READS = _NON_MUTATING | {"repr", "int", "float", "type", "min", "max", "su
                                "dumps", "dump", "pformat", "copy", "deepcopy"}
 
 
+#: ⛔ AN ITERATOR OVER THE PAGE IS A REACH TO ITS ROWS (#14326 review at `b504b565`, P0
+#: MEASURED END-TO-END). `reversed`/`enumerate`/`zip` were added to `_NON_MUTATING` to stop
+#: four genuinely inert shapes red-ing (that repair stands, and they stay in that set). But
+#: `_NON_MUTATING` is the BASE of `_PURE_READS`, which is the base of `_SCALAR_CALLEES` — the
+#: allow-list whose contract is "build NO CONTAINER AT ALL: a string, a number, a bool, a
+#: class, or `None`", used by `_aliases_of` to DROP a bind as an alias of the page. Adding
+#: them there made `_it = reversed(results)` a "scalar producer", so the `for` target `_r` was
+#: never tainted and the element write became invisible:
+#:
+#:     _it = reversed(results)
+#:     for _r in _it:
+#:         _r["id"] = "X"            -> 44 passed, pin GREEN  <-- measured end-to-end
+#:
+#: while `results[0]["id"] = "X"` red the same suite (1 failed) — i.e. the pin was carrying a
+#: page-mutating edit as `rank_identical: True`. That is the exact false PASS this pin exists
+#: to prevent, and it was INTRODUCED by the false-red repair, so the two are separated here:
+#: the names stay `_NON_MUTATING` (not mutated BY the call) and are excluded from the SCALAR
+#: derivation (they still hand back the page's own rows) — the same treatment `min`/`max`
+#: already had at `_SCALAR_CALLEES`, for the same reason, one hop weaker.
+_ITERATOR_CALLEES = frozenset({"reversed", "enumerate", "zip"})
+
+
 def _names_handed(node: ast.AST) -> set[str]:
     """Names in `node` at a position that could HAND the collection to a mutation.
 
@@ -3546,7 +3618,11 @@ def _names_handed(node: ast.AST) -> set[str]:
         return {node.id}
     if isinstance(node, ast.Call):
         callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-        if callee in _PURE_READS:
+        # ⛔ …EXCEPT AN ITERATOR OVER THE PAGE, WHICH DOES HAND ITS ROWS ON (#14326 review at
+        # `b504b565`, MEASURED): the short-circuit below is what makes `_scrub(zip(results,
+        # results))` invisible to every `handed` arm at once. An iterator is not a read that
+        # CONSUMES the page; the callee it is handed to sees the page's own row objects.
+        if callee in _PURE_READS and callee not in _ITERATOR_CALLEES:
             return set()
     out: set[str] = set()
     for child in ast.iter_child_nodes(node):
@@ -3597,7 +3673,8 @@ _SHALLOW_COPY_CALLEES = frozenset({"list", "tuple", "sorted", "set", "frozenset"
 #: rather than left to fall through to the alias arm.
 #: ⛔ AND `min`/`max` ARE DELIBERATELY **NOT** IN IT: they return an ELEMENT of the page,
 #: which is exactly why the blanket `callee in _PURE_READS` exemption was the P0.
-_SCALAR_CALLEES = frozenset(_PURE_READS - _SHALLOW_COPY_CALLEES - {"min", "max"})
+_SCALAR_CALLEES = frozenset(
+    _PURE_READS - _SHALLOW_COPY_CALLEES - _ITERATOR_CALLEES - {"min", "max"})
 
 
 def _is_scalar_producer(value: ast.AST) -> bool:
@@ -4788,6 +4865,17 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                 return not bool(_names_in(arg.value) & page_container)
             if isinstance(arg, ast.Call):
                 callee_id = getattr(arg.func, "id", None) or getattr(arg.func, "attr", None)
+                # ⛔ AN ITERATOR OVER THE PAGE IS NOT AN ELEMENT (#14326 review at `b504b565`,
+                # P0 MEASURED END-TO-END). `zip(results, results)` is not `results[0]`: it
+                # yields the page's OWN row objects, so handing it to a helper that writes
+                # each row rewrites what the artifact records. Exempting it here is what made
+                # `_scrub(zip(results, results))` GREEN with the page rewritten (44 passed),
+                # while `_scrub(reversed(...))`/`_scrub(enumerate(...))` were GREEN the same
+                # way. Same exclusion as `_names_handed` and `_SCALAR_CALLEES`: `_NON_MUTATING`
+                # answers "does the CALL mutate its argument" (no), not "does it hand the page
+                # on" (yes, for these three).
+                if callee_id in _ITERATOR_CALLEES:
+                    return False
                 return callee_id in _PURE_READS or any(
                     _element_only(a) for a in arg.args)
             return isinstance(arg, ast.JoinedStr)  # an f-string mutates nothing it interpolates
@@ -6061,6 +6149,31 @@ def test_a_COPY_of_the_page_is_NOT_an_alias() -> None:
          '    _c = list(results)\n    _d = _c\n    _d[0]["id"] = "X"\n'),
         ("copy, element write through ITERATION of it",
          '    _c = list(results)\n    for _e in _c:\n        _e["id"] = "X"\n'),
+        # ⛔ AN ITERATOR OVER THE PAGE IS A REACH TO ITS ROWS (#14326 review at `b504b565`,
+        # P0 MEASURED END-TO-END). `reversed`/`enumerate`/`zip` were added to `_NON_MUTATING`
+        # to stop four inert shapes red-ing, and that repair stands — but `_NON_MUTATING` is
+        # the base of `_PURE_READS`, which feeds `_SCALAR_CALLEES` (via `_aliases_of`, so the
+        # `for` target was never tainted), `_names_handed` (whose short-circuit stopped the
+        # walk), and `_element_only` (which exempted the call). All three now exclude
+        # `_ITERATOR_CALLEES`. MEASURED before the fix, against the shipped tool:
+        #
+        #     _it = reversed(results); for _r in _it: _r["id"] = "X"   44 passed  <-- GREEN
+        #     _scrub(zip(results, results))                            44 passed  <-- GREEN
+        #
+        # while the `results[0]["id"] = "X"` control red the same suite — the pin was carrying
+        # a rewritten page as `rank_identical: True`, the exact false PASS it exists to stop.
+        ("reversed() bound, then written through its target",
+         '    _it = reversed(results)\n    for _r in _it:\n        _r["id"] = "X"\n'),
+        ("enumerate() bound, then written through its target",
+         '    _e = enumerate(results)\n    for _i, _r in _e:\n        _r["id"] = "X"\n'),
+        ("zip() bound, then written through its target",
+         '    _z = zip(results, results)\n    for _r, _s in _z:\n        _r["id"] = "X"\n'),
+        # The `handed` axis: the iterator is handed to a helper that writes each row, so the
+        # page is reached THROUGH the iterator. Reverting `_element_only`'s `_ITERATOR_CALLEES`
+        # arm reds this row.
+        ("iterator handed to a helper that writes its rows",
+         '    def _scrub(_rows):\n        for _r in _rows:\n            _r["id"] = "X"\n'
+         '    _scrub(zip(results, results))\n'),
         # ⛔ `min`/`max` ARE NOT COPIES AT ALL — they return an ELEMENT of the page, and the
         # old exemption (`callee in _PURE_READS`, which carries both) treated one as a new
         # container, so these two measured GREEN.
@@ -6158,13 +6271,22 @@ def test_the_ROW_and_SLOT_arms_bless_a_PURE_READ_and_still_catch_a_MUTATOR() -> 
 
     ⛔ THE ARM WAS UNFALSIFIABLE (#14326 round 35 review cycle 8, MEASURED: reverting
     `row_handed`/`slot_handed` to `_PURE_READS` left the file at `43 passed`, and neutering
-    `row_handed` outright left `43 passed` too, while the three shapes `_row_ref`'s docstring
-    names all went GREEN). The exemption those arms take was justified in a commit message and
-    a docstring — and this file's own rule is that a clause no mutant can red is not
-    coverage. The GREEN half is the fix (a pure id mapper reached through a RECORDED row or a
-    holder slot must not be called a mutation); the RED half is what the arm EXISTS for (an
-    unknown callee handed a recorded row can write it, and `compare()` would then read a page
-    the pin never inspected — the #14192 false PASS the `intentional_keep` grant rests on).
+    `row_handed` outright ALSO left `43 passed` — nothing distinguished the exemption from
+    its absence). The exemption was justified only in a commit message and a docstring, and
+    this file's own rule is that a clause no mutant can red is not coverage.
+
+    The GREEN half is the fix: a pure id mapper reached through a RECORDED row or a holder
+    slot must not be reported as a mutation. The RED half is what the arm EXISTS for: an
+    unknown callee handed a recorded row can WRITE it, and `compare()` would then read a page
+    the pin never inspected — the #14192 false PASS the `intentional_keep` grant rests on.
+
+    ⛔ EACH ASSERTION BELOW IS INDIVIDUALLY FALSIFIABLE, and that is the point (#14326 review
+    cycle 9, MEASURED one predicate at a time): reverting ONLY the SLOT arm to `_PURE_READS`
+    reds the second assertion (`[6]`), reverting ONLY the ROW arm reds the first (`[4]`), and
+    `row_handed = False` reds the third (`[]`). Scoped precisely: `_scrub3(per_query)` — the
+    WHOLE list, not a recorded row — stays RED under `row_handed = False` because
+    `_element_handed` catches it, so this test does not claim that shape and the arm is
+    justified by the two it does own.
     """
     assert not _mutations_of("    _rid = _result_id(per_query[-1])\n"), (
         "a PURE id mapper handed a RECORDED row is not a mutation — `_ID_MAPPERS` is in "
@@ -7542,6 +7664,38 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    dict.__getitem__(builtins.__dict__, "exec")('
             "'results = sdk._tortoise_fts_query(query=q, limit=10)')\n"),
+        # ⛔ THE ONE-ELEMENT `*` SPREAD, WHICH IS THE SAME CALL (#14326 review round 9, EACH
+        # MEASURED GREEN and LIVE at `cb87c7c8cb` with a third reach executing the read —
+        # every one the STAR twin of a shape an arm already REFUSED, on BOTH axes):
+        #
+        #   _f = dict; _f(*(m,))             the ALIAS arm read `node.args[0]`, saw a
+        #                                    `Starred`, and answered False
+        #   copy.copy(*[m])                  the INLINE copy arm, list operand
+        #   dict.copy(*((m,)))               the UNBOUND arm, nested tuple operand
+        #   {}.__or__(*(m,))                 the `__or__` arm reads its operands from `args`
+        #   _g = dict.get; _g(*(m,), "exec")   the FETCH arm's `_key_at` decided 0, not 1
+        "an ALIASED `dict` callee with a STARRED mapping argument": (
+            '    import builtins\n'
+            '    _f = dict\n'
+            '    _d = _f(*(builtins.__dict__,))\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`copy.copy(*[builtins.__dict__])` — the STARRED list operand": (
+            '    import builtins, copy\n'
+            '    _d = copy.copy(*[builtins.__dict__])\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`dict.copy(*((builtins.__dict__,)))` — the STARRED nested tuple": (
+            '    import builtins\n'
+            '    _d = dict.copy(*((builtins.__dict__,)))\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`{}.__or__(*…)` — the STARRED dunder operand": (
+            '    import builtins\n'
+            '    _d = {}.__or__(*(builtins.__dict__,))\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "a STARRED mapping argument to an ALIASED READ METHOD": (
+            '    import builtins\n'
+            '    _g = dict.get\n'
+            '    _g(*(builtins.__dict__,), "exec")(\n'
+            '        "results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         # ⛔ THE INTRA-PREDICATE TWINS OF THE CONSTRUCTORS ALREADY CLOSED (#14326 round 35
         # review cycle 5, EACH MEASURED GREEN: `dict(**m)["exec"] is exec` at RUNTIME, and the
         # pin saw `m=2 c=2 i=0`). A `**` spread lives in `node.keywords` with `arg is None`, an
@@ -8205,6 +8359,24 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     assert not _pin_refuses(_pin_source(name_carried_store)), (
         "a subscript STORE whose key is a NAME bound to the read literal is the same false "
         "RED as the literal spelling — the Name arm's Load guard is its twin")
+    # ⛔ THE STAR-SPREAD UNWRAP IS A COUNT, NOT A BAN (#14326 review round 9). It must not
+    # red a spread that is NOT the same call: `_f(*(cfg,))` copies an ordinary config, and
+    # `_f(*(m, {}))` is `_f(m, {})` — TWO arguments, a TypeError for every callee in the
+    # family — so both stay GREEN. Without these, the only way a later lane learns the
+    # unwrap's bound is by breaking it.
+    assert not _pin_refuses(_pin_source(
+        '    import copy\n'
+        '    _cfg = {"a": 1}\n'
+        '    _d = copy.copy(*(_cfg,))\n')), (
+        "a one-element star over a NON-mapping operand must stay GREEN — the unwrap asks "
+        "whether the spread element is the builtins mapping, not whether a star exists")
+    assert not _pin_refuses(_pin_source(
+        '    import builtins\n'
+        '    _f = dict\n'
+        '    _d = _f(*(builtins.__dict__, {}))\n')), (
+        "a TWO-element star is `_f(mapping, {})` — two arguments, not the one-argument copy "
+        "the arm refuses; the unwrap must return the spread unchanged rather than pick an "
+        "element out of it")
 
     # ⛔ THE RECORDING DIRECTION, IN THE CALL SPELLINGS (#14326 round 6, all four MEASURED
     # REFUSED at `81973329`): the Constant arm treated every callee outside `_PURE_READS` as
