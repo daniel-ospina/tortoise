@@ -3709,6 +3709,49 @@ def _css_all_rules(css: str) -> list[tuple[str, str, bool]]:
     return out
 
 
+def _css_reaching_decls(css: str, prop: str, compound: str,
+                        tokens: tuple[str, ...] = ()) -> list[tuple[str, str]]:
+    """Every BASE rule that declares `prop` and can select `compound`.
+
+    The complement of `_css_rules_with_scope`, and the reason it exists: that
+    reader matches a prelude only when it contains the exact selector TEXT and
+    never consults specificity, so a HIGHER-SPECIFICITY rule under a different
+    prelude can override a pinned declaration while every exact-selector row
+    stays green. Measured (#14406 review finding 2): appending
+    `.pricing-grid .pricing-card .btn { margin-top: 0 }` — (0,3,0) against the
+    pinned `.pricing-card .btn`'s (0,2,0), so it wins at ANY source order —
+    left `test_each_card_is_a_flex_column_and_its_cta_takes_the_slack` GREEN
+    while the rendered CTAs split again.
+
+    "Can select" is decided on the RIGHTMOST compound of each comma part: a
+    selector can only select an element the same KIND as its subject, so
+    `.pricing-card` -> `.pricing-card` (any ancestor chain in front of it) is
+    a candidate, while `.features` (a sibling subject) is not. `tokens`
+    narrows it further for a compound that must also carry them
+    (`(".popular",)` for `.pricing-card.popular`). `inside_media` is skipped:
+    a narrow-viewport override is a legitimate re-declaration, not an override
+    of the desktop pin.
+
+    This is a SUBJECT test, not a cascade resolver — it does not prove which
+    declaration wins, so callers assert that every candidate AGREES with the
+    pinned value (a disagreement is either a live override or dead weight the
+    next editor will not be able to tell apart).
+    """
+    out: list[tuple[str, str]] = []
+    for prelude, body, inside_media in _css_all_rules(css):
+        if inside_media:
+            continue
+        value = _effective_decl(body, prop)
+        if value is None:
+            continue
+        for part in (p.strip() for p in prelude.split(",")):
+            rightmost = re.split(r"[\s>+~]+", part)[-1]
+            if compound in rightmost and all(t in rightmost for t in tokens):
+                out.append((part, value))
+                break
+    return out
+
+
 def _css_rule_preludes(css: str, selector: str) -> list[tuple[str, str]]:
     """Every rule whose selector LIST contains `selector`, as `(prelude, body)`.
 
@@ -10279,12 +10322,20 @@ class TestProductTeamsCopy:
     `#13645 item 2` is the title, `#13645 item 3` is "your context", `#13645
     items 4-5` are step 03's heading and body, and `#13645 item 6` is the
     pricing-CTA baseline. They used to read `owner item 1` / `owner item 2`,
-    which collided with THIS repo's other owner item set: `#13696 item 3` is
-    the outcomes/lead measure overhang, and `#13696 item 2` is the deleted
-    hairline (`:10396`, `:10548`, `:10564`, `:10599`, `:10451`). A bare `grep
+    which collided with THIS repo's other owner item set (both in `#13696`):
+    item 3 is the outcomes/lead measure overhang
+    (`test_the_outcomes_grid_is_never_wider_than_the_prose_above_it`), and item
+    2 is the deleted hairline
+    (`test_the_intro_opens_on_the_lead_and_carries_no_rule`). A bare `grep
     "owner item 3"` returned both fixes as one undifferentiated set, so an
     artifact that records four different owner items under two labels could not
     be resolved back to the decision that owns it.
+    ⛔ The two cites are METHOD NAMES, not line numbers (#14406 review finding
+    6): this paragraph used to carry `(:10396, :10548, :10564, :10599,
+    :10451)`, which at that head were four `item 3` positions and one `item 2`
+    — so the parenthetical attached to item 2 was 80% evidence for item 3, the
+    very conflation it claimed to fix — and every one of them was stale here,
+    pointing a reader at unrelated text. A test name survives an edit above it.
 
     ⛔ AND THE TYPOS' ABSENCE IS PINNED SEPARATELY
     (`test_the_pdfs_two_typos_are_absent_from_the_rendered_page`). Without that
@@ -10765,7 +10816,14 @@ class TestProductTeamsCopy:
         and every copy row would stay green.
         """
         compute = _element_by_id(_product_teams_html(), "beat-compute")
-        h2 = re.search(r"<h2>(.*?)</h2>", compute, re.S)
+        # ⛔ `\b[^>]*>` rather than a bare `<h2>` (#14406 review finding 5): the
+        # exact-tag reader cannot see `<h2 class="beat-title">`, so the
+        # ORDINARY next edit — giving the new title a class in order to style
+        # it — made this row fail with "#beat-compute has no <h2>" while the
+        # `<h2>` was right there. Fail-closed either way, but a failure message
+        # that names a tag the page carries is the kind of note a maintainer
+        # learns to distrust.
+        h2 = re.search(r"<h2\b[^>]*>(.*?)</h2>", compute, re.S)
         assert h2, (
             "#beat-compute has no <h2> — the compute claim reads as a "
             "continuation of the intro above it, which is the defect the "
@@ -10815,7 +10873,7 @@ class TestProductTeamsCopy:
         for section_id, heading, paragraph in self.STEPS:
             source = self.STEP_SOURCES[section_id]
             beat = _element_by_id(html, section_id)
-            h2 = re.search(r"<h2>(.*?)</h2>", beat, re.S)
+            h2 = re.search(r"<h2\b[^>]*>(.*?)</h2>", beat, re.S)
             assert h2, f"#{section_id} has no <h2>"
             assert _beat_text(h2.group(1)) == heading, (
                 f"#{section_id}'s heading reads {_beat_text(h2.group(1))!r}; "
@@ -10954,9 +11012,16 @@ class TestProductTeamsPricingCardCtaBaseline:
     other row here — no copy, no price and no markup changes — so a revert of
     the two declarations would be green everywhere else and the owner would
     have to report it a second time. The rows below read the WINNING
-    declaration from the COMMENT-BLANKED sheet (`_effective_decl`), because the
-    rule carries a comment that names `display: flex` and `margin-top: auto`:
-    a substring search would be satisfied by the comment explaining the fix.
+    declaration from the COMMENT-BLANKED sheet (`_effective_decl`), because on
+    THIS sheet the comments explain the fix and NAME both declarations: the
+    block above `.pricing-card` says "FLEX COLUMN so the four CTAs share ONE
+    baseline" (`…html:205`) and `` `margin-top: auto` on `.btn` (below)
+    absorbs each card's leftover height `` (`…html:213`) — both OUTSIDE any
+    rule body, so a sheet-wide substring search would stay green with the two
+    declarations deleted. `.pricing-card.popular` additionally carries a
+    comment BETWEEN two of its declarations (`…html:222-226`), so a reader
+    that split the RAW body on `;` would keep that prose in a declaration
+    slot. The blanking is what makes each reader below read a DECLARATION.
     """
 
     def test_each_card_is_a_flex_column_and_its_cta_takes_the_slack(self):
@@ -10984,6 +11049,34 @@ class TestProductTeamsPricingCardCtaBaseline:
             "baseline (#13645 item 6). `margin-top: auto` is the mechanism; "
             "without it `display: flex` alone changes nothing a reader sees")
 
+        # ⛔ AN EXACT-SELECTOR READ IS NOT A CASCADE READ (#14406 review
+        # finding 2, measured). `_css_rules_with_scope` matches only a prelude
+        # containing the exact selector TEXT and never consults specificity, so
+        # a HIGHER-SPECIFICITY rule under a different prelude overrides the
+        # pinned declaration while every row above stays green: appending
+        # `.pricing-grid .pricing-card .btn { margin-top: 0 }` — (0,3,0) against
+        # `.pricing-card .btn`'s (0,2,0) — re-split the rendered CTAs with this
+        # row still GREEN. So every BASE rule that can select each subject and
+        # declares the property must AGREE with the pinned value.
+        for compound, prop, expected in (
+                (".pricing-card", "display", "flex"),
+                (".pricing-card", "flex-direction", "column"),
+                (".btn", "margin-top", "auto")):
+            reaching = _css_reaching_decls(css, prop, compound)
+            disagreeing = [(p, v) for p, v in reaching if v != expected]
+            first = disagreeing[0] if disagreeing else ("", "")
+            assert disagreeing == [], (
+                f"a rule that can select `{compound}` declares "
+                f"`{prop}: {first[1]}` ({first[0]!r}), overriding the pinned "
+                f"`{prop}: {expected}`. `_effective_decl` "
+                "reads the winning declaration of the rule that NAMES the "
+                "selector, so a higher-specificity override under another "
+                "prelude does not red it — every base rule reaching the "
+                "subject must agree (#14406 review finding 2; measured with "
+                "`.pricing-grid .pricing-card .btn { margin-top: 0 }`, (0,3,0) "
+                "against (0,2,0), which split the four baselines again while "
+                "this row was green)")
+
     def test_the_popular_cards_thicker_border_does_not_move_its_cta(self):
         """The 2px border eats ONE more px than its siblings' 1px — measured.
 
@@ -11004,6 +11097,19 @@ class TestProductTeamsPricingCardCtaBaseline:
             "the popular card's bottom inset does not compensate for its 2px "
             "border, so its CTA sits 1px above the other three (measured "
             "744.78 vs 745.78 at 1440x900 — #13645 item 6)")
+        # The same cascade caveat as the row above: `.pricing-card`'s `padding`
+        # shorthand and any higher-specificity `.pricing-card.popular` rule
+        # reach this element without naming this selector text, so every base
+        # rule that can select it must agree with the compensating value.
+        disagreeing = [(p, v) for p, v in _css_reaching_decls(
+            css, "padding-bottom", ".pricing-card", (".popular",))
+            if v != "calc(1.75rem - 1px)"]
+        assert disagreeing == [], (
+            f"a rule that can select `.pricing-card.popular` declares "
+            f"`padding-bottom: {disagreeing[0][1]}` ({disagreeing[0][0]!r}), "
+            "overriding the 1px compensation — the popular card's CTA lands "
+            "1px off the other three (#14406 review finding 2, same "
+            "exact-selector limit as the row above)")
 
     def test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render(self):
         """`margin-top: auto` aligns the LAST item — so nothing may follow the CTA.
@@ -11013,8 +11119,29 @@ class TestProductTeamsPricingCardCtaBaseline:
         footnote added after it would take the slack and the buttons would
         misalign on one path only (JS visitors) or the other (crawlers).
         """
-        for chunk in _static_pricing_grid(_served(_product_teams_html())).split(
-                '<div class="pricing-card')[1:]:
+        grid = _static_pricing_grid(_served(_product_teams_html()))
+        # ⛔ THE SPLIT IS A POPULATION, SO ITS SIZE IS ASSERTED (#14406 review
+        # finding 3, measured). `str.split('<div class="pricing-card')` finds
+        # NOTHING for a card whose opening tag changes shape — that card is
+        # silently absorbed into its predecessor and cut at the predecessor's
+        # `</div>` — and finds nothing at all when the cards are gone. In both
+        # cases the loop below iterates fewer times (or zero) and PASSES, which
+        # is a green row over a page it never read. Its siblings assert their
+        # non-empty rule lists for the same reason. The count is checked two
+        # ways: against the four tiers the grid is contracted to carry, and
+        # against the ATTRIBUTE-TOLERANT count (`class="[^"]*\bpricing-card\b`,
+        # the reader the funnel legend already uses), so an extra attribute
+        # becomes a MISMATCH rather than a card that quietly stopped being read.
+        cards = grid.split('<div class="pricing-card')[1:]
+        declared = len(re.findall(r'class="[^"]*\bpricing-card\b', grid))
+        assert len(cards) == declared == 4, (
+            f"the split found {len(cards)} pricing cards and the markup declares "
+            f"{declared}, not 4 in both. This row iterates the SPLIT, so a card "
+            "whose opening tag no longer reads exactly `<div class=\"pricing-card` "
+            "is skipped and the row passes over a card it never looked at (the "
+            "tail check then judges the PREVIOUS card). Fix the split or the "
+            "markup — do not relax the counts (#14406 review finding 3)")
+        for chunk in cards:
             # Cut the chunk at the CARD's own balanced close: the slice handed in
             # ends at the usage paragraph, so the last chunk would otherwise
             # carry `<p class="pricing-usage">` into the tail and the row would

@@ -1567,7 +1567,23 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
     # returned `surfaces: []` with `test_website_static.py` absent. That is the
     # exact silent drop the row's own comment cites as its reason for existing
     # ("a diff that … changed a price selected NOTHING").
-    for asset in ("website/assets/tortoise-pricing.js",):
+    #
+    # ⛔ AND THE PAGE ITSELF, for the same reason (#14406 review finding 1, whose
+    # PREMISE was falsified but whose PURPOSE was not met by any pin). That
+    # review measured `select(["website/tortoise-for-product-teams.html"])` →
+    # `surfaces: []` and concluded the row was missing. Measured at this head it
+    # is PRESENT (added with `website/assets/tortoise-pricing.js` in
+    # `b9dc23c9c2433`) and the selection is `surfaces: ['onboarding']` with both
+    # website guards — so the finding describes an older tree, not this one. What
+    # it correctly identified is that NOTHING pinned it: the forward ratchet
+    # (`test_every_source_pattern_is_selectable`) iterates the entries, so it
+    # cannot notice an entry being DELETED, and the reverse one covers
+    # `tortoise/**` pairs only. A page-only diff is exactly the change class the
+    # PR's copy pins exist to catch (an earlier revision of the branch reverted
+    # the typo correction page-side), and it is the one that runs ZERO of them if
+    # this row ever goes. Hence the pin.
+    for asset in ("website/assets/tortoise-pricing.js",
+                  "website/tortoise-for-product-teams.html"):
         r = _sel([asset])
         assert r["surfaces"] == ["onboarding"], (
             f"{asset} selects {r['surfaces']} — the ONE price table both "
