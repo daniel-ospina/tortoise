@@ -473,6 +473,21 @@ def _reap(*pids: int) -> None:
         _discard_decoy_stderr(pid)
 
 
+def _reap_wait(proc: subprocess.Popen, timeout: float = 20.0) -> None:
+    """Reap by `wait()` AND drop the decoy's captured stderr log (#14388 review F6).
+
+    ⛔ `_reap`/`_reap_group` ARE NOT THE ONLY WAY A DECOY DIES. `test_alive_calls_a_
+    zombie_GONE_not_alive` must let its child EXIT without being reaped — the unreaped
+    `Z` IS the subject — and then end it with `Popen.wait()`, so it can use neither
+    reaper. That was the one spawn site F4's fix missed: one `/tmp/decoy-stderr-*.log`
+    leaked per run of that test, and `_DECOY_STDERR` kept a dead pid's entry forever.
+    Whoever ends the decoy's life ends its log; this is that, for the wait-reaped arm.
+    """
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=timeout)
+    _discard_decoy_stderr(proc.pid)
+
+
 def _reap_group(pid: int) -> None:
     """Kill a `_spawn`ed tree by its SESSION, not by an enumerated child list (#12227).
 
@@ -1259,6 +1274,32 @@ def test_a_reap_leaves_no_decoy_stderr_log_behind(tmp_path: Path, monkeypatch) -
         _reap(decoy.pid)
 
 
+def test_a_wait_reaped_decoy_leaves_no_decoy_stderr_log_behind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The `Popen.wait()` reaper is a reaper too (#14388 review F6).
+
+    `test_alive_calls_a_zombie_GONE_not_alive` cannot use `_reap`/`_reap_group` (the
+    unreaped `Z` is its subject), so it ended its decoy with a bare `wait()` and left one
+    `/tmp/decoy-stderr-*.log` per run — the one site F4's fix missed.
+
+    Non-vacuity: drop the `_discard_decoy_stderr` call from `_reap_wait` and the file
+    survives the reap, so both assertions redden.
+    """
+    made = _record_mkstemp(monkeypatch)
+    decoy = _spawn(["/bin/true"], tmp_path)
+    assert made, "the pin never reached `mkstemp` — the assertions below would be vacuous"
+    log = made[0]
+    assert log.exists(), "`_spawn` created no log, so there is nothing to leak"
+    _reap_wait(decoy, timeout=20)
+    assert not log.exists(), (
+        f"the wait-reaper left {log} behind — one leaked temp file per decoy"
+    )
+    assert decoy.pid not in _DECOY_STDERR, (
+        "the registry still names a log that no longer exists"
+    )
+
+
 def test_a_raising_spawn_leaves_no_decoy_stderr_log_behind(tmp_path: Path, monkeypatch) -> None:
     """A `Popen` that raises never reaches `_DECOY_STDERR`, so nothing would ever remove
     its log — the registry is the only handle on it (#14388 F4).
@@ -1461,8 +1502,16 @@ def test_alive_calls_a_zombie_GONE_not_alive(tmp_path: Path, state) -> None:
         assert "GONE" in result.stdout and "DIED MID-RUN" in result.stdout, result.stdout
         assert " is ALIVE" not in result.stdout, result.stdout
     finally:
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            child.wait(timeout=20)
+        # ⛔ THE `wait()` REAPER OWNS THE LOG TOO (#14388 review F6). A bare
+        # `child.wait()` here left one `/tmp/decoy-stderr-*.log` per run — the single
+        # spawn site F4's fix did not reach. Asserted, not just called: reverting this
+        # line to `child.wait(...)` must REDDEN this test, not silently re-leak.
+        log = _DECOY_STDERR.get(pid)
+        _reap_wait(child, timeout=20)
+        assert log is not None and not log.exists(), (
+            "the wait-reaped decoy left its captured stderr log behind — one leaked "
+            "temp file per run of this test (#14388 F6)"
+        )
 
 
 def test_alive_refuses_a_recycled_pid(tmp_path: Path, state) -> None:

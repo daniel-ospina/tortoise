@@ -9695,19 +9695,45 @@ class CollisionPreflightTest(unittest.TestCase):
         # the subset that is this fixture.
         returned: list[int] = []
         matching: list[int] = []
+        # ⛔ AND THE ERROR STRINGS ARE THE ONLY SIGNAL THAT THE CENSUS NEVER ANSWERED
+        # (review of #14388 at b066addf63, P3 — the last open arm of F3/F5). `err` and
+        # `cerr` were computed and thrown away, so a WHOLE-CENSUS failure (`ps` printed
+        # nothing) and a healthy census with no `pi` row — the two classes #14122's re-open
+        # says the next `test (j)` triager must tell apart — printed the SAME sentence,
+        # and the one actionable datum (the census's own error text) was not printed at
+        # all. `pi_processes` reports "produced nothing" as an ERROR, never as an empty
+        # fleet (`tools/fleet_state.py:1479`), so this is the only place that text can
+        # surface.
+        last_err = ""
+        last_cerr = ""
         while time.time() < deadline:
             procs, err = mod.fleet_state.pi_processes()
+            last_err = err
             if not err:
                 returned = [int(p["pid"]) for p in procs]
                 matching = (returned if pid is None
                             else [p for p in returned if p == pid])
                 cwds, cerr = mod.fleet_state.process_cwds(matching)
+                last_cerr = cerr
                 if not cerr and any(
                         os.path.realpath(c) == want for c in cwds.values()):
                     return
             time.sleep(0.1)
         fatal = ""
-        if proc is not None:
+        if last_err:
+            # A CENSUS THAT NEVER ANSWERED IS NOT A GAP IN A CENSUS THAT DID.
+            fatal = (
+                f"; on the last sample the census NEVER ANSWERED (err={last_err!r}) — a "
+                "whole-census failure is not a gap in a population that answered, and no "
+                "narrower population can repair it"
+            )
+        elif last_cerr:
+            # The population answered and the ATTRIBUTION read failed. Same rule: not a gap.
+            fatal = (
+                f"; on the last sample the CWD READER failed (err={last_cerr!r}) — the "
+                "population answered, so what failed is the attribution read, not the census"
+            )
+        elif proc is not None:
             rc = proc.poll()
             fatal = (
                 f"; the fake lane pid {pid} EXITED with rc={rc} — a dead process has no "
@@ -9719,8 +9745,9 @@ class CollisionPreflightTest(unittest.TestCase):
         self.fail(
             "the process census never saw the fake pi lane — the test cannot "
             "discriminate process-cwd liveness "
-            f"(the census returned: {returned!r}; of those, this fixture's: "
-            f"{matching!r}; wanted cwd {want!r}{fatal})"
+            f"(the census returned: {returned!r} (err={last_err!r}); of those, this "
+            f"fixture's: {matching!r}; cwd reader err={last_cerr!r}; wanted cwd "
+            f"{want!r}{fatal})"
         )
 
     def test_the_pi_cwd_precondition_asks_about_our_pid_not_the_hosts_population(self):
@@ -9762,6 +9789,64 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn(f"the census returned: [{me.pid}, {foreign}]", msg,
                       "the report must name what the census SAID, not the filtered list")
         self.assertIn(f"this fixture's: [{me.pid}]", msg)
+        # The census ANSWERED (err="") and the fixture is alive, so this really is a gap
+        # in a population that answered — the arm the two error tests below must NOT hit.
+        self.assertIn("this IS a census gap", msg)
+
+    def test_the_census_gap_message_never_blames_a_census_that_did_not_answer(self):
+        """⛔ A CENSUS THAT NEVER ANSWERED IS NOT A GAP (#14122's re-open; review P3).
+
+        The two classes the re-open says a `test (j)` triager must tell apart — a
+        whole-census `ps` failure and a healthy population missing our pid — rendered as
+        the same sentence, and the census's own error text was dropped.
+
+        Non-vacuity: stop interpolating `last_err` and the text disappears; drop the
+        `if last_err:` arm and the message claims a gap — each assertion reddens on its own
+        half, so this arm can never pass for the wrong reason.
+        """
+        me = subprocess.Popen(["/bin/sleep", "30"])
+        mod = _tool_module()
+        census_err = "`ps -ww -axo pid=,ppid=,uid=,command=` produced nothing"
+        try:
+            with mock.patch.object(mod.fleet_state, "pi_processes",
+                                   return_value=([], census_err)), \
+                 self.assertRaises(AssertionError) as caught:
+                self._wait_for_pi_cwd(self.tmp, timeout=0.2, proc=me)
+        finally:
+            me.kill()
+            me.wait(timeout=10)
+        msg = str(caught.exception)
+        self.assertIn(census_err, msg,
+                      "the census's own error text is the actionable datum — print it")
+        self.assertIn("NEVER ANSWERED", msg)
+        self.assertNotIn("this IS a census gap", msg,
+                         "a census that produced nothing is not a gap in an answer")
+
+    def test_the_census_gap_message_names_a_cwd_reader_failure(self):
+        """An ATTRIBUTION-read failure is not a census gap either — `cerr` was dropped too.
+
+        Non-vacuity: drop the `elif last_cerr:` arm (or the `cerr` interpolation) and the
+        failure is once again reported as a census gap with no text from the reader.
+        """
+        me = subprocess.Popen(["/bin/sleep", "30"])
+        mod = _tool_module()
+        read_err = "`lsof` could not be run: FileNotFoundError: lsof"
+        try:
+            with mock.patch.object(mod.fleet_state, "pi_processes",
+                                   return_value=([{"pid": me.pid}], "")), \
+                 mock.patch.object(mod.fleet_state, "process_cwds",
+                                   return_value=({}, read_err)), \
+                 self.assertRaises(AssertionError) as caught:
+                self._wait_for_pi_cwd(self.tmp, timeout=0.2, proc=me)
+        finally:
+            me.kill()
+            me.wait(timeout=10)
+        msg = str(caught.exception)
+        self.assertIn(read_err, msg,
+                      "the cwd reader's own error text is the actionable datum — print it")
+        self.assertIn("CWD READER failed", msg)
+        self.assertNotIn("this IS a census gap", msg,
+                         "the population answered — only the attribution read failed")
 
     def test_the_census_gap_message_says_when_the_fixture_itself_died(self):
         """A DEAD FIXTURE is not a census gap — the two send a reader to different places.
