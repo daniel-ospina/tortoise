@@ -4576,29 +4576,64 @@ def _de_numbered_cite_problems(
         # same VALUE for a DIFFERENT subject, 20 lines of one `#` run. A block test therefore stays
         # green over an opposite-claim rewrite of the cited clause — measured. So the block is split
         # into sentences and ONE piece must carry the pointer, the marker AND the declaration.
-        lo, hi = _comment_block(lines, pointers[0])
-        block = "\n".join(lines[lo:hi])
-        # ⛔ COUNTED ON WRAP-NORMALISED PROSE, like the completeness arm: a second pointer that is
-        # WRAPPED is still a second pointer, and a line-wise count does not see it — so the duplicate
-        # this branch exists to refuse would be excused, which is the fail-open shape cycle 3 closed
+        # ⛔ THE POINTER IS SELECTED BY THE MARKER ITS SENTENCE NAMES, never by position in the file.
+        # `pointers[0]` was the first form, and it graded exactly ONE pointer per file however many
+        # the file carried: a SECOND pointer in another paragraph stayed ungraded — and because this
+        # loop then resolved the FIRST one, rotting the original's cited clause to the opposite depth
+        # left BOTH arms green (measured). Selecting by marker makes a second pointer that names the
+        # same marker ambiguous (it cannot tell which the register covers) and leaves a second
+        # pointer naming a DIFFERENT note to the completeness arm, which is that arm's job.
+        #
+        # ⛔ AND THE COUNT IS ON WRAP-NORMALISED PROSE, like the completeness arm: a second pointer
+        # that is WRAPPED is still a second pointer, and a line-wise count does not see it — so the
+        # duplicate this branch exists to refuse would be excused, the fail-open shape cycle 3 closed
         # for the UNWRAPPED case. ONE definition of "a pointer", shared by both arms.
-        if len(re.findall(_DE_NUMBERED_POINTER_RE, _comment_prose(lines[lo:hi]))) > 1:
+        blocks: list[tuple[int, int, str]] = []
+        multi = False
+        for i in pointers:
+            lo, hi = _comment_block(lines, i)
+            block = "\n".join(lines[lo:hi])
+            if any(b[0] == lo for b in blocks):
+                continue
+            if len(re.findall(_DE_NUMBERED_POINTER_RE, _comment_prose(lines[lo:hi]))) > 1:
+                problems.append(
+                    f"the pointer's own comment block at {rel}:{lo + 1}-{hi} carries more than one "
+                    "de-numbered pointer — the register's marker cannot say which one this entry "
+                    "covers, so a second pointer is registered nothing"
+                )
+                multi = True
+                break
+            blocks.append((lo, hi, block))
+        if multi:
+            continue
+        naming: list[tuple[int, int, str]] = []
+        for lo, hi, block in blocks:
+            sentences = [
+                piece
+                for piece in _SENTENCE_SPLIT_RE.split(block)
+                if re.search(_DE_NUMBERED_POINTER_RE, piece)
+            ]
+            if any(marker in piece for piece in sentences):
+                naming.append((lo, hi, sentences[0] if sentences else ""))
+        if len(naming) > 1:
             problems.append(
-                f"the pointer's own comment block at {rel}:{lo + 1}-{hi} carries more than one "
-                "de-numbered pointer — the register's marker cannot say which one this entry "
-                "covers, so a second pointer is registered nothing"
+                f"the {marker!r} marker is named by {len(naming)} de-numbered pointers in "
+                f"{rel} (comment blocks {[lo + 1 for lo, _hi, _s in naming]}) — the register "
+                "cannot tell which one this entry covers"
             )
             continue
-        sentences = [
-            piece
-            for piece in _SENTENCE_SPLIT_RE.split(block)
-            if re.search(_DE_NUMBERED_POINTER_RE, piece)
-        ]
-        sentence = sentences[0] if sentences else ""
-        if marker not in sentence:
+        if not naming:
             problems.append(
-                f"the pointer at {rel}:{pointers[0] + 1} no longer names the {marker!r} marker in "
-                "its own sentence — the citation then resolves to no note at all"
+                f"no de-numbered pointer in {rel} names the {marker!r} marker in its own sentence — "
+                "the citation then resolves to no note at all"
+            )
+            continue
+        lo, hi, block = naming[0]
+        sentence = naming[0][2]
+        if marker not in sentence:  # defensive: `naming` selected on this, so this cannot fire
+            problems.append(
+                f"the pointer at {rel}:{lo + 1} no longer names the {marker!r} marker in its own "
+                "sentence — the citation then resolves to no note at all"
             )
             continue
         # ⛔ PUNCTUATION-INDEPENDENT CONTRADICTION CHECK. The split is punctuation-based, so a rewrite
@@ -4611,14 +4646,14 @@ def _de_numbered_cite_problems(
         _values = set(re.findall(rf"{re.escape(_key)}:\s*['\"]?(\d+)", sentence))
         if len(_values) > 1:
             problems.append(
-                f"the pointer at {rel}:{pointers[0] + 1} states more than one value for `{_key}` "
+                f"the pointer at {rel}:{lo + 1} states more than one value for `{_key}` "
                 f"in its own sentence {sorted(_values)} — the cited note's depth must be stated "
                 "once, or this pin cannot tell which value is the cited one"
             )
             continue
         if declaration not in sentence:
             problems.append(
-                f"the pointer at {rel}:{pointers[0] + 1} no longer states the `{declaration}` claim "
+                f"the pointer at {rel}:{lo + 1} no longer states the `{declaration}` claim "
                 "in its own sentence (the piece this pin grades ends at the first `.` or `;` that "
                 "is not part of an abbreviation) — it would then grade a claim the sentence does "
                 "not make"
@@ -5095,10 +5130,32 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
             "the completeness arm unexpectedly covers the double-pointer shape — the register branch "
             "above is then redundant, or the check is no longer the one this control exercises"
         )
+        # …and a second pointer in a SEPARATE block, naming the SAME marker, must red TOO. Grading
+        # `pointers[0]` graded one pointer per file however many it carried, so this shape stayed
+        # green — and rotted the FIRST pointer's cited clause to the opposite depth behind it. The
+        # entry must be resolvable by the MARKER its sentence names, not by position in the file.
+        _separate = [
+            *_lines,
+            "",
+            "    # Another paragraph, added later, about the same note.",
+            f"    # `python-ci.yml`'s own checkout step, the one the {_marker} marker names, and",
+            f"    # it states `{_declaration}`.",
+        ]
+        assert any(
+            "is named by 2 de-numbered pointers" in problem
+            for problem in _de_numbered_cite_problems("\n".join(_separate), workflow_lines, _entry)
+        ), (
+            "a SECOND de-numbered pointer naming the same marker in another comment block is "
+            "accepted — the entry is then graded against whichever pointer the file lists first, and "
+            "a rewrite of the other one's cited clause reads green"
+        )
         # (d) The completeness arm's coverage must be STRUCTURAL (the pointer's own comment block),
-        # not a proximity window: a `#`-only line between the marker and the pointer is what a rewrap
-        # of that paragraph produces, and a ±N-line window then reds the REGISTERED pointer with a
-        # remedy (add a register entry) that is already applied.
+        # not a proximity window: `#`-only lines between the marker and the pointer are what a rewrap
+        # of that paragraph produces, and a ±N-line window reds the REGISTERED pointer once the rewrap
+        # is N lines wide — with a remedy (add a register entry) that is already applied. Measured at
+        # N=1 and N=5 below, with the rewrap grown to match each: the WINDOW'S WIDTH and the REWRAP'S
+        # WIDTH are different quantities, so a control that inserts one line and then talks about ±5
+        # tests neither the shape it names nor the arm it claims to.
         _rewrapped = _lines[:]
         _rewrapped.insert(_pointer_at, " " * 10 + "#")
         assert _unregistered_de_numbered_pointers("\n".join(_rewrapped), _entry) == [], (
@@ -5150,6 +5207,40 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
             "a WRAPPED second pointer in a covered block is excused — the register's marker cannot "
             "say which pointer it covers when only a line-wise count is taken"
         )
+        # …and the claim above is about a WINDOW, so the window is what this control runs. A prose
+        # note that says "±N" while the control only exercises N=1 is the defect the cycle-6 review
+        # measured: mutate the arm back to ±5 and the module stayed green. Both widths are run here,
+        # against a re-implementation of the windowed arm, so the sentence is true of what is tested.
+        def _windowed_unregistered(
+            near: int, text_lines: list[str], covered: frozenset[str]
+        ) -> list[tuple[int, str]]:
+            _covered = covered
+            _wl = text_lines
+            _out: list[tuple[int, str]] = []
+            for _i, _line in enumerate(_wl):
+                _m = re.search(_DE_NUMBERED_POINTER_RE, _line)
+                if _m is None:
+                    continue
+                _near = "\n".join(_wl[max(0, _i - near): _i + near + 1])
+                if not any(mk in _near for mk in _covered):
+                    _out.append((_i + 1, _m.group(0)))
+            return _out
+
+        for _gap in (1, 5):
+            _gapped = _lines[:]
+            for _j in range(_gap):
+                _gapped.insert(_pointer_at, " " * 10 + "#")
+            assert _unregistered_de_numbered_pointers("\n".join(_gapped), _entry) == [], (
+                f"a {_gap}-line rewrap makes the STRUCTURAL completeness arm call the REGISTERED "
+                "pointer unregistered — that arm is not structural after all"
+            )
+            assert _windowed_unregistered(
+                _gap, _gapped, frozenset(mk for _r, mk, _d in _entry)
+            ), (
+                f"a ±{_gap}-line proximity window does NOT red the REGISTERED pointer after a "
+                f"{_gap}-line rewrap — the window's width and the rewrap's width are not the same "
+                "quantity, so this control must grow the rewrap with the window"
+            )
         # (e) The abbreviation list in `_SENTENCE_SPLIT_RE`: `e.g.` inside the cited clause must not
         # cut the sentence before the depth it states. Remove the lookbehinds and this REDS with a
         # message that is untrue ("no longer states the claim").
