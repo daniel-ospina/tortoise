@@ -37,7 +37,10 @@ from tools.ci_selection import (  # noqa: I001
     carve_matrix_include, carve_shard_issues, carve_shard_count,
     MAX_CARVE_SHARDS, DEFAULT_CARVE_SHARDS,
     slow_matrix_include, slow_shard_issues, slow_shard_count,
-    slow_shard_entries, slow_leg_files, MAX_SLOW_SHARDS, DEFAULT_SLOW_SHARDS,
+    slow_shard_entries, slow_leg_files, slow_wall_projection,
+    MAX_SLOW_SHARDS, DEFAULT_SLOW_SHARDS,
+    SLOW_LEG_WALL_TARGET_MIN, SLOW_LEG_SETUP_ALLOWANCE_MIN,
+    SLOW_LEG_CAPPED_WALL_TARGET_MIN,
 )
 from tools import mergify_config_guard as mcg
 from tools import ci_selection as cs
@@ -12639,6 +12642,166 @@ def test_slow_shards_declaration_is_fail_closed():
     assert len(slow_shard_entries(m)) == 2
     assert set(f for e in slow_shard_entries(m) for f in e["files"]) == \
         set(slow_leg_files(m))
+
+
+def _slow_wall_remedy(manifest: dict, target: float | None = None,
+                      setup: float | None = None) -> str:
+    """#11605: the remedy the wall arm can ACTUALLY clear, derived from the map.
+
+    The wall arm's failure text used to tell every reader to "Raise
+    `config/ci-surfaces.yml::slow_shards` (reviewed)". Measured on the 2026-11-09
+    refresh, that advice is INERT: a leg is FILE-granular (`build_shard_entries`
+    packs whole files, and `python-ci.yml` maps each name to `tests/<name>.py`),
+    so `max(leg) >= <the heaviest file>`. Once one file alone exceeds the pytest
+    budget a leg may spend (`target - setup`), no leg count clears the wall —
+    raising the count only relocates the red onto the BALANCE arm. Five lanes
+    re-derived that dead end from the failure text, one after another.
+
+    So the two arms are solved for the leg count before a word is written. With
+    `pool` = the gating pool, `h` = the heaviest file, `room = target - setup`:
+
+      * the WALL needs `pool / L <= room`  ->  `L >= ceil(pool / room)` = `lo`;
+      * the BALANCE band needs `h <= ratio x pool / L`  ->  `L <= floor(ratio x
+        pool / h)` = `hi` (the heaviest file must still fit the band).
+
+    `lo > hi` (or `h > room`) is the indivisible-pool state: no `slow_shards`
+    value can pass, and the message says so, names the file, and names the two
+    routes that remain (split/move it, or move the ceiling — an OWNER decision,
+    #6792). Otherwise the window `[lo, hi]` is stated, so the advice is a number
+    a reviewer can act on instead of "raise it".
+
+    Pure: reads only the passed manifest (and the two measured constants), so it
+    is testable against synthetic maps. Returns "" when the pool is empty (an
+    empty pool is the coverage arm's finding, not this one's).
+    """
+    target = SLOW_LEG_WALL_TARGET_MIN if target is None else target
+    setup = SLOW_LEG_SETUP_ALLOWANCE_MIN if setup is None else setup
+    room = target - setup
+    dmap = cs._durations_map(manifest)
+    weights = {n: cs._duration_weight(dmap.get(f"{n}.py")) / 60.0
+               for n in slow_leg_files(manifest)}
+    if not weights or room <= 0:
+        return ""
+    heaviest = max(weights, key=lambda n: weights[n])
+    h = weights[heaviest]
+    pool = sum(weights.values())
+    count = slow_shard_count(manifest)
+    ratio = cs.HALF_DURATION_IMBALANCE_RATIO
+    # ceil(pool / room) on the seconds, so the answer is exact at a boundary
+    lo = -(-round(pool * 60) // round(room * 60))
+    hi = int(ratio * pool / h) if h > 0 else 0
+    if h > room or lo > hi:
+        return (
+            f"⛔ No `slow_shards` value can clear this, and more legs are not the "
+            f"remedy: a leg is FILE-granular, so `max(leg)` is at least the "
+            f"heaviest file (`{heaviest}`, {h:.2f}m alone) while a leg may spend "
+            f"only {room:.2f}m of pytest ({target:.0f}m target − {setup:.1f}m "
+            f"setup). Clearing the wall needs >= {lo} legs; the {ratio}x balance "
+            f"band admits at most {hi} at {h:.2f}m — the two windows do not "
+            f"overlap, so the pool has to become DIVISIBLE: split or move "
+            f"`{heaviest}` (or move the {target:.0f}m ceiling, an OWNER decision "
+            f"— #6792 — never a lane's). Committed at {count} legs; see #11605.")
+    return (
+        f"Raise `config/ci-surfaces.yml::slow_shards` (reviewed) into the "
+        f"[{lo}, {hi}] window this map admits: the wall needs >= {lo} legs "
+        f"({pool:.2f}m / {room:.2f}m of pytest per leg — a LOWER bound, the LPT "
+        f"pack must still land inside it) and the {ratio}x balance band allows "
+        f"<= {hi} while `{heaviest}` ({h:.2f}m) is the heaviest file, instead of "
+        f"letting this lane become the merge ceiling again")
+
+
+def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
+    """#9539: the slow legs must be a complete, duration-balanced partition AND
+    the wall their pack projects must stay inside the CI guideline.
+
+    This is the guard the lane did not have. The old committed rows could rot
+    without ANY test noticing: #9017 found the halves at 6.4:1 because the eval
+    file had grown from its declared 855 s to a measured 24.4 min and nothing
+    re-derived the split. Here the properties are recomputed from the committed
+    `durations` map on every run, so a slow file that grows reds THIS instead of
+    silently restoring the merge ceiling:
+
+      * coverage — the legs partition `slow_gating_files()` exactly, once
+        each (no gap, no duplicate);
+      * balance — no leg exceeds its fair share by more than the house
+        `HALF_DURATION_IMBALANCE_RATIO` band (an LPT pack normally lands
+        within 0.1%, so 1.25 is deliberately loose enough for a coarse map);
+      * the bound — `max(leg) + SLOW_LEG_SETUP_ALLOWANCE_MIN` <= the 10m
+        guideline, AND, once the matrix is capped (#6744), the job's real band
+        `ceil(legs/cap) x (max leg + allowance)` <= `SLOW_LEG_CAPPED_WALL_TARGET_MIN`.
+        A new slow file big enough to break either reds here, and the remedy is derived
+        by `_slow_wall_remedy()` from the map rather than asserted: a reviewed
+        `slow_shards` bump when the pool is divisible, and a split/move of the
+        offending file when one file alone exceeds the pytest budget a leg may
+        spend (no leg count can help then — #11605). Never a quieter number. The
+        second bound is not optional: a per-leg number alone certifies a wall the
+        job cannot hit as soon as one leg is not the whole job.
+
+    The setup allowance is a MEASURED constant (1.9–2.1 min from the jobs API
+    over 5 main runs), not zero: a bound that ignored the per-leg fixed cost
+    would claim a wall the job cannot hit.
+    """
+    m = load_manifest()
+    count = slow_shard_count(m)
+    entries = slow_shard_entries(m)
+    assert len(entries) == count, (
+        f"slow_shards declares {count} legs but the pack emitted {len(entries)} "
+        f"— a short pack means the pool cannot be sharded that widely")
+    assert count >= 2
+    # coverage: exactly once each
+    flat = [f for e in entries for f in e["files"]]
+    assert len(flat) == len(set(flat)), (
+        f"a slow file rides more than one leg: "
+        f"{sorted({f for f in flat if flat.count(f) > 1})}")
+    assert set(flat) == set(slow_leg_files(m)), (
+        "the slow legs must cover slow_gating_files() "
+        "(slow_files - carve_out - the non-gating lane, #10194) exactly: "
+        f"missing={sorted(set(slow_leg_files(m)) - set(flat))} "
+        f"extra={sorted(set(flat) - set(slow_leg_files(m)))}")
+    # balance: no leg above its fair share by more than the house band
+    proj = slow_wall_projection(m, entries)
+    pool = proj["pool_min"]
+    fair = pool / count
+    assert proj["max_leg_min"] <= fair * cs.HALF_DURATION_IMBALANCE_RATIO, (
+        f"slow legs are duration-imbalanced: {proj['legs_min']} min against a "
+        f"{fair:.2f}m fair share (band {cs.HALF_DURATION_IMBALANCE_RATIO}x) — "
+        f"the LPT pack regressed; re-cut from the `durations` map")
+    # the bound itself
+    assert proj["projected_wall_min"] <= SLOW_LEG_WALL_TARGET_MIN, (
+        f"the slow lane no longer meets its wall target: {proj['legs_min']} min "
+        f"per leg against a {pool:.2f}m pool at {count} legs, plus the measured "
+        f"{SLOW_LEG_SETUP_ALLOWANCE_MIN}m per-leg setup, projects "
+        f"{proj['projected_wall_min']:.2f}m — over the "
+        f"{SLOW_LEG_WALL_TARGET_MIN:.0f}m CI guideline. "
+        + _slow_wall_remedy(m))
+    # #6744: the per-leg number above is NOT the job's wall once the matrix is
+    # capped. `max-parallel: 3` over 5 legs is TWO waves (ceil(5/3)), so a guard
+    # that stops at the per-leg share stays GREEN while asserting a wall the job
+    # cannot hit — the same defect this docstring names for the per-leg fixed
+    # cost, one multiplication further out. The cap is read from the workflow so
+    # a re-tune moves this assertion with it, and its absence fails closed (a
+    # vacuous wave count would be a second way to pass on nothing).
+    cap = ((_load_python_ci()["jobs"]["test-slow"].get("strategy")
+            or {}).get("max-parallel"))
+    assert isinstance(cap, int), (
+        "python-ci.yml's `test-slow` matrix declares no integer `max-parallel` "
+        f"(got {cap!r}) — the wave band below would be vacuously one wave")
+    capped = slow_wall_projection(m, entries, max_parallel=cap)
+    assert capped["waves"] == -(-count // cap), (
+        f"the projection says {capped['waves']} waves for {count} legs at cap "
+        f"{cap}, which is not ceil({count}/{cap})")
+    assert capped["projected_job_wall_min"] <= SLOW_LEG_CAPPED_WALL_TARGET_MIN, (
+        f"the slow JOB's wall is now {capped['projected_job_wall_min']:.2f}m "
+        f"({capped['waves']} waves x ({capped['max_leg_min']:.2f}m leg + "
+        f"{capped['setup_allowance_min']:.2f}m setup)) at `max-parallel: {cap}`, "
+        f"over the {SLOW_LEG_CAPPED_WALL_TARGET_MIN:.0f}m ceiling that cap was "
+        f"accepted with (#6744). Re-tune `slow_shards` or the cap, or move the "
+        f"ceiling from a fresh measurement — do not drop this assertion, or the "
+        f"guard goes back to certifying a wall the job cannot hit")
+    # the emitted matrix is what the job expands, and every leg is non-empty
+    inc = slow_matrix_include(entries)["include"]
+    assert [r["half"] for r in inc] == [e["name"] for e in entries]
+    assert all(r["files"].split() for r in inc), "a slow leg must never be empty"
 
 
 def test_the_selector_offers_no_unwired_slow_matrix_flag():

@@ -774,7 +774,8 @@ slow pool **up** to `8.59 m` → `17.19 m` (it read `8.18 m` → `16.36 m` at th
 holds it. That constant is a documented departure from the 10 m
 per-leg guideline: a guard that stopped at the per-leg share stayed GREEN while the job's wall was
 double it, which is the false PASS a per-leg-share guard would let through — so the cap is a
-committed number the projection is compared against, not a test's opinion. The fast
+committed number that `tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_the_wall_target`
+compares the projection against, not a number any test gets to opine. The fast
 matrix's band is pinned at `ceil(11/3)` = **4** waves after #11576 raised `fast_shards` to 11
 (it was `ceil(10/3)` = 4 at the 10-shard shape and `ceil(9/3)` = 3 at the 9-shard measurement) — exactly the 2–4 wave band invariant 1
 protects, so the pin stays GREEN while the accounted regression grows by a wave. That matters for

@@ -83,8 +83,10 @@ version: 1
 # from the POOL, not from the pre-suite terms (those are measurements and file
 # facts).
 #
-# The 1.25x balance band is enforced by `test_real_workflow_halves_are_
-# consistent`, which recomputes the ratio from the committed map. The old
+# The 1.25x balance band is enforced by `--integrity`'s
+# `workflow_halves_issues()`, which recomputes the ratio from the committed map
+# (the `test_real_workflow_halves_are_consistent` arm that used to sit beside it
+# went with the durations-map arithmetic cut). The old
 # "single-file floor" argument is RETIRED: it rested on
 # `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
 # file — so extra shards do keep reducing max(shard). The lane-parity contract
@@ -153,12 +155,12 @@ carve_shards: 3
 #
 # Absence means 2 — the shape this repo ran until now — so deleting this key
 # gives the leg count back. It is NOT, on its own, a complete rollback: the
-# wall-target guard recomputes from the map, and 2 legs project ~20.9m against
-# the 10m target, so removing the key reds that projection (`tools/ci_selection.py`'s
-# `slow_wall_projection` arm). A real rollback therefore moves the target/guard
-# too — which is what makes a growing slow file red HERE rather than silently
-# restoring the ceiling the key was added to raise. The red belongs to the
-# projection, not to a test.
+# wall-target guard recomputes from the map, and 2 legs project over double the
+# 10m target, so removing the key reds it
+# (`tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_
+# the_wall_target`). A real rollback therefore moves the target/guard too — which
+# is what makes a growing slow file red HERE rather than silently restoring the
+# ceiling the key was added to raise.
 slow_shards: 5
 
 surfaces:
@@ -9555,10 +9557,11 @@ surfaces:
   #     `tests/test_uri_requiring_selection.py`
   #     `::test_declared_list_matches_the_observation` re-derives the set by running
   #     pytest with an EMPTY URI and reds a declared/observed mismatch (#6884);
-  #   * the `durations:` row → the REQUIRED `manifest-integrity` leg
-  #     (`python3 tools/ci_selection.py --integrity`), which names any fast-pool
-  #     file with no row; the separate coverage check is a 0.90 RATIO with
-  #     headroom and is silent over one missing row.
+  #   * the `durations:` row → the `duration_issues()` coverage check composed
+  #     into `python3 tools/ci_selection.py --integrity`: a 0.90 RATIO with
+  #     headroom, silent over one missing row (the per-file ENTRY-RULE pin that
+  #     named it exactly went with the durations-map arithmetic cut). A missing
+  #     row costs a mis-ranked pack, not a wrong selection: the file still runs.
   # The three are added together because a lane that adds one and stops is red in a leg
   # it is not looking at — not because any one check reds the others.
   - test_evictor_invalidates_fallback_snapshot_13123.py
