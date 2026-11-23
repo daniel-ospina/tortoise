@@ -2669,7 +2669,16 @@ def render_decompose(dec: dict) -> str:
                      f"| 100.0% |")
         lines.append(f"| *fitted constant (this arm's own intercept)* | "
                      f"{out['fitted_constant']:,} | — |")
-        lines.append(f"| **unattributed** | {out['unattributed']:,.0f} | — |")
+        # ⛔ THE RESIDUAL IS DERIVED FROM THE PRINTED TOTAL, so the column
+        # RECONCILES when a reader adds it up (review cycle 13, P2). It used to
+        # be formatted from the UNROUNDED `out['unattributed']`, so the printed
+        # rows summed to 17,829 while the residual printed 4,972 and the fitted
+        # row said 22,802 — 17,829 + 4,972 = 22,801, one short, in the table whose
+        # stated rule is that a column which does not sum is not evidence. The
+        # measured value stays in the JSON (`output.unattributed`); only the
+        # printed residual is re-based so the DISPLAY sums.
+        printed_unattributed = out["fitted_constant"] - printed_total
+        lines.append(f"| **unattributed** | {printed_unattributed:,.0f} | — |")
         lines.append("")
         tail = out.get("reemission_tail") or {}
         lines.append(

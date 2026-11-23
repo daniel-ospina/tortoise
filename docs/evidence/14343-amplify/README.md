@@ -91,7 +91,7 @@ Median document 5,211 tokens · 3.98 calls/document (s1 1.68, s2 1.16, s4 1.14).
 | graph search results (S4) | 129 | 0.3 % | empty (`sdk=None`) — a **floor**; a populated graph adds candidates |
 | **composition total** | **42,509** | 100 % | |
 | *fitted constant (`#14295`)* | *45,503* | — | |
-| **unattributed** | **2,994** | **6.6 % of the fitted constant** | the fit's intercept is an OLS line through 50 points, and one of them is far outside the others: the 127,914-token document is 9.3 % of the corpus's prompt tokens but 29.7 % of its *document* tokens, and it is a **high-leverage** point — drop it and the intercept falls 45,503 → 30,156 (R² 0.715 → 0.523). So the fit's intercept sits ABOVE the composition, and 2,994 is what an OLS line does at `T=0` where the composition is a measurement at the median. This bundle does not close that gap by pro-rating it — an unexplained remainder is a finding, and the finding here is that fit and composition agree to 6.6 %. ⚠️ **This row's share is OF THE 45,503 FIT, not of the 42,509 column above it** — it is the only row on a different denominator, so the column does not sum to 100 % and is not meant to: 2,994 / 42,509 would be 7.0 %, and the honest pairing is the fit's own. |
+| **unattributed** | **2,994** | **6.6 % of the fitted constant** | the fit's intercept is an OLS line through 50 points, and one of them is far outside the others: the 127,914-token document is 9.3 % of the corpus's prompt tokens but 29.7 % of its *document* tokens, and it is a **high-leverage** point — drop it and the intercept falls 45,503 → 30,156 (R² 0.715 → 0.523). So the fit's intercept sits ABOVE the composition, and 2,994 is what an OLS line does at `T=0` where the composition is a **`Σ(calls × median per-call prompt)` estimator, not a median measurement**. ⚠️ **That estimator is not neutral and its overshoot is the same order as this residual**: composition 42,509 + the document term 8,754 = 51,263, which is **2,802 (5.8 %) ABOVE** the 48,461 median document total the bundle measures in §4a/§5 — so part of this 2,994 is estimator overshoot, not pure leverage. §2 discloses the same estimator split for the output table; this row does too rather than charging the whole gap to the high-leverage point. This bundle does not close that gap by pro-rating it — an unexplained remainder is a finding, and the finding here is that fit and composition agree to 6.6 %. ⚠️ **This row's share is OF THE 45,503 FIT, not of the 42,509 column above it** — it is the only row on a different denominator, so the column does not sum to 100 % and is not meant to: 2,994 / 42,509 would be 7.0 %, and the honest pairing is the fit's own. |
 
 **The document itself is not in that table.** It is the fit's *slope*: S1 sends the whole
 document text once **per call**, and 34 of 50 documents take a **second** S1 call
@@ -121,9 +121,9 @@ document text once **per call**, and 34 of 50 documents take a **second** S1 cal
 | s1 | 2,798 | 15.7 % | 1.68 |
 | **s2** | **11,677** | **65.5 %** | 1.16 |
 | s4 | 3,354 | 18.8 % | 1.14 |
-| **composition total** | **17,830** | 100 % | |
+| **composition total** | **17,829** | 100 % | |
 | *fitted constant (this arm's own intercept)* | *22,802* | — | |
-| **unattributed** | **4,972** | 27.9 % of the composition · 21.8 % of the fitted constant | |
+| **unattributed** | **4,973** | 27.9 % of the composition · 21.8 % of the fitted constant | |
 
 **Two estimators, both reported — the 4,972 is not noise, and it is a result.** The rows are
 per-call **medians** × the measured call counts (the median document's shape). The fitted
@@ -162,10 +162,10 @@ derived from the input. Here is what it is deriving from.**
 S2 emits the whole embed list, and what moves its size is the **item count** — a constant of
 the record schema — not the document. The measured population is the S2 emissions in the
 write-path receipts (§4a): **580 items over 14 emissions, 58,544 completion tokens** across
-the 7 sessions `#1789` measured — **100.9 completion tokens per emitted record**, and the
+the 7 sessions `#1789` measured — **100.9 completion tokens per emitted item**, and the
 per-emission item count is 20–54. (`#1789`'s own `311` is the `narrative` arm alone; the
 `raw` arm carries the rest, which is why both are counted here.) So the cost is
-`items × record-shape` — and with a record at ~101 tokens, the shape below is most of it:
+`items × record-shape` — and with an item at ~101 tokens, the shape below is most of it:
 
 | field on a `points[]` record | rough tokens | quality role |
 |---|---|---|
@@ -180,7 +180,10 @@ per-emission item count is 20–54. (`#1789`'s own `311` is the `narrative` arm 
 ⚠️ Those per-field figures are the SHAPE's shares, not a measured partition — the emission is
 not instrumented field-by-field, and a `points[]` record measured on its own is 210 tokens
 (indent) / 141 (compact) at a median `content` length, because it carries a `quote` and
-2–4 `search_keys`. What is measured is the **total**: 100.9 tokens per record. What follows
+2–4 `search_keys`. What is measured is the **total**: 100.9 tokens per emitted ITEM (the
+580 counted are every list in the emission, including the 82 entries that are resolution
+notes and chain notes rather than records — over the 498 actual records the figure is
+117.6, so read the ~101 as the item average it is). What follows
 from the schema is that **provenance and participation metadata (`quote` + `search_keys` +
 `slots` + `when`/`supersedes`/`source_turn_id`) are the larger half of every record**, which
 is a quality *feature* (E2/E3), not slack — and why this issue's lever is not "emit less",

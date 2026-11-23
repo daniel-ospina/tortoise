@@ -54,7 +54,7 @@ Solved dynamic regions: the S1 story is **2,110** tokens as the later stages see
 | s4 | 3,354 | 18.8% |
 | **composition total** | **17,829** | 100.0% |
 | *fitted constant (this arm's own intercept)* | 22,802 | — |
-| **unattributed** | 4,972 | — |
+| **unattributed** | 4,973 | — |
 
 ⚠️ **Two estimators, both reported.** The rows are per-call MEDIANS × measured call counts (the median document's shape); the fitted row is the intercept of this arm's own per-document fit, and output's fit is nearly flat (slope 0.18, R²=0.02) so its intercept sits near the MEAN output per document (24,350), not the median. The mean is above the median because **S4's output is bimodal**: 13 of 50 documents (26.0%) average more than 6,000 completion tokens per S4 call (max 24,000 against a median of 2,942) — the delta contract complying on most documents and not on the tail. That tail is where the gap between the two estimators lives, so it is stated rather than smoothed.
 
