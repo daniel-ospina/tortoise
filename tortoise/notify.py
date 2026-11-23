@@ -195,10 +195,20 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #: no-incident-channel fallback, where it is the only bound there is.
 #:
 #: ACTIVITY kinds: the collapse window for the digest. 6h is chosen against the
-#: detector cadence — R3 re-arms every 5 minutes (288 messages/day/scope at
-#: defaults) and R4/R8 are daily — so 6h bounds one scope to 4 messages/day while
-#: still surfacing a fresh burst immediately (the FIRST detection of a window is
-#: delivered at once; only the repeats are folded).
+#: detector cadence — R3 re-arms every 5 minutes (288 detections/day at
+#: defaults) and R4/R8 are daily — so 6h bounds one SUBJECT to 4 messages/day
+#: while still surfacing a fresh burst immediately (the FIRST detection of a
+#: window is delivered at once; only the repeats are folded).
+#:
+#: The ledger key is ``(kind, subject)``, and the subject is the ORG (``"_"``
+#: when the detection carried none) — NOT an R3 key scope and not an R8 client
+#: IP. Stated explicitly because the earlier wording said "per scope" and the
+#: code has never keyed that way: one org's five breaching keys share ONE digest,
+#: and every keyless R8/R4/R3 source platform-wide shares the ``"_"`` subject.
+#: That is over-folding, never a mute, and the folded SOURCES are carried into
+#: the digest and named there (bounded by `_MAX_FOLDED_IDENTITIES`) instead of
+#: the key being per-client — per-client keying would page once per IP under a
+#: distributed burst, which is the storm, not the bound.
 _INCIDENT_DELIVERY_WINDOW_S = 86400.0
 _ACTIVITY_DELIVERY_WINDOW_S = 21600.0
 
