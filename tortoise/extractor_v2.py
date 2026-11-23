@@ -1542,13 +1542,13 @@ def run_s1(model, transcript: str, *,
     three buckets (S1 has no parse ladder → no ``partial`` bucket):
     ``escalated == recovered + residual + abort``. Escalation is narrative
     (not list-bearing): a residual returns the ESCALATED response when one
-    exists (the longer emission — fewer facts dropped); an abort (the
-    escalated call itself raised) keeps attempt-1's retained truncated
-    summary. The chunk is never dropped — a raise would convert a benign
-    tail-drop into a chunk failure for zero gain (P2-14a/P1-21). An
-    un-escalatable truncation (esc <= base, P2-15) records the per-seam
-    truncation keys only — NO escalation episode (the S2/S4 seam's
-    ordering; ``escalated`` counts calls that actually fired)."""
+    exists; an abort keeps attempt-1's retained truncated summary — UNLESS
+    attempt-1 was the collapse itself, whose retained summary is empty, so
+    the chunk is deliberately dropped as ``reasoning_collapse`` rather than
+    shipped as an empty narrative (#14357's fail-open). A non-collapsed base
+    is never dropped by a raise (a benign tail-drop must not become a chunk
+    failure — P2-14a/P1-21). An un-escalatable truncation (esc <= base,
+    P2-15) records the per-seam keys only, NO escalation episode."""
     granularity = _granularity_text(master)
     if emphasis:
         # The emphasis rides the SAME slot as the granularity declaration it
@@ -1608,10 +1608,10 @@ def run_s1(model, transcript: str, *,
     except BaseException as e:
         if not isinstance(e, Exception):
             raise
-        # P1-21 abort: keep attempt-1's retained truncated summary — the
-        # chunk is NOT dropped (a transient raise on the one-attempt
+        # P1-21 abort: a NON-collapsed base keeps its retained truncated summary
+        # (the chunk is not dropped: a transient raise on the one-attempt
         # escalated call must not be MORE fragile than the base call's
-        # _COMPLETE_RETRIES=2 budget).
+        # _COMPLETE_RETRIES=2 budget); a COLLAPSED base re-raises below.
         if _rec is not None:
             _rec["escalated_abort"] = _rec.get("escalated_abort", 0) + 1
         # R3-3/P1-39: the escalated call's except-update wrote
