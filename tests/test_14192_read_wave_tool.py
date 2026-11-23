@@ -286,9 +286,18 @@ _PRODUCT_MAX_COMBINATIONS = 4096
 #: `MemoryError` (3 GB `ulimit -v`, one probe) instead of `_ResolutionDidNotConverge`,
 #: because pass 40 is a 1 TB string and the budget is never reached. A kill is not a red
 #: either, so the resolver caps the PRODUCT too: a name whose statically possible values
-#: exceed these bounds makes it REFUSE. Real spellings are nowhere near them — the three
-#: files the pin parses hold 2, 7 and 4 passes' worth of small literals — and a read name is
-#: never 8 kB long.
+#: exceed these bounds makes it REFUSE.
+#: ⛔ THE MEASUREMENT, CORRECTED (#14326 review cycle 22). This note used to claim "real
+#: spellings are nowhere near them — the three files the pin parses hold 2, 7 and 4 passes'
+#: worth of small literals". MEASURED AT THIS HEAD: `_str_constants` RAISES
+#: `_ResolutionDidNotConverge` on `tortoise/sdk.py` (`message` exceeds the value budget) and on
+#: `tortoise/hosted_api.py` (the `+` product exceeds 4096), two of the three files the pin
+#: parses — and 19 of 709 real `.py` files in `.venv/lib` + `tortoise/` raise. The REFUSAL is
+#: the designed polarity (loud, not a silent under-approximation and not an OOM kill), but the
+#: claim that real files stay inside the budget was FALSE, and it is the reason a later lane
+#: would run this resolver over arbitrary source without a guard. The budget is therefore a
+#: BOUNDARY THE CALLER MUST RESPECT: the pin runs it only on files it has already validated,
+#: and a new caller must catch `_ResolutionDidNotConverge` rather than assume it cannot fire.
 _VALUE_MAX_CHARS_PER_NAME = 8192
 _VALUE_MAX_PER_NAME = 512
 
@@ -1652,6 +1661,18 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
     """
     if isinstance(node, ast.Attribute):
         return node.attr == "__dict__"
+    # ⛔ AND `globals()["__builtins__"]`, THE STORE DIRECTION (#14326 review cycle 22, MEASURED
+    # GREEN **and LIVE**: `globals()["__builtins__"].update({"print": getattr})` and
+    # `globals()["__builtins__"]["print"] = getattr` reinstated an allow-listed callee, while
+    # `__builtins__.update({...})` is REFUSED). The key is a literal and the receiver is a
+    # namespace expression, which this predicate already owns — the same shape, one composition
+    # over, and `_is_builtins_mapping` carries the READ half of it.
+    # (A LITERAL key only — this predicate takes no `consts`, so a computed key is left to the
+    # READ arm in `_is_builtins_mapping`, which does resolve one. Stated rather than implied.)
+    if (isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant) and node.slice.value == "__builtins__"
+            and _is_namespace_expr(node.value)):
+        return True
     if isinstance(node, ast.Name):
         # ⛔ AND `__builtins__`, THE ONE ROOT THAT NEEDS NO IMPORT (#14326 review cycle 19,
         # EACH MEASURED GREEN **and LIVE**): `__builtins__["print"] = getattr` then a
@@ -2158,6 +2179,20 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
         # `copy.copy(m)` was RED). A deep copy of the mapping still holds the SAME function
         # objects at its leaves — nothing about the depth changes what reading `exec` out of
         # it executes — so the arm reads the copy FAMILY, not one member of it.
+        return True
+    # ⛔ AND `globals()["__builtins__"]` — A KEYED READ OUT OF A NAMESPACE (#14326 review
+    # cycle 22, MEASURED GREEN **and LIVE**: `globals()["__builtins__"]["exec"](<read>)` and
+    # its `.get("exec")` / computed-key twins executed the read, while `__builtins__["exec"]`,
+    # `vars(__builtins__)["exec"]` and `builtins.__dict__["exec"]` are REFUSED). In an IMPORTED
+    # module — which is how this pin loads the tool — `__builtins__` in the module globals IS
+    # that `__dict__`, so the keyed read reaches exactly the same mapping. Both halves already
+    # exist: `__builtins__` is an enumerated ROOT (`frozenset({"__builtins__"})` is seeded in
+    # `_bu_dict_roots`), and `_is_namespace_expr` owns the `globals()`/`locals()`/`vars()`
+    # vocabulary — so this is one arm on a shape the file already resolves in the STORE
+    # direction (`_namespace_rebind_names` reds `globals()["print"] = getattr`).
+    if (isinstance(node, ast.Subscript)
+            and "__builtins__" in _string_keys_of(node.slice, consts)
+            and _is_namespace_expr(node.value)):
         return True
     return ((isinstance(node, ast.Name) and node.id in dict_names)
             or _is_builtins_dict_of(node, names, launderers, consts))
@@ -8055,6 +8090,17 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # and the OPERATOR form reached no arm at all.
         "a STORE into a namespace by `__ior__`": (
             '    __builtins__.__ior__({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
+        # ⛔ AND THE KEYED READ / STORE OUT OF A NAMESPACE (#14326 review cycle 22, EACH
+        # MEASURED GREEN **and LIVE**): in an imported module — how this pin loads the tool —
+        # `__builtins__` in the globals IS the builtins `__dict__`, so `globals()["__builtins__"]`
+        # is the SAME mapping `__builtins__` names.
+        "a KEYED READ out of `globals()`": (
+            '    globals()["__builtins__"]["exec"]'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a KEYED STORE out of `globals()`": (
+            '    globals()["__builtins__"].update({"print": getattr})\n'
             '    print(sdk, "_tortoise_fts_query")'
             '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
         "a STORE into a namespace by `__init__`": (
