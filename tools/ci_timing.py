@@ -2443,9 +2443,9 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        So: a block that opens a note is NOT this row's note. It is not joined, not
        appended into, and not dropped — the row line is rewritten and the block is
        left byte-identical. `test_a_note_block_that_opens_of_its_own_is_never_this_rows`
-       pins the behaviour on a synthetic map;
-       `tests/test_ci_selection.py::test_the_cap_block_is_not_read_as_the_row_aboves_note`
-       pins it on the real one.
+       pins the behaviour on a synthetic map (its companion arm, which read the real
+       map and asserted the same rule there, went with the durations-map
+       arithmetic cut).
     """
     out: list[int] = []
     for j in range(index + 1, len(lines)):
@@ -2488,11 +2488,11 @@ def _joined_note_tail(fragment: str, continuation_lines: list[str]) -> str:
 
 # ── the UNMEASURED-STATE note, and the adoption that falsifies it ───────────
 #
-# Two guards in the suite read ONE rule off this map, and the writer did not
+# A guard in the suite reads ONE rule off this map, and the writer did not
 # implement it: a row that carries a MEASUREMENT may not also carry the note of a
-# row no sweep has collected.
+# row no sweep has collected. The second arm that read the same rule was cut as
+# durations-map arithmetic; this one stays.
 #
-#   tests/test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value
 #   tests/test_tool_risk_tiers.py::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it
 #
 # The map's own rule for it is stated above `durations:` — "a row's comment is kept

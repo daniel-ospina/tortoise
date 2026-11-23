@@ -396,8 +396,8 @@ was re-cut. Re-derive it with the emission rather than restating it, exactly lik
 the committed `config/ci-surfaces.yml` S=11 header block's `0.5 m` of headroom; summing the
 UNROUNDED terms instead gives `60 − 51.6467` = 8.35, which moves no verdict and would put this
 sentence 0.01 m away from the instrument it cites.)
-`tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
-that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
+`tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pinned
+that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`) until that arithmetic arm was cut, and the watchdog comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
 is how a constant goes stale. At the first pass FOUR rows did NOT clear it, and all four were
@@ -749,11 +749,10 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 | 5 / 3 / 3 — ⛔ rejected by invariant 2 (`sum = 11 > 12 - 3`) | 10 / 12 | +8.1 m / +9.6 m |
 | unset | 11 / 18 | 0 / 0 |
 
-⛔ **The `2 / 2 / 2` row is the one candidate this section's own pin rejects.** `ceil(10 / 2)` = 5
-waves exceeds the `max_waves = 4` ceiling invariant 1 pins
-(`tests/test_ci_selection.py::test_every_matrix_bounds_its_fan_out_below_the_measured_pool`), so a
-re-derivation from a fresh measurement that picks the row with the most pool headroom (`8 / 9`) is
-redded by the pin shipped in this same section. The two rows that fail the other side are the
+⛔ **The `2 / 2 / 2` row is the one candidate this section's own invariant rejects.** `ceil(10 / 2)` = 5
+waves exceeds the `max_waves = 4` ceiling of invariant 1, so a re-derivation from a fresh measurement
+that picks the row with the most pool headroom (`8 / 9`) is rejected by the arithmetic shipped in this
+same section rather than by a test. The two rows that fail the other side are the
 mirror case: `4 / 4 / 3` and `5 / 3 / 3` each hold 11 matrix slots, past `12 - 3 = 9`, so they fail
 invariant 2.
 
@@ -771,11 +770,11 @@ committed `durations` map (re-derived from the map, not restated: registering
 and onto the slow pool, which is the whole of the change: the `durations` weight it was given was the
 flat `DEFAULT_FAST_WEIGHT`, so the row then packed identically to no row at all (measured; the 2026-11-16 sweep has since given it a real reading). Since then the 2026-11-23 sweep re-packed the
 slow pool **up** to `8.59 m` → `17.19 m` (it read `8.18 m` → `16.36 m` at the 2026-11-16 head). The
-`test_the_documented_slow_wall_restates_the_committed_maps_own_projection` pin recomputes it) — and
-`test_slow_shards_are_duration_packed_and_meet_the_wall_target` holds it to
-`SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m
+`slow_wall_projection` instrument recomputes it) — and `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m)
+holds it. That constant is a documented departure from the 10 m
 per-leg guideline: a guard that stopped at the per-leg share stayed GREEN while the job's wall was
-double it, which is the false PASS this pin exists to prevent. The fast
+double it, which is the false PASS a per-leg-share guard would let through — so the cap is a
+committed number the projection is compared against, not a test's opinion. The fast
 matrix's band is pinned at `ceil(11/3)` = **4** waves after #11576 raised `fast_shards` to 11
 (it was `ceil(10/3)` = 4 at the 10-shard shape and `ceil(9/3)` = 3 at the 9-shard measurement) — exactly the 2–4 wave band invariant 1
 protects, so the pin stays GREEN while the accounted regression grows by a wave. That matters for
@@ -844,15 +843,16 @@ these jobs is measured from runner pickup — the in-step watchdog is started IN
 start delayed by the cap cannot consume a shard's budget. The matrix itself is untouched (the
 shard set is still the selector's `fast_matrix` / `slow_matrix` / `carve_matrix`), and a `needs:`
 on a matrix job waits for **every** leg regardless of ordering (#5219) — so `python-ci-gate`
-cannot conclude before a shard it needs has run. Both halves are pinned, and by three separate
-pins rather than two — the caps are a different property from the two false-red halves:
+cannot conclude before a shard it needs has run. Both halves are backed by the workflow's own
+wiring, and the arithmetic behind the caps is stated above rather than pinned:
 
 - the per-shard watchdog sitting INSIDE the job, and the matrix coming from the selector rather
-  than a workflow literal →
-  `tests/test_ci_selection.py::test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard`;
+  than a workflow literal → verified by reading `python-ci.yml`'s `test` job (the retired
+  `test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard` arm did this mechanically);
 - the aggregate keying on the job id, never on a leg name → `::test_no_required_check_names_a_fast_leg`;
-- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) →
-  `::test_every_matrix_bounds_its_fan_out_below_the_measured_pool`.
+- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) — arithmetic
+  properties, stated here rather than pinned by a test. Re-derive them from the pool before
+  moving any of the three numbers.
 
 **Re-derive before moving any of the three numbers**: re-read the pool (`gh api
 repos/<owner>/<repo>/actions/runners`), and re-measure the per-shard wall with §2's command — but
