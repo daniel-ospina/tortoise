@@ -25,7 +25,7 @@
        `A Superbrain for Founders & Product Teams.pdf`, reproduced VERBATIM,
        with FIVE departures — departures 1-2 are the TYPO ruling, departure 3 is
        #13696 item 4, and departures 4-5 are the owner's OWN EDITS of
-       2026-11-23 (owner items 1-2) — recorded here so these are decisions and
+       2026-11-23 (#13645 items 2-5) — recorded here so these are decisions and
        not assertions:
 
        1. page 2 — "make decision" is written "make decisions";
@@ -51,8 +51,8 @@
           rather than left to a comment.
 
        4. the compute beat — the owner added a TITLE, "Organisational
-          Intelligence", and changed "this context" to "your context" (owner
-          item 1). The title is an ADDITION, not a correction: the PDF opens
+          Intelligence", and changed "this context" to "your context" (#13645
+          items 2-3). The title is an ADDITION, not a correction: the PDF opens
           that beat with the claim alone, so it read as a continuation of the
           intro above it.
 
@@ -60,7 +60,7 @@
           owner's new sentence: "Thanks to an algorithm inspired by
           interconnected prediction markets, Tortoise can compute hundreds or
           even millions of data points, calculating confidence with business
-          logic and learning from new evidence." (owner item 2). The PDF's
+          logic and learning from new evidence." (#13645 items 4-5). The PDF's
           step-03 paragraph no longer appears on this page at all, so restoring
           it is now a revert of an OWNER EDIT rather than a return to verbatim.
 
@@ -74,6 +74,15 @@
        The pricing block below is byte-identical to product.html's on purpose —
        `tests/test_website_static.py::TestPricingSourceIsShared` asserts the two
        pages agree, so a price cannot change on one page only.
+
+       The CARD CSS is page-scoped, and it carries a fix the MARKUP does not:
+       the four CTAs share one baseline since the owner's 2026-11-23 report.
+       That report is item 6 of the same relayed decision
+       (https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7108810457),
+       recorded there because a screenshot filename is not a decision — item 6
+       is NOT one of the copy departures above, and its `OVERRIDES:` line does
+       not reach this CSS. `/tortoise`'s cards are deliberately left as they
+       are; see the comment on `.pricing-card` for what to do if that changes.
 
        TRACKING: PostHog, consent-gated through the existing `/consent.js`; the
        three named events and the campaign tags are in the script at the bottom
@@ -193,8 +202,10 @@
     .pricing-toggle button.active { background: var(--accent); color: #04121a; border-color: var(--accent); }
     .pricing-toggle .badge { display: inline-block; font-size: 0.625rem; font-weight: 700; padding: 0.125rem 0.375rem; border-radius: 9999px; background: var(--green); color: #04121a; margin-left: 0.375rem; }
     .pricing-grid { display: flex; justify-content: center; gap: 1.5rem; flex-wrap: wrap; max-width: 1100px; margin: 0 auto; }
-    /* ⛔ FLEX COLUMN so the four CTAs share ONE baseline (owner item 3, the
-       `clipboard-2026-11-23-121001` report). `.pricing-grid`'s default
+    /* ⛔ FLEX COLUMN so the four CTAs share ONE baseline (#13645 item 6 — the
+       owner's 2026-11-23 pricing-CTA report, recorded on
+       https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7108810457
+       because the screenshot itself is outside this repo). `.pricing-grid`'s default
        `align-items: stretch` already gives the four BOXES one height, so the
        defect was where the CTA sat INSIDE its box, not the box: measured at
        1440x900 before this rule, the `.btn` tops read 675.58 / 675.58 / 697.05 /
@@ -488,7 +499,7 @@
        against `.lead`'s own font: with the serif clamp on `.lead` that is
        ~710–780px, `min()` picks the flat 660px, and the intro's first line is
        54px wider than — and, every box being flex-centred, ~27px left of — the
-       605.6px prose beneath it. That IS owner item 3's defect, one element up.
+       605.6px prose beneath it. That IS #13696 item 3's defect, one element up.
        (Measured at 768×900 in headless Chrome: `.lead` 660px at 20.8px, the
        paragraph 605.625px at 13.6px. #14020 review P1.)
 
@@ -717,7 +728,7 @@
          shared `min(660px, 74ch)` for the whole 670–760px band: at 760 the grid
          box was 660 against a 605.9px prose box (+54.1px, 27.1px out on each
          side). It is inherited now, so the grid matches the prose at every
-         width — that is owner item 3, and it was still broken here. */
+         width — that is #13696 item 3, and it was still broken here. */
       .outcomes {
         grid-template-columns: 1fr;
         justify-content: stretch;
@@ -821,7 +832,7 @@
 
     <!-- ══ 3. Compute claim + the ↑/↓ contrast ═══════════════════════════ -->
     <section id="beat-compute" class="beat workflow">
-      <!-- The beat's TITLE (owner item 1): the compute claim used to open this
+      <!-- The beat's TITLE (#13645 item 2): the compute claim used to open this
            beat bare, so it read as a continuation of the intro above it. No
            `.beat-num` here on purpose — the numbered beats are the three steps,
            and this one is a claim, not a step. -->

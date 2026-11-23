@@ -3542,7 +3542,7 @@ MEDIA_PRELUDE_RE = re.compile(r"@media\s*\(\s*max-height:\s*(\d+)\s*px\s*\)\s*\{
 
 
 #: `@media (max-width: Npx) { ... }` — the narrow-viewport blocks. Height has
-#: `_max_height_media_blocks`; width had no reader, which is how owner item 3
+#: `_max_height_media_blocks`; width had no reader, which is how #13696 item 3
 #: (a flat `.outcomes { max-width }` override inside this block) survived a
 #: full review cycle and had to be caught by eye (#13696).
 MAX_WIDTH_MEDIA_RE = re.compile(r"@media\s*\(\s*max-width:\s*(\d+)\s*px\s*\)\s*\{")
@@ -4065,7 +4065,7 @@ class TestPageHeadingOutline:
         """#13645: same outline contract, one page over.
 
         Measured outline: `[1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4]` — one hero h1;
-        SIX h2 (the compute beat's "Organisational Intelligence" — owner item 1,
+        SIX h2 (the compute beat's "Organisational Intelligence" — #13645 item 2,
         added 2026-11-23, which is why the intro is the only heading-less beat
         left — then the three steps, onboarding and pricing); the four
         tier-card h3s under `#pricing-section`; and one h4 on the self-hosted
@@ -10264,7 +10264,7 @@ class TestProductTeamsCopy:
     departure (#13696 item 4), recorded as one rather than folded into the copy
     ruling.
 
-    ⛔ AND THE OWNER RE-WROTE PART OF THE PAGE ON 2026-11-23 (owner items 1-2):
+    ⛔ AND THE OWNER RE-WROTE PART OF THE PAGE ON 2026-11-23 (#13645 items 2-5):
     the compute beat gained the title "Organisational Intelligence" and reads
     "over YOUR context", and step 03 is retitled "03 · Reason & Learn" with its
     body REPLACED — the PDF's step-03 paragraph no longer appears on the page at
@@ -10274,6 +10274,17 @@ class TestProductTeamsCopy:
     revert of a ruling. The ruling on the two typos stands on #13645 for anyone
     who does restore that paragraph. The edits are relayed onto the artifact at
     https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7108810457
+
+    ⛔ THE LABELS BELOW ARE THAT COMMENT'S OWN NUMBERS, qualified by issue —
+    `#13645 item 2` is the title, `#13645 item 3` is "your context", `#13645
+    items 4-5` are step 03's heading and body, and `#13645 item 6` is the
+    pricing-CTA baseline. They used to read `owner item 1` / `owner item 2`,
+    which collided with THIS repo's other owner item set: `#13696 item 3` is
+    the outcomes/lead measure overhang, and `#13696 item 2` is the deleted
+    hairline (`:10396`, `:10548`, `:10564`, `:10599`, `:10451`). A bare `grep
+    "owner item 3"` returned both fixes as one undifferentiated set, so an
+    artifact that records four different owner items under two labels could not
+    be resolved back to the decision that owns it.
 
     ⛔ AND THE TYPOS' ABSENCE IS PINNED SEPARATELY
     (`test_the_pdfs_two_typos_are_absent_from_the_rendered_page`). Without that
@@ -10305,14 +10316,16 @@ class TestProductTeamsCopy:
     #: page 2 — the compute claim + the six ↑/↓ labels, in the PDF's ROW order.
     #: ⛔ `decisions` (PLURAL) is the owner's RULING, not a builder's tidy-up:
     #: #13645#issuecomment-7047852104 records it, and the PDF's singular is the
-    #: typo it corrects (#14020 review P1 at `73dbbf66ea`).
+    #: typo it corrects (#14020 review P1 at `73dbbf66ea`). `your context` (not
+    #: the PDF's `this context`) is the owner's separate edit of 2026-11-23,
+    #: `#13645 item 3`.
     COMPUTE = (
         "Tortoise then computes over your context, analysing hundreds or even "
         "millions of variables so you and your agents make decisions with "
         "superintelligence."
     )
     #: The compute beat's section TITLE — the owner's addition of 2026-11-23
-    #: (owner item 1), not the PDF's: the PDF opens that beat with the claim.
+    #: (`#13645 item 2`), not the PDF's: the PDF opens that beat with the claim.
     COMPUTE_H2 = "Organisational Intelligence"
     OUTCOMES_UP = ("Agent Autonomy & Token efficiency", "Decision quality", "Alignment")
     OUTCOMES_DOWN = ("Constant Supervision", "Drift & Regressions", "Slack Noise & Meetings")
@@ -10334,6 +10347,19 @@ class TestProductTeamsCopy:
          "calculating confidence with business logic and learning from new "
          "evidence."),
     )
+    #: Where each step's pinned copy actually comes from. Steps 01-02 are the
+    #: PDF reproduced verbatim; step 03's heading AND body are the owner's
+    #: 2026-11-23 rewrites (`#13645 items 4-5`), so naming the PDF as the source
+    #: for that beat was false on both branches of the failure message — and the
+    #: PDF's paragraph is pinned ABSENT below, so "restore the PDF's copy" is a
+    #: revert of an owner edit, not a return to verbatim. (`fdd3a6a60f` reverted
+    #: it once already, which is why the message has to name the right source.)
+    STEP_SOURCES = {
+        "beat-ingest": "the PDF",
+        "beat-organize": "the PDF",
+        "beat-reason": (
+            "the owner's 2026-11-23 rewrite of step 03 (`#13645 items 4-5`)"),
+    }
     ONBOARD_H2 = "Onboard in 5 minutes, without learning another UI"
     ONBOARD_P = (
         "Tortoise connects via MCP or SDK, so you and your agents can use it in "
@@ -10393,7 +10419,7 @@ class TestProductTeamsCopy:
         `.lead`, whose `font-size` was the serif clamp (1.3–1.9rem) — where 74ch
         is ~710–780px, so `min()` picked the flat 660px while the paragraphs
         below computed 605.625px (13.6px mono). 54px wider, ~27px left of the
-        prose, every box flex-centred: owner item 3's defect one element up.
+        prose, every box flex-centred: #13696 item 3's defect one element up.
         Headless Chrome at 768x900: `.lead` 660px @ 20.8px vs `p` 605.625px.
 
         Three things keep it resolved in the PROSE font, and each is asserted
@@ -10448,7 +10474,7 @@ class TestProductTeamsCopy:
         # its own rule — the shape an editor leaves while debugging — keep this
         # row GREEN while the lead loses its serif (#14020 review P2).
         assert any("font-family: var(--serif)" in b for b in span_rules), (
-            "the lead's inner <span> does not take the serif; owner item 2 has "
+            "the lead's inner <span> does not take the serif; #13696 item 2 has "
             "the opening line read as the section's title, not as body copy")
         # …and the <span> has to EXIST. The serif moved onto it, so deleting it
         # from the markup drops the lead back to body copy with every CSS row
@@ -10545,7 +10571,7 @@ class TestProductTeamsCopy:
                     f"`max-width` for `.outcomes` ({m.group(1).strip()!r}). "
                     "That overrides the shared `min(660px, 74ch)` for every "
                     "width in the band and makes the grid wider than the prose "
-                    "it sits under — owner item 3, #13696. Delete the override "
+                    "it sits under — #13696 item 3. Delete the override "
                     "and let the grid inherit the shared measure.")
         # ⛔ THE MEDIA-ONLY SWEEP ABOVE IS NOT THE INVARIANT, and reading only
         # `@media (max-width: Npx)` bodies left the BASE block unread: appending
@@ -10561,7 +10587,7 @@ class TestProductTeamsCopy:
             "`.outcomes` gets its measure from "
             f"{len(with_measure)} rules: "
             f"{[p for p, _ in with_measure]!r}. Exactly ONE may declare it — a "
-            "second override (base OR media) is owner item 3 again: the grid "
+            "second override (base OR media) is #13696 item 3 again: the grid "
             "is wider than the prose above it whenever that rule applies "
             "(#13696, #14020 review P2.3)")
         prelude, body = with_measure[0]
@@ -10596,7 +10622,7 @@ class TestProductTeamsCopy:
         assert grid_rules, (
             "`.outcomes` declares no base `font-size`, so it inherits the body's "
             "14px: its `74ch` is then NOT the prose's `74ch` and the grid measures "
-            "623.7px against the prose's 605.9px at 768 — owner item 3, 18px the "
+            "623.7px against the prose's 605.9px at 768 — #13696 item 3, 18px the "
             "other way (#14020 review P2.4). Mirror `.beat p`'s clamp.")
         for body_, inside_ in grid_rules:
             got = _effective_decl(body_, "font-size")
@@ -10726,10 +10752,10 @@ class TestProductTeamsCopy:
             "decisions` (plural) is the owner's ruling, recorded on "
             "#13645#issuecomment-7047852104 — restoring the PDF's singular "
             "re-lands a typo the owner ruled on; `your context` is the owner's "
-            "edit of 2026-11-23 (owner item 1).")
+            "edit of 2026-11-23 (#13645 item 3).")
 
     def test_the_compute_beat_carries_the_owners_section_title(self):
-        """Owner item 1: the beat opens on a TITLE, not on the claim.
+        """#13645 item 2: the beat opens on a TITLE, not on the claim.
 
         The PDF's compute beat has no heading — it opens with the paragraph — so
         the owner asked for one, and it is an ADDITION to the PDF's text rather
@@ -10746,7 +10772,7 @@ class TestProductTeamsCopy:
             "owner's item 1 fixes")
         assert _beat_text(h2.group(1)) == self.COMPUTE_H2, (
             f"the compute beat's title reads {_beat_text(h2.group(1))!r}; the "
-            f"owner asked for {self.COMPUTE_H2!r} (owner item 1)")
+            f"owner asked for {self.COMPUTE_H2!r} (#13645 item 2)")
         assert "beat-num" not in h2.group(1), (
             "the compute beat's title carries a `.beat-num`. The numbered beats "
             "are the three STEPS (01/02/03); this one is a claim, and a number "
@@ -10771,22 +10797,33 @@ class TestProductTeamsCopy:
             f"the ↓ column reads {labels(down[0])!r}; the PDF reads "
             f"{self.OUTCOMES_DOWN!r}")
 
-    def test_the_three_steps_are_verbatim(self):
+    def test_the_three_steps_carry_the_pinned_copy(self):
+        """Each step against ITS OWN source — the PDF for 01/02, the owner for 03.
+
+        ⛔ THE NAME AND THE MESSAGE ARE THE GUARD, not decoration: this row used
+        to be `test_the_three_steps_are_verbatim` and to tell the maintainer, on
+        red, that "the PDF reads …" — true for steps 01-02 and FALSE for step
+        03, whose heading and body the owner replaced on 2026-11-23. In the same
+        breath it printed the pinned paragraph (the owner's) beside the PDF's
+        and warned about a `superintelligence` typo that paragraph no longer
+        contains. The row a maintainer hits first when touching step 03 was
+        therefore instructing them to perform the exact revert the edit
+        superseded — the shape that already cost this branch `fdd3a6a60f`. The
+        source is now named per beat.
+        """
         html = _product_teams_html()
         for section_id, heading, paragraph in self.STEPS:
+            source = self.STEP_SOURCES[section_id]
             beat = _element_by_id(html, section_id)
             h2 = re.search(r"<h2>(.*?)</h2>", beat, re.S)
             assert h2, f"#{section_id} has no <h2>"
             assert _beat_text(h2.group(1)) == heading, (
-                f"#{section_id}'s heading reads {_beat_text(h2.group(1))!r}; the "
-                f"PDF reads {heading!r}")
+                f"#{section_id}'s heading reads {_beat_text(h2.group(1))!r}; "
+                f"{source} reads {heading!r}")
             body = [_beat_text(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", beat, re.S)]
             assert body == [paragraph], (
-                f"#{section_id}'s paragraph reads {body!r}; the PDF, as ruled, "
-                f"reads [{paragraph!r}]. ⛔ `superintelligence` (one word) in "
-                "step 03 is the owner's ruling, recorded on "
-                "#13645#issuecomment-7047852104 — restoring the PDF's two-word "
-                "spelling re-lands a typo the owner ruled on.")
+                f"#{section_id}'s paragraph reads {body!r}; {source} reads "
+                f"[{paragraph!r}]")
 
     def test_the_pdfs_two_typos_are_absent_from_the_rendered_page(self):
         """The PDF's spellings must NOT reach the reader — pinned as ABSENCE.
@@ -10803,7 +10840,7 @@ class TestProductTeamsCopy:
         https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
 
         ⛔ STEP 03'S PARAGRAPH IS NO LONGER ON THE PAGE AT ALL: the owner
-        REPLACED it on 2026-11-23 (owner item 2), so the second typo pair has
+        REPLACED it on 2026-11-23 (#13645 item 5), so the second typo pair has
         nothing left to guard. It is pinned ABSENT as a whole sentence instead —
         both spellings — because a lane that "restores the PDF's copy" would put
         that paragraph back, and restoring it is now a revert of an owner edit
@@ -10828,10 +10865,23 @@ class TestProductTeamsCopy:
                             "Improve decision-making with superintelligence"):
             assert pdf_step_03 not in served, (
                 f"the rendered page contains {pdf_step_03!r}, part of the "
-                "step-03 paragraph the owner REPLACED on 2026-11-23 (owner "
-                "item 2). The PDF's paragraph is gone from this page by the "
+                "step-03 paragraph the owner REPLACED on 2026-11-23 (#13645 "
+                "item 5). The PDF's paragraph is gone from this page by the "
                 "owner's instruction — restoring it reverts an owner edit, not "
                 "a builder's paraphrase.")
+        # ⛔ THE OTHER 2026-11-23 EDIT HAD NO SUCH PIN, so reverting BOTH the page
+        # (`…html:829`) and `COMPUTE` to "over this context" kept every row green
+        # (measured on `fb5514dcdc`: 16 passed) — while the same pair-revert for
+        # step 03 reds 2. `COMPUTE` catches the page-only revert; this catches the
+        # PAIR, for the same reason the PDF's paragraph is pinned absent above.
+        # `this context` occurs only in the constant and in the page, so nothing
+        # else can satisfy or defeat the literal.
+        assert "over this context" not in served, (
+            "the rendered page reads \"over this context\". The owner changed it "
+            "to \"your context\" on 2026-11-23 (#13645 item 3, "
+            "#issuecomment-7108810457) — restoring the old phrase reverts an "
+            "owner edit, and a page+constant pair-revert would otherwise stay "
+            "green")
         # The onboarding heading is the THIRD departure (#13696 item 4) and its
         # pair-revert was unpinned: `ONBOARD_H2` has no full stop, so reverting
         # page and constant together kept every copy row green. Pinned ABSENT
@@ -10879,9 +10929,9 @@ class TestProductTeamsCopy:
 
 
 class TestProductTeamsPricingCardCtaBaseline:
-    """Owner item 3 — the four pricing CTAs share ONE baseline.
+    """#13645 item 6 — the four pricing CTAs share ONE baseline.
 
-    The report (`clipboard-2026-11-23-121001`) was that the buttons sit at
+    The report was that the buttons sit at
     different heights because the tier copy has different lengths. The BOXES
     were never the problem — `.pricing-grid`'s default `align-items: stretch`
     already gives all four one height (measured 1440x900: every card ran
@@ -10889,6 +10939,16 @@ class TestProductTeamsPricingCardCtaBaseline:
     `.btn` tops read 675.58 / 675.58 / 697.05 / 745.78, three distinct
     baselines 70.2px apart. After the two declarations pinned below all four
     read 745.78 at 1440x900 (measured, headless Chromium).
+
+    ⛔ THE REPORT IS A SCREENSHOT THE OWNER PASTED, so it is item 6 of the
+    relayed decision rather than a filename this repo can hold:
+    https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7108810457
+    (`clipboard-2026-11-23-121001` exists nowhere in this repo, and the
+    screenshots are deliberately outside it). Without that record a later lane
+    meeting `display: flex` + `padding-bottom: calc(1.75rem - 1px)` has only an
+    ephemeral filename behind it, cannot tell an owner-requested fix from a
+    builder's preference, and reverting unexplained CSS is an ordinary edit —
+    which is the asymmetry this class existed to close for the copy items.
 
     ⛔ WHY A STATIC PIN FOR A LAYOUT FIX: the failure is invisible to every
     other row here — no copy, no price and no markup changes — so a revert of
@@ -10909,11 +10969,11 @@ class TestProductTeamsPricingCardCtaBaseline:
             "`.pricing-card` is not a flex container, so `margin-top: auto` on "
             "its CTA has no free space to absorb and the four buttons go back "
             "to their content-length heights (three baselines, 70.2px apart at "
-            "1440x900 — owner item 3)")
+            "1440x900 — #13645 item 6)")
         assert _effective_decl(card_rules[-1], "flex-direction") == "column", (
             "`.pricing-card` is a flex ROW, so its children sit side by side "
             "instead of stacking — the card renders as one line of text "
-            "(owner item 3)")
+            "(#13645 item 6)")
         cta_rules = [body for body, inside_media
                      in _css_rules_with_scope(css, ".pricing-card .btn")
                      if not inside_media]
@@ -10921,7 +10981,7 @@ class TestProductTeamsPricingCardCtaBaseline:
         assert _effective_decl(cta_rules[-1], "margin-top") == "auto", (
             "the card's CTA does not take the leftover height, so it sits "
             "wherever its tier's copy ends and the four buttons do not share a "
-            "baseline (owner item 3). `margin-top: auto` is the mechanism; "
+            "baseline (#13645 item 6). `margin-top: auto` is the mechanism; "
             "without it `display: flex` alone changes nothing a reader sees")
 
     def test_the_popular_cards_thicker_border_does_not_move_its_cta(self):
@@ -10943,7 +11003,7 @@ class TestProductTeamsPricingCardCtaBaseline:
         assert _effective_decl(popular[-1], "padding-bottom") == "calc(1.75rem - 1px)", (
             "the popular card's bottom inset does not compensate for its 2px "
             "border, so its CTA sits 1px above the other three (measured "
-            "744.78 vs 745.78 at 1440x900 — owner item 3)")
+            "744.78 vs 745.78 at 1440x900 — #13645 item 6)")
 
     def test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render(self):
         """`margin-top: auto` aligns the LAST item — so nothing may follow the CTA.
@@ -10973,11 +11033,11 @@ class TestProductTeamsPricingCardCtaBaseline:
                 "a static pricing card carries markup after its CTA "
                 f"({tail.strip()!r}). `.pricing-card .btn {{ margin-top: auto }}` "
                 "aligns the last child, so anything below the button steals the "
-                "slack and the four baselines split again (owner item 3)")
+                "slack and the four baselines split again (#13645 item 6)")
         template = re.search(r"return `<div class=\"pricing-card[^`]*`", _product_teams_html(), re.S)
         assert template, "renderPricing()'s card template changed shape — re-point this gate"
         assert re.search(r'</a>\s*</div>`$', template.group(0)), (
             "renderPricing()'s template does not end on the CTA anchor, so the "
             "JS-rendered cards (what a real visitor sees) would take the slack "
             "somewhere other than the button while the static cards stay "
-            "aligned (owner item 3)")
+            "aligned (#13645 item 6)")
