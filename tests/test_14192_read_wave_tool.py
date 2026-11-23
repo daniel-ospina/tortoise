@@ -7408,6 +7408,23 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    _b = builtins\n'
             '    _v = _b.vars\n'
             '    _v(_b)["exec"]("sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        # ⛔ AND THE BOUND SPELLINGS OF THE `__builtins__` MAPPING-KEY FETCH (#14326 review
+        # cycle 11, EACH MEASURED: GREEN before the `dict_names` argument was passed, and RED
+        # after; reverting that one argument leaves 44 passed WITHOUT these rows, which is what
+        # makes them load-bearing rather than decorative). `__builtins__` is the one root that
+        # needs no import and is INJECTED, never bound — the arm had to be told about it
+        # explicitly, and the inline twin was already a row here.
+        "`__builtins__[\"dict\"]` BOUND to a name, then called": (
+            '    import builtins\n'
+            '    _dd = __builtins__["dict"]\n'
+            '    _d = _dd(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`__builtins__[\"getattr\"]` BOUND, then a mapping-key fetch": (
+            '    import builtins\n'
+            '    _g = __builtins__["getattr"]\n'
+            '    _dd = _g(vars(builtins), "dict")\n'
+            '    _d = _dd(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         "`builtins.__dict__[\"exec\"]` — the mapping SUBSCRIPT": (
             '    import builtins\n'
             '    builtins.__dict__["exec"]('
