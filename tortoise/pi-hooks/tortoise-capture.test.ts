@@ -6254,3 +6254,305 @@ test("#9599: a not-yet-created transcript under a symlink still keys like Python
   // A wholly non-existent path is still anchored (lexically) rather than throwing.
   assert.match(localSessionId(join(root, "a", "b", "c.jsonl"))!, /^c-[0-9a-f]{12}$/);
 });
+
+test("#14359: a failed rewrite restores unusable transcript bytes and refuses failed quarantine", () => {
+  const spool = tmpSpool();
+  const sid = "sess-preserve-rewrite";
+  writeSpoolEntry(spool, snapshot(sid));
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const original = "torn transcript bytes that cannot be parsed\n";
+  writeFileSync(log, original);
+
+  const failed = writeSpoolEntry(spool, {
+    ...snapshot(sid),
+    turns: [{ role: "user", content: "replacement" }],
+  }, undefined, {
+    atomicWrite(path, text) {
+      if (path === log) throw new Error("simulated full disk");
+      writeFileSync(path, text);
+    },
+  });
+  assert.equal(failed.written, false);
+  assert.equal(readFileSync(log, "utf8"), original, "old bytes are restored after replacement fails");
+  assert.equal(readdirSync(join(spool, "entries")).some((name) => name.includes(".orphan")), false);
+
+  const refused = writeSpoolEntry(spool, {
+    ...snapshot(sid),
+    turns: [{ role: "user", content: "replacement" }],
+  }, undefined, { quarantine: () => undefined });
+  assert.equal(refused.written, false);
+  assert.equal(readFileSync(log, "utf8"), original, "failed quarantine must not overwrite the source");
+  assert.ok(refused.discards.some((d) => d.reason === "spool_write_failed"));
+});
+
+test("#14359: duplicate metadata counts one physical entry in saturation and pruning", () => {
+  // ⛔ EACH HALF MUST BE ABLE TO GO RED ON ITS OWN, and the first version of this
+  // test could not: it asserted saturation on a FILED entry, and the predicate
+  // ends in `!metas.some(entryFiled)` — false whatever the byte total is — and it
+  // pruned with `maxEntries: 1`, so the COUNT axis decided and the sum was never
+  // read. MEASURED: restoring per-meta arithmetic in `saturatedForMetas` or in
+  // `pruneSpool` left this test green (200 pass / 0 fail, both mutations). The
+  // two shapes below are the ones that discriminate:
+  //   * saturation needs an UNFILED entry, so the byte test is what answers, and
+  //     a ceiling between one entry's bytes and two (per-meta doubles it);
+  //   * pruning needs a FILED entry (only filed entries are evictable at all —
+  //     capture-loss), a LOOSE count (so the count axis cannot answer), and the
+  //     same binding byte ceiling.
+  const saturatedSpool = tmpSpool();
+  const unfiled = "sess-duplicate-meta";
+  writeSpoolEntry(saturatedSpool, snapshot(unfiled));
+  const unfiledMeta = join(saturatedSpool, "entries", `${entryKey(unfiled)}.meta.json`);
+  const unfiledJson = readFileSync(unfiledMeta, "utf8");
+  writeFileSync(
+    join(saturatedSpool, "entries", `${entryKey(unfiled)}-duplicate.meta.json`),
+    unfiledJson,
+  );
+  const unfiledSize = spoolEntryBytes(saturatedSpool, unfiled);
+  assert.equal(
+    spoolSaturated(saturatedSpool, { maxEntries: 10, maxTotalBytes: unfiledSize + 1 }),
+    false,
+    "a duplicate meta must not make an UNFILED spool read as saturated (per-meta arithmetic doubles it)",
+  );
+
+  const prunedSpool = tmpSpool();
+  const filed = "sess-duplicate-meta-filed";
+  writeSpoolEntry(prunedSpool, snapshot(filed));
+  const filedMeta = join(prunedSpool, "entries", `${entryKey(filed)}.meta.json`);
+  const filedJson = JSON.parse(readFileSync(filedMeta, "utf8"));
+  filedJson.filed_key = filedJson.capture_key;
+  writeFileSync(filedMeta, JSON.stringify(filedJson));
+  writeFileSync(
+    join(prunedSpool, "entries", `${entryKey(filed)}-duplicate.meta.json`),
+    JSON.stringify(filedJson),
+  );
+  const filedSize = spoolEntryBytes(prunedSpool, filed);
+  const pruned = pruneSpool(prunedSpool, null, {
+    maxEntries: 10,
+    maxTotalBytes: filedSize + 1,
+  });
+  assert.deepEqual(
+    pruned,
+    [],
+    "the spool holds ONE session's bytes under its ceiling — a duplicate meta must not make prune evict",
+  );
+  assert.ok(readSpoolEntry(prunedSpool, filed), "the filed entry was evicted for a copy that is not on disk");
+});
+
+test("#14359: a REFUSED write must not have moved the transcript aside", () => {
+  // ⛔ THE ORDER OF THE QUARANTINE IS THE BUG (#14359 review P1). It sat above the
+  // entry-bound and saturation refusals, which `return` without running the
+  // `catch` restore — so a REFUSED write left `<key>.meta.json` beside
+  // `<key>.turns.jsonl.orphan` and NO turn log. The next `flushSpool` read that
+  // absent log as its *provably empty* arm, UNLINKED the entry and recorded
+  // `transcript_empty` two milliseconds after our own writer moved the bytes
+  // aside: a retained torn capture became a deleted one. Python's leg never had
+  // this window (its bound and admission checks precede the quarantine), which is
+  // why the divergence was invisible to a per-leg test.
+  //
+  // MUTATION THAT REDS THIS: move the `unusableBytes`/`quarantined` block back
+  // above the saturation branch — the log is gone and an orphan exists.
+  const spool = tmpSpool();
+  const sid = "sess-refused-keeps-log";
+  const bounds = { maxEntries: 2, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  writeSpoolEntry(spool, { ...snapshot(sid), turns: [{ role: "user", content: "1" }] }, bounds);
+  writeSpoolEntry(spool, { ...snapshot("filler"), turns: [{ role: "user", content: "2" }] }, bounds);
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const unusable = "torn transcript bytes that cannot be parsed\n";
+  writeFileSync(log, unusable);
+
+  // The per-entry bound refuses THIS write — the refusal whose `return` used to
+  // skip the restore.
+  const refused = writeSpoolEntry(
+    spool,
+    { ...snapshot(sid), turns: [{ role: "user", content: "3".repeat(50_000) }] },
+    bounds,
+  );
+  assert.equal(refused.written, false, "fixture must actually hit the refusal");
+  assert.equal(
+    readFileSync(log, "utf8"),
+    unusable,
+    "a REFUSED write moved the bytes it could not use aside — the poison the ordering closes",
+  );
+  assert.equal(
+    readdirSync(join(spool, "entries")).some((name) => name.includes(".orphan")),
+    false,
+    "no orphan may exist for a write that never wrote",
+  );
+});
+
+test("#14359: a kill between the quarantine and the write keeps the entry (orphan witness)", async () => {
+  // The writer renames an unusable log ASIDE and then writes the replacement. A
+  // process killed in that window leaves a readable meta, no turn log, and the
+  // bytes in `<key>.turns.jsonl.orphan`. "Log absent" used to mean "provably
+  // empty" to the drain: it UNLINKED the entry and wrote `transcript_empty` —
+  // "there was nothing to keep" — about bytes this module itself had moved aside
+  // because they were worth keeping.
+  //
+  // A sibling orphan for the SAME key makes that arm unprovable, so it is read as
+  // torn: recorded, terminal, KEPT (`--retry-terminal` reverses it). Mirrors
+  // `capture_spool._adopt_sibling_orphan`; the asymmetry is the point — a stale
+  // orphan can only make an entry retained, never destroyed.
+  //
+  // MUTATION THAT REDS THIS: drop the `else if (siblingOrphanExists(...))` arm
+  // from the drain → the entry is unlinked and the ledger says `transcript_empty`.
+  const spool = tmpSpool();
+  const sid = "killed-mid-rewrite";
+  writeSpoolEntry(spool, snapshot(sid));
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const orphan = `${log}.orphan`;
+  renameSync(log, orphan);
+  const kept = readFileSync(orphan);
+
+  const { fetchImpl, calls } = mockFetch([{ ok: true }]);
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 });
+
+  assert.deepEqual(calls.map((c) => c.body.session_id), [],
+    "an entry whose bytes are in an orphan cannot be posted");
+  assert.deepEqual(summary.discarded.map((d) => d.reason), ["transcript_torn"],
+    "an orphan beside the meta must not read as provably empty");
+  assert.ok(readSpoolEntry(spool, sid), "the entry was deleted although its bytes are on disk");
+  assert.equal(readDiscards(spool).at(-1)?.reason, "transcript_torn");
+  // ⛔ KEEPING THE ENTRY IS ONLY HALF OF IT (#14359 review cycle 4): the bytes used
+  // to stay in the ORPHAN class, which `pruneSpool` byte-evicts once the ceiling
+  // binds — the entry survived as a husk whose log died one write later. The drain
+  // puts them BACK as the log, where an UNFILED entry's log is never evicted and
+  // `spoolEntryBytes` counts it.
+  assert.deepEqual(readFileSync(log), kept,
+    "the drain recorded 'kept' but left the bytes in the evictable orphan class");
+  assert.equal(existsSync(orphan), false, "an adopted orphan leaves no second name behind");
+  // The ledger must describe the arm that actually ran: there is no turn log at
+  // this point, so a "turn log has bytes" detail would assert a state that is false
+  // (the twin of `capture_spool._flush_one`, which splits them for this reason).
+  assert.match(readDiscards(spool).at(-1)!.detail as string, /no turn log, but an `.orphan`/,
+    "the ledger must not claim a turn log has bytes when none exists");
+});
+
+test("#14359: the restore cannot clobber a log that landed IN BETWEEN", () => {
+  // ⛔ The restore was a two-syscall TOCTOU (#14359 review cycle 4). Both legs
+  // write ONE spool directory; `stat`-then-`renameSync` let this happen: our
+  // writer quarantines the log, its write fails, it checks "absent" and the answer
+  // is yes — then the PYTHON leg writes the new turn, and our `renameSync`
+  // overwrites it with the pre-quarantine bytes. That leg reported `written: true`
+  // and its newest turn is gone, silently, caused by the code that exists to
+  // prevent exactly this. `linkSync` fails with EEXIST the moment any log exists.
+  //
+  // MUTATION THAT REDS THIS: restore with an UNCONDITIONAL
+  // `renameSync(quarantined, logPath)` — the other leg's turn is destroyed and the
+  // stale bytes take its place.
+  //
+  // ⚠️ STATED LIMITATION, measured (the twin of the Python test's note): a
+  // black-box fixture cannot separate `linkSync` from
+  // `if (!turnLogHasContent(...)) renameSync(...)` — that form reads "present" and
+  // skips, so it stays GREEN here (verified). `linkSync` is the mechanism AND the
+  // guarantee: it cannot be lied to because it does not ask. Do not "simplify" this
+  // back to a stat+rename on the strength of a green suite.
+  const spool = tmpSpool();
+  const sid = "raced-restore";
+  writeSpoolEntry(spool, snapshot(sid));
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const stale = '{"note": "pre-quarantine bytes"}\n';
+  const newer = '{"role":"user","content":"the turn the other leg just wrote"}\n';
+  writeFileSync(log, stale);
+
+  const failed = writeSpoolEntry(
+    spool,
+    { ...snapshot(sid), turns: [{ role: "user", content: "replacement" }] },
+    undefined,
+    {
+      atomicWrite(path, text) {
+        if (path === log) {
+          // The other leg lands while we are "failing".
+          writeFileSync(log, newer);
+          throw new Error("simulated full disk");
+        }
+        writeFileSync(path, text);
+      },
+    },
+  );
+  assert.equal(failed.written, false);
+  assert.equal(
+    readFileSync(log, "utf8"),
+    newer,
+    "the restore overwrote a log that landed after the quarantine — the newest turn is gone",
+  );
+  const orphans = readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan"));
+  assert.equal(orphans.length, 1, "the stale bytes stay in the orphan, not in the live log");
+  assert.equal(readFileSync(join(spool, "entries", orphans[0]), "utf8"), stale);
+});
+
+test("#14359: a prune under byte pressure cannot spend the ONLY COPY of a capture", () => {
+  // ⛔ The write path ends in `pruneSpool`, and the orphan pass reaps orphans while
+  // the spool is over the ceiling. `keepSessionId` protects live ENTRIES only, so a
+  // write that quarantined an unusable log and then crossed the ceiling in the SAME
+  // call deleted its own orphan — returning `written: true` and logging
+  // `UNREACHABLE` about the only copy it had just moved aside (measured: review
+  // cycle 5, `orphans: []`, "THE ONLY COPY still anywhere on disk: False").
+  //
+  // This drives the WRITE path's own orphan (`keepSessionId` = the session being
+  // written, with a live log beside it) — the witness the first version of this
+  // test missed entirely: it passed `null`, so only the meta-and-no-log witness
+  // was exercised and dropping the keep witness left the suite green (measured).
+  //
+  // MUTATION THAT REDS THIS: drop the `orphanIsOnlyCopy` guard from the orphan pass,
+  // or drop only its `keepSessionId` witness.
+  const spool = tmpSpool();
+  const sid = "only-copy";
+  const other = "pressure-other";
+  writeSpoolEntry(spool, { ...snapshot(sid), turns: [{ role: "user", content: "s".repeat(800) }] });
+  writeSpoolEntry(spool, { ...snapshot(other), turns: [{ role: "user", content: "o".repeat(800) }] });
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const unusable = '{"note":"unparseable"}\n[1,2,3]\n';
+  // The state the WRITE leaves: the replacement is the LOG and the unusable bytes
+  // are the ORPHAN of the same key. The log must still be there, or the OTHER
+  // witness (meta and no log) protects the orphan and this test cannot see the keep
+  // witness at all — measured: with only the kill-window state, dropping the keep
+  // witness left the suite green.
+  const orphan = `${log}.orphan`;
+  writeFileSync(orphan, unusable);
+  writeFileSync(log, '{"role":"user","content":"the replacement turn"}\n');
+
+  // A ceiling the live entries alone fit under, but which the orphan pushes past.
+  const ceiling = spoolEntryBytes(spool, other) + spoolEntryBytes(spool, sid) + 16;
+  const discards = pruneSpool(spool, sid, { maxEntries: 20_000, maxTotalBytes: ceiling, maxEntryBytes: 1 << 20 });
+
+  assert.deepEqual(
+    discards.filter((d) => d.session_id.startsWith("orphan:")),
+    [],
+    "the prune spent the only copy of a capture",
+  );
+  assert.equal(readFileSync(orphan, "utf8"), unusable, "the bytes are still on disk");
+});
+
+test("#14359: the adoption takes the NEWEST orphan and LINKS it, not copies", () => {
+  // Two properties the Python twin pins and this leg did not:
+  //   * newest-first — `sorted()` is lexicographic, so `.orphan` (the OLDEST) won
+  //     while the prune then spent `.orphan2` (the newest): the drain kept stale
+  //     bytes, lost fresh ones, and said they had been put back;
+  //   * linked, not copied — a copy can be half-written and doubles the disk cost.
+  //     The inode is the assertion, because a copy is byte-identical.
+  //
+  // MUTATION THAT REDS THIS: `names.sort()` (lexicographic), or
+  // `writeFileSync(log, readFileSync(orphan))` instead of `linkSync`.
+  const spool = tmpSpool();
+  const sid = "two-orphans";
+  writeSpoolEntry(spool, snapshot(sid));
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const older = `${log}.orphan`;
+  const newer = `${log}.orphan2`;
+  writeFileSync(older, '{"role":"user","content":"older capture"}\n');
+  writeFileSync(newer, '{"role":"user","content":"newer capture"}\n');
+  const base = 1_700_000_000;
+  utimesSync(older, base, base);
+  utimesSync(newer, base + 60, base + 60);
+  const newerBytes = readFileSync(newer);
+  const newerIno = statSync(newer).ino;
+  rmSync(log); // the kill: only the orphans hold bytes
+
+  const { fetchImpl } = mockFetch([{ ok: true }]);
+  return flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 }).then(() => {
+    assert.deepEqual(readFileSync(log), newerBytes,
+      "the drain adopted the OLDEST orphan — the newest capture is still evictable");
+    assert.equal(statSync(log).ino, newerIno,
+      "the adoption copied the bytes instead of linking them");
+  });
+});
