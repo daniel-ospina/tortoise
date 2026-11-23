@@ -1,0 +1,120 @@
+reap: kept fdb-lane-03f6712ee8 — nothing holds /home/cmux/tortoise/.worktrees/prd-14086 (no live process names it, no client attached within 300s, 44.6h old, no OBSERVED use for 21.3h > 2h), but its owning worktree still EXISTS and #8180 authorises a reap only when that worktree is gone. Release it from its own worktree: `cd /home/cmux/tortoise/.worktrees/prd-14086 && uv run python tools/test_lane.py down` (or rule on #8180 to arm `TORTOISE_TEST_LANE_REAP_LANE_GONE=1`)
+reap: kept fdb-lane-14577804f9 — nothing holds /home/cmux/tortoise/.worktrees/fix-14140 (no live process names it, no client attached within 300s, 22.9h old, no OBSERVED use for 13.4h > 2h), but its owning worktree still EXISTS and #8180 authorises a reap only when that worktree is gone. Release it from its own worktree: `cd /home/cmux/tortoise/.worktrees/fix-14140 && uv run python tools/test_lane.py down` (or rule on #8180 to arm `TORTOISE_TEST_LANE_REAP_LANE_GONE=1`)
+reap: kept fdb-lane-165caf1351 — no live process holds /home/cmux/.worktrees/w2-archive and it shows no OBSERVED use, but only 1.4h of 2h grace has passed
+reap: kept fdb-lane-203008781d — its owning lane is LIVE in /home/cmux/tortoise/.worktrees/fix-14038
+reap: kept fdb-lane-6f210d23c0 — no live process holds /home/cmux/tortoise/.worktrees/prd-14278 and it shows no OBSERVED use, but only 1.2h of 2h grace has passed
+reap: kept fdb-lane-7c387728c2 — nothing holds /home/cmux/.worktrees/wave2 (no live process names it, no client attached within 300s, 145.0h old, no OBSERVED use for 110.3h > 2h), but its owning worktree still EXISTS and #8180 authorises a reap only when that worktree is gone. Release it from its own worktree: `cd /home/cmux/.worktrees/wave2 && uv run python tools/test_lane.py down` (or rule on #8180 to arm `TORTOISE_TEST_LANE_REAP_LANE_GONE=1`)
+reap: kept fdb-lane-8dadecb5c0 — no live process holds /home/cmux/tortoise/.worktrees/fix-14039 and it shows no OBSERVED use, but only 1.4h of 2h grace has passed
+reap: kept fdb-lane-9eb30462dd — no live process holds /home/cmux/tortoise/.worktrees/fix-14306 and it shows no OBSERVED use, but only 1.4h of 2h grace has passed
+reap: kept fdb-lane-a2b21a5ee3 — nothing holds /home/cmux/tortoise/.worktrees/fix-14222 (no live process names it, no client attached within 300s, 15.8h old, no OBSERVED use for 8.7h > 2h), but its owning worktree still EXISTS and #8180 authorises a reap only when that worktree is gone. Release it from its own worktree: `cd /home/cmux/tortoise/.worktrees/fix-14222 && uv run python tools/test_lane.py down` (or rule on #8180 to arm `TORTOISE_TEST_LANE_REAP_LANE_GONE=1`)
+reap: kept fdb-lane-a8b8b9b7e4 — nothing holds /home/cmux/.worktrees/P6 (no live process names it, no client attached within 300s, 95.0h old, no OBSERVED use for 92.4h > 2h), but its owning worktree still EXISTS and #8180 authorises a reap only when that worktree is gone. Release it from its own worktree: `cd /home/cmux/.worktrees/P6 && uv run python tools/test_lane.py down` (or rule on #8180 to arm `TORTOISE_TEST_LANE_REAP_LANE_GONE=1`)
+reap: kept fdb-lane-b4a3d2714c — no live process holds /home/cmux/tortoise/.worktrees/prd-14039 and it shows no OBSERVED use, but only 1.4h of 2h grace has passed
+reap: kept fdb-lane-b9bfa5561d — nothing holds /home/cmux/.worktrees/rv14224-main (no live process names it, no client attached within 300s, 11.5h old, no OBSERVED use for 8.7h > 2h), but its owning worktree still EXISTS and #8180 authorises a reap only when that worktree is gone. Release it from its own worktree: `cd /home/cmux/.worktrees/rv14224-main && uv run python tools/test_lane.py down` (or rule on #8180 to arm `TORTOISE_TEST_LANE_REAP_LANE_GONE=1`)
+reap: kept fdb-lane-c814686857 — nothing holds /home/cmux/tortoise/.worktrees/prd-13680 (no live process names it, no client attached within 300s, 82.6h old, no OBSERVED use for 25.1h > 2h), but its owning worktree still EXISTS and #8180 authorises a reap only when that worktree is gone. Release it from its own worktree: `cd /home/cmux/tortoise/.worktrees/prd-13680 && uv run python tools/test_lane.py down` (or rule on #8180 to arm `TORTOISE_TEST_LANE_REAP_LANE_GONE=1`)
+reap: kept fdb-lane-d5307ec0ba — no live process holds /home/cmux/tortoise/.worktrees/fix-14183 and it shows no OBSERVED use, but only 1.4h of 2h grace has passed
+reap: kept fdb-lane-fed5c933b3 — no live process holds /home/cmux/tortoise/.worktrees/prd-14060 and it shows no OBSERVED use, but only 1.4h of 2h grace has passed
+test-lane: fdb-lane-c747f7f246 on 127.0.0.1:16405 — TORTOISE_DB_URI=docker://:@127.0.0.1:16405/tortoise_test_matrix TORTOISE_TEST_DOCKER_PORT=16405 TORTOISE_TEST_DOCKER_PASSWORD='' TORTOISE_TEST_LEGACY_PORT=16405 — invoking: /home/cmux/wt-14326/.venv/bin/python3 -m pytest tests/test_14192_read_wave_tool.py tests/test_reap_redislite_orphans.py -v
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /home/cmux/wt-14326/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/cmux/wt-14326
+configfile: pyproject.toml
+plugins: playwright-0.9.0, base-url-2.1.0, asyncio-1.4.0, xdist-3.8.0, timeout-2.4.0, anyio-4.14.2
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+collecting ... collected 89 items
+
+tests/test_14192_read_wave_tool.py::test_the_result_id_is_read_from_a_dict_and_from_an_object PASSED [  1%]
+tests/test_14192_read_wave_tool.py::test_rank_identity_goes_red_when_a_page_is_permuted PASSED [  2%]
+tests/test_14192_read_wave_tool.py::test_a_shorter_page_diverges_at_its_length PASSED [  3%]
+tests/test_14192_read_wave_tool.py::test_identical_pages_stay_green PASSED [  4%]
+tests/test_14192_read_wave_tool.py::test_an_unrecorded_order_refuses_the_verdict_instead_of_passing PASSED [  5%]
+tests/test_14192_read_wave_tool.py::test_a_different_corpus_is_not_compared PASSED [  6%]
+tests/test_14192_read_wave_tool.py::test_a_tool_only_diff_selects_this_pin PASSED [  7%]
+tests/test_14192_read_wave_tool.py::test_a_door_diff_selects_this_pin PASSED [  8%]
+tests/test_14192_read_wave_tool.py::test_handing_an_ALIASED_page_to_a_call_is_red PASSED [ 10%]
+tests/test_14192_read_wave_tool.py::test_a_TWO_HOP_or_WALRUS_alias_still_reaches_the_sort PASSED [ 11%]
+tests/test_14192_read_wave_tool.py::test_an_UNPACKED_alias_still_reaches_the_sort PASSED [ 12%]
+tests/test_14192_read_wave_tool.py::test_a_CONTAINER_SLOT_holding_an_element_is_that_element PASSED [ 13%]
+tests/test_14192_read_wave_tool.py::test_an_UNLISTED_METHOD_on_the_page_is_a_MUTATION_not_a_pass PASSED [ 14%]
+tests/test_14192_read_wave_tool.py::test_a_CHAINED_UNPACK_binds_EVERY_target PASSED [ 15%]
+tests/test_14192_read_wave_tool.py::test_a_CONTAINER_that_only_HOLDS_the_page_is_NOT_the_page PASSED [ 16%]
+tests/test_14192_read_wave_tool.py::test_a_BOUND_MUTATOR_of_a_recorded_row_is_red PASSED [ 17%]
+tests/test_14192_read_wave_tool.py::test_a_BOUND_MUTATOR_in_an_OBJECT_SLOT_is_red PASSED [ 19%]
+tests/test_14192_read_wave_tool.py::test_a_COPY_of_the_page_is_NOT_an_alias PASSED [ 20%]
+tests/test_14192_read_wave_tool.py::test_a_FALLBACK_expression_alias_still_reaches_the_sort PASSED [ 21%]
+tests/test_14192_read_wave_tool.py::test_a_PURE_READ_in_a_log_line_is_NOT_a_handed_mutation PASSED [ 22%]
+tests/test_14192_read_wave_tool.py::test_a_BENIGN_bind_or_serialiser_is_NOT_a_mutation PASSED [ 23%]
+tests/test_14192_read_wave_tool.py::test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping PASSED [ 24%]
+tests/test_14192_read_wave_tool.py::test_mutating_a_RECORDED_entry_through_an_alias_is_red PASSED [ 25%]
+tests/test_14192_read_wave_tool.py::test_EVERY_static_binding_form_is_a_READ_reach PASSED [ 26%]
+tests/test_14192_read_wave_tool.py::test_the_READ_side_of_str_is_NOT_a_MUTATION PASSED [ 28%]
+tests/test_14192_read_wave_tool.py::test_a_COMPREHENSION_argument_is_NOT_the_collection PASSED [ 29%]
+tests/test_14192_read_wave_tool.py::test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags PASSED [ 30%]
+tests/test_14192_read_wave_tool.py::test_every_argument_clause_reds PASSED [ 31%]
+tests/test_14192_read_wave_tool.py::test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name PASSED [ 32%]
+tests/test_14192_read_wave_tool.py::test_every_door_contract_clause_reds PASSED [ 33%]
+tests/test_14192_read_wave_tool.py::test_the_artifact_generator_filter_clauses_red PASSED [ 34%]
+tests/test_reap_redislite_orphans.py::test_a_live_peers_young_server_is_kept PASSED [ 35%]
+tests/test_reap_redislite_orphans.py::test_an_aged_server_is_reaped PASSED [ 37%]
+tests/test_reap_redislite_orphans.py::test_a_server_whose_socket_dir_is_gone_is_reaped PASSED [ 38%]
+tests/test_reap_redislite_orphans.py::test_an_unmeasurable_age_on_a_live_dir_is_kept PASSED [ 39%]
+tests/test_reap_redislite_orphans.py::test_undeterminable_ownership_is_kept PASSED [ 40%]
+tests/test_reap_redislite_orphans.py::test_the_age_arm_clears_every_embedded_lane_job_outer_timeout PASSED [ 41%]
+tests/test_reap_redislite_orphans.py::test_the_embedded_lane_scan_reads_every_workflow_extension PASSED [ 42%]
+tests/test_reap_redislite_orphans.py::test_an_expression_valued_carve_out_is_admitted PASSED [ 43%]
+tests/test_reap_redislite_orphans.py::test_the_age_arm_clears_the_widest_permitted_leg_watchdog PASSED [ 44%]
+tests/test_reap_redislite_orphans.py::test_the_derivation_block_names_the_dir_floor_as_open_risk PASSED [ 46%]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv0-/tmp/tt_ab/tmpcd] PASSED [ 47%]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv1-/tmp/tt_ab/tmpcd] PASSED [ 48%]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv2-/tmp/tt_ab/tmpcd] PASSED [ 49%]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv3-/tmp/tt_ab/tmpcd] PASSED [ 50%]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv4-None] PASSED [ 51%]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv5-None] PASSED [ 52%]
+tests/test_reap_redislite_orphans.py::test_a_dry_run_never_signals PASSED [ 53%]
+tests/test_reap_redislite_orphans.py::test_apply_signals_exactly_the_reapable_rows PASSED [ 55%]
+tests/test_reap_redislite_orphans.py::test_the_cli_reads_its_inventory_from_the_proc_json_seam PASSED [ 56%]
+tests/test_reap_redislite_orphans.py::test_an_unreadable_inventory_is_exit_2_not_a_silent_zero PASSED [ 57%]
+tests/test_reap_redislite_orphans.py::test_an_unlistable_proc_is_exit_2_too PASSED [ 58%]
+tests/test_reap_redislite_orphans.py::test_a_ps_that_runs_and_fails_is_exit_2_too PASSED [ 59%]
+tests/test_reap_redislite_orphans.py::test_the_ps_branch_identifies_by_comm_and_parses_every_shape PASSED [ 60%]
+tests/test_reap_redislite_orphans.py::test_a_measured_empty_host_is_still_exit_0 PASSED [ 61%]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argc1-measured] PASSED [ 62%]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[wrapper-comm] PASSED [ 64%]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[renamed-comm] PASSED [ 65%]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[direct-argv0] PASSED [ 66%]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[renamed-exe] PASSED [ 67%]
+tests/test_reap_redislite_orphans.py::test_the_seeded_wrapper_row_reaches_the_decision_table PASSED [ 68%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-server-True] PASSED [ 69%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-server *:6379-True] PASSED [ 70%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-server *:-True] PASSED [ 71%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-server:6379-True] PASSED [ 73%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-cli-False] PASSED [ 74%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-sentinel-False] PASSED [ 75%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-serverish-False] PASSED [ 76%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-server-x-False] PASSED [ 77%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-serve-False] PASSED [ 78%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[not-redis-server-False] PASSED [ 79%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[Redis-Server-False] PASSED [ 80%]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[-False] PASSED [ 82%]
+tests/test_reap_redislite_orphans.py::test_the_pre_fix_identity_filter_is_what_dropped_the_measured_shape PASSED [ 83%]
+tests/test_reap_redislite_orphans.py::test_a_process_that_only_NAMES_the_binary_is_not_a_server PASSED [ 84%]
+tests/test_reap_redislite_orphans.py::test_a_plain_tcp_redis_is_excluded_with_a_stated_reason PASSED [ 85%]
+tests/test_reap_redislite_orphans.py::test_a_census_the_inventory_cannot_account_for_is_exit_3 PASSED [ 86%]
+tests/test_reap_redislite_orphans.py::test_the_census_fires_when_the_identity_gate_matches_nothing PASSED [ 87%]
+tests/test_reap_redislite_orphans.py::test_an_accounted_census_is_not_a_gap PASSED [ 88%]
+tests/test_reap_redislite_orphans.py::test_a_non_utf8_process_name_cannot_kill_the_run PASSED [ 89%]
+tests/test_reap_redislite_orphans.py::test_a_real_argv0_wrapper_process_is_enumerated PASSED [ 91%]
+tests/test_reap_redislite_orphans.py::test_no_ci_step_reaps_embedded_redis_by_process_name PASSED [ 92%]
+tests/test_reap_redislite_orphans.py::test_every_cleaning_job_invokes_the_scoped_reaper PASSED [ 93%]
+tests/test_reap_redislite_orphans.py::test_every_reaper_call_site_states_the_real_population PASSED [ 94%]
+tests/test_reap_redislite_orphans.py::test_no_ci_step_duplicates_its_tempdir_cleanup PASSED [ 95%]
+tests/test_reap_redislite_orphans.py::test_every_embedded_leg_invokes_the_scoped_reaper[test] PASSED [ 96%]
+tests/test_reap_redislite_orphans.py::test_every_embedded_leg_invokes_the_scoped_reaper[test-slow] PASSED [ 97%]
+tests/test_reap_redislite_orphans.py::test_every_embedded_leg_invokes_the_scoped_reaper[test-concurrency-falkor] PASSED [ 98%]
+tests/test_reap_redislite_orphans.py::test_every_embedded_leg_invokes_the_scoped_reaper[test-carve-out] PASSED [100%]
+
+============================= 89 passed in 35.95s ==============================
+test-lane: reaping fdb-lane-c747f7f246 on exit -> removed
