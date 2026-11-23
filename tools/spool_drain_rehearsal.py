@@ -63,6 +63,19 @@ stays `tools/acceptance_14232_drain.py`.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.12+-only construct would otherwise fail first, and it would fail with a
+# traceback instead of this message. The gate that enforces this shape is
+# tests/test_entry_point_python_guard.py, not a style rule.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/spool_drain_rehearsal.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/spool_drain_rehearsal.py`"
+    )
+
 import argparse
 import contextlib
 import hashlib
@@ -72,7 +85,6 @@ import re
 import shutil
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
