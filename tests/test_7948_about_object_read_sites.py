@@ -3745,8 +3745,8 @@ def test_every_customer_callable_row_reaches_a_declared_door():
         )
         # ⛔ `or 0` would be WRONG here: `_door_distance` returns `None` for "not found
         # within `_DISTANCE_SEARCH_CAP` hops", and `0` is a LEGITIMATE distance (a door
-        # that IS the reader) — see `_door_distance:3043-3047` (the docstring that states
-        # `None` as a TRUNCATION, not an absence) and the cap loop at `:3063`, plus
+        # that IS the reader) — see `_door_distance:3046-3057` (the docstring that states
+        # `None` as a TRUNCATION, not an absence) and the cap loop at `:3065`, plus
         # `_DISTANCE_SEARCH_CAP`'s docstring, which requires "every message that consumes
         # the value [to say] which of the two it is". Collapsing `None` into `0` reports a
         # capped search as a zero-hop door, which is the exact confusion the sibling arm
