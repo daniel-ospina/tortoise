@@ -79,7 +79,7 @@ version: 1
 # compares the per-shard sentence above against the live emission (and its own `ceil(...)` operand
 # against the emitted watchdog), so a carried figure reds a required leg instead of shipping, which
 # is how this block went stale three times before this guard existed (#11298 review
-# cycle 5, #14015, #14296). ⛔ The cap was NOT
+# cycle 5, #14015, #14296).) ⛔ The cap was NOT
 # moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
 # from the pre-suite terms (those are measurements and file facts).

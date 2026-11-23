@@ -14055,8 +14055,9 @@ def test_the_emission_block_guard_is_not_vacuous():
     assert duplicate_ceil is not None
     # ⛔ The witness is the MARKER, and its paired NEGATIVE — not `partition != live_groups`. That
     # comparison is satisfied by any live-emission drift as well, so it would stop witnessing the
-    # arm exactly when the block went stale (which the manifest's own block now counts at four,
-    # having been caught a fourth time as this PR landed): an assertion that cannot fail for the
+    # arm exactly when the block went stale (which it has been caught doing again since this
+    # guard landed — #14434's and #14220's registrations each re-packed the bins): an assertion
+    # that cannot fail for the
     # reason it names is the class this file keeps re-learning. The single-clause block below
     # proves the marker is caused by the duplicate.
     assert all("<ceil stated 2 times>" in names for names in duplicate_ceil[0].values()), (
