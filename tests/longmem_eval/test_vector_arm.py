@@ -1488,11 +1488,14 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
         # exactly as the unset router does and fingerprints the same. ⛔ This is
         # NOT "the same as session_workers=1": the sw=1 spec path returns the
         # bare registry adapter (`MODELS['deepseek-flash-direct']`), a
-        # direct-only `DeepSeekDirectModel` that hardcodes `thinking: disabled`
-        # and therefore has no `disable_reasoning` attribute for the fingerprint
-        # to record — which is why the two fingerprints differ and the toggle is
-        # refused below. (A different registry key, `MODELS['deepseek-flash']`,
-        # IS the thinking-ON one: a bare `OpenRouterModel`, #14368.)
+        # direct-only `DeepSeekDirectModel`, so the two fingerprints differ on
+        # the wire id itself (`deepseek-v4-flash` vs
+        # `deepseek/deepseek-v4-flash`) — which is why the toggle is refused
+        # below. (Both routes suppress thinking: that member HARDCODES
+        # `thinking: disabled` in its own `complete()`, so its inherited
+        # `disable_reasoning` stays False and the fingerprint adds no suffix from
+        # it. A different registry key, `MODELS['deepseek-flash']`, is the bare
+        # `OpenRouterModel` that reasons — #14368.)
         assert runner._model_id(adapters[-1]) == _FLASH_FP
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=1))
