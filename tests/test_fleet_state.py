@@ -3810,7 +3810,7 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: all 12 params; `0` reds the SAME 12, but by `ZeroDivisionError` rather than premise (b), so `0`
 #: is not a silent typo but a crash. Every OTHER value tried stayed green (`7`, `18`, `19`, `1`,
 #: `2`). ⚠️ THE TOTALS ABOVE ARE THIS HEAD's, AND `origin/main`'s TOO: the `184` in the prose
-#: below was measured at `a7baa98d05`, BEFORE #14287 merged, so every number here was re-measured
+#: below was measured at `a7baa98d05`, BEFORE #14287 merged, so every TOTAL here was re-measured
 #: rather than inherited. The behavioural pins are the `once_slow` and `death_after_streak` ROWS,
 #: not a bare assertion on this constant.
 #: ⛔ EVERY `184 passed` / `173 passed` TOTAL IN THIS WHOLE FILE — ABOVE *AND* BELOW, in this
@@ -3867,10 +3867,13 @@ _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 #: over 2.50s`), and the count it needs GROWS with `K`, so it is a RANGE carrying its endpoints —
 #: never a bare "from K = …": 2 at `K = 2..6` (2.50 s at the shipped `K = 5`), 3 at `7..16` (3.47 /
 #: 3.15 / 2.40 / 2.03 s at 7 / 8 / 12 / 16), 4 at `17..37` (2.83 / 2.67 / 2.00 s at 17 / 19 / 37),
-#: 5 at `38..113` (2.59 / 2.38 / 2.00 s at 38 / 50 / 113), 6 at `K = 114` (2.47 s). Every bracketed
-#: value is MEASURED with the deletion mutant, and each range ends where it does because the next K
-#: crosses to the next count: the boundary pairs are `6|7`, `16|17`, `37|38`, `113|114`. The model
-#: is the one the `time()`-read note below already documents — `step_s + 4(k - 1) * step_s`, i.e.
+#: 5 at `38..113` (2.59 / 2.38 / 2.00 s at 38 / 50 / 113), 6 at `K >= 114` (2.47 s at 114). Every
+#: bracketed value is MEASURED with the deletion mutant, and each boundary is the PAIR where the
+#: count crosses (`6|7`, `16|17`, `37|38`, `113|114`). ⛔ THE LAST SEGMENT HAS NO UPPER END, so
+#: writing it as the point `6 at K = 114` would be the same over-claim in the safe direction: past
+#: 114 the count SATURATES at `6` (MEASURED: 6 samples, 2.47 s at `K = 115` and 2.31 s at `K = 200`),
+#: which is the ceiling the derivation below explains: the model is the one the `time()`-read
+#: note already documents — `step_s + 4(k - 1) * step_s`, i.e.
 #: `(4k - 3) * step_s` with `step_s = 2/K + 0.1` — so `k` is the FIRST `k >= 2` clearing
 #: `(4k - 3) * (2/K + 0.1) >= 2.0`. That reproduces every span above, and `6` is the CEILING
 #: because the step never falls below `0.1` (`17 * 0.1 = 1.7 < 2.0` at `k = 5`), so the count rises
