@@ -1052,9 +1052,9 @@ jobs:
       # 127280762096: `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` at
       # 14:42:50Z — the action's own rate, 4.9 MB/s across the whole 12 m 21 s post
       # step), so the honest cost of 3.88 GB is ~13 m healthy and ~57 m+ degraded
-      # against the ~8.36 m of room: over the bound either way, but by ~1.4x rather
-      # than 8x. Splitting the payload is what brings it inside — not an assumption
-      # that this pool cannot write it.
+      # against the ~8.36 m of room: over the bound either way — by ~1.55x healthy
+      # (13 / 8.36) and ~6.82x degraded (57 / 8.36). Splitting the payload is what
+      # brings it inside — not an assumption that this pool cannot write it.
       #
       # FAIL-OPEN IN EVERY BRANCH: a prune or save that aborts on its bound is a
       # MISS, never a red — both are `continue-on-error: true` — and the save is
