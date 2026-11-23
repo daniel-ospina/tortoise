@@ -650,3 +650,121 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
             "on the ambient interpreter and `tests/test_extractor_cost_measure.py` is not "
             "in `slow_files` — so its two corpus cases die with `ModuleNotFoundError` "
             f"(#14277). Install line: {line.strip()}")
+
+
+# ── #14343: the decomposition of the two constants ────────────────────────
+#
+# `decompose` answers a different question from `run`: not "how much" but "of
+# what". Its table is the deliverable, so the properties that make it EVIDENCE
+# are pinned here — a table that silently stopped summing, or that attributed
+# a region the prompt does not contain, would read as a result.
+
+def _evidence_rows() -> list[dict]:
+    from tools.extractor_cost_measure import build_report  # noqa: F401
+    import json as _json
+    path = (_REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
+            / "measurements.jsonl")
+    return [_json.loads(line) for line in path.read_text().splitlines()
+            if line.strip()]
+
+
+def test_the_static_regions_of_a_prompt_are_its_own_bytes():
+    """Every static region plus the template prose must equal the render.
+
+    The table's first section is only evidence if it is exhaustive: a region
+    that the renderer splices but this helper does not count would show up as
+    template prose and be attributed to the wrong party.
+    """
+    from tortoise import extractor_v2 as X
+    statics = m._render_regions()
+    enc = m._encoding()
+    master = X.build_master_list()
+    date = "2026-11-21T00:00:00+00:00"
+
+    s1 = (X.S1_TMPL
+          .replace("{memory_granularity}", X._granularity_text(master))
+          .replace("{date_anchor}", X._date_anchor(date)))
+    assert sum(statics["s1"].values()) == len(enc.encode(s1))
+    # S2/S4: the region map is captured from the renderer's own fill map, so
+    # the equality is the property that the capture is complete.
+    for stage, rendered in (("s2", X.render_s2_prompt(master, session_date=date,
+                                                      story="", edus=None)),
+                            ("s4", X.render_s4_prompt("", {}, {}, master,
+                                                      session_date=date,
+                                                      edus=None))):
+        assert sum(statics[stage].values()) == len(enc.encode(rendered)), stage
+
+
+def test_the_kind_vocabulary_is_a_measured_region_not_prose():
+    """The master render is the region the issue names; it must be separable."""
+    statics = m._render_regions()
+    assert statics["s2"]["master_list"] > 1000, statics["s2"]
+    assert statics["s4"]["master_list"] == statics["s2"]["master_list"], (
+        "S2 and S4 render the SAME vocabulary — two different sizes would mean "
+        "the capture paired a region with the wrong stage")
+
+
+def test_every_document_region_is_charged_once_per_call():
+    """A per-document figure must use the measured call counts, not one call.
+
+    S1 makes more than one call per document (68% of the corpus does), and the
+    static prompt is paid on EACH — a roll-up that assumed one call per stage
+    would understate the constant by ~40% on S1 and by the retry rate on S2/S4.
+    """
+    dec = m.decompose(_evidence_rows())
+    assert dec["calls_per_doc"]["s1"] > 1.0
+    s1_slot = dec["statics"]["s1"]["memory_granularity"]
+    rounds = [v for k, v in dec["regions"].items()
+              if k.startswith("memory granularity")][0]
+    assert rounds == pytest.approx(dec["calls_per_doc"]["s1"] * s1_slot,
+                                   rel=0.02)
+
+
+def test_the_composition_sums_and_states_its_unattributed_remainder():
+    """The table's parts must sum to what it claims, residual disclosed."""
+    dec = m.decompose(_evidence_rows())
+    assert sum(dec["regions"].values()) == pytest.approx(
+        dec["composition_total"], abs=1.0)
+    assert dec["unattributed"] == pytest.approx(
+        dec["fitted_constant"] - dec["composition_total"], abs=1.0)
+    # The remainder is stated, not hidden: it is the OLS intercept's leverage,
+    # and a table that closed the gap by construction would be a rounder lie.
+    assert abs(dec["unattributed"]) < 0.25 * dec["fitted_constant"]
+
+
+def test_the_reemitted_embed_list_is_the_largest_single_region():
+    """#14343's finding, pinned: the biggest input term is the pipeline's OWN
+    emission re-read, not any static instruction set."""
+    dec = m.decompose(_evidence_rows())
+    ranked = list(dec["regions"].items())
+    assert ranked[0][0].startswith("**S2's embed list"), ranked[:3]
+    assert dec["solved"]["embed_over_emission"] > 1.0, (
+        "S4 serializes S2's list at indent=1 and after the normaliser; a ratio "
+        "<= 1 would mean the region is smaller than the emission, which the "
+        "measured prompts contradict")
+
+
+def test_the_output_constant_is_dominated_by_the_mapping_stage():
+    dec = m.decompose(_evidence_rows())
+    assert dec["output"]["s2_share"] > 50.0, dec["output"]
+
+
+def test_decompose_refuses_an_arm_the_evidence_does_not_carry():
+    with pytest.raises(SystemExit):
+        m.decompose(_evidence_rows(), arm="tepid")
+
+
+def test_the_offline_compose_arm_makes_no_provider_call():
+    """The decomposition must be runnable with no key — that is what makes it
+    reviewable. `--offline` swaps the transport, never the render."""
+    rows = m.compose_one(doc={"path": "synthetic", "tokens": 3,
+                              "text": "one two three"}, live=False)
+    stages = {c["stage"] for c in rows["calls"]}
+    assert stages == {"s1", "s2", "s4"}, stages
+    assert all(c["prompt_tokens"] == 0 for c in rows["calls"]), (
+        "the stub reports no provider counts; a non-zero one would be a "
+        "fabricated measurement")
+    # and the composition still attributes every token of the real render
+    report = m.compose_report([rows])
+    for stage, acc in report["rows"][0]["stages"].items():
+        assert acc["system_tokens"] > 0, stage

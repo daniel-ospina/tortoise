@@ -1394,6 +1394,700 @@ def report_json(report: dict) -> str:
                       indent=1, sort_keys=True)
 
 
+# ── #14343: WHERE the two constants come from ────────────────────────────
+#
+# `run` answers *how much*. It cannot answer *of what*: the fitted 45,503 /
+# 22,802 are summed over stages, calls and regions, and a constant nobody can
+# decompose cannot be shrunk without guessing. `compose` runs the SAME
+# pipeline over ONE document and attributes every prompt token to the region
+# that produced it, plus every output token to the records the model emitted.
+#
+# It is additive by construction: the region counts are computed on the exact
+# strings `_fill_template` was handed (captured by wrapping it, so the table
+# can never describe a prompt other than the one sent), and the difference
+# between their sum and the prompt's own token count is reported as its own
+# row. A table that does not sum is not evidence.
+
+#: The stage → (system-prompt prefix, template constants) map. The prefix is
+#: how a captured call is identified as a stage: the pipeline renders three
+#: distinct system prompts and the first line of each is a fixed signature.
+_COMPOSE_STAGE_SIGNATURES = (
+    ("s1", "You are the STORY SUMMARIZER"),
+    ("s2", "You are the GRAPH MAPPER"),
+    ("s4", "You are the GAP REVIEWER"),
+)
+
+
+def _compose_stage(system: str) -> str | None:
+    for stage, sig in _COMPOSE_STAGE_SIGNATURES:
+        if (system or "").startswith(sig):
+            return stage
+    return None
+
+
+def _output_structure(text: str) -> dict:
+    """What a stage's OUTPUT is made of (#14343 step 2).
+
+    The question the constant asks is not "how many tokens" but "tokens of
+    WHAT, derived from WHAT". So a JSON emission is counted structurally:
+    section → item count, item chars, and the kinds those items carry. A stage
+    whose item COUNT does not move with the document is emitting something the
+    document did not authorise, and the counts are what make that visible.
+    """
+    from tortoise.extractor_v2 import _parse_json_robust
+    enc = _encoding()
+    out: dict = {"chars": len(text or ""),
+                 "tokens": len(enc.encode(text or "")),
+                 "json": False, "sections": {}}
+    if not text:
+        return out
+    try:
+        parsed = _parse_json_robust(text)
+    except Exception:  # noqa: BLE001 — a narrative emission is not a defect
+        parsed = None
+    if not isinstance(parsed, dict):
+        # S1's narrative: report its shape rather than pretending it is JSON.
+        out["paragraphs"] = len([p for p in (text or "").split("\n\n")
+                                 if p.strip()])
+        return out
+    out["json"] = True
+    for section, value in parsed.items():
+        if isinstance(value, list):
+            items = [v for v in value if isinstance(v, dict)]
+            kinds: dict[str, int] = {}
+            for item in items:
+                kind = str(item.get("kind") or item.get("type") or "-")
+                kinds[kind] = kinds.get(kind, 0) + 1
+            payload_tokens = len(enc.encode(json.dumps(value, indent=1)))
+            out["sections"][section] = {
+                "items": len(value),
+                "item_chars": (round(sum(len(json.dumps(i)) for i in items)
+                                     / len(items), 1) if items else 0),
+                "tokens": payload_tokens,
+                "kinds": dict(sorted(kinds.items(),
+                                     key=lambda kv: -kv[1])[:12]),
+                "distinct_kinds": len(kinds),
+            }
+        elif isinstance(value, dict):
+            out["sections"][section] = {
+                "keys": len(value),
+                "tokens": len(enc.encode(json.dumps(value, indent=1))),
+            }
+        else:
+            out["sections"][section] = {
+                "value_tokens": len(enc.encode(json.dumps(value))),
+            }
+    return out
+
+
+def compose_one(*, doc: dict, master: dict | None = None,
+                session_date: str = "2026-11-21T00:00:00+00:00",
+                live: bool = True) -> dict:
+    """Run the real pipeline over ONE document and decompose each prompt.
+
+    ``live=False`` swaps the provider for a canned emission (the prompts are
+    still the REAL rendered ones for S1/S2; S4's ``embed_list_json`` region is
+    then a stub, which is why the offline arm is a shape check and the live
+    arm is the measurement).
+    """
+    from tortoise import extractor_v2 as X
+
+    calls: list[dict] = []
+    renders: list[dict] = []
+    slots: list[dict] = []
+
+    orig_fill = X._fill_template
+    orig_granularity = X._granularity_text
+    orig_anchor = X._date_anchor
+
+    def _fill(tmpl, values):
+        rendered = orig_fill(tmpl, values)
+        stage = ("s2" if tmpl in (X.S2_TMPL, X.S2_TMPL_CORE_ONLY)
+                 else "s4" if tmpl in (X.S4_TMPL, X.S4_TMPL_CORE_ONLY,
+                                       X.S4_TMPL_DELTA,
+                                       X.S4_TMPL_CORE_ONLY_DELTA)
+                 else None)
+        renders.append({"stage": stage, "values": dict(values),
+                        "prompt": rendered})
+        return rendered
+
+    def _granularity(master=None):
+        text = orig_granularity(master)
+        slots.append({"slot": "memory_granularity", "text": text})
+        return text
+
+    def _anchor(session_date, *, include_emission_rules=False):
+        text = orig_anchor(session_date,
+                           include_emission_rules=include_emission_rules)
+        slots.append({"slot": "date_anchor", "text": text,
+                      "emission": include_emission_rules})
+        return text
+
+    X._fill_template = _fill
+    X._granularity_text = _granularity
+    X._date_anchor = _anchor
+    try:
+        model = _compose_model(live=live, calls=calls)
+        out = X.extract_session_v2(model, [{"role": "user",
+                                            "content": doc["text"]}],
+                                   sdk=None, session_date=session_date,
+                                   master=master)
+    finally:
+        X._fill_template = orig_fill
+        X._granularity_text = orig_granularity
+        X._date_anchor = orig_anchor
+
+    enc = _encoding()
+    # Pair each provider call with the render that produced its system
+    # prompt. Identity, not order: a retry re-sends the SAME string, and
+    # every render is captured, so the first unconsumed match is the one.
+    consumed: set[int] = set()
+    for call in calls:
+        stage = _compose_stage(call["system"])
+        call["stage"] = stage
+        match = None
+        for i, render in enumerate(renders):
+            if i in consumed or render["stage"] != stage:
+                continue
+            if render["prompt"] == call["system"]:
+                match, consumed_i = render, i
+                consumed.add(consumed_i)
+                break
+        call["regions"] = ({k: len(enc.encode(v or ""))
+                            for k, v in (match["values"].items()
+                                         if match else {})})
+        if match is None and stage == "s1":
+            # S1 substitutes with .replace, not the fill map — its slots are
+            # the granularity block and the date anchor, captured above.
+            for slot in slots:
+                if slot["slot"] == "memory_granularity" and "emission" not in slot:
+                    call["regions"]["memory_granularity"] = len(
+                        enc.encode(slot["text"] or ""))
+                elif slot["slot"] == "date_anchor" and not slot["emission"]:
+                    call["regions"]["date_anchor"] = len(
+                        enc.encode(slot["text"] or ""))
+        call["user_tokens"] = len(enc.encode(call["user"] or ""))
+        call["system_tokens"] = len(enc.encode(call["system"] or ""))
+        call["output"] = _output_structure(call.get("response") or "")
+        call.pop("response", None)
+        call.pop("system", None)
+        call.pop("user", None)
+
+    return {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "live": live,
+        "doc": {"path": doc["path"], "item_tokens": doc["tokens"]},
+        "session_date": session_date,
+        "calls": calls,
+        "pipeline": {"calls": out.get("stats", {}).get("llm", {}).get("calls"),
+                     "story_chars": len(out.get("story_arc") or ""),
+                     "errors": list(out.get("errors") or [])[:5]},
+    }
+
+
+def _compose_model(*, live: bool, calls: list[dict]):
+    """The measuring model: the production adapter, wrapped.
+
+    The wrapper is the instrument, not a change to the pipeline — it records
+    what was actually sent and returned, then delegates. ``live=False`` swaps
+    only the transport for a canned emission, which is what makes the shape
+    of the decomposition testable offline.
+    """
+    if live:
+        inner = _build_model()
+    else:
+        inner = _StubModel()
+
+    class _Recording:
+        """Delegating wrapper with a ``max_tokens`` KWARG in its signature.
+
+        The kwarg is not decoration: ``extractor_v2._cap_kind`` picks the
+        race-free per-call path only when the signature accepts it, and its
+        fallback MUTATES ``model.max_tokens`` (an attribute this wrapper does
+        not own). A ``**kwargs``-only signature therefore defers to a
+        read-only property and every stage raises
+        ``property 'max_tokens' has no setter`` before its first call.
+        """
+
+        def __init__(self, model):
+            self._m = model
+
+        def complete(self, *, system, user, max_tokens=None, **kwargs):
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            resp = self._m.complete(system=system, user=user, **kwargs)
+            calls.append({"system": system, "user": user, "response": resp,
+                          "prompt_tokens": int(
+                              getattr(self._m, "last_prompt_tokens", 0) or 0),
+                          "completion_tokens": int(
+                              getattr(self._m, "last_completion_tokens", 0) or 0),
+                          "finish_reason": getattr(
+                              self._m, "last_finish_reason", None)})
+            return resp
+
+        def __getattr__(self, name):
+            return getattr(self._m, name)
+
+    return _Recording(inner)
+
+
+class _StubModel:
+    """A canned emission for the offline arm — never a measured result.
+
+    Its only job is to let the pipeline reach S4 so the render path is
+    exercised without a provider call. The S4 prompt's ``embed_list_json``
+    region is therefore a STUB in this arm and the offline composition is a
+    shape check: a table built from it describes the instructions, not the
+    pipeline.
+    """
+
+    last_finish_reason = "stop"
+    last_prompt_tokens = 0
+    last_completion_tokens = 0
+    last_cache_hit_tokens = 0
+    last_cost_usd = 0.0
+    last_route = "stub/stub"
+    max_tokens = None
+
+    _S2 = json.dumps({
+        "entities": [{"name": "stub entity", "kind": "core:Project",
+                      "lifecycle": "created"}],
+        "events": [], "points": [], "operators": [],
+        "link_before_create": [], "chain_notes": []})
+
+    def complete(self, *, system, user, max_tokens=None, **kwargs):
+        if (system or "").startswith("You are the STORY SUMMARIZER"):
+            return "The session changed the state of the project."
+        if (system or "").startswith("You are the GRAPH MAPPER"):
+            return self._S2
+        return json.dumps({"gaps": [], "corrections": [],
+                           "link_before_create": [], "chain_notes": []})
+
+
+def compose_report(artifacts: list[dict]) -> dict:
+    """Fold one or more ``compose`` artifacts into the #14343 table.
+
+    Two tables, because the constants have two audiences: the INPUT table
+    attributes every prompt token to the region that produced it, and the
+    OUTPUT table says what the model emitted and what it derived it from.
+    """
+    rows: list[dict] = []
+    for art in artifacts:
+        per_stage: dict[str, dict] = {}
+        for call in art["calls"]:
+            stage = call.get("stage") or "?"
+            acc = per_stage.setdefault(stage, {
+                "calls": 0, "system_tokens": 0, "user_tokens": 0,
+                "completion_tokens": 0, "regions": {}, "output": {}})
+            acc["calls"] += 1
+            acc["system_tokens"] += call["system_tokens"]
+            acc["user_tokens"] += call["user_tokens"]
+            acc["completion_tokens"] += call["completion_tokens"]
+            for name, tokens in (call.get("regions") or {}).items():
+                acc["regions"][name] = acc["regions"].get(name, 0) + tokens
+            out = call.get("output") or {}
+            acc["output"]["tokens"] = (acc["output"].get("tokens", 0)
+                                       + out.get("tokens", 0))
+            acc["output"]["sections"] = _merge_sections(
+                acc["output"].get("sections") or {}, out.get("sections") or {})
+        rows.append({"doc": art["doc"], "stages": per_stage})
+    return {"rows": rows}
+
+
+def _merge_sections(a: dict, b: dict) -> dict:
+    merged = {k: dict(v) for k, v in a.items()}
+    for section, val in b.items():
+        cur = merged.setdefault(section, {})
+        for key, value in val.items():
+            if key == "kinds" and isinstance(value, dict):
+                kinds = dict(cur.get("kinds") or {})
+                for kind, count in value.items():
+                    kinds[kind] = kinds.get(kind, 0) + count
+                cur["kinds"] = kinds
+            elif isinstance(value, (int, float)) and isinstance(
+                    cur.get(key), (int, float)):
+                cur[key] = cur[key] + value
+            else:
+                cur.setdefault(key, value)
+    return merged
+
+
+def render_compose(report: dict) -> str:
+    """The #14343 deliverable: a table whose parts SUM to the prompt."""
+    lines: list[str] = ["## Prompt composition (#14343)", ""]
+    for row in report["rows"]:
+        lines.append(f"### `{row['doc']['path']}` — "
+                     f"{row['doc']['item_tokens']} tokens")
+        lines.append("")
+        lines.append("| stage | calls | system | user | **total prompt** "
+                     "| completion |")
+        lines.append("|---|---|---|---|---|---|")
+        for stage, acc in sorted(row["stages"].items()):
+            lines.append(
+                f"| {stage} | {acc['calls']} | {acc['system_tokens']:,} | "
+                f"{acc['user_tokens']:,} | "
+                f"**{acc['system_tokens'] + acc['user_tokens']:,}** | "
+                f"{acc['completion_tokens']:,} |")
+        lines.append("")
+        lines.append("| stage | region | tokens | share of that stage's "
+                     "prompt |")
+        lines.append("|---|---|---|---|")
+        for stage, acc in sorted(row["stages"].items()):
+            total = acc["system_tokens"] + acc["user_tokens"]
+            regions = dict(sorted(acc["regions"].items(),
+                                  key=lambda kv: -kv[1]))
+            named = sum(regions.values())
+            for name, tokens in regions.items():
+                share = (100.0 * tokens / total) if total else 0.0
+                lines.append(f"| {stage} | `{name}` | {tokens:,} | {share:.1f}% |")
+            # the unattributed remainder is a ROW, never a rounding note: it
+            # is the template prose the slots sit in plus every tokenizer
+            # boundary, and hiding it would make the table sum by assertion.
+            rest = total - named
+            share = (100.0 * rest / total) if total else 0.0
+            lines.append(f"| {stage} | *template prose + boundaries* | "
+                         f"{rest:,} | {share:.1f}% |")
+        lines.append("")
+        lines.append("| stage | output tokens | sections |")
+        lines.append("|---|---|---|")
+        for stage, acc in sorted(row["stages"].items()):
+            out = acc.get("output") or {}
+            secs = "; ".join(
+                f"{name}: {val.get('items', val.get('keys', 0))} "
+                f"({val.get('tokens', 0):,} tok)"
+                for name, val in sorted((out.get("sections") or {}).items()))
+            lines.append(f"| {stage} | {out.get('tokens', 0):,} | {secs or '—'} |")
+        lines.append("")
+    return "\n".join(lines)
+
+
+#: The stage → (system-prompt prefix, template constants) map. The prefix is
+#: how a captured call is identified as a stage: the pipeline renders three
+#: distinct system prompts and the first line of each is a fixed signature.
+_COMPOSE_STAGE_SIGNATURES = (
+    ("s1", "You are the STORY SUMMARIZER"),
+    ("s2", "You are the GRAPH MAPPER"),
+    ("s4", "You are the GAP REVIEWER"),
+)
+
+
+def _render_regions() -> dict[str, dict[str, int]]:
+    """The STATIC region sizes of each stage prompt, offline and exact.
+
+    A region is a value the renderer SPLICES into the template; everything
+    else in the prompt is the template's own prose (the instructions the
+    stage is written in). Both are computed from the real render — the fill
+    map is captured by wrapping ``_fill_template`` — so the numbers describe
+    the prompt the pipeline sends, not a reconstruction of it.
+
+    ⛔ No provider call is made: this is the render path only. It is the one
+    part of the decomposition that is exact — the dynamic regions (the story
+    and the re-serialized embed list) are solved from the measured evidence
+    in ``decompose``.
+    """
+    from tortoise import extractor_v2 as X
+    enc = _encoding()
+    n = lambda s: len(enc.encode(s or ""))  # noqa: E731
+    master = X.build_master_list()
+    session_date = "2026-11-21T00:00:00+00:00"
+
+    out: dict[str, dict[str, int]] = {}
+
+    # S1 substitutes with .replace, so its two slots are counted directly.
+    granularity = X._granularity_text(master)
+    anchor_s1 = X._date_anchor(session_date)
+    system_s1 = (X.S1_TMPL
+                 .replace("{memory_granularity}", granularity)
+                 .replace("{date_anchor}", anchor_s1))
+    out["s1"] = {"memory_granularity": n(granularity),
+                 "date_anchor": n(anchor_s1),
+                 "template_prose": n(system_s1) - n(granularity) - n(anchor_s1)}
+
+    captured: list[dict] = []
+    orig_fill = X._fill_template
+
+    def _fill(tmpl, values):
+        rendered = orig_fill(tmpl, values)
+        captured.append({"values": dict(values), "prompt": rendered})
+        return rendered
+
+    X._fill_template = _fill
+    try:
+        # Blank dynamic slots: this is what isolates the static part. The
+        # story is a LABEL-ORDER SEED in the verbose render, so the static
+        # vocabulary is the same with it empty (compact mode differs — that
+        # is the lever `decompose` reports the size of, not a static here).
+        X.render_s2_prompt(master, session_date=session_date, story="",
+                           edus=None)
+        X.render_s4_prompt("", {}, {}, master, session_date=session_date,
+                           edus=None)
+    finally:
+        X._fill_template = orig_fill
+    for stage, rec in zip(("s2", "s4"), captured, strict=False):
+        regions = {name: n(text) for name, text in rec["values"].items()}
+        regions["template_prose"] = (n(rec["prompt"])
+                                     - sum(regions.values()))
+        out[stage] = regions
+    # The envelope a stage pays to frame the untrusted region, measured on a
+    # one-character body so the body itself is not counted.
+    out["envelope"] = {"clause": n(X._render_untrusted_block("S1 STORY", "x")) - 1}
+    return out
+
+
+def decompose(rows: list[dict], *, arm: str = "cold") -> dict:
+    """Attribute the two fitted constants of #14295 to the regions that make
+    them (#14343).
+
+    Every number here is either (a) tiktoken on a real render of the stage
+    prompts (the statics), or (b) a measured token count from the evidence
+    rows (the per-call inputs, the emissions, the call counts). Nothing is
+    assumed; the residual rows are what keeps the table honest.
+    """
+    docs = [r for r in rows
+            if r.get("arm") == arm and r.get("kind") == "doc"
+            and not r.get("failed") and r.get("stages")]
+    if not docs:
+        raise SystemExit(f"no usable `{arm}` document rows in the evidence")
+    statics = _render_regions()
+    enc = _encoding()
+
+    def _per_call(stage: str) -> tuple[float, float, float]:
+        """(calls/doc, prompt tokens per call, completion tokens per call).
+
+        MEDIANS, not means: one 128k-token document carries 27% of the corpus's
+        prompt tokens, so a mean per-call figure describes that document's
+        leverage rather than the median document the issue is about.
+        """
+        calls, pc, oc = [], [], []
+        for r in docs:
+            s = r["stages"].get(stage)
+            if not s or not s.get("calls"):
+                continue
+            calls.append(s["calls"])
+            pc.append(s["prompt_tokens"] / s["calls"])
+            oc.append(s["completion_tokens"] / s["calls"])
+        return (sum(calls) / len(calls), statistics.median(pc),
+                statistics.median(oc))
+
+    c1, pc1, oc1 = _per_call("s1")
+    c2, pc2, oc2 = _per_call("s2")
+    c4, pc4, oc4 = _per_call("s4")
+    t_med = statistics.median([r["item_tokens"] for r in docs])
+
+    s1_sys = sum(statics["s1"].values())
+    s2_sys = sum(statics["s2"].values())
+    s4_sys = sum(statics["s4"].values())
+    clause = statics["envelope"]["clause"]
+    #: how often S1 makes a SECOND call for the same document (the narrative
+    #: cap is hit, so the escalation re-sends the identical prompt).
+    two_call_share = (sum(1 for r in docs
+                          if (r["stages"].get("s1") or {}).get("calls", 0) > 1)
+                      / len(docs))
+
+    # The two dynamic regions, solved from the measured per-call prompts. The
+    # story is S1's own emission seen by the next stage; the embed list is
+    # S2's emission re-serialized into S4's prompt.
+    story = max(0.0, pc2 - s2_sys - clause)
+    embed = max(0.0, pc4 - s4_sys - story)
+
+    regions = {
+        # (label, tokens/doc, what it is, provenance)
+        "kind vocabulary (`master_list`)": c2 * statics["s2"]["master_list"]
+        + c4 * statics["s4"]["master_list"],
+        "mapping rules (`anti_routine`)": c2 * statics["s2"]["anti_routine"]
+        + c4 * statics["s4"]["anti_routine"],
+        "output schema (`output_contract`)":
+        c2 * statics["s2"]["output_contract"]
+        + c4 * statics["s4"]["output_contract"],
+        "stage instructions (template prose)":
+        c1 * statics["s1"]["template_prose"]
+        + c2 * statics["s2"]["template_prose"]
+        + c4 * statics["s4"]["template_prose"],
+        "memory granularity (S1 only)": c1 * statics["s1"]["memory_granularity"],
+        "chains": c2 * statics["s2"].get("chains_text", 0)
+        + c4 * statics["s4"].get("chains_text", 0),
+        "date anchor": c1 * statics["s1"]["date_anchor"]
+        + c2 * statics["s2"]["date_anchor"] + c4 * statics["s4"]["date_anchor"],
+        "graph search results (S4)": c4 * statics["s4"].get("search_results", 0),
+        "**S1's story, re-sent to S2 and S4**": (c2 + c4) * story,
+        "**S2's embed list, re-sent to S4**": (c4 * embed),
+    }
+    total = sum(regions.values())
+    fitted = 45_503  # #14295's input constant (intercept of the per-doc fit)
+    return {
+        "arm": arm,
+        "documents": len(docs),
+        "median_doc_tokens": t_med,
+        "calls_per_doc": {"s1": round(c1, 3), "s2": round(c2, 3),
+                          "s4": round(c4, 3),
+                          "total": round(c1 + c2 + c4, 3)},
+        "per_call": {"s1": {"prompt": pc1, "completion": oc1},
+                     "s2": {"prompt": pc2, "completion": oc2},
+                     "s4": {"prompt": pc4, "completion": oc4}},
+        "output": {
+            "s1_tokens_per_doc": round(c1 * oc1, 1),
+            "s2_tokens_per_doc": round(c2 * oc2, 1),
+            "s4_tokens_per_doc": round(c4 * oc4, 1),
+            "total_per_doc": round(c1 * oc1 + c2 * oc2 + c4 * oc4, 1),
+            "s2_share": round(100.0 * c2 * oc2
+                              / max(1e-9, c1 * oc1 + c2 * oc2 + c4 * oc4), 1),
+            "contract_tokens": sum(statics["s2"].get("output_contract", 0)
+                                   for _ in [0]),
+        },
+        "statics": statics,
+        "solved": {"story_tokens": round(story, 1),
+                   "embed_list_tokens": round(embed, 1),
+                   "embed_over_emission": round(embed / oc2, 2) if oc2 else None},
+        "regions": {k: round(v, 1) for k, v in
+                    sorted(regions.items(), key=lambda kv: -kv[1])},
+        "composition_total": round(total, 1),
+        "fitted_constant": fitted,
+        "unattributed": round(fitted - total, 1),
+        "document_term": {
+            "s1_calls_x_median_doc": round(c1 * t_med, 1),
+            "fitted_slope_x_median_doc": round(2.159 * t_med, 1),
+            "note": ("S1 sends the WHOLE document once per call, and 34/50 "
+                     "documents take a second S1 call, so the document is "
+                     "paid for ~2x"),
+        },
+        "levers_offline": _offline_levers(statics, c1, c2, c4, t_med,
+                                          two_call_share, oc2),
+    }
+
+
+def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
+                    t_med: float, two_call_share: float, oc2: float) -> dict:
+    """The size of each candidate lever, measured WITHOUT a provider call.
+
+    A lever that cannot be sized cannot be chosen between, and a lever's size
+    is a property of the prompt — not of the model's answer. What this cannot
+    do is establish a lever's EFFECT ON QUALITY, which only a run of the
+    capstone corpus can; every entry below therefore carries that limit.
+    """
+    from tortoise import extractor_v2 as X
+    enc = _encoding()
+    n = lambda s: len(enc.encode(s or ""))  # noqa: E731
+    master = X.build_master_list()
+    out: dict = {}
+    try:
+        compact = X._render_master_compact(master, "")
+        verbose = X._render_master(master, "")
+        out["compact_master_render"] = {
+            "verbose_tokens": n(verbose),
+            "compact_tokens": n(compact),
+            "saved_per_doc": round((c2 + c4) * (n(verbose) - n(compact)), 1),
+            "quality_risk": ("compact mode story-filters the pack kinds, so "
+                             "a document that misses every trigger word drops "
+                             "to the all-packs fallback and a document that "
+                             "hits one drops the others — not "
+                             "quality-neutral"),
+        }
+    except Exception as exc:  # noqa: BLE001 - the lever's absence is a result
+        out["compact_master_render"] = {"error": f"{type(exc).__name__}: {exc}"}
+    out["s1_second_send"] = {
+        "cause": (f"S1's narrative cap is {X._S1_MAX_TOKENS} tokens; a story "
+                  "that hits it escalates and re-sends the SAME prompt, so "
+                  "the document is paid for twice"),
+        "documents_with_two_s1_calls": round(100.0 * two_call_share, 1),
+        "saved_per_doc_if_one_call": round(
+            two_call_share * (t_med + sum(statics["s1"].values())), 1),
+        "quality_risk": ("a longer narrative is more content, not less — but "
+                         "it also enlarges the story both later stages "
+                         "re-read, so the net is a measurement, not "
+                         "arithmetic; the story's own growth is NOT "
+                         "sizeable offline"),
+    }
+    return out
+
+
+def render_decompose(dec: dict) -> str:
+    lines = ["## The input constant, decomposed (#14343)", ""]
+    lines.append(f"arm `{dec['arm']}` · {dec['documents']} documents · median "
+                 f"document {dec['median_doc_tokens']:,} tokens · calls/doc "
+                 f"{dec['calls_per_doc']['total']}"
+                 f" (s1 {dec['calls_per_doc']['s1']}, "
+                 f"s2 {dec['calls_per_doc']['s2']}, "
+                 f"s4 {dec['calls_per_doc']['s4']})")
+    lines.append("")
+    lines.append("### Static part of each prompt (offline render, exact)")
+    lines.append("")
+    stages = sorted(dec["statics"])
+    names = sorted({k for st in stages for k in dec["statics"][st]})
+    lines.append("| region | " + " | ".join(stages) + " |")
+    lines.append("|---" * (len(stages) + 1) + "|")
+    for name in names:
+        cells = [f"{dec['statics'][st].get(name, 0):,}" for st in stages]
+        lines.append(f"| `{name}` | " + " | ".join(cells) + " |")
+    lines.append("")
+    lines.append("### Per document — what the constant is made of")
+    lines.append("")
+    lines.append("| region | tokens/doc | share |")
+    lines.append("|---|---|---|")
+    total = dec["composition_total"] or 1
+    for name, tokens in dec["regions"].items():
+        lines.append(f"| {name} | {tokens:,.0f} | {100.0 * tokens / total:.1f}% |")
+    lines.append(f"| **composition total** | **{total:,.0f}** | 100.0% |")
+    lines.append(f"| *fitted constant (#14295)* | {dec['fitted_constant']:,} | — |")
+    lines.append(f"| *unattributed (fit intercept − composition)* | "
+                 f"{dec['unattributed']:,.0f} | — |")
+    lines.append("")
+    doc_term = dec["document_term"]
+    lines.append(f"The document itself is NOT in that table: it is the fit's "
+                 f"slope, {doc_term['s1_calls_x_median_doc']:,.0f} tokens/doc "
+                 f"({dec['calls_per_doc']['s1']} × "
+                 f"{dec['median_doc_tokens']:,}) against the fitted "
+                 f"{doc_term['fitted_slope_x_median_doc']:,.0f}. "
+                 f"{doc_term['note']}.")
+    lines.append("")
+    solved = dec["solved"]
+    lines.append(f"Solved dynamic regions: the S1 story is **{solved['story_tokens']:,.0f}** "
+                 f"tokens as the later stages see it, and S2's embed list is "
+                 f"re-serialized into S4's prompt at "
+                 f"**{solved['embed_list_tokens']:,.0f}** tokens — "
+                 f"{solved['embed_over_emission']}× S2's own emission.")
+    lines.append("")
+    out = dec.get("output") or {}
+    if out:
+        lines.append("### The output constant, decomposed")
+        lines.append("")
+        lines.append("| stage | completion tokens/doc | share of output |")
+        lines.append("|---|---|---|")
+        for stage in ("s1", "s2", "s4"):
+            tokens = out.get(f"{stage}_tokens_per_doc", 0)
+            share = (100.0 * tokens / out["total_per_doc"]) \
+                if out.get("total_per_doc") else 0.0
+            lines.append(f"| {stage} | {tokens:,.0f} | {share:.1f}% |")
+        lines.append(f"| **total** | **{out['total_per_doc']:,.0f}** | 100.0% |")
+        lines.append("")
+        lines.append(
+            "S2 emits the whole embed list, and it is the same object that "
+            "becomes S4's largest input region — so one stage's emission is "
+            "paid for THREE times: as output, as S1's story is re-read, and "
+            "as the list is re-serialized. Nothing in this table scales with "
+            "the document: the item COUNT is what moves, and a document's "
+            "length barely moves it (R²=0.000 on S2's input fit).")
+        lines.append("")
+    if dec.get("levers_offline"):
+        lines.append("### Candidate levers, sized offline")
+        lines.append("")
+        lines.append("| lever | size (tokens/doc) | quality-neutral? |")
+        lines.append("|---|---|---|")
+        cm = dec["levers_offline"].get("compact_master_render") or {}
+        if "saved_per_doc" in cm:
+            lines.append(f"| compact master render ({cm['compact_tokens']:,} vs "
+                         f"{cm['verbose_tokens']:,} tokens/call) | "
+                         f"−{cm['saved_per_doc']:,.0f} | NO — {cm['quality_risk']} |")
+        s1l = dec["levers_offline"].get("s1_second_send") or {}
+        if "saved_per_doc_if_one_call" in s1l:
+            lines.append(
+                f"| S1 truncation double-send "
+                f"({s1l['documents_with_two_s1_calls']}% of documents take 2 "
+                f"S1 calls) | −{s1l['saved_per_doc_if_one_call']:,.0f} | NO — "
+                f"{s1l['quality_risk']} |")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1428,6 +2122,26 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--json-out", type=Path)
     rep.add_argument("--markdown-out", type=Path)
 
+    comp = sub.add_parser(
+        "compose", help="#14343 — decompose ONE document's prompts by region")
+    comp.add_argument("--out", required=True, type=Path)
+    comp.add_argument("--docs", type=int, default=50,
+                      help="corpus size to select the median FROM")
+    comp.add_argument("--seed", type=int, default=7)
+    comp.add_argument("--doc", default="median",
+                      help="'median' | 'p75' | 'max' | a repo path")
+    comp.add_argument("--offline", action="store_true",
+                      help="canned emission: a shape check, NOT a "
+                           "measurement (S4's embed-list region is a stub)")
+
+    dec = sub.add_parser(
+        "decompose", help="#14343 — attribute the fitted constants to regions")
+    dec.add_argument("--evidence", required=True, type=Path,
+                     help="the measurements.jsonl a `run` produced")
+    dec.add_argument("--out", required=True, type=Path)
+    dec.add_argument("--json-out", type=Path)
+    dec.add_argument("--arm", default="cold")
+
     args = ap.parse_args(argv)
     if args.cmd == "run":
         if args.corpus_only:
@@ -1444,6 +2158,40 @@ def main(argv: list[str] | None = None) -> int:
                                long_split=args.long_split,
                                split_max_turns=args.split_max_turns,
                                split_only=args.split_only)
+    if args.cmd == "decompose":
+        decomposition = decompose(load_rows(args.evidence), arm=args.arm)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(finalize_markdown(render_decompose(decomposition)),
+                            encoding="utf-8")
+        if args.json_out:
+            args.json_out.write_text(json.dumps(decomposition, indent=1,
+                                               sort_keys=True),
+                                     encoding="utf-8")
+        sys.stdout.write(render_decompose(decomposition))
+        return 0
+    if args.cmd == "compose":
+        corpus = pick_corpus(limit=args.docs, seed=args.seed)
+        if args.doc in ("median", "p75", "max"):
+            sizes = [r["tokens"] for r in corpus]
+            target = {"median": _quantile(sizes, 0.5),
+                      "p75": _quantile(sizes, 0.75),
+                      "max": max(sizes)}[args.doc]
+            pick = min(corpus, key=lambda r: abs(r["tokens"] - target))
+        else:
+            pick = next((r for r in corpus if r["path"] == args.doc), None)
+            if pick is None:
+                raise SystemExit(f"{args.doc!r} is not in the selected corpus")
+        doc = {"path": pick["path"], "tokens": pick["tokens"],
+               "text": (_REPO_ROOT / pick["path"]).read_text(
+                   encoding="utf-8", errors="replace")}
+        art = compose_one(doc=doc, live=not args.offline)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(art, indent=1, sort_keys=True),
+                            encoding="utf-8")
+        table = render_compose(compose_report([art]))
+        sys.stdout.write(table)
+        sys.stderr.write(f"\ncompose artifact: {args.out}\n")
+        return 0
     rows = load_rows(args.out)
     report = report_from_rows(rows)
     text = report_markdown(report)

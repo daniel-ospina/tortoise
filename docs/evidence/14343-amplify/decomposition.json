@@ -1,0 +1,102 @@
+{
+ "arm": "cold",
+ "calls_per_doc": {
+  "s1": 1.68,
+  "s2": 1.16,
+  "s4": 1.14,
+  "total": 3.98
+ },
+ "composition_total": 43567.4,
+ "document_term": {
+  "fitted_slope_x_median_doc": 11250.5,
+  "note": "S1 sends the WHOLE document once per call, and 34/50 documents take a second S1 call, so the document is paid for ~2x",
+  "s1_calls_x_median_doc": 8754.5
+ },
+ "documents": 50,
+ "fitted_constant": 45503,
+ "levers_offline": {
+  "compact_master_render": {
+   "compact_tokens": 2335,
+   "quality_risk": "compact mode story-filters the pack kinds, so a document that misses every trigger word drops to the all-packs fallback and a document that hits one drops the others \u2014 not quality-neutral",
+   "saved_per_doc": 1959.6,
+   "verbose_tokens": 3187
+  },
+  "s1_second_send": {
+   "cause": "S1's narrative cap is 1500 tokens; a story that hits it escalates and re-sends the SAME prompt, so the document is paid for twice",
+   "documents_with_two_s1_calls": 68.0,
+   "quality_risk": "a longer narrative is more content, not less \u2014 but it also enlarges the story both later stages re-read, so the net is a measurement, not arithmetic; the story's own growth is NOT sizeable offline",
+   "saved_per_doc_if_one_call": 4651.9
+  }
+ },
+ "median_doc_tokens": 5211.0,
+ "output": {
+  "contract_tokens": 951,
+  "s1_tokens_per_doc": 2798.5,
+  "s2_share": 65.5,
+  "s2_tokens_per_doc": 11677.1,
+  "s4_tokens_per_doc": 3353.9,
+  "total_per_doc": 17829.5
+ },
+ "per_call": {
+  "s1": {
+   "completion": 1665.75,
+   "prompt": 7138.0
+  },
+  "s2": {
+   "completion": 10066.5,
+   "prompt": 12056.0
+  },
+  "s4": {
+   "completion": 2942.0,
+   "prompt": 23643.0
+  }
+ },
+ "regions": {
+  "**S1's story, re-sent to S2 and S4**": 6108.8,
+  "**S2's embed list, re-sent to S4**": 14164.5,
+  "chains": 547.4,
+  "date anchor": 653.1,
+  "graph search results (S4)": 128.8,
+  "kind vocabulary (`master_list`)": 7330.1,
+  "mapping rules (`anti_routine`)": 4466.6,
+  "memory granularity (S1 only)": 1550.6,
+  "output schema (`output_contract`)": 2187.3,
+  "stage instructions (template prose)": 6430.1
+ },
+ "solved": {
+  "embed_list_tokens": 12425.0,
+  "embed_over_emission": 1.23,
+  "story_tokens": 2656.0
+ },
+ "statics": {
+  "envelope": {
+   "clause": 93
+  },
+  "s1": {
+   "date_anchor": 78,
+   "memory_granularity": 923,
+   "template_prose": 629
+  },
+  "s2": {
+   "anti_routine": 1942,
+   "chains_text": 238,
+   "date_anchor": 227,
+   "master_list": 3187,
+   "output_contract": 951,
+   "pack_namespaces": 0,
+   "template_prose": 2762
+  },
+  "s4": {
+   "anti_routine": 1942,
+   "chains_text": 238,
+   "date_anchor": 227,
+   "embed_list_json": 1,
+   "master_list": 3187,
+   "output_contract": 951,
+   "search_results": 113,
+   "story": 0,
+   "template_prose": 1903
+  }
+ },
+ "unattributed": 1935.6
+}
