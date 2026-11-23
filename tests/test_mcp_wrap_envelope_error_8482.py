@@ -1003,9 +1003,10 @@ async def test_a_repaired_error_is_never_message_less(quiet):
 
     No typed registry tool has this return path today (measured at the #14248
     head: no typed handler RETURNS `None` on its own path — the only `return
-    None` among the nine sits inside the nested `_with_claim_class` helper that
-    `tortoise_search`'s handler calls, a sentinel on THAT helper's degraded path
-    rather than the handler's result) — the test pins the class, not a live
+    None` among the nine sits inside the nested `_filter_and_annotate_claim_class`
+    helper that `tortoise_search`'s handler calls, whose own docstring says
+    "`None` means THE CLASS READ FAILED": a sentinel on that helper's degraded
+    path, not the handler's result) — the test pins the class, not a live
     producer.
     """
     def _none() -> list[dict]:
