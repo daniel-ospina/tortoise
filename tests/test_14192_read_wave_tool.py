@@ -354,7 +354,9 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     `for`-target arm above is the same argument one statement earlier.
 
     RESIDUALS, stated rather than implied: a value COMPUTED at runtime (`"".join(…)`,
-    `_N + "_x"`, a method call other than `str.format`, a parameter), a value read out of a
+    `_N + "_x"` **with an UNRESOLVED `_N`** — a resolvable `_N` DOES resolve, measured, so the
+    qualifier is part of the claim), a method call other than `str.format`, a parameter), a
+    value read out of a
     **NAME-held** container or an attribute (`_CFG["read"]`, `self._read`) and an unpack
     whose RIGHT-HAND SIDE is an attribute or a call (`_N, _M = cfg.pair`, `_a, _b = pair()`)
     are not resolved here — nothing about them is statically pairable, and they are named
@@ -1510,16 +1512,21 @@ def _sys_names_of(tree: ast.AST) -> frozenset[str]:
     ⛔ AND `_s = sys` IS THE SAME BIND ONE SPELLING OVER (#14326 round 22, MEASURED: pinning
     this set to IMPORT aliases alone made `_s = sys; _s.modules["tortoise.sdk"] = _Mirror`
     GREEN — it was RED before the narrowing, so the first version of this function traded a
-    false red for a FAIL-OPEN, the wrong direction). Assignment aliases resolve to a fixpoint
-    (two hops covers `_t = _s`); `os.sys.modules` is accepted by `_is_sys_ref`'s `x.sys` arm.
+    false red for a FAIL-OPEN, the wrong direction).
 
-    ⛔ AND THE SAME BIND WITH NO `Assign` NODE — A LOOP TARGET (#14326 round 22b, MEASURED
-    GREEN at `2975fdf32165`: `for _s in (sys,): _s.modules["tortoise.sdk"] = _Mirror` inserted
-    the entry with the pin GREEN, while the `_s = sys` assignment spelling of the same bind is
-    RED). `_loop_target_sources` gives the element of a literal iterable — CPython's own
-    semantics for a loop target — so `for`/`async for` feed the same fixpoint; a NAME or a
-    call there binds an unstatable value and stays GREEN, exactly as it does on the registry
-    axis.
+    ⛔ AND IT IS RESOLVED BY `_aliases_of`, NOT BY A HAND-WRITTEN WALK (#14326 round 23,
+    MEASURED: the previous version accepted `Assign`/`AnnAssign`/`NamedExpr` but only a BARE
+    `Name` target, so NINE other binds of a name to `sys` left the pin GREEN — `_s, _t = sys,
+    None`, `(_s, _t) = (sys, None)`, `[_s] = [sys]`, `_s, *_r = sys, 1`, `for _s in (sys,)`,
+    `with sys as _s:`, `match sys: case _s:`, `def _f(_s=sys):`, and the unpack one driving a
+    mutator — every one of them RED at `ff85c6ab73af`). `_str_constants` had ALREADY enumerated
+    exactly those forms; re-implementing three of them here is how the other six were missed.
+    This file resolves binds through ONE walk, so a later spelling is closed once.
+    ⛔ THAT UNION ALSO SUBSUMES A SIBLING LANE'S LOOP-TARGET ARM (`35bd48ec`, which resolved
+    `for _s in (sys,)` by hand — MEASURED GREEN at `2975fdf32165`, and closed there). Keeping
+    both would be two mechanisms for one bind; `_aliases_of(…, loops=True)` reaches `for`
+    targets through `_loop_target_sources`, so the same shape stays RED here without a second
+    walk. Recorded so the next lane does not re-add it.
     """
     names = {"sys"}
     for node in ast.walk(tree):
@@ -1527,26 +1534,13 @@ def _sys_names_of(tree: ast.AST) -> frozenset[str]:
             for alias in node.names:
                 if alias.name == "sys" and alias.asname:
                     names.add(alias.asname)
-    for _ in range(2):
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.For, ast.AsyncFor)):
-                # ⛔ A LOOP TARGET IS THE SAME BIND WITHOUT AN `Assign` NODE (round 22b): the
-                # target takes each ELEMENT of a literal iterable, so `for _s in (sys,)` binds
-                # `sys` to `_s` exactly as `_s = sys` does.
-                if isinstance(node.target, ast.Name) and any(
-                        isinstance(source, ast.Name) and source.id in names
-                        for source in _loop_target_sources(node.iter)):
-                    names.add(node.target.id)
-                continue
-            if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
-                continue
-            value = node.value
-            if not (isinstance(value, ast.Name) and value.id in names):
-                continue
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
+    # The same machinery `_aliases_of` gives every other axis: unpack, chained, walrus,
+    # `for`/`async for`, `with`, `match` capture, parameter default — all of them, to a fixpoint.
+    names |= _aliases_of(
+        tree,
+        lambda n: (isinstance(n, ast.Name) and n.id in names)
+        or (isinstance(n, ast.Attribute) and n.attr == "sys"),
+        loops=True)
     return frozenset(names)
 
 
@@ -1556,9 +1550,10 @@ def _is_sys_ref(node: ast.AST, sys_names: frozenset[str]) -> bool:
     ⛔ NARROWER THAN `_aliases_of` ON PURPOSE (#14326 round 21): this decides "the registry"
     and a false positive reds an unrelated module, so a bare `Name` must be a name that IS
     `sys`. A `x.sys` ATTRIBUTE is accepted (round 22): `os.sys.modules` IS the registry, so the
-    over-red is the safe direction — and it is what keeps `_s = sys; _s.modules[…]` from
-    going GREEN, which the import-alias-only version did. What stays rejected is
-    `other.modules`, whose base is neither a `sys` name nor a `sys` attribute.
+    over-red is the safe direction. ⛔ IT IS NOT WHAT HOLDS `_s = sys; _s.modules[…]` (#14326
+    round 23, MEASURED: deleting only this arm leaves that row RED — `_sys_names_of`'s
+    `_aliases_of` fixpoint supplies `_s`); the ONE row this arm holds is `os.sys.modules`. What
+    stays rejected is `other.modules`, whose base is neither a `sys` name nor a `sys` attribute.
     """
     if isinstance(node, ast.Name):
         return node.id in sys_names
@@ -8094,6 +8089,17 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             '_s = sys\n_s.modules["tortoise.sdk"] = _Mirror\n',
         "`os.sys.modules` ATTRIBUTE":
             'os.sys.modules["tortoise.sdk"] = _Mirror\n',
+        # ⛔ THE BIND FORMS `_aliases_of` GIVES FOR FREE, and the reason `_sys_names_of` now
+        # calls it instead of walking assignments itself (#14326 round 23, MEASURED: a bespoke
+        # walk accepting only a BARE `Name` target left these RED→GREEN). Two rows per bind
+        # SHAPE class — one `AnnAssign`, one walrus — plus the unpack row below, because the
+        # previously-hand-written disjuncts were the two clauses no mutant could red.
+        "`_s: str = sys` ANNASSIGN alias":
+            '_s: object = sys\n_s.modules["tortoise.sdk"] = _Mirror\n',
+        "`(_s := sys)` WALRUS alias":
+            '(_s := sys)\n_s.modules["tortoise.sdk"] = _Mirror\n',
+        "`_s, _t = sys, None` UNPACKED alias":
+            '_s, _t = sys, None\n_s.modules["tortoise.sdk"] = _Mirror\n',
         # ⛔ AND THE UNBOUND MUTATOR SPELLINGS (#14326 round 21, MEASURED GREEN: all three
         # INSERTED into `sys.modules` with the pin green). This is the asymmetry the file
         # already pins on the NAMESPACE axis — `dict.__setitem__(<ns>, …)` has its own row
