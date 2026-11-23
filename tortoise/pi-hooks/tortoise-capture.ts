@@ -5223,7 +5223,11 @@ export interface DrainClaim {
 function takedownClaim(
   path: string, token: string,
 ): { quarantine: string; raw: string } | undefined {
-  const quarantine = `${path}.take-${process.pid}-${token}`;
+  // ⚠️ The `.tmp-` INFIX is load-bearing: `sweepStaleTempFiles` collects
+  // abandoned `*.tmp-*` files by mtime, and a taker killed between the rename and
+  // the disposal would otherwise leave a file in the spool root nothing ever
+  // collects. The quarantine lives for microseconds; the sweep bound is minutes.
+  const quarantine = `${path}.tmp-take-${process.pid}-${token}`;
   try {
     renameSync(path, quarantine);
   } catch {

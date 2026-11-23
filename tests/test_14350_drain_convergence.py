@@ -752,3 +752,43 @@ def test_a_TARGETED_pass_does_NOT_yield_on_a_capacity_refusal(tmp_path):
     assert summary.capacity_yields == 0
     assert summary.capacity_stopped is True
     assert read_spool_meta(root, "sess-0")["attempts"] == 0
+
+
+def test_a_crashed_takers_quarantine_is_COLLECTED_by_the_scratch_sweeper(
+        tmp_path, monkeypatch):
+    """A taker killed between the claim's rename and its disposal must not leave a
+    file nothing ever collects.
+
+    The spool ROOT holds only `drain.claim` and `status.json`, so no spool scan
+    walks it — the only collector is `capture_spool`'s mtime-based `*.tmp-*`
+    sweep. The quarantine therefore has to MATCH that glob, which is why its name
+    carries a `.tmp-` infix rather than just `.take-`.
+
+    ⛔ The leftover is produced by an INTERRUPTED TAKEDOWN, not by writing a
+    hand-named file: a test that spells the name itself asserts the sweeper's glob,
+    not the implementation's choice of name, and passes with the infix removed
+    (measured — it did).
+
+    MUTATION THAT REDS THIS: name the quarantine `{path.name}.take-{pid}-{token}`.
+    """
+    from tortoise.capture_spool import _sweep_stale_temp_files
+
+    root = tmp_path / "spool"
+    stale = drain_claim.acquire(root, leg="python", now=1000.0, ttl_s=10.0)
+    assert stale is not None  # left in place, and EXPIRED at the taker's clock
+
+    # The taker MOVES the stale claim aside and then dies before disposing of it.
+    monkeypatch.setattr(drain_claim, "_dispose_quarantine",
+                        lambda *a, **k: False)
+    taker = drain_claim.acquire(root, leg="pi", now=2000.0, ttl_s=10.0)
+    assert taker is None, "the interrupted taker gives up rather than proceeding"
+    leftovers = [p for p in root.iterdir() if p.name != "drain.claim"]
+    assert leftovers, "the interrupted takedown left its quarantine behind"
+    ages = [(p, time.time() - 7200) for p in leftovers]
+    for path, old in ages:
+        os.utime(path, (old, old))
+    _sweep_stale_temp_files(root)
+    assert not [p for p in root.iterdir() if p.name != "drain.claim"], (
+        "an abandoned quarantine must be swept like any other scratch file; "
+        "otherwise the spool root grows a file per crash, forever: "
+        f"{sorted(p.name for p in root.iterdir())}")

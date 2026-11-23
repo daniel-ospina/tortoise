@@ -263,7 +263,14 @@ def _takedown(path: Path, token: str) -> tuple[Path, bytes] | None:
     gone (a peer moved it first, which is not a failure). The caller MUST dispose
     of the quarantine: :func:`_dispose_quarantine`.
     """
-    quarantine = path.with_name(f"{path.name}.take-{os.getpid()}-{token}")
+    # ⚠️ The `.tmp-` INFIX is load-bearing, not cosmetic: `capture_spool`'s
+    # scratch sweeper deletes abandoned `*.tmp-*` files under the spool root by
+    # mtime, and a taker killed between the rename and the disposal would
+    # otherwise leave a small file in the root that NOTHING ever collects (the
+    # root holds only `drain.claim` and `status.json`, so no spool scan walks it).
+    # The lifetime here is microseconds, so the sweeper can never race a live
+    # quarantine: its bound is minutes.
+    quarantine = path.with_name(f"{path.name}.tmp-take-{os.getpid()}-{token}")
     try:
         os.rename(path, quarantine)
     except (FileNotFoundError, OSError):
