@@ -72,6 +72,20 @@ it, so what bounds the breach alert is ``_claim_notify`` alone (once per
 the decision, and a failure there is debug-only. Stated because the old
 sentence claimed a guarantee its artifact no longer provides.
 (The notify-only rules R3/R4/R8 have no flag to persist.)
+
+Notification DELIVERY (#14407) is bounded separately from those ATTEMPTS, because
+an attempt bound is not a delivery bound and the two had drifted apart: the push
+was emitted per DETECTION here while the incident was create-once, so ONE open
+incident re-paged a human every window (24 messages/day for R1) with no issue
+reference, and `abuse_flag` filed nothing at all. `notify.notify_abuse` now owns
+the delivery contract: a state change files an incident and is pushed once when
+the episode opens, then at most one reminder per 24h while it stays open; a
+measurement (#10156's ACTIVITY register) files nothing by design and is
+DELIVERED as a bounded digest. `_end_alert_episode` re-arms both and resolves the
+incidents on the first clean window, so the bound is the EPISODE — never a mute.
+The in-process claim below stays as the ATTEMPT bound (it self-heals a store
+failure, which an episode-scoped claim could not), so the honest ceiling across
+replicas is N replicas x 1 attempt per window and 1 delivery per episode.
 """
 from __future__ import annotations
 
