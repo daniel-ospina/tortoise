@@ -342,8 +342,14 @@ now has a verb of its own, so it is reproducible by one command instead of by ha
 ```bash
 uv run python tools/extractor_cost_measure.py embed-json \
     --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
-    --evidence docs/evidence/14277-extractor-cost/measurements.jsonl
+    --evidence docs/evidence/14277-extractor-cost/measurements.jsonl \
+    --out docs/evidence/14343-amplify/embed-json-offline.md \
+    --json-out docs/evidence/14343-amplify/embed-json-offline.json
 ```
+
+⛔ The two `--out` flags are what make it a REGENERATION. Without them the verb
+prints the document to stdout and writes nothing, so a lane following a command that
+omits them sees no file change and can record a stale artifact as current.
 
 Output: `docs/evidence/14343-amplify/embed-json-offline.md` (generated — do not hand-edit)
 and `embed-json-offline.json`. The verb reuses `serialization_lever` (§1's instrument) and
@@ -365,9 +371,11 @@ corpus rather than quoting it.
 
 ### 7b. Before → after per median document, with the arithmetic shown
 
-1. the re-sent embed region is **solved** per S4 call (provider `prompt_tokens` minus the
-   `cl100k` static render): **12,411.5** tokens (this bundle prints `12,412` — the same
-   solve, rendered to the whole token);
+1. the re-sent embed region is **solved** per S4 call: `23,176.0` (provider `prompt_tokens`
+   per call) − `8,562` (the S4 static render) − `2,109.5` (S1's story, re-sent) − `93` (the
+   #10311 untrusted-data envelope) = **12,411.5** tokens (this bundle prints `12,412` — the
+   same solve at whole-token precision). Every term is subtracted because each is charged to
+   its OWN row in §1; omitting the last two gives 14,614.0, **which is not this region**.
 2. S4 takes **1.14** calls per document over 50 documents ⇒
    `12,411.5 × 1.14` = **14,149.1 tokens/document** (§4a's 14,149 is the same quantity at
    that display precision);
@@ -404,24 +412,40 @@ That is **+3 / +5 / +28** documents a month. (The counts agree with §4a's 49 / 
 the multiplication lines differ in the last few tokens because §4a rounds the unit to
 60,201 and this run does not.)
 
-### 7d. The two guards that make this quotable
+### 7d. The guards that make this quotable
 
-* **Posture.** The solved region is only comparable to 12,411.5 under the posture the corpus
-  was scored in, so the verb **refuses** to publish under a render-moving ambient switch —
-  and, equally, refuses to refuse a value that RESOLVES to the recorded render
-  (`TORTOISE_S4_DELTA=1` or `garbage`, `TORTOISE_EXTRACTOR_PROMPT=verbose`, a
-  `TORTOISE_PACKS_DIR` at the in-tree `packs/`). Both halves are pinned: a presence test was
-  measured refusing this repo's own suite, which exports `TORTOISE_S4_DELTA=0` from
-  `tests/conftest.py`.
-* **Offline.** The run reports whether it fetched tiktoken's BPE ranks; the recorded run
-  **fetched nothing** (`network_used: false` in the JSON), so "reproducible with no network"
-  is a measurement and not a claim.
+* **Posture, graded by RESOLUTION through the pipeline's own predicates.** The solved region
+  is only comparable to 12,411.5 under the posture the corpus was scored in, so the verb
+  **refuses** a value that MOVES the render (`TORTOISE_S4_DELTA=0/off`,
+  `TORTOISE_EXTRACTOR_PROMPT=compact`, `TORTOISE_CLASSIFY_LATER`, `TORTOISE_REFERENTIALITY`)
+  and **does not refuse** a value that resolves to it (`S4_DELTA=1` or `garbage`,
+  `EXTRACTOR_PROMPT=verbose`). Presence-based grading was measured refusing this repo's own
+  suite, which exports `TORTOISE_S4_DELTA=0` from `tests/conftest.py`.
+  `TORTOISE_PACKS_DIR` is graded the same way: `pack_registry.env_packs_dir()` DISCARDS a
+  missing / not-a-dir / manifest-less value and the in-tree catalog renders, so a set-but-broken
+  value is **accepted** (refusing it was a measured false block — the fleet's normal case is a
+  reaped worktree under an exported variable), while a DIFFERENT loadable catalog is refused
+  because its vocabulary cannot be proved identical.
+* **One arm or no artifact.** `cost_table` prices the COLD arm whenever the corpus carries one,
+  so `--arm warm` would have published warm's call structure and solved region beside cold's
+  medians under a single label (measured: the team cell moved 398 → 397 on a quantity belonging
+  to neither arm). A mismatch is now refused (exit 2) instead of mixed.
+* **Offline, as POSITIVE evidence.** The verb wraps `tiktoken.load.read_file` — the function
+  `read_file_cached` reaches ONLY on a cache miss — and reports the blob URLs it was called for.
+  The recorded run called it **zero times** (`network_used: false`, `fetched: []`), so
+  "reproducible with no network" is an observation rather than a claim. A directory snapshot
+  could not answer this: tiktoken resolves its cache by PRESENCE of
+  `TIKTOKEN_CACHE_DIR`/`DATA_GYM_CACHE_DIR` (an empty value disables caching and fetches on every
+  call while writing nothing), so a snapshot of the wrong directory reports "no fetch" most
+  confidently when it is wrong.
 
 `tests/test_14371_offline_embed_json.py` pins the recorded cells against the committed
 artifact, pins both layouts back to the **identical parsed object** on every real emission
 (key order included — the risk is a format change a downstream parser tolerates but reads
-differently), and runs the whole measurement end to end wherever a BPE cache exists, skipping
-rather than downloading where it does not.
+differently), pins the guard in both directions plus the arm-mixing refusal, and runs the whole
+measurement end to end wherever a BPE cache holds the `cl100k_base` blob, skipping rather than
+downloading where it does not (the skip gate names the blob, not "some file in a directory":
+any other encoding in the cache would pass a loose gate and then download on the miss).
 
 ### 7e. What this does NOT deliver
 

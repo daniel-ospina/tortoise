@@ -43,8 +43,9 @@
   }
  ],
  "encoder_cache": {
-  "cache_dir": "<tmp>/data-gym-cache",
-  "fetched_during_measurement": [],
+  "cache_dir": "/tmp/data-gym-cache",
+  "caching_disabled": false,
+  "fetched": [],
   "network_used": false
  },
  "evidence": "docs/evidence/14277-extractor-cost/measurements.jsonl",
@@ -62,7 +63,14 @@
   "s4_calls_per_doc": 1.14,
   "saved_pct": 7.1,
   "saved_per_call": 4035.0,
-  "saved_per_doc": 4599.9
+  "saved_per_doc": 4599.9,
+  "solve": {
+   "embed_region_per_call": 12411.5,
+   "s4_prompt_tokens_per_call": 23176.0,
+   "s4_static_render_per_call": 8562,
+   "story_re_sent_per_call": 2109.5,
+   "untrusted_envelope_per_call": 93
+  }
  },
  "per_emission": [
   {
@@ -192,7 +200,18 @@
    "story_tokens": 479
   }
  ],
- "posture": "production (no ambient extractor switch set)",
+ "posture": {
+  "observed": {
+   "TORTOISE_CLASSIFY_LATER": "<unset>",
+   "TORTOISE_EXTRACTOR_PROMPT": "<unset>",
+   "TORTOISE_PACKS_DIR": "<unset>",
+   "TORTOISE_REFERENTIALITY": "<unset>",
+   "TORTOISE_S4_DELTA": "<unset>",
+   "TORTOISE_S4_EMBED_JSON": "indent"
+  },
+  "problems": [],
+  "verdict": "production"
+ },
  "provider_calls": 0,
  "receipts": "tests/eval/write_path/receipts/7947-arms-2026-10-18",
  "tokenizer": "cl100k_base"

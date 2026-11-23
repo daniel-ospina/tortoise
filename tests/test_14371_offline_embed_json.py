@@ -40,6 +40,7 @@ import json
 import sys
 from pathlib import Path
 
+import hashlib
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -79,21 +80,29 @@ def _emissions() -> list[tuple[str, str, dict]]:
     return out
 
 
+#: tiktoken caches a blob under `sha1(blobpath)`. The gate below asks for THIS
+#: blob, not for "some file in a directory": a cache holding any other encoding
+#: passes a loose gate and then downloads `cl100k_base` on the miss — network
+#: egress from a deterministic test, which is exactly what the gate exists to
+#: prevent.
+_BPE_BLOB = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+_BPE_CACHE_KEY = hashlib.sha1(_BPE_BLOB.encode()).hexdigest()  # noqa: S324 - tiktoken's own key
+
+
 def _host_bpe_cache_dir() -> Path | None:
-    """A BPE cache that ALREADY holds `cl100k_base`, anywhere on this box.
+    """A BPE cache dir that ALREADY holds the `cl100k_base` blob.
 
     ⛔ `tests/conftest.py` redirects `tempfile.tempdir` into a private session
     root at import, so tiktoken's DEFAULT cache location is empty inside a
     suite run even when the host cache is warm — the skip this helper feeds
     would then be permanent and the live measurement would never execute
     anywhere. Pointing `TIKTOKEN_CACHE_DIR` at the host's existing copy is what
-    "offline" means here: no fetch, whatever directory it lives in. The run
-    still ASSERTS `network_used is False`, so a cache that turns out not to
-    hold the right blob reds instead of silently downloading.
+    "offline" means here: no fetch, whatever directory it lives in.
     """
     import os
     import tempfile
     candidates = [os.environ.get("TIKTOKEN_CACHE_DIR"),
+                  os.environ.get("DATA_GYM_CACHE_DIR"),
                   str(Path(tempfile.gettempdir()) / "data-gym-cache"),
                   "/tmp/data-gym-cache"]
     for candidate in candidates:
@@ -101,7 +110,7 @@ def _host_bpe_cache_dir() -> Path | None:
             continue
         path = Path(candidate)
         try:
-            if path.is_dir() and any(p.is_file() for p in path.iterdir()):
+            if (path / _BPE_CACHE_KEY).is_file():
                 return path
         except OSError:
             continue
@@ -166,7 +175,7 @@ def test_the_verb_makes_no_provider_call():
 # ── the information-neutrality pin (no tokenizer, runs everywhere) ────────
 
 
-def test_both_layouts_parse_back_to_the_identical_object():
+def test_both_layouts_parse_back_to_the_identical_object(clean_posture):
     """The saving is information-neutral ONLY if the region round-trips.
 
     Both renders come from `_embed_json_kwargs()` — the PRODUCTION seam, not a
@@ -174,11 +183,14 @@ def test_both_layouts_parse_back_to_the_identical_object():
     send, key order included (Python dicts preserve insertion order through
     `json`), on every real emission in the corpus.
     """
+    from tortoise import extractor_v2 as v2
     emissions = _emissions()
     assert len(emissions) == _RECORDED["emissions"]
     for session, arm, embed in emissions:
-        today = json.dumps(embed, indent=1)
-        compact = json.dumps(embed, separators=(",", ":"))
+        clean_posture.delenv(m._TOGGLE, raising=False)
+        today = json.dumps(embed, **v2._embed_json_kwargs())
+        clean_posture.setenv(m._TOGGLE, "compact")
+        compact = json.dumps(embed, **v2._embed_json_kwargs())
         assert today != compact, (
             f"{session}/{arm}: the two layouts are byte-identical, so the "
             "measurement would be comparing a render with itself")
@@ -284,13 +296,89 @@ def test_the_in_tree_packs_dir_is_a_production_posture(clean_posture):
 
 
 def test_an_out_of_tree_packs_dir_is_refused(clean_posture, tmp_path):
-    clean_posture.setenv("TORTOISE_PACKS_DIR", str(tmp_path))
+    """A DIFFERENT, LOADABLE packs tree cannot be proved to render the
+    recorded vocabulary, so it is refused."""
+    import shutil
+    other = tmp_path / "packs"
+    (other / "somepack").mkdir(parents=True)
+    # one loadable manifest, the shape `env_packs_dir()` requires
+    source = next((_REPO_ROOT / "packs").glob("*/manifest.yaml"), None)
+    assert source is not None, "the in-tree catalog changed shape"
+    shutil.copy(source, other / "somepack" / "manifest.yaml")
+    clean_posture.setenv("TORTOISE_PACKS_DIR", str(other))
     problems = m._posture_problems()
     assert problems and "TORTOISE_PACKS_DIR" in problems[0]
 
 
+def test_a_set_but_BROKEN_packs_dir_is_NOT_refused(clean_posture, tmp_path):
+    """⛔ The other direction: the pipeline DISCARDS a broken value.
+
+    `tortoise.pack_registry.env_packs_dir()` returns `None` for a value that is
+    missing / not-a-dir / holds no loadable manifest, and `default_packs_dir()`
+    then falls back to the in-tree catalog — so the render is the recorded one
+    and refusing it would be a false block. The fleet makes this the NORMAL
+    case: a reaped worktree under an exported `TORTOISE_PACKS_DIR`. Measured
+    before this guard: `TORTOISE_PACKS_DIR=/nonexistent` was refused with a
+    message claiming the kind vocabulary differed, which was false.
+    """
+    clean_posture.setenv("TORTOISE_PACKS_DIR", str(tmp_path / "reaped-worktree"))
+    assert m._posture_problems() == []
+
+    empty = tmp_path / "empty-catalog"
+    empty.mkdir()
+    clean_posture.setenv("TORTOISE_PACKS_DIR", str(empty))
+    assert m._posture_problems() == []
+
+
 def test_a_clean_environment_has_no_posture_problems(clean_posture):
     assert m._posture_problems() == []
+
+
+def test_the_cache_dir_mirrors_tiktoken_s_own_resolution(clean_posture):
+    """The offline claim is only about the cache tiktoken ACTUALLY uses.
+
+    `tiktoken.load.read_file_cached` resolves by PRESENCE (`in os.environ`),
+    prefers `TIKTOKEN_CACHE_DIR`, then `DATA_GYM_CACHE_DIR`, else the temp dir —
+    and an EMPTY value disables caching, i.e. guarantees a fetch. A snapshot of
+    one guessed directory answered a different question (measured: with
+    `DATA_GYM_CACHE_DIR` set, the old detector watched `/tmp/data-gym-cache` and
+    reported `no fetch` most confidently when it was wrong).
+    """
+    clean_posture.delenv("TIKTOKEN_CACHE_DIR", raising=False)
+    clean_posture.delenv("DATA_GYM_CACHE_DIR", raising=False)
+    assert m._tiktoken_cache_dir().endswith("data-gym-cache")
+
+    clean_posture.setenv("DATA_GYM_CACHE_DIR", "/dg/only")
+    assert m._tiktoken_cache_dir() == "/dg/only"
+
+    clean_posture.setenv("TIKTOKEN_CACHE_DIR", "/tk/wins")
+    assert m._tiktoken_cache_dir() == "/tk/wins"
+
+    # presence with an EMPTY value = caching disabled (fetch every call)
+    clean_posture.setenv("TIKTOKEN_CACHE_DIR", "")
+    assert m._tiktoken_cache_dir() == ""
+
+
+def test_the_fetch_observer_records_tiktoken_s_own_reader(clean_posture):
+    """POSITIVE evidence, not a directory diff.
+
+    The observer wraps `tiktoken.load.read_file` — the function
+    `read_file_cached` reaches ONLY on a cache miss — so the recorded list is
+    the fetch itself. The real reader is stubbed here (no network), which also
+    pins that the wrapper DELEGATES and restores.
+    """
+    import tiktoken.load as _load
+    real = _load.read_file
+    clean_posture.setattr(_load, "read_file", lambda blobpath, *a, **k: b"stub")
+    try:
+        with m._observe_encoder_fetches() as fetched:
+            assert fetched == []
+            assert _load.read_file(_BPE_BLOB) == b"stub"
+            assert fetched == [_BPE_BLOB]
+        # restored to what it was on entry, not to the real reader
+        assert _load.read_file(_BPE_BLOB) == b"stub"
+    finally:
+        clean_posture.setattr(_load, "read_file", real)
 
 
 # ── the committed artifact: the recorded cells must be REACHABLE ─────────
@@ -332,12 +420,28 @@ def test_the_committed_artifact_states_what_it_does_not_deliver():
     assert data["encoder_cache"]["network_used"] is False, (
         "the recorded run fetched the BPE ranks — it is not the offline run the "
         "artifact claims; re-run on a warm cache and re-record")
+    assert data["encoder_cache"]["fetched"] == [], (
+        "the artifact names a fetched blob, so `network_used` must not be False")
+    # the posture is DERIVED and the layout is RECORDED, not asserted as prose
+    assert data["posture"]["verdict"] == "production"
+    assert data["posture"]["observed"]["TORTOISE_S4_EMBED_JSON"] == "indent", (
+        "the recorded run must say which layout the seam resolved to — an "
+        "armed shell producing a disarmed-looking artifact is the false pass "
+        "this field exists to prevent")
 
 
 def test_the_committed_artifact_carries_the_reproduce_command():
+    """The command must WRITE the artifact, not just print it to stdout.
+
+    `--out`/`--json-out` are optional, so a command without them leaves the
+    committed file untouched — a lane following it would believe it regenerated
+    while the file stayed stale.
+    """
     text = _ARTIFACT_MD.read_text(encoding="utf-8")
     assert "tools/extractor_cost_measure.py embed-json" in text
     assert "7947-arms-2026-10-18" in text
+    assert f"--out {_ARTIFACT_MD.relative_to(_REPO_ROOT)}" in text
+    assert f"--json-out {_ARTIFACT_JSON.relative_to(_REPO_ROOT)}" in text
 
 
 def test_the_committed_allowance_cells_are_the_recorded_floors():
@@ -411,3 +515,25 @@ def test_the_offline_measurement_reproduces_the_recorded_cells(clean_posture):
     assert "NOT delivered here" in rendered
     assert "#7949" in rendered
     assert "embed-json" in rendered
+    # every term of the solve is printed, so a reader can re-derive the region
+    solve = doc["solve"]
+    assert (solve["s4_prompt_tokens_per_call"]
+            - solve["s4_static_render_per_call"]
+            - solve["story_re_sent_per_call"]
+            - solve["untrusted_envelope_per_call"]) == pytest.approx(
+                doc["embed_region_per_s4_call"], abs=0.2)
+    assert "− `2,109.5`" in rendered or "- `2,109.5`" in rendered
+
+
+def test_a_second_arm_is_refused_rather_than_mixed(clean_posture):
+    """⛔ One arm or no artifact: `cost_table` always prices the COLD arm.
+
+    So `--arm warm` would publish warm's call structure and solved region
+    beside cold's medians, under a label naming one of them. Measured before
+    the guard: the team cell moved 398 → 397 on a quantity belonging to neither
+    arm.
+    """
+    clean_posture.setenv("TIKTOKEN_CACHE_DIR", str(_BPE_CACHE))
+    with pytest.raises(SystemExit) as exc:
+        m.embed_json_measurement(_RECEIPTS, _EVIDENCE, arm="warm")
+    assert exc.value.code == 2

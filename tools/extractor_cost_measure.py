@@ -97,6 +97,7 @@ import statistics
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -2899,33 +2900,92 @@ def _posture_problems() -> list[str]:
                    "and the S1 story)")
     packs = (os.environ.get(_POSTURE_PACKS_DIR) or "").strip()
     if packs:
-        try:
-            resolved = Path(packs).expanduser().resolve()
-        except OSError:  # pragma: no cover - unreadable path is still a value
-            resolved = Path(packs)
-        if resolved != (_REPO_ROOT / "packs").resolve():
-            out.append(f"`{_POSTURE_PACKS_DIR}={packs}` (resolves outside the "
-                       "in-tree `packs/`, so the kind vocabulary differs)")
+        # ⛔ GRADED BY THE PIPELINE'S OWN RESOLUTION, not by path equality. A
+        # set-but-broken value (missing / not-a-dir / no loadable manifest) is
+        # DISCARDED by `env_packs_dir()` and the in-tree catalog is used, so
+        # refusing it would be a false block — and the fleet makes that the
+        # normal case (a worktree reaped under an exported variable). Verified:
+        # `TORTOISE_PACKS_DIR=/nonexistent` → `env_packs_dir()` is None →
+        # `default_packs_dir()` is the in-tree `packs/`.
+        from tortoise import pack_registry as _packs
+        resolved_env = _packs.env_packs_dir()
+        if resolved_env is not None:
+            # `_skip_env=True`: `default_packs_dir()`'s OWN first leg is the env
+            # value, so comparing against it would make this check vacuous — the
+            # recorded vocabulary is whatever the NON-env legs resolve to
+            # (packaged catalog, else the repo root's `packs/`).
+            default = _packs.default_packs_dir(_skip_env=True)
+            if resolved_env.expanduser().resolve() != default.expanduser().resolve():
+                out.append(
+                    f"`{_POSTURE_PACKS_DIR}={packs}` (a DIFFERENT packs tree "
+                    f"than the in-tree catalog — the kind vocabulary cannot "
+                    f"be proved identical to the one the corpus was scored "
+                    f"with)")
     return out
 
 
-def _bpe_cache_files() -> set[Path]:
-    """tiktoken's on-disk BPE cache — the OFFLINE PRECONDITION, observable.
+def _posture_observed() -> dict[str, str]:
+    """What each posture switch ACTUALLY resolved to — recorded, not asserted.
 
-    `tiktoken.get_encoding("cl100k_base")` fetches ~1.6 MB of BPE ranks over the
-    network on a COLD cache (`openaipublic.blob.core.windows.net`), and reuses
-    the copy on disk afterwards. The verb reports whether a fetch happened
-    during the measurement, so "reproducible with no network" is a MEASUREMENT
-    rather than a claim: the run that produced the recorded cells fetched
-    nothing.
+    The artifact used to carry a literal `posture: production` string. A label
+    that is not derived from a read is not evidence, and it cannot say which
+    layout the measured prompt would have taken — so this reads every switch
+    the guard grades, plus the layout seam itself.
     """
-    import tempfile
-    base = (os.environ.get("TIKTOKEN_CACHE_DIR")
-            or str(Path(tempfile.gettempdir()) / "data-gym-cache"))
+    observed = {key: (os.environ.get(key) or "<unset>")
+                for key in (*_POSTURE_SWITCHES, _POSTURE_PACKS_DIR)}
     try:
-        return {p for p in Path(base).iterdir() if p.is_file()}
-    except OSError:
-        return set()
+        observed["TORTOISE_S4_EMBED_JSON"] = _embed_mode()
+    except Exception as exc:  # pragma: no cover - a broken seam is reported
+        observed["TORTOISE_S4_EMBED_JSON"] = f"<unreadable: {exc}>"
+    return observed
+
+
+def _tiktoken_cache_dir() -> str:
+    """The encoder cache dir, resolved EXACTLY as `tiktoken.load` resolves it.
+
+    ⛔ Presence, not truthiness, and `DATA_GYM_CACHE_DIR` is a real second
+    location — `tiktoken.load.read_file_cached` checks `"TIKTOKEN_CACHE_DIR" in
+    os.environ`, then `"DATA_GYM_CACHE_DIR" in os.environ`, then the temp dir,
+    and treats an EMPTY value as "caching disabled" (fetch on every call,
+    write nothing). A snapshot of one guessed directory answers a different
+    question from the one this verb claims to answer.
+    """
+    if "TIKTOKEN_CACHE_DIR" in os.environ:
+        return os.environ["TIKTOKEN_CACHE_DIR"]
+    if "DATA_GYM_CACHE_DIR" in os.environ:
+        return os.environ["DATA_GYM_CACHE_DIR"]
+    import tempfile
+    return str(Path(tempfile.gettempdir()) / "data-gym-cache")
+
+
+@contextmanager
+def _observe_encoder_fetches():
+    """POSITIVE evidence of a network fetch: wrap tiktoken's OWN reader.
+
+    A before/after directory snapshot cannot establish "no fetch": tiktoken
+    resolves the cache by PRESENCE of `TIKTOKEN_CACHE_DIR`/`DATA_GYM_CACHE_DIR`
+    (an empty value disables caching and fetches on every call while writing
+    NOTHING), and a snapshot of the wrong directory reports `no fetch` most
+    confidently exactly when it is wrong. So the observation is the call
+    itself: `read_file_cached` reaches `read_file` only on a cache MISS, and
+    this records every such call while still delegating to the real reader.
+
+    Yields the list the wrapper appends to (blob URLs).
+    """
+    import tiktoken.load as _load
+    original = _load.read_file
+    fetched: list[str] = []
+
+    def _spy(blobpath, *args, **kwargs):
+        fetched.append(str(blobpath))
+        return original(blobpath, *args, **kwargs)
+
+    _load.read_file = _spy
+    try:
+        yield fetched
+    finally:
+        _load.read_file = original
 
 
 def embed_json_measurement(receipts: Path, evidence: Path, *,
@@ -2960,19 +3020,36 @@ def embed_json_measurement(receipts: Path, evidence: Path, *,
             file=sys.stderr)
         raise SystemExit(2)
 
-    cache_before = _bpe_cache_files()
-    lev = serialization_lever(receipts)
-    if not lev:
-        raise SystemExit(
-            f"no usable write-path receipts in {receipts} — the verb's entire "
-            "subject is the real S2 emissions they carry")
-    rows = load_rows(evidence)
-    dec = decompose(rows, arm=arm, receipts=None)
-    costs = (report_from_rows(rows).get("costs") or {})
+    fetched: list[str] = []
+    with _observe_encoder_fetches() as fetched:
+        lev = serialization_lever(receipts)
+        if not lev:
+            raise SystemExit(
+                f"no usable write-path receipts in {receipts} — the verb's "
+                "entire subject is the real S2 emissions they carry")
+        rows = load_rows(evidence)
+        dec = decompose(rows, arm=arm, receipts=None)
+        costs = (report_from_rows(rows).get("costs") or {})
     median_row = (costs.get("rows") or [None])[0]
     if not median_row:
         raise SystemExit(f"no usable `{arm}` median document in {evidence}")
-    fetched = _bpe_cache_files() - cache_before
+    #: ⛔ ONE ARM OR NO ARTIFACT. `cost_table` prices the COLD arm whenever the
+    #: corpus carries one (it must — its `hit_ratio` comes from the same arm), so
+    #: `--arm warm` would publish a hybrid: warm's call structure and solved
+    #: region beside cold's medians, under a label that names only one of them.
+    #: Measured before this guard: `--arm warm` moved the team cell 398 → 397 on
+    #: a quantity that belongs to neither arm.
+    if costs.get("arm") != arm:
+        print(
+            f"refusing to mix arms: `--arm {arm}` was asked for, but the "
+            f"median document resolves from the `{costs.get('arm')}` arm "
+            f"(`cost_table` prices the arm its cache ratio comes from). The "
+            f"per-document figure would be `{arm}`'s call structure with "
+            f"`{costs.get('arm')}`'s medians. Re-run with "
+            f"`--arm {costs.get('arm')}`.",
+            file=sys.stderr)
+        raise SystemExit(2)
+    cache_dir = _tiktoken_cache_dir()
 
     #: ⛔ EXACT ratio, not the rounded 32.5: the published bundle applies the
     #: rounded share and prints 4,598, this applies the exact one and prints
@@ -3000,12 +3077,21 @@ def embed_json_measurement(receipts: Path, evidence: Path, *,
         "provider_calls": 0,
         "tokenizer": "cl100k_base",
         "encoder_cache": {
-            "cache_dir": (os.environ.get("TIKTOKEN_CACHE_DIR")
-                          or "<tmp>/data-gym-cache"),
-            "fetched_during_measurement": sorted(str(p) for p in fetched),
+            "cache_dir": (cache_dir or "<disabled: TIKTOKEN_CACHE_DIR is "
+                           "empty, so tiktoken fetches on every call and "
+                           "writes nothing>"),
+            "caching_disabled": cache_dir == "",
+            #: POSITIVE evidence: the blob URLs tiktoken's own reader was
+            #: called for. Empty = nothing was fetched during this run.
+            "fetched": list(fetched),
             "network_used": bool(fetched),
         },
-        "posture": "production (no ambient extractor switch set)",
+        #: DERIVED from the guard and from a read of the seam — never a literal.
+        "posture": {
+            "verdict": "production" if not problems else "NON-PRODUCTION",
+            "problems": list(problems),
+            "observed": _posture_observed(),
+        },
         "receipts": str(receipts),
         "evidence": str(evidence),
         "arm": arm,
@@ -3043,6 +3129,20 @@ def embed_json_measurement(receipts: Path, evidence: Path, *,
             "after_in": round(before_in - saved_per_doc, 1),
             "after_total": after,
             "saved_pct": round(100.0 * saved_per_doc / before, 2),
+            #: EVERY term of the solve `decompose` performs, so the artifact can
+            #: print a subtraction a reader can re-derive. The embed region is
+            #: NOT just `prompt − static`: S1's re-sent story and the #10311
+            #: untrusted-data envelope are subtracted too, each charged to its
+            #: own row (`decompose`, and this bundle's §1).
+            "solve": {
+                "s4_prompt_tokens_per_call": round(
+                    float(dec["per_call"]["s4"]["prompt"]), 1),
+                "s4_static_render_per_call": sum(dec["statics"]["s4"].values()),
+                "story_re_sent_per_call": dec["solved"]["story_tokens"],
+                "untrusted_envelope_per_call": dec["statics"]["envelope"][
+                    "clause"],
+                "embed_region_per_call": region_per_call,
+            },
         },
         "documents_per_month": buys,
         "not_delivered": (
@@ -3083,10 +3183,20 @@ def render_embed_json_measurement(m: dict) -> str:
         f"`{m['tokenizer']}`; the encoder cache was "
         + ("**FETCHED during this run** (network used)"
            if m["encoder_cache"]["network_used"]
-           else "**warm — no fetch, no network**") + ".", "",
+           else "**warm — tiktoken's own reader was never called**")
+        + f" (cache dir `{m['encoder_cache']['cache_dir']}`).", "",
         f"Corpus: `{m['receipts']}` ({agg['receipts']} sessions / "
         f"{agg['emissions']} emissions / {agg['items']:,} items). Vertex: "
-        f"`{m['evidence']}` arm `{m['arm']}`.", "",
+        f"`{m['evidence']}` arm `{m['arm']}`. Posture: "
+        f"**{m['posture']['verdict']}** (every switch read, not asserted: "
+        + ", ".join(f"{k}={v}" for k, v in m["posture"]["observed"].items())
+        + ")", "",
+        "The layout seam resolved to "
+        f"**`{m['posture']['observed'].get('TORTOISE_S4_EMBED_JSON')}`** — "
+        "this measurement counts BOTH layouts over the same objects, so its "
+        "numbers do not depend on that setting; it is recorded because an "
+        "armed shell must not produce an artifact indistinguishable from a "
+        "disarmed one.", "",
         "### The tokens the lever removes, per emission", "",
         "| session | arm | items | `indent=1` | compact | saved | saved % |",
         "|---|---|---|---|---|---|---|",
@@ -3110,9 +3220,17 @@ def render_embed_json_measurement(m: dict) -> str:
         "### Tokens per document, before → after", "",
         "The arithmetic, in the order it is applied:", "",
         f"1. the re-sent embed region is **solved** from the corpus per S4 "
-        f"call — provider `prompt_tokens` minus the `cl100k` static render: "
-        f"**{lev['embed_region_per_s4_call']:,.1f}** tokens (the bundle prints "
-        f"`12,412`: same solve, rendered to the whole token);",
+        f"call: `{lev['solve']['s4_prompt_tokens_per_call']:,.1f}` (provider "
+        f"`prompt_tokens` per call) − "
+        f"`{lev['solve']['s4_static_render_per_call']:,}` (the S4 static "
+        f"render) − `{lev['solve']['story_re_sent_per_call']:,.1f}` (S1's story, "
+        f"re-sent) − `{lev['solve']['untrusted_envelope_per_call']}` (the "
+        f"#10311 untrusted-data envelope) = "
+        f"**{lev['solve']['embed_region_per_call']:,.1f}** tokens — the bundle "
+        f"prints `12,412`, the same solve at whole-token precision. Every term "
+        f"is subtracted because each is charged to its OWN row in the "
+        f"decomposition; omitting the last two gives 14,614.0, which is not "
+        f"this region.",
         f"2. S4 takes **{lev['s4_calls_per_doc']}** calls per document "
         f"({corpus['documents']} documents), so the region is "
         f"`{lev['embed_region_per_s4_call']:,.1f} × {lev['s4_calls_per_doc']}` "
@@ -3173,8 +3291,13 @@ def render_embed_json_measurement(m: dict) -> str:
         "```bash",
         "uv run python tools/extractor_cost_measure.py embed-json \\",
         "    --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \\",
-        "    --evidence docs/evidence/14277-extractor-cost/measurements.jsonl",
+        "    --evidence docs/evidence/14277-extractor-cost/measurements.jsonl \\",
+        "    --out docs/evidence/14343-amplify/embed-json-offline.md \\",
+        "    --json-out docs/evidence/14343-amplify/embed-json-offline.json",
         "```",
+        "",
+        "Without the two `--out` flags the command prints this document to "
+        "stdout and writes nothing — that is a READ, not a regeneration.",
         "",
     ]
     return "\n".join(lines)
@@ -3437,7 +3560,10 @@ def main(argv: list[str] | None = None) -> int:
     ej.add_argument("--evidence", required=True, type=Path,
                     help="the `measurements.jsonl` supplying the call "
                          "structure and the median document's in/out columns")
-    ej.add_argument("--arm", default="cold")
+    ej.add_argument("--arm", default="cold",
+                    help="the corpus arm to read (default `cold`). A mismatch with "
+                         "the arm the median document resolves from is "
+                         "REFUSED rather than mixed")
     ej.add_argument("--out", type=Path, help="write the markdown here")
     ej.add_argument("--json-out", type=Path)
 

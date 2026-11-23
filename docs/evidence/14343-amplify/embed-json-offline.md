@@ -13,9 +13,11 @@ aboutObjects: "#14371, #14343, #14365, #14295, #14277, #14275, #7949"
 
 ## The S4 embed-list saving, measured offline (#14371)
 
-⛔ **OFFLINE — zero provider calls, zero spend, no key read.** Both layouts are `json.dumps` over the SAME objects, counted with `cl100k_base`; the encoder cache was **warm — no fetch, no network**.
+⛔ **OFFLINE — zero provider calls, zero spend, no key read.** Both layouts are `json.dumps` over the SAME objects, counted with `cl100k_base`; the encoder cache was **warm — tiktoken's own reader was never called** (cache dir `/tmp/data-gym-cache`).
 
-Corpus: `tests/eval/write_path/receipts/7947-arms-2026-10-18` (7 sessions / 14 emissions / 580 items). Vertex: `docs/evidence/14277-extractor-cost/measurements.jsonl` arm `cold`.
+Corpus: `tests/eval/write_path/receipts/7947-arms-2026-10-18` (7 sessions / 14 emissions / 580 items). Vertex: `docs/evidence/14277-extractor-cost/measurements.jsonl` arm `cold`. Posture: **production** (every switch read, not asserted: TORTOISE_S4_DELTA=<unset>, TORTOISE_EXTRACTOR_PROMPT=<unset>, TORTOISE_CLASSIFY_LATER=<unset>, TORTOISE_REFERENTIALITY=<unset>, TORTOISE_PACKS_DIR=<unset>, TORTOISE_S4_EMBED_JSON=indent)
+
+The layout seam resolved to **`indent`** — this measurement counts BOTH layouts over the same objects, so its numbers do not depend on that setting; it is recorded because an armed shell must not produce an artifact indistinguishable from a disarmed one.
 
 ### The tokens the lever removes, per emission
 
@@ -43,7 +45,7 @@ Corpus: `tests/eval/write_path/receipts/7947-arms-2026-10-18` (7 sessions / 14 e
 
 The arithmetic, in the order it is applied:
 
-1. the re-sent embed region is **solved** from the corpus per S4 call — provider `prompt_tokens` minus the `cl100k` static render: **12,411.5** tokens (the bundle prints `12,412`: same solve, rendered to the whole token);
+1. the re-sent embed region is **solved** from the corpus per S4 call: `23,176.0` (provider `prompt_tokens` per call) − `8,562` (the S4 static render) − `2,109.5` (S1's story, re-sent) − `93` (the #10311 untrusted-data envelope) = **12,411.5** tokens — the bundle prints `12,412`, the same solve at whole-token precision. Every term is subtracted because each is charged to its OWN row in the decomposition; omitting the last two gives 14,614.0, which is not this region.
 2. S4 takes **1.14** calls per document (50 documents), so the region is `12,411.5 × 1.14` = **14,149.1 tokens/document**;
 3. the measured share — `25,215 / 77,561` = 32.5099% — applied to that region: `0.325099 × 14,149.1` = **4,599.9 tokens/document** (4,035.0 per call);
 4. the median document is `48,461 in + 16,338 out` = **64,799 tokens**, so after = `64,799 − 4,599.9` = **60,199.1** (**−7.1%**).
@@ -77,5 +79,9 @@ That is **+3 / +5 / +28** documents a month (solo / pro / team) — the size of 
 ```bash
 uv run python tools/extractor_cost_measure.py embed-json \
     --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
-    --evidence docs/evidence/14277-extractor-cost/measurements.jsonl
+    --evidence docs/evidence/14277-extractor-cost/measurements.jsonl \
+    --out docs/evidence/14343-amplify/embed-json-offline.md \
+    --json-out docs/evidence/14343-amplify/embed-json-offline.json
 ```
+
+Without the two `--out` flags the command prints this document to stdout and writes nothing — that is a READ, not a regeneration.
