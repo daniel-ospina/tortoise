@@ -147,7 +147,96 @@ jobs:
             echo "::warning::published-artifact-canary exited 1 WITHOUT publishing a FAIL verdict — classifying as a DETECTOR fault (exit 2), not a release call"
             rc=2
           fi
+          # ⛔ THE LOG MUST ANSWER THE QUESTION THE LOG INVITES (measured 2026-11-22).
+          # `--json` sends the verdict to a FILE, so this step's own stdout carried NO
+          # verdict at all — while the runner echoes the whole run script above in bold
+          # cyan (`\x1b[36;1m`), which reads exactly like output. A reader of
+          # `gh run view --log` therefore concluded "no verdict line was printed, so the
+          # canary died before it could publish one" about a run whose verdict.json said
+          # FAIL: the artifact was broken and the detector was blamed. The artifact
+          # download resolves it, but the log is what everyone reads first, so print the
+          # reading (and say so when there is none) instead of leaving the two
+          # indistinguishable. Pinned by
+          # `test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read`.
+          #
+          # ⛔ PUBLISH THE SEVERITY SIGNAL BEFORE PRINTING IT (review cycle 1, P1, MEASURED).
+          # `exit_code=` is the only severity signal the alert has, and it used to be
+          # downstream of the display: a `cat` that failed under `-e` (a
+          # present-but-unreadable verdict.json — permissions, a directory, a damaged
+          # mount) aborted the step BEFORE the write ran — measured the output sink EMPTY
+          # while its own logic had decided 2. `-s` cannot catch it (`-s` is true for an
+          # unreadable file).
+          #
+          # ⛔ AND WHAT THE ORDERING DOES *NOT* BUY, stated here because the headline above
+          # said otherwise until a review measured it (P3): the step's own final `exit` is
+          # still BELOW this display, so a display write that fails for a reason `|| true`
+          # does not cover (an `echo` onto a closed or EPIPE'd stdout) can still abort the
+          # step under `-e` and turn a PASS into a RED STEP. What the ordering guarantees is
+          # narrower and is the thing that matters: the severity signal written to the output
+          # SINK above is already there and is never lost, so the alert and the round-18 gate
+          # read the true verdict even when the step's own exit status is spoiled. Do not
+          # restate this as "the display cannot decide the exit" — it can spoil the EXIT,
+          # never the SIGNAL.
+          #
+          # ⛔ WHAT ACTUALLY PREVENTS THE ABORT, stated precisely because a MUTATION PASS
+          # (agent-infra#3442) showed the first version of this comment overclaimed: the
+          # `|| true` on the `cat` is the LOAD-BEARING guard — with it in place, moving the
+          # display above this write changes nothing in any state where stdout is OPEN, and
+          # the suite stayed green under that mutant BEFORE case (e) existed (`1 passed`,
+          # history, not a present-tense claim). The ORDERING is defence in depth: it means a
+          # future display line that fails for a reason `|| true` does not cover (a failing
+          # `echo` on a closed or EPIPE'd stdout) still cannot cost the severity signal,
+          # which is the only thing the alert and the round-18 gate read. So: the guard is
+          # pinned by a mutant (remove `|| true` -> case (c) reds), and the ORDERING is
+          # pinned too, by case (e) of `test_the_canary_step_PRINTS_its_verdict_so_the_log_
+          # can_be_read`: it runs this block with fd 1 CLOSED, so the display `echo` fails
+          # exactly as a closed or EPIPE'd stdout does, and asserts the severity signal is
+          # already in the sink. Moving the display above this write makes case (e) red
+          # (measured: sink `exit_code=1` vs EMPTY). ⛔ This paragraph used to call the
+          # ordering "not something the test can falsify today" — that was FALSE, as a
+          # mutation pass showed by closing fd 1 in three lines; the sentence is corrected
+          # rather than deleted because it is the sentence a reader would trust.
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          if [ -s "$RUNNER_TEMP/canary/verdict.json" ]; then
+            # ⛔ THE HEADER STATES ONLY WHAT IS TRUE ON EVERY PATH (review cycle 15, P2,
+            # MEASURED). It used to say "the verdict.json the exit code was derived from",
+            # which holds only on the `rc=1` + `verdict=FAIL` path: on a PASS run the code
+            # came from the tool's own exit, and on the retag path it came from the
+            # CLASSIFIER because the JSON could not be read.
+            # ⛔ AND IT MUST NOT ASSERT A READ EITHER (fresh-context review of #14314, P3,
+            # MEASURED — the earlier wording of THIS comment claimed the dangled-colon defect
+            # was fixed while it was still live one phrase along). `-s` is true for a DIRECTORY
+            # too, so on the retag path this branch runs over an unreadable `verdict.json`:
+            # `json.load` has already raised, the header still claimed a read that did not
+            # happen, and the colon dangled over `cat`'s own error:
+            #
+            #   stdout: … — the verdict.json this step read:
+            #   stderr: cat: /…/runner/canary/verdict.json: Is a directory
+            #
+            # Naming the file and the two values the reader needs, and saying the payload is
+            # PRINTED rather than read, is true in all three states.
+            echo "published-artifact-canary exit_code=$rc published_fail=$published_fail — verdict.json at $RUNNER_TEMP/canary/verdict.json (printed below; a read failure prints its own error):"
+            # `|| true`: printing the reading must never be able to change the reading.
+            cat "$RUNNER_TEMP/canary/verdict.json" || true
+          else
+            # ⛔ "NO verdict FILE" was one case too broad (review cycle 3, P3, MEASURED): the
+            # redirection above (`--json > "$RUNNER_TEMP/canary/verdict.json"`) is performed
+            # by the SHELL before the tool is exec'd, so on a crash the file EXISTS and is
+            # 0 bytes (`verdict.json exists: True size: 0`). A human who downloads the
+            # artifact therefore sees verdict.json present and the log telling them it is
+            # absent — the same class of unfollowable log this change exists to end. `-s`
+            # is a test for CONTENT, so the line describes what it can actually observe.
+            # ⛔ AND IT MUST NOT CLAIM MORE THAN THE ABSENCE IT SEES (review cycle 7, P3,
+            # MEASURED): "nothing was measured" was false in a REACHABLE state. The tool
+            # flushes its transcript INCREMENTALLY (one line per command) and prints the JSON
+            # only at the very end, so a run that installs, measures, and then fails before
+            # emitting JSON (the `--summary-file` append's guarded `return 2`, or `main()`'s
+            # backstop) leaves a 0-byte verdict.json AND a populated
+            # `published-artifact-canary.log` — the only diagnosis that exists. Telling a
+            # reader "nothing was measured" sends them away from it. This line names what is
+            # absent (the verdict payload) and where the evidence actually lives.
+            echo "published-artifact-canary wrote NO verdict (empty or absent verdict.json) — no verdict payload exists; any transcript is in the uploaded log artifact (exit_code=$rc)"
+          fi
           exit "$rc"
       # `always()` — not `failure()` — so this step is still considered when the JOB is
       # cancelled (its `if` is re-evaluated during the cancellation grace window) and when
@@ -270,7 +359,13 @@ jobs:
               echo
               echo "The published PyPI artifact failed the documented steps. No change in"
               echo "this repo fixes it: it clears when a release lands (version bump → tag →"
-              echo "`publish-pypi.yml`) and `tortoise-client` is published. See #12363."
+              # ⛔ NO BACKTICKS: inside these double quotes they are COMMAND SUBSTITUTION,
+              # so the two artifact names this branch exists to name were EXECUTED — the
+              # shell printed one command-not-found line PER NAME (`publish-pypi.yml:` and
+              # `tortoise-client:`, each once) and the summary reached the human as
+              # "… → ) and  is published" (measured on run 44995025534, the release finding
+              # for a client-published arm that IS the tortoise-client 404).
+              echo "the publish-pypi.yml workflow) and tortoise-client is published. See #12363."
             fi
             echo
             echo "canary result=${{ needs.canary.result }} exit_code=${EXIT_CODE:-none}"

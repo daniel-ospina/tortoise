@@ -1570,6 +1570,25 @@ class TestCapabilityModel:
         dropped["no_such_wrapped_method"] = "tortoise_create_point"
         assert any("stale map" in v
                    for v in write_surface_map_violations(dropped))
+        # ⛔ THE VALUE IS GRADED TOO, and this mutation is the one that proves it
+        # (`#14249` review P2-1). The clause it exercises had NO arm: the assertion
+        # above points a value at a DEAD name (the `dead` clause), and the one above
+        # THAT adds a key with no wrap site (the `inverse` clause — which also happens
+        # to trip the reach clause, because no handler reaches a method that does not
+        # exist). Neither ASSERTS the wrong-door message, so neither can red if that
+        # clause is deleted — which is how `link_entities -> tortoise_create_point`
+        # stayed green while the entry's own comment claimed the pair is what makes the
+        # wrap site checkable.
+        # The pair below is measured wrong against the source (the arm builds the tool's
+        # own handler reach), and `tortoise_create_point` is live and write-typed, so
+        # only the reach clause can red it — deleting that clause reds this line.
+        wrong_door = dict(DECLARED_WRITE_SURFACE_MAP)
+        wrong_door["link_entities"] = "tortoise_create_point"
+        assert any("wrong door" in v
+                   for v in write_surface_map_violations(wrong_door)), (
+            "a method pointed at a live write tool whose handler never reaches it "
+            "must red — otherwise the map's VALUE is ungraded"
+        )
         # FORWARD: a wrap site with no map entry is reported (no KeyError)
         # #4282 Phase 2: the dropped key must be a method that really HAS a wrap
         # site in `tortoise/mcp_server.py` — this mutation is only non-vacuous
@@ -2569,10 +2588,20 @@ class TestToolIdentity:
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
         writers = sorted(e.name for e in served if e.writes)
 
-        # 54 = the served writer census (29 live + 25 retired shims) at this head:
+        # 56 = the served writer census (19 live + 37 retired shims) at this head,
+        # MEASURED from this list rather than subtracted from the previous number:
         # #11609 lane B moved the advertised number and left the served one larger
         # than 43; lane C then retired SEVEN advertised writers into its containers
-        # (still served, #3883) and added FIVE writing containers (+5 served, -2 live).
+        # (still served, #3883) and added FIVE writing containers (+5 served, -2 live);
+        # lane P7 retired five advertised DOORS — THREE of them writers
+        # (`delete`, `create_edge`, `create_operator`; `events_poll` and
+        # `list_graphs` are reads) — and registered four targets, TWO of which write
+        # (`delete_knowledge`, `link_entities`), so the retiring half added three
+        # writer shims (34 -> 37) and the LIVE half fell 20 -> 19 (-3 +2) while the
+        # SERVED census rose 54 -> 56. The sibling arm ABOVE
+        # (`test_write_names_are_derived_from_the_entries`) states that pair, and this
+        # header used to read `54 / 29 live / 25 retired` — refuted by the assert four
+        # lines down.
         # Pinned here so the derived loop below can never pass by covering nothing.
         assert len(writers) == 56, writers
         for name in ("tortoise_index_files", "tortoise_dream",

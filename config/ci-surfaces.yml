@@ -2416,7 +2416,16 @@ surfaces:
   # registered under `core` because `tortoise/capture_spool.py` and
   # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
   - test_capture_spool.py
-  # #6388: the session-events DRAIN's CLI consumer (`tortoise session drain`) and
+  # #14342 D2 (#12483/#12484/#12487): the spool-integrity guard belongs beside
+  # `test_capture_spool.py` for the SAME two reasons — its CLI surface
+  # (`tortoise session spool` / `session drain`) lives in `tortoise/__main__.py`,
+  # an EXACT `api` SOURCE_PATTERNS match, so an api-only diff would otherwise run
+  # no guard for the arithmetic this file pins. The `core` row below is the
+  # mechanism half (`tortoise/capture_spool.py` matches no named surface).
+  # ⛔ Both rows are required: an unregistered test file also reds the
+  # `manifest-integrity` leg (`tools/ci_selection.py --integrity`), and the tests
+  # themselves would then run on NO surface at all.
+  - test_12483_12487_spool_integrity.py
   # its SessionStart hook live in `tortoise/__main__.py`, an EXACT `api`
   # SOURCE_PATTERNS match. A match REPLACES the `core` fallback in `select()`, so
   # a `__main__.py`-only diff selected `api` and NOT this guard — the #1349/#2938
@@ -3797,6 +3806,25 @@ surfaces:
   # the gate's own `meters=` seam, and the door halves are SOURCE-order pins via
   # `inspect.getsource`. No DSN, no graph, no model.
   - test_13829_cache_cap_at_fold.py
+  # #14185: the record's projection on its OWN loop — the projection worker, the
+  # seven conditions under which a write may be deferred, and the lag metric.
+  # ⛔ SEVEN: four correctness arms, the unimportable loop, and the two switches
+  # (`live_write._submitted_to_worker`; an earlier cut said six and lost the
+  # unimportable arm).
+  # `core` for the same MEASURED reason as the two rows above: the subjects
+  # (`tortoise/projection_worker.py` — a new file — and `tortoise/live_write.py`)
+  # have no `SOURCE_PATTERNS` entry, so `--changed-files
+  # tortoise/projection_worker.py` resolves `['core']` and a diff to the loop or
+  # to the chokepoint's deferral gate collects this file only through a `core`
+  # row. ⛔ The `tortoise/monitoring.py` half is covered by the same fallback
+  # (`--changed-files tortoise/monitoring.py` -> `['core']`, the #10893 row's own
+  # measurement at the head of this list).
+  # ⛔ NO CASE COUNT IN THIS COMMENT: derive it
+  # (`grep -c '^def test_' tests/test_14185_projection_worker.py`).
+  # DB-FREE: the fold is represented by a callable — the exact boundary the
+  # worker owns (it decides WHEN a fold runs, never WHAT it does) — and the
+  # stall is a `threading.Event`, not a sleep. No DSN, no graph, no model.
+  - test_14185_projection_worker.py
   # #13034: the ONE currency rule (lifecycle word AND position axis) and its
   # five consumers. `core` for the same reason as the rows above —
   # `tortoise/live.py`, `tortoise/pipeline.py` and
@@ -6747,6 +6775,12 @@ surfaces:
   # tortoise/__main__.py); this `core` entry is what runs the guard when the
   # spool module itself — an unmatched `tortoise/` path — changes.
   - test_capture_spool.py
+  # #14342 D2 (#12483/#12484/#12487): the spool-integrity guard's MECHANISM half.
+  # `tortoise/capture_spool.py` matches no named `SOURCE_PATTERNS` entry, so it
+  # falls through to `core`; without this row a change to the spool module itself
+  # would run no guard for the retained-unreadable accounting it pins. Dual
+  # registration mirrors `test_capture_spool.py` one block up.
+  - test_12483_12487_spool_integrity.py
   # #6388: the session-events SEAL policy (`tools/seal_session_events.py` —
   # compress, never discard, per the #3870 ruling). `tools/` is a flat
   # NON_PYTHON_PREFIXES entry, so a change to that tool selects NO surface on
@@ -7782,6 +7816,16 @@ surfaces:
   # (verified with `tools/ci_selection.py --changed-files <path>`), and without
   # this arm the guard would never run on the write path it holds.
   - test_operator_label_vocabulary.py
+  # #14263: the relation-PAIR leg (`tortoise/relation_guards.py`) and its three
+  # wiring sites. Registered under `core` for the same two reasons as the row
+  # above: `tortoise/relation_guards.py` matches no `SOURCE_PATTERNS` entry, so a
+  # module-only diff falls through to `core`; and `tortoise/sdk.py` is a
+  # `SHARED_MODULE` whose own diff forces the FULL matrix, so no narrower row
+  # could rescue a leg on the write path this file exists to pin. Without this
+  # row the file is UNCLASSIFIED — `tools/ci_selection.py --integrity` reds
+  # (`manifest-integrity` is a REQUIRED leg) AND no diff can select it, so the
+  # whole proof-of-work would never execute in CI.
+  - test_relation_guards_14263.py
   - test_operator_source_search.py
   - test_operator_source_unit.py
   - test_ops_safety.py
@@ -14056,7 +14100,7 @@ durations:
   test_extractor.py: 1.4  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 1.0
   test_extractor_doc.py: 1.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.0
   test_extractor_v4_step_list_consistency.py: 0.2  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded) — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.1
-  test_s2_decision_record_5087.py: 0.1  # Shape: file reads of `docs/architecture/S2-DECISION-SEAM.md` splitlines + regex, plus payload-building cases that measure the §7 construction through a stub transport (#10117) — `test_the_pre_framing_baseline_is_a_measurement_and_a_superseded_row_is_marked` pins the clause-REMOVED baseline the framing's cost percentage is derived from (PR #10302 review round 5 P2: two different figures were both published as "the pre-framing request"), and `test_section_7_s_reproduction_figures_re_derive_from_the_measured_pair` re-derives the §7 reproduction percentages and the per-call dollar delta from the measured pair (round 8 P2+P3: a single `0.15%` was false for the classify cell and `~$0.00008` came from the superseded `$0.00039` row). ⛔ This row cites cases by NAME — never by row ordinal, and never with a case count: an earlier revision of it said "the ninth"/"the tenth" and "10 cases at this head", and both went one case stale inside PR #10302 itself (`S2-DECISION-SEAM.md` §8 states the rule this note follows). It builds the two requests twice more (framed and clause-removed) and compares them by serialized BYTES, which is why it stays at the same weight — 2.0 covers a DB-free, graph-free, NETWORK-FREE file (stub transports; no model, no graph); ⚠️ the §7 `tok` cells are a RECORDED `cl100k_base` proxy (`_S7_TOKEN_CELLS`), NOT re-derived here (PR #10302 review round 6, P1 + P2): `tiktoken` is declared only in the `dev` group (no CI leg installs it), and `get_encoding` fetches ~1.1 MB of BPE ranks from `openaipublic.blob.core.windows.net` at construction on a cold cache, over `requests` rather than `httpx`, so the hermetic guard could not even see the egress — an earlier revision of this row disclosed that fetch and chose "red rather than skip", which was the wrong trade for a deterministic leg: the bytes are exact and hermetic and they are the tripwire a payload change hits first, while the §7 table's `tok` cell is asserted EQUAL to the recorded cell and its `$` cell is re-derived from it at `4.2e-8 $/token` over the row's own item count (PR #10302 review round 7, P2: before that equality the table's token column was pinned by nothing — a token-only edit to `| 50,004 B | 11,223 |` shipped green, because the pair matcher requires the `B ≈ tok` form a table row does not have); no DB/graph/model and no network; local `--durations=0` on this host is ~0.05 s of test body, and the 12.5 s wall reading is the once-per-leg conftest/DB setup the #3400 method attributes to no file — so the local number is deliberately NOT substituted. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
+  test_s2_decision_record_5087.py: 0.1  # Shape: file reads of `docs/architecture/S2-DECISION-SEAM.md` splitlines + regex, plus payload-building cases that measure the §7 construction through a stub transport (#10117) — `test_the_pre_framing_baseline_is_a_measurement_and_a_superseded_row_is_marked` pins the clause-REMOVED baseline the framing's cost percentage is derived from (PR #10302 review round 5 P2: two different figures were both published as "the pre-framing request"), and `test_section_7_s_reproduction_figures_re_derive_from_the_measured_pair` re-derives the §7 reproduction percentages and the per-call dollar delta from the measured pair (round 8 P2+P3: a single `0.15%` was false for the classify cell and `~$0.00008` came from the superseded `$0.00039` row). ⛔ This row cites cases by NAME — never by row ordinal, and never with a case count: an earlier revision of it said "the ninth"/"the tenth" and "10 cases at this head", and both went one case stale inside PR #10302 itself (`S2-DECISION-SEAM.md` §8 states the rule this note follows). It builds the two requests twice more (framed and clause-removed) and compares them by serialized BYTES, which is why it stays at the same weight — 2.0 covers a DB-free, graph-free, NETWORK-FREE file (stub transports; no model, no graph); ⚠️ the §7 `tok` cells are a RECORDED `cl100k_base` proxy (`_S7_TOKEN_CELLS`), NOT re-derived here (PR #10302 review round 6, P1 + P2): `tiktoken` is declared in the `dev` group AND, since #14277, in the `test` extra those CI legs install — availability is NOT what protects the cells — and `get_encoding` fetches ~1.6 MB (1,681,126 B, measured 2026-11-22) of BPE ranks from `openaipublic.blob.core.windows.net` at construction on a cold cache, over `requests` rather than `httpx`, so the hermetic guard could not even see the egress — an earlier revision of this row disclosed that fetch and chose "red rather than skip", which was the wrong trade for a deterministic leg: the bytes are exact and hermetic and they are the tripwire a payload change hits first, while the §7 table's `tok` cell is asserted EQUAL to the recorded cell and its `$` cell is re-derived from it at `4.2e-8 $/token` over the row's own item count (PR #10302 review round 7, P2: before that equality the table's token column was pinned by nothing — a token-only edit to `| 50,004 B | 11,223 |` shipped green, because the pair matcher requires the `B ≈ tok` form a table row does not have); no DB/graph/model and no network; local `--durations=0` on this host is ~0.05 s of test body, and the 12.5 s wall reading is the once-per-leg conftest/DB setup the #3400 method attributes to no file — so the local number is deliberately NOT substituted. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 7.5  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 7.0
   test_extractor_v4_s4_stage_claims.py: 6.7  # #8500: `ast` walks over two source files + doc-text scans, plus THREE in-process behavioural tests (`vet_gate.check_batch`/`apply_vet`, `kind_classifier`/`_apply_classify_kinds`) and a row-scoped read of §4.0; no DB. Measured 2026-10-18 with `--durations=0`: 3.96–6.97 s of call time over three runs (one `ast.parse` of the 9.5k-line `extractor_v2.py` is 0.44 s and the mutation fixtures reparse it), so the previous `0.1` under-declared ~50x (#8955 review, UNVERIFIED item) — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 5.0
@@ -14378,6 +14422,14 @@ durations:
   test_session_attribution.py: 0.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.3
   test_session_import_codex.py: 23.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 23.6
   test_capture_spool.py: 4.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 5.1
+  # #14342 D2: registering `test_12483_12487_spool_integrity.py` puts one more file
+  # in `fast_pool()`, and `--integrity`'s duration-coverage floor (0.90) is
+  # measured against that pool's own size — so the row must EXIST, not merely
+  # default. Measured locally: 34 tests (11 at #12483/#12487, +6 at the cycle-2
+  # findings, +9 at the cycle-3 ones, and +8 across the cycle-4/5/6 pins),
+  # DB-free / graph-free / network-free / model-free, every case under
+  # `tmp_path`.
+  test_12483_12487_spool_integrity.py: 1.5
   test_6388_session_events_drain.py: 0.3  # The row has to EXIST, not merely default: the `core` + `api` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: DB-free, graph-free, network-free and model-free — every case writes day files under `tmp_path` (`TORTOISE_SESSION_EVENTS_DIR`/`store=`) and drives `drain_session_events` with a recording `PostOutcome` transport; the only subprocess-free cost is gzip encode/decode on the sealed-day cases. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.0
   # #3516 §B: the capture-lane marker. Measured as the CALL sum of an
   # embedded-lane run (23 tests, four of them HTTP round-trips); the docker
@@ -15240,6 +15292,8 @@ durations:
   test_record_reconcile_trigger.py: 2.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.5
   test_13337_cache_graph_declaration.py: 2.0  # new in #13337 — a file a PR ADDS can never carry a CI junit reading yet (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT`; "a default is not a reading", so the row must EXIST (`api`+`core` above are what put it in `fast_pool()`). What the weight covers: the declaration's source order, the control-plane read's filters, both verbs' flag/whitespace arms and the JSON coordinate are DB-FREE; the store-backed acceptance legs skip without `TEST_RECORD_DB_URI` + `TORTOISE_DB_URI` and are ARMED in `test-record-postgres`. Refresh from the first post-merge run that includes it.
   test_record_schema_placement.py: 0.2
+  test_relation_guards_14263.py: 2.0  # new in #14263 (PR #14284) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity`'s coverage check is a RATIO with headroom, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file; the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because the entry-rule pin iterates an EXPLICIT tuple and cannot see a file nobody listed. What the weight covers: the module's four-outcome verdict table (accept / normalised / undeclared / reversed, the reversed state kept DISTINCT per AX §2), the two silent legs staying silent, the shipped-declaration read being the pack catalog rather than a fixture, the `LABEL_ENDPOINTS` mirror against `pack_state._ONTOLOGY_LABELS`, the abstention reasons staying distinct (`ABSTAIN_*` — the module defines
+  # seven stable ids and this file pins four of them by equality), the `declarationOnly` row contributing no pair, the namespace fold being refused, and each of the three connect doors carrying the honest state while still writing the edge (`#1934` warn-not-block). Mostly in-process over an embedded graph; the ingest/door cases build the SDK's own store under `tmp_path`, and on a `TORTOISE_DB_URI`-set lane those constructions are redirected to the server the run was given by the epic-#1647 class-level redirect. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_12901_wave2_control_plane.py: 2.0  # new in #12901 (PR wave 2) — a file a PR ADDS can never carry a CI junit reading yet (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ('a default is not a reading'): the `core` registration above is what puts the file in `fast_pool()`. ⚠️ MEASURED LOCALLY as context, NOT as the weight: whole-file through `tools/test_lane.py run` measured **50 passed in 8.57 s** on a private lane container at head `b4ca3f2849`, so the flat 2.0 UNDERSTATES it until a sweep re-bases it. `--integrity` is the authority and the refresher replaces this row from junit.
   test_10663_placement_table_packaged.py: 0.1  # new in #10663 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.0
   test_11075_record_declared_type_contract.py: 0.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.3
@@ -15418,6 +15472,26 @@ durations:
   # wall time `pytest -q` reports belongs to the shared session fixture; `--durations=5`
   # is the authority and `--refresh-durations` replaces this row from junit.
   test_14192_read_wave_tool.py: 2.0
+  # #14185 (PR #14222) — the record's projection on its OWN loop. The #3400/#4348 trap
+  # applies: a file a PR ADDS cannot carry a CI junit reading yet (the `durations`
+  # refresher samples push-to-main runs only), so this is the flat
+  # `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a
+  # SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default
+  # ("a default is not a reading"): the `core` registration above is what puts the
+  # file in `fast_pool()`, and `--integrity` is a 0.90 RATIO check that stays green
+  # over the absence — so only this row records the weight (the #14222 review's P3
+  # finding; the file also had to be added to `tests/test_ci_selection.py::
+  # ROWED_BY_THIS_FOLD`, whose ENTRY-RULE pin iterates an EXPLICIT tuple and could
+  # not see a file nobody listed). `tools/ci_timing.py --refresh-durations` replaces
+  # this value from the first push-to-main junit sweep that includes the file. What
+  # the weight covers, hermetically: the worker's FIFO and its seven deferral gates
+  # driven against a CALLABLE in place of the fold, a stalled fold as a
+  # `threading.Event` rather than a sleep, the gauge/publish protocol under its
+  # sequence, and one `os.fork()` leg — no DSN, no graph, no model, no docker. ⛔ No
+  # local timing and no case count are quoted on purpose — a figure beside a
+  # shard-layout input re-stales against the run it came from, and the count moves
+  # with every review round (`tools/ci_selection.py --integrity` is the authority).
+  test_14185_projection_worker.py: 2.0
   test_journal_segments.py: 0.3
   test_journal_segments_falsifier.py: 0.2
   test_name_entropy_12294.py: 0.1

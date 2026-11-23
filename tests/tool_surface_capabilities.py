@@ -444,6 +444,16 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "mine_knowledge_from_session": "tortoise_mine_knowledge_from_session",
     "register_source": "tortoise_register_source",
     "manage_source_trust": "tortoise_manage_source_trust",
+    # ⛔ #11609 lane P7 gave the `tortoise_link_entities` container a SECOND quota-gated
+    # wrap site and the map did not follow: its operator arm wraps
+    # `_quota_gated(sdk._create_operator, …)` — `_create_operator` is mapped above — and
+    # its relation-decided arm wraps `_quota_gated(sdk.link_entities, …)`, which was NOT
+    # mapped, so the forward arm reported it as an unmapped site. The second wrapper
+    # is load-bearing rather than decoration (`mcp_server.py` says so at the wrap:
+    # `sdk.link_entities` reaches the same node/edge writers and is NOT gated inside the
+    # SDK), which is exactly why the pair must be DECLARED here rather than waved
+    # through: an entry is what makes the door's write classification checkable.
+    "link_entities": "tortoise_link_entities",
 }
 
 # Tenant-scoped control-plane labels: a registry mutation whose labels are
@@ -1633,6 +1643,19 @@ def wrap_site_violations(mcp_src: str | None = None) -> list[str]:
     return out
 
 
+@lru_cache(maxsize=8)
+def _reach_index(source: str | None) -> dict[str, frozenset[str]]:
+    """tool name -> the operations its handler reaches, for the served set.
+
+    Cached because building it is one AST pass PER TOOL (~9 s over 112 entries), and
+    `write_surface_map_violations` is called with several candidate maps by the same test.
+    """
+    return {
+        entry.name: frozenset(handler_operations(entry.name, source).operations)
+        for entry in served_registry()
+    }
+
+
 def write_surface_map_violations(method_to_tool: dict[str, str] | None = None,
                                  entries=None, mcp_src: str | None = None) -> list[str]:
     """The declared write-surface map is live BOTH ways: every wrap site is
@@ -1657,6 +1680,31 @@ def write_surface_map_violations(method_to_tool: dict[str, str] | None = None,
     dead = set(mapping.values()) - live
     if dead:
         out.append(f"write-surface map names non-existent tools (update the map): {sorted(dead)}")
+    # ⛔ THE VALUE IS GRADED, not just the key (`#14249` review P2-1). `live` and
+    # `WRITE_TOOL_NAMES` only prove the mapped name EXISTS and is write-classified — so
+    # pointing a method at any live write tool left this gate GREEN, while the entry's own
+    # comment claimed the pair is what makes the wrap site checkable. Measured before this
+    # arm existed: `"link_entities": "tortoise_create_point"` passed every clause here.
+    #
+    # The association is the SOURCE's own: the mapped TOOL's handler must reach the mapped
+    # method. ⛔ NOT `entry.sdk_method == m` — six of the 28 entries map a method their tool
+    # does not DECLARE (`_annotate_operator` -> `tortoise_operator_action`,
+    # `_index_directory` -> `tortoise_index_files`), so an sdk_method arm would red six
+    # correct rows (measured). ⛔ AND NOT "the module-level function enclosing this wrap
+    # site" — one method has wrap sites in SEVERAL tools (`update_knowledge` sits in
+    # `tortoise_update_point`/`tortoise_update`/`tortoise_update_entity`) and the map records
+    # one canonical tool, so that rule reds four correct rows (measured).
+    #
+    # ⛔ AND THE INDEX IS BUILT ONCE AND CACHED. Reaching per entry re-parses
+    # `mcp_server.py` 28 times and measurably blew this gate's 300 s pytest timeout
+    # (`test_guard4_rename_simulation_fails_loudly`: 308 s, `#14249` review P2-1's first
+    # attempt). One pass over the served registry is 8.9 s measured, paid once per process.
+    reach = _reach_index(mcp_src)
+    wrong_door = {m: t for m, t in mapping.items()
+                  if t in live and m not in reach.get(t, frozenset())}
+    if wrong_door:
+        out.append("write-surface map pairs a method with a tool whose handler never "
+                   f"reaches it (wrong door): {sorted(wrong_door.items())}")
     missing = {mapping[m] for m in (wrapped & set(mapping))} - _ms.WRITE_TOOL_NAMES
     if missing:
         out.append(f"write tools missing from WRITE_TOOL_NAMES: {sorted(missing)}")
