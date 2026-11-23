@@ -3809,12 +3809,15 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: cannot reach). Only a raise to `>= 20` reds (`20 * 0.5 = 10.0` is no longer `< 10`) — MEASURED,
 #: `11 failed`, the premise-(b) assertion firing across all 11 params. The behavioural pins are the
 #: `once_slow` and `death_after_streak` ROWS, not a bare assertion on this constant.
-#: ⛔ EVERY TOTAL ABOVE IS `main`'s, MEASURED AT `a7baa98d05` (#14387) — and this tree carries ONE
-#: MORE test than main, so re-measure instead of trusting them: PR #14287 restores
+#: ⛔ EVERY TOTAL ABOVE IS `main`'s, MEASURED AT `a7baa98d05` (#14387) — and this tree carries TWO
+#: MORE tests than main, so re-measure instead of trusting them: PR #14287 restores
 #: `test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail`, which drives `_verdict_or_fail`
-#: with a STUB and never constructs a child, a census or this constant. Every total therefore
-#: reads one HIGHER here (`185 passed` at `K = 6`, verified), while the FAILING counts are
-#: unchanged — this row cannot see this constant in either direction.
+#: with a STUB and never constructs a child, a census or this constant, and adds the `blip` census
+#: ROW (a prior error, a recovery, then a derived late burst — #14287 review P3). Every total
+#: therefore reads TWO HIGHER here (`186 passed` at `K = 6`, verified), and the FAILING count at
+#: `K >= 20` is `12`, not `11`: unlike the stub row, `blip` DOES read this constant (it jumps the
+#: simulated clock by the bound + 1 s), so a raise past the poll's budget reds it through the
+#: `calls["n"] > started_at + burst` premise assertion, legibly, instead of retiring it.
 _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 
 #: How many `time()` reads span the STREAK at the sample where the count+span conjunction fires
@@ -4223,6 +4226,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     time.sleep(0.1)
                     continue
                 err_streak = 0
+                # ⛔ INDIVIDUALLY REDUNDANT WITH THE `err_streak == 0` STAMP ABOVE, and that is
+                # deliberate: the stamp restarts the clock on the next error either way, so
+                # deleting THIS line alone leaves every row green — measured on this tree. The
+                # PROPERTY (a recovery restarts the streak clock) is graded as a PAIR by the
+                # `blip` row, whose recorded mutant is the two-line revert to the pre-#12039
+                # `if streak_started is None:` semantics. Read the row, not this line, before
+                # concluding a deletion here should have redded something (#14287 review P3).
                 streak_started = None
                 healthy_samples += 1
                 pids = [p["pid"] for p in procs]
@@ -4669,6 +4679,14 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
             "belongs to the STREAK, not to the poll (cycle-6 P1)",
         ),
         (
+            "blip", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "ONE `ps` blip, TWO healthy samples, then a DERIVED late burst: the span belongs to "
+            "the CURRENT streak, so a recovery must restart the clock. ⛔ THE ONLY ROW THAT "
+            "GRADES IT — with this arm removed, the pre-#12039 `if streak_started is None:` "
+            "revert leaves 17 passed; with it, that revert reds this row alone (#14287 review "
+            "P3, lost in the #12039 rebase)",
+        ),
+        (
             "persistent", True, -9, "skip", "was killed by SIGKILL (9)",
             "a fixture the BOX killed is classified by its own arm, whatever the census did — "
             "arm-specific text for the same reason as `death_after_streak` (cycle-11 F2)",
@@ -4932,6 +4950,53 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
             if clock.step_s == 0.0:
                 clock.step_s = step_s
             return [], None
+        if census_kind == "blip":
+            # ⛔ THE STREAK CLOCK MUST RESTART AFTER A RECOVERY (#14287 review P3, restored here
+            # after the #12039 rebase dropped it). `_CENSUS_ERROR_MIN_SPAN_S` bounds the age of
+            # the CURRENT CONTINUOUS streak, not of the poll's first-ever error: a sample-1 blip,
+            # a long healthy stretch, then a 0.2 s late burst is the load class rule 1 protects,
+            # and a `streak_started` that still holds the blip's timestamp turns it into a
+            # `HarnessDefect` on a REQUIRED shard.
+            # ⛔ THIS IS THE ONLY SHAPE WHERE A STALE `streak_started` IS OBSERVABLE, and the
+            # `late_pair` row above does NOT subsume it: that poll has no prior error at all, so
+            # its first burst sample stamps the clock from `None` either way. MEASURED on this
+            # tree with this arm removed — revert the pair below to the pre-#12039 semantics
+            # (`if streak_started is None:` stamp, reset line deleted) and the census selection
+            # stays `17 passed`, i.e. the term was UNGRADED. With this arm, the same revert reds
+            # exactly this row.
+            # Shape: ONE erroring sample (the blip), TWO healthy samples (the recovery that must
+            # clear the streak), then the derived burst. The healthy prefix is TWO rather than the
+            # one sample the reset needs, so the arm does not hinge on the loop's first-sample
+            # bookkeeping (a census error and a census answer both cost reads).
+            # ⛔ THE PLACEMENT IS A CLOCK JUMP, NOT A SAMPLE INDEX AND NOT A WAIT. `late_pair`
+            # waits because its premise is the poll's OWN elapsed time; here the premise is a gap
+            # between the BLIP's stamp and the burst, and a wait on the shared clock budgets for
+            # reads the blip sample itself consumed (MEASURED on the first version of this arm,
+            # which waited for `MIN_SPAN + 3 steps`: the mutant's span came out 1.9 s < 2.0 and the
+            # row passed on the regression it exists to catch). Jumping the clock by the bound plus
+            # ONE SECOND makes the gap structural: the correct implementation stamps AFTER the
+            # jump, so its span is 0; a stale stamp is >= 1 s over the bound whatever the per-sample
+            # read count is. The burst length stays DERIVED (`burst`), so raising
+            # `_CENSUS_ERROR_STREAK` moves the arm with the constant instead of retiring it.
+            # The premise that keeps this honest — the jump must stay inside the poll's budget, or
+            # the poll breaks before the burst completes and the row goes vacuous — is ASSERTED in
+            # the post-block below (`calls["n"] > started_at + burst`), the same guard `late_pair`
+            # carries.
+            if calls["n"] == 1:
+                return [], err
+            if calls["n"] <= 3:
+                return [], None
+            if burst_state["started_at"] is None:
+                clock.now += _CENSUS_ERROR_MIN_SPAN_S + 1.0
+                burst_state["started_at"] = calls["n"]
+                burst_state["left"] = burst
+            if burst_state["left"]:
+                burst_state["left"] -= 1
+                clock.step_s = 0.0
+                return [], err
+            if clock.step_s == 0.0:
+                clock.step_s = step_s
+            return [], None
         if census_kind == "death_after_streak":
             # ⛔ THE FIXTURE DIES WHERE THE GATE WOULD FIRE (#12039 cycle 10, P2). Sample 1 errors
             # while the child is ALIVE, so the streak STARTS and no arm can classify the death
@@ -4980,15 +5045,15 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
         )
     if census_kind == "once":
         assert calls["n"] > _CENSUS_ERROR_STREAK, "a single error must not decide the verdict"
-    if census_kind == "late_pair":
+    if census_kind in {"late_pair", "blip"}:
         assert burst_state["started_at"] is not None, (
             "the burst never started: `_CENSUS_ERROR_MIN_SPAN_S` was not reachable inside the "
             "poll's own budget, so this arm never placed the blip and graded the deadline arm "
             "instead — raise the poll's budget or lower the bound (#12039)")
         assert calls["n"] > burst_state["started_at"] + burst, (
             "the poll must keep running after a burst that satisfies the COUNT but not the SPAN "
-            f"(started_at={burst_state['started_at']}, burst={burst}) — a census verdict here is "
-            "the #5049 rule-1 false red this arm pins against")
+            f"(kind={census_kind}, started_at={burst_state['started_at']}, burst={burst}) — a "
+            "census verdict here is the #5049 rule-1 false red this arm pins against")
 
 
 def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
