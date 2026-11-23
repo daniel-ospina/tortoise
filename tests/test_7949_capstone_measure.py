@@ -19597,10 +19597,13 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 
     # ⛔ F2'S NON-VACUITY, proved by REPLAY on a mutated copy of the document rather than argued
     # in the comment that claims it (#14386 review round 8, P2 — MEASURED). The census counts with
-    # `r"sdk\.py:147(?!\d)"`; entry 10 grades TWO of the seven occurrences, so repointing the
-    # other FIVE to `sdk.py:1475` — a line that is not the `#14381` insert — must red. Under the
-    # `str.count` this arm shipped with, the mutated document still counted SEVEN and the census
-    # returned `[]`, which is why this assertion is here: reverting the boundary reds HERE.
+    # `r"sdk\.py:147(?!\d)"`; entry 10 grades ONE of the SIX occurrences at this head, so
+    # repointing the other FIVE to `sdk.py:1475` — a line that is not the `#14381` insert — must
+    # red. Under the `str.count` this arm shipped with, the mutated document still counted every
+    # occurrence and the census returned `[]`, which is why this assertion is here: reverting the
+    # boundary reds HERE. (Those totals are THIS head's reading: `_SDK147_OCCURRENCES` is the
+    # census — #14386 review round 10 caught this block still typing the pre-dedup two/seven,
+    # 20 lines from a paragraph that had already been corrected.)
     _doc_now = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
     _mutated = _doc_now.replace("sdk.py:147", "sdk.py:1475")
     assert _mutated != _doc_now, (
@@ -19616,10 +19619,11 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 
 #: ⛔ THE `sdk.py:147` FIGURES ARE GRADED BY A DECLARED CENSUS, not by one `re.search`
 #: (#14386 review round 6, P2 — MEASURED). Entry 10 of `_INDEX_ROW_ANCHORS` binds the spelling
-#: ``line at `sdk.py:N` is `main`'s own``, which occurs ONCE (on line 102); the other five
-#: occurrences — 1 on line 102, 3 on line 108 and 2 on line 114, SIX in all (#14386 review
-#: round 9: this said seven / TWICE, which was the pre-dedup reading) — match that shape not at
-#: all. Mutating occurrence 2, 3 or 6 to `:148` (whose line is `from .live import
+#: ``line at `sdk.py:N` is `main`'s own``, which occurs ONCE, on line 102 — the same line
+#: whose single `sdk.py:147` it grades; the other FIVE occurrences — 3 on line 108 and 2 on
+#: line 114, SIX in all (#14386 review rounds 9 and 10: this said seven / TWICE, the pre-dedup
+#: reading, and the first correction's enumeration then counted line 102 twice) — match that
+#: shape not at all. Mutating occurrence 2, 3 or 6 to `:148` (whose line is `from .live import
 #: direction_flows`, NOT the insert) left `485 passed`. The arm reads one match, so one
 #: occurrence is graded out of six: the fail-open direction, on prose this PR itself adds.
 #: ⛔ THOSE TOTALS ARE A READING OF THIS HEAD, NOT THE CENSUS — `_SDK147_OCCURRENCES` below is,
