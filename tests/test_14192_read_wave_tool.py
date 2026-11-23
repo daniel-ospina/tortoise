@@ -678,7 +678,7 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         # as `_possible_strings`: a union is wrong in both directions (round 10).
         if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
             _left, _right = _values(value.left), _values(value.right)
-            return {a + b for a in _left for b in _right}
+            return set(_concatenations(_left, _right))
         # ⛔ AND THE REPETITION THAT BUILDS THE NAME (#14326 review at `a29f3cd8`, MEASURED
         # GREEN at `80d2ab52`): `_N = "_tortoise_fts_query" * 1` bound nothing, so
         # `getattr(sdk, _N)(…, kind="statement")` left the pin GREEN — the inline sibling is
@@ -832,7 +832,7 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
             _acc = out[_target.id] = set()
         if kind == "aug":
             _bases = set(_acc)
-            _acc |= {base + suffix for base in _bases for suffix in _values(_value)}
+            _acc |= _concatenations(frozenset(_bases), frozenset(_values(_value)))
         else:
             _acc |= _values(_value)
         _check_budget(_target.id, _acc)
@@ -896,6 +896,39 @@ def _repetitions(strings: frozenset[str], counts: frozenset[int]) -> frozenset[s
             f"_VALUE_MAX_CHARS_PER_NAME={_VALUE_MAX_CHARS_PER_NAME}: the pin cannot census "
             "a value that size, so it REFUSES rather than allocate it.")
     return frozenset(s * n for s in strings for n in counts)
+
+
+def _concatenations(left: frozenset[str], right: frozenset[str]) -> frozenset[str]:
+    """Every string the two statically-possible sets can spell as `left + right` — BUDGETED.
+
+    ⛔ THE `+` ARM WAS THE ONE PRODUCT LEFT UNBUDGETED (#14326 delta review P2, MEASURED):
+    `_N + _N + _N` over a name holding 17 spellings resolved **4913** concatenations, and a
+    name at `_VALUE_MAX_PER_NAME=512` built **262144** from a two-operand `+` — while the
+    IDENTICAL operand shape handed to the JOIN forms came back `_ResolutionDidNotConverge`
+    on the very same call. In a scratch copy at `9f6bdcf894` the three-operand spelling over
+    512-spellings OOM-killed the process at a 3 GB `ulimit -v` after 13.5 s (inline) and
+    11.8 s (bind path).
+
+    ⛔ A KILL IS NEITHER RED NOR GREEN. `_PRODUCT_MAX_COMBINATIONS` above states the rule the
+    other three products follow — "an unbounded product is a timeout, not a red" — and a
+    resolver that dies answers NOTHING, so the pin would report a silent no-op verdict
+    instead of REFUSING. That is the same no-op-gate defect this whole file exists to refuse,
+    and the reason this arm was the asymmetry worth deleting: the bind path and the inline
+    path now share one budgeted implementation, so neither can drift from the other again.
+
+    Returning the empty set when either side is unresolvable is what keeps the declared
+    residual (`_N + "_x"` with a parameter `_N`) out of the census without a guard clause
+    restating it (#14326 round 11) — the same rule `_string_products` keeps.
+    """
+    if not left or not right:
+        return frozenset()
+    if len(left) * len(right) > _PRODUCT_MAX_COMBINATIONS:
+        raise _ResolutionDidNotConverge(
+            f"the `+` resolver would build more than {_PRODUCT_MAX_COMBINATIONS} "
+            f"concatenations from {len(left)} x {len(right)} statically possible spellings: "
+            "no useful verdict comes from materialising it, so the pin REFUSES rather than "
+            "allocate — an unbounded product is a kill, not a red.")
+    return frozenset(a + b for a in left for b in right)
 
 
 def _string_products(option_sets) -> list[tuple[str, ...]]:
@@ -1313,7 +1346,7 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
         # (`("_tortoise_fts_query" if queries else "x") + "_y"`, whose every value ends in
         # `_y`). Every combination of the two statically-possible sets is a possible value of
         # the sum, so the product is both the fail-closed and the false-red-correct reading.
-        return frozenset(a + b for a in _left for b in _right)
+        return _concatenations(_left, _right)
     # ⛔ AND A REPETITION BY A STATIC COUNT IS THE SAME LITERAL (#14326 review at
     # `a29f3cd8`, MEASURED GREEN at `80d2ab52`): `getattr(sdk, "_tortoise_fts_query" * 1)`
     # reached the read while the `+` spelling was refused. Either operand can be the sequence.
@@ -1450,8 +1483,8 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
     ⛔ THE SPELLING OF THE BUILTIN IS NOT THE BUILTIN (#14326 round 35, MEASURED: with the
     literal test alone, `_v = vars; _v(builtins)["exec"]` and `_gr = getattr;
     _gr(builtins, "__dict__")["exec"]` both executed the read with the pin GREEN). The
-    sibling lane's `getattr_fetchers` / `dict_fetchers` cover the CALL spellings
-    (`getattr(builtins, "exec")`, `dict.get(m, k)`); they never reach the mapping-COMPOSITION
+    sibling lane's `getattr_fetchers` set covers the CALL spellings
+    (`getattr(builtins, "exec")`); it never reaches the mapping-COMPOSITION
     spellings, which is the half this set closes. Both are needed: the fetchers name the
     callee, this set names the builtin used to BUILD the mapping.
 
@@ -1665,8 +1698,7 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                          dict_names: frozenset[str],
                          launderers: frozenset[str],
                          members: frozenset[str] | None = None,
-                         getattr_fetchers: frozenset[str] = frozenset({"getattr"}),
-                         dict_fetchers: frozenset[str] = frozenset({"dict"})) -> str | None:
+                         getattr_fetchers: frozenset[str] = frozenset({"getattr"})) -> str | None:
     """The `members` (default `_REGISTRY_BUILTINS`) member a callee expression resolves to
     THROUGH builtins' mapping.
 
@@ -1686,6 +1718,18 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     over (`_g = getattr` then `_g(sys, "__dict__")` has been RED since round 21), so the
     fetcher name is a parameter rather than a hard-coded literal. The defaults are the
     literals, so every existing caller is unchanged.
+
+    ⛔ `dict_fetchers` IS DELETED, and it must not come back (#14326 delta review P2,
+    MEASURED BOTH WAYS): it was threaded through this signature, the recursive pass-through
+    and three call sites, and **no arm ever read it as a set** — the unbound and receiver
+    arms decide by ARGUMENT SHAPE (`node.func.attr in _BUILTINS_MAPPING_READS` plus the
+    mapping/arity test), which is why emptying the whole channel to `frozenset()` left all
+    43 tests green and a differential probe over 8 `_dg = dict` / `dict.get` / `getattr`
+    shapes found **0** differing verdicts. A parameter that cannot change a verdict reads as
+    coverage and is not — the clause class this file deletes on sight (#14326 round 21) — and
+    the prose claiming the arm "keys on `node.func.value.id in dict_fetchers`" was the one
+    thing that made the dead channel look load-bearing. The class it was meant to name is
+    closed by the shape arm.
 
     ⛔ THE MAPPING LOOKUP IS THE NEXT CALLEE SPELLING (#14326 round 30, EACH MEASURED GREEN at
     `de42a75ac4b5`), while `builtins.getattr` itself was RED:
@@ -1737,8 +1781,7 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                 and node.func.value.id in (names | dict_names)) \
             or (_builtin_lookup_name(node.func, names, consts, dict_names, launderers,
                                      members=getattr_fetchers,
-                                     getattr_fetchers=getattr_fetchers,
-                                     dict_fetchers=dict_fetchers) in getattr_fetchers):
+                                     getattr_fetchers=getattr_fetchers) in getattr_fetchers):
         # ⛔ THE RECEIVER MAY BE THE MAPPING ITSELF (#14326 review cycle 3, measured):
         # `getattr(_d, "exec")` with `_d = builtins.__dict__` was GREEN. `dict_names` already
         # holds every resolved spelling of that mapping, so the receiver accepts either set.
@@ -1774,8 +1817,10 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     #     __builtins__.get("exec")                  GREEN   -> closed here
     #
     # The arm above is the UNBOUND `dict.get(mapping, key)`; this is the RECEIVER spelling, and
-    # it was the surviving half: the unbound arm keys on `node.func.value.id in dict_fetchers`,
-    # which an ATTRIBUTE receiver (`builtins.__dict__`) can never satisfy. Arity is `>= 1` — a
+    # it was the surviving half: the gate that preceded these arms keyed on the CALLEE's name
+    # (`node.func.value.id in dict_fetchers`), which an ATTRIBUTE receiver
+    # (`builtins.__dict__`) can never satisfy. Both arms now decide by ARGUMENT SHAPE, so
+    # neither depends on a callee set — and that dead `dict_fetchers` channel is gone. Arity is `>= 1` — a
     # `pop`/`setdefault` DEFAULT never fires when the key EXISTS, the same reasoning the registry
     # axis' `.get` arm uses for its optional second argument.
     if (isinstance(node.func, ast.Attribute)
@@ -2739,7 +2784,7 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
     #: `_dg = dict; _dg.get(_d, "exec")(…)` were GREEN, and the sibling axis has resolved
     #: `_g = getattr` since round 21 (a hard-coded name there would be the same asymmetry).
     #: Statically-visible aliases of the three builtins used to BUILD the mapping (#14326
-    #: round 35) — the composition half `getattr_fetchers`/`dict_fetchers` do not reach.
+    #: round 35) — the composition half `getattr_fetchers` does not reach.
     _builtins_launderers = _builtin_name_aliases(tree)
     _getattr_literal = frozenset({"getattr"})
     _getattr_fetchers = frozenset({"getattr"}) | frozenset(_aliases_of(
@@ -2749,11 +2794,8 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
             and isinstance(n.value, ast.Name) and n.value.id in _builtins_names)
         or _builtin_lookup_name(n, _builtins_names, consts, _builtins_dict_names,
                                 _builtins_launderers, members=_getattr_literal,
-                                getattr_fetchers=_getattr_literal,
-                                dict_fetchers=frozenset({"dict"})) in _getattr_literal,
+                                getattr_fetchers=_getattr_literal) in _getattr_literal,
         loops=True))
-    _dict_fetchers = frozenset({"dict"}) | frozenset(_aliases_of(
-        tree, lambda n: isinstance(n, ast.Name) and n.id == "dict", loops=True))
     _code_executing_names = _CODE_EXECUTING_CALLEES | frozenset(_aliases_of(
         tree,
         lambda n: (isinstance(n, ast.Name) and n.id in _CODE_EXECUTING_CALLEES)
@@ -2768,8 +2810,7 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         or _builtin_lookup_name(n, _builtins_names, consts, _builtins_dict_names,
                                 _builtins_launderers,
                                 members=_CODE_EXECUTING_CALLEES,
-                                getattr_fetchers=_getattr_fetchers,
-                                dict_fetchers=_dict_fetchers) is not None,
+                                getattr_fetchers=_getattr_fetchers) is not None,
         loops=True))
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call):
@@ -2819,8 +2860,7 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
                 _builtin_lookup_name(n.func, _builtins_names, consts, _builtins_dict_names,
                                      _builtins_launderers,
                                      members=_CODE_EXECUTING_CALLEES,
-                                     getattr_fetchers=_getattr_fetchers,
-                                     dict_fetchers=_dict_fetchers) is not None:
+                                     getattr_fetchers=_getattr_fetchers) is not None:
             out.append(n)
             continue
         if not any(_carries_read_name(arg, consts)
@@ -6798,10 +6838,10 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    dict.get(_d, "exec")("sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         # ⛔ AND THE MAPPING'S OWN METHODS, ONE SPELLING OVER THAT SUBSCRIPT (#14326 round 35,
         # EACH MEASURED GREEN at `a12902a5d4` while the `m["exec"]` subscript of the IDENTICAL
-        # mapping was RED). No row here can ride the `dict.get(mapping, key)` rows above: that
-        # arm keys on `node.func.value.id in dict_fetchers`, which an ATTRIBUTE receiver
+        # mapping was RED). No row here can ride the `dict.get(mapping, key)` rows above: the
+        # gate that preceded those arms keyed on the CALLEE's name, which an ATTRIBUTE receiver
         # (`builtins.__dict__`) can never satisfy — so the RECEIVER half needed its own arm,
-        # not a wider fetcher set. One row per spelling, because a spelling with no row is one
+        # not a wider fetcher set (and that dead fetcher set is now deleted). One row per spelling, because a spelling with no row is one
         # a later lane deletes with the suite green (this file's own round-21 finding).
         "`builtins.__dict__.get(\"exec\")` — the mapping's BOUND `.get`": (
             '    import builtins\n'
@@ -7761,6 +7801,34 @@ def test_a_PRODUCT_that_outgrows_its_budget_REFUSES_instead_of_spinning() -> Non
             '(query=queries[0]["query"], limit=10, kind="statement")\n')
     with pytest.raises(_ResolutionDidNotConverge):
         _read_reach(_pin_source(body))
+    # ⛔ AND THE `+` PRODUCT IS THE SAME PRODUCT (#14326 delta review P2, MEASURED: the arm
+    # returned 4913 concatenations for `_N + _N + _N` over 17 spellings, and 262144 from a
+    # two-operand `+` over 512 — past this budget and past `_VALUE_MAX_PER_NAME`, with NO
+    # refusal, while the JOIN forms refused the identical operand shape). Both paths are
+    # asserted because BOTH were unbudgeted and they are separate functions; a mutation that
+    # only re-opens one of them must red here rather than pass on the other's coverage.
+    _plus_many = ",".join(f"'v{i}'" for i in range(17))
+    with pytest.raises(_ResolutionDidNotConverge):
+        _read_reach(_pin_source(
+            f"    _N = {{{_plus_many}}}\n"
+            '    getattr(sdk, _N + _N + _N)'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'))
+    with pytest.raises(_ResolutionDidNotConverge):
+        _read_reach(_pin_source(
+            f"    _N = {{{_plus_many}}}\n"
+            "    _s = _N + _N + _N\n"
+            '    getattr(sdk, _s)'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'))
+    # …and the budget is a CEILING, not a tripwire: exactly `_PRODUCT_MAX_COMBINATIONS`
+    # concatenations still resolve, so the refusal above is the budget firing and not a
+    # blanket rejection of the `+` spelling.
+    _at_budget = ",".join(f"'v{i}'" for i in range(64))
+    assert _read_reach(_pin_source(
+        f"    _N = {{{_at_budget}}}\n"
+        '    getattr(sdk, _N + _N)'
+        '(query=queries[0]["query"], limit=10, kind="statement")\n')) is not None, (
+        "a `+` product of exactly _PRODUCT_MAX_COMBINATIONS spellings must still resolve — "
+        "the guard is a budget, not a ban on the `+` spelling")
 
 
 def test_the_READ_side_of_str_is_NOT_a_MUTATION() -> None:
