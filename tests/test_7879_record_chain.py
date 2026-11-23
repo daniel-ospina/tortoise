@@ -77,9 +77,12 @@ HOW TO RUN IT (the arming the CI job uses):
     TEST_RECORD_DB_URI=postgresql://…  uv run --extra postgres \\
         pytest tests/test_7879_record_chain.py -q
 
-Unset ⇒ every leg SKIPS by name, never passes: the `test-record-postgres` leg
-gate (`.github/scripts/record-postgres-leg-gate.py`, #9551) fails a job whose
-record legs skip, which is what makes the armed run real rather than absent.
+Unset ⇒ 7 of the 8 legs SKIP by name; the DB-free import-graph leg
+(`test_the_runner_cannot_reach_the_cache`) RUNS either way, so an unarmed run
+measures **1 passed, 7 skipped** and is evidence about that one leg and about
+nothing else. The `test-record-postgres` leg gate
+(`.github/scripts/record-postgres-leg-gate.py`, #9551) fails a job whose record
+legs skip, which is what makes the ARMED run real rather than absent.
 """
 from __future__ import annotations
 
@@ -291,7 +294,12 @@ def test_a_live_write_lands_in_the_record_with_its_vector(schema, armed, tenant)
     """
     sdk, journal = armed
     embedding = _vec()
-    out = sdk._create_point("statement", "the record holds this claim",
+    #: ONE spelling of the content, so the write below and the lookup after it
+    #: cannot drift apart — the lookup is what makes the key assertion
+    #: non-vacuous, so a second literal here would quietly put it back to
+    #: "find the row by the id, then assert the id".
+    content = "the record holds this claim"
+    out = sdk._create_point("statement", content,
                             extractedFrom=None, embedding=embedding)
     point_id = out["id"]
 
@@ -306,17 +314,32 @@ def test_a_live_write_lands_in_the_record_with_its_vector(schema, armed, tenant)
         "only column the dense leg reads, so this row is invisible to every "
         "semantic query while satisfying `count(*)`")
 
+    # ⛔ THE LOOKUP IS BY CONTENT, NOT BY `id`, and that is the whole point of
+    # this assertion. Selecting the row with `WHERE … id = point_id` and then
+    # asserting `row[0] == point_id` cannot fail: the returned column IS the
+    # value it was selected by, and `public.point.id` is `text`
+    # (`20261012000003_record_epistemic.sql:55`), so not even a coercion edge
+    # exists. That was cycle 1's F2 finding — and its "fix" reproduced the very
+    # defect it removed, so this lookup takes the expected value from something
+    # the fold was never told to preserve: the content the write supplied. A
+    # fold that keys the row by, say, a content hash now satisfies `count(*)`
+    # above and REDS here, which is the `#9881` reachability claim the
+    # docstring makes.
     with schema.cursor() as cur:
         cur.execute(
             "SELECT id FROM public.point WHERE org_id=%s AND graph_id=%s "
-            "AND id=%s", (*tenant, point_id))
-        row = cur.fetchone()
-        assert row is not None, f"no `public.point` row for id {point_id!r}"
-        assert row[0] == point_id, (
-            f"the record's row is keyed {row[0]!r}, not the id the write "
-            f"returned {point_id!r} — the dense leg joins the kNN's hit back to "
-            "this column, so a row under a different key is a row the read "
-            "returns and cannot resolve")
+            "AND content=%s", (*tenant, content))
+        rows = cur.fetchall()
+    assert len(rows) == 1, (
+        f"expected exactly one `public.point` row carrying the written content "
+        f"{content!r}, found {len(rows)} — the row the dense leg joins its kNN "
+        "hit back to is the one a reader can find from the payload, not one "
+        "only a row-count gate can see")
+    assert rows[0][0] == point_id, (
+        f"the record's row is keyed {rows[0][0]!r}, not the id the write "
+        f"returned {point_id!r} — the dense leg joins the kNN's hit back to "
+        "this column, so a row under a different key is a row the read "
+        "returns and cannot resolve")
     # ⛔ NO `vector_dims() == DIM` ASSERTION HERE, on purpose: `embedding_vec` is
     # declared `vector(384) GENERATED ALWAYS AS public.record_embedding_vector(
     # embedding) STORED` (`20261109000001_record_embedding_vector.sql:207`), so
