@@ -325,13 +325,16 @@ shards at **721.3 s** (a, b, c, i) and **seven** at **721.2 s**, and `ceil(721.3
 sentence still carried the `10e51693f1` sha — one tree's emission carried under another tree's sha
 is the exact defect class this section exists to record for the minute boundary — and the follow-up
 that claimed to restore the split carried no edit to this file at all, which is why the figure is
-restored here by measurement instead. ⛔ The command this § invites names a **durable** commit, not
-the follow-up: that follow-up was a commit on this PR's own branch, and this repo squash-merges with
-`delete_branch_on_merge`, so a cite naming its sha stops resolving the moment the branch lands —
-which is a RED on the required `docs` job for every PR afterwards, not a missing footnote. The
-citation below therefore names a commit that is an ancestor of `main` and never touched this file
-(`git show --stat 10e51693f1 -- docs/ops/ci-wall-clock.md` is empty), i.e. that tree's split was
-never carried over from an edit here — it is re-emitted, which is what the paragraph asserts.
+restored here by measurement instead. ⛔ The command this § invites names a **durable** commit, and
+that is deliberate: the follow-up, and the pre-merge merge tree this paragraph's split was emitted
+at (`c0b929403aa9`), are commits on this PR's own branch, and this repo squash-merges with
+`delete_branch_on_merge`, so a cite naming their shas stops resolving the moment the branch lands —
+a RED on the required `docs` job for every PR afterwards, not a missing footnote. The citation below
+is therefore the durable re-derivation arm ALONE — an ancestor of `main` whose command prints
+nothing (`git show --stat 10e51693f1 -- docs/ops/ci-wall-clock.md` is empty) — and it says only
+that: re-deriving never reads a diff. The split's own emission belongs to `c0b929403aa9`, named
+above; it is NOT this cite's tree, and reading it as such is the same one-tree's-numbers-under-
+another-tree's-sha error this paragraph exists to record.
 Nothing grades this number (`grep -rn '721\.' tests/ tools/` finds no pin), so re-derive it
 with `--emit-push-matrix` at the sha the sentence names. The three
 hand-added figures are re-added from the
