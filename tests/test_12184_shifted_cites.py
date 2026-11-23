@@ -147,12 +147,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
-    # so the header counts it as drifted rather than compared, and it is ONE OF ELEVEN that are
-    # incomparable at the pin — measured at this head, and stated by the header itself: 223 comparable,
-    # 130 of them drifted, plus EIGHT of those eleven = 138 of the 234. ⛔ An earlier form of this
-    # sentence carried `211 comparable, 119 of them drifted, plus those three = 122 of the 214` — the
-    # figures of the pre-`#14246` corpus, left standing beside a header that had since been
-    # re-derived, and graded by nothing (`_SPLIT_*` reads the DOCUMENT, not this comment). ⛔ The
+    # so the header counts it as drifted rather than compared, and it is ONE OF THIRTEEN that are
+    # incomparable at the pin — measured at this head, and stated by the header itself: 221 comparable,
+    # 128 of them drifted, plus EIGHT of those thirteen = 136 of the 234. ⛔ THIS SENTENCE HAS NOW SHIPPED
+    # WRONG TWICE, both times with figures that were right about an EARLIER edition: `211 comparable, 119
+    # of them drifted, plus those three = 122 of the 214` (the pre-`#14246` corpus), then `223 / 130 /
+    # eight of eleven / 138` (the `#14246` corpus — still what this branch inherited, and no longer true
+    # of the document AFTER its own re-point moved two pairs past the pin's EOF and two more past
+    # `main`'s). Neither edition was graded: `_SPLIT_*` reads the DOCUMENT, and a comment beside a pin is
+    # prose to every arm in this file. The lesson this repetition states is the file's own: a figure
+    # quoted from a header rots the moment the header moves, so quote it at the level of "stated by the
+    # header" and let `_PIN_FILE_LENGTHS` grade the header instead of transcribing it here. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
@@ -662,9 +667,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "138 of this document's 234",
+        "136 of this document's 234",
         "dedupes the **345** as-written spellings to 234 — **111**",
-        "345 written spellings → 234 pairs → 111 collisions → 138 drifters of the 234",
+        "345 written spellings → 234 pairs → 111 collisions → 136 drifters of the 234",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -1184,10 +1189,36 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58966): 56415,
     ("tortoise/sdk.py", 61999): 56415,
     ("tortoise/sdk.py", 62019): 56415,
+    # ⛔ `#14278`'s re-point of §2.1's two `search_engine.py` adjacency rows DID add a pin-side fact: `:7193`
+    # and `:7226` are past this pin's 7,071-line copy (their predecessors `:6837`/`:6891` were not), so the
+    # split's denominators moved with them. Missing those two entries is how the table stayed
+    # self-consistent while the split published `223 / eleven / 130 / eight` about a document that measured
+    # `221 / thirteen / 128 / eight`: `expected_comparable` is derived FROM this table, so an
+    # under-enumerated table can never disagree with itself. `test_the_non_comparable_set_is_derived_from_the_pins_file_lengths`
+    # closes that by deriving membership from `_PIN_FILE_LENGTHS` instead.
+    ("tortoise/search_engine.py", 7193): 7071,
+    ("tortoise/search_engine.py", 7226): 7071,
     ("tortoise/search_engine.py", 7600): 7071,
     ("tortoise/search_engine.py", 7602): 7071,
     ("tortoise/hosted_api.py", 50935): 49851,
     ("tortoise/mcp_server.py", 11590): 11466,
+}
+#: The pin's own file lengths — the MEMBERSHIP RULE behind the split, kept per FILE rather than transcribed
+#: per pair (`git show ccb49741b2ec:<path> | wc -l`). A pair is non-comparable exactly when its line is past
+#: its own file's length at the pin, which is a fact about the census and the pin and nothing else, so it can
+#: be DERIVED on every run instead of being copied into `_PIN_EOF_PAIRS` by whoever re-points a cite. That
+#: transcription is what shipped the split wrong twice (`#14246` review finding 1, then `#14278`'s own `+23`
+#: re-point): both editions were internally consistent, and the second one was consistent with a table that
+#: had stopped describing the document.
+_PIN_FILE_LENGTHS: dict[str, int] = {
+    "tortoise/sdk.py": 56415,
+    "tortoise/search_engine.py": 7071,
+    "tortoise/mcp_server.py": 11466,
+    "tortoise/hosted_api.py": 49851,
+    # Declared because the document cites it at `:22118`, i.e. above the ceiling below — it holds NO
+    # non-comparable pair (its pin copy is 22,857 lines), and that is the point: the ceiling arm asks for a
+    # declared length from every file cited high enough to hide an EOF crossing, not from every file.
+    "tortoise/projection/__init__.py": 22857,
 }
 #: The split's three published sentences. Each is matched on the header's emphasis-stripped body, like every
 #: other figure pattern in this file, and each group is graded as a NUMBER (`_as_int`), so an edition may
@@ -1326,6 +1357,71 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             "but the header's pin-side `wc -l` parenthetical does not state it. Without that figure the "
             "five numerals above are unverifiable prose, which is how they shipped wrong."
         )
+
+
+def test_the_non_comparable_set_is_derived_from_the_pins_file_lengths() -> None:
+    """MEMBERSHIP IS DERIVED, not transcribed — the arm the split was missing.
+
+    WHY THIS EXISTS. `_PIN_EOF_PAIRS` was the split's only source of membership, and the arm above derives
+    `expected_comparable = len(pairs) - len(_PIN_EOF_PAIRS)` FROM it — so an under-enumerated table agrees
+    with itself perfectly. That is not hypothetical: `#14278` re-pointed §2.1's three `search_engine.py`
+    adjacency rows and two of the new addresses (`:7193`, `:7226`) crossed this pin's 7,071-line copy,
+    while two addresses it re-pointed the other way (`:7600`/`:7602`) crossed `main`'s 7,441-line copy, so
+    the true split became 221 comparable / thirteen non-comparable / 128 drifters among the comparable /
+    eight of the thirteen / five at neither head — and the header went on publishing `223`/`eleven`/`130`/
+    `eight`/`three` over exactly that document, with every arm green (`138` too, which the same measurement
+    moves to `136`). The four figures were again internally consistent and again wrong: `223 + 11 == 234`
+    and `130 + 8 == 138` held, exactly as they did in the `#14246` edition this table was written to stop.
+
+    WHAT IT GRADES. A pair is non-comparable iff its line is past ITS OWN file's length at the pin — a fact
+    of the census and the pin, not of anyone's transcription. So the set is computed from `_PIN_FILE_LENGTHS`
+    and the table built from it must be that set, in both directions (a pair left out of the table cannot
+    hide, and a pin-side fact invented for a pair the document no longer writes cannot linger). The two
+    structures are also held to agree on the length each file states, so they cannot drift apart.
+
+    RESIDUAL, stated rather than claimed closed: a file NOT in `_PIN_FILE_LENGTHS` is checked by a CEILING —
+    no undeclared file may be cited at a line above the shortest declared length — because this file cannot
+    know its `wc -l` at the pin. Below that ceiling a short file's own EOF is invisible here; measured at
+    this head only `tortoise/projection/__init__.py` was cited above the ceiling without a declaration, it
+    was declared, and every census pair past its file's pin-EOF now lives in a declared file.
+
+    NON-VACUOUS: on `058f5555b4`'s edition of the document the derived set is 11 pairs while this table now
+    holds 13, so the first arm reds; and flipping one document number across an EOF (e.g. `:7193` ->
+    `:7190`, which IS comparable at 7,071 lines) removes it from the derived set and reds the same arm.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    _spellings, pairs = _resolved_pairs(text)
+
+    floor = min(_PIN_FILE_LENGTHS.values())
+    undeclared = sorted({path for path, line in pairs
+                         if line > floor and path not in _PIN_FILE_LENGTHS})
+    assert not undeclared, (
+        f"the document cites {undeclared} above the shortest declared pin length ({floor} lines), so a "
+        "pair in one of them could be past that file's own EOF and this arm could not see it. Declare the "
+        "file's `git show ccb49741b2ec:<path> | wc -l` in `_PIN_FILE_LENGTHS` — the ceiling is what makes "
+        "the undeclared-file residual finite rather than silent."
+    )
+
+    for (path, _line), pin_lines in _PIN_EOF_PAIRS.items():
+        assert _PIN_FILE_LENGTHS.get(path) == pin_lines, (
+            f"`_PIN_EOF_PAIRS` says `{path}` is {pin_lines} lines at the pin while `_PIN_FILE_LENGTHS` says "
+            f"{_PIN_FILE_LENGTHS.get(path)} — the two structures describe one pin, so they must agree; "
+            "otherwise membership is derived from one fact and published from another."
+        )
+
+    derived = {(path, line) for path, line in pairs
+               if path in _PIN_FILE_LENGTHS and line > _PIN_FILE_LENGTHS[path]}
+    missing = sorted(derived - set(_PIN_EOF_PAIRS))
+    stale = sorted(set(_PIN_EOF_PAIRS) - derived)
+    assert not missing and not stale, (
+        "the non-comparable split is not what the document's own cites measure at this pin — "
+        f"past-EOF pairs the table omits: {missing}; table entries the document no longer writes past its "
+        f"file's EOF: {stale}. `_PIN_EOF_PAIRS` is transcribed by hand while the census is derived, so a "
+        "re-point that crosses an EOF (or one that moves back under it) changes the split with nothing "
+        "red — which is how this header published `223 / eleven / 130 / eight / three` over a document "
+        "measuring `221 / thirteen / 128 / eight / five`. Re-derive the table AND the four published "
+        "figures from the measured split; do not adjust one to the other."
+    )
 
 
 def test_a_carried_forward_figure_is_reported() -> None:
