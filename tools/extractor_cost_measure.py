@@ -1934,8 +1934,13 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     # other arm — the bundle's own completion recipe runs `--arm after`, where a
     # literal would report the BEFORE intercept as the AFTER one and absorb the
     # lever's whole saving into "unattributed".
-    fitted = round(_fit([(r["item_tokens"], r["prompt_tokens"])
-                         for r in docs])["intercept"])
+    # ⛔ The SLOPE is derived from the SAME fit, for the same reason the
+    # intercept is: a literal 2.159 is the COLD arm's slope alone (warm is
+    # 2.127575), so on `--arm after` — the bundle's own completion recipe — the
+    # document-term row would report the BEFORE slope and read the lever's
+    # effect there as zero (11,250.5 published against the arm's own 11,086.8).
+    doc_fit = _fit([(r["item_tokens"], r["prompt_tokens"]) for r in docs])
+    fitted = round(doc_fit["intercept"])
     out_fit = _fit([(r["item_tokens"], r["completion_tokens"]) for r in docs])
     composition_out = c1 * oc1 + c2 * oc2 + c4 * oc4
     return {
@@ -1983,7 +1988,7 @@ def decompose(rows: list[dict], *, arm: str = "cold",
         "unattributed": round(fitted - total, 1),
         "document_term": {
             "s1_calls_x_median_doc": round(c1 * t_med, 1),
-            "fitted_slope_x_median_doc": round(2.159 * t_med, 1),
+            "fitted_slope_x_median_doc": round(doc_fit["slope"] * t_med, 1),
             "note": ("S1 sends the WHOLE document once per call, and 34/50 "
                      "documents take a second S1 call, so the document is "
                      "paid for ~2x"),

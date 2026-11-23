@@ -8,7 +8,7 @@
  },
  "composition_total": 43567.4,
  "document_term": {
-  "fitted_slope_x_median_doc": 11250.5,
+  "fitted_slope_x_median_doc": 11249.9,
   "note": "S1 sends the WHOLE document once per call, and 34/50 documents take a second S1 call, so the document is paid for ~2x",
   "s1_calls_x_median_doc": 8754.5
  },

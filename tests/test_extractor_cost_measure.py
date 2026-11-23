@@ -952,3 +952,15 @@ def test_the_fitted_constant_is_derived_from_the_arm_not_hardcoded():
     assert lean["fitted_constant"] == round(
         m._fit([(r["item_tokens"], r["prompt_tokens"])
                 for r in docs if r is not longest])["intercept"])
+    # ⛔ The SLOPE too, for the same reason: `document_term` published a literal
+    # 2.159, which is the COLD arm's slope alone (warm is 2.127575), so on
+    # `--arm after` that row reported the BEFORE slope and read the lever's
+    # effect on the document term as zero. Dropping the high-leverage document
+    # moves the slope as well, which a literal cannot follow either.
+    assert cold["document_term"]["fitted_slope_x_median_doc"] == pytest.approx(
+        m._fit([(r["item_tokens"], r["prompt_tokens"]) for r in docs])["slope"]
+        * cold["median_doc_tokens"], abs=0.2)
+    assert (lean["document_term"]["fitted_slope_x_median_doc"]
+            != cold["document_term"]["fitted_slope_x_median_doc"]), (
+        "the document-term slope did not move when the data did — it is a "
+        "literal, and on `--arm after` it hides the lever's own effect")
