@@ -627,8 +627,11 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                 # open re-alarms at most once per window, and the message NAMES
                 # the incident so the human can see it is the same one — the
                 # pre-fix code pushed every window with no reference at all.
-                number = store.incident_record(incident_kind, subject).get(
-                    "issue_number")
+                try:
+                    number = store.incident_record(incident_kind, subject).get(
+                        "issue_number")
+                except Exception:  # noqa: BLE001 — NEVER raise from the alert path
+                    number = None
                 ref = (f"issue #{number}" if number
                        else "an open incident with no issue number on record")
                 bot_token = _env("TELEGRAM_BOT_TOKEN")

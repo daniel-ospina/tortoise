@@ -339,6 +339,38 @@ def test_an_unresolvable_close_never_breaks_the_request_path(monkeypatch):
     notify.resolve_abuse_episode("org-a", "point_create")  # must not raise
 
 
+def test_a_failing_incident_read_never_raises_from_the_alert_path(monkeypatch):
+    """``notify_abuse`` documents NEVER raising, and the re-alarm reads the
+    incident — that read must be guarded too, or a DEDUP outcome on an R2 blip
+    would propagate into the request path."""
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    sent: list[str] = []
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+
+    class _Store:
+        def open_incident_state(self, *a, **kw):
+            return OpenOutcome.DEDUP
+
+        def incident_record(self, *a, **kw):
+            raise RuntimeError("r2 blip")
+
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    notify.notify_abuse("abuse_review_needed", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 900})
+
+    assert len(sent) == 1
+    assert "no issue number on record" in sent[0]
+    notify.reset_abuse_delivery_for_tests()
+
+
 # ── 6. the security instrument itself is untouched ───────────────────────────
 
 def test_detection_thresholds_are_not_loosened():
