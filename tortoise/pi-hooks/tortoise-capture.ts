@@ -3372,9 +3372,17 @@ function saturatedForMetas(
     reclaimableOrphanBytes;
   const { projectedBytes, replacesSessionId } = projection;
   // The COUNT answer and the BYTE answer are different questions (#14347
-  // review, cycle 2, finding 4): an entry whose meta is unreadable occupies disk
-  // (a byte REPLACEMENT) but is absent from `metas.length` (so it still ADDS one
-  // to the count). Defaults keep every existing caller's behaviour.
+  // review, cycle 2, finding 4). The caller's answer is the POST-WRITE entry
+  // count: `addsEntry` is `true` only when the session is not on disk at all —
+  // the write path passes `!entryOnDisk` (#14347 review, cycle 5, finding 1), so
+  // an unreadable, corrupt or meta-less-log REPLACEMENT adds nothing. It is NOT
+  // `prior === undefined`: that operand was written when `parsedCount` was
+  // `metas.length` alone, and it now double-counts the unreadable class, which
+  // `unreadableCount` below already carries. Defaults keep every existing
+  // caller's behaviour. (The wording is the Python twin's, `capture_spool.py`
+  // `_admission_saturated` — see #14347 review, cycle 7, finding 1: this block
+  // stated the operand cycle 5 had already removed, twelve lines above the rule
+  // it contradicted, so a reader believed whichever leg they opened first.)
   const addsEntry =
     projection.addsEntry ?? (projection.replacesSessionId === undefined);
   // #12483 said "both ceilings": `metas.length` cannot see a read-refused or
@@ -3385,12 +3393,6 @@ function saturatedForMetas(
   const parsedCount = metas.length + unreadableCount;
   let strict = false;
   let count = parsedCount;
-  // #14347 review, cycle 5, finding 1: the caller's `addsEntry` is the
-  // POST-WRITE entry count — `true` only when the session is not on disk at all —
-  // so an unreadable, corrupt or meta-less-log REPLACEMENT adds nothing. It is
-  // NOT `prior === undefined`: that operand was written when `parsedCount` was
-  // `metas.length` alone, and it now double-counts the unreadable class, which
-  // `unreadableCount` already carries.
   if (projectedBytes === undefined && replacesSessionId === undefined) {
     // STRICT: the question is whether ADDING an entry would cross the ceiling, so
     // a spool exactly AT the count ceiling is already saturated.

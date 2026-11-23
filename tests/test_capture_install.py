@@ -4915,7 +4915,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: behaviour is untouched) because `contract_version_for('pi')` grades the pair
 #: as ONE contract.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    31, "d41433921a700adb62755b25f3de9c5a4c8bbe64a49fba43e22a444a7e3ff858")
+    31, "461c210f8daf22f170dabe3989985d41d594f8908eb398e7c143d8720dcc79db")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5060,7 +5060,13 @@ _GENERATION_DIGESTS = {
     # protects a SHIPPED digest and this file records the exception (generation
     # 6): a NEVER-SHIPPED generation may be re-cut. Neither 29, 30 nor 31 has
     # shipped, and each entry below records the byte set its own commit carried.
-    31: "d41433921a700adb62755b25f3de9c5a4c8bbe64a49fba43e22a444a7e3ff858",
+    # ⚠️ 31 was re-cut once (#14347 review, cycle 7, finding 1): the Pi leg's
+    # `addsEntry` COMMENT still stated the operand cycle 5 removed ("an unreadable
+    # meta … still ADDS one to the count") twelve lines above the block that says
+    # the opposite, so the Python twin's wording was copied across. Comment-only,
+    # no behaviour change — but a comment IS bytes here, so the generation-31
+    # digest moved with it (the same never-shipped re-cut that 29 and 30 carry).
+    31: "461c210f8daf22f170dabe3989985d41d594f8908eb398e7c143d8720dcc79db",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -5338,6 +5344,48 @@ def test_a_shipped_pi_seam_byte_change_moves_the_generation():
         "read as `modified-artifact` (\"local edit\") by every install made "
         "from the previous bytes, so move the generation (tortoise-hook-version) "
         "and update _EXPECTED_INSTALL_CONTRACT + this pair in the same commit.")
+
+
+def test_the_two_legs_state_the_SAME_addsEntry_operand_rule():
+    """#14347 review, cycle 7, finding 1: one seam, one wording.
+
+    ``adds_entry`` / ``addsEntry`` is the POST-WRITE entry count — the write path
+    passes ``not entry_on_disk`` / ``!entryOnDisk`` — so an unreadable, corrupt or
+    meta-less-log REPLACEMENT adds nothing.  Cycle 5 removed the older operand
+    (``prior is None``) from BOTH legs' code, but only the Python leg's
+    explanatory comment was rewritten: the Pi leg went on claiming an unreadable
+    meta does still add one to the count, twelve lines above a block stating the
+    opposite.  A reviewer read that as an open finding in two consecutive cycles,
+    which is exactly what a reader does — two legs, two rules, believe whichever
+    you open first.
+
+    A comment cannot be graded by behaviour, so it is graded as text: the
+    retracted sentence must be ABSENT from both legs and the post-write rule
+    PRESENT in both.  Mutation (the shape a careless revert of cycle 5
+    produces): restore the retracted sentence on either leg — this REDs while
+    every behavioural row in the repo stays green.
+    """
+    retracted = "still ADDS one to the count"
+    rule = "POST-WRITE entry count"
+    legs = {
+        "Pi capture seam": _PI_SRC,
+        "Python spool writer": _REPO_ROOT / "tortoise" / "capture_spool.py",
+    }
+    for leg, path in legs.items():
+        assert path.is_file(), f"{leg}: {path} is missing"
+        # Collapse the comment wrapping: the two legs' lines are not identical.
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        assert retracted not in text, (
+            f"{leg} ({path}) restates the retracted `adds_entry` operand: "
+            f"{retracted!r}.  It is the POST-WRITE entry count (`not "
+            "entry_on_disk`), so an unreadable/corrupt/meta-less-log "
+            "REPLACEMENT adds NOTHING — cycle 5 removed that operand from both "
+            "legs' code, and both legs' comments must say so.")
+        assert rule in text, (
+            f"{leg} ({path}) no longer states the `adds_entry` operand rule "
+            f"({rule!r}).  The two legs are ONE contract: a reader of either "
+            "must get the same operand, and a deleted sentence is how the "
+            "contradictory one got back in.")
 
 
 def test_a_shipped_pi_read_seam_byte_change_moves_the_generation():
