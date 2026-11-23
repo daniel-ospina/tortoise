@@ -86,6 +86,7 @@ legs skip, which is what makes the ARMED run real rather than absent.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -132,6 +133,86 @@ MECHANISM_GRAPH_SCAN = MECHANISM_SCAN_FALLBACK
 MECHANISM_KEY = VECTOR_MECHANISM_KEY
 
 DIM = 384
+
+#: The CACHE'S FRONT END + every module in the package that CONSTRUCTS a graph
+#: client. ⛔ MEASURED, NOT LISTED FROM MEMORY: the six client-constructing names
+#: below are what this scan returns at `3c45c8ae875` —
+#:
+#:     python - <<'EOF'
+#:     import ast, pathlib
+#:     SYMS = {"FalkorDB", "Graph", "Redis", "RedisMixin", "StrictRedis"}
+#:     for p in sorted(pathlib.Path("tortoise").glob("*.py")):
+#:         t = p.read_text(); s = ast.parse(t); n = set()
+#:         for x in ast.walk(s):
+#:             if isinstance(x, ast.ImportFrom) and x.module: n |= {a.name for a in x.names}
+#:             elif isinstance(x, ast.Import): n |= {a.name.rsplit(".", 1)[-1] for a in x.names}
+#:         if n & SYMS: print("tortoise." + p.stem)
+#:     EOF
+#:
+#: — and it is here rather than computed at test time because the scan costs
+#: **2.5 s** (it reads all 283 modules of the package) against this file's `2.0`
+#: fast-shard weight. The COMMAND is the pin: re-run it and the list must match.
+#:
+#: ⛔ WHY AN EXPLICIT LIST IS ACCEPTABLE HERE AND WAS NOT BEFORE. An earlier cut
+#: listed five names and called itself exhaustive; measured, it missed every one
+#: of the five driver importers below, so `from tortoise.backup import …` in the
+#: runner passed green while opening exactly the handle this leg refuses. The
+#: difference is not the shape — it is that this list is now the scan's OUTPUT and
+#: the scan is quoted, so the next reader can re-derive it instead of trusting it.
+#: The residual that remains, stated rather than implied: a module that reaches a
+#: driver INDIRECTLY (through a shim this scan would not see) is not covered. The
+#: leg is a guard against the CHANGE, not a proof about the package.
+CACHE_DOORS = (
+    # the two folds and the three write doors — the cache's front end by design
+    "tortoise.projection",
+    "tortoise.cache_projection",
+    "tortoise.sdk",
+    "tortoise.api",
+    "tortoise.mining",
+    # the scan's output: every module that CONSTRUCTS a graph client
+    "tortoise.__init__",
+    "tortoise.__main__",
+    "tortoise.backup",
+    "tortoise.cypher_guard",
+    "tortoise.embedded_lifecycle",
+    "tortoise.session_indexer",
+)
+
+#: The DRIVER CLIENTS, by the name a binding would carry. `falkordb` and
+#: `redislite` are whole-package roots (importing either imports a client
+#: factory); `redis` is NOT — `redis.exceptions` is a diagnostic import, which is
+#: why `tortoise/retry.py` (`redis._parsers.base`) is correctly NOT a door above
+#: even though it imports the package.
+DRIVER_ROOTS = ("falkordb", "redislite")
+DRIVER_CLASSES = ("redis.Redis", "redis.asyncio", "redis.client")
+
+
+def _imported_modules(path: Path) -> set[str]:
+    """Every module name ``path`` imports, INCLUDING the ``from X import Y`` form.
+
+    ⛔ BOTH SPELLINGS MUST BE COLLECTED (measured): `from tortoise import
+    projection` records the module `tortoise`, so a collector that only looked at
+    `node.module` would see nothing to refuse while the handle is right there in
+    the binding (`projection.FalkorProjection`). `tools/record_runner.py` already
+    uses that spelling for a sibling (`from tortoise import journal_segments`), so
+    it is the file's native idiom rather than a hypothetical. An ``ImportFrom``
+    therefore yields BOTH ``module`` and ``module.alias`` per imported name, and a
+    relative import yields the alias alone (there is no absolute parent to trust).
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    reached: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            reached.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or not node.module:
+                reached.update(alias.name for alias in node.names)
+                continue
+            reached.add(node.module)
+            reached.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return reached
+
+
 
 
 # ── plumbing ───────────────────────────────────────────────────────────────
@@ -628,7 +709,13 @@ def test_the_runner_folds_and_a_second_run_is_a_no_op(schema, unarmed, tenant):
         f"events — nothing was written: {report}")
     assert report["no_op"] is False, f"a folding run claimed to be a no-op: {report}"
 
-    points = _count(schema, "point", tenant)
+    # ⛔ `ids_only=True` IS LOAD-BEARING, not decoration. `_count` builds
+    # `SELECT count(*), count(*)` without it, so `points[1]` would BE `points[0]`
+    # and the assertion below could not fail — while its message claims the
+    # vector is missing. A fold that wrote the row with `embedding = NULL` was
+    # green against that shape (measured: `count(*) = 1`, `count(embedding_vec)
+    # = 0` over one NULL-embedding row on this schema).
+    points = _count(schema, "point", tenant, ids_only=True)
     objects = _count(schema, "object", tenant)
     assert points[0] == 1, f"the folded point is not in the record: {points}"
     assert points[1] == 1, (
@@ -675,31 +762,22 @@ def test_the_runner_cannot_reach_the_cache():
     Deliberately no DSN and no tenant: the subject is a file's import graph, so
     this leg RUNS in the fast matrix instead of skipping there.
     """
-    import ast
+    reached = _imported_modules(REPO_ROOT / "tools" / "record_runner.py")
 
-    tree = ast.parse((REPO_ROOT / "tools" / "record_runner.py").read_text(encoding="utf-8"))
-
-    #: Every module whose import would give the runner a way into the cache.
-    #: PREFIX-matched: a submodule of any of these (`tortoise.projection.edges`)
-    #: is the same door.
-    FORBIDDEN = (
-        "falkordb", "redislite", "redis", "FalkorDB", "redislite.client",
-        "tortoise.projection", "tortoise.cache_projection", "tortoise.sdk",
-        "tortoise.api", "tortoise.mining",
-    )
-    reached: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            reached.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            reached.append(node.module)
-    hits = sorted({name for name in reached
-                   for bad in FORBIDDEN
-                   if name == bad or name.startswith(bad + ".")})
+    hits = sorted(
+        name for name in reached
+        if name.split(".")[0] in DRIVER_ROOTS
+        or any(name == door or name.startswith(door + ".") for door in CACHE_DOORS)
+        or any(name.startswith(cls) for cls in DRIVER_CLASSES))
     assert hits == [], (
         f"`tools/record_runner.py` imports {hits} — the runner must not be able "
         "to reach the cache at all (#10175 forbids pruning or deleting it, and "
         "#5333 governs customer memories). A fold that can open a graph handle "
         "is a data-loss surface, not a regression. Imports seen: "
         f"{sorted(reached)}")
+    # POSITIVE CONTROL — the leg is graded against a file that was really read.
+    for expected in ("tortoise.record_projection", "tortoise.record_writer"):
+        assert expected in reached, (
+            f"the runner does not import `{expected}`, so this leg read nothing "
+            f"it expected and would be vacuous: {sorted(reached)}")
 
