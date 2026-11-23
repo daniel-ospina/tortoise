@@ -6838,8 +6838,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # (unreachable) but ALSO discarded THIS row, ~900 lines away and not D5 machinery. The
         # claim it guards is live and is in this PR's own net diff —
         # `probes/capstone_measure.py`'s `` ``embed_list:`` (``:18055``) and ``if vet_enabled
-        # and complete_list:`` (``:15382``) `` sentence. Measured at the head that still carried
-        # `:17970`/`:17967` — this PR re-points both, so that mutation no longer exists in today's
+        # and complete_list:`` (``:15382``) `` sentence. Measured at the head that carried
+        # `:17970` — this PR re-points both, so that mutation no longer exists in today's
         # probe: WITHOUT this row, mutating `:17970` -> `:17967` left `444 passed` (green); WITH
         # it, the same mutation made `test_the_bare_continuation_cites_name_what_they_say` fail.
         # Non-vacuity, MEASURED at the head that carried `:17970`: mutating it to `:17967` in the

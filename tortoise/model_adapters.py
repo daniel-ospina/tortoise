@@ -1928,8 +1928,14 @@ def build_reader_model(model_id: str | None = None, *,
                                 # hardcodes ``thinking: disabled``, and the gate
                                 # that decides WHICH ids get it was widened here
                                 # to the whole flash family (#4129), so a spec
-                                # naming the family-prefixed form, a dated build,
-                                # or a ``:free`` tail newly gains the field.
+                                # naming the family-prefixed form or a dated build
+                                # newly gains the field. ⛔ NOT an OpenRouter
+                                # ``:free`` tail on THIS lane —
+                                # ``_normalize_ask_model_spec`` rejects any
+                                # colon-form spec above, so no ask-lane spec can
+                                # carry one; that id gains the field on the
+                                # EXTRACTOR lane only, which performs no colon
+                                # check.
                                 # ⛔ NOT the bare registry key ``deepseek-flash``:
                                 # both lanes remap it to
                                 # ``deepseek/deepseek-v4-flash``
