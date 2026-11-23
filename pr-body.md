@@ -180,6 +180,13 @@ The review's last mutation-table row ("`tortoise-capture.test.ts` … stays GREE
 what the P2 row above removes: the row now names the behaviour it protects, and
 the mutant reds it.
 
+The branch's own lint findings are cleared at `b1822f8`: `ruff check` over every Python
+file this diff touches reports **no findings** (the 13 the `agent-infra-ci / lint` job
+listed were 12 here, now fixed, plus `tests/test_13098_cypher_inventory.py`'s `I001`, which is
+**already red on `main`** and is tracked as #14426 — the decision there is to keep it out of
+unrelated PR diffs, so it is named rather than fixed here). That context is **not** in the
+required set, so it cannot block the merge; it stays red only on that `main`-side row.
+
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
