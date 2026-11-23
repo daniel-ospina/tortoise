@@ -4275,38 +4275,37 @@ def test_the_13854_range_spans_end_inside_the_statement_their_anchor_opens() -> 
             f"span (anchor {path}:{line}) — the range's END was carried instead of re-derived. Move it "
             f"by the same MEASUREMENT that moved the start (grep the row's own closing fragment)."
         )
-def test_a_def_range_pin_ends_on_the_docstring_its_prose_names() -> None:
+def test_a_def_range_pin_ends_on_the_functions_own_last_line() -> None:
     """A `def …` span pins BOTH ends, not only its start.
 
     ⛔ WHY. `_PINS` grades the fragment at a range token's START line, and the sibling range arm above
     only asks that an anchor sit INSIDE the span — so the PUBLISHED END of a `def` span is read by no
     row in `_PINS` at all. The END is therefore DERIVED from the source, so an insert that moves the
-    docstring's closing quote reds this arm instead of leaving the published `:N` stating a line nothing
-    reads.
+    end reds this arm instead of leaving the published `:N` stating a line nothing reads.
 
-    ⛔ THE END IS THE DOCSTRING'S LAST LINE, because that is the span the document publishes. The row
-    reads "consumed only by `subject_binding_available()` at `:7605-7619`", and measured on this tree
-    `subject_binding_available` has its `def` at 7605, its docstring's closing quote at 7619 and its
-    function body's last line at 7644 (AST: `FunctionDef.lineno` 7605, first body statement's
-    `end_lineno` 7619, `FunctionDef.end_lineno` 7644). Deriving the FUNCTION's end instead would grade
-    7644 and so red the range main publishes deliberately; the derivation follows the published span.
+    ⛔ THE BOUNDARY IS THE SENTENCE'S, AND SIMPLY IMPORTING `main`'s RULE REDS A CORRECT CITE. This arm
+    arrived from `main` (`#14269`) asserting the DOCSTRING's closing quote, because `main`'s edition of
+    the paragraph cited a docstring claim. THIS tree's §2.1 row cites the CONSUMER — "consumed only by
+    `subject_binding_available()` at `:7605-7644`" — so the span has to cover the code the row names,
+    and the docstring close (`7619`) stops before it. Measured on this tree (AST):
+    `FunctionDef.lineno` 7605, first body statement's `end_lineno` 7619 (the docstring's closing
+    quote), `FunctionDef.end_lineno` 7644 (the last body line, `return True`). Graded verbatim,
+    `main`'s rule asserted `7619 == 7644` and reddened this PR's OWN CORRECT CITE; the identical
+    correction is already recorded by the sibling arm
+    `test_the_subject_binding_range_ends_where_the_function_it_names_ends` (line 3239), which derives
+    the last non-blank body line for the same reason. The boundary is therefore the function's own
+    `end_lineno`, stated rather than assumed.
 
     The START is graded against the same AST rather than against the pin's own claim, so a row that
     names the wrong definition reds here instead of resolving some other `def`'s fragment.
 
-    ⛔ THIS ARM IS *NOT* THE FILE'S ONLY END READER — that claim was FALSE and is corrected here
-    (measured at review of `#14269`). `main` DOES carry a `def`-span END arm,
-    `test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter` (line 2230, landed by
-    `ff2218b6` / `#14249`), which grades the DOCUMENT's cited end against the source. The two arms
-    cover DIFFERENT mutations, and which one sees which is MEASURED rather than assumed — mutate only
-    the `_PINS` row (`:7605-7619` -> `:7605-7618`) and leave the document alone:
-
-        test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter  PASSED
-        test_a_def_range_pin_ends_on_the_docstring_its_prose_names              FAILED
-
-    So `main`'s arm reads the document and this one reads the PIN TABLE; a doc-side re-point is caught
-    there, and a pin-table-only re-point is caught ONLY here. Neither is redundant and neither may be
-    dropped during a resolution on the strength of the other existing.
+    ⛔ THIS ARM IS NOT THE FILE'S ONLY END READER, AND THE TWO GRADE DIFFERENT SURFACES — which is why
+    neither may be dropped during a resolution on the strength of the other existing. The sibling arm
+    `test_the_subject_binding_range_ends_where_the_function_it_names_ends` reads the DOCUMENT's cited
+    span; this one reads the PIN TABLE's. Neither is redundant: a doc-side re-point is caught there,
+    and a pin-table-only re-point is caught only here — MEASURED by mutating only the `_PINS` row
+    (`:7605-7644` -> `:7605-7643`) and leaving the document alone: the doc-side arm stays GREEN (the
+    document still says 7644) and this arm is the only one that REDS.
     """
     checked = 0
     for _doc, token, src_path, _line, fragment in _PINS:
@@ -4331,29 +4330,24 @@ def test_a_def_range_pin_ends_on_the_docstring_its_prose_names() -> None:
             f"{token!r} names {name!r}'s first definition line as {start}, but {src_path}'s AST puts it "
             f"at {derived_start} — so the START of the span is not the line the document says it is."
         )
-        docstring_ends = [
-            node.body[0].end_lineno
-            for node in definitions
-            if node.body
-            and isinstance(node.body[0], ast.Expr)
-            and isinstance(node.body[0].value, ast.Constant)
-            and isinstance(node.body[0].value.value, str)
-        ]
-        assert docstring_ends, (
-            f"{src_path}:{start} is pinned as {token!r} ('{fragment}') but {name!r} opens with no "
-            "docstring — the row's span ends on the docstring's closing quote, so there has to be one."
+        # ⛔ THE FUNCTION'S OWN END, not its docstring's close — see the docstring above: this
+        # document cites the CONSUMER, so the boundary is the last line the function spans.
+        function_ends = [node.end_lineno for node in definitions if node.end_lineno is not None]
+        assert function_ends, (
+            f"{src_path}:{start} is pinned as {token!r} ('{fragment}') but the AST reports no end "
+            f"line for {name!r} — so the END of the span cannot be derived at all."
         )
-        derived_end = max(docstring_ends)
+        derived_end = max(function_ends)
         assert derived_end == end, (
-            f"{token!r} names {name!r}'s docstring's closing quote as {end}, but {src_path}'s AST ends "
-            f"that docstring at {derived_end} — so the END of the span is not the line the document says "
-            "it is, and a line inserted inside the docstring moves it. Re-derive the range from the "
-            "source, do not adjust the sentence to the number."
+            f"{token!r} names {name!r}'s last line as {end}, but {src_path}'s AST ends that function "
+            f"at {derived_end} — so the END of the span is not the line the document says it is, and "
+            "a line inserted inside the function moves it. Re-derive the range from the source, do "
+            "not adjust the sentence to the number."
         )
         checked += 1
     assert checked, (
         "no `def`-anchored range pin was graded — the arm is vacuous, which is how the END of "
-        "`:7605-7619` stayed unread."
+        "`:7605-7644` stayed unread."
     )
 
 
