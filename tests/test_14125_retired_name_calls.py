@@ -5657,6 +5657,18 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #: `except ImportError:` masks it — that arm catches every subclass, which is how a
     #: later `except ModuleNotFoundError: raise` becomes unreachable (review of #14160,
     #: cycle 11, P1-1). The mirror pair does the same for `NameError` / `UnboundLocalError`.
+    #: ⛔ THESE THREE ROWS ARE CONJUNCTION-ONLY, AND UNLIKE THEIR SIBLINGS THEY WERE NOT
+    #: LABELLED AS SUCH (review of #14287, mutation attribution, P3). Measured: reversing EITHER
+    #: guard ALONE leaves all three GREEN — delete `_masked_by`'s family term and `_covered` is
+    #: still `set()`, because the FAMILY-CLOSE withholds the child name; remove the family-close
+    #: (`out |= set(reachable)`) and `_covered` is still `set()`, because `_masked_by` has already
+    #: emptied `reachable` — and only BOTH together let `{'ModuleNotFoundError'}` /
+    #: `{'ZipImportError'}` / `{'UnboundLocalError'}` through. So the ACCOUNTING half
+    #: (`_masked_by`) is not independently graded here, and the paragraph above read as though it
+    #: were. What these rows DO pin, and must keep pinning, is the NET behaviour: an earlier
+    #: PARENT arm leaves a later CHILD re-raise crediting nothing. That is the same conjunction
+    #: the `parent then child` / `same spelling twice` rows are declared for further down; these
+    #: three now carry the label instead of implying a single-guard witness.
     for _parent, _child in (
         ("ImportError", "ModuleNotFoundError"),
         ("ImportError", "ZipImportError"),
