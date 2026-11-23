@@ -24,10 +24,10 @@
   },
   {
    "allowance": 4000000,
-   "documents": 62,
+   "documents": 61,
    "pct_off_peak": 3.3,
    "pct_peak": 6.6,
-   "sessions": 110,
+   "sessions": 109,
    "subscription": 25.0,
    "tier": "pro",
    "usd_off_peak": 0.8285,
