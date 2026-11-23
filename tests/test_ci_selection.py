@@ -13862,13 +13862,17 @@ def _emission_block_claims(
         # test is not a reason to move a pinned count.
         groups[est] = groups[est] | names
     ceil_matches = _EMISSION_CEIL_RE.findall(header)
-    if not groups or not ceil_matches:
+    if not ceil_matches:
         return None
     # The multiplier is `ci_selection.WATCHDOG_HEADROOM`, not a literal this guard owns. Read
     # from the code so a change there REDS here with an accurate reason instead of returning
     # `None` (which the caller reports as "states no emission the guard can read" — fail-closed,
     # but it would send the next reader looking for a missing sentence rather than a moved
-    # constant).
+    # constant). ⛔ This runs BEFORE the empty-`groups` check on purpose: a header carrying a
+    # wrong multiplier but NO partition clause must raise for the headroom, not fall down the
+    # generic `None` path this check exists to avoid. The `not ceil_matches` guard above stays
+    # ahead of it, because a block that states no derivation at all must read as `None` rather
+    # than being redded for a headroom it never used.
     # ⛔ Compare the headroom NUMERICALLY, not as a spelling. `f"{2.0:g}"` is `"2"`, so a string
     # comparison reds a block that writes `x 2.0` — the same multiplier, and the spelling the
     # manifest's own block uses (`config/ci-surfaces.yml:46`: `shard_watchdog_minutes()` rounds
@@ -13879,6 +13883,8 @@ def _emission_block_claims(
         f"`ci_selection.WATCHDOG_HEADROOM` = {cs.WATCHDOG_HEADROOM:g} — the `ceil(...)` operand "
         "no longer states the code's own multiplier, so the figures beside it are not the ones "
         "anything computes. Update the sentence, or the constant moved and the block is stale.")
+    if not groups:
+        return None
     if len(ceil_matches) > 1:
         # A SECOND `ceil(...)` clause is a repeat, not a second statement of one fact — the same
         # doctrine as `<est X stated twice>` for the partition clauses, which also fires on an
@@ -14048,9 +14054,10 @@ def test_the_emission_block_guard_is_not_vacuous():
     # arm exactly when the block went stale (which the manifest's own comment says it has done three
     # times): an assertion that cannot fail for the reason it names is the class this file keeps
     # re-learning. The single-clause block below proves the marker is caused by the duplicate.
-    assert "<ceil stated 2 times>" in next(iter(duplicate_ceil[0].values())), (
-        "the duplicate `ceil(...)` marker did not fire — `.findall` should mark a repeat the way "
-        f"`<est X stated twice>` does: {duplicate_ceil[0]}")
+    assert all("<ceil stated 2 times>" in names for names in duplicate_ceil[0].values()), (
+        "the duplicate `ceil(...)` marker did not reach EVERY group — an arm that marks one group "
+        "and not the other still leaves a live-looking partition beside a marked one, and "
+        f"`next(iter(...))` would not have seen it: {duplicate_ceil[0]}")
     single_ceil = _emission_block_claims(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
         "# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n")
@@ -14065,10 +14072,10 @@ def test_the_emission_block_guard_is_not_vacuous():
     exact_repeat = _emission_block_claims(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
         "# `ceil(836.4/60 x 2)` = 28 m\n# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n")
-    assert exact_repeat is not None and "<ceil stated 2 times>" in next(
-        iter(exact_repeat[0].values())), (
+    assert exact_repeat is not None and all(
+        "<ceil stated 2 times>" in names for names in exact_repeat[0].values()), (
         "an EXACT restatement of the derivation was read as one statement — the same repeat rule "
-        f"as the partition clauses must apply: {exact_repeat[0]}")
+        f"as the partition clauses must apply to every group: {exact_repeat[0]}")
     # …and the multiplier is the CODE's constant, not a literal this guard owns. A block deriving
     # with a different headroom does not state what `ci_selection.WATCHDOG_HEADROOM` computes, so
     # it reds with that reason rather than reading as "no emission stated".
