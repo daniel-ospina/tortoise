@@ -12283,8 +12283,15 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     resolved read with a literal key is the CALLEE-COMPOSITION class, not the non-enumerable one.
     Closing it needs a two-step application in the census, which is new machinery rather than a
     threaded set; it is DECLARED here (a row below pins it GREEN) rather than left reading as
-    covered. Its ONE-hop twins — `vars(dict).get("get")` BOUND first, `dict.__dict__.get("get")`,
-    and every `[…"get"]`/`dict.get` spelling — are REFUSED and pinned by rows.
+    covered. Its ONE-hop twins, EACH BOUND FIRST — `_g = vars(dict).get; _g("get")`,
+    `_g = dict.__dict__.get; _g("get")`, and every `[…"get"]`/`dict.get` spelling — are REFUSED and
+    pinned by rows. ⛔ THE INLINE FORM OF THE SAME COMPOSITION IS **NOT** REFUSED, and it is rowed
+    BELOW with the class rather than here: `dict.__dict__.get("get")(m, "exec")` applies the
+    resolved read to a literal key and then applies THAT, in one expression, which is the two-step
+    application and not the receiver spelling this PR closes. Binding the callee first is what the
+    arms reach; chaining it inline is what they do not. The qualifier is on the LIST and not on its
+    first item for that reason — carried on item one, this sentence read as covering the inline form
+    and the same function's own table contradicted it eight lines down (#14395 review, P3).
 
     ⛔ EACH ROW BELOW WAS MEASURED AS A LIVE LEVER at `7b1589ef9e` — a third reach executing the
     product read while the pin passed (`m=2 c=2 i=0`). They are pinned GREEN so the note cannot
