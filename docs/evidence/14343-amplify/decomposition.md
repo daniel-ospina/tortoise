@@ -90,4 +90,4 @@ Measured on **7 real sessions / 14 emissions / 580 items** from `tests/eval/writ
 | lever | size (tokens/doc) | quality-neutral? |
 |---|---|---|
 | compact master render (2,335 vs 3,187 tokens/call) | −1,960 | NO — compact mode story-filters the pack kinds, so a document that misses every trigger word drops to the all-packs fallback and a document that hits one drops the others — not quality-neutral |
-| S1 truncation double-send (68.0% of documents take 2 S1 calls) | −4,652 | NO — a longer narrative is more content, not less — but it also enlarges the story both later stages re-read, so the net is a measurement, not arithmetic; the story's own growth is NOT sizeable offline |
+| S1 truncation double-send (34 documents, 68.0% of the corpus take 2 S1 calls) | −4,652 | NO — a longer narrative is more content, not less — but it also enlarges the story both later stages re-read, so the net is a measurement, not arithmetic; the story's own growth is NOT sizeable offline |

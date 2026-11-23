@@ -420,6 +420,7 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
     print(f"running {total} measurements at {workers} workers "
           f"(arms: {', '.join(arms)})", flush=True)
     finished = 0
+    first_batch = True
     # ⛔ ARMS RUN AS SEQUENTIAL BATCHES — NEVER INTERLEAVED (review cycle 10, P2).
     # `os.environ` is PROCESS-GLOBAL and every worker thread shares it, so the
     # first cut of this fix — installing the flag per JOB, around the single
@@ -435,6 +436,18 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
     for item, kind, arm in jobs:
         by_arm.setdefault(arm, []).append((item, kind))
     for batch_arm, batch_jobs in by_arm.items():
+        #: ⛔ `--arm-gap-s` IS HONOURED HERE (review cycle 11, P3). It was
+        #: documented as "a pause between arms (a provider's prefix cache is
+        #: time-bounded)" but was bound to a parameter nothing ever read — an
+        #: option that promised a pause it never took, so a caller asking for
+        #: 300 s to defeat prefix-cache carry-over silently got a back-to-back
+        #: replay and a delta that included the cache warm-up. The pause belongs
+        #: between BATCHES, which is exactly where the arms now meet.
+        if not first_batch and arm_gap_s > 0:
+            print(f"arm gap: pausing {arm_gap_s:g}s before {batch_arm!r}",
+                  flush=True)
+            time.sleep(arm_gap_s)
+        first_batch = False
         saved_embed = os.environ.get(_TOGGLE)
         try:
             _install_arm(batch_arm)
@@ -2160,10 +2173,12 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     s4_sys = sum(statics["s4"].values())
     clause = statics["envelope"]["clause"]
     #: how often S1 makes a SECOND call for the same document (the narrative
-    #: cap is hit, so the escalation re-sends the identical prompt).
-    two_call_share = (sum(1 for r in docs
-                          if (r["stages"].get("s1") or {}).get("calls", 0) > 1)
-                      / len(docs))
+    #: cap is hit, so the escalation re-sends the identical prompt). ONE
+    #: predicate, counted once: `document_term` publishes the COUNT and
+    #: `levers_offline` the SHARE, and a second `sum(...)` could drift from it.
+    n_two_call = sum(1 for r in docs
+                     if (r["stages"].get("s1") or {}).get("calls", 0) > 1)
+    two_call_share = n_two_call / len(docs)
 
     # The two dynamic regions, solved from the measured per-call prompts. The
     # story is S1's own emission seen by the next stage; the embed list is
@@ -2283,15 +2298,14 @@ def decompose(rows: list[dict], *, arm: str = "cold",
             "s1_calls_x_median_doc": round(c1 * t_med, 1),
             "fitted_slope_x_median_doc": round(in_fit["slope"] * t_med, 1),
             "documents": len(docs),
-            "documents_taking_two_s1_calls": sum(
-                1 for r in docs
-                if (r["stages"].get("s1") or {}).get("calls", 0) > 1),
+            "documents_taking_two_s1_calls": n_two_call,
             "note": ("S1 sends the WHOLE document once per call, and a "
                      "majority of documents take a second S1 call, so the "
                      "document is paid for ~2x"),
         },
         "levers_offline": _offline_levers(statics, c1, c2, c4, t_med,
-                                          two_call_share, oc2),
+                                          two_call_share, oc2,
+                                          n_two_call=n_two_call),
         "serialization": serialization_lever(receipts) if receipts else {},
     }
 
@@ -2323,7 +2337,8 @@ def _output_tail(docs: list[dict]) -> dict:
 
 
 def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
-                    t_med: float, two_call_share: float, oc2: float) -> dict:
+                    t_med: float, two_call_share: float, oc2: float,
+                    *, n_two_call: int) -> dict:
     """The size of each candidate lever, measured WITHOUT a provider call.
 
     A lever that cannot be sized cannot be chosen between, and a lever's size
@@ -2356,7 +2371,14 @@ def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
         "cause": (f"S1's narrative cap is {X._S1_MAX_TOKENS} tokens; a story "
                   "that hits it escalates and re-sends the SAME prompt, so "
                   "the document is paid for twice"),
-        "documents_with_two_s1_calls": round(100.0 * two_call_share, 1),
+        # ⛔ COUNT AND SHARE ARE SEPARATE, CORRECTLY-NAMED KEYS (review cycle
+        # 11, P3). This was `documents_with_two_s1_calls: round(100.0 * share,
+        # 1)` — a PERCENTAGE under a COUNT-shaped name, published in the same
+        # artifact as `document_term.documents_taking_two_s1_calls`, which is
+        # the count of the same quantity. So the bundle asserted that 68 of a
+        # 50-document corpus took two S1 calls.
+        "documents_taking_two_s1_calls": n_two_call,
+        "share_pct": round(100.0 * two_call_share, 1),
         "saved_per_doc_if_one_call": round(
             two_call_share * (t_med + sum(statics["s1"].values())), 1),
         "quality_risk": ("a longer narrative is more content, not less — but "
@@ -2619,7 +2641,8 @@ def render_decompose(dec: dict) -> str:
         if "saved_per_doc_if_one_call" in s1l:
             lines.append(
                 f"| S1 truncation double-send "
-                f"({s1l['documents_with_two_s1_calls']}% of documents take 2 "
+                f"({s1l['documents_taking_two_s1_calls']} documents, "
+                f"{s1l['share_pct']}% of the corpus take 2 "
                 f"S1 calls) | −{s1l['saved_per_doc_if_one_call']:,.0f} | NO — "
                 f"{s1l['quality_risk']} |")
         lines.append("")
