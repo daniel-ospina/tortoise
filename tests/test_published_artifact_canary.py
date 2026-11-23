@@ -2905,6 +2905,7 @@ def _strip_shell_comments(script: str) -> str:
     arith = 0  # >0 while inside a `$(( … ))`; an integer count of the OPEN paren depth
     brace_quotes: list[str | None] = []  # one entry per open `${ … }`: its inner quote state
     cmd_arith = 0  # >0 while inside an unquoted `(( … ))` arithmetic COMMAND
+    depr_arith = 0  # >0 while inside a deprecated `$[ … ]`; an integer count of the `[` depth
     heredocs: list[tuple[str, bool]] = []  # (delimiter, terminator ignores leading tabs)
     i = 0
     while i < len(script):
@@ -2982,6 +2983,33 @@ def _strip_shell_comments(script: str) -> str:
                 brace_quotes[-1] = ch
             elif ch == "}":
                 brace_quotes.pop()
+            i += 1
+            continue
+        # ⛔ `$[ … ]` IS THE SAME WORD CONTEXT AS `${ … }` AND `$(( … ))` (fresh-context review
+        # of #14314, P3, MEASURED). It is bash's deprecated arithmetic expansion, and a `#`
+        # inside it is an ARITHMETIC token (`16#ff`), not a comment opener — so everything
+        # after it on the line is still CODE and a substitution there RUNS. This lexer did
+        # not track it, stripped the rest of the line as a comment, and
+        # `_executable_prose_lines` returned `[]` over an executing line: the SILENT PASS this
+        # file calls worse than no pin, reached through an operator it did not model.
+        # Measured, marker created by the substitution:
+        #
+        #   $ printf 'echo $[ 1 # $(touch /tmp/lexm6) ]\n' > s6.sh && bash -e s6.sh
+        #   → marker CREATED; `_strip_shell_comments` gave `echo $[ 1 ` and the scan `[]`
+        #
+        # The closing bracket is tracked by DEPTH, not by `find(']')`, so a nested `[` inside
+        # the expression cannot close it early. A backslash pair is consumed by the escape
+        # branch above, so an escaped `]` cannot close it either.
+        if quote is None and script.startswith("$[", i):
+            out.append("$[")
+            depr_arith, at_word_start, i = 1, False, i + 2
+            continue
+        if depr_arith:
+            out.append(ch)
+            if ch == "[":
+                depr_arith += 1
+            elif ch == "]":
+                depr_arith -= 1
             i += 1
             continue
         if (
@@ -3192,6 +3220,23 @@ HIDDEN continues                       rc 0
             i += 2  # an escape pair is inert: `\`` is a literal backtick, `\$(` a literal `$(`
             continue
         width = 2 if text.startswith("$(", i) else (1 if text[i] == "`" else 0)
+        # ⛔ A PROCESS SUBSTITUTION EXECUTES TOO (fresh-context review of #14314, P3,
+        # MEASURED): `cat <(touch /tmp/ps)` CREATES the file and returns `[]` here, so the
+        # same silent pass closed for `$(` and the backtick was still open through `<(` and
+        # `>(` — a token this scan simply did not look for. It is flagged on the same footing
+        # as the other two, because the obligation this detector serves is "this block
+        # executes no prose", not "this block uses these two spellings". `<<(` and `>>(` are
+        # excluded (a `<`/`>` directly before the operator means it is part of a redirection
+        # or a here-doc operator, not a process substitution), and a `<(` inside a quoted
+        # span is flagged anyway — the same DELIBERATE CONSERVATIVE EDGE the docstring states
+        # for single quotes: an over-block a human can reword, never a silent pass.
+        if (
+            not width
+            and text[i] in "<>"
+            and text.startswith("(", i + 1)
+            and not (i > 0 and text[i - 1] in "<>")
+        ):
+            width = 2
         if not width:
             i += 1
             continue
@@ -3622,6 +3667,87 @@ def test_the_prose_pin_does_not_read_a_hash_inside_an_EXPANSION_as_a_comment(tmp
     # heredoc, nor stop a plain heredoc or a plain escaped `\"` from being read as before.
     assert _executable_prose_lines('cat <<<"x"\necho ok  # `tick`\n') == []
     assert _executable_prose_lines("cat <<EOF\n# $(printf PLAIN)\nEOF\n") == ["# $(printf PLAIN)"]
+
+
+def test_the_prose_pin_sees_the_DEPRECATED_arithmetic_and_PROCESS_substitutions(tmp_path):
+    """Two tokens that EXECUTE and that this pin did not look for — both were silent passes.
+
+    Fresh-context review of #14314, P3, MEASURED. The lexer tracked `${ … }`, `$(( … ))` and
+    `(( … ))` as word contexts but not `$[ … ]`, bash's DEPRECATED arithmetic expansion — so a
+    `#` there (an arithmetic token, the shape `16#ff`) was read as a comment opener, the rest of
+    the line was DELETED before the token scan, and a substitution on it vanished from the
+    report:
+
+        $ printf 'echo $[ 1 # $(touch M6) ]\n' > s6.sh && bash -e s6.sh     → M6 CREATED
+        $ _strip_shell_comments(…) → 'echo $[ 1 '   _executable_prose_lines(…) → []
+
+    …and the detector looked for `$(` and the backtick only, so a PROCESS SUBSTITUTION — which
+    executes a command just as directly — was invisible to it as well:
+
+        $ bash -e -c 'cat <(touch PS)'                      → PS CREATED
+        $ _executable_prose_lines('cat <(touch PS)\n')      → []
+
+    Both are the silent pass this file calls worse than no pin, so both are pinned the way the
+    other holes here are: the premise is EXECUTED — a marker file the substitution creates —
+    before the detector is asked, because a substitution that never ran also looks quiet.
+    """
+    # ⛔ `$[ … ]` IS A WORD CONTEXT: the `#` inside it opens no comment, so the `$(` after it runs.
+    m6 = tmp_path / "m6"
+    arithmetic_hash = f"echo $[ 1 # $(touch {m6}) ]\n"
+    subprocess.run([*_RUNNER_SHELL, arithmetic_hash], capture_output=True, text=True)
+    assert m6.exists(), (
+        "`$[ … # $( ) … ]` did not execute its substitution, so this pin's premise is gone — "
+        "the hole reproduced here is not the one being closed"
+    )
+    assert _executable_prose_lines(arithmetic_hash), (
+        "a `$(` inside `$[ … ]` after a `#` EXECUTES and the pin reported nothing — the silent "
+        "pass this pin exists to close, through an operator it did not model"
+    )
+    with pytest.raises(AssertionError, match="command substitution"):
+        _assert_no_executable_prose(arithmetic_hash)
+
+    # The same context hides a BACKTICK the same way — one case, not a parity claim.
+    m7 = tmp_path / "m7"
+    arithmetic_tick = f"echo $[ 1 # `touch {m7}` ]\n"
+    subprocess.run([*_RUNNER_SHELL, arithmetic_tick], capture_output=True, text=True)
+    assert m7.exists(), "the backtick inside `$[ … # … ]` did not execute — premise gone"
+    assert _executable_prose_lines(arithmetic_tick), (
+        "a backtick inside `$[ … ]` after a `#` EXECUTES and the pin reported nothing"
+    )
+
+    # ⛔ AND PLAIN ARITHMETIC IS NOT AN OFFENCE — the fix tracks the CONTEXT, it does not red the
+    # operator. Executed, so the clean row is not a vacuous `[]`.
+    plain = "echo $[ 1 + 2 ]\n"
+    plain_ran = subprocess.run([*_RUNNER_SHELL, plain], capture_output=True, text=True)
+    assert plain_ran.stdout == "3\n", (plain_ran.stdout, plain_ran.stderr)
+    assert _executable_prose_lines(plain) == [], (
+        "plain arithmetic executes no command and must stay green: "
+        f"{_executable_prose_lines(plain)!r}"
+    )
+
+    # ⛔ A PROCESS SUBSTITUTION EXECUTES — `<(` and `>(` are looked for on the same footing now.
+    ps = tmp_path / "ps-marker"
+    read_side = f"cat <(touch {ps}) >/dev/null\n"
+    subprocess.run([*_RUNNER_SHELL, read_side], capture_output=True, text=True)
+    assert ps.exists(), "`cat <(touch …)` did not run its command, so this pin's premise is gone"
+    for label, script in (
+        ("read-side", read_side),
+        ("write-side", "echo hi >(cat >/dev/null)\n"),
+    ):
+        assert _executable_prose_lines(script), (
+            f"the {label} process substitution executes a command and the pin reported nothing: "
+            f"{script!r}"
+        )
+        with pytest.raises(AssertionError, match="command substitution"):
+            _assert_no_executable_prose(script)
+
+    # ⛔ AND ORDINARY REDIRECTIONS ARE NOT PROCESS SUBSTITUTIONS — the over-block guard that keeps
+    # this fix from redding the five real blocks: a `<`/`>` preceded by another one is not `<(`.
+    for benign in ("echo hi >> out.txt\n", "echo hi 2>&1\n", "cat <<EOF\nbody\nEOF\n"):
+        assert _executable_prose_lines(benign) == [], (
+            f"a plain redirection or here-doc was read as a process substitution: {benign!r} → "
+            f"{_executable_prose_lines(benign)!r}"
+        )
 
 
 def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
