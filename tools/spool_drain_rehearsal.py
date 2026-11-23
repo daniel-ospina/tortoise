@@ -238,7 +238,7 @@ def _install_observer(app, log_path: Path) -> None:
     log = log_path.open("a", encoding="utf-8")
 
     @app.middleware("http")
-    async def _rehearsal_observer(request, call_next):  # noqa: ANN001
+    async def _rehearsal_observer(request, call_next):
         t0 = time.perf_counter()
         response = await call_next(request)
         dur_ms = (time.perf_counter() - t0) * 1000.0
@@ -575,7 +575,7 @@ def _wait_health(port: int, timeout_s: float = 180.0) -> bool:
     url = f"http://127.0.0.1:{port}/health"
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=5) as r:  # noqa: S310 — loopback
+            with urllib.request.urlopen(url, timeout=5) as r:
                 if r.status == 200:
                     return True
         except (urllib.error.URLError, OSError):
