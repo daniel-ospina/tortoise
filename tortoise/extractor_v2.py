@@ -2433,6 +2433,16 @@ def _complete_parsed(model, system: str, user: str, *,
                     head = (_parse_canonical_strict(retained_response)
                             or _longest_valid_prefix(retained_response))
                     if head is None:
+                        # #14357: the ESCALATED call produced no content at all
+                        # — that is the collapse, not a truncated parse. Re-raise
+                        # the original so the census class stays
+                        # ``reasoning_collapse``, which the eval gate VETOES;
+                        # wrapping it in ``_ParseError(truncated=True)`` would
+                        # file it as the RECOVERABLE ``truncated_parse_error`` and
+                        # let the gate rate-limit a zero-content extraction —
+                        # the fail-open #14357 exists to close.
+                        if isinstance(e, _ReasoningCollapse):
+                            raise
                         raise _ParseError(
                             str(e), truncated=True, attempt=attempts,
                             excerpt=_error_excerpt(retained_response, None)

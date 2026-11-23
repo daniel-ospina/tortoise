@@ -128,11 +128,25 @@ def _cache_hit_tokens(usage: object) -> int:
 #: suppressed even though ``suppress_reasoning`` is False there.
 #:
 #: Prefix-agnostic (``deepseek/deepseek-v4-flash`` counts) — a prefixed id must
-#: never bypass the gate. ``deepseek-v4-pro`` is deliberately NOT in the set:
-#: it keeps its default (no collapse evidence — pending verification, #1790).
+#: never bypass the gate — and FAMILY-matched, not literal-matched (#4129):
+#: ``deepseek-v4-flash`` is RETIRED, api.deepseek.com answers 200 to it and
+#: silently serves ``deepseek-flash``, and keying the #1790 thinking-disable on
+#: ONE exact id is what let that rename re-enable thinking with no failing test
+#: to say so. Same family rule as ``analyze._is_deepseek_flash_family``, kept
+#: local because ``model_adapters`` is the module that builds the wire body.
+#: ``deepseek-v4-pro`` is deliberately NOT in the set: it keeps its default (no
+#: collapse evidence — pending verification, #1790).
+_FLASH_FAMILY_IDS: tuple[str, ...] = ("deepseek-v4-flash", "deepseek-flash")
+
+
 def _runs_non_thinking(model_id: str) -> bool:
-    """True → the served id is one this module runs with thinking DISABLED."""
-    return (model_id or "").rsplit("/", 1)[-1] == "deepseek-v4-flash"
+    """True → the served id is one this module runs with thinking DISABLED.
+
+    Family-matched on the LAST path segment — dated builds
+    (``deepseek-v4-flash-0731``) and OpenRouter suffixes
+    (``deepseek/deepseek-v4-flash:free``) included."""
+    tail = (model_id or "").rsplit("/", 1)[-1].split(":", 1)[0]
+    return any(tail == i or tail.startswith(i + "-") for i in _FLASH_FAMILY_IDS)
 
 
 class OpenRouterModel:

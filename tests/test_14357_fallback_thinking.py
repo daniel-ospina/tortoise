@@ -147,6 +147,41 @@ def test_v4_pro_pool_members_agree_and_keep_the_default(monkeypatch):
     assert "venice_parameters" not in bodies["venice"]
 
 
+def test_the_family_gate_matches_the_family_not_one_literal():
+    """#4129: the gate keys on the flash FAMILY, not on one exact id.
+
+    ``deepseek-v4-flash`` is RETIRED — api.deepseek.com answers 200 to it and
+    silently serves ``deepseek-flash`` — and a literal-only gate is what let that
+    rename re-enable thinking with no failing test to say so (the recorded
+    #4129 finding, whose predicate ``analyze._is_deepseek_flash_family`` this
+    mirrors). A literal-only gate here means EVERY pool member sends no
+    suppression field for the served id — i.e. the pre-#14357 body, silently.
+    """
+    from tortoise.model_adapters import _runs_non_thinking
+
+    for family_id in ("deepseek-v4-flash", "deepseek-flash",
+                      "deepseek/deepseek-v4-flash",
+                      "deepseek/deepseek-flash",
+                      "deepseek-v4-flash-0731",           # the dated build
+                      "deepseek/deepseek-v4-flash:free",  # the OpenRouter suffix
+                      ):
+        assert _runs_non_thinking(family_id) is True, family_id
+    for outside_id in ("deepseek-v4-pro", "deepseek/deepseek-v4-pro",
+                       "deepseek/deepseek-v4-pro-0731", "gpt-4o", ""):
+        assert _runs_non_thinking(outside_id) is False, outside_id
+
+
+def test_a_registry_family_id_gets_the_suppressed_body(monkeypatch):
+    """End-to-end for the same family gate: a wire id the gate used to MISS
+
+    (``deepseek-flash`` — the id the provider actually serves for the retired
+    one) now gets the suppressed body on the two hop members."""
+    bodies = _three_member_bodies(monkeypatch, "deepseek/deepseek-flash")
+    assert bodies["deepseek-direct"]["thinking"] == {"type": "disabled"}
+    assert bodies["openrouter"]["reasoning"] == {"effort": "none"}
+    assert bodies["venice"]["venice_parameters"] == {"disable_thinking": True}
+
+
 def test_failover_call_is_the_suppressed_one(monkeypatch):
     """THE defect shape: the primary 429s, the fallback serves the call.
 
@@ -285,6 +320,53 @@ def test_empty_length_response_raises_the_yield_guard(monkeypatch):
     assert census == {"reasoning_collapse": 1}
     # the message names the SERVING route so a failover is investigable
     assert "reasoning" in str(ei.value)
+    # …and that claim is only pinned if the INTERPOLATION is asserted: the prose
+    # above contains "hidden reasoning tokens" unconditionally, so asserting on
+    # the word alone stays green after the route/model fields are dropped.
+    assert "route=" in str(ei.value), str(ei.value)
+    assert "model=" in str(ei.value), str(ei.value)
+
+
+def test_escalated_collapse_stays_fatal_not_a_recoverable_truncation(monkeypatch):
+    """#14357 — a collapse on the ESCALATED call is the collapse, not a
+    truncated parse.
+
+    The escalation ladder's abort arm re-parses the retained base response and,
+    failing that, raises ``_ParseError(truncated=True)``. An escalated
+    ``_ReasoningCollapse`` before this fix fell into that wrap, so the census
+    recorded ``truncated_parse_error`` — a class the eval gate treats as
+    RECOVERABLE (rate-limits) — for a call that produced ZERO content. The
+    census is what decides whether that gate vetoes, so the wrap silently
+    re-opened the fail-open this PR closes.
+    """
+    class _EscCollapses:
+        last_finish_reason = "length"
+        last_prompt_tokens = 10
+
+        def __init__(self):
+            self.calls = 0
+            self.last_completion_tokens = 1500
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.calls += 1
+            self.last_finish_reason = "length"
+            if (max_tokens or 0) >= 32000:
+                return ""  # the ESCALATED budget collapsed too
+            # Base: truncated NON-EMPTY with NO recoverable head, so the abort
+            # arm's canonical-then-rung-4 re-parse finds nothing to fall back
+            # to — the only shape that reaches the wrap this test guards.
+            return '{"entities": [{"name": "a"'
+
+    m = _EscCollapses()
+    census: dict = {}
+    with pytest.raises(v2._ReasoningCollapse):
+        try:
+            v2.run_s2(m, "STORY", stats={})
+        except BaseException as e:  # record the class, then re-raise
+            v2._bump_census(census, e)
+            raise
+    assert census == {"reasoning_collapse": 1}, census
+    assert m.calls == 2  # base + one escalated call, no third
 
 
 def test_non_empty_length_response_is_still_returned():
