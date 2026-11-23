@@ -1223,8 +1223,8 @@ def test_recover_does_not_steal_a_live_claim():
     # claim itself is NOT taken — that is the safety property.
     # ⛔ `== []` would be the WRONG contract (#14415 review round 5, BLOCKING 1):
     # "not ours to TAKE" is not "not ours to REPORT". Skipping the batch discards
-    # the decision instead of deferring it, and since `_BATCH_RECOVERED` makes
-    # this scan one-shot per process, the item is then stranded for ever — which
+    # the decision instead of deferring it, and the item is then stranded until
+    # the reclaim window expires with nothing looking again — which
     # is exactly the ordinary redeploy (a runner in flight, a replacement booting
     # a second later). The batch is reported so a later pass revisits it; the
     # drain re-checks the window itself (`run_item`) and leaves the claim alone.

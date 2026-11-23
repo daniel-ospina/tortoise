@@ -1042,7 +1042,12 @@ class GraphBatchStore:
             "UNION "
             f"MATCH (i:{ITEM_LABEL} {{org_id:$org}}) "
             "WHERE NOT i.state IN $terminal "
-            "RETURN DISTINCT i.batch_id AS bid",
+            "RETURN DISTINCT i.batch_id AS bid "
+            # ⛔ ORDERED, because the ROTATING recovery window is only fair if the
+            # list it rotates over is deterministic (#14415 review round 7, N6):
+            # a `UNION` with no `ORDER BY` leaves the order to the engine, and a
+            # window over a reshuffling list is a window that can starve a batch.
+            "ORDER BY bid",
             {"org": org_id, "terminal": [str(s) for s in TERMINAL_ITEM_STATES],
              "batch_terminal": [str(s) for s in TERMINAL_BATCH_STATES]},
         )
@@ -1254,14 +1259,26 @@ def _report_unmetered(org_id: str, exc: BaseException) -> None:
     try:
         from tortoise.metering import report_unmetered_increment
 
-        # `capture_ledger` is the lane token this increment belongs to: a batch
-        # item moves the `capture_extraction` dimension, and the token set is
-        # the documented one — inventing a ninth token would make a batch loss
-        # unattributable on the surface that exists to attribute it.
-        report_unmetered_increment("capture_ledger", org_id, exc)
+        # ⛔ ITS OWN LANE, not `capture_ledger` (#14415 review round 7, N3).
+        # `lane` names the SWALLOW SITE so an alert is attributable to the handler
+        # that dropped the increment; reusing the capture lane made a batch loss
+        # indistinguishable from a capture loss on the surface that exists to
+        # attribute it. The keyword form is required — the swallow-site census
+        # matches `lane="…"` only, so a positional call would be invisible to the
+        # fence that is supposed to enumerate these sites.
+        report_unmetered_increment(lane="batch_ingest", org_id=org_id, error=exc)
     except Exception:
-        _logger.warning("batch metering loss could not be reported for %s",
-                        org_id, exc_info=True)
+        # ⛔ THE FALLBACK STILL ALERTS (#14415 review round 7, N3). A log line on
+        # an ephemeral rootfs is the #3677 loss class; when `metering` itself
+        # cannot be imported, `operator_alert` is the standing fallback — the same
+        # one `hosted_api._alert_unmetered` uses.
+        try:
+            from tortoise.operator_alert import alert_unmetered_increment
+
+            alert_unmetered_increment("batch_ingest", org_id, exc)
+        except Exception:
+            _logger.warning("batch metering loss could not be reported for %s",
+                            org_id, exc_info=True)
 
 
 class BatchWorker:
@@ -1569,10 +1586,18 @@ class BatchCoordinator:
         item.state = new_state
         if reason or new_state in TERMINAL_ITEM_STATES:
             item.reason = reason
+        # ⛔ THE ROW ACCUMULATES; it does not overwrite (#14415 review round 7,
+        # BLOCKING 2). A retried item has more than one runner call behind it, and
+        # the meter bills every one of them — so a row holding only the LAST
+        # call's figures made `status_body()["tokens_spent"]` report 100 for a
+        # 200-token spend: the bill and the receipt disagreeing about the same
+        # document, which is the very measurement this layer's metering docstring
+        # narrates as the defect it fixes. `tokens_in/out` are therefore the
+        # document's CUMULATIVE spend, which is exactly what the meter sums.
         if tokens_in is not None:
-            item.tokens_in = max(0, int(tokens_in))
+            item.tokens_in = max(0, item.tokens_in) + max(0, int(tokens_in))
         if tokens_out is not None:
-            item.tokens_out = max(0, int(tokens_out))
+            item.tokens_out = max(0, item.tokens_out) + max(0, int(tokens_out))
         if content_key is not None:
             item.content_key = content_key
         if content_changed is not None:
@@ -1685,19 +1710,10 @@ class BatchCoordinator:
             fresh = claimed
         elif fresh.state in (BatchItemState.EXTRACTING,
                              BatchItemState.EMBEDDED):
-            # ⛔ A FRESH CLAIM MAY BELONG TO A LIVE PEER — LEAVE IT ALONE
-            # (#14415 review round 5, BLOCKING 2). The staleness window used to
-            # be consulted only in `recover()`, which decides per BATCH; the CLAIM
-            # is per ITEM, so the moment a batch had any `queued` sibling this
-            # drain re-entered an `extracting` row another instance was inside the
-            # runner call on — two extractions of one document, two graph writes,
-            # charged twice. The guard belongs HERE, where the claim is taken.
+            # The fresh-claim guard is ABOVE and covers this arm too — one rule,
+            # one place (#14415 review round 7, N5: the copy that lived here was
+            # unreachable, proven by line-tracing `run_item`).
             #
-            # ⚠️ DECLARED RESIDUAL (kept from the design): an item that legitimately
-            # runs longer than the window can be re-claimed. A real lease (a
-            # heartbeat on the row) is the fix and needs the drain to refresh it.
-            if _age_seconds(fresh.updated_at) < float(BATCH_RECLAIM_AFTER_S):
-                return fresh
             # ⛔ A RE-ENTERED CLAIM IS AN ATTEMPT TOO (#14415 review round 3,
             # BLOCKING 3). The ceiling above only ran for a `queued` item, so an
             # item re-driven from a DEAD claim (`extracting`/`embedded` — its
@@ -1738,6 +1754,14 @@ class BatchCoordinator:
         # already terminal and must not be resurrected (the customer stopped it).
         latest = self._fresh(org_id, fresh)
         if latest.terminal:
+            # ⛔ OUR CALL STILL SPENT (#14415 review round 7, N1). Reaching here
+            # means the runner RAN and reported tokens, but the row was settled
+            # by someone else first (a peer, or a cancel). The tokens are a real
+            # spend — of a genuinely separate call, not a re-bill of the peer's —
+            # so they belong on the meter. Returning the row with an empty charge
+            # record under-billed it and left the ONE budget under-read.
+            latest.charge_in = max(0, int(outcome.tokens_in or 0))
+            latest.charge_out = max(0, int(outcome.tokens_out or 0))
             return latest
         try:
             landed = self.advance(
@@ -2030,8 +2054,7 @@ class BatchCoordinator:
                         # instead of deferring it: an item in flight when the
                         # process died is SECONDS old at the restart that
                         # recovers it, so the ordinary redeploy stranded it for
-                        # the process lifetime (`_BATCH_RECOVERED` makes this scan
-                        # one-shot). The drain re-checks the window itself
+                        # the process lifetime. The drain re-checks the window itself
                         # (`run_item`) and leaves a fresh claim alone, so listing
                         # the batch is safe: it works the `queued` siblings,
                         # re-drives the leftover, and the tick revisits until the
@@ -2049,9 +2072,17 @@ class BatchCoordinator:
             # `_drain_batch` refuses to re-enter a fresh claim on its own
             # (`run_item`), so the peer a fresh claim may belong to is not raced.
             if moved or any(not i.terminal for i in items):
-                batch.state = BatchState.RESUMING
-                batch.updated_at = stamp
-                self._store.put_batch(batch)
+                # ⛔ BUT ONLY RELABEL A BATCH THIS SCAN GAVE WORK TO (#14415
+                # review round 7, N7). A batch whose only non-terminal item is a
+                # FRESH claim may be running in a PEER process right now; writing
+                # `resuming` over its row made the customer's status surface say
+                # "resuming" over work that was in progress, until the peer's own
+                # `settle()` repaired it — hours for a 500-item batch. Return it
+                # (a later pass must revisit it) without touching its state.
+                if moved or any(i.state is BatchItemState.QUEUED for i in items):
+                    batch.state = BatchState.RESUMING
+                    batch.updated_at = stamp
+                    self._store.put_batch(batch)
                 resumed.append(batch_id)
             elif items:
                 # ⛔ A LAGGING BATCH ROW IS REPAIRED HERE (#14415 review round 2,
@@ -2215,6 +2246,12 @@ def _discard_staged(stage_base: str | None, batch_id: str) -> None:
             os.rmdir(target)
 
 
+#: How far into the future an `updated_at` may sit before it is treated as an
+#: untrustworthy stamp (and therefore as an ANCIENT claim). A second or two is
+#: ordinary clock skew between boxes; a minute is not a clock, it is a bug.
+_FUTURE_STAMP_SKEW_S = 60.0
+
+
 def _age_seconds(stamp: str) -> float:
     """Seconds since an ISO stamp. An unparseable stamp counts as ANCIENT.
 
@@ -2229,7 +2266,17 @@ def _age_seconds(stamp: str) -> float:
         return float("inf")
     if then.tzinfo is None:
         then = then.replace(tzinfo=UTC)
-    return max(0.0, (datetime.now(UTC) - then).total_seconds())
+    delta = (datetime.now(UTC) - then).total_seconds()
+    if delta < -_FUTURE_STAMP_SKEW_S:
+        # ⛔ A STAMP IN THE FUTURE IS NOT A FRESH CLAIM (#14415 review round 7,
+        # N8). `max(0.0, …)` read a skewed or corrupt `updated_at` as age 0, i.e.
+        # permanently "someone is working on it": the item was never re-claimed,
+        # the retry ceiling never incremented (`attempts` stayed at 1 across five
+        # passes) and the document was non-terminal for ever. A stamp we cannot
+        # trust is treated as ANCIENT, because the failure it would otherwise
+        # cause is a lost document.
+        return float("inf")
+    return max(0.0, delta)
 
 
 def _utc_now() -> str:

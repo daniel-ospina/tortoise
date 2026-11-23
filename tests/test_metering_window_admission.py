@@ -83,7 +83,7 @@ from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_metering_period_window import _anchor, reg_org  # noqa: F401
 
-#: The eight swallow sites → the lane token each must report. The inventory is
+#: The nine swallow sites → the lane token each must report. The inventory is
 #: asserted against source in ``test_the_eight_swallow_sites_are_the_eight_lanes``.
 SITE_LANES: dict[str, str] = {
     "write_op": "tortoise/hosted_api.py",
@@ -108,6 +108,14 @@ SITE_LANES: dict[str, str] = {
     # note landing after the tally was consumed is the declared
     # capture-cancellation residual. Same ruling, eighth lane.
     "retrieval": "tortoise/retrieval_metering.py",
+    # #14219 (Track F4): the BATCH ingest lane's swallow site. A batch item moves
+    # the SAME `capture_extraction` dimension a session does (owner #14275, "one
+    # budget"), and `record_item_spend` absorbs a failed increment so a document
+    # that was already indexed is never failed by our bookkeeping. Its own token,
+    # not `capture_ledger`: the token names the SWALLOW SITE, and reusing the
+    # capture lane made a batch loss unattributable on the surface that exists to
+    # attribute it (#14415 review round 7, N3).
+    "batch_ingest": "tortoise/batch_ingest.py",
 }
 
 _SUPABASE_URL = "https://n3981.test.supabase.co"
@@ -614,14 +622,15 @@ def test_ask_ledger_drop_is_signalled(caplog, monkeypatch, tmp_path):
 # ── The completeness fence ─────────────────────────────────────────────────
 
 
-def test_the_eight_swallow_sites_are_the_eight_lanes():
+def test_the_declared_swallow_sites_are_the_declared_lanes():
     """The correctness proof for #3981 IS coverage completeness, so pin the
     inventory against the SOURCE — not against this module's own dict (a bare
     ``len(SITE_LANES) == 8`` is tautological: it counts a literal three lines
     above it and cannot fail). The scan covers every lane token passed through
     the two lane-carrying helpers — ``_alert_unmetered("<lane>", ...)`` and
     ``report_unmetered_increment(lane="<lane>", ...)``; the (file, lane) pairs
-    actually emitted must equal the declared eight. A site routed through
+    actually emitted must equal the declared set (nine since #14219 added the
+    batch lane). A site routed through
     either helper, a renamed token, or a deleted alert turns this RED.
 
     (#4488 added the seventh lane, ``embed``, and #4489 the eighth,
