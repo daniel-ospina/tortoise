@@ -3704,11 +3704,20 @@ def _row_for_pid(pid: int) -> str:
     """The `command=` text a census would read for ONE pid — a DIAGNOSTIC, never an oracle.
 
     Only ever called on a failure path (#12039): when the poll ends without the census seeing
-    the fixture's pid — the deadline expiring, or the child dying early — what settles the
-    cause in one run is whether the table holds the fixture at all, holds it under a
-    truncated argv[0], or does not hold it at all. `""` means the table has no row for the
-    pid. ⚠️ Called BEFORE `proc.poll()` by the test, on purpose: `poll()` collects the child
-    and a collected child has no row left to quote.
+    the fixture's pid — the deadline expiring, or the child dying early — this says whether the
+    table holds the fixture at all. `""` means the table has no row for the pid.
+
+    ⛔ IT READS WITH `-ww`, SO IT IS DELIBERATELY UN-TRUNCATED — AND SAYING SO IS THE POINT
+    (#14287 review P3). It can answer "the process is there" or "the process is gone"; it can
+    NEVER answer "the census's own rows are truncated", because `-ww` removes the very
+    truncation being diagnosed. Measured: with `-ww` dropped from `tools/fleet_state.py`'s
+    census call, this row still printed the FULL argv[0]
+    (`/tmp/tt_…/pi -c import time; time.sleep(60)`) over a census that could not match it — so a
+    triager reading only this row concludes "the matcher is broken", which is the one branch it
+    is not. The census's own answer is `pids seen`; this row is the table's.
+
+    ⚠️ Called BEFORE `proc.poll()` by the test, on purpose: `poll()` collects the child and a
+    collected child has no row left to quote.
     """
     import subprocess  # no module-level import in this file; the caller imports it too
 
@@ -4107,7 +4116,10 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                         f"census for {10.0:.0f}s of polling (pids seen: {pids}; the table's row "
                         f"for the fixture pid read {row!r}) — a narrow/`-ww`-less census truncates "
                         f"the argv[0] on every sample, so this is the flag removed or the matcher "
-                        f"broken")
+                        f"broken. NOTE: that row is read WITH `-ww`, so it is deliberately "
+                        f"UN-TRUNCATED — it can only say the process is present or absent, never "
+                        f"whether the CENSUS's own rows truncate. Read `pids seen` for the "
+                        f"census's answer and this row for the table's.")
                 if rc < 0 and -rc in _OUTSIDE_SIGNALS:
                     # A signal from OUTSIDE the fixture — the OOM killer, an orphan sweep, the
                     # shard's `timeout -s INT`. That is evidence about the machine, never about
