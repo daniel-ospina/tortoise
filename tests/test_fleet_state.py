@@ -4309,7 +4309,12 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
             # then pass on the `poll_started` mutant it exists to catch, which is a false PASS in
             # the instrument rather than in the code.
             late = 2 + int(_CENSUS_ERROR_MIN_SPAN_S / clock.step_s)
-            return ([], err) if calls["n"] in (late, late + 1) else ([], None)
+            # ⛔ THE LENGTH IS DERIVED TOO (#12039 review round 8): a burst of exactly two
+            # samples stops reaching the threshold the moment `_CENSUS_ERROR_STREAK` is raised,
+            # so the case would degenerate to the deadline arm and pass identically on the
+            # `poll_started` mutant — a silent retirement of the pin, which is worse than a
+            # failing test because nothing says the guard is gone.
+            return ([], err) if late <= calls["n"] < late + max(2, _CENSUS_ERROR_STREAK) else ([], None)
         if calls["n"] == 1:
             return [], err
         return [], None
