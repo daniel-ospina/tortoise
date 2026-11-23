@@ -1094,10 +1094,12 @@ def _argv0_stand_in_source() -> Path:
 
     Asserted, NOT skipped ON ANY BOX THAT REACHES IT: this file's frozen manifest declares no
     `allow-skipped` budget, so a box with no suitable shell reds here instead of passing
-    silently. ⚠️ ALL THREE of this helper's callers are platform-gated (each needs a plain-ELF
-    shell), so on a box whose platform gate excludes them — macOS ships Mach-O and no
+    silently. ⚠️ BOTH of this helper's callers are platform-gated (each needs a
+    plain-ELF shell), so on a box whose platform gate excludes them — macOS ships Mach-O and no
     `/bin/dash` — this refusal is not reached and those rows skip by design; the guarantee
-    above is about the boxes that DO run them, and is not a claim the gate contradicts.
+    above is about the boxes that DO run them, and is not a claim the gate contradicts. (The
+    file's THIRD platform gate, `test_a_non_utf8_process_name_cannot_kill_the_run`, never calls
+    this helper — it uses `sys.executable` — so it is not a caller.)
 
     A candidate qualifies only if it resolves to a REAL SHELL and is a plain
     **ELF regular file**. The two checks exclude two DIFFERENT hazards, and an
