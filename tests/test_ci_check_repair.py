@@ -4486,12 +4486,22 @@ def test_the_wall_clock_citations_resolve_at_this_head():
         # are unaffected (a placeholder is caught before any history is asked for, so
         # it still exits 1 in every clone), and the resolve arm is proved where it can
         # be — the depth-0 `docs` job runs this very function.
-        pytest.skip(
-            "this checkout cannot answer the resolve question (`git rev-parse "
-            "--is-shallow-repository` reports a grafted history), so the wall-clock "
-            f"cites are UNVERIFIED rather than wrong: {findings[0]} The depth-0 `docs` "
-            "job runs `tools/ci_check_repair.py --check-doc-citations`, which is "
-            "where they are proved.")
+        # …but the abstention is LICENSED by the checkout's own state, never granted
+        # to any rc==2: only a clone that reports NOT a full graph (`true` = grafted,
+        # "" = no `git` / not a work tree) may skip. A FULL clone answering 2 would
+        # mean the tool declining to answer on a graph that can — a real defect, red.
+        shallow = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parents[1]),
+             "rev-parse", "--is-shallow-repository"],
+            capture_output=True, text=True).stdout.strip()
+        if shallow != "false":
+            pytest.skip(
+                "this checkout cannot answer the resolve question (`git rev-parse "
+                "--is-shallow-repository` reports a grafted history), so the "
+                f"wall-clock cites are UNVERIFIED rather than wrong: {findings[0]} "
+                "The depth-0 `docs` job runs "
+                "`tools/ci_check_repair.py --check-doc-citations`, which is where "
+                "they are proved.")
     assert rc == 0, f"the wall-clock doc's own citations are a defect at this head: {findings}"
 
 
@@ -4537,6 +4547,91 @@ def test_a_grafted_history_is_UNVERIFIED_not_a_DEFECT(tmp_path, monkeypatch):
         "in a grafted graph an absent ancestor and a bogus sha are indistinguishable, "
         f"so this must be UNVERIFIED (exit 2), not a finding: rc={rc} {findings}")
     assert "UNVERIFIED" in findings[0] and "grafted" in findings[0]
+
+
+def test_an_UPPERCASE_hex_cite_is_not_a_defect(tmp_path):
+    """git resolves upper-case hex, so a lower-case-only token test would FALSE BLOCK.
+
+    #13998 review P2 item 1, measured: `git rev-parse --verify --quiet 8ABF4844^{commit}`
+    answers `8abf4844…` (rc=0), while the first version of the tool reported
+    "'8ABF4844' is not a commit" — a wrong verdict AND a wrong message, in a REQUIRED
+    job. `_citation_tree` commits an empty tree, so the cite is resolvable but its
+    `show` prints nothing: the correct verdict is green.
+    """
+    from tools import ci_check_repair as R
+    root = _citation_tree(tmp_path, "placeholder")
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip().upper()
+    assert sha == sha.upper() and len(sha) == 40
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        f"… `git show --stat {sha} -- docs/ops/ci-wall-clock.md` is empty …\n")
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 0, f"upper-case hex is a real commit token, got rc={rc}: {findings}"
+
+
+def test_a_cite_whose_command_PRINTS_OUTPUT_is_a_DEFECT(tmp_path):
+    """The sentence asserts the command is EMPTY; resolving is not the same as true.
+
+    #13998 review P2 item 2, measured on `b5618e52` (a real commit that edits the file):
+    `git show --stat b5618e52 -- docs/ops/ci-wall-clock.md` prints 2 stat lines while
+    the paragraph reads "carried no edit to this file at all (… is empty)". A gate that
+    only resolves the ref reports that as verified.
+    """
+    from tools import ci_check_repair as R
+    root = _citation_tree(tmp_path, "placeholder")
+    # Commit an EDIT of the document first, then cite THAT commit: the sha the test
+    # needs is the one whose `git show --stat … -- <doc>` prints a stat, not the empty
+    # root commit.
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text("… edited body …\n")
+    subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b",
+                    "-c", "user.name=c", "add", "docs"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b",
+                    "-c", "user.name=c", "commit", "-q", "-m", "edit the doc"],
+                   check=True)
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        f"… `git show --stat {sha} -- docs/ops/ci-wall-clock.md` is empty …\n")
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 1, (
+        "a cite whose own command prints a stat CONTRADICTS the sentence it is cited "
+        f"for; that must be a DEFECT, got rc={rc}: {findings}")
+    assert "contradicts its own sentence" in findings[0]
+
+
+def test_a_cite_written_in_an_UNMATCHED_shape_is_still_seen(tmp_path):
+    """A citation the regex cannot see is a citation nothing checks (#13998 P3 item 1).
+
+    The first version matched only `git show --stat <ref>`; `git -C . show --stat …`
+    in the same document was invisible while the pass stayed green.
+    """
+    from tools import ci_check_repair as R
+    root = _citation_tree(tmp_path, "8abf4844")
+    doc = root / "docs" / "ops" / "ci-wall-clock.md"
+    doc.write_text(doc.read_text() +
+                   "… `git -C . show --stat deadbeef0 -- docs/ops/ci-wall-clock.md` …\n")
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 1, (
+        "a bogus sha written in a different (still conventional) command shape must "
+        f"not be invisible, got rc={rc}: {findings}")
+
+
+def test_a_host_without_git_is_UNVERIFIED(tmp_path, monkeypatch):
+    """No `git` at all is a missing ANSWER, not a defect in the document (P3 item 2).
+
+    The pytest arm already skipped for this while the tool crashed with a traceback and
+    exit 1 — "a DEFECT in the document" about a document nobody could read.
+    """
+    from tools import ci_check_repair as R
+    root = _citation_tree(tmp_path, "8abf4844")
+
+    def no_git(argv, *a, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(R.subprocess, "run", no_git)
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 2, f"a git-less host must be UNVERIFIED (exit 2), got rc={rc}: {findings}"
+    assert "`git` is not installed" in findings[0]
 
 
 def test_a_directory_that_is_not_a_checkout_is_UNVERIFIED(tmp_path):
