@@ -4316,8 +4316,9 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
         ),
         (
             "late_pair", True, None, AssertionError, "was ALIVE and invisible to the census",
-            "TWO consecutive errors arriving AFTER 2 s of healthy polling are still a 0.2 s blip "
-            "— the span belongs to the STREAK, not to the poll (cycle-6 P1)",
+            "a burst that satisfies the ERROR COUNT but not the SPAN, arriving AFTER "
+            "_CENSUS_ERROR_MIN_SPAN_S of healthy polling, is still the load class — the span "
+            "belongs to the STREAK, not to the poll (cycle-6 P1)",
         ),
         (
             "persistent", True, -9, "skip", "INCONCLUSIVE [#5049]",
@@ -4354,18 +4355,50 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     child = _FakeChild(child_rc)
     err = "`ps -ww -axo pid=,ppid=,uid=,command=` produced nothing"
     calls = {"n": 0}
+    # DERIVED from the constants, never literal (see the `late_pair` arm below): a literal burst
+    # pins today's numbers, so raising `_CENSUS_ERROR_STREAK` — the natural direction for a
+    # load-sensitivity constant — silently retires the pin instead of reding.
+    step_s = clock.step_s
+    # `late` = the burst's first sample, placed far enough into the poll that a span measured from
+    # `poll_started` is already past `_CENSUS_ERROR_MIN_SPAN_S` (`(late - 1) * step_s > MIN_SPAN`,
+    # strictly, by the floor's definition).
+    late = 2 + int(_CENSUS_ERROR_MIN_SPAN_S / step_s)
+    # `burst` = how many consecutive errors: at least the count `_CENSUS_ERROR_STREAK` so the COUNT
+    # condition is always reachable.
+    burst = max(2, _CENSUS_ERROR_STREAK)
 
     def _census():
         calls["n"] += 1
         if census_kind == "persistent":
             return [], err
         if census_kind == "late_pair":
-            # ~40 healthy samples first (the fake clock advances 0.1 s per `time()` call, so
-            # that is ≈4 s of well-past-the-bound polling), then EXACTLY TWO consecutive
-            # errors, then healthy again. The old gate measured the span from `poll_started`,
-            # so this pair — 0.2 s of real failure — raised `HarnessDefect` on a required
-            # shard; the fixed gate measures it from the streak and keeps polling.
-            return ([], err) if 40 <= calls["n"] < 42 else ([], None)
+            # Healthy samples first, then a burst of consecutive errors, then healthy again.
+            # `late` places the burst's FIRST sample just after `_CENSUS_ERROR_MIN_SPAN_S` of
+            # healthy polling (each healthy sample costs ONE `time()` call, so `step_s` of
+            # simulated time), which is what makes the old gate's from-`poll_started` span
+            # already over the bound when the burst starts — it raises `HarnessDefect` on a
+            # required shard, while the fixed gate measures the span from the STREAK and keeps
+            # polling.
+            # ⛔ BOTH the placement AND the length are DERIVED (measured, #12039). They were the
+            # literals 40..42 — a burst of exactly two — so raising `_CENSUS_ERROR_STREAK` to 3
+            # made the COUNT condition unreachable: the case degenerated to the deadline arm and
+            # the from-`poll_started` mutant passed IDENTICALLY to the correct implementation
+            # (measured on throwaway copies: streak 3 → `6 passed` for BOTH; streak 2 →
+            # `1 failed, 5 passed` for the mutant). A pin that goes QUIET on a constant bump is
+            # the same false-PASS class this PR removes.
+            # ⛔ AND THE CLOCK IS FROZEN ACROSS THE BURST so its SPAN is structurally ZERO, not
+            # merely "one sample". The implementation spends TWO `time()` calls per erroring
+            # sample (`streak_started`, then the span), so a burst long enough to reach a large
+            # `_CENSUS_ERROR_STREAK` would otherwise accumulate `burst * step_s` and trip the
+            # span bound in the CORRECT implementation too — the same silent retirement, moved
+            # from the count axis to the span axis. Freezing makes the arm independent of BOTH
+            # constants: the mutant's from-`poll_started` span is frozen at ≥ the bound (fires),
+            # the streak's own span is frozen at 0 (does not).
+            if calls["n"] == late:
+                clock.step_s = 0.0
+            elif calls["n"] >= late + burst:
+                clock.step_s = step_s
+            return ([], err) if late <= calls["n"] < late + burst else ([], None)
         return ([], err) if calls["n"] == 1 else ([], None)
 
     class _Completed:
@@ -4389,9 +4422,10 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     if census_kind == "once":
         assert calls["n"] > _CENSUS_ERROR_STREAK, "a single error must not decide the verdict"
     if census_kind == "late_pair":
-        assert calls["n"] > 42, (
-            "the poll must keep running after a two-sample blip that arrives late — a census "
-            "verdict here is the #5049 rule-1 false red this arm pins against")
+        assert calls["n"] > late + burst, (
+            "the poll must keep running after a burst that satisfies the COUNT but not the SPAN "
+            f"(late={late}, burst={burst}) — a census verdict here is the #5049 rule-1 false red "
+            "this arm pins against")
 
 
 def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
