@@ -172,7 +172,21 @@ def test_extraction_failed_but_200_status_not_processed(status_client, monkeypat
     The capture stores its turns (so the HTTP status stays 200 — the partial
     write would be hidden by a non-2xx), and BOTH read surfaces must say what
     actually happened to its memory.
+
+    ⛔ WARM THE TENANT-VOCAB MEMO FIRST (measured at the round-4 head, not a new
+    assertion). The mock failure is instant, but `_extract_capture` compiles the
+    tenant vocabulary on its FIRST use in a process (~12 s cold) and that compile
+    sits INSIDE the ACK's join window — so on a cold process the join misses, the
+    deferred `accepted` body answers (its `errors` is empty BY DESIGN: the outcome
+    is not known yet), and this row reds for a start-up cost rather than for the
+    behaviour it grades. Reproduced at that head in isolation, green once any
+    prior capture had warmed the memo. The warm-up is a NORMAL capture (failing
+    only after the patch), so it provisions exactly the state the measured one
+    needs.
     """
+    status_client.post("/v1/sessions", json={
+        "conversation": _CONV, "harness": "claude", "session_id": "s-3520-warmup"})
+
     restore = _v2_failing(monkeypatch)
     r = status_client.post("/v1/sessions", json={
         "conversation": _CONV, "harness": "claude", "session_id": "s-3520-failed"})
@@ -571,6 +585,12 @@ def test_new_columns_appended_at_end():
         1700000000.0,                # r[10] s.client_captured_at         (#3516)
         "cli_observed",              # r[11] s.client_captured_at_source  (#3516)
         "hook",                      # r[12] s.capture_lane               (#3516)
+        # #14232: the in-flight extraction phase pair, APPENDED after #3516's
+        # triplet. NULL here because this row is a PROCESSED session — the
+        # terminal record clears the phase in the same statement that writes
+        # `capture_ok`, so a processed row can never carry one.
+        None,                        # r[13] s.capture_extraction_phase   (#14232)
+        None,                        # r[14] s.capture_extraction_phase_at (#14232)
     )
     d = _ha._session_row_dict(row, {})
     assert d["id"] == "sess-1"
@@ -583,6 +603,23 @@ def test_new_columns_appended_at_end():
     assert d["model"] == row[7]
     assert d["extraction"] == {
         "status": "stored-and-processed", "extractor": "v2", "outcome_known": True}
+    # #14232: a TERMINAL row publishes NO phase — absent, not null (the exact
+    # key-set pin above is #3520's, and a phase beside a known outcome would be
+    # a second, contradicting claim).
+    assert set(d["extraction"]) == {"status", "extractor", "outcome_known"}
+
+    # ...and the SAME positional row with an in-flight phase (r[13]/r[14]) reads
+    # as in flight: the outcome is still unknown, and the phase names what the
+    # record says is happening. This is the row a `GET /v1/sessions` serves
+    # between the ack and completion.
+    row_in_flight = (*row[:8], None, "v2",
+                     *row[10:13], "extracting", "2026-11-21T21:00:00.000Z")
+    d2 = _ha._session_row_dict(row_in_flight, {})
+    assert d2["extraction"] == {
+        "status": "stored", "extractor": "v2", "outcome_known": False,
+        "phase": "extracting",
+        "phase_at": "2026-11-21T21:00:00.000Z",
+    }, d2["extraction"]
     assert d["client_captured_at"] == 1700000000.0
     assert d["client_captured_at_source"] == "cli_observed"
     assert d["capture_lane"] == "hook"
@@ -612,6 +649,10 @@ def test_new_columns_appended_at_end():
         "s.actor_user_id", "s.harness",
         "s.machine_id", "s.model", "s.capture_ok", "s.capture_extractor",
         "s.client_captured_at", "s.client_captured_at_source", "s.capture_lane",
+        # #14232: the in-flight phase pair, APPENDED after #3516's triplet for
+        # the only legal reason a column may be added here — the mapping is
+        # positional, so a new column goes at the END or it re-binds r[0..3].
+        "s.capture_extraction_phase", "s.capture_extraction_phase_at",
     ], (
         f"#3520's pair and #3516's triplet must be the LAST columns of the "
         f"RETURN clause, in that order (got {selected}) — the column list is "
@@ -632,4 +673,6 @@ def test_new_columns_appended_at_end():
         # for the same reason every other append is: the wire mapping is
         # positional, so a NEW column may only ever go at the end.
         "s.turn_max_index",
+        # #14232: APPENDED after the tail witness — same rule, same reason.
+        "s.capture_extraction_phase", "s.capture_extraction_phase_at",
     ], detail_sel

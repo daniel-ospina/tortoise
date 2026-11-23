@@ -294,9 +294,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", 'sdk.py:22226', "tortoise/sdk.py", 22226, "search_text = _source_search_text(topics=topics)"),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", 'sdk.py:22268', "tortoise/sdk.py", 22268, "s.summary=CASE WHEN $sum"),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", '`:22391`', "tortoise/sdk.py", 22391, "s.summary, s.topics, s."),
-    (_AUDIT, 'hosted_api.py:23501', 'tortoise/hosted_api.py', 23501, 'MERGE (s:Source {url:$did})'),
-    (_AUDIT, '`:23313`', 'tortoise/hosted_api.py', 23313, 'def _execute_commit_writes'),
-    (_AUDIT, '`:34276`', 'tortoise/hosted_api.py', 34276, 'MERGE (p:PackInstall {namespace: $ns})'),
+    (_AUDIT, 'hosted_api.py:24289', 'tortoise/hosted_api.py', 24289, 'MERGE (s:Source {url:$did})'),
+    (_AUDIT, '`:24101`', 'tortoise/hosted_api.py', 24101, 'def _execute_commit_writes'),
+    (_AUDIT, '`:35075`', 'tortoise/hosted_api.py', 35075, 'MERGE (p:PackInstall {namespace: $ns})'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -414,8 +414,8 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     ("search_engine.py:7226", _SE, 7226, "RETURN op.id, type(r2) AS et, count(other)"),
     ("sdk.py:22268", "tortoise/sdk.py", 22268, "s.summary=CASE WHEN $sum"),
     (":22391", "tortoise/sdk.py", 22391, "s.summary, s.topics, s."),
-    ("hosted_api.py:23501", "tortoise/hosted_api.py", 23501, "MERGE (s:Source {url:$did})"),
-    (":23313", "tortoise/hosted_api.py", 23313, "def _execute_commit_writes"),
+    ("hosted_api.py:24289", "tortoise/hosted_api.py", 24289, "MERGE (s:Source {url:$did})"),
+    (":24101", "tortoise/hosted_api.py", 24101, "def _execute_commit_writes"),
 )
 
 
@@ -530,9 +530,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22226'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22268'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22391`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23501'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23313`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:34276`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:24289'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24101`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:35075`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`expand_ops` preview at `:7190`'): 1,
@@ -1236,9 +1236,9 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58387): 56415,
     ("tortoise/sdk.py", 58603): 56415,
     ("tortoise/sdk.py", 58605): 56415,
-    ("tortoise/sdk.py", 59254): 56415,
-    ("tortoise/sdk.py", 62585): 56415,
-    ("tortoise/sdk.py", 62605): 56415,
+    ("tortoise/sdk.py", 59262): 56415,
+    ("tortoise/sdk.py", 62593): 56415,
+    ("tortoise/sdk.py", 62613): 56415,
     # ⛔ `#14278`'s re-point of §2.1's two `search_engine.py` adjacency rows DID add a pin-side fact: `:7193`
     # and `:7226` are past this pin's 7,071-line copy (their predecessors `:6837`/`:6891` were not), so the
     # split's denominators moved with them. Missing those two entries is how the table stayed
@@ -1251,13 +1251,14 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     # `:7577`/`:7579` were correct at the base, and `#14278` moved §2.1's rows by content to
     # `:7193`/`:7226`/`:7600`/`:7602`. Re-measured on the merged tree (`sed -n '<N>p'` on this worktree's
     # `tortoise/search_engine.py`, which the branch does not touch), `#14278`'s four are the ones that
-    # resolve, so they are the ones a reader may cite. The one address the branch keeps is `hosted_api.py`'s
-    # `:51506`, which this branch re-pointed and `#14278` did not.
+    # resolve, so they are the ones a reader may cite. The ONE address this branch keeps is `mcp_server.py`'s
+    # `:11645` — this branch's own `+48` insert above the site moved it off `main`'s `11597`, so the branch's
+    # address is the one that lands on the fragment; `hosted_api.py`'s `:52305` is `main`'s, moved by `#14232`.
     ("tortoise/search_engine.py", 7193): 7071,
     ("tortoise/search_engine.py", 7226): 7071,
     ("tortoise/search_engine.py", 7600): 7071,
     ("tortoise/search_engine.py", 7602): 7071,
-    ("tortoise/hosted_api.py", 51506): 49851,
+    ("tortoise/hosted_api.py", 52305): 49851,
     ("tortoise/mcp_server.py", 11645): 11466,
 }
 #: The FRAGMENT each non-comparable pair is written to name, at the line the document writes for it.
@@ -1285,15 +1286,15 @@ _NONCOMPARABLE_FRAGMENTS: dict[tuple[str, int], str] = {
     ("tortoise/sdk.py", 58387): 'entity_type="event"',
     ("tortoise/sdk.py", 58603): "proj.g.query(",
     ("tortoise/sdk.py", 58605): "s.turn_count, s.actor_user_id, s.harness,",
-    ("tortoise/sdk.py", 59254): "MATCH (s:Source {url:$url})-[:references]->(n)",
-    ("tortoise/sdk.py", 62585): "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
-    ("tortoise/sdk.py", 62605): "def _config_reset_state(self)",
+    ("tortoise/sdk.py", 59262): "MATCH (s:Source {url:$url})-[:references]->(n)",
+    ("tortoise/sdk.py", 62593): "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
+    ("tortoise/sdk.py", 62613): "def _config_reset_state(self)",
     ("tortoise/search_engine.py", 7193): "CALL { WITH op MATCH (op)-[r2:IMPL|hasPart]-(other:Point)",
     ("tortoise/search_engine.py", 7226): "RETURN op.id, type(r2) AS et, count(other)",
     ("tortoise/search_engine.py", 7600): "MATCH (n:Point)-[r:aboutSubject]->(:Subject) RETURN count(r) AS c",
     ("tortoise/search_engine.py", 7602): "MATCH (m:Event)-[r2:aboutSubject]->(:Subject) RETURN count(r2) AS c",
     ("tortoise/mcp_server.py", 11645): "MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)",
-    ("tortoise/hosted_api.py", 51506): "s.actor_user_id = $uid",
+    ("tortoise/hosted_api.py", 52305): "s.actor_user_id = $uid",
 }
 #: The pin's own file lengths — the MEMBERSHIP RULE behind the split, kept per FILE rather than transcribed
 #: per pair (`git show ccb49741b2ec:<path> | wc -l`). A pair is non-comparable exactly when its line is past
@@ -2287,10 +2288,10 @@ _HOSTED = "tortoise/hosted_api.py"
 
 #: ⛔ A RANGE CITE MUST CONTAIN THE CODE ITS OWN SENTENCE NAMES — measured at the head this arm
 #: was written at: the three paragraphs that carry `turn_max_index`'s `graph` verdict all cited
-#: `hosted_api.py:45586-45598`, which is the prior-turn-count reader's DOCSTRING ending at `try:`.
+#: `hosted_api.py:46385-46397`, which is the prior-turn-count reader's DOCSTRING ending at `try:`.
 #: Everything the sentences claim sits AFTER that range — the walk (`:45601`), the predicate
 #: (`:45602`) and the composition (`total = int(nodes or 0)` `:45608`, `total = max(total, mark +
-#: 1)` `:45611`) — so a reader who follows the cite lands on prose and a `try:` and cannot verify
+#: 1)` `:46410`) — so a reader who follows the cite lands on prose and a `try:` and cannot verify
 #: one word of the claim. That is the `+21`-class defect one indirection out: the range RESOLVES
 #: (it is neither blank nor past EOF), so every arm in this file was green on it; only reading the
 #: number's own sentence sees it. The fragment lines are RESOLVED BY CONTENT, never typed, so a
@@ -2393,7 +2394,7 @@ def test_the_prior_turn_count_cites_contain_the_composition_their_sentences_name
         "population, so re-point it rather than letting the count drift"
     )
     # (a) the spelling that SHIPPED before the fix: every paragraph cited the docstring's tail.
-    pre_fix = doc_text.replace("hosted_api.py:45586-45611", "hosted_api.py:45586-45598")
+    pre_fix = doc_text.replace("hosted_api.py:46385-46410", "hosted_api.py:46385-46397")
     assert pre_fix != doc_text, (
         "the pre-fix control could not be built — this document no longer cites the repaired "
         "range at all, so the negative control below would grade an unchanged document"
@@ -2402,7 +2403,7 @@ def test_the_prior_turn_count_cites_contain_the_composition_their_sentences_name
     assert control, "the pre-fix range still passed this arm — it is vacuous"
     # (b) one END short: `-45610` still misses the `max(...)` line the sentences name.
     short_end, _ = _prior_count_cite_problems(
-        doc_text.replace("hosted_api.py:45586-45611", "hosted_api.py:45586-45610"), src_lines
+        doc_text.replace("hosted_api.py:46385-46410", "hosted_api.py:46385-46409"), src_lines
     )
     assert short_end, "a range ending one line short of the composition still passed"
     # (c) empty population is REPORTED, never skipped.
@@ -3091,12 +3092,12 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     ('sdk.py:18036', "tortoise/sdk.py", 18036, "\"MATCH (p:Point {id:$id})-[:extractedFrom]->\"", 1),
     ('sdk.py:42016', "tortoise/sdk.py", 42016, "\"MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NUL", 3),
     (':42774', "tortoise/sdk.py", 42774, "\"MATCH (s:Source)-[:references]->(o:Source) RETURN s.url, o.url\",", 0),
-    ('sdk.py:59254', "tortoise/sdk.py", 59254, "\"MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)\",", 2),
+    ('sdk.py:59262', "tortoise/sdk.py", 59262, "\"MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)\",", 2),
     ('sdk.py:20142-20145', "tortoise/sdk.py", 20145, "\"AND coalesce(n.is_episodic, false) <> true \")", 2),
     ('sdk.py:20150', "tortoise/sdk.py", 20150, "_stamp_capture_provenance(", 2),
-    ("hosted_api.py:21337-21339", "tortoise/hosted_api.py", 21339,
+    ("hosted_api.py:21894-21896", "tortoise/hosted_api.py", 21896,
      "\"(n:Point) WHERE n.eventId IS NULL AND coalesce(n.is_episodic,false) <> true \")", 2),
-    ("hosted_api.py:21344", "tortoise/hosted_api.py", 21344, "_stamp_capture_provenance(", 2),
+    ("hosted_api.py:21901", "tortoise/hosted_api.py", 21901, "_stamp_capture_provenance(", 2),
     ('sdk.py:58603-58627', "tortoise/sdk.py", 58605, "\"s.turn_count, s.actor_user_id, s.harness, \"", 1),
     ('sdk.py:58605-58627', "tortoise/sdk.py", 58605, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
     ('sdk.py:58605', "tortoise/sdk.py", 58605, "\"s.turn_count, s.actor_user_id, s.harness, \"", 8),

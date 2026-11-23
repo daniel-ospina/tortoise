@@ -447,15 +447,21 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "mine_knowledge_from_session": "tortoise_mine_knowledge_from_session",
     "register_source": "tortoise_register_source",
     "manage_source_trust": "tortoise_manage_source_trust",
-    # ⛔ #11609 lane P7 gave the `tortoise_link_entities` container a SECOND quota-gated
+    # ⛔ `link_entities` — ONE row, and it has to be ONE: #14261's union merge is the
+    # measured proof (see the merge note at the end of this block).
+    # #11609 lane P7 gave the `tortoise_link_entities` container a SECOND quota-gated
     # wrap site and the map did not follow: its operator arm wraps
     # `_quota_gated(sdk._create_operator, …)` — `_create_operator` is mapped above — and
-    # its relation-decided arm wraps `_quota_gated(sdk.link_entities, …)`, which was NOT
-    # mapped, so the forward arm reported it as an unmapped site. The second wrapper
-    # is load-bearing rather than decoration (`mcp_server.py` says so at the wrap:
-    # `sdk.link_entities` reaches the same node/edge writers and is NOT gated inside the
-    # SDK), which is exactly why the pair must be DECLARED here rather than waved
-    # through: an entry is what makes the door's write classification checkable.
+    # its relation-decided arm wraps `_quota_gated(sdk.link_entities, …)`
+    # (`mcp_server.py:7972`), which was NOT mapped, so the forward arm reported it as an
+    # unmapped site and that arm had gone red on `main` with nothing repairing it — the
+    # same "a permanently red gate enforces nothing" shape the `update_entity` note above
+    # records (surfaced as CI `test-slow`'s only failure at the #14232 head: `unmapped
+    # _quota_gated wrap sites: ['link_entities']`). The second wrapper is load-bearing
+    # rather than decoration (`mcp_server.py` says so at the wrap: `sdk.link_entities`
+    # reaches the same node/edge writers and is NOT gated inside the SDK), which is
+    # exactly why the pair must be DECLARED here rather than waved through: an entry is
+    # what makes the door's write classification checkable.
     #
     # #14237 review N3 adds the other half of the reason: `tortoise_link_entities`
     # absorbed `tortoise_create_edge` AND `tortoise_create_operator`, so the declaration
@@ -464,6 +470,17 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # (`test_no_write_tool_counted_as_read` was already red on main in P7's wake). The map
     # must be live in BOTH directions, so an undeclared write surface is the same stale-gate
     # defect as a declared one with no wrap site.
+    # ⛔ The two halves above were added INDEPENDENTLY — #14232 on `main` and #14237 here —
+    # in different regions of this map, so a union merge keeps BOTH literals: a duplicate
+    # key, repo-wide ruff `F601`, and, had the linter allowed it, Python silently keeping
+    # the LAST. One entry is the whole declaration; this row is it.
+    # ⚠️ The merged tree does NOT take `main`'s version of this note unchanged: `main`'s
+    # clause "the method is NOT in `WEIGHT_BEARING_METHODS` and its site carries
+    # `abuse_weight=False`" was true only while `main` lacked P7's weighting. Here the
+    # method IS declared in `WEIGHT_BEARING_METHODS` and the site passes
+    # `abuse_weight=_link_entities_scalar_abuse_weight` (`mcp_server.py:7973`) — the
+    # CALLABLE pair `create_entity` uses, because a plain edge creates no Point. Merging
+    # `main`'s clause verbatim would have published the opposite of the tree's state.
     "link_entities": "tortoise_link_entities",
 }
 

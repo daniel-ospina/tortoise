@@ -71,6 +71,7 @@ import contextlib
 import contextvars
 import json
 import os
+import time
 import uuid
 
 import pytest
@@ -268,6 +269,167 @@ def xtenant(tmp_path_factory):
 
 # ── Capture (the "capture" half of capture -> read) ──────────────────────────
 
+def _await_extraction(client: TestClient, body: dict, deadline_s: float = 90.0) -> dict:
+    """Return the session record once the extraction's outcome is RECORDED.
+
+    ⛔ The POST MAY be an ACK rather than a receipt (#14232): when the extraction
+    does not finish inside the 0.5 s ack budget (`_CAPTURE_ACK_DEADLINE_S`), the
+    extractor runs BEHIND the answer and `body["extracted"]` is the count *so
+    far* — `0` — with an `extraction` block whose `outcome_known` is False and
+    whose `phase` names what is happening. That is the shape CI produced (job
+    `test-carve-out`, head `2285bebc1e`: `832 passed, 9 errors`, every error
+    this fixture reading the ack's zero as "extraction produced nothing"); the
+    record itself was fine.
+
+    ⛔ THE DISCRIMINATOR IS THE ADDRESS, not the `extraction` block (#14232
+    review round J, P1). The SAME endpoint still answers today's RECEIPT when the
+    join lands inside the window, and a receipt carries a real `extracted` and
+    NO `extraction` block AT ALL — so keying on that block's shape either way
+    turns a fast host into the mirror of a slow one (a `KeyError`/assert on the
+    receipt, a false "nothing extracted" on the ACK). `status_url` is present on
+    every deferred ACK and absent from every receipt, so it answers exactly both
+    ways; the receipt is the no-address shape and is returned as it stands.
+
+    Terminal state is the phase pair's absence with `outcome_known` true — the
+    same predicate `test_14232_ingest_ack_split.py` pins for this record. A
+    polled record with NO phase and `outcome_known` false is the one shape this
+    loop must NOT wait on forever, and the docstring will not claim it is
+    identified: a record whose tail DIED after `_clear_capture_phase` retired the
+    phase, and a live capture whose best-effort `queued` phase write was swallowed
+    (`_mark_capture_extraction_phase` deliberately does not fail a committed
+    capture), serve the SAME bytes — `capture_ok` is NULL in both. They are
+    indistinguishable at read time, so this fails CLOSED on the first poll, naming
+    both readings, instead of burning the deadline and reporting a live capture as
+    "still running" (or a dead one as alive).
+    """
+    url = body.get("status_url")
+    if not url:
+        return body  # the in-budget receipt: a real count, no address to poll
+    deadline = time.monotonic() + deadline_s
+    while True:
+        r = client.get(url)
+        assert r.status_code == 200, (
+            f"GET {url} raised the status poll: {r.status_code} {r.text}")
+        detail = r.json()
+        block = detail.get("extraction") or {}
+        if block.get("phase") is None:
+            assert block.get("outcome_known") is True, (
+                "the record carries NO phase and NO outcome — either a DEAD TAIL "
+                "(retired phase, no outcome) or a capture whose best-effort "
+                "`queued` phase write never landed; the two are indistinguishable "
+                f"here, so this fails closed: {json.dumps(detail, sort_keys=True)}")
+            return detail
+        assert time.monotonic() < deadline, (
+            f"extraction did not finish within {deadline_s}s: "
+            f"{json.dumps(block, sort_keys=True)}")
+        # ~4 polls/s: one poll is five graph queries (`SESSION_DETAIL_FIELDS`),
+        # so a tighter cadence is load the runner does not need.
+        time.sleep(0.2)
+
+
+class _StubPollResponse:
+    def __init__(self, status_code: int, payload: dict):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = json.dumps(payload)
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _StubPollClient:
+    """A `TestClient` stand-in for the wait's four arms (no server, no DB).
+
+    The arms below are the branches a real capture only reaches on a particular
+    host (a fast join, a record with no phase and no outcome, a broken poll), so
+    without these rows none of them has a witness and the reviewer-measured
+    "drop the `outcome_known` check" mutant stayed GREEN (#14232 review round J,
+    P3).
+    """
+
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.calls: list[str] = []
+
+    def get(self, url: str) -> _StubPollResponse:
+        self.calls.append(url)
+        # The last response repeats, so an in-flight stub stays in flight and the
+        # deadline is what ends the poll (never a StopIteration).
+        return self._responses.pop(0) if len(self._responses) > 1 else self._responses[0]
+
+
+def test_the_extraction_wait_returns_a_receipt_without_polling() -> None:
+    """The in-budget receipt: a real count and NO address — nothing to poll.
+
+    ⛔ The receipt has no `extraction` block (measured on the receipt shape), so
+    any predicate keyed on that block raises here instead of reading it: this row
+    is what keeps a fast host from being the mirror image of a slow one.
+    """
+    receipt = {"status": "ok", "session_id": "s-1", "extracted": 3,
+               "first_capture": True}
+    client = _StubPollClient()
+    assert _await_extraction(client, receipt) is receipt
+    assert client.calls == []
+
+
+def test_the_extraction_wait_returns_the_record_it_polled_for() -> None:
+    """Mid-flight then terminal: the ACK's count-so-far is not the answer."""
+    ack = {"session_id": "s-1", "extracted": 0, "status_url": "/v1/sessions/s-1",
+           "extraction": {"outcome_known": False, "phase": "queued"}}
+    client = _StubPollClient(
+        _StubPollResponse(200, {"extracted": 0,
+                               "extraction": {"outcome_known": False, "phase": "extracting"}}),
+        _StubPollResponse(200, {"extracted": 2,
+                               "extraction": {"outcome_known": True}}),
+    )
+    got = _await_extraction(client, ack)
+    assert got["extracted"] == 2, got
+    assert client.calls == ["/v1/sessions/s-1"] * 2
+
+
+def test_the_extraction_wait_fails_fast_on_a_record_with_no_phase_and_no_outcome() -> None:
+    """No phase + no outcome is DECIDED — not "still running": one poll, both readings.
+
+    ⛔ The two shapes it covers are indistinguishable at read time (a retired
+    phase with no outcome, or a live capture whose best-effort `queued` write
+    never landed), so the row pins the BOUND and the naming, never an
+    identification: guessing "dead" would be a false red on a live capture and
+    guessing "alive" would be a false green on a dead one.
+    """
+    ack = {"session_id": "s-1", "extracted": 0, "status_url": "/v1/sessions/s-1",
+           "extraction": {"outcome_known": False, "phase": "extracting"}}
+    client = _StubPollClient(
+        _StubPollResponse(200, {"extracted": 0,
+                               "extraction": {"status": "stored", "outcome_known": False}}),
+    )
+    started = time.monotonic()
+    with pytest.raises(AssertionError, match="NO phase and NO outcome"):
+        _await_extraction(client, ack, deadline_s=60.0)
+    assert time.monotonic() - started < 5.0, "the undecided record burned the deadline"
+    assert len(client.calls) == 1, client.calls
+
+
+def test_the_extraction_wait_names_a_broken_status_poll() -> None:
+    """A non-200 poll is a broken instrument, not an unfinished extraction."""
+    ack = {"session_id": "s-1", "extracted": 0, "status_url": "/v1/sessions/s-1",
+           "extraction": {"outcome_known": False, "phase": "extracting"}}
+    client = _StubPollClient(_StubPollResponse(404, {"detail": "no such session"}))
+    with pytest.raises(AssertionError, match="raised the status poll: 404"):
+        _await_extraction(client, ack, deadline_s=60.0)
+
+
+def test_the_extraction_wait_is_bounded_while_the_phase_persists() -> None:
+    """A phase that never retires ends at the deadline — the loop cannot spin."""
+    ack = {"session_id": "s-1", "extracted": 0, "status_url": "/v1/sessions/s-1",
+           "extraction": {"outcome_known": False, "phase": "extracting"}}
+    client = _StubPollClient(
+        _StubPollResponse(200, {"extracted": 0,
+                               "extraction": {"outcome_known": False, "phase": "extracting"}}),
+    )
+    with pytest.raises(AssertionError, match="did not finish within"):
+        _await_extraction(client, ack, deadline_s=0.3)
+
+
 def _capture(h: _TenantHarness, tenant: str) -> None:
     """Capture a session as `tenant` whose transcript carries its marker."""
     client = h.as_tenant(tenant)
@@ -286,7 +448,12 @@ def _capture(h: _TenantHarness, tenant: str) -> None:
     assert r.status_code == 200, f"capture as {tenant} failed: {r.status_code} {r.text}"
     body = r.json()
     assert body["session_id"] == session_id, body
-    assert body["extracted"] >= 1, f"capture as {tenant} extracted nothing: {body}"
+    # The seed must have LANDED before any read surface is probed (the presence
+    # half of every test below depends on it), so wait for the record rather
+    # than reading the ack's partial count.
+    detail = _await_extraction(client, body)
+    assert detail["extracted"] >= 1, (
+        f"capture as {tenant} extracted nothing: ack={body} detail={detail}")
 
 
 def _seed_both_tenants(h: _TenantHarness) -> None:
