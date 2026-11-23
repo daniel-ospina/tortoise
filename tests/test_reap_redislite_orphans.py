@@ -1089,8 +1089,24 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     binary = tmp_path / "redis-server"
     binary.write_bytes(Path(shutil.which("cat") or "/bin/cat").read_bytes())
     binary.chmod(0o755)
-    gone = tmp_path / "gone-socket-dir"
-    line = f"{binary} unixsocket:{gone}/redis.socket"
+    # ⛔ THE SOCKET DIR MUST EXIST, or the fixture is a legitimately REAPABLE
+    # process and this repo's own cleanup kills it (#14347 CI red, measured).
+    # `reap-redislite-orphans.py --apply` runs in the setup of EVERY leg
+    # (`python-ci.yml` ×4, `ci.yml`, `post-merge-validation.yml`) on shared
+    # self-hosted runners whose own orphan gate measures `other_suites=10`. A
+    # process named `redis-server` whose socket dir is ABSENT is classified
+    # `REAP — socket dir … is gone`, so a leg booting while this test runs
+    # SIGTERMs it; the dead child's `/proc/<pid>/cmdline` is then EMPTY, the
+    # inventory returns its row with `socket_dir: None` (the documented KEEP
+    # arm), and the assertion below fails as `None == …/gone-socket-dir` —
+    # measured: SIGTERM, `child.poll() == -15`, row `socket_dir: None`. With
+    # the dir present the same row classifies `KEEP — could be a concurrent
+    # leg's live instance` (age ~0s), so no reaper can take it. Nothing this
+    # test asserts changes: identity is still `comm`, and the socket dir is
+    # still read out of the one-element `argv[0]` line.
+    sockdir = tmp_path / "socket-dir"
+    sockdir.mkdir()
+    line = f"{binary} unixsocket:{sockdir}/redis.socket"
     child = subprocess.Popen(
         [line], executable=str(binary), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL
     )
@@ -1116,7 +1132,16 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
             "a live wrapper-exec'd server must be enumerated from the kernel's "
             f"name, not from argv[0] — inventory held {sorted(rows)}"
         )
-        assert rows[child.pid]["socket_dir"] == str(gone)
+        assert rows[child.pid]["socket_dir"] == str(sockdir)
+        # …and the fixture is not itself reapable litter. This is the half that
+        # makes the fix above non-vacuous: drop the `sockdir.mkdir()` and this
+        # row REDs with `REAP — socket dir … is gone`, i.e. it names the state
+        # in which the repo's own cleanup is entitled to kill the fixture
+        # mid-assertion — the shape that flaked this test on CI.
+        assert reaper.classify(rows[child.pid], reaper.DEFAULT_MAX_AGE_MINUTES * 60.0)[0] is False, (
+            "the fixture must never be a reap candidate, or a concurrent leg's "
+            "cleanup can SIGTERM it mid-assertion (#14347)"
+        )
     finally:
         child.kill()
         child.wait(timeout=30)
