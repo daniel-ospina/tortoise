@@ -4452,6 +4452,49 @@ def _verdict_or_fail(expect, why: str, call):
     return excinfo.value
 
 
+def test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail() -> None:
+    """The skip→FAIL conversion needs its OWN witness (restored after the #12039 rebase).
+
+    `_verdict_or_fail` is the mechanism every verdict-bearing arm of the four-way split relies
+    on: `pytest.skip.Exception` derives from `BaseException` (measured:
+    `Skipped.__mro__` -> `Skipped, OutcomeException, BaseException, object`), so
+    `pytest.raises(...)` never sees an escaping skip and a must-FAIL arm regressed to
+    `pytest.skip(...)` would record its witness as SKIPPED rather than failing it — the false
+    PASS this file's own comments record as nearly shipping.
+
+    ⛔ THIS ROW WAS LOST IN THE REBASE ONTO `origin/main` `d2cd8ab06e` (#14287 review, P2). The
+    rebase took main's landed #12039 repair (`10d54ad03d8a`, #14372) wholesale, which renamed
+    the helper `_drive_long_path_arm` -> `_verdict_or_fail` and is otherwise a superset — but
+    main carries NO row that drives the helper with a skipping stub, so its
+    `except pytest.skip.Exception: pytest.fail(...)` branch was left UNGRADED. Measured on
+    main's text: `grep -c 'SKIPPED where' tests/test_fleet_state.py` -> 0. Both of main's call
+    sites pass the real fixture, so a simplification of the helper back to a bare
+    `pytest.raises(...)` would restore the hole with nothing red.
+
+    ⛔ AND THE WITNESS ITSELF MUST NOT BE ABLE TO PASS BY SKIPPING (the finding that produced the
+    form below). Delegating to the helper inside `pytest.raises` measures `passed, 1 skipped`
+    once the helper's skip-`except` is deleted — the witness skipping over the hole. So the
+    outcome is asserted DIRECTLY: a raised skip here is caught and FAILED, never propagated.
+
+    What this grades: replacing the helper's `pytest.fail(...)` body with `pass`, or deleting
+    its skip-`except`, reds this row. It does NOT grade the helper's `expect == "skip"` re-raise
+    branch — that branch is graded by the four `expect="skip"` parametrizations below, which red
+    when it is neutered.
+    """
+
+    def _skipping():
+        pytest.skip("STUB: an arm that must never skip")
+
+    try:
+        _verdict_or_fail(AssertionError, "the stub witness", _skipping)
+    except pytest.fail.Exception as exc:
+        assert "SKIPPED where AssertionError is required" in str(exc), exc
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"_verdict_or_fail let a skip escape instead of converting it: {exc}")
+    else:
+        pytest.fail("_verdict_or_fail returned without converting the skip into a FAIL")
+
+
 @pytest.mark.parametrize(
     ("rc", "expect", "marker", "why"),
     [
