@@ -123,16 +123,30 @@ def test_line_endings_are_not_content():
     assert content_key(crlf) == content_key(lf)
 
 
-def test_content_key_matches_the_repo_precedent():
-    """One definition, not three: the key equals ``file_indexer.hash_text``.
+def test_content_key_matches_the_repo_precedent(tmp_path):
+    """One definition, not three: the key equals what the INDEXER writes.
 
-    If these ever diverge, the batch reports "new" for documents the indexer
-    calls "unchanged" (and vice versa) — two answers to one question.
+    ⛔ Compared against the indexer's REAL READ PATH, not against
+    ``hash_text(normalise_text(text))`` (#14415 review round 5, P3): that
+    comparison re-applied this module's own normalisation on BOTH sides, so any
+    sha256 body passed it — including one with no normalisation at all, which is
+    exactly the divergence the test exists to catch (``hash_text`` does NOT
+    normalise; ``compute_file_hash``'s text-mode read does).
+
+    If these diverge, the batch reports "new" for documents the indexer calls
+    "unchanged" (and vice versa) — two answers to one question.
     """
-    from tortoise.file_indexer import hash_text
+    from tortoise.file_indexer import compute_file_hash
 
-    text = "# Doc\n\nbody\n"
-    assert content_key(text) == hash_text(normalise_text(text))
+    path = tmp_path / "doc.md"
+    # CRLF on disk: the indexer normalises through its text-mode read, and the
+    # batch must key the same document to the same hash.
+    path.write_bytes(b"# Doc\r\n\r\nbody\r\n")
+    stored = compute_file_hash(str(path))
+    assert stored is not None
+    assert content_key("# Doc\r\n\r\nbody\r\n") == stored
+    assert content_key("# Doc\n\nbody\n") == stored, (
+        "a CRLF file and its LF twin must be one document")
 
 
 # ── duplicate-submit spends zero tokens ────────────────────────────────────
@@ -1293,17 +1307,18 @@ def test_a_rejected_acceptance_discards_its_own_rows_and_staged_files(tmp_path):
 
 
 # ── round 5: the claim's IDENTITY, and a cancel over a dead claim ──────────
-def test_two_reclaimers_cannot_both_win_the_same_stale_row():
-    """⛔ ROUND-5 REVIEW P1, reproduced: two drains, one stale claim, TWO charges.
+def test_two_reclaimers_cannot_both_win_the_same_stale_row(monkeypatch):
+    """⛔ ROUND-5 REVIEW P1, reproduced by interleaving INSIDE the reclaim.
 
-    A re-claim that writes `state = <the state it read>` has a compare key equal
-    to the value it writes back, so BOTH re-claimers matched and both ran the
-    runner — one document extracted twice and billed twice (measured on the
-    pre-fix tree: 2 runner calls, 120 000 tokens charged for 60 000 spent).
+    A state-only compare on a re-claim matches the value it is about to write
+    back, so two drains over one stale row both matched, both ran the runner, and
+    one document was extracted twice and BILLED TWICE (measured: 2 runner calls,
+    120 000 tokens charged for 60 000 spent).
 
-    The re-claim is now two state-CHANGING compare-and-sets (void the dead claim,
-    then claim it), so exactly one drain can walk the pair and the loser returns
-    before the runner.
+    ⛔ The interleave fires inside the CAS, not between two sequential `run_item`
+    calls: the first call settles the row on its own, and a second `run_item` then
+    returns at the terminal check having written nothing — a green test that
+    never races. (That is exactly how the first cut of this test was vacuous.)
     """
     store = InMemoryBatchStore()
     batch, items = BatchCoordinator(store).submit(ORG, ["/a.md"])
@@ -1315,26 +1330,36 @@ def test_two_reclaimers_cannot_both_win_the_same_stale_row():
     store.put_item(ORG, stale)
 
     calls: list[str] = []
+    coord = BatchCoordinator(store)
+    real_cas = store.put_item_if_state
+    fired = {"done": False}
 
-    def runner(item: BatchItem) -> ItemOutcome:
-        calls.append(item.item_id)
-        return ItemOutcome(BatchItemState.INDEXED, tokens_in=60_000)
+    def racing_cas(org_id, item, expected, expected_attempts=None):
+        if (not fired["done"] and expected is BatchItemState.QUEUED
+                and item.state is BatchItemState.EXTRACTING):
+            fired["done"] = True
+            # A PEER takes the claim between our void and our claim.
+            other = BatchCoordinator(store)
+            other.advance(org_id, store.get_item(org_id, item.batch_id,
+                                                 item.item_id),
+                          BatchItemState.EXTRACTING, attempt=True,
+                          expected=BatchItemState.QUEUED,
+                          expected_attempts=expected_attempts)
+        return real_cas(org_id, item, expected,
+                        expected_attempts=expected_attempts)
 
-    # Two coordinators, as two processes; each reads the SAME stale row.
-    a_row = store.get_item(ORG, batch.batch_id, claimed.item_id)
-    b_row = store.get_item(ORG, batch.batch_id, claimed.item_id)
-    first, second = BatchCoordinator(store), BatchCoordinator(store)
-    first.run_item(ORG, a_row, runner)
-    second.run_item(ORG, b_row, runner)
+    monkeypatch.setattr(store, "put_item_if_state", racing_cas)
+    coord.run_item(ORG, store.get_item(ORG, batch.batch_id, claimed.item_id),
+                   lambda i: calls.append(i.item_id) or ItemOutcome(
+                       BatchItemState.INDEXED, tokens_in=60_000))
 
-    assert calls == [claimed.item_id], (
-        "one document was run twice over two drains — the stale claim was "
-        f"re-entered by both (calls={calls}), which bills the customer twice")
-    final = store.items(ORG, batch.batch_id)[0]
-    assert final.state is BatchItemState.INDEXED
-    assert final.attempts == 2, (
-        "the re-claim must count as an attempt, so the ceiling bounds a poison "
-        f"item (attempts={final.attempts})")
+    assert fired["done"], "the interleaving never fired — the test proves nothing"
+    assert calls == [], (
+        "one document was run twice over two drains — the peer's claim was not "
+        f"respected (calls={calls}), which bills the customer twice")
+    row = store.items(ORG, batch.batch_id)[0]
+    assert row.state is BatchItemState.EXTRACTING, (
+        "this pass must not settle a claim it does not hold")
 
 
 def test_put_item_if_state_compares_the_claim_identity_in_the_inmemory_store():
@@ -1415,6 +1440,30 @@ def _ancient_stamp() -> str:
 def store_items_helper(store):
     coord = BatchCoordinator(store)
     return coord.submit(ORG, ["/a.md"])
+
+
+def test_record_item_spend_returns_the_tokens_it_recorded(monkeypatch):
+    """⛔ ROUND-5 REVIEW P1: the success path of the meter was DEAD.
+
+    It ended `return spent_in + spent_out` — locals that do not exist — so every
+    non-zero charge raised `NameError` AFTER writing the ledger. `_drain_batch`
+    catches it inside the per-item try, so the money landed and every metered
+    item emitted a false item-failure log, and the documented return contract was
+    unreachable. This test is the one that reds: nothing else called it.
+    """
+    from tortoise import metering
+
+    calls: list[dict] = []
+    monkeypatch.setattr(metering, "record_capture_usage",
+                        lambda org_id, **kw: calls.append({"org": org_id, **kw}))
+    from tortoise.batch_ingest import record_item_spend
+
+    assert record_item_spend(ORG, tokens_in=700, tokens_out=30) == 730
+    assert calls == [{"org": ORG, "calls": 0, "tokens_in": 700,
+                      "tokens_out": 30}]
+    # The zero case is still a no-op (no phantom capture row, #3359).
+    assert record_item_spend(ORG, tokens_in=0, tokens_out=0) == 0
+    assert len(calls) == 1
 # ── round 8: the order the rotation needs, the receipt/ledger equality ─────
 def test_pending_batches_is_ordered_by_the_caller_not_by_cypher():
     """⛔ BLOCKING 1: a `UNION` followed by `ORDER BY` is IGNORED by FalkorDB.
@@ -1492,17 +1541,24 @@ def test_a_receipt_and_the_meter_agree_when_the_row_moved_on():
         if variant == "cas-lost":
             # The row moves BETWEEN the coordinator's `_fresh` and its write, so
             # the compare-and-set loses and the outcome cannot be applied.
-            real = coord.advance
+            #
+            # ⛔ THE PEER'S MOVE MUST CHANGE THE COMPARED STATE (#14415 review
+            # round 5, P2). The first cut advanced `EXTRACTING → EXTRACTING` — the
+            # very state the terminal compare expects — so the write LANDED and
+            # the lost-CAS arm (`_bill` on a lost compare) was never exercised:
+            # deleting it left the test green, in both variants. A customer
+            # cancel moves the row to `CANCELLED`, which genuinely loses the
+            # compare.
+            real = coord._advance_landed
 
             def _advance(org_id, item, new_state, _store=store, _real=real,
                          **kw):
                 if new_state is BatchItemState.INDEXED:
-                    peer = _store.get_item(org_id, item.batch_id, item.item_id)
-                    BatchCoordinator(_store).advance(
-                        org_id, peer, BatchItemState.EXTRACTING, attempt=True)
+                    BatchCoordinator(_store).cancel(
+                        org_id, item.batch_id, reason="cancelled by the customer")
                 return _real(org_id, item, new_state, **kw)
 
-            coord.advance = _advance  # type: ignore[method-assign]
+            coord._advance_landed = _advance  # type: ignore[method-assign]
 
         out = coord.run_item(ORG, items[0], runner)
         billed = out.charge_in + out.charge_out

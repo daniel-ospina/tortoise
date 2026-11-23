@@ -4088,9 +4088,12 @@ app.add_middleware(
         # registering the STATIC constant made `TORTOISE_BATCH_MAX_INLINE_BYTES`
         # a no-op — the middleware refused at 4 MiB before the handler (which
         # had the env-aware bound) ever saw the raised limit, an advertised
-        # setting nobody could reach. `_BATCH_MAX_INLINE_BYTES` is defined far
-        # below this registration, which runs at import time, so the same
-        # expression is spelled once here rather than referenced.
+        # setting nobody could reach. The env expression lives in
+        # `_batch_cap_bytes()` — a helper DEFINED ABOVE this registration, which
+        # runs at import time, so the bound and the 413 copy that names it are
+        # resolved from ONE place. (It used to be spelled inline here, and the
+        # comment then named a `_BATCH_MAX_INLINE_BYTES` constant that no longer
+        # existed.)
         "/v1/batches": (
             _batch_cap_bytes(),
             # ⛔ THE REFUSAL NAMES THE CAP IT WAS CONFIGURED WITH (#14415 review
@@ -16689,8 +16692,13 @@ class BatchItemRequest(BaseModel):
     name: str | None = Field(None, max_length=512)
     #: The document's text, when the caller already holds it (an upload). When
     #: absent, ``ref`` names a path under this ORG's storage root —
-    #: ``$TORTOISE_INGEST_BASE_DIR/<org_id>/…`` (#329), absolute or relative to
-    #: that root. ⛔ A URL is NOT fetched (#14415 review round 4, P1): this
+    #: ``$TORTOISE_INGEST_BASE_DIR/<org_id>/…`` (#329). ⛔ A RELATIVE ref is
+    #: relative to ``<base>/<org_id>``, NOT to the base: `docs/a.md` resolves to
+    #: ``<base>/<org_id>/docs/a.md``. Spelling the ORG SEGMENT into a relative ref
+    #: (`org_1/docs/a.md`) doubles it into ``<base>/org_1/org_1/docs/a.md`` — a
+    #: path that is still inside the tenancy bound, so it is accepted and then
+    #: fails as missing. An absolute ref is used as given and must stay inside
+    #: the same root. ⛔ A URL is NOT fetched (#14415 review round 4, P1): this
     #: docstring used to promise "or a URL the indexer fetches", and no fetch
     #: exists on this path — the indexer door reads a FILE under the base, and a
     #: URL arrived at ``resolve_under_base`` and settled the item `failed` with a

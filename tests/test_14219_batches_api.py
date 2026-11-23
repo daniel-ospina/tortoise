@@ -1495,8 +1495,11 @@ def test_a_claim_the_row_has_moved_past_is_not_run(store, monkeypatch):
     batch, items = coord.submit(ORG_ID, ["/d/a.md"])
     stale = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
 
-    # The row settles between `run_item`'s read and its claim write.
-    real_advance = coord.advance
+    # The row settles between `run_item`'s read and its claim write. The seam is
+    # `_advance_landed` — the claim calls it DIRECTLY (it needs the `landed`
+    # flag), so patching `advance` no longer intercepts the claim and the test
+    # would pass while proving nothing.
+    real_advance = coord._advance_landed
 
     def _advance(org_id, item, new_state, **kw):
         if new_state is bi.BatchItemState.EXTRACTING and not calls:
@@ -1509,7 +1512,7 @@ def test_a_claim_the_row_has_moved_past_is_not_run(store, monkeypatch):
             other.advance(org_id, peer, bi.BatchItemState.INDEXED)
         return real_advance(org_id, item, new_state, **kw)
 
-    monkeypatch.setattr(coord, "advance", _advance)
+    monkeypatch.setattr(coord, "_advance_landed", _advance)
     out = coord.run_item(ORG_ID, stale,
                          lambda i: calls.append(i.item_id) or bi.ItemOutcome(
                              bi.BatchItemState.INDEXED, tokens_in=500))
@@ -1632,10 +1635,22 @@ def test_the_413_detail_names_the_configured_cap_not_the_default(monkeypatch):
     assert "8 MiB" in bi_mod.inline_413_detail(8 * 1024 * 1024)
     assert "1024 bytes" in bi_mod.inline_413_detail(1024)
 
-    monkeypatch.setenv("TORTOISE_BATCH_MAX_INLINE_BYTES", str(1024 * 1024))
-    assert ha._batch_cap_bytes() == 1024 * 1024, (
-        "the cap the middleware registers must follow the env, or the refusal "
-        "names a bound it does not enforce")
+    # ⛔ READ THE REGISTERED ENTRY, NOT THE HELPER (#14415 review round 5, P3).
+    # Asserting `_batch_cap_bytes()` re-computes the value the middleware was
+    # supposed to have used: a middleware still registered with the STATIC
+    # constant — the exact regression the env-aware fix exists to prevent —
+    # leaves that assertion green.
+    registered = None
+    for mw in ha.app.user_middleware:
+        caps = getattr(mw, "kwargs", {}).get("path_caps") or {}
+        if "/v1/batches" in caps:
+            registered = caps["/v1/batches"]
+            break
+    assert registered is not None, "no body-cap entry for /v1/batches"
+    cap, detail = registered
+    assert cap == bi.BATCH_MAX_INLINE_BYTES, (
+        "the registered cap must be the shipped constant at import time")
+    assert "4 MiB" in detail, detail
 
 
 def test_the_acceptance_copy_says_one_hour_not_1_hours(client):
@@ -1781,6 +1796,48 @@ def test_a_runner_call_that_spent_is_billed_even_when_the_row_moved_on(
         "budget then reads used less than it is")
 
 
+def test_a_lost_claim_never_runs_the_runner(store, monkeypatch):
+    """⛔ ROUND-5 REVIEW P1: the claim's loss test cannot be the returned STATE.
+
+    The claim writes the state both the winner and the loser then observe, so
+    `claimed.state is EXTRACTING` is TRUE for a lost compare: the loser fell
+    through and ran the runner on a document a peer was already inside —
+    measured: two runner calls and 120 000 tokens billed for 60 000 spent.
+    `_advance_landed`'s `landed` flag is the only thing that distinguishes my
+    write from theirs, and the claim consumes it now.
+    """
+    calls: list[str] = []
+    coord = bi.BatchCoordinator(store)
+    batch, _items = coord.submit(ORG_ID, ["/d/a.md"])
+
+    real = coord._advance_landed
+
+    def losing_claim(org_id, item, new_state, **kw):
+        if (new_state is bi.BatchItemState.EXTRACTING and not calls
+                and kw.get("expected") is bi.BatchItemState.QUEUED):
+            # A peer takes the claim first, leaving the row EXTRACTING — exactly
+            # what our own write would have produced.
+            other = bi.BatchCoordinator(store)
+            other.advance(org_id, store.get_item(org_id, item.batch_id,
+                                                 item.item_id),
+                          bi.BatchItemState.EXTRACTING, attempt=True,
+                          expected=bi.BatchItemState.QUEUED,
+                          expected_attempts=kw.get("expected_attempts"))
+        return real(org_id, item, new_state, **kw)
+
+    monkeypatch.setattr(coord, "_advance_landed", losing_claim)
+    out = coord.run_item(
+        ORG_ID, store.get_item(ORG_ID, batch.batch_id, _items[0].item_id),
+        lambda i: calls.append(i.item_id) or bi.ItemOutcome(
+            bi.BatchItemState.INDEXED, tokens_in=60_000))
+
+    assert calls == [], (
+        "the runner ran over a claim this pass LOST — a second extraction of one "
+        "document, and a second 60 000 tokens on the meter")
+    assert out.charge_in == 0 and out.charge_out == 0
+    assert out.state is bi.BatchItemState.EXTRACTING
+
+
 # ── round 8: the failure throttle anchors at the failure, and one bad batch
 #    must not pin the rotation ─────────────────────────────────────────────
 def test_a_slow_failing_scan_still_throttles(store, monkeypatch):
@@ -1840,3 +1897,41 @@ def test_one_unreadable_batch_does_not_pin_the_rotation(store, monkeypatch):
     assert set(ids[1:]) <= seen, (
         f"{sorted(set(ids[1:]) - seen)} were never inspected because one batch's "
         "read raises")
+
+
+def test_a_status_poll_cannot_erase_a_cancellation(store, monkeypatch):
+    """⛔ ROUND-5 REVIEW P1: `recover()`'s resume write had no compare-and-set.
+
+    `_resume_batch` reads the batch row, then the items, then wrote `resuming` —
+    so a `cancel()` landing in that gap was erased WITH its `cancelled_at`, and
+    `settle()`'s own CAS could then no longer save it (RESUMING is in that
+    compare's expected set), so the derived `partial` landed and
+    `pending_batches()` stopped selecting the row: the cancellation was gone for
+    good, and the cancelled document could be re-driven and billed. A status poll
+    is enough to reach it.
+    """
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/a.md", "/b.md"])
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.INDEXED, tokens_in=5)
+
+    real_items = store.items
+    state = {"fired": False}
+
+    def items_then_cancel(org_id, batch_id):
+        rows = real_items(org_id, batch_id)
+        if not state["fired"]:
+            state["fired"] = True
+            bi.BatchCoordinator(store).cancel(org_id, batch_id,
+                                              reason="cancelled by the customer")
+            return real_items(org_id, batch_id)
+        return rows
+
+    monkeypatch.setattr(store, "items", items_then_cancel)
+    coord.recover(ORG_ID)
+    monkeypatch.undo()
+
+    row = store.get_batch(ORG_ID, batch.batch_id)
+    assert row.state is bi.BatchState.CANCELLED, (
+        f"a status poll's resume write erased the cancel — row reads {row.state}")
+    assert row.cancelled_at, "the cancellation timestamp was erased"

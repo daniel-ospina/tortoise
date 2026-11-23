@@ -14034,7 +14034,6 @@ def test_the_emission_block_guard_is_not_vacuous():
         _EMISSION_CLAUSE_RE.findall(spliced)), (
         "a spliced block's unreadable shard-figure sentence went undetected — that is the "
         f"fail-open this arm exists for: {spliced}")
-
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
 

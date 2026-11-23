@@ -87,7 +87,8 @@ path that wrote raw points would produce exactly the bloat the capability audit
       check, and the one a test pins with a runner that fails if reached;
     * **path items** are keyed by the INDEXER once it has read the file (its
       stored ``:Source.contentHash`` vs the file's hash). That is the SAME rule
-      (:func:`content_key` is asserted equal to ``file_indexer.hash_text``), and
+      (a test asserts :func:`content_key` equals ``file_indexer.compute_file_hash``
+      over a CRLF file — the indexer's real read path, not a re-derivation), and
       it is still decided before the three LLM passes — the layer cannot pre-read
       a file it has not opened, and doing so would double every read. What the
       layer does guarantee there is that the verdict is *surfaced* as
@@ -898,7 +899,16 @@ def _finish_counts(raw: Mapping[str, Any]) -> dict[str, int]:
 
 
 def _copy_item(i: BatchItem) -> BatchItem:
-    return BatchItem(**{**i.__dict__})
+    """A copy carrying the ROW's facts — and NEVER the charge record.
+
+    ⛔ `charge_in`/`charge_out` are the "what THIS call spent" record, and their
+    whole point is that they cannot be re-read and charged again (#14415 review
+    round 5, P3). A store that round-tripped them let a re-read of a settled row
+    re-meter the same spend, in the very store the money tests drive; the graph
+    store never writes them, so zeroing here is what keeps the in-memory store
+    honest to the same Protocol promise.
+    """
+    return BatchItem(**{**i.__dict__, "charge_in": 0, "charge_out": 0})
 
 
 def _copy_batch(b: Batch) -> Batch:
@@ -1787,9 +1797,20 @@ class BatchCoordinator:
                             f"{twin.item_id} in this batch — no work done, no "
                             "tokens spent"))
             # The twin failed or is still running: this copy is NOT a duplicate
-            # of anything that exists, so it proceeds. Two different paths to
-            # the same bytes are then deduped by the indexer's own url+hash
-            # gate, which is the write-side authority.
+            # of anything that exists, so it proceeds.
+            # ⛔ WHAT THE INDEXER'S GATE DOES AND DOES NOT CATCH (#14415 review
+            # round 5, P3 — this comment used to claim the gate deduped any two
+            # paths to the same bytes). The gate compares a ``:Source``'s stored
+            # ``contentHash`` to the file's hash, and the ``:Source`` identity is
+            # derived from the PATH — so it dedupes a RE-SUBMITTED path and does
+            # NOT dedupe two different paths carrying identical bytes. Inline
+            # text is staged per batch (``<base>/_batches/<batch_id>/…``), so two
+            # batches uploading the same document are two sources: the
+            # content-key check above is the only cross-batch guard, and it is
+            # read-before-run, so two batches draining concurrently can both miss
+            # it. Content-addressed staging is the fix (``content_key`` is known
+            # at acceptance); until then the honest statement is "deduped within
+            # a batch and against already-settled items, serially".
         if fresh.content_key:
             prior = self._store.find_settled_by_content_key(org_id,
                                                             fresh.content_key)
@@ -1839,10 +1860,11 @@ class BatchCoordinator:
                             "which ended without settling the item (a "
                             "retryable skip, or a process that stopped "
                             "mid-item); re-submit this item to try again"))
-            claimed = self.advance(org_id, fresh, BatchItemState.EXTRACTING,
-                                   attempt=True,
-                                   expected=BatchItemState.QUEUED,
-                                   expected_attempts=fresh.attempts)
+            claimed, won = self._advance_landed(
+                org_id, fresh, BatchItemState.EXTRACTING,
+                attempt=True,
+                expected=BatchItemState.QUEUED,
+                expected_attempts=fresh.attempts)
             # ⛔ THE CLAIM IS A COMPARE-AND-SET, AND A LOST ONE DOES NOT RUN THE
             # RUNNER (#14415 review round 4, BLOCKING 1). A cancel that landed
             # between the read above and this write leaves the row `cancelled`;
@@ -1851,7 +1873,15 @@ class BatchCoordinator:
             # stopped — the module's own promise ("`queued` → `cancelled`, zero
             # tokens") is broken by exactly that interleaving. Reproduced against
             # the pre-fix tree: item `indexed`, 60 000 tokens, batch `cancelled`.
-            if claimed.state is not BatchItemState.EXTRACTING:
+            #
+            # ⛔ AND THE TEST IS `won`, NOT THE RETURNED STATE (#14415 review
+            # round 5, P1). The claim writes the very state both the winner and
+            # the loser then observe, so `claimed.state is EXTRACTING` is TRUE for
+            # a lost compare too: the loser fell through and ran the runner on a
+            # document a peer was already inside, billing the same 60 000 tokens
+            # twice (reproduced). `_advance_landed`'s flag is the only thing that
+            # distinguishes my write from theirs.
+            if not won or claimed.state is not BatchItemState.EXTRACTING:
                 return claimed
             fresh = claimed
         elif fresh.state in (BatchItemState.EXTRACTING,
@@ -1894,11 +1924,15 @@ class BatchCoordinator:
             if voided.state is not BatchItemState.QUEUED:
                 # Another drain voided or settled it first: its row is the truth.
                 return voided
-            claimed = self.advance(org_id, voided, BatchItemState.EXTRACTING,
-                                   attempt=True,
-                                   expected=BatchItemState.QUEUED,
-                                   expected_attempts=attempts_before)
-            if claimed.state is not BatchItemState.EXTRACTING:
+            claimed, won = self._advance_landed(
+                org_id, voided, BatchItemState.EXTRACTING,
+                attempt=True,
+                expected=BatchItemState.QUEUED,
+                expected_attempts=attempts_before)
+            # ⛔ `won`, not the state: see the QUEUED claim above — the loser
+            # observes the winner's `extracting` row, so the state test cannot
+            # tell them apart and the loser would run the runner too.
+            if not won or claimed.state is not BatchItemState.EXTRACTING:
                 return claimed
             fresh = claimed
         try:
@@ -2097,7 +2131,15 @@ class BatchCoordinator:
                                           reason=(reason or
                                                   "cancelled by the customer"),
                                           expected=BatchItemState.QUEUED)
-                    stopped = stopped or halted.state is not BatchItemState.QUEUED
+                    # ⛔ ONLY A ROW THAT ACTUALLY BECAME `cancelled` IS A STOP
+                    # (#14415 review round 5, P2). This read `is not QUEUED`,
+                    # which counted a LOST compare whose row came back
+                    # `extracting`/`indexed` as "we stopped something" — so the
+                    # batch was stamped `cancelled` with an invented
+                    # `cancelled_at` over work that was still running, and the
+                    # route rendered "will not run and is not charged" beside an
+                    # item that then ran and was charged.
+                    stopped = stopped or halted.state is BatchItemState.CANCELLED
         if not stopped:
             # ⛔ NOTHING WAS ACTUALLY STOPPED, SO DO NOT RELABEL THE BATCH (#14415
             # review round 4, BLOCKING 1 direction B). Every CAS above lost,
@@ -2330,9 +2372,25 @@ class BatchCoordinator:
             # a 500-item batch. Return it (a later pass must revisit it) without
             # touching its state.
             if moved or any(i.state is BatchItemState.QUEUED for i in items):
+                # ⛔ THE RESUME WRITE IS A COMPARE-AND-SET TOO (#14415 review
+                # round 5, P1). This is the THIRD unconditional writer of the
+                # batch row, and it is the one a status poll reaches: `batch` was
+                # read before `items()`, so a `cancel()` landing in that gap was
+                # overwritten with `resuming` + EMPTY `cancelled_at`/
+                # `cancel_reason`. That also DEFEATS `settle()`'s own fix one
+                # window later: `RESUMING` is in the terminal compare's expected
+                # set, so the derived `partial`/`completed` then lands, the row
+                # stops being selected by `pending_batches()`, and the customer's
+                # cancellation is gone for good (measured: cancel → `resuming` →
+                # `partial`, nothing left to repair it).
                 batch.state = BatchState.RESUMING
                 batch.updated_at = stamp
-                self._store.put_batch(batch)
+                if not self._store.put_batch_if_state(
+                        batch, (BatchState.ACCEPTED, BatchState.RUNNING,
+                                BatchState.RESUMING)):
+                    # The row moved on (a cancel, or a peer's own settle). Leave
+                    # it alone: `_drain_batch` over a cancelled batch settles it.
+                    return True
             return True
         if items:
             # ⛔ A LAGGING BATCH ROW IS REPAIRED HERE (#14415 review round 2, B1
@@ -2370,9 +2428,25 @@ class BatchCoordinator:
                           for i in items)
             if batch.state is not BatchState.RUNNING and (
                     batch.state is not BatchState.RESUMING or started):
+                observed = batch.state
                 batch.state = BatchState.RUNNING
                 batch.updated_at = self._now()
-                self._store.put_batch(batch)
+                # ⛔ EVEN THE NON-TERMINAL WRITE IS A COMPARE-AND-SET (#14415
+                # review round 5, P1). `batch` was read before `items()`, so a
+                # `cancel()` landing in that gap used to be overwritten by
+                # `running` WITH EMPTY `cancelled_at`/`cancel_reason` — and
+                # `recover()` then no longer recognised the batch as cancelled
+                # (`abandon_dead_claims` is skipped only for a row that says so),
+                # so the cancelled document was re-driven and BILLED. Measured:
+                # cancel recorded → settle wrote `running` with no evidence →
+                # `recover()` resumed it → runner ran → 60 000 tokens. The
+                # terminal write below was hardened first; this one is the same
+                # window one line earlier.
+                if not self._store.put_batch_if_state(batch, (observed,
+                                                              BatchState.RUNNING,
+                                                              BatchState.RESUMING)):
+                    return self._store.get_batch(batch.org_id,
+                                                 batch.batch_id) or batch
             return batch
         # ⛔ THE TERMINAL WRITE IS A COMPARE-AND-SET (#14415 review round 5, P2).
         # `batch` above was read BEFORE `items()`, so a `cancel()` landing in
@@ -2396,7 +2470,14 @@ class BatchCoordinator:
                 batch.cancel_reason
                 or next((i.reason for i in items if i.reason), ""))
             batch.updated_at = self._now()
-            self._store.put_batch(batch)
+            # ⛔ Same window, same rule (#14415 review round 5, P1): a `cancel()`
+            # that landed between the row read and here already wrote its own
+            # `cancelled_at`/`cancel_reason`, and this derived write would replace
+            # them with a guessed stamp.
+            if not self._store.put_batch_if_state(
+                    batch, (BatchState.ACCEPTED, BatchState.RUNNING,
+                            BatchState.RESUMING, BatchState.CANCELLED)):
+                return self._store.get_batch(batch.org_id, batch.batch_id) or batch
             return batch
         derived = (BatchState.COMPLETED if ok == len(items)
                    else BatchState.PARTIAL)
