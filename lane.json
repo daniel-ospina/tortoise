@@ -1,0 +1,21 @@
+{
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "exit_code": null,
+  "heartbeat_at": 1795447608,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14343-reduce-1795447608-p953021-9de5cf88",
+  "lease_until": 1795484208,
+  "pid": 953021,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795447608,
+  "state": "RUNNING",
+  "tag": "14343-reduce",
+  "worktree": "/home/cmux/tortoise/.worktrees/14343-reduce"
+}
