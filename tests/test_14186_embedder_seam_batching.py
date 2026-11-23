@@ -716,6 +716,45 @@ class TestConfiguration:
             assert embed_seam.resolve_max_batch() == embed_seam.DEFAULT_MAX_BATCH
         assert caplog.records
 
+    def test_one_bad_lever_is_ONE_warning_not_one_per_health_poll(
+            self, monkeypatch, caplog):
+        """A malformed lever must not become a log storm on the health path.
+
+        ⛔ ``seam_status`` resolves every backing's window (``BACKINGS`` — three —
+        then the configured one again) plus ``max_batch``/``timeout_s``, and
+        ``/health`` is the endpoint a load balancer polls. With the refusal
+        unlatched, a single ``TORTOISE_EMBED_MAX_WAIT_MS=20ms`` emitted four
+        WARNING lines PER POLL, forever (review P3 at ``5e2ae31a``). This row
+        fails on that code: it counts what three polls actually logged.
+
+        ⛔ The latch is on the WARNING, never on the parse — the other three
+        assertions here pin that, because a fix that cached the resolved VALUE
+        would pass a warning count while breaking "the next read sees the
+        corrected lever".
+        """
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "20ms")
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        with caplog.at_level("WARNING"):
+            for _ in range(3):
+                status = embed_seam.seam_status()
+        warnings = [r.getMessage() for r in caplog.records
+                    if embed_seam.ENV_MAX_WAIT_MS in r.getMessage()]
+        assert len(warnings) == 1, (
+            f"one malformed lever logged {len(warnings)} times across 3 polls: "
+            f"{warnings}")
+        # The refusal is still TOTAL, and still applied on every poll — each
+        # backing falls back to ITS OWN default (0 ms in-process, 20 ms remote),
+        # which is why the assertion is per backing and not one flat number.
+        assert status["max_wait_ms"] == 0.0, (
+            "the in-process window must keep its 0 ms default")
+        assert status["backings"][embed_seam.BACKING_WORKER]["max_wait_ms"] == \
+            embed_seam.DEFAULT_MAX_WAIT_MS
+        assert status["backings"][embed_seam.BACKING_EXTERNAL]["max_wait_ms"] == \
+            embed_seam.DEFAULT_MAX_WAIT_MS
+        # …and the VALUE is not cached: a corrected lever takes effect at once.
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "15")
+        assert embed_seam.resolve_max_wait_ms(embed_seam.BACKING_WORKER) == 15.0
+
 
 # ── the exported distributions ───────────────────────────────────────────────
 
@@ -1212,6 +1251,40 @@ class TestTheExternalBacking:
         server = http_endpoint({"vectors": [[0.1]]})
         with pytest.raises(ValueError, match="row"):
             self._backing(monkeypatch, server).encode(["a", "b"])
+
+    @pytest.mark.parametrize("answer", [
+        {"vectors": [[]]},
+        {"embeddings": [[]]},
+        {"data": [{"embedding": []}]},
+    ])
+    def test_a_zero_width_row_is_refused_on_every_answer_shape(
+            self, monkeypatch, http_endpoint, answer):
+        """ROW COUNT IS NOT WIDTH (review P3 at ``5e2ae31a``).
+
+        ⛔ ``{"vectors": [[]]}`` satisfied ``len(rows) == len(texts)`` and came
+        back as a zero-length ``query_vec`` — accepted by the parser and "handled"
+        only downstream by ``_degrade_to_width``, which turns a wrong-width row
+        into a silent degrade. The module's rule is "never fall back silently",
+        so the seam names the malformed answer here, at the protocol edge, which
+        is where comparable servers validate it (vLLM rejects a non-2-D embedding
+        array; OpenAI's guide tells clients to reject empty vectors).
+
+        ⛔ ALL THREE SHAPES: pre-fix only the refusal was absent everywhere, and
+        a fix applied to one branch would leave two shapes accepting ``[]``.
+        """
+        server = http_endpoint(answer)
+        with pytest.raises(ValueError, match="EMPTY vector"):
+            self._backing(monkeypatch, server).encode(["a"])
+
+    def test_a_well_formed_answer_still_passes_the_width_guard(
+            self, monkeypatch, http_endpoint):
+        """The CONTROL for the row above — the guard cannot pass by refusing all.
+
+        Without this, a guard that raised on every row would satisfy the
+        ``pytest.raises`` assertions while breaking every remote backing.
+        """
+        server = http_endpoint({"vectors": [[0.25]]})
+        assert self._backing(monkeypatch, server).encode(["a"]) == [[0.25]]
 
     def test_the_whole_seam_runs_on_the_external_backing(
             self, monkeypatch, http_endpoint):

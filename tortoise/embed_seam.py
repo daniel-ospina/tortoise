@@ -280,6 +280,34 @@ WORKER_STARTUP_S_CEILING = 86_400.0
 # ── small total helpers ──────────────────────────────────────────────────────
 
 
+#: Refusals already reported, keyed ``(lever, raw value)``.
+#:
+#: ⛔ ONE REFUSAL IS ONE LINE, NOT ONE PER READ (review P3 at ``5e2ae31a``).
+#: :func:`seam_status` resolves EVERY backing's window on every call — three
+#: ``BACKINGS`` plus the configured one again, then ``max_batch`` and
+#: ``timeout_s`` — and ``/health`` is the endpoint a load balancer polls, so a
+#: single malformed ``TORTOISE_EMBED_MAX_WAIT_MS`` emitted four WARNING lines per
+#: poll, forever. The latch is on the WARNING only: the parse stays total and no
+#: resolved value is cached, so a corrected lever takes effect on the next read
+#: and a still-bad one keeps returning its default.
+_REFUSAL_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_refusal(name: str, raw: str, message: str, *args: Any) -> None:
+    """Log a lever refusal once per ``(lever, raw value)`` for this process.
+
+    :func:`reset_seam` clears the latch, which is what keeps it from leaking
+    across tests. A benign race (two threads both missing the key) can duplicate
+    one line; that is the direction to fail in — a lost warning would hide the
+    refusal the operator needs.
+    """
+    key = (name, raw)
+    if key in _REFUSAL_WARNED:
+        return
+    _REFUSAL_WARNED.add(key)
+    _logger.warning(message, *args)
+
+
 def _env_float(name: str, default: float, *, minimum: float = 0.0,
                maximum: float | None = None) -> float:
     """Read a float lever, refusing an unusable value with a warning.
@@ -308,7 +336,8 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0,
         value = -1.0
     if not math.isfinite(value) or not (value >= minimum) or \
             (maximum is not None and value > maximum):
-        _logger.warning(
+        _warn_refusal(
+            name, raw,
             "%s=%r is not a finite number >= %s%s — using the default %s",
             name, raw, minimum,
             "" if maximum is None else f" (and <= {maximum})", default)
@@ -326,7 +355,8 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     except ValueError:
         value = 0
     if value < minimum:
-        _logger.warning(
+        _warn_refusal(
+            name, raw,
             "%s=%r is not an integer >= %s — using the default %s",
             name, raw, minimum, default)
         return default
@@ -1262,6 +1292,36 @@ class ExternalBacking:
         }
 
 
+def _external_vector(row: Any, index: int, shape: str) -> list[float]:
+    """One answer row as floats — refusing a WIDTH of zero.
+
+    ⛔ ROW COUNT IS NOT WIDTH (review P3 at ``5e2ae31a``). ``{"vectors": [[]]}``
+    satisfies ``len(rows) == len(texts)`` and flows back as a zero-length
+    ``query_vec``; the store path is contained only *downstream*, by
+    :func:`_degrade_to_width` (``#4280``, which drops a wrong-width row and logs
+    it). So without this guard the parser was the one place in the module that
+    ACCEPTED a malformed provider answer instead of naming it — against this
+    module's own rule, "never fall back silently".
+
+    Validating at the protocol edge is what comparable servers do: vLLM rejects
+    an embedding array that is not two-dimensional, and OpenAI's embeddings guide
+    tells clients to reject empty and inconsistent-width vectors. This seam IS
+    that edge for a remote backing, so it makes the same refusal.
+    """
+    try:
+        vector = [float(x) for x in row]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"external embedding answer's {shape}[{index}] is not a list of "
+            f"numbers: {exc}") from exc
+    if not vector:
+        raise ValueError(
+            f"external embedding answer's {shape}[{index}] is an EMPTY vector "
+            f"(width 0) — a zero-width row satisfies the row count and would "
+            f"flow back as an empty embedding")
+    return vector
+
+
 def _external_rows(payload: Any) -> list[list[float]]:
     """Pick the vector table out of an external answer (:class:`ExternalBacking`).
 
@@ -1269,6 +1329,10 @@ def _external_rows(payload: Any) -> list[list[float]]:
     them raises with the keys it DID carry — a validator that says "bad shape"
     and nothing else is how a provider migration turns into a silent
     ``encode_failed`` degrade on every read.
+
+    ⛔ EVERY row goes through :func:`_external_vector`, so the empty-vector
+    refusal cannot be true of one shape and false of another (review P3: two of
+    the three accepted ``[]``).
     """
     if not isinstance(payload, dict):
         raise ValueError(
@@ -1277,15 +1341,20 @@ def _external_rows(payload: Any) -> list[list[float]]:
     for key in ("vectors", "embeddings"):
         table = payload.get(key)
         if isinstance(table, list):
-            return [[float(x) for x in row] for row in table]
+            return [_external_vector(row, index, key)
+                    for index, row in enumerate(table)]
     data = payload.get("data")
     if isinstance(data, list):
-        try:
-            return [[float(x) for x in item["embedding"]] for item in data]
-        except (KeyError, TypeError) as exc:
-            raise ValueError(
-                f"external embedding answer's `data` is not the OpenAI shape "
-                f"(every item needs an `embedding` list): {exc}") from exc
+        rows: list[list[float]] = []
+        for index, item in enumerate(data):
+            try:
+                embedding = item["embedding"]
+            except (KeyError, TypeError) as exc:
+                raise ValueError(
+                    f"external embedding answer's `data` is not the OpenAI shape "
+                    f"(every item needs an `embedding` list): {exc}") from exc
+            rows.append(_external_vector(embedding, index, "data"))
+        return rows
     raise ValueError(
         "external embedding answer carries none of vectors/embeddings/data "
         f"(keys: {sorted(payload)})")
@@ -2229,6 +2298,7 @@ def reset_seam() -> None:
     """
     global _backing, _backing_name, _collector, _injected
     global _last_decline, _last_decline_at
+    _REFUSAL_WARNED.clear()
     with _lock:
         collector, _collector = _collector, None
         backing, _backing = _backing, None
