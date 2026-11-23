@@ -155,7 +155,7 @@ carve_shards: 3
 #
 # Absence means 2 — the shape this repo ran until now — so deleting this key
 # gives the leg count back. It is NOT, on its own, a complete rollback: the
-# wall-target guard recomputes from the map, and 2 legs project over double the
+# wall-target guard recomputes from the map, and 2 legs project well over the
 # 10m target, so removing the key reds it
 # (`tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_
 # the_wall_target`). A real rollback therefore moves the target/guard too — which
@@ -9557,11 +9557,12 @@ surfaces:
   #     `tests/test_uri_requiring_selection.py`
   #     `::test_declared_list_matches_the_observation` re-derives the set by running
   #     pytest with an EMPTY URI and reds a declared/observed mismatch (#6884);
-  #   * the `durations:` row → the `duration_issues()` coverage check composed
-  #     into `python3 tools/ci_selection.py --integrity`: a 0.90 RATIO with
-  #     headroom, silent over one missing row (the per-file ENTRY-RULE pin that
-  #     named it exactly went with the durations-map arithmetic cut). A missing
-  #     row costs a mis-ranked pack, not a wrong selection: the file still runs.
+  #   * the `durations:` row → the `duration_coverage_issues()` coverage check
+  #     composed into `python3 tools/ci_selection.py --integrity`: a 0.90 RATIO
+  #     with headroom, silent over one missing row (the per-file ENTRY-RULE pin
+  #     that named it exactly went with the durations-map arithmetic cut). A
+  #     missing row costs a mis-ranked pack, not a wrong selection: the file
+  #     still runs.
   # The three are added together because a lane that adds one and stops is red in a leg
   # it is not looking at — not because any one check reds the others.
   - test_evictor_invalidates_fallback_snapshot_13123.py

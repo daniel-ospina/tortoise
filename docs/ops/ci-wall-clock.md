@@ -848,8 +848,10 @@ cannot conclude before a shard it needs has run. Both halves are backed by the w
 wiring, and the arithmetic behind the caps is stated above rather than pinned:
 
 - the per-shard watchdog sitting INSIDE the job, and the matrix coming from the selector rather
-  than a workflow literal → verified by reading `python-ci.yml`'s `test` job (the retired
-  `test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard` arm did this mechanically);
+  than a workflow literal → `--integrity`'s `workflow_matrix_issues()` still checks the matrix half
+  mechanically (both `test` and `test-slow` take theirs from `fromJSON(...)` and carry no literal
+  `include:` rows); the WATCHDOG half is what lost its mechanical pin with
+  `test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard`, so read it from the job;
 - the aggregate keying on the job id, never on a leg name → `::test_no_required_check_names_a_fast_leg`;
 - the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) — arithmetic
   properties, stated here rather than pinned by a test. Re-derive them from the pool before

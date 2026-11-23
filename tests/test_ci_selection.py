@@ -11258,6 +11258,181 @@ def _durations_rows_with_a_stale_case_count(text: str, tests_dir: Path):
 # `"33 passed" … (31 tests / 2.77 s BEFORE this review)`, and `at 35 tests on an
 # [earlier] idle host` — is not judged). A same-sentence `0 … N>0` needs no
 # history exemption: no correct note can say it.
+def test_duration_coverage_guard_boundary_and_realistic():
+    """#3400: the floor is inclusive; realistic coverage is silent."""
+    from tools.ci_selection import duration_coverage_issues, load_manifest
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    below = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+             "durations": {f: 2.0 for f in files[:89]}}
+    at = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+          "durations": {f: 2.0 for f in files[:90]}}
+    above = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+             "durations": {f: 2.0 for f in files[:95]}}
+    assert duration_coverage_issues(below) != [], "89% must fire"
+    assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
+    assert duration_coverage_issues(above) == [], "95% must be silent"
+    assert duration_coverage_issues(load_manifest()) == []
+
+
+def _added_files_off_the_flat_default(durations: dict, tails: dict):
+    """Files in this fold's row set whose row is neither the flat default nor a CI reading.
+
+    The ENTRY RULE's SECOND half, which the existence pin above cannot see: the
+    VALUE of a PR-added row must be `DEFAULT_FAST_WEIGHT`, because no push-to-main
+    junit sweep can have collected the file yet — a hand-picked number is this
+    host's wall clock, and `fast_pool()` feeds the shard balancer (#2818/#3419/#4348,
+    the rule stated verbatim above the `durations:` block). The one legitimate
+    exception is a row whose tail carries a CI basis: that is the refresher having
+    ADOPTED a junit reading, which IS the number the balancer should take.
+    """
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT
+    off = []
+    for f in ROWED_BY_THIS_FOLD:
+        if f not in durations:
+            continue
+        value = durations[f]
+        if abs(value - DEFAULT_FAST_WEIGHT) < 1e-9:
+            continue
+        if _MEASURED_BASIS_RE.search(tails.get(f, "")):
+            continue
+        off.append((f, value))
+    return off
+
+
+def test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading():
+    """#10726 review P1: `test_9548_record_search_keys_shape.py` shipped `4.0`.
+
+    That 4.0 was this host's local clock — the row's note at the time quoted "11 passed,
+    1 skipped in 3.45s", a count a later commit removed because a hand-written figure
+    re-stales — while the other eight files in `ROWED_BY_THIS_FOLD` all took 2.0.
+    (Only ONE of the nine is a file this fold ADDED — the `ROWED_BY_THIS_FOLD` block
+    above is the authority on what the set actually is, #2148 review P3 — but the whole
+    set is the row-set this pin guards.)
+
+    The existence pin above stayed green through it, because a local reading is a
+    row like any other; the coverage floor could not see it either (it is a RATIO
+    with ~70 files of headroom). Nothing reds on a hand-picked shard weight, which
+    is precisely why it needs its own pin — `test_state_value_verbatim_10360.py` is
+    the settled shape: state the local reading as a sanity bound and keep the flat
+    default as the weight.
+    """
+    from tools.ci_selection import load_manifest
+    durations = load_manifest()["durations"]
+    tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
+    off = _added_files_off_the_flat_default(durations, tails)
+    assert off == [], (
+        "a test file this PR ADDS carries a weight that is neither the flat "
+        f"`DEFAULT_FAST_WEIGHT` nor a CI reading: {off}. A local wall clock is not "
+        "a shard-layout input (#2818/#3419) — keep the flat default and state the "
+        "local number as a sanity bound, or wait for the junit sweep to adopt one.")
+
+
+def _durations_rows_claiming_the_flat_default(text: str, durations: dict):
+    """Rows that claim the flat default as their OWN basis for a non-default value."""
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT
+    out = []
+    for line in text.splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is None or m.group("key") not in durations:
+            continue
+        value = float(m.group("value"))
+        if abs(value - DEFAULT_FAST_WEIGHT) < 1e-9:
+            continue
+        if _FLAT_DEFAULT_CLAIM_RE.search(m.group("tail")):
+            out.append((m.group("key"), value))
+    return out
+
+
+def test_no_durations_row_claims_the_flat_default_at_a_measured_value():
+    """#2876/#8254 (P3): a re-derived value must not keep its old basis note."""
+    from tools.ci_selection import load_manifest
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_claiming_the_flat_default(
+        text, load_manifest()["durations"])
+    assert offenders == [], (
+        "a durations row states the #3400 flat 2.0s default as its basis while "
+        "carrying a different value — the refresh re-derived the row and the note "
+        f"went stale: {offenders}. Rewrite the note to the new basis (or drop the "
+        "claim), keeping any #4348 do-not-drop instruction.")
+
+
+def test_no_durations_row_states_a_stale_case_count():
+    """#10356 review P3-1: a cited `grep -c` count must match the file it weighs."""
+    offenders = _durations_rows_with_a_stale_case_count(
+        cs.MANIFEST.read_text(encoding="utf-8"), cs.TESTS_DIR)
+    assert offenders == [], (
+        "a durations row states its file's case count with the instrument the map's "
+        "ENTRY RULE tells the reader to re-derive with (`grep -c '^def test_'`) and "
+        f"the file disagrees — (key, stated, actual): {offenders}. Re-derive the "
+        "count AND extend the row's staleness chain with the cycle that moved it.")
+
+
+def test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it():
+    """#9003 review (P2): a NEW file's first weight is the flat default, not a local timing.
+
+    The `durations` header above `durations:` prescribes `DEFAULT_FAST_WEIGHT` for a file
+    no sweep has collected yet (the #3419 `test_venture_pack.py` precedent) because a
+    weight is a SHARD-LAYOUT input: a locally-measured number decides which files share
+    a shard, so it must not be hand-picked. The #2818 row shipped a measured-on-this-box
+    4.9 first, under a comment that CLAIMED the flat-default convention it violated — and
+    the guard above could not see it, because the claim sat on the comment lines PRECEDING
+    the row rather than on its tail. Pinned by name here: the row is MARGIN on the
+    coverage floor, not the floor itself (`duration_coverage_issues()` is count-based and
+    passes either way — 90.01% without the row, 90.12% with it), so its MAGNITUDE must be
+    the flat default while its absence is a derivation to re-run, not an automatic red.
+    """
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT, load_manifest
+    row = "test_pack_value_declarations_2818.py"
+    durations = load_manifest()["durations"]
+    assert row in durations, (
+        "the #2818 row is missing from `durations` — its presence is the margin the "
+        "#3400 coverage floor has (90.01% without it, still above the 0.90 floor, so "
+        "treat its absence as a finding to re-derive, not an automatic red)")
+    # Scoped to the UNMEASURED state on purpose: once a sweep collects the file,
+    # `tools/ci_timing.py::render_refreshed_manifest` rewrites the value and CLEARS a
+    # tail that LEADS with the `# unmeasured` marker (that is how the #3419/#2788
+    # precedent rows work), and this pin must not then fail on a legitimate CI
+    # measurement. The marker is read exactly the way the refresher reads it — by its
+    # leading token — so the two cannot disagree: any OTHER trailing comment is
+    # preserved verbatim by the refresh, including one that mentions the word later.
+    if not _ROW_LEADS_WITH_UNMEASURED.match(
+            _durations_row_tail("test_pack_value_declarations_2818.py")):
+        assert durations[row] > 0, (
+            f"{row} carries a non-positive weight {durations[row]}s — a sweep has "
+            "collected the file, so its value must be a real measurement")
+        return
+    assert durations[row] == DEFAULT_FAST_WEIGHT, (
+        f"{row} carries {durations[row]}s, but a NEW file's first weight is the flat "
+        f"{DEFAULT_FAST_WEIGHT}s default until a CI sweep collects it. Do not substitute "
+        "a local timing: a weight is a shard-layout input, so a number that does not "
+        "model CI decides which files run together (#3419, #9003 review).")
+
+
+_ROW_LEADS_WITH_UNMEASURED = re.compile(r"[ \t]*#\s*unmeasured\b")
+
+
+def _durations_row_tail(key: str) -> str:
+    """The tail comment of a `durations:` row, or "" when the row is absent.
+
+    Scoped to the `durations:` block, NOT the whole file: a floored/capped key is
+    also declared in `durations_floors` ABOVE the block, and a whole-file scan takes
+    that declaration for the row — returning its (empty) tail while the real row
+    carries the note the caller is asking about (#10575 delta review, P3).
+    """
+    lines = cs.MANIFEST.read_text(encoding="utf-8").splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == "durations:")
+    except StopIteration:  # pragma: no cover — the map always declares the block
+        return ""
+    end = next((i for i in range(start + 1, len(lines))
+                if _DURATIONS_TOP_KEY_RE.match(lines[i])), len(lines))
+    for line in lines[start + 1:end]:
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is not None and m.group("key") == key:
+            return m.group("tail")
+    return ""
+
+
 _ZERO_CASE_CLAIM_RE = re.compile(r"\b0\s+(?:tests|cases)\b")
 
 
