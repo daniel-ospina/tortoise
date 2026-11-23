@@ -415,7 +415,7 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/search_engine.py:4950-4954` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
 | `tortoise/search_engine.py:7170` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg's subquery PREVIEW | **adjacency** |
 | `tortoise/search_engine.py:7201` | `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)` — the operator-expansion leg's COUNT, the statement that follows `:7167` inside the same function | **adjacency** |
-| `tortoise/search_engine.py:7577` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:7576-7579`, consumed only by `subject_binding_available()` at `:7582-7620`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
+| `tortoise/search_engine.py:7577` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:7576-7579`, consumed only by `subject_binding_available()`, `:7582-7621`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
 | `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
 | `tortoise/search_engine.py:4878-4880` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
 | `tortoise/search_engine.py:4293` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
