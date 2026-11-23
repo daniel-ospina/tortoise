@@ -368,6 +368,50 @@ def test_episode_end_resolves_the_abuse_incidents(delivered, monkeypatch):
     assert len(titles) == 1, "resolving must not re-file"
 
 
+def test_a_clean_window_with_no_episode_does_no_store_work(monkeypatch):
+    """A clean window on an org that was NEVER flagged is not an episode end.
+
+    Pre-fix `ended` meant "the clean-window read did not raise", so every clean
+    evaluation — the overwhelmingly common case, twice per point create — ran the
+    episode-end resolution: 2 incident kinds × 2 subject spellings =
+    up to 8 `resolve_incident_state` calls, each one an R2 `get_object` round
+    trip through `_read_json`, on the 4-worker abuse pool. The pre-#14407 path
+    spent zero network calls here.
+    """
+    import tortoise.notify as notify
+
+    resolved: list[tuple[str, str]] = []
+
+    class _Store:
+        def resolve_incident_state(self, kind, subject="", **kw):
+            resolved.append((kind, subject))
+
+    class _NoEpisodeStore:
+        def __init__(self) -> None:
+            self.cleared: list[tuple[str, str]] = []
+
+        def window_sum(self, org_id, rule, window_s, now):
+            return 0
+
+        def latest_flag_at(self, org_id, rule):
+            return None                     # no flag ⇒ no episode to end
+
+        def flag_clear(self, org_id, rule, now=None):
+            self.cleared.append((org_id, rule))
+
+    store = _NoEpisodeStore()
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    engine = AbuseEngine(store)
+
+    engine._evaluate("org-a", "point_create", 500, 3600,
+                     datetime.now(timezone.utc))  # noqa: UP017
+
+    assert store.cleared == [], "there is no flag to clear"
+    assert resolved == [], (
+        "a clean window with no episode must not touch the incident store — "
+        f"{len(resolved)} resolve call(s) on the request path ({resolved})")
+
+
 def test_an_unresolvable_close_never_breaks_the_request_path(monkeypatch):
     """Best-effort on the request path: a close failure is a log line, not a 500."""
     import tortoise.notify as notify
