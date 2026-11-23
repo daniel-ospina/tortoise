@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **308** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **310** files scanned |
 | files carrying at least one statement site | **102** |
 | **statement sites (this census)** | **1327** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **875** (589 read, 286 write) |
@@ -109,17 +109,17 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (308 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (310 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 308 files>` → **1,643** across **111** files: exactly the
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 310 files>` → **1,643** across **111** files: exactly the
 tool's number. A bare `rg … tortoise/` gives **1,649 / 112**, the 6 extra occurrences living in
 the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,643 / 111 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 308 files>` → **2,368** across **148** files, while the tool
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 310 files>` → **2,368** across **148** files, while the tool
 reports 2,381 / 149. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
@@ -132,7 +132,7 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 308 files finds exactly 13 — the verb-at-end-of-line scan alone finds **183**,
+predicate over the same 310 files finds exactly 13 — the verb-at-end-of-line scan alone finds **183**,
 and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
 enumerated, and the other **170** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
@@ -976,9 +976,11 @@ them. §1's `rg` reconciliation is re-measured at this tree (door **1,640 / 111*
 **2,377 / 149**, bare **1,646 / 112**), and Appendix A is regenerated with `--markdown` at this head
 — the two new files' six rows are in it, so a reader can resolve every one.
 
+**The cut this PR (#14220, `fix/14186-embedder-seam-batching`) makes — `files_scanned` 308→**310** and NOTHING else.** The embedder seam adds two product-surface modules, `tortoise/embed_seam.py` (the backing arbiter, its bounded collection window and its two remote clients) and `tortoise/embed_worker.py` (the out-of-process encoder). ⛔ Neither issues a Cypher statement — they hand text to `EmbeddingModel`/an HTTP endpoint, not to a query door — so they are scanned and carry no site: `files` stays **102** and every shape pin below is untouched. This is the same class of move `#14222`'s `projection_worker.py` and `#14284`'s `relation_guards.py` made, and it is the reason `files_scanned` is pinned: the population can grow without a single statement moving, and before that pin existed `--check` stayed green through it (`#13098` review P3). §1's `rg` reconciliation is unchanged in every FIGURE (door **1,643 / 111**, verb **2,381 / 149**, the cross-line class **13**) because both new files match no predicate there; only the stated population size follows the pin.
+
 <!-- cypher-inventory:sites = 1327 -->
 <!-- cypher-inventory:files = 102 -->
-<!-- cypher-inventory:files_scanned = 308 -->
+<!-- cypher-inventory:files_scanned = 310 -->
 <!-- cypher-inventory:unresolved = 105 -->
 <!-- cypher-inventory:candidates = 589 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->

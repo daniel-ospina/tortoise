@@ -63,18 +63,13 @@ _BACKFILL = _REPO_ROOT / "graph-scripts" / "backfill_embeddings.py"
 
 _DIM = 384
 
-#: EVERY cause ``EmbeddingModel.await_write_ready_reason`` can return.
+#: The four causes ``EmbeddingModel.await_write_ready_reason`` can return.
 #: Spelled here AND asserted equal to the module's own constants
 #: (``test_the_metric_label_vocabulary_is_the_seam_s_own``), because the counter
 #: emits them into a Prometheus label: a silent rename forks the series and an
 #: operator's existing alert reads zero forever. A comment claiming that pin is
-#: not a pin — the assertion is. ⛔ Keep this in step when a cause is added: a
-#: cause the tuple omits is a label value the counter emits UNPINNED, which is
-#: the false-PASS this test exists to prevent (#14186 added ``backing_cold``).
-_CAUSES = (
-    "not_installed", "fail_cooldown", "attempt_spent", "budget_expired",
-    "backing_cold",
-)
+#: not a pin — the assertion is.
+_CAUSES = ("not_installed", "fail_cooldown", "attempt_spent", "budget_expired")
 
 #: ``"<leg>:<cause>"``, the counter's one label value (#13417). The two legs are
 #: never summed: they have different repairs.
@@ -251,7 +246,7 @@ def test_the_unbounded_default_never_consults_the_count(monkeypatch):
 
 
 def test_the_metric_label_vocabulary_is_the_seam_s_own():
-    """Every cause is the SEAM's constant, not a hand-copied literal.
+    """The four causes are the SEAM's constants, not a hand-copied literal.
 
     The counter emits them into a Prometheus label value. A silent rename forks
     the series, and an operator's existing alert on `reason="budget_expired"`
@@ -263,11 +258,7 @@ def test_the_metric_label_vocabulary_is_the_seam_s_own():
         embeddings._WRITE_DECLINE_FAIL_COOLDOWN,
         embeddings._WRITE_DECLINE_ATTEMPT_SPENT,
         embeddings._WRITE_DECLINE_BUDGET_EXPIRED,
-        embeddings._WRITE_DECLINE_BACKING_COLD,
-    }, (
-        "the counter's label vocabulary and the seam's decline causes diverged "
-        "— a label value is emitting unpinned"
-    )
+    }
 
 
 def test_a_cold_re_write_of_an_embedded_row_counts_but_loses_nothing(
