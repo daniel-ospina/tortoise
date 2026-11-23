@@ -18999,9 +18999,13 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
     # ⛔ THE RESIDUAL, DECLARED: (1) the window is `_PAIRED_SPAN` characters, so numbers
     # further apart than that evade it; (2) a marker word outside {`head`, `main`} —
     # `upstream`, say — is not a marker here, and a figure stated with no marker beside it is
-    # not a pair at all. Neither is closable by a list, and no count of spellings is stated
-    # anywhere above: the closure for the whole class is the ONE-HEAD rule the twin arm
-    # enforces positively, on the sentence that matters.
+    # not a pair at all; (3) a marker further than `_PAIRED_TAIL` characters from the nearer
+    # figure is outside the window. None is closable by a list, and no count of spellings is
+    # stated anywhere above. ⛔ AND THE CLASS IS NOT CLOSED HERE: the nearest twin
+    # (`assert _d5.count(_twin) == 2`) counts TWO fixed literals about
+    # `register_source(..., raw_state=...)` and cannot SEE a new pair anywhere on the row —
+    # measured green under a live injection this arm reds (#14386 review round 7, P1: an
+    # earlier cut of this comment called that arm "the closure for the whole class").
     _PAIRED_SPAN = 140
     _PAIRED_TAIL = 30
     #: The legitimate multi-head spans, declared IN FULL — a flagged span is exempt only when
@@ -19028,7 +19032,11 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
         for _end in _num_tokens[_i + 1:]:
             if _end - _start > _PAIRED_SPAN:
                 break
-            _span = d5[0][_start:_end + _PAIRED_TAIL]
+            #: The window reaches BACKWARD as well as forward: a fabrication may put its
+            #: markers FIRST (`at this head `:25107`, on `origin/main` `:24856``), and a scan
+            #: that only looked forward measured that GREEN while the same wording with the
+            #: markers last red (#14386 review round 7, P1).
+            _span = d5[0][max(0, _start - _PAIRED_TAIL):_end + _PAIRED_TAIL]
             _low = _span.lower()
             if "head" in _low and "main" in _low:
                 # the exemption is tested on the TOKEN-TO-TOKEN text only, so the marker
