@@ -310,8 +310,10 @@ all three `durations:` rows still emitted **721.3** on THAT resolution
 those rows moved NOTHING **at that head**, which is the point of the sentence). ⛔ The premise is
 scoped to that head ON PURPOSE: the 2026-11-23 sweep has since lowered two of the three to `0.1`
 (`test_14012_resident_pin.py`, `test_14012_outside_view.py`; only `test_14012_resident_cli.py`
-is still `2.0`), so at this head dropping all three DOES move the worst — `835.2 s → 835.5 s`,
-the 28 m minute unchanged — what moves the term is three more
+is still `2.0`), so **at `a7baa98d053d`** dropping all three DOES move the worst — `835.7 s →
+836.0 s`, the 28 m minute unchanged (both arms re-emitted at that sha; the number is pinned to
+a NAMED commit rather than "this head" on purpose — it moves with every merge to `main`, and a
+figure whose head is not named is the rot this paragraph's own rule forbids) — what moves the term is three more
 files in the pack, +6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is
 applied at the earlier heads. ⛔ **EACH RE-CUT MERGES A DIFFERENT PAIR, SO THE TERM IS READ OFF THE
 RESULTING TREE RATHER THAN INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on the tree that
@@ -349,9 +351,10 @@ same shape as every earlier one: NO ARITHMETIC ON THE TWO PARENTS' FIGURES WOULD
 (`721.1` on the parent that merged `10e51693`, `721.3` here). ⛔ **THAT SENTENCE IS HISTORY, AND SO
 ARE THE TERMS IT QUOTES**: at `f56aac204ca6` the minute was
 unchanged — `ceil(721.3/60 x 2)` = 25 — so the hand-added trio stood at 56.6 m / 85.0 m / 5.0 m. The
-**2026-11-23 sweep** then re-packed this pool, so that trio is history too: the committed map now
-emits **28 m** on all eleven shards at a worst `est_seconds` of **835.2**
-(`ceil(835.2/60 x 2)` = 28), and the trio is **59.6 m / 89.5 m / 0.5 m**. The three
+**2026-11-23 sweep** then re-packed this pool, so that trio is history too: at `a7baa98d053d` the
+committed map
+emits **28 m** on all eleven shards at a worst `est_seconds` of **835.7**
+(`ceil(835.7/60 x 2)` = 28), and the trio is **59.6 m / 89.5 m / 0.5 m**. The three
 hand-added figures are re-added from the emitted 28 m: 59.6 m / **89.5 m** / **0.5 m** (the row
 above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 59.64 m,
 x 1.5 = 89.5 m, 0.5 m of headroom**, and the `test_demo_session_read_exclusion_8290.py`
@@ -847,7 +850,8 @@ shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `4 
 (`ceil(11/3)` = 4 waves at `fast_shards: 11` — read it off the band pin below, not the 3-wave
 reading `ceil(9/3)` an earlier 9-shard shape gave), slow `2 × 8.5933 m ≈ 17.19 m` (the `8.59`
 above is that per-leg figure — `6.5933 m` plus the `2.0 m` setup allowance, printed as `8.59`,
-so take the product on the 2-dp leg: `2 × 8.59` reads 17.18 and is the same ROUNDED-SUM trap the
+so take the product on the HIGHER-PRECISION leg, not the 2-dp one: `2 × 8.59` reads 17.18 and is
+the same ROUNDED-SUM trap the
 `59.64 m` trio clause above forbids; the pin
 recomputes both halves from the map, and both moved on
 the 2026-11-23 sweep, which re-packed the slow pool — they read `8.18 m`/`16.36 m` at the
