@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14424-onboarding-1795470045-p2954621-65ffd55d",
+  "_sha": "b88949159a56d92a03def1f1fd93bb3eb89aa4d4",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14424-onboarding.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/14424-onboarding-first-run"
+    },
+    {
+      "kind": "sha",
+      "value": "26bea032a96b88ebfba5ac5b05a68bb175e60042"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14424-onboarding"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 5108,
+  "ended_at": 1795475153,
+  "exit_code": 0,
+  "heartbeat_at": 1795475153,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14424-onboarding-1795470045-p2954621-65ffd55d",
+  "lease_until": 1795511753,
+  "pid": 2954621,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795470045,
+  "state": "DONE",
+  "tag": "14424-onboarding",
+  "worktree": "/home/cmux/tortoise/.worktrees/14424-onboarding"
+}
