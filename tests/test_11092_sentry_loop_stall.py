@@ -832,9 +832,6 @@ def test_the_real_sdk_builds_an_event_with_no_source_context(real_sentry) -> Non
 # `uv.lock` holds 2.68.1, so a leg that resolves through the lock never sees it —
 # which is why the declaration, not the lock, is what is pinned here.
 
-#: The first `sentry-sdk` major that rejects `tortoise/sentry.py`'s option set.
-_FIRST_MAJOR_WITHOUT_OUR_OPTIONS = Version("3.0.0")
-
 #: Probe releases across the WHOLE 3.x major, not just its first release (#14347
 #: review, cycle 13, finding 2). The removal happened in 3.0.0 and nothing readds
 #: the options later — `send_default_pii`, `include_local_variables` and
@@ -909,8 +906,9 @@ def test_the_pin_keeps_every_option_our_init_passes_inside_the_ceiling() -> None
 
     Three arms, each with its own mutant:
 
-    1. NO 3.x release is admitted — probed across the major, not just at its first
-       release. Mutants, both red: `">=2.0,<3"` → `">=2.0"` (the pre-fix
+    1. NO PROBED 3.x release is admitted — the probes span the major, not just its
+       first release (`SpecifierSet` cannot be enumerated, so the arm's guarantee is
+       over these edges, not over every 3.x ever published). Mutants, both red: `">=2.0,<3"` → `">=2.0"` (the pre-fix
        declaration) and `"…>=2.0,<3"` → `"…>=2.0,!=3.0.0"` (the shape that
        previously slipped through: 3.0.0 excluded, 3.1+ admitted). This is the arm
        that catches a re-loosened pin BEFORE a resolving env installs the major,
