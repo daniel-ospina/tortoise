@@ -792,10 +792,21 @@ def backoff_delay(attempts: int) -> int:
 # ── Read/write ─────────────────────────────────────────────────────────────
 
 
-def _atomic_write(path: Path, text: str) -> None:
+def _atomic_write_tmp(path: Path, text: str) -> Path:
+    """Write `text` to a temp BESIDE `path`, fsynced, and return the temp.
+
+    The PREPARE half of `_atomic_write`, split out for the one caller that must
+    spend the expensive part (up to `max_entry_bytes` of I/O) BEFORE it makes an
+    entry's log disappear: the #14359 quarantine in `write_spool_entry`. Doing
+    the I/O first and renaming second narrows the window in which the entry has
+    no log from "one whole write" to two renames, and it is what makes a full
+    disk fail with the stored log still in place instead of already moved aside.
+    A caller that does not `os.replace` this onto its target must unlink it.
+
+    0600: the spool holds full conversation text (the same private-file
+    convention ~/.tortoise uses for credentials).
+    """
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    # 0600: the spool holds full conversation text (the same private-file
-    # convention ~/.tortoise uses for credentials).
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -808,7 +819,11 @@ def _atomic_write(path: Path, text: str) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
-    os.replace(tmp, path)
+    return tmp
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    os.replace(_atomic_write_tmp(path, text), path)
 
 
 def _sweep_stale_temp_files(root: Path, max_age_s: float = 300.0) -> None:
@@ -922,6 +937,31 @@ def _entry_bytes(root: Path, session_id: str) -> int:
     return total
 
 
+def _total_entry_bytes(root: Path, metas: list[dict]) -> int:
+    """The spool's live-entry bytes, counting each entry's file pair ONCE.
+
+    One count per DISTINCT ``session_id``: ``_entry_bytes`` is a pure function
+    of ``(root, session_id)`` and ``entry_key`` addresses a disjoint file pair
+    per session, so two metas naming one session (a hand-placed duplicate) must
+    not add its bytes twice. This is the ONE arithmetic every ceiling uses —
+    ``_saturated_for_metas`` (admission) and ``prune_spool`` (eviction) — because
+    the two disagreeing is the direction that deletes: saturation would admit on
+    the smaller total while prune evicted a live entry on the larger one (#14359).
+
+    ⛔ WHAT THIS IS NOT: a sum of the directory. ``_entry_bytes`` addresses the
+    CANONICAL pair derived from the field, so a meta whose ``session_id``
+    disagrees with its own file stem (``dup.meta.json``) contributes only the
+    canonical pair's bytes — the stray file itself is counted by NO term here.
+    That residual is #14359's own fix-direction (b) (*address the file, or refuse
+    a meta whose id disagrees with its stem*) and no writer produces the shape:
+    both legs derive the file name and the field from one id. It is NAMED rather
+    than implied, because the cheap scan (`_cheap_spool_scan`, one count per
+    file) is the upper bound the admission fast path relies on and this term is
+    what must not exceed it — for every shape a writer can make, it does not.
+    """
+    return sum(_entry_bytes(root, sid) for sid in {m["session_id"] for m in metas})
+
+
 def _orphan_paths(root: Path) -> list[Path]:
     """Quarantined turn logs in the entries dir, OLDEST first.
 
@@ -975,20 +1015,23 @@ def _turn_log_has_content(root: Path, session_id: str) -> bool:
 def _quarantine_log(log: Path) -> Path | None:
     """Move a turn log ASIDE instead of unlinking it — kept FOR FORENSICS.
 
-    Used by `list_spool_metas` when the META is corrupt: the transcript has
-    nothing to do with the corruption and is the only copy, so deleting it turns
-    a bad `meta.json` into permanent data loss (#7708). An empty/absent log is
-    removed (nothing to keep); a log with bytes is renamed to
-    ``<name>.turns.jsonl.orphan`` with a numeric suffix so an earlier orphan is
-    never clobbered. Best-effort: a rename failure leaves the log in place,
-    which is still better than deleting it.
+    Two callers, and they differ in what they leave behind: `list_spool_metas`
+    quarantines a log whose META is corrupt and then removes that meta (the only
+    copy of the session id — #7708), while `write_spool_entry` quarantines a log
+    that holds bytes but parses to ZERO turns and leaves a perfectly READABLE
+    meta in place (#14359). An empty/absent log is removed (nothing to keep); a
+    log with bytes is renamed to ``<name>.turns.jsonl.orphan`` with a numeric
+    suffix so an earlier orphan is never clobbered. Best-effort: a rename
+    failure leaves the log in place, which is still better than deleting it.
 
     NOT re-fileable — the honesty this owes the reader who finds an `.orphan`:
-    the entry's key is ``sha256(session_id)[:32]`` and the corrupt meta (the only
-    copy of the session id) is REMOVED, so no verb can reconstruct the session
-    id the server needs. The bytes are preserved FOR FORENSICS (grep a lost turn,
-    recover a prefix by hand), not for a retry. The wording here once said
-    "recoverable", which overstated what the name can deliver.
+    the entry's key is ``sha256(session_id)[:32]``, and on the corrupt-meta path
+    the meta (the only copy of the session id) is REMOVED, so no verb can
+    reconstruct the session id the server needs. The bytes are preserved FOR
+    FORENSICS (grep a lost turn, recover a prefix by hand), not for a retry. The
+    wording here once said "recoverable", which overstated what the name can
+    deliver. Do not read the corrupt-meta case as the only one: an orphan on
+    disk may equally have a live, readable meta beside it.
     """
     if _file_size(log) <= 0:
         with contextlib.suppress(OSError):
@@ -2207,10 +2250,23 @@ def write_spool_entry(
     # #14359: a log that holds bytes but parses to ZERO turns is unusable, yet
     # the rewrite below would replace it silently. Keep those bytes as an
     # `.orphan` first (the same forensic move a corrupt meta's log gets), so
-    # the stored content is never destroyed without a trace. Gated on the
-    # BYTES, not on the parse, and on a non-extending rewrite only.
-    if not extends and _turn_log_has_content(root, snapshot.session_id):
-        _quarantine_log(log_path)
+    # the stored content is never destroyed without a trace.
+    #
+    # ⛔ THE `not stored` CONJUNCT IS LOAD-BEARING, not a redundant re-test of
+    # `not extends`. `not extends` is the ROUTINE path for any session past the
+    # MAX_TURNS window: the window slides, so `len(snapshot.turns) ==
+    # len(stored)` and the append test (`len(snapshot.turns) > len(stored)`)
+    # fails — a full rewrite on EVERY such turn. Gated on bytes alone, those
+    # turns each moved a complete copy of a perfectly usable transcript aside,
+    # filling the byte budget with near-duplicates of the live log so that
+    # `prune_spool` relieved the ceiling by evicting real FILED entries first.
+    # This shape is the one the finding names — bytes on disk, nothing parsed —
+    # so that is what the gate tests.
+    quarantined: Path | None = None
+    log_tmp: Path | None = None
+    keep_stored_bytes = (
+        not extends and not stored
+        and _turn_log_has_content(root, snapshot.session_id))
     try:
         if extends:
             fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -2219,11 +2275,40 @@ def write_spool_entry(
                 fh.flush()
                 os.fsync(fh.fileno())
         else:
-            _atomic_write(log_path, log_text)
+            # ⛔ PREPARE, THEN QUARANTINE, THEN COMMIT — in that order. Writing
+            # the replacement body first means the failures that actually happen
+            # (a full disk, a read-only home) land while the stored log is still
+            # IN PLACE and nothing has been moved aside, and the window in which
+            # the entry has no log at all shrinks from one whole write to two
+            # renames. A concurrent drain that reads that window sees zero turns
+            # from a log that is not empty, takes the `transcript_empty` arm and
+            # UNLINKS the meta (#14359 review).
+            log_tmp = _atomic_write_tmp(log_path, log_text)
+            if keep_stored_bytes:
+                quarantined = _quarantine_log(log_path)
+            os.replace(log_tmp, log_path)
+            log_tmp = None
         _atomic_write(meta_path, meta_text)
     except OSError as exc:
         # A filesystem failure (full disk, read-only home) is a LOSS — record
         # it with a reason rather than returning an empty discard list.
+        #
+        # #14359 review: with the body written BEFORE the quarantine this is
+        # belt-and-braces, not the main guard — but a rename pair can still
+        # fail on its own. If the log is left ABSENT, the next drain reads
+        # `turns == []` and `_turn_log_has_content(...) is False`, so it takes
+        # the `transcript_empty` arm — which UNLINKS the meta and records "turn
+        # log is empty" — destroying an undelivered capture that the base left
+        # intact and filable. Put the bytes back so a failed write is a delay,
+        # not a loss. The `not log_path.exists()` test keeps a successfully
+        # written log: when only the META write failed, the fresh log stays and
+        # this does not clobber it with the bytes it replaced.
+        if log_tmp is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(log_tmp)
+        if quarantined is not None and not log_path.exists():
+            with contextlib.suppress(OSError):
+                os.replace(quarantined, log_path)
         discards.append(record_discard(root, {
             "session_id": snapshot.session_id,
             "capture_key": meta["capture_key"],
@@ -2436,8 +2521,7 @@ def _saturated_for_metas(
     # session address the same files, so a per-meta sum counted them twice and
     # could exceed the cheap scan, which sums each file once and is the upper
     # bound the admission fast path relies on.
-    total = sum(_entry_bytes(root, sid)
-                for sid in {m["session_id"] for m in metas})
+    total = _total_entry_bytes(root, metas)
     total += reclaimable_orphan_bytes
     if projected_bytes is None and replaces_session_id is None:
         # STRICT: the question is whether ADDING an entry would cross the ceiling,
@@ -2565,7 +2649,13 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
         key=lambda m: (0 if _entry_is_filed(m) else 1, *_age_key(m)),
     )
     count = len(metas)
-    total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
+    # #14359: ONE byte total per directory, computed the same way as
+    # `_saturated_for_metas` — one count per DISTINCT session_id, because two
+    # metas naming the same session address the same file pair. Left per-meta,
+    # the two sites disagreed the moment a duplicate meta existed: saturation
+    # said "not over" while this sum said "over" and evicted a live FILED entry
+    # on a total roughly twice the bytes on disk.
+    total = _total_entry_bytes(root, metas)
     total += sum(_file_size(path) for path in orphans)
     # The quarantined-log pass runs AFTER the filed-entry pass below, never
     # before it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on

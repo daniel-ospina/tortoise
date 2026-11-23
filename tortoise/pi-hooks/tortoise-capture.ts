@@ -1427,13 +1427,22 @@ function discardPath(dir: string): string {
   return join(dir, "discarded.jsonl");
 }
 
-function atomicWrite(path: string, text: string): void {
+function atomicWriteTmp(path: string, text: string): string {
+  /** Write `text` to a temp BESIDE `path`, fsynced, and return the temp — the
+   *  PREPARE half of `atomicWrite` (the Python leg's `_atomic_write_tmp`).
+   *
+   *  Split out for the one caller that must spend the expensive part (up to
+   *  `maxEntryBytes` of I/O) BEFORE it makes an entry's log disappear: the
+   *  #14359 quarantine in `writeSpoolEntry`. Doing the I/O first and renaming
+   *  second is what makes a full disk fail with the stored log still in place
+   *  instead of already moved aside. A caller that does not rename this onto its
+   *  target must unlink it.
+   *
+   *  0600: the spool holds full conversation text (the rest of ~/.tortoise uses
+   *  the same private-file convention for credentials). fsync before the rename:
+   *  the whole point of the spool is surviving a kill or a power loss, and a
+   *  rename without an fsync can leave a zero-length file. */
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  // 0600: the spool holds full conversation text (the rest of ~/.tortoise uses
-  // the same private-file convention for credentials).
-  //
-  // fsync before the rename: the whole point of the spool is surviving a kill or
-  // a power loss, and a rename without an fsync can leave a zero-length file.
   const fd = openSync(tmp, "w", 0o600);
   try {
     writeFileSync(fd, text, { encoding: "utf8" });
@@ -1441,7 +1450,11 @@ function atomicWrite(path: string, text: string): void {
   } finally {
     closeSync(fd);
   }
-  renameSync(tmp, path);
+  return tmp;
+}
+
+function atomicWrite(path: string, text: string): void {
+  renameSync(atomicWriteTmp(path, text), path);
 }
 
 /** Remove our own abandoned `*.tmp-*` scratch files (see the Python twin).
@@ -1732,6 +1745,30 @@ export function spoolEntryBytes(dir: string, sessionId: string): number {
   return total;
 }
 
+/**
+ * The spool's live-entry bytes, counting every FILE exactly once — the TS twin
+ * of the Python leg's `_total_entry_bytes` (#14359).
+ *
+ * One count per DISTINCT `session_id`: `spoolEntryBytes` is a pure function of
+ * `(dir, sessionId)` and `entryKey` addresses a disjoint file pair per session,
+ * so two metas naming one session (a hand-placed duplicate) must not add its
+ * bytes twice. BOTH ceiling sites go through this — `saturatedForMetas`
+ * (admission) and `pruneSpool` (eviction) — because the two legs and the two
+ * sites disagreeing is the direction that deletes: admission would admit on the
+ * smaller total while prune evicted a live entry on the larger one.
+ */
+export function totalEntryBytes(dir: string, metas: SpoolMeta[]): number {
+  const seen = new Set<string>();
+  let total = 0;
+  for (const meta of metas) {
+    const sessionId = meta.session_id;
+    if (seen.has(sessionId)) continue;
+    seen.add(sessionId);
+    total += spoolEntryBytes(dir, sessionId);
+  }
+  return total;
+}
+
 /** Whether the turn log exists with bytes — the gate between the TWO
  *  empty-transcript outcomes (#7708). An ABSENT/zero-byte log is
  *  `transcript_empty` (removed — provably nothing to keep); a log with bytes is
@@ -1756,7 +1793,7 @@ function turnLogHasContent(dir: string, sessionId: string): boolean {
  *  the session id) is REMOVED, so no verb can rebuild the session id the server
  *  needs. The bytes are kept FOR FORENSICS, not for a retry. (The wording here
  *  once said "recoverable", which overstated what the name can deliver.) */
-function quarantineLog(log: string): void {
+function quarantineLog(log: string): string | undefined {
   let size = 0;
   try {
     size = statSync(log).size;
@@ -1769,7 +1806,7 @@ function quarantineLog(log: string): void {
     } catch {
       // already gone
     }
-    return;
+    return undefined;
   }
   let target = `${log}.orphan`;
   let suffix = 1;
@@ -1781,7 +1818,9 @@ function quarantineLog(log: string): void {
     renameSync(log, target);
   } catch {
     // leave it in place — better than deleting it
+    return undefined;
   }
+  return target;
 }
 
 /** Quarantined turn logs in the entries dir, OLDEST first (#8531 review).
@@ -2514,6 +2553,23 @@ export function writeSpoolEntry(
     };
   }
 
+  let quarantined: string | undefined;
+  let logTmp: string | undefined;
+  // #14359: the Python leg's twin. A log that holds bytes but parses to ZERO
+  // turns is unusable, yet the rewrite below would replace it silently. Keep
+  // those bytes as an `.orphan` first (the same forensic move a corrupt meta's
+  // log gets), so stored content is never destroyed without a trace.
+  //
+  // ⛔ The gate is the ZERO-PARSE shape, never "this write is not an extension".
+  // `!extendsStored` is the ROUTINE path for any session past the MAX_SESSION
+  // turns window: the window slides, so `turns.length === stored.length` and the
+  // append test fails — a full rewrite on every such turn. Gated on that, every
+  // sliding turn would bank a complete copy of a perfectly usable transcript,
+  // charging the byte ceiling so `pruneSpool` relieved it by evicting real FILED
+  // entries first. A branch, a window shift and a compaction are DELIBERATE
+  // replacements, not lost bytes.
+  const keepStoredBytes =
+    !extendsStored && stored.length === 0 && fileSize(logPath) > 0;
   try {
     if (extendsStored) {
       // fsync the append: this is the path holding the MOST RECENT turns, and a
@@ -2526,7 +2582,17 @@ export function writeSpoolEntry(
         closeSync(fd);
       }
     } else {
-      atomicWrite(logPath, logText);
+      // ⛔ PREPARE, THEN QUARANTINE, THEN COMMIT — in that order. Writing the
+      // replacement body first means the failures that actually happen (a full
+      // disk, a read-only home) land while the stored log is still IN PLACE and
+      // nothing has been moved aside, and the window in which the entry has no
+      // log at all shrinks from one whole write to two renames. A concurrent
+      // drain that reads that window sees zero turns from a log that is not
+      // empty, takes the `transcript_empty` arm and UNLINKS the meta.
+      logTmp = atomicWriteTmp(logPath, logText);
+      if (keepStoredBytes) quarantined = quarantineLog(logPath);
+      renameSync(logTmp, logPath);
+      logTmp = undefined;
     }
     atomicWrite(metaPath, metaText);
     sweepStaleTempFiles(dir);
@@ -2534,6 +2600,25 @@ export function writeSpoolEntry(
     // A filesystem failure (full disk, read-only home) is a LOSS — record it
     // with a reason rather than returning an empty discard list (the silent
     // drop this issue exists to remove).
+    // …and put back what the quarantine moved. If the log is left ABSENT the
+    // next drain reads zero turns, takes the `transcript_empty` arm and UNLINKS
+    // the meta — destroying an undelivered capture the base left intact and
+    // filable. `!existsSync(logPath)` keeps a successfully written log: when only
+    // the META write failed, the fresh log stays and is not clobbered.
+    if (logTmp !== undefined) {
+      try {
+        unlinkSync(logTmp);
+      } catch {
+        // already gone
+      }
+    }
+    if (quarantined !== undefined && !existsSync(logPath)) {
+      try {
+        renameSync(quarantined, logPath);
+      } catch {
+        // best effort, exactly as the quarantine itself is
+      }
+    }
     discards.push(
       recordDiscard(dir, {
         session_id: snapshot.sessionId,
@@ -2631,7 +2716,7 @@ export function pruneSpool(
 
   let count = metas.length;
   let total =
-    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
+    totalEntryBytes(dir, metas) +
     orphans.reduce((sum, path) => sum + fileSize(path), 0);
   // The quarantined-log pass runs AFTER the filed-entry pass below, never before
   // it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on the
@@ -2642,7 +2727,7 @@ export function pruneSpool(
   // unfiled entry still has a surface that can deliver it — and an unfiled entry
   // is never evicted at all (capture-loss). The record names the class in the
   // same `loss` vocabulary the live entries use (#6388).
-  for (const { meta, bytes } of ranked.filter(({ meta: m }) => entryFiled(m))) {
+  for (const { meta } of ranked.filter(({ meta: m }) => entryFiled(m))) {
     if (count <= bounds.maxEntries && total <= bounds.maxTotalBytes) break;
     const reason =
       total > bounds.maxTotalBytes ? DISCARD_BYTES_EXCEEDED : DISCARD_COUNT_EXCEEDED;
@@ -2657,9 +2742,16 @@ export function pruneSpool(
       reason === DISCARD_BYTES_EXCEEDED
         ? `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}${loss}`
         : `spool has ${count} entries > maxEntries=${bounds.maxEntries}${loss}`;
+    // Re-stat HERE, exactly as the Python leg's in-loop `_entry_bytes` does,
+    // rather than subtracting the count memoised at scan time. `discardEntry`
+    // removes the file PAIR derived from the session_id, so a second candidate
+    // naming an already-evicted session contributes 0 — while the scan-time
+    // count subtracted that pair twice and left the two legs evicting different
+    // sets on the duplicate shape (#14359).
+    const size = spoolEntryBytes(dir, meta.session_id);
     discards.push(discardEntry(dir, meta, reason, detail));
     count -= 1;
-    total -= bytes;
+    total -= size;
   }
   for (const orphan of orphans) {
     if (total <= bounds.maxTotalBytes) break;
@@ -2817,9 +2909,7 @@ function saturatedForMetas(
   // Bytes `pruneSpool` may reclaim WITHOUT spending an undelivered entry: the
   // orphan class is byte-evictable only (see below).
   const reclaimableOrphanBytes = orphanPaths(dir).reduce((sum, path) => sum + fileSize(path), 0);
-  let total =
-    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
-    reclaimableOrphanBytes;
+  let total = totalEntryBytes(dir, metas) + reclaimableOrphanBytes;
   const { projectedBytes, replacesSessionId } = projection;
   if (projectedBytes === undefined && replacesSessionId === undefined) {
     // STRICT: the question is whether ADDING an entry would cross the ceiling, so

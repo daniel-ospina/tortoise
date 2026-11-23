@@ -89,6 +89,7 @@ import {
   sourceName,
   spoolEntryBytes,
   spoolSaturated,
+  DEFAULT_BOUNDS,
   truncationMarker,
   warnIfCredentialStoreIsReadable,
   writeSpoolEntry,
@@ -557,6 +558,50 @@ test("buildCapturePayload normalises a bad clock instead of forwarding it", () =
   assert.ok(
     !("client_captured_at" in buildCapturePayload({ ...base, clientCapturedAt: Number.NaN })),
     "a NaN reached the wire",
+  );
+});
+
+test("a duplicate meta gives prune and saturation the SAME byte total (#14359)", async () => {
+  // The two ceiling sites must agree. `saturatedForMetas` counts one entry per
+  // DISTINCT session_id (two metas naming one session address the same file
+  // pair), and `pruneSpool` sums per META unless it uses the same arithmetic —
+  // and they disagree in the direction that DELETES: saturation admits a write
+  // on the smaller total while prune evicts a live FILED entry on the larger
+  // one, writing the inflated number into the ledger. Both legs share this
+  // directory, so the Python twin must agree too.
+  //
+  // MUTATION THAT REDS THIS: revert `pruneSpool`'s total to the per-meta sum ->
+  // it evicts `sess-one-total` under a ceiling the spool is comfortably under.
+  const spool = tmpSpool();
+  const sid = "sess-one-total";
+  const turns = [{ role: "user" as const, content: "x".repeat(1000) }];
+  writeSpoolEntry(spool, snapshot(sid, turns));
+
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.ok(
+    readSpoolEntry(spool, sid)?.filed_key,
+    "the fixture must build a FILED entry (an unfiled entry is never evictable)",
+  );
+
+  const entries = join(spool, "entries");
+  const metaPath = join(entries, `${entryKey(sid)}.meta.json`);
+  writeFileSync(join(entries, "dup.meta.json"), readFileSync(metaPath, "utf8"));
+
+  const onDisk = readdirSync(entries).reduce(
+    (sum, name) => sum + statSync(join(entries, name)).size,
+    0,
+  );
+  const bounds = { ...DEFAULT_BOUNDS, maxTotalBytes: onDisk + 1 };
+  assert.equal(
+    spoolSaturated(spool, bounds),
+    false,
+    `the spool holds ${onDisk} bytes under a ${onDisk + 1}-byte ceiling`,
+  );
+  assert.deepEqual(
+    pruneSpool(spool, undefined, bounds).map((d) => d.reason),
+    [],
+    "prune must agree with saturation about the total; it evicted a live entry",
   );
 });
 
@@ -6253,4 +6298,63 @@ test("#9599: a not-yet-created transcript under a symlink still keys like Python
     "the not-yet-existent leaf was anchored differently from its real path");
   // A wholly non-existent path is still anchored (lexically) rather than throwing.
   assert.match(localSessionId(join(root, "a", "b", "c.jsonl"))!, /^c-[0-9a-f]{12}$/);
+});
+
+test("a zero-turn stored log is ORPHANED, not overwritten (#14359 shape 1)", () => {
+  // The Pi leg's twin of the Python test. #14359 was found on the Python leg,
+  // but both legs write the SAME spool directory and the same session can be
+  // written by the Pi hook AND by the Python store-sync backstop — so a repair
+  // on one leg only is a leg DISAGREEMENT about the same bytes: one preserves
+  // the unusable log, the other destroys it silently.
+  //
+  // MUTATION THAT REDS THIS: drop the `keepStoredBytes` quarantine call from
+  // `writeSpoolEntry` — `orphans` is then empty and the stale bytes are gone.
+  const spool = tmpSpool();
+  const sid = "sess-zero-turn";
+  writeSpoolEntry(spool, snapshot(sid, [{ role: "user", content: "first" }]));
+
+  const entries = join(spool, "entries");
+  const logPath = join(entries, `${entryKey(sid)}.turns.jsonl`);
+  const garbage = { note: "half-written" };
+  writeFileSync(logPath, `${JSON.stringify(garbage)}\n[1, 2, 3]\n`);
+  const original = readFileSync(logPath);
+
+  writeSpoolEntry(spool, snapshot(sid, [{ role: "user", content: "a fresh turn" }]));
+
+  const orphans = readdirSync(entries).filter((n) => n.includes(".turns.jsonl.orphan"));
+  assert.equal(orphans.length, 1, `the unusable bytes must be kept as an orphan, found ${orphans}`);
+  assert.deepEqual(
+    readFileSync(join(entries, orphans[0]!)),
+    original,
+    "the orphan must hold the bytes the rewrite replaced",
+  );
+  assert.deepEqual(
+    readSpoolTurns(spool, sid).map((t) => t.content),
+    ["a fresh turn"],
+    "…and the live log must hold the new snapshot",
+  );
+});
+
+test("a window shift over a USABLE log banks no orphan (#14359 review)", () => {
+  // `!extendsStored` is the ROUTINE path for any session past the MAX_TURNS
+  // window: the window slides, the lengths match, and every turn is a full
+  // rewrite. Gating the orphan on that would bank one transcript copy per turn
+  // for the rest of the session.
+  //
+  // MUTATION THAT REDS THIS: gate `keepStoredBytes` on `!extendsStored` alone.
+  const spool = tmpSpool();
+  const sid = "sess-window-shift";
+  const window = 4;
+  let conversation = Array.from({ length: window }, (_, i) => ({
+    role: "user" as const,
+    content: `t${i}`,
+  }));
+  writeSpoolEntry(spool, snapshot(sid, conversation));
+  for (let step = 1; step < window; step += 1) {
+    conversation = [...conversation, { role: "assistant" as const, content: `p${step}` }];
+    writeSpoolEntry(spool, snapshot(sid, conversation.slice(-window)));
+  }
+  const entries = join(spool, "entries");
+  const orphans = readdirSync(entries).filter((n) => n.includes(".turns.jsonl.orphan"));
+  assert.deepEqual(orphans, [], "a window shift replaces usable turns BY DESIGN");
 });

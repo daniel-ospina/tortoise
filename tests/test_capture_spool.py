@@ -5376,3 +5376,174 @@ def test_a_readable_meta_over_a_zero_turn_log_is_orphaned_and_a_duplicate_meta_n
     assert spool_saturated(dup_root, Bounds(max_total_bytes=on_disk + 1)) is False, (
         f"the spool holds {on_disk} bytes under a {on_disk + 1}-byte ceiling; "
         "a duplicate meta must not make it read as saturated")
+
+
+def test_a_non_extending_rewrite_of_USABLE_turns_creates_no_orphan(tmp_path):
+    """#14359 review: the orphan gate is the ZERO-PARSE shape, not `not extends`.
+
+    ``not extends`` is the ROUTINE path for any session past the MAX_TURNS
+    window: the window slides, so ``len(snapshot.turns) == len(stored)`` and the
+    append test fails — a full rewrite on EVERY such turn. A gate on bytes alone
+    therefore moved a complete copy of a perfectly usable transcript aside on
+    every turn, filling the byte budget with near-duplicates of the live log so
+    that ``prune_spool`` relieved the ceiling by evicting real FILED entries
+    first.
+
+    MUTATION THAT REDS THIS: drop the ``not stored`` conjunct from the gate in
+    ``write_spool_entry`` -> one orphan per rewrite, three here.
+    """
+    from tortoise.capture_spool import _entries_dir
+
+    root = tmp_path / "window-shift"
+    sid = "14359-usable-rewrite"
+    write_spool_entry(root, _snapshot(sid, turns=[
+        {"role": "user", "content": f"t{i}"} for i in range(4)]))
+    # A window slide / branch: same length, different content, so `extends` is
+    # False — but the stored log parses fine, so NOTHING is being discarded that
+    # the harness cannot still supply.
+    for k in range(3):
+        write_spool_entry(root, _snapshot(sid, turns=[
+            {"role": "user", "content": f"z{k}-{i}"} for i in range(4)]))
+        orphans = sorted(p.name for p in _entries_dir(root).iterdir()
+                         if ".turns.jsonl.orphan" in p.name)
+        assert orphans == [], (
+            f"a rewrite of a USABLE log discards nothing on disk, so there is "
+            f"nothing to quarantine, found {orphans}")
+
+
+def test_a_failed_rewrite_leaves_the_stored_bytes_IN_PLACE(tmp_path, monkeypatch):
+    """#14359 review: write the replacement body FIRST, then move the old one.
+
+    The quarantine is a RENAME, so any code that moves the log aside before it
+    has a replacement to put back opens a window in which the entry has no log:
+    the next drain reads zero turns from a log that is not empty, takes the
+    ``transcript_empty`` arm and UNLINKS the meta. A full disk is exactly when
+    that window would be entered, because that is when the rewrite fails — so
+    the body is written and fsynced to a temp BEFORE the quarantine, and the
+    failures that actually happen leave the stored log untouched.
+
+    MUTATION THAT REDS THIS: move `_quarantine_log` back above
+    `_atomic_write_tmp` — an ENOSPC then leaves the bytes banked as an
+    `.orphan` (or gone) instead of still in place.
+    """
+    import errno
+
+    import tortoise.capture_spool as sp
+
+    root = tmp_path / "prepare-first"
+    sid = "14359-prepare-first"
+    write_spool_entry(root, _snapshot(sid))
+    log_path = sp._log_path(root, sid)
+    # An unusable stored log — the quarantine gate fires — and then the
+    # replacement body cannot be written at all.
+    unusable = b'{"note": "half-written"}\n[1, 2, 3]\n'
+    log_path.write_bytes(unusable)
+
+    def _enospc(tmp_path_, text):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(sp, "_atomic_write_tmp", _enospc)
+    result = write_spool_entry(root, _snapshot(sid, turns=[
+        {"role": "user", "content": "a fresh turn"}]))
+    monkeypatch.undo()
+
+    assert result["written"] is False
+    assert [d["reason"] for d in result["discards"]] == [sp.DISCARD_WRITE_FAILED], (
+        f"a failed log write is a LOSS and must be recorded as one: {result}")
+    orphans = sorted(p.name for p in sp._entries_dir(root).iterdir()
+                     if ".turns.jsonl.orphan" in p.name)
+    assert orphans == [], f"nothing may be moved aside before there is a body to put back: {orphans}"
+    assert log_path.read_bytes() == unusable, (
+        "a failed rewrite must leave the stored bytes exactly where they were")
+    assert read_spool_meta(root, sid) is not None, (
+        "…and the entry readable, or the next drain unlinks it as transcript_empty")
+
+
+def test_a_failed_COMMIT_of_the_new_log_puts_the_stored_bytes_back(tmp_path, monkeypatch):
+    """The rename pair can fail on its own, after the quarantine has fired.
+
+    Belt to the previous test's braces: the body was prepared and the old log
+    moved aside, and then the commit rename failed. The prior bytes must come
+    back rather than sit in an un-fileable ``.orphan`` beside a meta that is
+    about to be reaped as ``transcript_empty``.
+
+    MUTATION THAT REDS THIS: drop the ``os.replace(quarantined, log_path)``
+    restore from the ``except OSError`` arm — the log is then absent and the
+    bytes are only in an orphan.
+    """
+    import tortoise.capture_spool as sp
+
+    root = tmp_path / "commit-fails"
+    sid = "14359-commit-fails"
+    write_spool_entry(root, _snapshot(sid))
+    log_path = sp._log_path(root, sid)
+    unusable = b'{"note": "half-written"}\n[1, 2, 3]\n'
+    log_path.write_bytes(unusable)
+
+    real_replace = os.replace
+
+    def _replace(src, dst):
+        # Only the COMMIT of the prepared temp fails; the restore of the orphan
+        # (a rename onto the same target) must still work, or this would pin a
+        # restore that cannot happen.
+        if Path(dst) == log_path and ".tmp-" in Path(src).name:
+            raise OSError(5, "Input/output error")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(sp.os, "replace", _replace)
+    result = write_spool_entry(root, _snapshot(sid, turns=[
+        {"role": "user", "content": "a fresh turn"}]))
+    monkeypatch.undo()
+
+    assert result["written"] is False
+    assert log_path.read_bytes() == unusable, (
+        "the bytes the failed commit moved aside must be back in place")
+    orphans = sorted(p.name for p in sp._entries_dir(root).iterdir()
+                     if ".turns.jsonl.orphan" in p.name)
+    assert orphans == [], f"the restore must not leave a second copy banked: {orphans}"
+    assert not list(sp._entries_dir(root).glob("*.tmp-*")), (
+        "the prepared temp must be cleaned up when the commit fails")
+
+
+def test_a_duplicate_meta_gives_prune_and_saturation_the_SAME_byte_total(tmp_path):
+    """#14359 review: one byte total per directory, or prune deletes on a lie.
+
+    ``_saturated_for_metas`` counts one entry per DISTINCT ``session_id``, while
+    ``prune_spool`` still summed per META. With a duplicate meta the two then
+    disagree, and they disagree in the direction that deletes: saturation admits
+    a write on the smaller total while prune evicts a live FILED entry on the
+    larger one, writing the inflated number into the ledger.
+
+    MUTATION THAT REDS THIS: revert ``prune_spool``'s total to the per-meta sum
+    -> it evicts ``filed-one`` under a ceiling the spool is comfortably under.
+    """
+    from tortoise.capture_spool import (
+        _entries_dir,
+        _finite_instant,
+        _meta_path,
+        prune_spool,
+        spool_saturated,
+    )
+
+    root = tmp_path / "one-total"
+    sid = "14359-one-total"
+    write_spool_entry(root, _snapshot(sid, turns=[
+        {"role": "user", "content": "x" * 1000}]))
+    # Make the entry FILED — an unfiled entry is never evictable, so the test
+    # would pass vacuously without this.
+    meta = read_spool_meta(root, sid)
+    meta["filed_key"] = meta["capture_key"]
+    meta["filed_lane"] = meta.get("capture_lane")
+    meta["filed_stamp"] = _finite_instant(meta.get("client_captured_at"))
+    _meta_path(root, sid).write_text(json.dumps(meta), encoding="utf-8")
+    assert _entry_is_filed(meta), "the fixture must build a filed entry"
+    (_entries_dir(root) / "dup.meta.json").write_text(
+        _meta_path(root, sid).read_text(encoding="utf-8"), encoding="utf-8")
+
+    on_disk = sum(p.stat().st_size for p in _entries_dir(root).iterdir())
+    bounds = Bounds(max_total_bytes=on_disk + 1)
+    assert spool_saturated(root, bounds) is False, (
+        f"the spool holds {on_disk} bytes under a {on_disk + 1}-byte ceiling")
+    assert prune_spool(root, None, bounds) == [], (
+        "prune must agree with saturation about the total; it evicted a live "
+        "entry on a byte count that counts one entry twice")
