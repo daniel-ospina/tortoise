@@ -3761,7 +3761,12 @@ def _code_spans(md: str) -> list[str | None]:
 
 #: The production shape that redded the required `docs` check on the 2026-11-23 sweep:
 #: a `parametrize`-controlled nodeid carrying its own backtick pair. Taken verbatim
-#: from the artifact row at `docs/ci-timing.md:823`.
+#: from the `_HOLD_NONE` row of the 2026-11-23 sweep's flake table (run
+#: `45071394329`) in `docs/ci-timing.md`. ⛔ Cited by ROW IDENTITY, never by line
+#: number: that artifact is regenerated every week and the flake table gains and
+#: loses rows with each sample, so `docs/ci-timing.md:823` names this row today and
+#: an unrelated one after the next sweep — the exact rot the 2026-11-23 refresh
+#: re-cut in `docs/ops/ci-wall-clock.md` §6.
 _BACKTICK_NODEID = ("tests/test_7949_capstone_measure.py::"
                     "test_each_block_arm_reds_on_the_mutation_it_guards"
                     "[<lambda>-`_HOLD_NONE` (the clause is negated)]")
