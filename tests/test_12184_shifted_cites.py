@@ -446,9 +446,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # was invisible except as ruff F601 (`ruff check .` red on `main` and every PR) and as
     # `test_dod_5090_probe.py::test_no_module_declares_the_same_dict_key_twice`. That guard reds a
     # `test` SHARD, not the required check directly: `python-ci-gate` lists `test` in
-    # `DEFERRABLE_LEGS` and hands a red leg to `ci-introduced-failure`, which EXEMPTS an id that is
-    # `main`'s own red and blocks only when the baseline cannot be measured — so the aggregate
-    # consequence depends on that predicate, not on this row alone. Root: #14367.
+    # `DEFERRABLE_LEGS` and hands a red leg to `ci-introduced-failure`, which DECIDES whether the
+    # failing ids are `main`'s own — so whether the aggregate reds depends on that predicate, not on
+    # this row alone. Root: #14367.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7600'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7602'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7599-7602`'): 1,
