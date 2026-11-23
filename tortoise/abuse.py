@@ -258,6 +258,12 @@ def _int_env(name: str, default: int) -> int:
 _WINDOW_WARNED: set[tuple[str, str | None]] = set()
 _WINDOW_WARN_LOCK = threading.Lock()
 
+#: Cap on the in-process set of episode ends whose incident resolution FAILED and
+#: is awaiting a retry on a later clean window (#14407). A retry hint, never an
+#: authority: the store holds the incident, and the runbook's manual close remains
+#: the fallback for a close that cannot succeed.
+_MAX_PENDING_EPISODE_RESOLVES = 4096
+
 
 def _negative_env(raw: str | None) -> bool:
     """True when ``raw`` parses as a negative int.
@@ -1801,6 +1807,10 @@ class AbuseEngine:
         # store remains authoritative for staging and is the cross-replica gate.
         self._last_notified: dict[tuple[str, str, str], datetime] = {}
         self._notify_lock = threading.Lock()
+        # Episode ends whose incident resolution FAILED, awaiting a retry on a
+        # later clean window (#14407). In-process and bounded — a hint, never an
+        # authority (see `_remember_pending_resolve`).
+        self._pending_episode_resolves: set[tuple[str, str]] = set()
 
     def _claim_notify(self, org_id: str, rule: str, stage: str,
                       now: datetime, window_s: int) -> bool:
@@ -1849,10 +1859,38 @@ class AbuseEngine:
         """
         try:
             from tortoise.notify import resolve_abuse_episode
-            resolve_abuse_episode(org_id, rule)
+            resolved = resolve_abuse_episode(org_id, rule)
         except Exception:  # noqa: BLE001, RUF100 — never break the request path
             logger.debug("abuse episode-end resolution failed (%s, %s)",
                          org_id, rule)
+            resolved = False
+        # A FAILED close is retried, not lost. `resolve_incident_state` fails
+        # non-destructively by design — a failed `_close` records `close_failed_at`
+        # and re-raises (#5143), an R2 transport error propagates — and this gate
+        # fires exactly ONCE per episode (the next clean window reads
+        # `flagged=False`), so without a pending set a single blip would strand the
+        # incident OPEN for the rest of time: the "permanent incident for a
+        # recovered condition" this whole fix exists to remove.
+        #
+        # The retry is a set lookup on the clean-window path — no store read — so
+        # it costs nothing on the hot path and cannot undo the R2-read reduction.
+        if resolved:
+            self._pending_episode_resolves.discard((org_id, rule))
+        else:
+            self._remember_pending_resolve(org_id, rule)
+
+    def _remember_pending_resolve(self, org_id: str, rule: str) -> None:
+        """Queue an episode-end resolution that FAILED, for the next clean window.
+
+        Bounded: this is a retry HINT, never an authority — the store holds the
+        incident. The cap keeps a permanently broken close from growing the set
+        without limit; dropping the oldest entries only costs the retry, and the
+        runbook's manual close remains the fallback.
+        """
+        self._pending_episode_resolves.add((org_id, rule))
+        if len(self._pending_episode_resolves) > _MAX_PENDING_EPISODE_RESOLVES:
+            self._pending_episode_resolves.clear()
+            self._pending_episode_resolves.add((org_id, rule))
 
     def _release_notify(self, org_id: str, rule: str, stage: str) -> None:
         """Re-arm the alert budget for a stage when its episode ENDS, so a
@@ -1955,6 +1993,13 @@ class AbuseEngine:
                 # increase it, so the claim is left to expire on its own.
                 self._release_notify(org_id, rule, EVENT_FLAG)
                 self._release_notify(org_id, rule, EVENT_REVIEW)
+                self._end_alert_episode(org_id, rule)
+            elif (org_id, rule) in self._pending_episode_resolves:
+                # A previous episode end could not close its incidents (a failed
+                # close re-raises by design, #5143). Retry it here: for this org
+                # the flag is already gone, so no later window would ever see
+                # `flagged=True` again and the incident would stay OPEN forever.
+                # A set lookup, never a store read.
                 self._end_alert_episode(org_id, rule)
             return None
         details = {"rule": rule, "count": total,

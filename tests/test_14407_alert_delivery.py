@@ -307,6 +307,56 @@ def test_resolution_announces_before_it_deletes(delivered):
 
 # ── 3. the measurement classes: declared non-filing, digest delivery ─────────
 
+def test_a_failed_send_does_not_consume_the_digest_window(monkeypatch):
+    """A Telegram blip must not mute the class for a whole window.
+
+    `_claim_delivery` arms the window before the send, so a swallowed send
+    failure used to cost that subject the full window (24h for an incident class
+    in the no-channel shape this PR declares as prod's residual). A failed send
+    releases the window instead.
+    """
+    import tortoise.notify as notify
+
+    attempts: list[str] = []
+
+    def _boom(bot, chat, text, **k):
+        attempts.append(text)
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr(notify, "telegram_send", _boom)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+    for _ in range(2):
+        notify.notify_abuse("abuse_new_ip", {"org_id": "org-a"}, {"country": "ES"})
+
+    assert len(attempts) == 2, (
+        "the failed send consumed the window — the second detection was "
+        f"swallowed instead of retried ({len(attempts)} attempt(s))")
+    notify.reset_abuse_delivery_for_tests()
+
+
+def test_an_anonymous_digest_does_not_claim_a_dashboard_row(
+        delivered, monkeypatch):
+    """The dashboard row is written only when the detection carried an org.
+
+    An anonymous subject is mapped to ``"_"``, and its folded detections are
+    recorded NOWHERE — so the digest must not assert that they are. Asserting an
+    attribution that does not exist is the defect class this change removes.
+    """
+    import tortoise.notify as notify
+
+    for _ in range(3):
+        notify.notify_abuse("abuse_new_ip", {}, {"country": "ES"})
+
+    assert len(delivered.pushes) == 1
+    message = delivered.pushes[0]
+    assert "dashboard" in message
+    assert "NO dashboard row was written" in message, message
+    assert "the rows are on the dashboard" not in message, message
+
+
 def test_activity_detections_collapse_into_one_message(delivered):
     """Pre-fix this sent 100 messages — the R3 rule is 1 per 5-min window."""
     import tortoise.notify as notify
@@ -488,6 +538,62 @@ def test_an_incident_that_cannot_name_an_issue_still_reaches_the_human(
     assert "issue number" in sent[0], sent[0]
 
     notify.reset_abuse_delivery_for_tests()
+
+
+def test_a_failed_episode_end_close_is_retried_on_the_next_clean_window(
+        monkeypatch):
+    """The episode end fires ONCE, so a close that fails must not be lost.
+
+    The `flagged` gate means no later clean window for that org ever sees
+    `flagged=True` again — the flag is gone — so a single transient close failure
+    (a failed `_close` re-raises by design, #5143; an R2 transport error
+    propagates) would strand the incident OPEN forever. The engine keeps a
+    (org, rule) retry hint: a set lookup on the clean path, never a store read.
+    """
+    import tortoise.notify as notify
+
+    calls: list[tuple[str, str]] = []
+    fail_first = {"n": 2}          # the first episode-end resolve fails entirely
+
+    class _Store:
+        def resolve_incident_state(self, kind, subject="", **kw):
+            calls.append((kind, subject))
+            if fail_first["n"] > 0:
+                fail_first["n"] -= 1
+                raise RuntimeError("close failed (#5143)")
+
+    class _FlagOnceStore:
+        def __init__(self) -> None:
+            self.flagged = True
+            self.cleared: list[tuple[str, str]] = []
+
+        def window_sum(self, org_id, rule, window_s, now):
+            return 0
+
+        def latest_flag_at(self, org_id, rule):
+            return (datetime.now(timezone.utc)  # noqa: UP017
+                    if self.flagged else None)
+
+        def flag_clear(self, org_id, rule, now=None):
+            self.cleared.append((org_id, rule))
+            self.flagged = False
+
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    engine = AbuseEngine(_FlagOnceStore())
+    now = datetime.now(timezone.utc)  # noqa: UP017
+
+    engine._evaluate("org-a", "point_create", 500, 3600, now)
+    first = len(calls)
+    assert first == 2, f"one resolve per incident kind, got {calls}"   # both RAISE
+
+    engine._evaluate("org-a", "point_create", 500, 3600, now)
+    assert len(calls) == first * 2, (
+        "the failed episode-end close was never retried — the incident stays "
+        f"OPEN forever ({calls})")
+
+    # ...and once it succeeds the retry is dropped: no further store work.
+    engine._evaluate("org-a", "point_create", 500, 3600, now)
+    assert len(calls) == first * 2, f"a resolved episode kept retrying ({calls})"
 
 
 def test_an_unresolvable_close_never_breaks_the_request_path(monkeypatch):

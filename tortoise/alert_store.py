@@ -539,7 +539,17 @@ class AlertStore:
             # recognisable (see the platform-scoping guard in `_alias_states`).
             state["org_id"] = new_subject
             state["team_id"] = new_subject
-            _write_json(self._storage, new_key, state)
+            # CREATE-IF-ABSENT, like every other write in this store: two rules of
+            # the same org can fire concurrently (the abuse pool is 4 workers and
+            # `_claim_notify` serialises only the SAME rule), and a blind write
+            # would let both mint a scoped sentinel for ONE issue — two dedup
+            # linearisation points, then one rule's episode end closes the issue
+            # while the other sentinel still claims it (`_issue_is_live` false →
+            # re-file). That is the #2844 alias class this migration exists to
+            # prevent, so only the winner releases the legacy object.
+            if not self._storage.create_if_not_exists(
+                    new_key, json.dumps(state).encode()):
+                return False
             try:
                 self._storage.delete(legacy_key)
             except Exception as e:  # noqa: BLE001, RUF100 — the move itself succeeded
