@@ -4992,11 +4992,16 @@ export function capacityRefusal(res: {
   const status =
     typeof res.status === "number" && Number.isFinite(res.status) ? res.status : undefined;
   const typed = detail.includes(CAPTURE_CAPACITY_CODE);
+  // ⛔ THE STATUS IS THE TRIGGER, THE CODE IS THE NAME (the Python leg's rule,
+  // verbatim). Requiring the typed category would leave the measured defect
+  // alive on every deployment that does not send one — the entry would be
+  // charged for a condition that says nothing about it. A 429 IS a saturation
+  // signal by construction.
   if (status !== 429 && !typed) return undefined;
   const retryAfter = retryAfterSeconds(detail);
   return {
     status: status ?? 429,
-    ...(typed ? { code: CAPTURE_CAPACITY_CODE } : {}),
+    code: CAPTURE_CAPACITY_CODE,
     ...(retryAfter !== undefined ? { retry_after: retryAfter } : {}),
     ...(detail ? { detail } : {}),
   };
@@ -5011,12 +5016,29 @@ export function capacityRefusal(res: {
  */
 function retryAfterSeconds(detail: string): number | undefined {
   if (!detail) return undefined;
+  // ⚠️ THIS LEG'S `detail` IS NOT ALWAYS A BARE JSON BODY: `post()` composes
+  // `HTTP <status> — <json>` for a non-2xx (see `post`), while the Python drain
+  // carries the raw body. So the parse is attempted on the whole string and,
+  // failing that, from the first `{` — otherwise every refusal this leg reports
+  // would silently lose the server's own `retry_after` and the two legs would
+  // disagree about one refusal body.
   let body: unknown;
-  try {
-    body = JSON.parse(detail);
-  } catch {
-    return undefined;
+  const candidates = [detail];
+  const brace = detail.indexOf("{");
+  if (brace > 0) candidates.push(detail.slice(brace));
+  for (const candidate of candidates) {
+    try {
+      body = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    const found = retryAfterFrom(body);
+    if (found !== undefined) return found;
   }
+  return undefined;
+}
+
+function retryAfterFrom(body: unknown): number | undefined {
   const candidates: unknown[] = [body];
   if (body && typeof body === "object" && !Array.isArray(body)) {
     const nested = (body as Record<string, unknown>).detail;

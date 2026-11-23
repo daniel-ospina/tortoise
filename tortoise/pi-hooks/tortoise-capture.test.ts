@@ -35,6 +35,7 @@ import {
   CAPTURE_REFUSAL_STAMP_FILE,
   CAPTURE_REFUSAL_STAMP_MAX,
   COHORT_COST_CAP_CODE,
+  CAPTURE_CAPACITY_CODE,
   DISCARD_COUNT_EXCEEDED,
   DISCARD_ENTRY_TOO_LARGE,
   DISCARD_HTTP_REJECTED,
@@ -82,6 +83,9 @@ import {
   normaliseSessionId,
   postInstallProbe,
   pruneSpool,
+  acquireDrainClaim,
+  capacityRefusal,
+  claimIsStale,
   quarantineEntry,
   readCaptureStatus,
   readDrainClaim,
@@ -7533,4 +7537,173 @@ test("the over-bound refusal does not call an ABSENT meta unreadable (#14347 cyc
     false,
     `there is no meta to read: ${detail}`,
   );
+});
+
+// ── #14350 (D1 of #14342): ONE drainer per spool ────────────────────────────
+//
+// The claim is only as good as the leg that ignores it: the spool is shared by
+// this seam and the Python CLI, so a lock one leg cannot take is a lock the
+// other leg does not have. Every rule below is the SAME rule the Python leg
+// pins in `tests/test_14350_drain_convergence.py` — a divergence between the
+// two would be invisible (each leg would take its own claim) and would restore
+// the defect silently.
+
+test("#14350: a second drainer PASS holds nothing — the claim makes it a no-op", async () => {
+  // MUTATION THAT REDS THIS: drop the claim from the untargeted path (or use
+  // `rename` for the create, which REPLACES an existing claim and lets both
+  // passes believe they own the spool).
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-claimed"));
+  const holder = acquireDrainClaim(spool, { leg: "python" });
+  assert.ok(holder, "the first drainer takes the claim");
+  try {
+    const { fetchImpl, calls } = mockFetch([{ ok: true }]);
+    const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 });
+    assert.deepEqual(calls, [], "the second drainer must make NO post");
+    assert.equal(summary.heldByClaim, true);
+    assert.equal(summary.attempted, 0);
+    assert.ok(
+      String(summary.claimHolder).includes("another drainer"),
+      `the report must say WHO holds it: ${summary.claimHolder}`,
+    );
+  } finally {
+    holder.release();
+  }
+});
+
+test("#14350: a TARGETED pass is never blocked by the claim", async () => {
+  // The shutdown flush files the LIVE session, one POST, and must never wait
+  // behind a whole-spool drain — the same exemption the Python leg makes.
+  // MUTATION THAT REDS THIS: take the claim for every pass.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-live"));
+  const holder = acquireDrainClaim(spool, { leg: "python" });
+  assert.ok(holder);
+  try {
+    const { fetchImpl, calls } = mockFetch([{ ok: true }]);
+    const summary = await flushSpool(TEST_CFG, {
+      dir: spool, fetchImpl, now: 1, onlySessionId: "sess-live",
+    });
+    assert.equal(calls.length, 1, "the live session's own filing must proceed");
+    assert.equal(summary.heldByClaim, undefined);
+    assert.equal(summary.filed, 1);
+  } finally {
+    holder.release();
+  }
+});
+
+test("#14350: the claim is RELEASED when the pass ends", async () => {
+  // MUTATION THAT REDS THIS: release after the loop instead of in a `finally`
+  // (a pass that throws then wedges the spool for the whole lease).
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-released"));
+  const { fetchImpl } = mockFetch([{ ok: true }]);
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 });
+  assert.equal(readDrainClaim(spool), undefined);
+  const again = acquireDrainClaim(spool, { leg: "pi" });
+  assert.ok(again, "the next drainer must be able to take it immediately");
+  again.release();
+});
+
+test("#14350: an EXPIRED claim is taken over; a LIVE one is honoured", async () => {
+  // The issue's own requirement: a stale claim is re-verifiable, not a
+  // permanent block. MUTATION THAT REDS THIS: return undefined for any existing
+  // claim file, or ignore `expires_at`.
+  const spool = tmpSpool();
+  const first = acquireDrainClaim(spool, { leg: "python", nowMs: 1000, ttlMs: 60 });
+  assert.ok(first);
+  assert.equal(
+    acquireDrainClaim(spool, { leg: "pi", nowMs: 1030, ttlMs: 60 }), undefined,
+    "inside the lease the claim is honoured",
+  );
+  const taken = acquireDrainClaim(spool, { leg: "pi", nowMs: 1100, ttlMs: 60 });
+  assert.ok(taken, "an expired claim is not a permanent block");
+  taken.release();
+});
+
+test("#14350: three staleness rules, all fail-closed toward NOT stealing", async () => {
+  const now = 1000;
+  const live = {
+    version: 1, token: "t", leg: "pi", pid: process.pid,
+    host: "box-a", boot_id: "boot-1", started_at: 0, expires_at: 2000,
+  };
+  // Rule 1 — unattributable.
+  for (const junk of [undefined, null, [], "text", {}, { expires_at: "soon" }]) {
+    assert.equal(claimIsStale(junk, { nowMs: now }), true, `unstale: ${JSON.stringify(junk)}`);
+  }
+  // Rule 2 — expired (and the ONLY rule for a foreign host).
+  assert.equal(
+    claimIsStale({ ...live, host: "box-b", pid: 999999999 }, { nowMs: now, host: "box-a", bootId: "boot-1" }),
+    false,
+    "a foreign host is judged by its lease alone — this box cannot check its pids",
+  );
+  assert.equal(
+    claimIsStale({ ...live, expires_at: now }, { nowMs: now, host: "box-a", bootId: "boot-1" }),
+    true,
+  );
+  // Rule 3 — same host+boot_id and a dead pid.
+  assert.equal(claimIsStale(live, { nowMs: now, host: "box-a", bootId: "boot-1" }), false);
+  assert.equal(
+    claimIsStale({ ...live, pid: 999999999 }, { nowMs: now, host: "box-a", bootId: "boot-1" }),
+    true,
+  );
+  // …and a REBOOT invalidates the pid (a reused pid is not the holder).
+  assert.equal(
+    claimIsStale(live, { nowMs: now, host: "box-a", bootId: "boot-2" }), true,
+  );
+});
+
+test("#14350: a CAPACITY 429 charges NOTHING and ends the pass", async () => {
+  // #14342 §7.3's mechanism: one saturated pass used to charge EVERY pending
+  // entry and arm an exponential backoff, which is how `attempts` reached 10–17
+  // on a 908-entry spool while every surface reported a drain in progress.
+  //
+  // MUTATION THAT REDS THIS: delete the `capacityRefusal` branch (the refusal
+  // then lands in the per-entry backoff write-back).
+  const spool = tmpSpool();
+  for (let i = 0; i < 3; i += 1) writeSpoolEntry(spool, snapshot(`sess-cap${i}`));
+  const server = statusFetch(429, { code: CAPTURE_CAPACITY_CODE, retry_after: 30 });
+  const { fetchImpl, calls } = mockFetch([]);
+  let n = 0;
+  const refusing = async (url: string, init?: Record<string, unknown>) => {
+    n += 1;
+    return (server.fetchImpl as (u: string, i?: Record<string, unknown>) => Promise<unknown>)(url, init);
+  };
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: refusing as never, now: 1 });
+  assert.equal(summary.stopped, "capacity");
+  assert.equal(summary.capacity?.status, 429);
+  assert.equal(summary.capacity?.code, CAPTURE_CAPACITY_CODE);
+  assert.equal(
+    summary.capacity?.retry_after, 30,
+    "the server's own retry_after is read out of this leg's `HTTP 429 — {…}` detail",
+  );
+  assert.equal(n, 1, "ONE refusal ends the pass — the rest cannot succeed either");
+  assert.deepEqual(calls, []);
+  for (let i = 0; i < 3; i += 1) {
+    const meta = readSpoolEntry(spool, `sess-cap${i}`);
+    assert.equal(meta?.attempts ?? 0, 0, `sess-cap${i} was charged for the box's ceiling`);
+    assert.equal(meta?.next_attempt_at_ms ?? 0, 0);
+  }
+});
+
+test("#14350: a capacity refusal is NAMED durably, and clears on the next pass", async () => {
+  // The hook that fires the drain throws its stderr away, so the console line is
+  // not enough — the cause has to survive into the next process, in the shape
+  // the health line already renders (`capture: BLOCKED (n queued, 429 capture
+  // capacity)`).
+  //
+  // MUTATION THAT REDS THIS: leave a capacity refusal to the `attempted > 0`
+  // arm, which records `ok` for a box that cannot file — the false PASS.
+  const spool = tmpSpool();
+  for (let i = 0; i < 2; i += 1) writeSpoolEntry(spool, snapshot(`sess-capd${i}`));
+  const refused = statusFetch(429, { code: CAPTURE_CAPACITY_CODE });
+  await sessionStartLines(spool, refused.fetchImpl);
+  const recorded = readCaptureStatus(spool);
+  assert.equal(recorded?.state, "blocked");
+  assert.equal(recorded?.status, 429);
+  assert.equal(recorded?.reason, CAPTURE_CAPACITY_CODE);
+
+  const accepted = statusFetch(200);
+  await sessionStartLines(spool, accepted.fetchImpl);
+  assert.equal(readCaptureStatus(spool)?.state, "ok", "a free slot clears the record");
 });
