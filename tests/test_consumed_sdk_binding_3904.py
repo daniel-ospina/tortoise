@@ -46,9 +46,13 @@ DRIVING THE REAL HANDLER
 
     Two argument vectors are tried per handler — ``minimal`` (required params
     filled, defaults elsewhere) and ``typed`` (every param filled) — and the
-    reads are UNIONED. ``_DRIVE_OVERRIDES`` adds a targeted vector for the three
+    reads are UNIONED. ``_DRIVE_OVERRIDES`` adds a targeted vector for the
     handlers whose declared read sits behind an early-return branch a generic
-    vector cannot reach (a real directory, an entity id, a valid action). A
+    vector cannot reach (a real directory, an entity id, a valid action). ⛔ Its
+    SIZE is deliberately never stated here, and was wrong ("three") until #14248:
+    the map holds one entry per such handler, so a count in this docstring drifts
+    silently with the suite still green — the same reason the map's own comment,
+    below, refuses a typed number. A
     handler that reaches NO SDK read at all is an explicit, CLOSED ledger
     (``_HANDLER_SERVED_NO_SDK_READ``) checked in BOTH directions — never a silent
     pass.
@@ -413,6 +417,38 @@ _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
             },
         ),
     ),
+    # #11609 lane P7: the ONE linking verb that absorbed `tortoise_create_edge` and
+    # `tortoise_create_operator`. Its declared binding is `link_entities`, and NO generic
+    # vector reaches it. Two independent reasons, both measured: the `minimal` vector
+    # supplies only the two required arguments, so the handler answers "link_entities
+    # requires a target" and reads nothing; and the `typed` vector is a NO-OP for this
+    # handler — `_vectors_for` builds it as a POSITIONAL tuple over every parameter,
+    # keyword-only ones included, so `tortoise_link_entities() takes from 2 to 3
+    # positional arguments but 14 were given` is raised before the body runs (recorded as
+    # `swallowed: ('typed:TypeError',)`). That early-return shape is exactly what
+    # `_DRIVE_OVERRIDES` exists for. Two vectors, one per arm: the relation-decided arm
+    # reads the declared `link_entities`, and the LIST arm reads `_create_operator`, the
+    # second writer behind the same declaration.
+    # ⛔ THE UNION IS PINNED, not merely described — `tortoise_link_entities` is a key in
+    # `_EXPECTED_SDK_READS` with exactly `{link_entities, _create_operator}`. Without that
+    # row this pair was HALF dead weight: the declared-binding gate below is satisfied by
+    # the relation arm ALONE, so deleting the LIST arm left the suite green (measured, a
+    # fresh review's mutation pass). Each arm now has its own red: dropping either one
+    # changes the recorded union and reds `test_declared_sdk_read_set_is_exact`. This is
+    # the same closed-map shape `tortoise_adjust_relationship` already carries for its two
+    # operator writers, for the same reason.
+    "tortoise_link_entities": (
+        (
+            "relation-arm",
+            ("performs", "x", "y"),  # scalar `to_id` -> the SDK's own dispatch
+            {},
+        ),
+        (
+            "operator-arm-list",
+            ("NAND", "x", ["y"]),  # a LIST `to_id` -> the operator writer
+            {},
+        ),
+    ),
 }
 
 
@@ -473,6 +509,15 @@ _EXPECTED_SDK_READS: dict[str, frozenset[str]] = {
     # unchanged; only the spelling the handler calls moved. The expectation is the set
     # of reads the handler makes, so it moves with them.
     "tortoise_adjust_relationship": frozenset({"_mitigate_operator", "_annotate_operator"}),
+    # #11609 lane P7: the one linking verb that absorbed `tortoise_create_edge` and
+    # `tortoise_create_operator` dispatches on the SHAPE of `to_id` — a scalar goes to the
+    # SDK's own `link_entities`, a LIST goes to the operator writer. Both arms are driven by
+    # `_DRIVE_OVERRIDES` (the generic vectors cannot reach this handler: see that block) and
+    # both reads are therefore REQUIRED. Pinning the union is what stops either vector from
+    # being dead weight: the declared-binding gate needs only `link_entities`, so a LIST-only
+    # regression, or a dropped LIST vector, would otherwise stay green (measured by a fresh
+    # review's mutation pass before this row existed).
+    "tortoise_link_entities": frozenset({"link_entities", "_create_operator"}),
 }
 
 
