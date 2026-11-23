@@ -198,6 +198,11 @@ def claim_is_stale(
     """
     if not isinstance(record, dict):
         return True  # rule 1: unattributable
+    # Rule 1 also covers a record whose VERSION this build does not know: a
+    # future format must never be interpreted by today's semantics (the trait a
+    # version field exists for) — it is re-verifiable by expiry instead.
+    if record.get("version") != CLAIM_VERSION:
+        return True
     expires = _finite(record.get("expires_at"))
     if expires is None:
         return True  # rule 1: nothing says when it ends
@@ -237,26 +242,72 @@ def _read_raw(path: Path) -> bytes | None:
         return None
 
 
-def _remove_if_unchanged(path: Path, expected: bytes) -> bool:
-    """Compare-and-delete: unlink ONLY if the file still holds ``expected``.
+def _takedown(path: Path, token: str) -> tuple[Path, bytes] | None:
+    """Atomically MOVE the claim aside, so the comparison can be trusted.
 
-    The compare is what makes a takedown safe. Two processes may both judge the
-    same claim stale; the first one's delete makes the second's ``ENOENT``, which
-    is not a failure. And a claim that changed between the read and the unlink
-    belongs to a NEW holder, who must keep it.
+    ⛔ THE READ-COMPARE-UNLINK SEQUENCE THIS REPLACES WAS RACY, and the race
+    restored the exact defect this module exists to remove (found in review).
+    Two processes that both judged the same claim stale both pass a *compare*,
+    then one `link`s its own claim while the other is between its `read` and its
+    `unlink` — and the second `unlink` removes the NEW, LIVE claim. Both then
+    hold it, and the loser only notices at its next refresh (up to TTL/3 later).
+    Reproduced deterministically by delaying one contender between the compare
+    and the unlink.
+
+    ``rename`` is the arbiter instead: exactly one contender can move the file
+    away, and the CONTENT THAT WAS THERE is what lands in the quarantine — so the
+    caller compares bytes it provably owns the moment of, not bytes that could
+    have been replaced underneath it.
+
+    Returns ``(quarantine_path, bytes)``, or ``None`` when the claim was already
+    gone (a peer moved it first, which is not a failure). The caller MUST dispose
+    of the quarantine: :func:`_dispose_quarantine`.
     """
-    if _read_raw(path) != expected:
-        return False
+    quarantine = path.with_name(f"{path.name}.take-{os.getpid()}-{token}")
     try:
-        path.unlink()
-    except FileNotFoundError:
-        # A peer judged the same claim stale and got there first. Not a failure:
-        # the claim is gone either way, and the caller's next attempt decides the
-        # winner by `link`'s EEXIST.
-        return True
-    except OSError:
+        os.rename(path, quarantine)
+    except (FileNotFoundError, OSError):
+        return None
+    data = _read_raw(quarantine)
+    if data is None:  # pragma: no cover — a rename we cannot read back
+        with contextlib.suppress(OSError):
+            os.unlink(quarantine)
+        return None
+    return quarantine, data
+
+
+def _dispose_quarantine(quarantine: Path, data: bytes,
+                        path: Path, expected: bytes) -> bool:
+    """Drop the quarantined claim, or PUT IT BACK if it was not the one we judged.
+
+    ``True`` means the bytes really were ``expected`` (ours / the stale record) and
+    the claim is gone. ``False`` means we displaced somebody else's NEW claim — a
+    third process installed it between our rename and our write — so the bytes are
+    restored by ``link`` (which cannot replace a claim a FOURTH process has since
+    installed; on ``EEXIST`` the displaced holder loses and will stop at its next
+    refresh, which is the safe direction) and this caller gives up.
+    """
+    if data != expected:
+        with contextlib.suppress(FileExistsError, OSError):
+            os.link(quarantine, path)
+        with contextlib.suppress(OSError):
+            os.unlink(quarantine)
         return False
+    with contextlib.suppress(OSError):
+        os.unlink(quarantine)
     return True
+
+
+def _claim_still_ours(path: Path, token: str) -> bool:
+    """Is the claim at ``path`` still ours? Used when a refresh WRITE failed.
+
+    A failed write is not evidence that a peer took the claim over, and treating
+    it as one (a) aborts a pass that still owns the spool and (b) leaves the claim
+    parked with a live pid, so every later pass reads ``held_by_claim`` for up to
+    the full lease — while the operator is told a peer took it (review finding).
+    """
+    record = read_claim(path.parent)
+    return isinstance(record, dict) and record.get("token") == token
 
 
 def _write_claim_atomic(path: Path, record: dict) -> None:
@@ -311,15 +362,32 @@ class DrainClaim:
         }
 
     def renew(self, now_s: float | None = None) -> bool:
-        """Refresh the lease. ``False`` means the claim is no longer ours."""
+        """Refresh the lease. ``False`` means the claim is no longer ours.
+
+        ⛔ TWO GUARDS, both from review findings, and both one-directional:
+
+        * a claim that is ALREADY EXPIRED is never resurrected. ``renew`` reads
+          the record and then ``os.replace``s its own — a read-then-replace with
+          no compare — so a holder that overran its lease (while still being the
+          token owner on disk) could overwrite the successor a peer had
+          legitimately installed, and return ``True``. Reproduced in review.
+          Refusing to renew an expired record converts that into "we are no
+          longer the holder", which the caller already handles by stopping.
+        * a failed WRITE is not "not ours": :func:`_claim_still_ours` says
+          whether the record is still ours, and the caller keeps draining on the
+          un-refreshed lease rather than aborting a pass it still owns.
+        """
         now = self.clock() if now_s is None else now_s
         current = read_claim(self.path.parent)
         if current is None or current.get("token") != self.token:
             return False
+        expires = _finite(current.get("expires_at"))
+        if expires is not None and now >= expires:
+            return False
         try:
             _write_claim_atomic(self.path, self.record(now))
         except OSError:
-            return False
+            return _claim_still_ours(self.path, self.token)
         self._issued_at = now
         self._renewed_at = now
         return True
@@ -332,17 +400,32 @@ class DrainClaim:
         return self.renew(now)
 
     def release(self) -> bool:
-        """Give the claim up. ``False`` means we no longer held it."""
-        raw = _read_raw(self.path)
-        if raw is None:
+        """Give the claim up. ``False`` means we no longer held it.
+
+        The takedown is atomic (see :func:`_takedown`): this used to read the
+        record, compare and then `unlink` — a sequence in which a successor
+        installed between the compare and the unlink was deleted by the previous
+        holder. Now the file is MOVED aside first and the bytes are compared in
+        quarantine, so a release can only ever dispose of a claim it actually
+        owned.
+        """
+        moved = _takedown(self.path, self.token)
+        if moved is None:
             return False
+        quarantine, data = moved
         try:
-            record = json.loads(raw.decode("utf-8"))
+            record = json.loads(data.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
-            return False
+            record = None
         if not isinstance(record, dict) or record.get("token") != self.token:
+            # Not ours any more (a successor holds it): put its bytes back exactly
+            # as we took them. The sentinel can never equal `data`, so this always
+            # takes the restore branch of `_dispose_quarantine`.
+            _dispose_quarantine(quarantine, data, self.path, b"<not-ours>")
             return False
-        return _remove_if_unchanged(self.path, raw)
+        with contextlib.suppress(OSError):
+            os.unlink(quarantine)
+        return True
 
 
 class DrainClaimUnavailable(RuntimeError):
@@ -386,7 +469,7 @@ def acquire(
     boot_id = _boot_id()
     host = _host()
     try:
-        root.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError as exc:
         raise DrainClaimUnavailable(str(exc)) from exc
     for _ in range(ACQUIRE_ATTEMPTS):
@@ -413,8 +496,19 @@ def acquire(
             if not claim_is_stale(parsed, now_s=now_s, host=host,
                                 boot_id=boot_id, alive=alive):
                 return None
-            if existing is not None:
-                _remove_if_unchanged(path, existing)
+            if existing is None:
+                continue
+            # ATOMIC TAKEDOWN, then verify in quarantine: see `_takedown`. The
+            # previous read-compare-unlink let two contenders delete each other's
+            # fresh claims (review finding).
+            moved = _takedown(path, token)
+            if moved is None:
+                continue  # a peer moved it first; the next attempt decides
+            quarantine, data = moved
+            if not _dispose_quarantine(quarantine, data, path, existing):
+                # We displaced a NEWER claim than the one we judged stale (a
+                # third process installed it). It is restored; give up this tick.
+                return None
             continue
         except OSError as exc:
             raise DrainClaimUnavailable(str(exc)) from exc

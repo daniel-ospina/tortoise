@@ -541,6 +541,12 @@ def outcome_recorded(body) -> bool:
 
 @dataclass
 class FlushSummary:
+    #: POSTs this pass made. ⚠️ It counts EVENTS, not distinct entries: a pass
+    #: that yields three times on a capacity refusal and retries the SAME entry
+    #: reports ``attempted == 4`` for one capture. Read it with
+    #: ``capacity_yields``/``deferred`` beside it — the counter is honest about
+    #: what it counts, and a reader who takes it for "entries touched" is the one
+    #: making an inference the number never made.
     attempted: int = 0
     filed: int = 0
     deferred: int = 0
@@ -4110,7 +4116,11 @@ def flush_spool(
 
     ── #14350 (D1): WHY THIS PASS IS SERIALIZED AND WHAT ITS CEILING IS ────
 
-    **One drainer per spool.** An UNTARGETED pass (``only_session_id is None``)
+    **One drainer per spool.** An UNTARGETED pass (no ``only_session_id``)
+    takes the drain claim; a TARGETED one does not. ``""`` counts as untargeted
+    on BOTH sides of that split — the claim here and the ``_flush_one`` filter
+    (`if only_session_id and …`) — so an empty id can never mean "drain the whole
+    spool, unclaimed" (review finding: it did).
     takes the spool's claim (:mod:`tortoise.drain_claim`, honoured by both legs)
     and returns immediately — ``held_by_claim``, zero POSTs — when another
     process holds it. Every ``SessionStart`` backgrounds a drain, ``SessionEnd``
@@ -4150,7 +4160,7 @@ def flush_spool(
     now_ms = time.time() * 1000.0 if now is None else now
     summary = FlushSummary()
     claim = None
-    if only_session_id is None:
+    if not only_session_id:
         from tortoise.drain_claim import DEFAULT_TTL_S as _CLAIM_TTL_S
         from tortoise.drain_claim import DrainClaimUnavailable, acquire, holder
         try:
@@ -4245,10 +4255,30 @@ def _flush_claimed(
             # The refusal is about the BOX, so it refused this entry — the same
             # entry is retried after yielding, never skipped past: skipping it
             # would let a busy box starve the OLDEST capture indefinitely.
+            #
+            # ⛔ A pass that does NOT hold the claim must never yield. Such a pass
+            # is a TARGETED one (`capture --session`, the SessionEnd flush), and it
+            # runs inside a hook budget — `session-end.sh` sets `"timeout": 60` —
+            # so three 30 s yields outlive the budget and the hook is KILLED
+            # mid-pass, which is worse than the refusal it was waiting out, and it
+            # does it three times per capture. One POST, one refusal, return: the
+            # detached drain is the only component that politeness-waits.
+            if claim is None:
+                break
             if summary.capacity_yields >= DRAIN_CAPACITY_YIELDS:
                 break
             summary.capacity_yields += 1
             sleep(_capacity_yield_seconds(summary.capacity))
+            # ⛔ Renew AFTER the wait, not only before the attempt: three yields
+            # plus a POST whose transport bound (30 s) expired can approach the
+            # lease, and a claim that expires mid-wait could be taken over while
+            # this process still considers itself the drainer. `renew()` re-reads
+            # the token, so a lost claim is detected HERE rather than at the next
+            # loop turn — and the pass then stops instead of becoming the second
+            # drainer.
+            if claim is not None and not claim.renew():
+                summary.lost_claim = True
+                break
             summary.capacity_stopped = False
             continue  # same index: retry THIS entry
         index += 1

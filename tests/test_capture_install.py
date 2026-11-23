@@ -4923,8 +4923,13 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: `modified-artifact` ("local edit"). The READ half moves its header only (its
 #: behaviour is untouched) because `contract_version_for('pi')` grades the pair
 #: as ONE contract.
+#: ⚠️ Generation 33 is INTRODUCED BY this change (#14350) and has never shipped,
+#: so its recorded digest in both maps below is the digest of the bytes at THIS
+#: head — updated in place during the PR rather than spending a generation 34 on
+#: a refinement of the same unreleased seam. From the moment 33 appears on main,
+#: the entries are frozen: the next byte change needs a NEW generation.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "15393a968987180dcaf573a2b901eeb1c9a9a3f2180c08e3fda392d488a975ff")
+    33, "a2314416a942690acab9e4181206e635db010d9bcd252a6b1e6072ea3aa5ab08")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5096,7 +5101,7 @@ _GENERATION_DIGESTS = {
     # keeps draining concurrently with the Python leg and keeps charging the
     # box's refusals to per-entry exponential backoff — the 908-entry /
     # attempts-10-17 shape #14342 starts from — so it must read STALE.
-    33: "15393a968987180dcaf573a2b901eeb1c9a9a3f2180c08e3fda392d488a975ff",
+    33: "a2314416a942690acab9e4181206e635db010d9bcd252a6b1e6072ea3aa5ab08",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

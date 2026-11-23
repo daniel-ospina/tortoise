@@ -504,6 +504,9 @@ class _CeilingServer:
 
     def __init__(self, limit: int = 8, post_seconds: float = 0.001) -> None:
         self.limit = limit
+        #: ``True`` makes the ceiling unreachable — the shape a box is in while
+        #: the user's OWN captures hold every slot (§7.3's live measurement).
+        self.externally_saturated = False
         self.post_seconds = post_seconds
         self.in_flight = 0
         self.high_water = 0
@@ -515,7 +518,7 @@ class _CeilingServer:
         with self._lock:
             self.in_flight += 1
             self.high_water = max(self.high_water, self.in_flight)
-            saturated = self.in_flight > self.limit
+            saturated = self.externally_saturated or self.in_flight > self.limit
             if saturated:
                 self.refusals += 1
         try:
@@ -537,15 +540,24 @@ def test_the_falsifier_holds(tmp_path):
     a full cycle with no entry exceeding `attempts = 3`** — with TWO drainers
     racing, against a server that enforces the real 8-slot ceiling.
 
-    Both halves of the shape are exercised together: the claim makes the second
-    drainer a no-op, and a capacity refusal (if one happens at all) costs no entry
-    anything. The `high_water` assertion is the ceiling's own measurement: a
-    serialized drain holds ONE of the eight slots, so a live capture can never be
-    starved by it.
+    ⛔ WHAT THIS TEST DOES AND DOES NOT EXERCISE (corrected in review: it claimed
+    more than it measured). It runs two drainers as THREADS, because the claim is
+    a file and excludes threads exactly as it excludes processes — process
+    exclusion is measured separately and honestly, by
+    `tools/measure_drain_convergence.py`'s 10-process race (1 winner).
+    And with TWO drainers it never saturates the 8-slot ceiling, so NO capacity
+    refusal occurs here at all: `server.refusals == 0` is asserted below rather
+    than implied. The capacity half of the shape gets its own forcing test
+    (`test_a_CAPACITY_refusal_charges_NOBODY`), which drives the refusal
+    directly. This test therefore proves the SERIALIZATION + convergence half
+    only, and says so.
 
-    MUTATION THAT REDS THIS: drop the claim (both passes run, the ceiling is hit,
-    refusals appear) or charge capacity refusals to entries (attempts climb on
-    every saturated pass).
+    The `high_water` assertion is the ceiling's own measurement: a serialized
+    drain holds ONE of the eight slots, so a live capture can never be starved.
+
+    MUTATION THAT REDS THIS: drop the claim — both passes run concurrently, the
+    ceiling's counter climbs, and (at 8 in flight) refusals appear that charge the
+    entries, pushing attempts past 3.
     """
     root = _spool(tmp_path, sessions=40)
     assert count_pending_captures(root) == 40
@@ -571,6 +583,9 @@ def test_the_falsifier_holds(tmp_path):
     assert server.high_water <= 1, (
         f"the serialized drain held {server.high_water} capture slots — the whole "
         "point of ONE in-flight POST is that the other seven stay free")
+    assert server.refusals == 0, (
+        "nothing here should have reached the ceiling; if refusals appear, read the "
+        "attempts assertion above as the capacity-charging bug, not this one")
 
     # …and it STAYS there for a full cycle: another pass files nothing, defers
     # nothing, and charges nobody.
@@ -578,3 +593,149 @@ def test_the_falsifier_holds(tmp_path):
     assert settled.filed == 0 and settled.deferred == 0
     assert count_pending_captures(root) == 0
     assert drain_claim.read_claim(root) is None
+
+    # ── The CAPACITY half, FORCED (the phase above never reaches the ceiling) ──
+    #
+    # The same spool, with the user's own captures holding every slot: the drain
+    # is refused for the BOX's capacity on every POST. This is exactly §7.3's live
+    # measurement, and the assertion is that it costs NOTHING — no `attempts`, no
+    # backoff window — so the moment the slots free, the SAME pass files
+    # everything. Before #14350 each of these refusals charged the entry and armed
+    # an exponential backoff, which is how 908 entries reached `attempts` 10–17.
+    root2 = _spool(tmp_path / "saturated", sessions=40)
+    server2 = _CeilingServer()
+    server2.externally_saturated = True
+    for _ in range(4):  # four saturated opportunities = a full backoff cliff
+        blocked = flush_spool(root2, server2.post, now=time.time() * 1000.0,
+                              sleep=lambda _s: None)
+        assert blocked.capacity_stopped is True
+        assert blocked.filed == 0
+    assert server2.refusals > 0, "the phase must actually meet the ceiling"
+    for i in range(40):
+        meta = read_spool_meta(root2, f"sess-{i}")
+        assert meta.get("attempts", 0) == 0, (
+            f"sess-{i} was charged {meta.get('attempts')} attempts for the BOX's "
+            "refusal — this is the self-feeding backlog")
+        assert not meta.get("next_attempt_at_ms"), (
+            "a capacity refusal must not arm a backoff window")
+    assert count_pending_captures(root2) == 40, "nothing filed, nothing lost"
+
+    server2.externally_saturated = False
+    freed = flush_spool(root2, server2.post, now=time.time() * 1000.0,
+                        sleep=lambda _s: None)
+    assert freed.filed == 40, "the freed pass files ALL of it — no entry left behind"
+    assert count_pending_captures(root2) == 0
+
+
+# ── Findings from the first review cycle ──────────────────────────────────
+
+
+def test_an_EXPIRED_claim_is_never_RESURRECTED_by_its_own_holder(tmp_path):
+    """A holder that overran its lease must not overwrite the successor a peer
+    legitimately installed.
+
+    `renew` reads the record and then `os.replace`s its own — a read-then-replace
+    with no compare. A holder whose lease expired is still the TOKEN OWNER on
+    disk, so without the expiry guard it wins that race and returns True while a
+    live successor believes it holds the spool. Reproduced in review.
+
+    MUTATION THAT REDS THIS: delete the `now >= expires` guard from `renew`.
+    """
+    root = tmp_path / "spool"
+    slow = drain_claim.acquire(root, leg="python", now=1000.0, ttl_s=60.0)
+    assert slow is not None
+    successor = drain_claim.acquire(root, leg="pi", now=1100.0, ttl_s=60.0)
+    assert successor is not None, "the lease expired, so the peer may take over"
+    assert slow.renew(now_s=1105.0) is False, (
+        "an expired lease is not renewable — that is how a successor gets clobbered")
+    assert drain_claim.read_claim(root)["token"] == successor.token
+    assert successor.renew(now_s=1110.0) is True
+    successor.release()
+
+
+def test_a_TAKEDOWN_never_deletes_a_live_claim_installed_under_it(tmp_path):
+    """The read-compare-unlink takedown was racy, and the race restored the exact
+    defect this module exists to remove: two processes judging one stale claim
+    both pass the compare, one installs its own claim, and the other's `unlink`
+    removes the LIVE one — two holders until the loser's next refresh.
+
+    This models that interleaving directly: a claim is judged stale and moved
+    aside, a NEW claim is installed, and the stale takedown must then decline and
+    restore rather than dispose.
+
+    MUTATION THAT REDS THIS: go back to compare-then-unlink (the taken claim's
+    bytes are no longer what was judged stale, so the successor is deleted).
+    """
+    root = tmp_path / "spool"
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None
+    stale_bytes = drain_claim.claim_path(root).read_bytes()
+    successor = drain_claim.acquire(root, leg="pi")  # a live claim replaces it
+    assert successor is None, "the first claim is still live, so it must be honoured"
+    # Simulate the interleaving at the primitive level.
+    moved = drain_claim._takedown(drain_claim.claim_path(root), "contender")
+    assert moved is not None
+    quarantine, data = moved
+    # A THIRD process installs its claim while the stale taker was moving files.
+    _ = stale_bytes
+    fresh = drain_claim.acquire(root, leg="python")
+    assert fresh is not None
+    restored_ok = drain_claim._dispose_quarantine(
+        quarantine, data, drain_claim.claim_path(root), b"<not what was judged stale>")
+    assert restored_ok is False, "a claim that is not the one judged stale is kept"
+    on_disk = drain_claim.read_claim(root)
+    assert on_disk is not None and on_disk["token"] == fresh.token, (
+        "the live claim must survive a stale taker's disposal attempt")
+    fresh.release()
+
+
+def test_a_FUTURE_version_claim_is_unattributable_not_reinterpreted(tmp_path):
+    """The version field is load-bearing: a record this build does not understand
+    must be staled out (then re-verifiable by expiry), never read with today's
+    semantics.
+
+    MUTATION THAT REDS THIS: drop the version rule from `claim_is_stale`.
+    """
+    record = {
+        "version": drain_claim.CLAIM_VERSION + 1, "token": "t", "leg": "pi",
+        "pid": os.getpid(), "host": "box-a", "boot_id": "boot-1",
+        "started_at": 0.0, "expires_at": time.time() + 600.0,
+    }
+    assert drain_claim.claim_is_stale(record, now_s=time.time()) is True
+
+
+def test_the_spool_root_is_created_0700(tmp_path):
+    """A drain can be the FIRST thing to touch a fresh spool (SessionStart fires it
+    before any capture). The directory then holds conversation-derived entry names,
+    so it must be private — every other creator in `capture_spool` passes 0700.
+
+    MUTATION THAT REDS THIS: drop `mode=0o700` from the mkdir.
+    """
+    if os.getuid() == 0:
+        pytest.skip("root ignores mode bits")
+    root = tmp_path / "fresh" / "spool"
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None
+    assert (root.stat().st_mode & 0o777) == 0o700
+    claim.release()
+
+
+def test_a_TARGETED_pass_does_NOT_yield_on_a_capacity_refusal(tmp_path):
+    """`session capture` and the SessionEnd flush run inside a HOOK BUDGET
+    (`session-end.sh` sets `"timeout": 60`), so a targeted pass must not sleep:
+    one POST, one refusal, return. Only the DETACHED drain may politeness-wait.
+
+    MUTATION THAT REDS THIS: gate the yield on `summary.capacity_stopped` alone
+    (drop `claim is not None`) — the targeted pass then sleeps 90 s and the hook
+    is cancelled mid-pass.
+    """
+    root = _spool(tmp_path, sessions=2)
+    post, state = _capacity()
+    waits: list[float] = []
+    summary = flush_spool(root, post, now=1000.0, sleep=waits.append,
+                          only_session_id="sess-0")
+    assert waits == [], "a targeted pass never yields"
+    assert state["calls"] == 1
+    assert summary.capacity_yields == 0
+    assert summary.capacity_stopped is True
+    assert read_spool_meta(root, "sess-0")["attempts"] == 0

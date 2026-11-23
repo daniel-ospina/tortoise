@@ -506,6 +506,16 @@ export const DRAIN_CLAIM_FILE = "drain.claim";
  */
 export const DRAIN_CLAIM_TTL_MS = 120_000;
 
+/**
+ * The claim's on-disk format version — MIRRORS `tortoise.drain_claim.CLAIM_VERSION`.
+ *
+ * It is not decoration: `claimIsStale` stales out a record carrying any other
+ * value, because a format this build does not know must never be interpreted by
+ * today's semantics (the whole point of a version field, and the trait that was
+ * missing when review found it read nowhere).
+ */
+export const DRAIN_CLAIM_VERSION = 1;
+
 export interface DrainClaimRecord {
   version: number;
   token: string;
@@ -4438,6 +4448,10 @@ async function refusalOutcomeVerdict(
  * POST is the most it can hold, and delaying a session's own filing behind a
  * whole-spool drain is a product regression, not contention control.
  *
+ * ⛔ `""` counts as UNTARGETED on both sides of that split — the claim here and
+ * the `opts.onlySessionId && …` filter inside the pass — so an empty id can never
+ * mean "drain the whole spool, unclaimed" (review finding: it did).
+ *
  * The claim is released in a `finally` — a pass that throws must not leave the
  * spool locked until the lease expires — and it is refreshed between entries
  * (`renewIfDue`); a `false` from the refresh means a peer took it over, and the
@@ -4459,7 +4473,7 @@ export async function flushSpool(
     budgetClock?: () => number;
   } = {},
 ): Promise<FlushSummary> {
-  if (opts.onlySessionId !== undefined) {
+  if (opts.onlySessionId) {
     return flushSpoolPass(cfg, opts, undefined);
   }
   const dir = opts.dir ?? SPOOL_DIR;
@@ -5064,7 +5078,17 @@ export function drainClaimPathFor(dir: string): string {
   return join(dir, DRAIN_CLAIM_FILE);
 }
 
-/** Read the parsed claim, or `undefined`. The SURFACE (drain line, tests). */
+/** Read the parsed claim, or `undefined`. The SURFACE (drain line, tests).
+ *
+ * ⛔ THE TOLERANCE HERE IS A SAFETY PROPERTY, not convenience (review finding).
+ * `acquireDrainClaim` refuses to take a claim `claimIsStale` judges LIVE; the
+ * caller then asks this function whether the refusal was "somebody holds it" or
+ * "the spool cannot hold a claim". A reader STRICTER than the staleness
+ * predicate answers `undefined` for a record that is live — and the caller then
+ * runs UNCLAIMED beside that holder, which is the two-drainer defect this whole
+ * mechanism removes. So the contract is: **whatever `claimIsStale` can judge is
+ * readable here.** Token-ness is the surface's business, not this reader's.
+ */
 export function readDrainClaim(dir: string): DrainClaimRecord | undefined {
   let text: string;
   try {
@@ -5080,7 +5104,7 @@ export function readDrainClaim(dir: string): DrainClaimRecord | undefined {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
-  return typeof record.expires_at === "number" && typeof record.token === "string"
+  return typeof record.expires_at === "number" && Number.isFinite(record.expires_at)
     ? (record as unknown as DrainClaimRecord)
     : undefined;
 }
@@ -5147,6 +5171,10 @@ export function claimIsStale(
 ): boolean {
   if (!record || typeof record !== "object" || Array.isArray(record)) return true;
   const rec = record as Record<string, unknown>;
+  // Rule 1 also covers a record whose VERSION this build does not know: a future
+  // format must never be interpreted by today's semantics — the version field
+  // exists to say so, and reading it nowhere made it decoration (review finding).
+  if (rec.version !== DRAIN_CLAIM_VERSION) return true;
   const expires = rec.expires_at;
   if (typeof expires !== "number" || !Number.isFinite(expires)) return true;
   if (opts.nowMs >= expires) return true;
@@ -5175,6 +5203,61 @@ export interface DrainClaim {
   renewIfDue(nowMs?: number): boolean;
   /** Give the claim up. `false` means we no longer held it. */
   release(): boolean;
+}
+
+/**
+ * Atomically MOVE the claim aside, so the comparison can be trusted.
+ *
+ * ⛔ THE READ-COMPARE-UNLINK SEQUENCE THIS REPLACES WAS RACY, and the race
+ * restored the exact defect the claim exists to remove (review finding, both
+ * legs): two processes that both judged the same claim stale both pass a
+ * compare, then one installs its own claim while the other is between its read
+ * and its unlink — and the second unlink removes the NEW, LIVE claim. Both then
+ * hold it, and the loser only finds out at its next refresh.
+ *
+ * `rename` is the arbiter: exactly one contender can move the file away, and the
+ * CONTENT THAT WAS THERE lands in the quarantine — so the caller compares bytes
+ * it provably owns the moment of. Returns `[quarantine, raw]`, or `undefined`
+ * when the claim was already gone (a peer moved it first; not a failure).
+ */
+function takedownClaim(
+  path: string, token: string,
+): { quarantine: string; raw: string } | undefined {
+  const quarantine = `${path}.take-${process.pid}-${token}`;
+  try {
+    renameSync(path, quarantine);
+  } catch {
+    return undefined;
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(quarantine, "utf8");
+  } catch {
+    try { unlinkSync(quarantine); } catch { /* best effort */ }
+    return undefined;
+  }
+  return { quarantine, raw };
+}
+
+/**
+ * Drop a quarantined claim, or PUT IT BACK if it was not the one we judged.
+ *
+ * `true` means the bytes really were `expected` and the claim is gone. `false`
+ * means we displaced somebody else's NEW claim — a third process installed it
+ * between our rename and our write — so it is restored by `linkSync` (which
+ * cannot replace a claim a FOURTH process has since installed; on `EEXIST` the
+ * displaced holder loses and stops at its next refresh — the safe direction).
+ */
+function disposeQuarantine(
+  quarantine: string, raw: string, path: string, expected: string,
+): boolean {
+  if (raw !== expected) {
+    try { linkSync(quarantine, path); } catch { /* a fourth holder has it */ }
+    try { unlinkSync(quarantine); } catch { /* best effort */ }
+    return false;
+  }
+  try { unlinkSync(quarantine); } catch { /* best effort */ }
+  return true;
 }
 
 /**
@@ -5219,7 +5302,7 @@ export function acquireDrainClaim(
     const nowMs = opts.nowMs ?? Date.now();
     const token = randomToken();
     const record: DrainClaimRecord = {
-      version: 1,
+      version: DRAIN_CLAIM_VERSION,
       token,
       leg: opts.leg,
       pid: process.pid,
@@ -5252,19 +5335,14 @@ export function acquireDrainClaim(
         parsed = undefined;
       }
       if (!claimIsStale(parsed, { nowMs, host, bootId, alive })) return undefined;
-      // Compare-and-delete: unlink ONLY if the file still holds what we judged
-      // stale. A claim that changed between the read and the unlink belongs to a
-      // NEW holder, who must keep it.
-      if (raw !== undefined) {
-        let current: string | undefined;
-        try {
-          current = readFileSync(path, "utf8");
-        } catch {
-          current = undefined;
-        }
-        if (current === raw) {
-          try { unlinkSync(path); } catch { /* a peer got there first */ }
-        }
+      if (raw === undefined) continue;
+      // ATOMIC TAKEDOWN, then verify in quarantine — see `takedownClaim`.
+      const moved = takedownClaim(path, token);
+      if (!moved) continue;  // a peer moved it first; the next attempt decides
+      if (!disposeQuarantine(moved.quarantine, moved.raw, path, raw)) {
+        // We displaced a NEWER claim than the one we judged stale. It is
+        // restored; give up this tick.
+        return undefined;
       }
       continue;
     }
@@ -5276,6 +5354,14 @@ export function acquireDrainClaim(
         const at = nowMsArg ?? Date.now();
         const current = readDrainClaim(dir);
         if (!current || current.token !== token) return false;
+        // ⛔ An ALREADY-EXPIRED claim is never resurrected (review finding):
+        // `renew` is a read-then-`rename` with no compare, so a holder that
+        // overran its lease is still the token owner on disk and would overwrite
+        // the successor a peer legitimately installed — returning `true` while
+        // two drainers exist. Refusing converts that into "no longer the holder",
+        // which the caller already handles by stopping.
+        const expires = (current as unknown as Record<string, unknown>).expires_at;
+        if (typeof expires === "number" && at >= expires) return false;
         const next: DrainClaimRecord = {
           ...record,
           started_at: record.started_at,
@@ -5287,7 +5373,12 @@ export function acquireDrainClaim(
           renameSync(tmpPath, path);
         } catch {
           try { unlinkSync(tmpPath); } catch { /* best effort */ }
-          return false;
+          // A failed WRITE is not "not ours" (review finding): reporting it as a
+          // lost claim aborts a pass that still owns the spool AND parks the claim
+          // with a live pid, so every later pass reads `heldByClaim` for up to the
+          // full lease while the operator is told a peer took it.
+          const still = readDrainClaim(dir);
+          return !!still && still.token === token;
         }
         renewedAt = at;
         return true;
@@ -5298,32 +5389,23 @@ export function acquireDrainClaim(
         return this.renew(at);
       },
       release(): boolean {
-        let raw: string | undefined;
-        try {
-          raw = readFileSync(path, "utf8");
-        } catch {
-          return false;
-        }
+        // Atomic takedown: the old read-compare-unlink could delete a successor
+        // installed between the compare and the unlink (review finding).
+        const moved = takedownClaim(path, token);
+        if (!moved) return false;
         let parsed: unknown;
         try {
-          parsed = JSON.parse(raw);
+          parsed = JSON.parse(moved.raw);
         } catch {
+          parsed = undefined;
+        }
+        if (!parsed || typeof parsed !== "object"
+            || (parsed as Record<string, unknown>).token !== token) {
+          // Not ours any more: put its bytes back exactly as we took them.
+          disposeQuarantine(moved.quarantine, moved.raw, path, "\u0000<not-ours>");
           return false;
         }
-        if (!parsed || typeof parsed !== "object") return false;
-        if ((parsed as Record<string, unknown>).token !== token) return false;
-        let current: string | undefined;
-        try {
-          current = readFileSync(path, "utf8");
-        } catch {
-          return false;
-        }
-        if (current !== raw) return false;
-        try {
-          unlinkSync(path);
-        } catch {
-          return false;
-        }
+        try { unlinkSync(moved.quarantine); } catch { /* best effort */ }
         return true;
       },
     };

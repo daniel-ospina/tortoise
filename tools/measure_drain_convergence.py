@@ -24,6 +24,10 @@ What it measures, and why each number is in the receipt:
   head reaches zero"). ``None`` means the spool could not be listed.
 * ``max_attempts`` — the falsifier's second half ("no entry exceeding
   ``attempts = 3``"). It is the number the pre-fix drain drove to 10–17.
+  ⛔ Read it as ``max_attempts_high_water``, sampled after EVERY round. Reading
+  it only at the end is a FALSE PASS in the after-tree: filing an entry removes
+  its meta, so a converged run reads 0 no matter what the saturated rounds
+  charged. Both numbers are emitted; the high-water one is the falsifier's.
 * ``refusals`` — how many ``capture_capacity_saturated`` answers the drain itself
   provoked. This is the self-feeding mechanism: the drain competing with itself
   for the box's eight slots.
@@ -218,8 +222,13 @@ def measure(sessions: int, drainers: int, post_seconds: float) -> dict:
         "post_seconds": post_seconds,
         "pending_before": pending_before,
         "pending_after": count_pending_captures(root),
-        "max_attempts": max(attempts) if attempts else 0,
+        # ONE pass here, so the high-water and after-filing readings coincide; the
+        # saturated receipt is where they diverge and where only the high-water one
+        # is a falsifier reading.
+        "max_attempts_high_water": max(attempts) if attempts else 0,
+        "max_attempts_after_filing": max(attempts) if attempts else 0,
         "attempts_histogram": {str(n): attempts.count(n) for n in sorted(set(attempts))},
+        "attempted": sum(p.get("attempted", 0) for p in summaries),
         "filed": server.filed,
         "refusals": server.refusals,
         "high_water": server.high_water,
@@ -242,7 +251,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="baseline: 10 concurrent drains, free server; "
                              "saturated: the box's slots held by live captures, "
                              "three passes, then one free pass")
-    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--rounds", type=int, default=12,
+                        help="saturated passes before the slots free; see the "
+                             "docstring's arithmetic for why the default is 12")
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args(argv)
     if args.scenario == "saturated":
@@ -263,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 
-def measure_saturated(sessions: int, drainers: int, rounds: int = 3,
+def measure_saturated(sessions: int, drainers: int, rounds: int = 12,
                       advance_s: float = 35.0, post_seconds: float = 0.002) -> dict:
     """The MEASURED shape: a box whose captures are live, so the drain is refused.
 
@@ -276,9 +287,20 @@ def measure_saturated(sessions: int, drainers: int, rounds: int = 3,
 
     ``attempts`` is the falsifier's number. The pre-#14350 drain charges every
     entry for the BOX's refusal on every pass, and `backoff_delay` is exponential
-    (30 s → 6 h), so after three saturated passes the spool sits in a SIX HOUR
-    window and the next pass — the one with a free server — cannot attempt any of
-    it. That is the "backlog does not converge, and grew while it drained" shape.
+    (30 s → 6 h), so the entries are pushed out of reach of the pass that could
+    actually file them. **The arithmetic is what the default ``rounds`` encodes**:
+    at ``advance_s`` = 35 s per round the backoff windows are what matter, not the
+    number of rounds — after round 1 (max attempts 1) the window is 30 s and round 2
+    (70 s later) clears it; after round 2 (attempts 2) the window is 60 s and round
+    4 (140 s) clears it; only from attempts 3 does the window (120 s) outlive the
+    default run. A 3-round default therefore STOPS BEFORE the pre-fix drain fails,
+    and measured both trees as converged — a false "before" (review finding). 12
+    rounds drives attempts to ~10 (the handoff's own 10–17) in the before-tree,
+    where the last pass cannot file anything at all.
+
+    ⛔ ``max_attempts_high_water`` is the falsifier reading; ``max_attempts`` after
+    the free pass is NOT (filing clears the meta, so it reads 0 in the after-tree
+    and would "pass" even if the saturated rounds had charged every entry).
     """
     from tortoise.capture_spool import (
         count_pending_captures,
@@ -291,6 +313,7 @@ def measure_saturated(sessions: int, drainers: int, rounds: int = 3,
     pending_before = count_pending_captures(root)
     server = CeilingServer(post_seconds)
     rounds_out: list[dict] = []
+    high_water = 0
     base_ms = time.time() * 1000.0
 
     def run_round(index: int) -> list[dict]:
@@ -323,6 +346,7 @@ def measure_saturated(sessions: int, drainers: int, rounds: int = 3,
         passes = run_round(index)
         attempts = max((read_spool_meta(root, f"measured-{i:04d}") or {}).get("attempts", 0)
                        for i in range(sessions))
+        high_water = max(high_water, attempts)
         rounds_out.append({
             "round": index + 1,
             "server": "saturated (live captures hold all 8 slots)",
@@ -347,6 +371,19 @@ def measure_saturated(sessions: int, drainers: int, rounds: int = 3,
         "entries_still_in_a_BACKOFF_window": blocked_by_backoff,
         "passes": passes,
     })
+
+    # ⛔ "reaches zero" is half the epic's condition; the other half is "and
+    # STAYS". A second free pass — a further drain opportunity, one full cycle
+    # later — must find nothing to do. Without it a run that filed everything and
+    # a run that merely emptied this pass are indistinguishable in the receipt.
+    passes = run_round(rounds + 1)
+    rounds_out.append({
+        "round": rounds + 2,
+        "server": "free (a further cycle — must find nothing to do)",
+        "pending": count_pending_captures(root),
+        "max_attempts": 0,
+        "passes": passes,
+    })
     return {
         "scenario": "saturated",
         "sessions": sessions,
@@ -354,8 +391,18 @@ def measure_saturated(sessions: int, drainers: int, rounds: int = 3,
         "rounds": rounds_out,
         "pending_before": pending_before,
         "pending_after": count_pending_captures(root),
-        "max_attempts": max(attempts) if attempts else 0,
+        "pending_after_a_further_cycle": rounds_out[-1]["pending"],
+        # The falsifier reading: the worst charge observed DURING the run.
+        "max_attempts_high_water": high_water,
+        # Secondary, and explicitly not the falsifier: filing clears the meta, so
+        # this reads 0 in a converged run whatever the saturated rounds charged.
+        "max_attempts_after_filing": max(attempts) if attempts else 0,
         "attempts_histogram": {str(n): attempts.count(n) for n in sorted(set(attempts))},
+        "attempted": sum(p.get("attempted", 0)
+                         for r in rounds_out for p in r["passes"]),
+        "filed": server.filed,
+        "refusals": server.refusals,
+        "peak_slots_held_by_the_drain": server.high_water,
         "claim_race": _claim_race(drainers),
     }
 

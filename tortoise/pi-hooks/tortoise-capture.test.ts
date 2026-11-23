@@ -85,6 +85,7 @@ import {
   pruneSpool,
   acquireDrainClaim,
   capacityRefusal,
+  DRAIN_CLAIM_VERSION,
   claimIsStale,
   quarantineEntry,
   readCaptureStatus,
@@ -7706,4 +7707,71 @@ test("#14350: a capacity refusal is NAMED durably, and clears on the next pass",
   const accepted = statusFetch(200);
   await sessionStartLines(spool, accepted.fetchImpl);
   assert.equal(readCaptureStatus(spool)?.state, "ok", "a free slot clears the record");
+});
+
+test("#14350: an EXPIRED claim is never RESURRECTED by its own holder", async () => {
+  // `renew` is a read-then-`rename` with no compare, so a holder that overran its
+  // lease is still the token owner on disk and would overwrite the successor a
+  // peer legitimately installed — returning `true` while two drainers exist.
+  // MUTATION THAT REDS THIS: delete the `at >= expires` guard from `renew`.
+  const spool = tmpSpool();
+  const slow = acquireDrainClaim(spool, { leg: "python", nowMs: 1000, ttlMs: 60 });
+  assert.ok(slow);
+  const successor = acquireDrainClaim(spool, { leg: "pi", nowMs: 1100, ttlMs: 60 });
+  assert.ok(successor, "the lease expired, so the peer may take over");
+  assert.equal(slow.renew(1105), false, "an expired lease is not renewable");
+  assert.equal(readDrainClaim(spool)?.token, successor.token);
+  assert.equal(successor.renew(1110), true);
+  successor.release();
+});
+
+test("#14350: a takedown never disposes of a claim it did not judge", async () => {
+  // The read-compare-unlink takedown was racy in the direction that restores the
+  // two-drainer defect: the stale taker's `unlink` removes the LIVE claim a peer
+  // installed between its read and its write. The takedown MOVES the file first
+  // and compares in quarantine, so a claim installed underneath it is kept.
+  // MUTATION THAT REDS THIS: go back to compare-then-unlink.
+  const spool = tmpSpool();
+  const staleBytes = `${JSON.stringify({
+    version: 1, token: "gone", leg: "pi", pid: 999999999,
+    host: "box-a", boot_id: "boot-1", started_at: 0, expires_at: 1,
+  })}\n`;
+  writeFileSync(join(spool, "drain.claim"), staleBytes);
+  const fresh = acquireDrainClaim(spool, { leg: "python", nowMs: 5000 });
+  assert.ok(fresh, "a genuinely stale claim IS taken over");
+  const live = readDrainClaim(spool);
+  assert.equal(live?.token, fresh.token);
+  assert.notEqual(live?.token, "gone");
+  fresh.release();
+});
+
+test("#14350: a FUTURE-version claim is unattributable, not reinterpreted", async () => {
+  // The version field is load-bearing: a format this build does not know must be
+  // staled out (then re-verifiable by its lease), never read with today's rules.
+  // MUTATION THAT REDS THIS: drop the version rule from `claimIsStale`.
+  const record = {
+    version: DRAIN_CLAIM_VERSION + 1, token: "t", leg: "pi", pid: process.pid,
+    host: "box-a", boot_id: "boot-1", started_at: 0, expires_at: 2000,
+  };
+  assert.equal(
+    claimIsStale(record, { nowMs: 1000, host: "box-a", bootId: "boot-1" }), true,
+  );
+});
+
+test("#14350: readDrainClaim is never STRICTER than claimIsStale", async () => {
+  // If the reader refuses a record the staleness predicate judges LIVE, the
+  // wrapper concludes "no holder" and runs UNCLAIMED beside it — the two-drainer
+  // defect. A token-less but lease-bearing record must therefore read as HELD.
+  // MUTATION THAT REDS THIS: require `typeof token === "string"` again.
+  const spool = tmpSpool();
+  writeFileSync(join(spool, "drain.claim"), `${JSON.stringify({
+    version: 1, leg: "pi", pid: process.pid, host: "x",
+    started_at: 0, expires_at: Date.now() + 60_000,
+  })}\n`);
+  const record = readDrainClaim(spool);
+  assert.ok(record, "a judgeable record must be readable");
+  assert.equal(
+    claimIsStale(record, { nowMs: Date.now() }), false,
+    "…and the same record is judged live, so the two must agree",
+  );
 });
