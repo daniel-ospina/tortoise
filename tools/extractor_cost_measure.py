@@ -1542,6 +1542,15 @@ def compose_one(*, doc: dict, master: dict | None = None,
     # Pair each provider call with the render that produced its system
     # prompt. Identity, not order: a retry re-sends the SAME string, and
     # every render is captured, so the first unconsumed match is the one.
+    #
+    # ⛔ PREFIX, not equality: `render_s2_prompt` / `render_s4_prompt` append
+    # the SOURCE TRANSCRIPT **outside** `_fill_template`
+    # (`return rendered + "\n\n" + transcript`), and that tail is non-empty
+    # whenever the EDUs fit `_SOURCE_TRANSCRIPT_CAP` (8,000 chars). An equality
+    # test therefore fails for every SMALL document — and fails silently: the
+    # region map comes back empty, the whole prompt is printed as one
+    # `*template prose*` row, and the table still sums. The tail is measured
+    # here as its own region instead of being attributed to the template.
     consumed: set[int] = set()
     for call in calls:
         stage = _compose_stage(call["system"])
@@ -1550,13 +1559,17 @@ def compose_one(*, doc: dict, master: dict | None = None,
         for i, render in enumerate(renders):
             if i in consumed or render["stage"] != stage:
                 continue
-            if render["prompt"] == call["system"]:
+            if call["system"].startswith(render["prompt"]):
                 match, consumed_i = render, i
                 consumed.add(consumed_i)
                 break
         call["regions"] = ({k: len(enc.encode(v or ""))
                             for k, v in (match["values"].items()
                                          if match else {})})
+        tail = (call["system"][len(match["prompt"]):]
+                if match and len(call["system"]) > len(match["prompt"]) else "")
+        if tail:
+            call["regions"]["source_transcript"] = len(enc.encode(tail))
         if match is None and stage == "s1":
             # S1 substitutes with .replace, not the fill map — its slots are
             # the granularity block and the date anchor, captured above.
@@ -1759,16 +1772,6 @@ def render_compose(report: dict) -> str:
     return "\n".join(lines)
 
 
-#: The stage → (system-prompt prefix, template constants) map. The prefix is
-#: how a captured call is identified as a stage: the pipeline renders three
-#: distinct system prompts and the first line of each is a fixed signature.
-_COMPOSE_STAGE_SIGNATURES = (
-    ("s1", "You are the STORY SUMMARIZER"),
-    ("s2", "You are the GRAPH MAPPER"),
-    ("s4", "You are the GAP REVIEWER"),
-)
-
-
 def _render_regions() -> dict[str, dict[str, int]]:
     """The STATIC region sizes of each stage prompt, offline and exact.
 
@@ -1852,9 +1855,12 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     def _per_call(stage: str) -> tuple[float, float, float]:
         """(calls/doc, prompt tokens per call, completion tokens per call).
 
-        MEDIANS, not means: one 128k-token document carries 27% of the corpus's
-        prompt tokens, so a mean per-call figure describes that document's
-        leverage rather than the median document the issue is about.
+        MEDIANS, not means: the longest document (127,914 tokens, 9.3% of the
+        corpus's prompt tokens but 29.7% of its DOCUMENT tokens) is sent twice
+        and carries more prompt tokens than 90 documents its size, so it drags
+        every mean per-call figure upward — the mean S1 call is 11,673 tokens
+        against a median of 7,138. A mean would describe that document's
+        leverage; the issue is about the median document.
         """
         calls, pc, oc = [], [], []
         for r in docs:
@@ -1910,7 +1916,13 @@ def decompose(rows: list[dict], *, arm: str = "cold",
         "**S2's embed list, re-sent to S4**": (c4 * embed),
     }
     total = sum(regions.values())
-    fitted = 45_503  # #14295's input constant (intercept of the per-doc fit)
+    # ⛔ DERIVED, not hardcoded: the constant is the intercept of THIS arm's
+    # per-document fit. A literal 45_503 is right for `cold` and wrong for any
+    # other arm — the bundle's own completion recipe runs `--arm after`, where a
+    # literal would report the BEFORE intercept as the AFTER one and absorb the
+    # lever's whole saving into "unattributed".
+    fitted = round(_fit([(r["item_tokens"], r["prompt_tokens"])
+                         for r in docs])["intercept"])
     return {
         "arm": arm,
         "documents": len(docs),
@@ -2108,7 +2120,8 @@ def render_decompose(dec: dict) -> str:
     for name, tokens in dec["regions"].items():
         lines.append(f"| {name} | {tokens:,.0f} | {100.0 * tokens / total:.1f}% |")
     lines.append(f"| **composition total** | **{total:,.0f}** | 100.0% |")
-    lines.append(f"| *fitted constant (#14295)* | {dec['fitted_constant']:,} | — |")
+    lines.append(f"| *fitted constant (this arm's own intercept)* | "
+                 f"{dec['fitted_constant']:,} | — |")
     lines.append(f"| *unattributed (fit intercept − composition)* | "
                  f"{dec['unattributed']:,.0f} | — |")
     lines.append("")
@@ -2139,6 +2152,14 @@ def render_decompose(dec: dict) -> str:
                 if out.get("total_per_doc") else 0.0
             lines.append(f"| {stage} | {tokens:,.0f} | {share:.1f}% |")
         lines.append(f"| **total** | **{out['total_per_doc']:,.0f}** | 100.0% |")
+        lines.append("")
+        lines.append(
+            "⚠️ This table's rows are per STAGE and sum to the emission; the "
+            "per-SECTION token counts printed by `compose` are "
+            "re-serializations of each section on their own, so they do not "
+            "sum to the emission and carry no residual row. Stage totals are "
+            "the measured `completion_tokens`; section sizes are shape, not an "
+            "account.")
         lines.append("")
         lines.append(
             "S2 emits the whole embed list, and it is the same object that "

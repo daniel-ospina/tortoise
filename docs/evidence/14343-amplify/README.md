@@ -65,7 +65,7 @@ Median document 5,211 tokens · 3.98 calls/document (s1 1.68, s2 1.16, s4 1.14).
 | graph search results (S4) | 129 | 0.3 % | empty (`sdk=None`) — a **floor**; a populated graph adds candidates |
 | **composition total** | **43,567** | 100 % | |
 | *fitted constant (`#14295`)* | *45,503* | — | |
-| **unattributed** | **1,936** | **4.3 %** | the fit's intercept is an OLS line, not a mean: the 128k-token document carries 27 % of the corpus's prompt tokens and pulls the intercept down. This bundle does not close that gap by pro-rating it — an unexplained remainder is a finding, and the finding here is that the fit and the composition agree to 4.3 %. |
+| **unattributed** | **1,936** | **4.3 %** | the fit's intercept is an OLS line through 50 points, and one of them is far outside the others: the 127,914-token document is 9.3 % of the corpus's prompt tokens but 29.7 % of its *document* tokens, and it is a **high-leverage** point — drop it and the intercept falls 45,503 → 30,156 (R² 0.715 → 0.523). So the fit's intercept sits ABOVE the composition, and 1,936 is what an OLS line does at `T=0` where the composition is a measurement at the median. This bundle does not close that gap by pro-rating it — an unexplained remainder is a finding, and the finding here is that fit and composition agree to 4.3 %. |
 
 **The document itself is not in that table.** It is the fit's *slope*: S1 sends the whole
 document text once **per call**, and 34 of 50 documents take a **second** S1 call
@@ -112,25 +112,31 @@ not a lever: it is a re-emission of the embed list, which is the `#7949` channel
 derived from the input. Here is what it is deriving from.**
 
 S2 emits the whole embed list, and what moves its size is the **item count** — a constant of
-the record schema — not the document. The measured population is in `#1789`'s bundle
-(`docs/evidence/1789-s4-reeemit-tax/`, 7 real sessions, 2 runs): **311 recorded items over 7
-sessions** (266 of them in the four tax-surface sections, 29–49 items per session). At S2's
-measured **10,066 completion tokens per call**, that is **~227 tokens per emitted record**.
-The cost is therefore `items × record-shape`, and the record shape is the thing to look at:
+the record schema — not the document. The measured population is the S2 emissions in the
+write-path receipts (§4a): **580 items over 14 emissions, 58,544 completion tokens** across
+the 7 sessions `#1789` measured — **100.9 completion tokens per emitted record**, and the
+per-emission item count is 20–54. (`#1789`'s own `311` is the `narrative` arm alone; the
+`raw` arm carries the rest, which is why both are counted here.) So the cost is
+`items × record-shape` — and with a record at ~101 tokens, the shape below is most of it:
 
 | field on a `points[]` record | rough tokens | quality role |
 |---|---|---|
-| `content` | ~40 | the claim itself |
-| `about_entities` | ~15 | linking |
-| `slots` (subject/object/event, each `{name,kind,confidence}`) | ~25 | typed participation (#1418) |
-| `quote` (verbatim, ≤200 chars) | ~55 | **E3 provenance** — the `#7949` verbatim anchor |
-| `search_keys` (2–4 aliases) | ~20 | E3 resolution |
-| `tier`, `when`, `supersedes`, `source_turn_id`, `pointKind` | ~30 | lifecycle/E2/E3 |
-| JSON punctuation + `indent` | ~40 | — |
+| `content` | ~25–40 | the claim itself |
+| `about_entities` | ~10 | linking |
+| `slots` (subject/object/event, each `{name,kind,confidence}`) | ~20 | typed participation (#1418) |
+| `quote` (verbatim, ≤200 chars) | ~25–55 | **E3 provenance** — the `#7949` verbatim anchor |
+| `search_keys` (2–4 aliases) | ~15 | E3 resolution |
+| `tier`, `when`, `supersedes`, `source_turn_id`, `pointKind` | ~20 | lifecycle/E2/E3 |
+| JSON punctuation | ~10 | — |
 
-i.e. **roughly half of each record is provenance and participation metadata, not the claim.**
-That is a quality *feature* (E2/E3), not slack — which is why this issue's lever is not
-"emit less", and why any change here must clear `#7949` rather than an arithmetic target.
+⚠️ Those per-field figures are the SHAPE's shares, not a measured partition — the emission is
+not instrumented field-by-field, and a `points[]` record measured on its own is 210 tokens
+(indent) / 141 (compact) at a median `content` length, because it carries a `quote` and
+2–4 `search_keys`. What is measured is the **total**: 100.9 tokens per record. What follows
+from the schema is that **provenance and participation metadata (`quote` + `search_keys` +
+`slots` + `when`/`supersedes`/`source_turn_id`) are the larger half of every record**, which
+is a quality *feature* (E2/E3), not slack — and why this issue's lever is not "emit less",
+and why any change here must clear `#7949` rather than an arithmetic target.
 
 ---
 

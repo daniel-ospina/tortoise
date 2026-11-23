@@ -670,38 +670,80 @@ def _evidence_rows() -> list[dict]:
 
 
 def test_the_static_regions_of_a_prompt_are_its_own_bytes():
-    """Every static region plus the template prose must equal the render.
+    """Every spliced region is counted, and the prose is the rest.
 
-    The table's first section is only evidence if it is exhaustive: a region
-    that the renderer splices but this helper does not count would show up as
-    template prose and be attributed to the wrong party.
+    ⛔ A "the parts sum to the render" assertion is VACUOUS as written in the
+    first revision of this file: `_render_regions` defines `template_prose` as
+    `render − Σ(regions)`, so the sum equals the render for ANY region
+    arithmetic — a region dropped or miscounted is absorbed into the prose and
+    the equality still holds. So the exhaustive property is pinned on its two
+    real parts instead:
 
-    ⛔ `template_prose` is a RESIDUAL — `render minus the named slots`
-    (`tools/extractor_cost_measure.py:1802` for S1, `:1826-1827` for S2/S4) — so
-    `sum(statics[stage]) == tokens(render)` is an ARITHMETIC IDENTITY and cannot
-    fail. It proves determinism, never completeness. The falsifiable property is
-    the one pinned below: an unaccounted splice would be silently filed under
-    "stage instructions (template prose)" — the 6,430-token row §1/§4 rank the
-    levers by — so the accounted region NAMES are pinned exactly.
+      1. the region MAP is exactly the renderer's fill map (a spliced value
+         that is not a key is a region attributed to the wrong party);
+      2. each region's size is the size of ITS OWN value (a wrong arithmetic
+         shows up here, not in the residual);
+      3. the prose is the template with the slots EMPTIED — measured
+         independently of the regions, so it can disagree with them.
     """
     from tortoise import extractor_v2 as X
+    enc = m._encoding()
+    n = lambda text: len(enc.encode(text or ""))  # noqa: E731
     statics = m._render_regions()
-
+    master = X.build_master_list()
+    date = "2026-11-21T00:00:00+00:00"
     # S1 is the stage whose slots are counted BY HAND (S2/S4 come from the
-    # renderer's own fill map), so a new `{slot}` there is the live risk.
+    # renderer's own fill map), so a NEW `{slot}` in S1_TMPL is the live risk:
+    # it would render unsubstituted and be counted as prose.
     assert set(re.findall(r"\{(\w+)\}", X.S1_TMPL)) == {
-        "memory_granularity", "date_anchor"}
-    assert set(statics["s1"]) == {
-        "memory_granularity", "date_anchor", "template_prose"}
-    # S2/S4: pin the full accounted set, so a slot the renderer grows without a
-    # matching region reds HERE instead of quietly inflating template_prose.
-    assert set(statics["s2"]) == {
-        "master_list", "anti_routine", "output_contract", "chains_text",
-        "pack_namespaces", "date_anchor", "template_prose"}
-    assert set(statics["s4"]) == {
-        "master_list", "anti_routine", "output_contract", "chains_text",
-        "search_results", "story", "embed_list_json", "date_anchor",
-        "template_prose"}
+        "memory_granularity", "date_anchor"}, (
+        "S1_TMPL grew a placeholder; `_render_regions`' hand-counted S1 branch "
+        "does not know it, so its tokens would be filed as template prose")
+
+    # S1 substitutes with `.replace`; its two slots are real, and the prose is
+    # the template with both slots blanked.
+    granularity = X._granularity_text(master)
+    anchor = X._date_anchor(date)
+    prose_s1 = (X.S1_TMPL.replace("{memory_granularity}", "")
+                .replace("{date_anchor}", ""))
+    assert set(statics["s1"]) == {"memory_granularity", "date_anchor",
+                                  "template_prose"}
+    assert statics["s1"]["memory_granularity"] == n(granularity)
+    assert statics["s1"]["date_anchor"] == n(anchor)
+    assert statics["s1"]["template_prose"] == pytest.approx(n(prose_s1), abs=8)
+
+    # S2/S4: the region map is the renderer's OWN fill map, captured by
+    # wrapping `_fill_template`. Compare each region against an independent
+    # computation of the same value, and the prose against the template with
+    # every slot emptied.
+    captured: list[dict] = []
+    orig = X._fill_template
+
+    def _fill(tmpl, values):
+        captured.append({"tmpl": tmpl, "values": dict(values)})
+        return orig(tmpl, values)
+
+    X._fill_template = _fill
+    try:
+        X.render_s2_prompt(master, session_date=date, story="", edus=None)
+        X.render_s4_prompt("", {}, {}, master, session_date=date, edus=None)
+    finally:
+        X._fill_template = orig
+    for stage, rec in zip(("s2", "s4"), captured, strict=True):
+        # (1) every spliced value is a region, and every region is a spliced
+        # value (plus the prose row) — nothing can hide.
+        assert set(statics[stage]) == set(rec["values"]) | {"template_prose"}, (
+            f"{stage}: region map and fill map disagree — "
+            f"{set(statics[stage]) ^ (set(rec['values']) | {'template_prose'})}")
+        # (2) each region is the size of its own value.
+        for name, value in rec["values"].items():
+            assert statics[stage][name] == n(value), (stage, name)
+        # (3) the prose is measured INDEPENDENTLY: the same template with
+        # every slot emptied, so it cannot be the residual of (2).
+        blank = orig(rec["tmpl"], dict.fromkeys(rec["values"], ""))
+        assert statics[stage]["template_prose"] == pytest.approx(n(blank), abs=12), (
+            f"{stage}: template prose {statics[stage]['template_prose']} vs "
+            f"independently-rendered {n(blank)} — a splice leaked into prose")
 
 
 def test_the_kind_vocabulary_is_a_measured_region_not_prose():
@@ -842,3 +884,53 @@ def test_the_offline_compose_arm_makes_no_provider_call():
     report = m.compose_report([rows])
     for stage, acc in report["rows"][0]["stages"].items():
         assert acc["system_tokens"] > 0, stage
+
+
+def test_a_transcript_tail_does_not_blank_the_region_map():
+    """#14343 review finding: S2/S4 append the SOURCE TRANSCRIPT **outside**
+    `_fill_template`, so pairing a call to its render by string EQUALITY
+    silently produced an empty region map for every small item — and the table
+    still summed, because the whole prompt then prints as one prose row.
+
+    The fixture here is deliberately tiny ("one two three": the EDUs fit
+    `_SOURCE_TRANSCRIPT_CAP`, so the tail IS present), and the assertion is on
+    the region map, not on the row count.
+    """
+    art = m.compose_one(doc={"path": "synthetic", "tokens": 3,
+                             "text": "one two three"}, live=False)
+    by_stage = {c["stage"]: c for c in art["calls"]}
+    for stage in ("s2", "s4"):
+        regions = by_stage[stage]["regions"]
+        assert regions, (
+            f"{stage}: the region map is empty — the call was not paired with "
+            f"its render (prefix match, not equality)")
+        assert "master_list" in regions, regions
+        assert regions["master_list"] > 1000, regions
+    # and the tail is attributed to itself rather than to the template: the
+    # EDUs fit the cap, so `_render_source_transcript` returned a block and that
+    # block is a region of its own (a legitimately-empty slot like
+    # `pack_namespaces` in the verbose render is allowed to be 0).
+    assert by_stage["s2"]["regions"].get("source_transcript", 0) > 0, (
+        "the SOURCE TRANSCRIPT tail is missing from the region map — it is "
+        "exactly the part that equality-pairing used to swallow")
+    assert by_stage["s4"]["regions"].get("source_transcript", 0) > 0
+
+
+def test_the_fitted_constant_is_derived_from_the_arm_not_hardcoded():
+    """The bundle's own completion recipe runs `--arm after`; a literal
+    intercept would report the BEFORE constant as the AFTER one and absorb the
+    lever's whole saving into `unattributed`."""
+    rows = _evidence_rows()
+    cold = m.decompose(rows, arm="cold")
+    # relabel ONLY the cold rows, so the two arms see the same DATA and a
+    # difference can only come from the label (relabelling every arm would
+    # merge cold+warm into one population and change the fit for a real reason)
+    same_data = [dict(r, arm="synthetic") if r.get("arm") == "cold" else r
+                 for r in rows]
+    other = m.decompose(same_data, arm="synthetic")
+    assert cold["fitted_constant"] == other["fitted_constant"]
+    # …and it equals the intercept of this arm's own fit
+    docs = [r for r in rows if r.get("arm") == "cold" and r.get("kind") == "doc"
+            and not r.get("failed")]
+    expected = m._fit([(r["item_tokens"], r["prompt_tokens"]) for r in docs])
+    assert cold["fitted_constant"] == round(expected["intercept"])

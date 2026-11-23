@@ -34,7 +34,7 @@ arm `cold` · 50 documents · median document 5,211.0 tokens · calls/doc 3.98 (
 | chains | 547 | 1.3% |
 | graph search results (S4) | 129 | 0.3% |
 | **composition total** | **43,567** | 100.0% |
-| *fitted constant (#14295)* | 45,503 | — |
+| *fitted constant (this arm's own intercept)* | 45,503 | — |
 | *unattributed (fit intercept − composition)* | 1,936 | — |
 
 The document itself is NOT in that table: it is the fit's slope, 8,754 tokens/doc (1.68 × 5,211.0) against the fitted 11,250. S1 sends the WHOLE document once per call, and 34/50 documents take a second S1 call, so the document is paid for ~2x.
@@ -49,6 +49,8 @@ Solved dynamic regions: the S1 story is **2,656** tokens as the later stages see
 | s2 | 11,677 | 65.5% |
 | s4 | 3,354 | 18.8% |
 | **total** | **17,830** | 100.0% |
+
+⚠️ This table's rows are per STAGE and sum to the emission; the per-SECTION token counts printed by `compose` are re-serializations of each section on their own, so they do not sum to the emission and carry no residual row. Stage totals are the measured `completion_tokens`; section sizes are shape, not an account.
 
 S2 emits the whole embed list, and it is the same object that becomes S4's largest input region — so one stage's emission is paid for THREE times: as output, as S1's story is re-read, and as the list is re-serialized. Nothing in this table scales with the document: the item COUNT is what moves, and a document's length barely moves it (R²=0.000 on S2's input fit).
 
