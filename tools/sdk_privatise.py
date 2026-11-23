@@ -1244,9 +1244,33 @@ SWEEP_NAMES = 66
 #: merged in, and `--repin` printed the same pair before and after that merge, so the merge
 #: contributes no row here either — nor do the sibling commits merged after it (all on this
 #: branch's census file, and named by log rather than counted here, because a count restated in this
-#: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
-#: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
-#: not carried forward.
+#: block goes stale at the next sibling push, the class `2465cda150` was written to stop). The
+#: pin is RE-DERIVED after every integration rather than carried forward. ⛔ EVERY PAIR HERE IS
+#: SCOPED TO THE TREE IT WAS MEASURED ON, and an earlier cut of this paragraph attributed one to
+#: another (review of #14287, round 4, P1): `(11861, "f0647020531c078c")` is what `main` COMMITS
+#: at `0467ba329d` and again at `47e28b549e76` (measured: `git show <rev>:tools/sdk_privatise.py`),
+#: and it is the pair THIS BRANCH carried before its FIRST rebase (`561a53ec04a7` and the original
+#: tip `f800a528acb9` both carry it) — so integrating `main` at those two commits re-measured the
+#: SAME pair and added no untyped receiver. The FIRST rebase is what moved the pin, and it moved it
+#: to `main`'s own pair: `--repin` on that rebased tree prints `(11864, "2a6400518a87775c")`, the
+#: SAME pair `main` commits at `588cf7aeb61f`, so those three arrived with `main`'s commits. The
+#: SECOND rebase onto `main` `cc936d47dba1` did NOT move it: `--repin` on the pre-rebase tip
+#: `a7690edb9ce8` prints `(11864, "2a6400518a87775c")` and so does the rebased tree, and
+#: `--check` exits 0 on each. ⛔ NOT EVERY REBASE MOVES IT, and asserting that it always does was
+#: the fault of an earlier cut of this sentence (review of #14287, round 8, P2): "the REBASE … DID
+#: move the pin" was TRUE of the first and FALSE of the second, and it named `f800a528acb9` as
+#: "the pre-rebase tip" when that rev is the pre-rebase tip of the FIRST rebase, NOT an ancestor of
+#: the tip it meant (measured: `git merge-base --is-ancestor f800a528acb9 a7690edb9ce8` exits 1).
+#: ⛔ "NO INTEGRATION ADDED A
+#: ROW" IS FALSE AS A GENERAL CLAIM: an integration CAN add untyped receivers, and re-cutting the
+#: pin is exactly how that gets recorded — the block BELOW is one, where merging `10e51693` moved
+#: the pair to `(11864, …)`, "FOUR MORE than this branch's parent". ⛔ AND THE EVIDENCE IS
+#: `--repin`'s OUTPUT, NOT THE CHECK'S EXIT: `--check` exiting 0 says the observed pair equals the
+#: pin, which it reports just as readily on a tree whose pin was re-cut after the integration
+#: added rows.
+#: ⛔ NAMED BY ITS COMMITS, NOT BY "this branch's base": the base moves under every integration
+#: and a parenthetical reading `this branch's base` went stale at the very next merge (measured:
+#: written naming `0467ba329d`, false the moment `47e28b549e76` was merged).
 #: ⛔ MERGED `origin/main` `10e51693` INTO THIS BRANCH AND KEPT BOTH SIDES' BLOCKS ABOVE — each is a
 #: true measurement of the tree it NAMES, which is the ground rule of this run, so neither side is
 #: dropped to make the conflict go away. THE PIN IS THEN RE-MEASURED ON THE RESOLVED TREE, because
