@@ -89,9 +89,9 @@ import secrets
 import socket
 import stat
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 #: The claim file, in the spool ROOT — never ``entries/``, so it is invisible to
 #: the spool's own accounting (`_entry_bytes`, `prune_spool`, `_scan_spool`),
@@ -233,10 +233,13 @@ def claim_is_stale(
     if recorded_boot and boot_id and recorded_boot != boot_id:
         return True  # rule 3, rebooted: the recorded pid is not the holder
     pid = record.get("pid")
-    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-        if not alive(pid):
-            return True  # rule 3: the holder is gone
-    return False
+    # rule 3: the holder is gone (an unusable `pid` is not a holder fact — fall through)
+    return (
+        isinstance(pid, int)
+        and not isinstance(pid, bool)
+        and pid > 0
+        and not alive(pid)
+    )
 
 
 def read_claim(root: Path) -> dict | None:
@@ -603,9 +606,12 @@ def acquire(
                 # holder. Rule 1 already says stale, and leaving it would `EEXIST`
                 # every future attempt — a permanent block, which #14350 forbids.
                 if not _clear_unusable_claim_path(path):
+                    # `from None`: the `FileExistsError` we are handling is the
+                    # EXPECTED contention signal, not this condition's cause —
+                    # chaining it would point a reader at the wrong file (B904).
                     raise DrainClaimUnavailable(
                         f"{path} exists and is not a claim, and cannot be cleared — "
-                        "the spool root is not writable by this process")
+                        "the spool root is not writable by this process") from None
                 continue
             # ATOMIC TAKEDOWN, then verify in quarantine: see `_takedown`. The
             # previous read-compare-unlink let two contenders delete each other's

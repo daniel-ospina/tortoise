@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -157,15 +156,15 @@ def _claim_race(processes: int) -> dict:
     # CORRECTLY reclaim it — counting that as a second winner would measure the
     # probe's own lifetime, not the exclusion.
     script = (
-        "import sys; sys.path.insert(0, %r)\n"
+        f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r})\n"
         "from tortoise.drain_claim import acquire\n"
-        "c = acquire(%r, leg='measure')\n"
+        f"c = acquire({str(root)!r}, leg='measure')\n"
         "if c is None:\n"
         "    print('LOST')\n"
         "    raise SystemExit(0)\n"
         "print('WON', flush=True)\n"
         "import time; time.sleep(1.0)\n"
-        "c.release()\n" % (str(REPO_ROOT), str(root))
+        "c.release()\n"
     )
     procs = [subprocess.Popen([sys.executable, "-c", script],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,

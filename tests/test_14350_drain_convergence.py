@@ -50,8 +50,8 @@ from tortoise.capture_spool import (
     PostOutcome,
     Snapshot,
     _age_key,  # noqa: F401  — the ordering the monotonicity argument rests on
-    capture_health_line,
     capacity_refusal,
+    capture_health_line,
     count_pending_captures,
     flush_spool,
     read_capture_status,
@@ -452,7 +452,7 @@ def test_a_capacity_stop_does_not_skip_the_OLDEST_entry(tmp_path):
     attributed to the entry and the oldest one drifts back in the queue).
     """
     root = _spool(tmp_path, sessions=3)
-    post, state = _capacity(refusals=2)
+    post, _state = _capacity(refusals=2)
     submitted: list[str] = []
     inner = post
 
@@ -828,7 +828,7 @@ def _ts_verdict(root: Path) -> dict:
     rules would agree with the Python rules by construction and prove nothing.
     """
     script = (
-        'import { acquireDrainClaim, claimIsStale, readDrainClaim } from %s;\n'
+        f'import {{ acquireDrainClaim, claimIsStale, readDrainClaim }} from {json_dumps(_TS_LEG.as_posix())};\n'
         'const dir = process.env.CLAIM_DIR;\n'
         'const rec = readDrainClaim(dir);\n'
         'const stolen = acquireDrainClaim(dir, { leg: "pi" });\n'
@@ -838,7 +838,7 @@ def _ts_verdict(root: Path) -> dict:
         '  stole: !!stolen,\n'
         '  seconds_scale: rec ? rec.expires_at < 1e11 : null,\n'
         '  version: rec ? rec.version : null,\n'
-        '}));\n' % json_dumps(_TS_LEG.as_posix())
+        '}));\n'
     )
     # `node -e` shifts argv (the script is argv[0]), so the path goes through the
     # environment: an off-by-one here would make the test pass against the WRONG
@@ -902,9 +902,9 @@ def test_a_PI_claim_is_read_in_the_SAME_UNIT_by_both_legs(tmp_path):
     root = tmp_path / "spool"
     root.mkdir(parents=True, exist_ok=True)
     script = (
-        'import { acquireDrainClaim } from %s;\n'
+        f'import {{ acquireDrainClaim }} from {json_dumps(_TS_LEG.as_posix())};\n'
         'const c = acquireDrainClaim(process.env.CLAIM_DIR, { leg: "pi", ttlMs: 60000 });\n'
-        'process.stdout.write(JSON.stringify({ ok: !!c }));\n' % json_dumps(_TS_LEG.as_posix())
+        'process.stdout.write(JSON.stringify({ ok: !!c }));\n'
     )
     out = subprocess.run([_NODE, "--input-type=module", "-e", script],
                          capture_output=True, text=True, timeout=120,
@@ -1006,7 +1006,7 @@ def test_a_pass_that_RECOVERS_from_a_capacity_refusal_is_not_recorded_BLOCKED(tm
     not None` again (drop the `capacity_stopped` gate).
     """
     root = _spool(tmp_path, sessions=3)
-    post, state = _capacity(refusals=1)  # one refusal, then the box is free
+    post, _state = _capacity(refusals=1)  # one refusal, then the box is free
     summary = flush_spool(root, post, now=1000.0, sleep=lambda _s: None)
     assert summary.filed == 3, "the pass recovered and filed everything"
     assert summary.capacity_stopped is False
@@ -1096,7 +1096,7 @@ def test_the_severed_SECOND_429_keeps_the_servers_own_NAME(tmp_path):
 
     MUTATION THAT REDS THIS: hardcode `code = CAPTURE_CAPACITY_CODE`.
     """
-    root = _spool(tmp_path, sessions=1)
+    _spool(tmp_path, sessions=1)
     outcome = PostOutcome(ok=False, status=429, detail=_INGEST_BODY)
     refusal = capacity_refusal(outcome)
     assert refusal is not None, "a 429 is still a box-level refusal (the CHARGING rule)"
@@ -1121,9 +1121,9 @@ def test_BOTH_legs_name_the_same_429_the_same_way(tmp_path):
     root = tmp_path / "spool"
     root.mkdir(parents=True)
     script = (
-        'import { capacityRefusal } from %s;\n'
+        f'import {{ capacityRefusal }} from {json_dumps(_TS_LEG.as_posix())};\n'
         'const r = capacityRefusal({ status: 429, detail: process.env.BODY });\n'
-        'process.stdout.write(JSON.stringify(r ?? null));\n' % json_dumps(_TS_LEG.as_posix())
+        'process.stdout.write(JSON.stringify(r ?? null));\n'
     )
     out = subprocess.run([_NODE, "--input-type=module", "-e", script],
                          capture_output=True, text=True, timeout=120,
