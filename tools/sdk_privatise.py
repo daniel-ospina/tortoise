@@ -1259,8 +1259,13 @@ SWEEP_NAMES = 66
 #: `--check` exits 0 on each. ⛔ NOT EVERY REBASE MOVES IT, and asserting that it always does was
 #: the fault of an earlier cut of this sentence (review of #14287, round 8, P2): "the REBASE … DID
 #: move the pin" was TRUE of the first and FALSE of the second, and it named `f800a528acb9` as
-#: "the pre-rebase tip" when that rev is two generations older and is NOT an ancestor of the tip it
-#: meant. ⛔ "NO INTEGRATION ADDED A
+#: "the pre-rebase tip" when that rev is the pre-rebase tip of the FIRST rebase, NOT an ancestor of
+#: the tip it meant (measured: `git merge-base --is-ancestor f800a528acb9 a7690edb9ce8` exits 1).
+#: ⛔ AND NO COUNT OF "GENERATIONS" IS QUOTED, deliberately: an earlier cut of this correction said
+#: "two generations older", which names no unit a reader can re-run — the distance between the two
+#: depends on whether it is counted in rebases, in commits along the mapped lineage, or in reflog
+#: rebase operations, and all three give different answers. The checkable fact is the ancestry test
+#: above, so that is what is stated. ⛔ "NO INTEGRATION ADDED A
 #: ROW" IS FALSE AS A GENERAL CLAIM: an integration CAN add untyped receivers, and re-cutting the
 #: pin is exactly how that gets recorded — the block BELOW is one, where merging `10e51693` moved
 #: the pair to `(11864, …)`, "FOUR MORE than this branch's parent". ⛔ AND THE EVIDENCE IS
