@@ -104,7 +104,7 @@ jobs:
         run: |
           echo "GRAPH_URI=docker://:falkordb@127.0.0.1:${TORTOISE_TEST_DOCKER_PORT:?the #6673 provision step did not export it}" >> "$GITHUB_ENV"
       - name: install (every extra named)
-        run: uv sync --extra embeddings --extra parity --extra postgres
+        run: uv sync --extra embeddings --extra parity --extra postgres --extra test
       # ⛔ THE HARNESS RUNS BEFORE THE CENSUS ON PURPOSE. The census pins are
       # ABSOLUTE counts over `tortoise/**`, so any product commit that lands
       # between this branch's merge-base and the merge commit moves them — and a
@@ -194,6 +194,36 @@ jobs:
             echo "::error::the mutated run returned $rc; the harness must report a difference (1). A 0 here means the harness cannot fail."
             exit 1
           fi
+      - name: census doc-vs-tree pins (#2148/B1 — the ONLY place they gate)
+        # ⛔ THIS STEP IS WHY THE PIN CAN BE DECOUPLED FROM THE MERGE GATE.
+        # `tests/test_13098_cypher_inventory.py` is `core`-registered, so it rides
+        # the REQUIRED `python-ci-gate` — and its doc-vs-tree arms compare
+        # committed counts against the live tree, which ANY product commit can
+        # move. #14296 reconciled nine open PRs / 115 files over that and still
+        # failed. Those arms now skip unless this env is set, and this job — NOT
+        # required, and path-filtered to `tortoise/**` + the census tool/doc — is
+        # the one place that sets it. A genuinely wrong census therefore still
+        # reds a job, on exactly the diffs that can make it wrong.
+        #
+        # The classifier/harness arms in the same file are NOT env-gated: they
+        # pin behaviour, not a number that rots with the tree.
+        env:
+          TORTOISE_CYPHER_DOC_PIN: "1"
+          # ⛔ THE SESSION FIXTURE FAILS WITHOUT THIS. `tests/conftest.py::
+          # _p4_uri_required` REFUSES a URI-less session unless `TORTOISE_DB_URI`
+          # or this flag is set, and this job exports no `TORTOISE_DB_URI` (its
+          # stores reach the HARNESS through `--graph-uri`/`--record-dsn`, not
+          # through the ambient env). MEASURED at this head: with the doc-pin env
+          # set and this flag absent the file reports `90 errors, 0 skipped` —
+          # every case, including the pin that asserts this step's own env, so
+          # the step would gate NOTHING. (The `76 errors, 14 skipped` shape is a
+          # DIFFERENT configuration: it is what you see when the doc pin is ALSO
+          # unset, since the 14 skipped are exactly the `@requires_doc_pin` arms.)
+          # `TORTOISE_TEST_CARVE_OUT` is the repo's URI-less-leg convention — the
+          # same one `python-ci.yml` uses in `TORTOISE_TEST_CARVE_OUT: ${{
+          # env.CARVE_OUT }}`.
+          TORTOISE_TEST_CARVE_OUT: "1"
+        run: uv run python -m pytest tests/test_13098_cypher_inventory.py -q -p no:cacheprovider
       - name: census pins match the doc (LAST of the checks — a base-drift pin must not mask the runs above)
         run: uv run python tools/cypher_inventory.py --check
       # ⛔ BOTH TEARDOWNS ARE UNCONDITIONAL (`if: always()`), and they are the

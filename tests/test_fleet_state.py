@@ -3814,19 +3814,22 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: rather than inherited. The behavioural pins are the `once_slow` and `death_after_streak` ROWS,
 #: not a bare assertion on this constant.
 #: ⛔ EVERY `184 passed` / `173 passed` TOTAL IN THIS WHOLE FILE — ABOVE *AND* BELOW, in this
-#: block, in the `_LONG_PATH_STREAK_TIME_CALLS` commentary, in `test_...` bodies and in the
-#: `:51xx` measured notes — IS `main`'s AS OF `a7baa98d05` (#14387), BEFORE #14287 merged.
-#: #14287 adds TWO tests, so those totals are NOT inheritable on ANY tree carrying it: this
-#: branch, and `origin/main` since `9d6d2e347fd4` — RE-MEASURE EACH SITE, because the delta
+#: block, in the `_LONG_PATH_STREAK_TIME_CALLS` commentary, and in `test_...` bodies (one of them
+#: records it beside the `ps -p <pid>` argv pin) — IS `main`'s AS OF `a7baa98d05` (#14387), BEFORE
+#: #14287 merged. #14287 adds TWO tests, so those totals are NOT inheritable on ANY tree carrying
+#: it: this branch, and `origin/main` since `9d6d2e347fd4` — RE-MEASURE EACH SITE, because the delta
 #: differs by site (two measured below): PR #14287 restores
 #: `test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail`, which drives `_verdict_or_fail`
 #: with a STUB and never constructs a child, a census or these constants, and adds the `blip` census
 #: ROW (a prior error, a recovery, then a derived late burst — #14287 review P3). So `184 passed` ->
-#: `186 passed` (verified at `K = 6`), and the `K = 1` site — which records `11 failed, 173
-#: passed` at `a7baa98d05` — reads `12 failed, 174 passed` here (verified) — the passed delta is
-#: ONE there, not two, because that site's run already fails the peer's row as well. The FAILING
-#: count at `K >= 20` is `12`, not `11`: the peer's `blip` row joins the failure set (it jumps the
-#: simulated clock by the bound + 1 s). ⛔ It does NOT red through the
+#: `186 passed` (verified at `_LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6` — this block's constant, which
+#: every bare `K` in THIS note means), and the OTHER site measured in this sentence —
+#: `_LONG_PATH_STREAK_TIME_CALLS = 1`, which records `11 failed, 173 passed` at `a7baa98d05` — reads
+#: `12 failed, 174 passed` here (verified); its passed delta is ONE, not two, because that site's run
+#: already fails the peer's row as well — whereas the streak `K = 8` sites below move by TWO
+#: (`184` -> `186 passed`), because that run fails nothing. The FAILING count at
+#: `_LONG_PATH_ERROR_SAMPLE_TIME_CALLS >= 20` is `12`, not `11`: the peer's `blip` row joins the
+#: failure set (it jumps the simulated clock by the bound + 1 s). ⛔ It does NOT red through the
 #: `calls["n"] > burst_state["started_at"] + burst` assertion —
 #: at `K = 20` EVERY one of the 12 params, `blip` included, reds at the GLOBAL premise (b) above
 #: ("the death sample must arrive BEFORE the poll's deadline"), which runs BEFORE the poll, so no
