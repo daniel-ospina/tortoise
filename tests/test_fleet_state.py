@@ -5069,29 +5069,43 @@ def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
     # with `commandx=` the stubbed directions all pass. This direction is why it reds.
     import shutil
 
+    # ⛔ THE TEXTUAL PIN RUNS ON EVERY BOX, SO IT COMES FIRST — ABOVE `shutil.which` (#12039 cycle
+    # 12 P2, cycle 13 F2). It needs no `ps` at all, so a `ps`-less box must still be able to red a
+    # mistyped invocation; behind any availability gate it silently stops being a pin there.
+    # It pins the WHOLE argv, not two substrings: `-p <pid>` is the selector the function's own
+    # docstring rests on ("asked about our OWN pid so it cannot depend on the fixture"), and
+    # dropping just that token left this file `184 passed` (measured), so substrings are not the
+    # property. The census invocation (`ps -ww -axo …`) is pinned separately, in the header guard.
+    invocation = inspect.getsource(_ps_answers)
+    assert (
+        '["ps", "-p", str(os.getpid()), "-o", "command="]' in invocation
+    ), (
+        "`_ps_answers` stopped asking `ps -p <our pid> -o command=`. Dropping ONLY the `-p` "
+        "selector leaves the tokens this test used to look for intact while the control starts "
+        "answering from the whole table, and every census error would then be excused as the "
+        f"box's. Its invocation is: {invocation!r}")
+
     if shutil.which("ps") is None:  # pragma: no cover — no `ps` to ask
         pytest.skip("no `ps` on this box: the positive direction cannot be measured")
-    # ⛔ THE TEXTUAL PIN COMES FIRST (#12039 cycle 12, P2), because it needs no `ps` at all: the
-    # mistyped-argument direction this arm exists for must stay measurable on a box whose `ps`
-    # cannot answer. Reading the invocation's own SOURCE is what carries it.
-    invocation = inspect.getsource(_ps_answers)
-    assert '"-o"' in invocation and "command=" in invocation, (
-        "`_ps_answers` stopped asking `ps` for `-o command=`, so every census error would be "
-        "excused as the box's and the regression this file pins stays green forever. Its "
-        f"invocation is: {invocation!r}")
-    # ⛔ AN UNUSABLE TABLE IS THE BOX'S LIMITATION, NOT A REQUIRED-SHARD FAIL (#5049 rules 1/4).
-    # `shutil.which` was the whole gate, so a `ps` that EXISTS but cannot answer (uutils, a
-    # restricted `/proc`, a field rejection that exits non-zero with empty stdout — this file's own
-    # definition of "no usable `ps`") redded the shard for a box reason, while the subject test on
-    # the same box correctly SKIPPED. Measured with a `ps` that exits 1 with empty stdout:
-    # `2 failed, 181 passed, 1 skipped`.
-    if not _ps_answers():  # pragma: no cover — a `ps` that exists and cannot answer
+    # ⛔ THE SKIP NEEDS A WITNESS THAT IS NOT THE PREDICATE UNDER TEST (#12039 cycle 13 P1). This
+    # was `if not _ps_answers(): skip` plus `assert _ps_answers() is True`, i.e. the assert could
+    # only fire if two adjacent calls flipped — so a BROKEN `_ps_answers` (the exact thing this
+    # test exists to catch) read as "this box cannot answer" and SKIPPED a required-shard FAIL arm.
+    # Measured: `_ps_answers`'s real call given `timeout=0.000001` → `182 passed, 2 skipped, 0
+    # failed` here, against `1 failed` on the parent commit. The witness is now a DIFFERENT
+    # invocation: the census itself, asked about our own pid. A table one probe can read while the
+    # other says it cannot is the CONTROL's breakage, and it FAILS.
+    answers = _ps_answers()
+    if not answers and not _row_for_pid(os.getpid()):
+        # pragma: no cover — a `ps` that exists and cannot answer
         pytest.skip(
-            "`ps` exists but cannot answer `-p <pid> -o command=`, so this box cannot measure the "
-            "positive direction; the invocation was pinned TEXTUALLY above")
-    assert _ps_answers() is True, (
-        "`ps -p <our pid> -o command=` answered nothing on a box whose `ps` DID answer the "
-        "capability probe above, so every census error would be excused as the box's")
+            "`ps` exists but neither `-p <pid> -o command=` nor a full table read can answer, so "
+            "this box cannot measure the positive direction; the invocation was pinned TEXTUALLY "
+            "above")
+    assert answers is True, (
+        "`ps -p <our pid> -o command=` answered nothing while the census's own `ps -ww -axo …` "
+        "DID return our row, so the control is what broke — every census error would be excused "
+        "as the box's and the regression this file pins would stay green")
 
 
 def test_the_outside_signal_set_is_exactly_the_signals_the_box_sends() -> None:
@@ -5135,13 +5149,17 @@ def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
 
     if shutil.which("ps") is None:  # pragma: no cover — no `ps` to read a row with
         pytest.skip("no `ps` on this box: the row this test grades cannot be read")
-    # ⛔ AND THE SAME CAPABILITY GATE AS THE CONTROL (#12039 cycle 12, P2). Without it a `ps` that
-    # exists but cannot answer turns the row assertion below into a required-shard FAIL for a box
-    # reason — the inversion this PR removes everywhere else.
-    if not _ps_answers():  # pragma: no cover — a `ps` that exists and cannot answer
+    # ⛔ AND THE SAME CAPABILITY GATE AS THE CONTROL, ON THE SAME INDEPENDENT WITNESS (#12039 cycle
+    # 12 P2, cycle 13 P1). Without a gate, a `ps` that exists but cannot answer turns the row
+    # assertion below into a required-shard FAIL for a box reason — the inversion this PR removes
+    # everywhere else. Keyed on `_ps_answers()` ALONE the gate is a fail-open: a broken control
+    # would skip this test too. The census is the witness, so only a box where BOTH invocations
+    # come back empty skips.
+    if not _ps_answers() and not _row_for_pid(os.getpid()):
+        # pragma: no cover — a `ps` that exists and cannot answer
         pytest.skip(
-            "`ps` exists but cannot answer `-p <pid> -o command=`, so the row this test grades "
-            "cannot be read on this box")
+            "`ps` exists but neither `-p <pid> -o command=` nor a full table read can answer, so "
+            "the row this test grades cannot be read on this box")
 
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     try:
