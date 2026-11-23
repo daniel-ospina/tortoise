@@ -354,15 +354,15 @@ FUNNEL_QUERY = (
 #
 # The prefix is INTERPOLATED from its one owner (``session_schema``), not bound
 # as a ``$`` parameter, and what that buys is LINE COST, stated at its real size:
-# the one PRODUCTION execution is ``hosted_api.py:27978`` (the two TEST sites are
+# the one PRODUCTION execution is ``hosted_api.py:28013`` (the two TEST sites are
 # ``tests/test_activation_scorecard.py`` — a stubbed ``_G``, through the hosted
 # route — and ``tests/test_demo_session_read_exclusion_8290.py``, which queries it
 # directly on a real embedded engine), and a ``params=…`` argument there does not
 # fit in 100 columns, so it wraps and pushes later lines down. Measured over every
 # ``hosted_api.py:<line>`` cite in the tracked tree: **165** distinct cite
-# targets have a line number LARGER than 27978 (28446 … 99999) and those are the
+# targets have a line number LARGER than 28013 (28446 … 99999) and those are the
 # ones that shift; **589** have a number smaller than it (26 … 27785) and cannot
-# move. (755 distinct targets in all — the remainder is 27978 itself, which this
+# move. (755 distinct targets in all — the remainder is 28013 itself, which this
 # very comment names. NEVER re-take these by hand — that is how they went wrong
 # twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every
 # figure in this note AND the list-helper's in one command whenever

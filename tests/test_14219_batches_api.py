@@ -1395,13 +1395,39 @@ def test_a_restart_defers_a_fresh_claim_instead_of_discarding_it(store,
     The staleness window's premise is "a young claim may belong to a live peer".
     Applying it by SKIPPING the whole batch threw the decision away: an item in
     flight when the process died is SECONDS old at the restart that recovers it —
-    the ordinary redeploy — and `_BATCH_RECOVERED` makes that scan one-shot, so
-    the item stayed `extracting` for the process lifetime with the batch reporting
-    `pending > 0` and nothing to re-drive it.
+    the ordinary redeploy — so the batch must still be REPORTED (and revisited),
+    or the claim is stranded until the window expires with nothing looking again.
     """
     monkeypatch.setattr(ha, "_BATCH_SCAN", {})
     monkeypatch.setattr(ha, "_BATCH_RESCAN_S", 0)
     monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    submitted: list[str] = []
+    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
+        "ceiling": 2,
+        "submit": staticmethod(lambda fn, *a, **k: submitted.append(a[1]) or True),
+    })())
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+
+    resumed = ha._recover_org_batches({"org_id": ORG_ID})
+
+    assert resumed == [batch.batch_id], (
+        "a batch holding only a FRESH claim must still be resolved, or the claim "
+        "is stranded for ever")
+    assert batch.batch_id in submitted, (
+        "the batch must be handed to a worker, which re-checks the window per "
+        "ITEM and leaves the fresh claim alone")
+    assert store.get_item(ORG_ID, batch.batch_id,
+                          items[0].item_id).state is bi.BatchItemState.EXTRACTING, (
+        "the fresh claim itself must NOT be requeued — a peer may hold it")
+
+    # …and once the claim is genuinely OLD it is requeued: the window is AGED,
+    # not switched off (see `_age_claim`).
+    _age_claim(store, ORG_ID, batch.batch_id, items[0].item_id)
+    assert bi.BatchCoordinator(store).recover(ORG_ID) == [batch.batch_id]
+    assert store.get_item(ORG_ID, batch.batch_id,
+                          items[0].item_id).state is bi.BatchItemState.QUEUED
 
 
 # ── round 4: ONE liveness rule, a re-scan, a rotating window, one charge ───
@@ -1660,3 +1686,77 @@ def test_a_peer_settling_the_same_state_is_not_charged_by_this_pass(store,
     assert out.charge_in == 0 and out.charge_out == 0, (
         "this pass charged a settlement a peer made — its write did not land")
     assert charged == []
+
+
+# ── round 7: the receipt agrees with the meter, and the row keeps its spend ─
+def test_the_receipt_and_the_meter_agree_about_a_retried_item(store, monkeypatch):
+    """⛔ BLOCKING 2: the bill and the receipt must not report different sums.
+
+    A retried item has two runner calls behind it and the meter bills both, so a
+    row holding only the LAST call's figures made `tokens_spent` report 100 for a
+    200-token spend — the exact measurement the metering docstring narrates as
+    the defect it fixes.
+    """
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(bi, "BATCH_RECLAIM_AFTER_S", 0.0)
+    verdicts = [bi.ItemOutcome(bi.BatchItemState.QUEUED, reason="lock-held",
+                               tokens_in=100),
+                bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=100)]
+    monkeypatch.setattr(ha, "_batch_item_runner",
+                        lambda *a, **k: (lambda i: verdicts.pop(0)))
+
+    coord = bi.BatchCoordinator(store)
+    batch, _ = coord.submit(ORG_ID, ["/d/a.md"])
+    charged = 0
+    real_charge = bi.record_item_spend
+
+    def _charge(org_id, *, tokens_in=0, tokens_out=0):
+        nonlocal charged
+        charged += tokens_in + tokens_out
+        return real_charge(org_id, tokens_in=tokens_in, tokens_out=tokens_out)
+
+    monkeypatch.setattr(bi, "record_item_spend", _charge)
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    body = bi.status_body(store.get_batch(ORG_ID, batch.batch_id),
+                          store.items(ORG_ID, batch.batch_id))
+    assert body["tokens_spent"] == 200, (
+        f"the row reports {body['tokens_spent']} while the meter holds {charged}")
+    assert body["tokens_spent"] == charged, (
+        "the customer's receipt and the ledger must be the same number")
+
+
+def test_a_runner_call_that_spent_is_billed_even_when_the_row_moved_on(
+        store, monkeypatch):
+    """⛔ N1: a peer settling the row does not un-spend OUR call's tokens."""
+    charged: list[int] = []
+    monkeypatch.setattr(bi, "record_item_spend",
+                        lambda org_id, *, tokens_in=0, tokens_out=0:
+                        charged.append(tokens_in + tokens_out) or tokens_in)
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+
+    def _runner(sdk, corpus, org_id):
+        def _run(item):
+            # A peer settles the row WHILE our call is inside the runner.
+            peer = store.get_item(org_id, item.batch_id, item.item_id)
+            other = bi.BatchCoordinator(store)
+            other.advance(org_id, peer, bi.BatchItemState.EXTRACTING,
+                          attempt=True)
+            other.advance(org_id, peer, bi.BatchItemState.INDEXED, tokens_in=5)
+            return bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=700,
+                                  tokens_out=30)
+        return _run
+
+    monkeypatch.setattr(ha, "_batch_item_runner", _runner)
+    coord = bi.BatchCoordinator(store)
+    batch, _ = coord.submit(ORG_ID, ["/d/a.md"])
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert charged == [730], (
+        "our runner call spent 730 tokens; the ledger was left short — the ONE "
+        "budget then reads used less than it is")

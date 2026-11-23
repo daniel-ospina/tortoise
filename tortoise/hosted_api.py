@@ -16832,16 +16832,32 @@ _BATCH_RETRY_THREAD: threading.Thread | None = None
 #: `BATCH_RECLAIM_AFTER_S`, and with the mark never expiring, nothing ever asked
 #: again — so the item stayed `extracting` for the process's life. The measured
 #: per-document wall clock is 56 s, so "crashed mid-batch, restarted at once" is
-#: the NORMAL restart shape, not an edge. Re-scanning every
-#: `_BATCH_RESCAN_S` costs one `pending_batches()` read per tenant per window and
-#: makes staleness the only thing that decides a claim.
+#: the NORMAL restart shape, not an edge. Re-scanning makes staleness the only
+#: thing that decides a claim.
+#:
+#: ⚠️ **What a re-scan COSTS, measured rather than assumed** (#14415 review round
+#: 7, N2): not "one read". It is `pending_batches()` plus, per batch in the
+#: window, `get_batch` + `items` + `put_batch` (the `resuming` write) — 152 graph
+#: round trips for a 50-batch window, on the 2-worker bookkeeping pool, from a
+#: `GET`. The mitigations are: the interval (`_BATCH_RESCAN_S`, default 900 s), the
+#: per-call limit, a rotating offset, and submitting a drain ONLY for batches the
+#: scan actually gave work to.
 _BATCH_SCAN: dict[str, tuple[float, int]] = {}
+#: How many tenants the scan register may hold before the oldest entries are
+#: dropped. It is an optimisation cache, so an eviction costs one extra scan, not
+#: correctness — but an unbounded dict is a leak with a tenant per entry (#14415
+#: review round 7, N9).
+_BATCH_SCAN_MAX_ORGS = 10_000
 #: How many unfinished batches one recovery scan may examine. Bounds the work a
 #: tenant's first request carries (it runs on the 2-worker bookkeeping pool) while
 #: the rotating offset guarantees progress for the rest.
 _BATCH_RECOVER_LIMIT = 50
 _BATCH_RESCAN_S = max(30, _int_env("TORTOISE_BATCH_RESCAN_S",
                                    int(_batch_ingest.BATCH_RECLAIM_AFTER_S)))
+#: How soon a FAILED scan may be retried. Short, so one transient fault does not
+#: sideline recovery for a whole window — but not zero, so a poison batch cannot
+#: make every read pay a full failing scan (#14415 review round 7, N2).
+_BATCH_RETAIN_FAILURE_S = 30.0
 
 
 def _batch_retry_enqueue(org: dict, batch_id: str) -> None:
@@ -16850,13 +16866,12 @@ def _batch_retry_enqueue(org: dict, batch_id: str) -> None:
             return
         # Bound the queue: an org cannot accumulate unbounded deferred batches in
         # memory.
-        # ⚠️ DECLARED RESIDUAL (#14219 review round 2, NB5): overflow past this
-        # bound is NOT re-derived in this process — `_BATCH_RECOVERED` is
-        # once-per-tenant-per-boot, so nothing here re-scans. The rows survive and
-        # are resumed by the next process; the drain-time retry path above is what
-        # keeps this queue from being the only safety-net. 1000 deferred batches
-        # for ONE process is well outside the measured shape (a batch is deferred
-        # for seconds, and the tick re-submits every one it can).
+        # ⚠️ DECLARED RESIDUAL: an entry dropped here is retried only by a LATER
+        # recovery scan (`_BATCH_RESCAN_S`, default 900 s) or by the next process.
+        # The rows are durable and are the record, so nothing is lost; the delay
+        # is. 1000 deferred batches for ONE process is well outside the measured
+        # shape (a batch is deferred for seconds, and the tick re-submits every
+        # one it can).
         if len(_BATCH_RETRY) < 1000:
             _BATCH_RETRY.append((org, batch_id))
 
@@ -16952,6 +16967,14 @@ def _recover_org_batches(org: dict) -> list[str]:
         # `recover()` wraps, so a tenant with n > 50 unfinished batches reaches
         # all of them within ceil(n / 50) scans.
         _BATCH_SCAN[org_id] = (now, offset + _BATCH_RECOVER_LIMIT)
+        if len(_BATCH_SCAN) > _BATCH_SCAN_MAX_ORGS:
+            # Evict the oldest half: a cache miss costs one extra scan, and the
+            # register is an optimisation rather than a record.
+            for stale_org, _entry in sorted(_BATCH_SCAN.items(),
+                                            key=lambda kv: kv[1][0])[
+                    : len(_BATCH_SCAN) // 2]:
+                if stale_org != org_id:
+                    _BATCH_SCAN.pop(stale_org, None)
     try:
         store = _batch_store_for(org)
         coord = _batch_ingest.BatchCoordinator(store)
@@ -16976,10 +16999,22 @@ def _recover_org_batches(org: dict) -> list[str]:
     except Exception:
         _logger.exception("batch recovery failed for team %s", org_id)
         with _BATCH_RETRY_LOCK:
-            # Forget the scan so a later request retries it at once, rather than
-            # serving a whole window with recovery down.
-            _BATCH_SCAN.pop(org_id, None)
+            # ⛔ KEEP THE THROTTLE, SHORTEN IT (#14415 review round 7, N2).
+            # Dropping the entry re-armed the scan on EVERY read, so a poison
+            # batch (a `get_batch`/`items` raise) made every request pay the full
+            # failing scan — and, because the offset went with it, reset the
+            # rotation to 0 so the tail was never reached while the fault
+            # persisted.
+            _BATCH_SCAN[org_id] = (now - _BATCH_RESCAN_S + _BATCH_RETAIN_FAILURE_S,
+                                   offset)
         return []
+    # ⚠️ Every returned batch gets a drain, including one whose only non-terminal
+    # item is a FRESH claim a peer may own — that is the round-5 decision (defer,
+    # never discard) and it is what keeps the claim revisitable. The cost of the
+    # needless ones is bounded and small: `_drain_batch` refuses a fresh claim on
+    # its first pass over the rows (the one liveness rule), so it is a
+    # `get_batch` + one `items` read, not a runner call (#14415 review round 7,
+    # N2 measured this and it is documented rather than hidden).
     for batch_id in resumed:
         _submit_or_defer(org, batch_id)
     if resumed:
@@ -17098,7 +17133,7 @@ def _drain_batch(org: dict, batch_id: str) -> None:
         # statement it ran only when the pass got that far, so ONE transient
         # failure before it — `_batch_store_for`, a `store.items()`, `settle()` —
         # left the items `queued` with `_BATCH_RETRY` empty and nothing else to
-        # re-drive them (`recover()` is one-shot per org via `_BATCH_RECOVERED`),
+        # re-drive them (recovery is throttled per tenant by `_BATCH_SCAN`),
         # and the status surface reported `pending > 0` for the process lifetime
         # with no error and no progress. A pass that could not even build a store
         # still knows the batch exists, so it re-drives blind and lets the next

@@ -131,9 +131,10 @@ publishes the estimate; the scheduler is F4's remaining half.
 
 **Landed:** the layer and the routes (`tortoise/batch_ingest.py`, PR #14415) with the per-item indexer door,
 content-hash dedup, resume (claim-staleness bounded, so a poll on one instance cannot take another's live claim),
-cancel (compare-and-set, so an in-flight item keeps its result), ONE liveness rule for a claim (applied in the
-coordinator's claim arm, so a drain cannot re-extract a document a peer is inside), a re-scanning, rotating
-recovery window (so a restart 30 s after a crash resumes, and no batch past the per-scan bound is stranded),
+cancel (compare-and-set, so an in-flight item keeps its result), a liveness rule for a claim applied in the
+coordinator's claim arm (so a drain cannot re-extract a document a peer is inside), a throttled, rotating recovery
+scan (so a claim left behind by a dead process is revisited once it ages out, and no batch past the per-scan bound is
+stranded),
 the proactive estimate against the ONE
 `capture_extraction` budget (#14275), and a **retry tick** — a deferred batch, or one whose drain leaves a retryable
 item `queued`, is re-swept instead of sitting `running` until the process restarts
@@ -149,8 +150,9 @@ tracked as #14431; `record_item_spend` therefore makes no ledger call today, bec
 tokens. Also not yet: the scheduler itself (the tick is an interval re-sweep, not an off-peak planner); a
 20/500-document scale measurement on the production shape; an ack-latency instrument for a 1000-item acceptance; and a
 cross-process drain lease (the claim is process-local).
-The meter records only what EACH landed runner call spent (never a row's cumulative figure, so a retry cannot
-double-bill), and it moves the TOKEN dimension only — the charge is `calls=0` with no measured price, so the COST
+The meter records what EACH landed runner call spent, and the item row ACCUMULATES its spend, so the customer's
+`tokens_spent` and the ledger hold the same number after a retry (a row that kept only the last call's figures
+reported 100 for a 200-token spend). It moves the TOKEN dimension only — the charge is `calls=0` with no measured price, so the COST
 ceiling does not see batch spend; that becomes load-bearing the moment extraction lands here.
 
 ### Track S — build the destination *(starts now; spend only when a gate says so; S = scale)*

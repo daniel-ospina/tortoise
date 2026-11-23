@@ -1876,7 +1876,17 @@ SWEEP_NAMES = 66
 #: `list_recent_batches` (the REST handler keeps the route's own name, which is not a receiver call site).
 #: Re-pin only from a tree whose covering suites are green: `--check` exits 0 on the pair below with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11899, "527d305da858bb14")
+#: ⛔ RE-CUT AGAIN AT `4b7be98fb38b` — ONE OCCURRENCE, NOT A NEW SHAPE, and the row count does not move.
+#: `--report --base 28ca66878d --top 3000` on the previous head (`1cd022aa06cc`) and on this one, diffed
+#: row by row, yields exactly one difference out of an UNCHANGED **861**-row set:
+#:   * `seen.update` **101 → 102** (+1) — an ordinary-word receiver on a Python SET (`.update(...)` in the
+#:     meter bookkeeping), which is the class this pin exists to DECLARE and deliberately leaves alone: the
+#:     sweep cannot type the receiver, and a `set` is not an SDK method, so "fixing" it would mean renaming
+#:     a builtin method call. `untyped receivers left alone (deliberate, reported): 11900`, and
+#:     `typed references still pointing at a public name` stays **0**, so no typed call site is legitimised
+#:     by this re-cut — that is the property `--check` gates, and the pin only records where the edge sits.
+#: Re-pinned by `--repin` on THIS tree, never by arithmetic on the last pair: `(11900, "79e3ca9943a7dfee")`.
+SWEEP_RESIDUE = (11900, "79e3ca9943a7dfee")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
