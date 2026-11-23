@@ -17008,8 +17008,17 @@ def _recover_org_batches(org: dict) -> list[str]:
             with _BATCH_DRAINING_LOCK:
                 return candidate in _BATCH_DRAINING
 
+        # ⛔ A FIRST SCAN IN THIS PROCESS MAY SETTLE FRESH CLAIMS; A RE-SCAN MAY
+        # NOT (#14415 review round 9, HIGH). `last == 0.0` is exactly "this
+        # process has never scanned this tenant", i.e. the boot case, where every
+        # existing claim belongs to a predecessor that is gone — that is what
+        # settles a cancelled batch's stranded rows. Every later scan is on a
+        # live deployment, where a claim younger than the reclaim window may be
+        # held by a PEER REPLICA: settling it drops that runner's outcome and
+        # bills the spend for a document the cancel copy promised to keep.
         resumed = coord.recover(org_id, live_batches=_is_live, offset=offset,
-                                limit=_BATCH_RECOVER_LIMIT)
+                                limit=_BATCH_RECOVER_LIMIT,
+                                settle_fresh_claims=not last)
     except Exception:
         _logger.exception("batch recovery failed for team %s", org_id)
         with _BATCH_RETRY_LOCK:
@@ -53439,7 +53448,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 205 tracked files (755 distinct
+# ABSOLUTE line number from 205 tracked files (751 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
