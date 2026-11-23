@@ -3479,9 +3479,15 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # **ON PURPOSE** (#14395 review P2, MEASURED BOTH WAYS): widening it to include
         # `_builtins_launderers` is a NO-OP — the resolver clause ABOVE already answers the
         # launderer receiver for a Subscript node (`_builtin_lookup_name`'s own Subscript arm),
-        # so reverting the widened union here alone leaves all 44 tests green. This file deletes
-        # what no mutant can red, so the subscript spellings are pinned by that clause's mutant
-        # instead; the rows still exist in `test_EVERY_static_binding_form_is_a_READ_reach`.
+        # so reverting the widened union here alone leaves all 44 tests green. ⛔ THIS WHOLE
+        # CLAUSE IS DOMINATED BY THE RESOLVER ASK ABOVE (#14395 review, P3, MEASURED): the
+        # resolver asks `_builtin_lookup_name` with the same `members`, the same launderers and a
+        # strict superset of `names`, and that function's Subscript arm never reads
+        # `getattr_fetchers`, so reverting this clause's union AND deleting the clause outright
+        # both leave 44 passed. That is the "deletes what no mutant can red" rule pointing at this
+        # clause itself; its removal is filed as its own change rather than mixed into a security
+        # fix at the end of a review cycle (deleting a clause whose dominance was argued but not
+        # exhaustively proven is the one edit that could turn a dead arm into a new fail-open).
         or (isinstance(n, ast.Subscript)
             and _builtin_lookup_name(n, _builtins_names | {"dict", "copy"}, consts,
                                      _builtins_dict_names, _builtins_launderers,
@@ -8219,7 +8225,10 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # (<read>)` was already RED and its `getattr(dict, …)["get"]` twin too, while the same
         # callee one BIND away (`_dc = dict`) was GREEN — the receiver spelling again, not the
         # callee-composition residual (the `.get("get")(…)` spellings, which stay GREEN for
-        # both receivers and are declared in the residual table above).
+        # both receivers and are declared in
+        # `test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN` below — named
+        # rather than pointed at by direction, because "the residual table above" sent a
+        # reviewer looking for a table that is four thousand lines the other way.
         "a READ METHOD subscripted out of a NAMESPACE ALIAS's `__dict__`, INLINE": (
             '    import builtins\n'
             '    _dc = dict\n'
@@ -12284,14 +12293,24 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     Closing it needs a two-step application in the census, which is new machinery rather than a
     threaded set; it is DECLARED here (a row below pins it GREEN) rather than left reading as
     covered. Its ONE-hop twins, EACH BOUND FIRST — `_g = vars(dict).get; _g("get")`,
-    `_g = dict.__dict__.get; _g("get")`, and every `[…"get"]`/`dict.get` spelling — are REFUSED and
-    pinned by rows. ⛔ THE INLINE FORM OF THE SAME COMPOSITION IS **NOT** REFUSED, and it is rowed
-    BELOW with the class rather than here: `dict.__dict__.get("get")(m, "exec")` applies the
-    resolved read to a literal key and then applies THAT, in one expression, which is the two-step
-    application and not the receiver spelling this PR closes. Binding the callee first is what the
-    arms reach; chaining it inline is what they do not. The qualifier is on the LIST and not on its
-    first item for that reason — carried on item one, this sentence read as covering the inline form
-    and the same function's own table contradicted it eight lines down (#14395 review, P3).
+    `_g = dict.__dict__.get; _g("get")`, and every `[…"get"]`/`dict.get` spelling OF THE MODULE
+    SPELLED `dict` — are REFUSED and pinned by rows. ⛔ THE SCOPE OF THAT WORD "EVERY" IS MEASURED,
+    and it does NOT reach the module fetched out of the builtins namespace (#14395 review, P1):
+    `_f = builtins.dict.get; _f(builtins.__dict__, "exec")(<read>)` is GREEN and LIVE
+    (`builtins.dict.get is dict.get` → True), as are `__builtins__["dict"].get`,
+    `builtins.__dict__["dict"].get`, `vars(builtins)["dict"].get`, `getattr(builtins, "dict").get`
+    and `_g = builtins.dict.__getitem__; _g("get")` — while the inline `builtins.dict.get(m,
+    "exec")` and `builtins.dict.__dict__["get"]` are RED. That class is PRE-EXISTING on `main`
+    (measured: the same seven shapes read GREEN there) and is FILED rather than claimed closed
+    here; the arm is a receiver the `{"dict", "copy"}` union cannot supply, because the module is
+    reached through the namespace and not named.
+    ⛔ THE INLINE FORM OF THE SAME COMPOSITION IS **NOT** REFUSED, and it is rowed BELOW with the
+    class rather than here: `dict.__dict__.get("get")(m, "exec")` applies the resolved read to a
+    literal key and then applies THAT, in one expression, which is the two-step application and
+    not the receiver spelling this PR closes. Binding the callee first is what the arms reach;
+    chaining it inline is what they do not. The qualifier sits on the LIST and not on its first
+    item for that reason — carried on item one, this sentence read as covering the inline form and
+    the same function's `declared_residual` table below contradicted it (#14395 review, P3).
 
     ⛔ EACH ROW BELOW WAS MEASURED AS A LIVE LEVER at `7b1589ef9e` — a third reach executing the
     product read while the pin passed (`m=2 c=2 i=0`). They are pinned GREEN so the note cannot
