@@ -5135,7 +5135,11 @@ jobs:
           # that can run it (`pgvector/pgvector:pg16` above), which is why the
           # file is here and not merely registered on `core`: there it collects
           # and skips, and a skip on this job reds the leg gate below.
-          # #9318: the POSITION-KEY COLLISION's two acceptance legs. They
+          # #9318: the POSITION-KEY COLLISION's acceptance legs (the count is
+          # deliberately not stated — it moves whenever a review round adds one;
+          # re-derive it from the file's own skip census, never from a number
+          # copied here, and note `tools/ci_selection.py --integrity` does NOT
+          # measure case counts). They
           # need this job's DSN (the live door runs as the migration's own
           # non-bypassing `tortoise_record_app` role), and this job's leg gate
           # FAILS on any skip — which is what makes them run rather than pass by
@@ -5153,8 +5157,24 @@ jobs:
           # `.[test,postgres]`, so the oracle executes here. Without this line
           # it would run in no CI lane at all, which is the `#9551` "the leg
           # that would catch it never ran" defect one layer down.
+          # #7879: the epic's own acceptance line — *"a live write's dense read
+          # reports the record, not the graph"* — had NO falsifier. Its WRITE half
+          # is pinned by `test_9078_…` (capture) and its READ half by the DB-free
+          # `test_11642_vector_move.py` (the served set) plus the LIVE
+          # `test_11642_vector_move_live.py` (seeded rows), but nothing drove the
+          # chain ONCE from a public write to the dense answer, and nothing could
+          # separate "the record answered" from "the graph answered and the record
+          # happened to hold the same vector" — measured: the two stores return the
+          # SAME id at the SAME distance, so only the leg's own `mechanism` token
+          # tells them apart. So the file is armed HERE, where the DSN and the
+          # driver exist and the leg gate reds on a skip.
+          # Its runner legs also land here rather than in `core`: `test_record_runner.py`
+          # is DB-FREE by construction and its own registration says the DB-level
+          # half belongs to this lane, so plan → refusal → apply → no-op is
+          # executed against the real server instead of described in a PR body.
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
+            tests/test_7879_record_chain.py \
             tests/test_9318_journal_collision.py \
             tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
@@ -5176,8 +5196,9 @@ jobs:
             --junit "$SCRATCH/junit.xml"
           exit $rc
       - name: The DB legs RAN, not skipped (#9551)
-        # The target of the issue is "0 of the two DB legs skipped in the armed
-        # job" — so this is asserted, not assumed. Without it the job is green
+        # The target of the issue is "0 of the DB-backed legs skipped in the armed
+        # job" — no count is stated, because it moves whenever a review round adds
+        # one; the gate below is count-agnostic (ANY skip fails it). Without it the job is green
         # when the leg skips, which is the whole defect: an unarmed job and an
         # armed-but-skipping job are indistinguishable from the outside.
         # Read from the junit XML, not from the log text: a count in a summary

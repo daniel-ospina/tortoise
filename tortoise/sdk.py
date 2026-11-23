@@ -176,6 +176,11 @@ from .read_stages import (
     STAGE_RETRIEVAL,
 )
 from .read_stages import mark as _mark_read_stage
+# #14186: the ONE embedder seam. Imported as a module (not as names) because the
+# seam is a live configuration — `resolve_backing()` is re-read per call, and a
+# `from .embed_seam import BACKING_INPROCESS` would freeze the comparison at
+# import time and make a mid-process backing switch invisible here.
+from . import embed_seam as _embed_seam
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -884,6 +889,30 @@ def _kind_invisible_char(kind: str) -> str | None:
         if _kind_non_identifier_char(probe, i):
             return probe[i]
     return None
+
+
+def _embedder_engine_kick_allowed() -> bool:
+    """Whether ENGINE INIT should kick the in-process encoder warm-up (#14186 F5).
+
+    ``False`` when the seam's backing is ``worker`` / ``external``: this process
+    runs no forward pass on those, so an eager load is a 432 MB copy nothing
+    consults — the RSS the ``worker`` backing exists to remove (#13674).
+
+    ⛔ FAILS SAFE, in the opposite direction from a skip: a seam that cannot be
+    imported answers ``True`` (warm), mirroring ``hosted_api._lifespan``'s
+    own arm, which keeps the pre-warm ON when the seam cannot be read. A silent
+    skip on an import error is a load that never happens on the configuration
+    that NEEDS it.
+
+    A function rather than an inline ``try`` so the three answers (worker ⇒ no,
+    inprocess ⇒ yes, unreadable seam ⇒ yes) are pinnable without building a graph.
+    """
+    try:
+        from .embed_seam import encodes_in_process
+
+        return encodes_in_process()
+    except Exception:  # noqa: BLE001, RUF100 — an unreadable seam warms
+        return True
 
 
 def _kind_suggestion(kind: str) -> str:
@@ -15505,9 +15534,33 @@ class TortoiseSDK:
             # EmbeddingModel.status() (``retrieval_legs()`` declared it too
             # until #4282 deleted that method); the cooldown
             # itself is unchanged (never sticky-off).
+            #
+            # ⛔ NOT WHEN THE ENCODER LIVES ELSEWHERE (#14186 review F5). With the
+            # seam's backing on ``worker``/``external`` this process runs no forward
+            # pass, so an eager in-process load is a 432 MB copy nothing consults —
+            # the RSS the ``worker`` backing exists to remove (#13674). This is the
+            # engine-init kick (thread ``tortoise-embedder-warmup``);
+            # ``hosted_api``'s lifespan pre-warm is gated the same way, and between
+            # them they were the two copies the documented migration left resident
+            # (``docs/infra-runbook.md`` §4.1.1e).
+            #
+            # ⛔ THE GATE IS HERE, NOT INSIDE ``start_warm_up``: the write/read
+            # readiness paths read that call's return value as "is a load in
+            # flight", so a skip there would turn a healthy LOCAL load into a
+            # decline on a deployment that still uses the in-process encoder for a
+            # residual path.
+            #
+            # ⛔ AND THE DECISION IS A FUNCTION, NOT AN INLINE IMPORT (review
+            # P3): folded into the blanket ``except`` below, a seam that could not
+            # be imported silently SKIPPED the warm-up — the mirror image of
+            # ``hosted_api._lifespan``, which keeps the pre-warm ON when the seam
+            # cannot be read. :func:`_embedder_engine_kick_allowed`
+            # fails SAFE (unreadable lever ⇒ warm) and is pinnable without
+            # building a graph.
             try:
                 from .embeddings import EmbeddingModel
-                EmbeddingModel.start_warm_up()
+                if _embedder_engine_kick_allowed():
+                    EmbeddingModel.start_warm_up()
             except Exception:  # noqa: BLE001, RUF100 — warm-up is never fatal
                 pass
         return self._proj
@@ -47133,7 +47186,48 @@ class TortoiseSDK:
         # encoder bug or a shape error is not the flag's contract.
         query_vec = None
         _vec_reason: str | None = None
-        if strategies.get("vector") and query and query.strip():
+        # ── #14186: WHICH BACKING ENCODES THIS QUERY ────────────────────────
+        # The acquire ladder below is a bound on a LOCAL model LOAD (`#13528`):
+        # it waits at most `READ_EMBED_BUDGET_S`, then declines so the read's
+        # dense leg is declared rather than parked. With a worker or external
+        # backing there is no local load to bound and no local model to acquire
+        # — running the ladder anyway would (a) load a 432 MB model this process
+        # no longer uses and (b) DECLINE the read on a budget for a model that
+        # was never going to be consulted, which is a false degradation. So the
+        # seam is asked directly on that path, through the SAME decline
+        # vocabulary (`encode_failed`), and the stage timeline still attributes a
+        # breach inside it to `embed_encode` — the step that is actually slow.
+        _seam_backing = _embed_seam.resolve_backing()
+        _seam_remote = _seam_backing != _embed_seam.BACKING_INPROCESS
+        if strategies.get("vector") and query and query.strip() and _seam_remote:
+            _mark_read_stage(STAGE_EMBED_ENCODE)
+            _declined = False
+            try:
+                query_vec = _embed_seam.encode_query(_dense_query)
+                # The backing produced no vector. Recorded with the term the local
+                # encode arm already uses rather than a new one: the leg trace's
+                # reason vocabulary is read by operators and pinned by rows, and a
+                # synonym for "the encode produced nothing" would split one
+                # population into two.
+                _declined = query_vec is None
+            except Exception:  # noqa: BLE001, RUF100
+                _declined = True
+            if _declined:
+                # ⛔ #5275 STILL BINDS ON THIS PATH. ``_unavailable`` raises iff
+                # ``TORTOISE_EMBEDDING_MODEL_REQUIRED`` is armed — an armed process
+                # must never be handed a keyword-only read. With a remote backing
+                # the local ``get()`` ladder is never reached, and that ladder is
+                # the only place the flag used to decide this; skipping it here
+                # would turn the flag's named refusal into the designed-absence
+                # degrade with no error and no signal, which is exactly the
+                # ``#2985`` shape #5275 was opened for.
+                from .embeddings import EmbeddingModel
+
+                EmbeddingModel._unavailable(
+                    context="read: the configured embed backing declined",
+                    kind=EmbeddingModel.absent_reason())
+                _vec_reason = "encode_failed"
+        elif strategies.get("vector") and query and query.strip():
             from .embeddings import READ_EMBED_BUDGET_S, EmbeddingModel
             from .exceptions import EmbedderUnavailableError
             # #10893: stage marks for the wait-bound breach. `mark` is a NO-OP
@@ -47208,7 +47302,14 @@ class TortoiseSDK:
             elif model is not None:
                 _mark_read_stage(STAGE_EMBED_ENCODE)
                 try:
-                    query_vec = model.encode([_dense_query])[0].tolist()
+                    # #14186: the encode routes through the seam. For the
+                    # in-process backing this is the pre-#14186 call exactly
+                    # (`EmbeddingModel.get()` + `ensure_embed_threads()` +
+                    # `model.encode([text])`), now with the query coalesced
+                    # behind the backing's bounded window.
+                    query_vec = _embed_seam.encode_query(_dense_query)
+                    if query_vec is None:
+                        _vec_reason = "encode_failed"
                 except Exception:  # noqa: BLE001, RUF100
                     _vec_reason = "encode_failed"
         if _vec_reason is not None and status_trace is not None:
@@ -49766,17 +49867,33 @@ class TortoiseSDK:
             return None
         from .embeddings import EmbeddingModel
         from .exceptions import EmbedderUnavailableError
+        # ⛔ #14186 review F5: with a worker or external backing there is no
+        # LOCAL encoder to acquire, so ``get()`` must not decide this pass at
+        # all. An ARMED ``get()`` with no local model RAISES (#5275), which made
+        # an armed process with a remote backing refuse a read the remote encoder
+        # can serve — #5275 inverted, because the refusal guards an absence that
+        # does not apply to this deployment. The flag's contract is honoured where
+        # the local model is actually the encoder; on the remote path the seam's
+        # own decline ladder carries it.
+        if _embed_seam.resolve_backing() == _embed_seam.BACKING_INPROCESS:
+            try:
+                model = EmbeddingModel.get()
+            except EmbedderUnavailableError:
+                raise  # #5275: REQUIRED — fail loud, never a silent fallback
+            except Exception:  # noqa: BLE001, RUF100
+                model = None
+            # Only the in-process backing reads ``model is None`` as "no dense
+            # leg": the seam carries its own encoder on the other backings.
+            if model is None:
+                return None
         try:
-            model = EmbeddingModel.get()
-        except EmbedderUnavailableError:
-            raise  # #5275: REQUIRED — fail loud, never a silent fallback
-        except Exception:  # noqa: BLE001, RUF100
-            model = None
-        if model is None:
-            return None
-        try:
-            # THE bounded extra embed: one composed string, one vector.
-            expanded_vec = model.encode([composed])[0].tolist()
+            # THE bounded extra embed: one string, one vector — and on a remote
+            # backing a SECOND round trip for this read: the primary encode above
+            # has RETURNED, so this opens its own batch. What the seam buys is
+            # coalescing with OTHER readers' tickets, not that batch (#14186).
+            expanded_vec = _embed_seam.encode_query(composed)
+            if expanded_vec is None:
+                return None
         except Exception:  # noqa: BLE001, RUF100
             _logger.warning(
                 "C2 dense expansion encode failed — keeping the original "
