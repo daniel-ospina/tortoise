@@ -35,12 +35,22 @@ path that wrote raw points would produce exactly the bloat the capability audit
     all, so ``_CAPTURE_ACK_DEADLINE_S``'s problem (a compatibility join) does
     not arise: the ack is a few graph writes, and the work is behind a worker.
 
-(b) ⛔ **one token budget, sessions AND documents** (owner, #14275). Items are
-    metered into the SAME ``capture_extraction`` dimension
+(b) ⛔ **one token budget, sessions AND documents** (owner, #14275). An item
+    that spends tokens is charged to the SAME ``capture_extraction`` dimension
     (``max_extraction_tokens``, ``allowance_gate.ALLOWANCE_KEYS``) through the
-    same ledger writer (``metering.record_capture_usage``) — never a second
-    meter. :func:`estimate_batch` reads that dimension's own meter; it does not
-    define a new one.
+    same ledger writer (``metering.record_capture_usage``), by
+    :func:`record_item_spend` — never a second meter. :func:`estimate_batch`
+    reads that dimension's own meter; it does not define a new one.
+
+    ⚠️ **What is actually metered TODAY, stated plainly** (#14219 review round 2,
+    BLOCKING 1): the production per-file indexer this route delegates to spends
+    no model tokens — it embeds and files — so ``tokens_in``/``tokens_out`` are 0
+    on every item and :func:`record_item_spend` makes no ledger call. The hook is
+    on the path (:class:`BatchRunner` → :func:`runner_result_to_outcome` carries
+    the counts, ``_drain_batch`` charges them) so that the moment LLM extraction
+    is wired to a batch item, the spend lands on the one meter with no second
+    change. Until then the estimate reports the *ceiling* of what a batch would
+    cost, and the ledger moves only for lanes that actually spend.
 
 (c) ⛔ **batch document processing is OFF-PEAK ONLY**; on-demand is for fewer
     than ~5–10 documents' equivalent (owner, 2026-11-23). This layer makes
@@ -94,6 +104,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import math
 import threading
 import time
@@ -114,6 +125,8 @@ from typing import Any, Protocol
 #: document's own size (5,211), which is the trap #14295 exists to correct: a
 #: small item is not "relatively expensive", it is *entirely* overhead, because
 #: S2 and S4 do not scale with the document at all (R² = 0.000 / 0.009).
+_logger = logging.getLogger(__name__)
+
 TOKENS_PER_MEDIAN_DOCUMENT = 64_799
 
 #: Measured wall clock per document, cold arm (#14295): 56.25 s. This is what
@@ -134,11 +147,12 @@ OVERAGE_USD_PER_MILLION_TOKENS = 1.00
 ON_DEMAND_MAX_ITEMS = 10
 
 #: The largest inline payload ONE batch request may carry (the sum of its items'
-#: text). ⛔ The same constant is registered as the route's body cap in
-#: ``hosted_api``'s ``CappedBodyMiddleware`` (``path_caps["/v1/batches"]``), so the
-#: bound the handler advertises is REACHABLE: without that entry the middleware's
-#: 256 KiB default refused first and the handler's "send it as several batches"
-#: guidance was dead code (#14219 review).
+#: text). ⛔ This constant IS the route's body cap: ``hosted_api`` registers it
+#: in ``CappedBodyMiddleware``'s ``path_caps["/v1/batches"]``, and the handler has
+#: no second check. Without that entry the middleware's 256 KiB default refuses
+#: first and this guidance is dead code; with a second check at the same number
+#: the handler's copy is unreachable and the env knob is a lie (#14219 review,
+#: BLOCKING 6 then NB1). One number, one owner.
 BATCH_MAX_INLINE_BYTES = 4 * 1024 * 1024
 BATCH_INLINE_413_DETAIL = (
     "batch request body exceeds the size cap (4 MiB) — send it as several "
@@ -376,8 +390,13 @@ def estimate_batch(
     """``items × tokens/item``, the expected allowance impact and the overage.
 
     ⛔ The unit is a SPEND figure (``TOKENS_PER_MEDIAN_DOCUMENT``), and it is
-    published as an **estimate**, never a promise — a 128k-token document is
-    ~5× the median, and the receipt says so (:func:`customer_copy`).
+    published as an **estimate**, never a promise: a 128k-token document is ~5×
+    the median, so a batch of long documents will exceed it. The receipt returns
+    the arithmetic (``items``, ``tokens_per_item``, ``estimated_tokens``) so the
+    multiple is visible, and the completion window is published in HOURS, not as
+    a deadline — :func:`customer_copy` deliberately says nothing about per-item
+    variance, because a customer-facing hedge ("unless your documents are long")
+    reads as an excuse rather than information.
 
     ``included_tokens is None`` means the tier publishes no included amount
     (``product/pricing.json`` currently carries none for any tier — the #14275
@@ -694,6 +713,11 @@ class InMemoryBatchStore:
             found = self._items.get((org_id, batch_id), {}).get(item_id)
             return _copy_item(found) if found else None
 
+    def discard(self, org_id: str, batch_id: str) -> None:
+        with self._lock:
+            self._items.pop((org_id, batch_id), None)
+            self._batches.pop((org_id, batch_id), None)
+
     def pending_batches(self, org_id: str) -> list[str]:
         with self._lock:
             out: list[str] = []
@@ -911,6 +935,14 @@ class GraphBatchStore:
             updated_at=r[9] or "",
             staged_path=(r[10] or "") if len(r) > 10 else "")
 
+    def discard(self, org_id: str, batch_id: str) -> None:
+        self._q(f"MATCH (i:{ITEM_LABEL} {{org_id:$org, batch_id:$bid}}) "
+                "DETACH DELETE i",
+                {"org": org_id, "bid": batch_id})
+        self._q(f"MATCH (b:{BATCH_LABEL} {{org_id:$org, id:$bid}}) "
+                "DETACH DELETE b",
+                {"org": org_id, "bid": batch_id})
+
     def pending_batches(self, org_id: str) -> list[str]:
         # ⛔ UNION, not just the item arm: a batch whose ROW is non-terminal is
         # unfinished even when every item is terminal (see the Protocol's note).
@@ -980,9 +1012,16 @@ def _as_state(enum: Any, value: Any, default: Any) -> Any:
 
     A stored state the machine does not know is a version-skew or a corrupt row.
     Reading it as the ``default`` (``queued``/``accepted``) is the SAFE direction
-    for a batch — the item is retried rather than silently treated as terminal —
-    and the caller can see the mismatch in the item's ``reason`` on the next
-    write. Reading it as terminal would be how work is dropped without a trace.
+    for a batch — the item is retried rather than silently treated as terminal.
+    ⛔ Read it as terminal and work is dropped without a trace; that is the one
+    direction it must never fail.
+
+    ⚠️ The mismatch is currently NOT surfaced (#14219 review round 2, NB10): the
+    fallback state is set but no ``reason`` records the unmapped value, so an
+    operator sees a ``queued`` row rather than an explanation. Turning it into a
+    ``reason`` needs the write path to know it was a fallback (the state is
+    already lost by the time the row is written), so it is a follow-up rather
+    than a docstring promise.
     """
     try:
         return enum(str(value))
@@ -1044,11 +1083,57 @@ def deferred_count() -> int:
 #: probe timeout and 9/12 failed probes — the failure mode a ceiling exists to
 #: avoid, and the reason the number is a bound rather than "as many as we can").
 #:
-#: The bound is enforced TWICE, deliberately: a semaphore in the coordinator
-#: (never more than N items submitted) and ``max_workers`` on the pool (nothing
-#: else can widen it at runtime). A single enforcement point that a future
-#: caller can bypass is how a ceiling becomes advisory.
+#: The bound is enforced TWICE, deliberately: the semaphore in
+#: :class:`BatchWorker` (never more than N *batches* in flight) and
+#: ``max_workers`` on the pool (nothing else can widen it at runtime). A single
+#: enforcement point that a future caller can bypass is how a ceiling becomes
+#: advisory. ⚠️ It bounds BATCHES, not items — a batch's items run one at a time
+#: inside its own drain, so the item-level concurrency is at most this number,
+#: reached only when that many batches are genuinely in flight at once.
 BATCH_ITEMS_IN_FLIGHT = 2
+
+#: How long an `extracting`/`embedded` claim must be UNTOUCHED before `recover()`
+#: may take it back. See :meth:`BatchCoordinator.recover` — this is what stops a
+#: poll on one instance from requeueing a document another instance is working.
+#: 15 minutes is ~16x the measured per-document wall clock (#14295, 56.25 s).
+BATCH_RECLAIM_AFTER_S = 900.0
+
+
+def record_item_spend(org_id: str, item: BatchItem) -> int:
+    """Charge one item's MEASURED tokens to the `capture_extraction` meter.
+
+    ⛔ **ONE BUDGET, ONE METER** (owner `#14275`: *"one budget, not a fourth
+    metered thing"*). A batch item that spends tokens must move the SAME
+    ``capture_extraction`` dimension a session does, through the SAME ledger
+    writer — otherwise the overage a customer acknowledged is never realised on
+    the bill, and the NEXT batch's estimate is computed against a headroom that
+    no batch can ever consume.
+
+    Returns the tokens recorded (0 when the item spent nothing — the common case
+    today: the per-file indexer this route runs spends no model tokens, and
+    extraction is the `ingest --upgrade-all` sweep's job, declared as a residual).
+    A zero-token call is deliberately NOT made: `record_capture_usage` would
+    mint a `capture_calls` row for a capture that never happened, which is the
+    denominator that keeps a free capture distinguishable from an unmeasured one
+    (#3359) — burning it on a no-op would corrupt that reading on every document.
+
+    The increment's own failure is absorbed and logged at WARNING, exactly as the
+    capture ledger does (#3824/#3981): our bookkeeping fault must never fail a
+    document that was already indexed.
+    """
+    tokens_in = int(item.tokens_in or 0)
+    tokens_out = int(item.tokens_out or 0)
+    if not org_id or (tokens_in + tokens_out) <= 0:
+        return 0
+    try:
+        from tortoise.metering import record_capture_usage
+
+        record_capture_usage(org_id, tokens_in=tokens_in, tokens_out=tokens_out)
+    except Exception:  # never fail a delivered document
+        _logger.warning("batch metering dropped for item %s (team %s)",
+                        item.item_id, org_id, exc_info=True)
+        return 0
+    return tokens_in + tokens_out
 
 
 class BatchWorker:
@@ -1188,6 +1273,38 @@ class BatchCoordinator:
         """
         bid = batch_id or new_batch_id()
         stamp = self._now()
+        try:
+            return self._submit_rows(org_id, bid, stamp, refs, names=names,
+                                     contents=contents, stage_base=stage_base,
+                                     corpus_name=corpus_name, estimate=estimate)
+        except Exception:
+            # ⛔ COMPENSATE, or the 503 is a lie (#14219 review round 2,
+            # BLOCKING 2). A graph write that times out mid-loop, or a disk error
+            # on `stage_text`, used to leave item rows behind: the caller was told
+            # "nothing was accepted; retry", the rows made the batch visible, and
+            # `recover()` adopted and drained them — so the retry ingested every
+            # document twice. The rollback is best-effort by necessity (it is the
+            # same store that just failed), and its own failure is logged loudly
+            # rather than silently leaving a batch the customer never accepted.
+            try:
+                self._store.discard(org_id, bid)
+                _discard_staged(stage_base, bid)
+            except Exception:
+                _logger.error(
+                    "batch %s acceptance FAILED and could not be rolled back — "
+                    "the rows survive and will be resumed; the customer was "
+                    "told nothing was accepted (possible duplicate with their "
+                    "retry)", bid, exc_info=True)
+            raise
+
+    def _submit_rows(self, org_id: str, bid: str, stamp: str,
+                     refs: Sequence[str], *,
+                     names: Sequence[str] | None,
+                     contents: Sequence[str | None] | None,
+                     stage_base: str | None,
+                     corpus_name: str,
+                     estimate: dict[str, Any] | None
+                     ) -> tuple[Batch, list[BatchItem]]:
         items = []
         first_by_key: dict[str, str] = {}
         for idx, ref in enumerate(refs):
@@ -1241,11 +1358,26 @@ class BatchCoordinator:
                 attempt: bool = False) -> BatchItem:
         """Move one item, validating the edge. Raises :class:`IllegalTransition`.
 
+        ⛔ **IT IS A COMPARE-AND-SET ON THE ROW'S STATE, and that is load-bearing**
+        (#14219 review round 2, BLOCKING 4). Every caller holds a COPY read some
+        time ago, and two writers act on the same row routinely: a customer
+        cancels while a drain is working, or a peer process settles an item this
+        one is about to write. Validating the edge against the CALLER's copy let
+        a stale ``queued`` copy walk the legal ``queued → cancelled`` edge over a
+        row that was already ``extracting`` — cancelling an item whose model call
+        had already spent its tokens, then discarding the result. So the stored
+        state is re-read here and a mismatch is NOT written over: the current row
+        is returned and the caller sees the truth. A state the row no longer
+        holds is not ours to move.
+
         Idempotence: a no-op transition (same state, same facts) is accepted and
         writes nothing — a retried write after an ambiguous failure must not be
         an error, because the alternative is a batch that wedges on a duplicate
         write it cannot distinguish from a conflict.
         """
+        current = self._store.get_item(org_id, item.batch_id, item.item_id)
+        if current is not None and current.state is not item.state:
+            return current
         if new_state is not item.state:
             allowed = ITEM_TRANSITIONS.get(item.state, frozenset())
             if new_state not in allowed:
@@ -1291,7 +1423,11 @@ class BatchCoordinator:
         if item.terminal:
             return item
         fresh = self._fresh(org_id, item)
-        if fresh.state is BatchItemState.CANCELLED:
+        if fresh.terminal:
+            # ⛔ Read the TERMINAL check from the FRESH row, never from the copy
+            # the caller passed (#14219 review round 2, NB2): a stale non-terminal
+            # copy used to run the runner against an already-`indexed` row, i.e. a
+            # second extraction of a completed document.
             return fresh
         if fresh.duplicate_of:
             twin = self._store.get_item(org_id, fresh.batch_id, fresh.duplicate_of)
@@ -1365,7 +1501,7 @@ class BatchCoordinator:
         # A cancel that landed while the runner was working wins: the item is
         # already terminal and must not be resurrected (the customer stopped it).
         latest = self._fresh(org_id, fresh)
-        if latest.state is BatchItemState.CANCELLED:
+        if latest.terminal:
             return latest
         try:
             return self.advance(
@@ -1491,8 +1627,10 @@ class BatchCoordinator:
                 self.advance(org_id, item, BatchItemState.CANCELLED,
                              reason="batch was cancelled")
 
-    def recover(self, org_id: str, *, live_batches: Collection[str] | Callable[[str], bool] = ()
-                ) -> list[str]:
+    def recover(self, org_id: str, *,
+                live_batches: Collection[str] | Callable[[str], bool] = (),
+                stale_after_s: float | None = None,
+                limit: int = 50) -> list[str]:
         """Re-open every batch with unfinished items. Returns the batch ids.
 
         ⛔ **What "recoverable" has to mean.** An item found ``extracting`` (or
@@ -1532,7 +1670,30 @@ class BatchCoordinator:
             else (lambda batch_id, _live=live_batches: batch_id in _live))
         resumed: list[str] = []
         stamp = self._now()
-        for batch_id in self._store.pending_batches(org_id):
+        window = (float(BATCH_RECLAIM_AFTER_S) if stale_after_s is None
+                  else float(stale_after_s))
+        # ⛔ TWO independent bounds, and both are needed.
+        #
+        # `is_live` answers "is a drain in THIS process working this batch right
+        # now" — the in-process claim (#14415 review B1). The staleness window
+        # answers the question `is_live` cannot: "is the claim on this ROW still
+        # young enough that some OTHER process may hold it" (#14219 review
+        # round 2, BLOCKING 5). Without the window, any multi-instance
+        # deployment has a deterministic path from a tenant's first STATUS POLL
+        # to two concurrent extractions of the same document (the file's own
+        # isolation evidence measured a second instance producing a 1,505 ms DB
+        # probe timeout and 9/12 failed probes). 15 minutes is ~16x the measured
+        # per-document wall clock (#14295, 56.25 s).
+        #
+        # ⚠️ DECLARED RESIDUAL: a single item that legitimately runs longer than
+        # the window can be re-claimed. A real lease (a heartbeat on the row)
+        # fixes that and needs the drain to refresh it mid-item.
+        #
+        # ⛔ BOUNDED PER CALL (#14219 review round 2, NB8): this runs on the
+        # tenant's first batch touch, from a request, on the 2-worker bookkeeping
+        # pool — a tenant with hundreds of unfinished batches must not turn a
+        # `GET /v1/batches` into an unbounded scan of all of them.
+        for batch_id in self._store.pending_batches(org_id)[:max(1, int(limit))]:
             if is_live(batch_id):
                 # A drain in THIS process owns this batch's claim; see the
                 # `live_batches` note above. Requeueing it would destroy the
@@ -1569,11 +1730,21 @@ class BatchCoordinator:
             for item in items:
                 if item.state in (BatchItemState.EXTRACTING,
                                   BatchItemState.EMBEDDED):
+                    if _age_seconds(item.updated_at) < window:
+                        continue  # a LIVE claim: not ours to take
                     self.advance(org_id, item, BatchItemState.QUEUED,
                                  reason="resumed after a process restart — "
                                         "requeued for a fresh attempt")
                     moved = True
-            if moved or any(not i.terminal for i in items):
+            # ⛔ Report a batch as RESUMED only when this call actually gave it
+            # work or found work that nobody had claimed (#14219 review round 2,
+            # BLOCKING 5). An item left `extracting` by a LIVE claim is neither:
+            # listing the batch here would hand it to THIS process's worker and
+            # drain a document another process is already extracting — the
+            # double-spend the staleness window above exists to prevent. A
+            # `queued` item with no claim IS ours to work (the deferred queue is
+            # process-local, so a restart is exactly how those get orphaned).
+            if moved or any(i.state is BatchItemState.QUEUED for i in items):
                 batch.state = BatchState.RESUMING
                 batch.updated_at = stamp
                 self._store.put_batch(batch)
@@ -1716,11 +1887,50 @@ def runner_result_to_outcome(per_file: Mapping[str, Any]) -> ItemOutcome:
                        reason=reason or "the indexer reported a failure")
 
 
+def _discard_staged(stage_base: str | None, batch_id: str) -> None:
+    """Remove a rejected batch's staged files. Best-effort, never raises."""
+    if not stage_base:
+        return
+    import os
+
+    with contextlib.suppress(OSError):
+        target = os.path.join(os.path.realpath(stage_base), "_batches", batch_id)
+        if os.path.isdir(target):
+            for child in os.listdir(target):
+                os.unlink(os.path.join(target, child))
+            os.rmdir(target)
+
+
+def _age_seconds(stamp: str) -> float:
+    """Seconds since an ISO stamp. An unparseable stamp counts as ANCIENT.
+
+    Ancient is the safe direction here: a row whose claim time cannot be read is
+    one whose liveness cannot be argued, and it is already non-terminal — leaving
+    it unsettled for ever is worse than retrying it.
+    """
+    from datetime import UTC, datetime
+    try:
+        then = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return float("inf")
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=UTC)
+    return max(0.0, (datetime.now(UTC) - then).total_seconds())
+
+
 def _utc_now() -> str:
     from datetime import UTC, datetime
     return datetime.now(UTC).isoformat()
 
 
 def elapsed_ms(start: float) -> int:
-    """Helper for the ack-latency measurement the receipt is graded on."""
+    """Milliseconds since a ``time.monotonic()`` reading.
+
+    Kept because the ACK bound is a NUMBER, not a slogan — but ⚠️ nothing on the
+    route measures it yet (#14219 review round 2, NB10): the 10 s transport bound
+    (owner `#3834`) is satisfied *by construction* (acceptance writes rows and
+    returns; nothing waits), and there is no instrument asserting the elapsed time
+    of a 1000-item acceptance. That measurement is a declared residual, not a
+    claim this module can make.
+    """
     return int((time.monotonic() - start) * 1000)
