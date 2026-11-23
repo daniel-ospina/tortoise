@@ -273,6 +273,13 @@ def test_the_s4_prompt_carries_a_region_that_parses_back_to_the_same_list(monkey
         "the S4 prompt must carry the embed list in exactly one of the two known "
         "layouts — carrying neither means the region moved, carrying both means a "
         "fragment leaked into another slot")
+    # …and exactly ONCE. `len(carriers) == 1` alone cannot see a second copy of the SAME
+    # layout (a template that gained a second `{embed_list_json}` slot renders the region
+    # twice and still matches one carrier), which is the duplicate-fragment case the message
+    # above names. Read at head; the count makes it real.
+    assert prompt.count(carriers[0]) == 1, (
+        f"the S4 prompt carries the embed-list region {prompt.count(carriers[0])} times — "
+        "a second copy means a template gained a slot, which pays for the region twice")
     assert json.loads(carriers[0]) == embed
 
 
