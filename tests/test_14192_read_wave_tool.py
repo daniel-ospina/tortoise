@@ -1679,12 +1679,18 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
     # `_string_keys_of` needs no `consts` at all.
     if (isinstance(node, ast.Subscript)
             and "__builtins__" in _string_keys_of(node.slice, {})
-            and _is_namespace_expr(node.value)):
+            # ⛔ `namespaces` IS FORWARDED (#14326 review cycle 25, EACH MEASURED GREEN **and
+            # LIVE**: `_n = globals(); _n["__builtins__"].update({"print": getattr})` and its
+            # `.get` twin reinstated the callee while the UN-ALIASED form is a REFUSED row —
+            # and the alias itself IS resolved one composition over, `_n["print"] = getattr`
+            # being RED). A recursion that drops the parameter re-spells the receiver at
+            # depth two, which is exactly the spelling the fixpoint exists to remove.
+            and _is_namespace_expr(node.value, namespaces)):
         return True
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
             and node.func.attr in _BUILTINS_MAPPING_READS and node.args
             and "__builtins__" in _string_keys_of(node.args[0], {})
-            and _is_namespace_expr(node.func.value)):
+            and _is_namespace_expr(node.func.value, namespaces)):
         return True
     if isinstance(node, ast.Name):
         # ⛔ AND `__builtins__`, THE ONE ROOT THAT NEEDS NO IMPORT (#14326 review cycle 19,
@@ -2222,11 +2228,24 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
             and "__builtins__" in _string_keys_of(node.args[0], consts)
             and _is_namespace_expr(node.func.value)):
         return True
-    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and (node.func.id == "getattr" or node.func.id in launderers)
+    # ⛔ NO `getattr(<namespace>, "__builtins__")` ARM HERE, AND THE CLAIM THAT MADE ME WRITE ONE
+    # WAS FALSE (#14326 review cycle 25, MEASURED: `getattr(globals(), "__builtins__")` raises
+    # `AttributeError: 'dict' object has no attribute '__builtins__'` — a `getattr` reads an
+    # ATTRIBUTE, and every node `_is_namespace_expr` accepts is a plain dict or a module. The
+    # arm matched a shape that cannot execute the read, and its row claimed "MEASURED GREEN
+    # **and LIVE**"; both are DELETED rather than kept, because a lever that cannot fire
+    # teaches the next lane that this axis covers one more spelling than it does.
+    # ⛔ AND THE UNBOUND SPELLING OF THE READ FAMILY IS A REAL LEVER (#14326 review cycle 25,
+    # EACH MEASURED GREEN **and LIVE**: `dict.get(globals(), "__builtins__")["exec"](<read>)`,
+    # its `__getitem__` / `pop` / `setdefault` twins — while the BOUND spelling is a REFUSED row
+    # and the same unbound position over the builtins mapping is already closed by
+    # `_builtin_lookup_name`). The namespace moves to `args[0]` and the key to `args[1]`: the
+    # `offset=1` rule `_namespace_rebind_names` already states.
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _BUILTINS_MAPPING_READS
             and len(node.args) >= 2
             and "__builtins__" in _string_keys_of(node.args[1], consts)
-            and _is_namespace_expr(node.args[0])):
+            and _is_namespace_expr(node.args[0], frozenset())):
         return True
     return ((isinstance(node, ast.Name) and node.id in dict_names)
             or _is_builtins_dict_of(node, names, launderers, consts))
@@ -8130,6 +8149,11 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # MEASURED GREEN **and LIVE**): in an imported module — how this pin loads the tool —
         # `__builtins__` in the globals IS the builtins `__dict__`, so `globals()["__builtins__"]`
         # is the SAME mapping `__builtins__` names.
+        "a KEYED STORE through an ALIAS of the namespace": (
+            '    _n = globals()\n'
+            '    _n["__builtins__"].update({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
         "a KEYED STORE out of `globals()`, computed key": (
             '    globals()["__builtins__" + ""].update({"print": getattr})\n'
             '    print(sdk, "_tortoise_fts_query")'
@@ -8144,8 +8168,12 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a KEYED READ out of `globals().get(…)`": (
             '    globals().get("__builtins__")["exec"]'
             '("results = sdk._tortoise_fts_query(query=q)")\n'),
-        "a KEYED READ out of `getattr(globals(), …)`": (
-            '    getattr(globals(), "__builtins__")["exec"]'
+        # ⛔ A `getattr(globals(), "__builtins__")` ROW USED TO SIT HERE AND IS DELETED, NOT
+        # KEPT (#14326 review cycle 25, MEASURED: it raises AttributeError — `getattr` reads an
+        # ATTRIBUTE and a namespace mapping has no `__builtins__` attribute). Its row claimed
+        # "MEASURED GREEN **and LIVE**" for a shape that cannot execute the read.
+        "a KEYED READ out of the UNBOUND fetch": (
+            '    dict.get(globals(), "__builtins__")["exec"]'
             '("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a KEYED READ out of `globals()`": (
             '    globals()["__builtins__"]["exec"]'
