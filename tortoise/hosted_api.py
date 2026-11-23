@@ -17386,16 +17386,33 @@ async def create_batch(body: BatchRequest,
         # act on. The disclosure the owner decided (2026-11-23 §4) is kept — the
         # batch is still refused until acknowledged — and what changes is that the
         # sentence says which of the two situations it is.
+        # ⛔ THREE cases, not two (#14415 recut review, P2). `overage_tokens` is
+        # `max(0, estimate - headroom)`, so a PUBLISHED allowance with headroom
+        # ≥ the estimate prices the overage at ZERO while
+        # `acknowledgement_required` still fires on the ESTIMATE alone
+        # (batch_ingest.py:452 vs :426-428) — an org on a 10M allowance posting
+        # 47 items (3,045,553 tokens, over the 3M floor) would be refused 402 and
+        # told to confirm "about 0 tokens (about $0.00)". The two-branch version
+        # reported every published allowance as if it were exceeded, and it
+        # reintroduced through the unpriced arm's sibling exactly the
+        # unactionable "confirm a zero" instruction round 4 removed. Latent only
+        # while no tier publishes `max_extraction_tokens` (#14275), and
+        # load-bearing on the first head that does.
         if est.included_tokens is None:
             overage_copy = (
                 " This batch is large enough that it may exceed your plan's "
                 "included extraction allowance, and that allowance is not "
                 "priced against your plan yet — so the figure to confirm is "
                 "the expected spend on this work, not a measured amount.")
-        else:
+        elif est.overage_tokens > 0:
             overage_copy = (
                 f" Expected overage: about {est.overage_tokens:,} tokens "
                 f"(about ${est.overage_usd:,.2f}).")
+        else:
+            overage_copy = (
+                " This batch is large enough to be confirmed before it runs; "
+                "your plan's included extraction allowance covers the whole "
+                "of it, so no overage is expected.")
         raise HTTPException(
             status_code=402,
             detail={

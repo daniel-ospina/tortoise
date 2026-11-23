@@ -1398,6 +1398,46 @@ def test_the_402_sentence_matches_the_numbers_beside_it(client):
         "the receipt must say whether the spend figure beside it is measured")
 
 
+def test_a_published_allowance_that_COVERS_the_batch_is_not_called_an_overage(
+        client, monkeypatch):
+    """⛔ RECUT REVIEW P2: `included_tokens is not None` is not the same as
+    "the estimate exceeds it".
+
+    `acknowledgement_required` fires on the ESTIMATE alone (>= the 3M floor),
+    while `overage_tokens` is `max(0, estimate - headroom)`. So the moment a
+    tier publishes `max_extraction_tokens` with headroom over the estimate, the
+    refusal told the customer to confirm "about 0 tokens (about $0.00)" — the
+    same unactionable instruction round 4 removed, reintroduced through the
+    sibling branch it did not add.
+
+    47 items x 64,799 = 3,045,553 tokens: over the 3M acknowledgement floor, and
+    fully inside a 10M allowance, so the overage is exactly ZERO. This test FAILS
+    on the pre-fix code, which printed "Expected overage: about 0 tokens".
+    """
+    async def _with_allowance(org, resource, **kwargs):
+        return {"max_extraction_tokens": 10_000_000}
+
+    monkeypatch.setattr(ha, "_carry_allowances_off_loop", _with_allowance)
+    r = client.post("/v1/batches",
+                    json={"items": [{"ref": f"/docs/{n}.md"} for n in range(47)]})
+    assert r.status_code == 402, r.text
+    detail = r.json()["detail"]
+    est = detail["estimate"]
+    # The premise of the test, asserted rather than assumed: a published
+    # allowance with zero overage is the state the fix exists for.
+    assert est["included_tokens"] == 10_000_000, est
+    assert est["estimated_tokens"] >= 3_000_000, est
+    assert est["overage_tokens"] == 0, est
+    assert est["overage_usd"] == 0.0, est
+    assert "about 0 tokens" not in detail["message"], (
+        "the copy names a zero overage the payload reports as $0.00: "
+        f"{detail['message']}")
+    assert "$0.00" not in detail["message"], detail["message"]
+    assert "no overage is expected" in detail["message"], detail["message"]
+    # The refusal itself is unchanged: owner §4 still requires the ack.
+    assert "acknowledge_overage" in detail["message"]
+
+
 def test_an_unmeasured_usage_read_is_reported_not_read_as_zero(client,
                                                               monkeypatch):
     """NB3: `get_capture_usage` never raises — a fault is a ZERO view.
