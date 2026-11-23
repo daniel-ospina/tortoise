@@ -4423,6 +4423,14 @@ _CHECKOUT_USES_RE = r"uses:\s*actions/checkout@"
 #: completeness arm over every bare mention would red a correct record.
 _DE_NUMBERED_POINTER_RE = r"`python-ci\.yml`'s\s+(?:own\s+)?(?:checkout\s+)?(?:step|note)"
 
+#: Where the pointer's SENTENCE ends. ⛔ An abbreviation is not a sentence end: `e.g.` inside the
+#: cited clause cuts the piece before the depth it states, and the pin then reports a false RED whose
+#: message ("no longer states the claim") is untrue. `re` has no variable-length lookbehind, so the
+#: abbreviations this repo actually writes are listed explicitly; a NEW one is a one-line addition,
+#: not a redesign — and the punctuation-independent contradiction check below still catches a piece
+#: that absorbs a second claim.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<!vs\.)(?<=[.;])\s+")
+
 
 def _enclosing_step(workflow: list[str], note: int) -> tuple[int, int] | None:
     """The `(start, end)` of the workflow STEP that encloses line index `note`, or None.
@@ -4557,7 +4565,7 @@ def _de_numbered_cite_problems(
             continue
         sentences = [
             piece
-            for piece in re.split(r"(?<=[.;])\s+", block)
+            for piece in _SENTENCE_SPLIT_RE.split(block)
             if re.search(_DE_NUMBERED_POINTER_RE, piece)
         ]
         sentence = sentences[0] if sentences else ""
@@ -4567,10 +4575,27 @@ def _de_numbered_cite_problems(
                 "its own sentence — the citation then resolves to no note at all"
             )
             continue
+        # ⛔ PUNCTUATION-INDEPENDENT CONTRADICTION CHECK. The split is punctuation-based, so a rewrite
+        # that swaps the terminal `;` for a comma MERGES the next sentence into this piece — and that
+        # next sentence states the SAME key for a DIFFERENT subject ("… This job checks out at
+        # `fetch-depth: 0`"). A substring test then reads the wrong subject's value as this note's
+        # and reports GREEN over a cited clause that now claims a different depth. Two values for one
+        # key in one sentence is not a claim this pin can grade, whichever one it happens to contain.
+        _key = declaration.partition(":")[0]
+        _values = set(re.findall(rf"{re.escape(_key)}:\s*['\"]?(\d+)", sentence))
+        if len(_values) > 1:
+            problems.append(
+                f"the pointer at {rel}:{pointers[0] + 1} states more than one value for `{_key}` "
+                f"in its own sentence {sorted(_values)} — the cited note's depth must be stated "
+                "once, or this pin cannot tell which value is the cited one"
+            )
+            continue
         if declaration not in sentence:
             problems.append(
                 f"the pointer at {rel}:{pointers[0] + 1} no longer states the `{declaration}` claim "
-                "in its own sentence — this pin would then grade a claim the sentence does not make"
+                "in its own sentence (the piece this pin grades ends at the first `.` or `;` that "
+                "is not part of an abbreviation) — it would then grade a claim the sentence does "
+                "not make"
             )
             continue
         notes = [i for i, line in enumerate(workflow) if marker in line]
@@ -4903,23 +4928,41 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         # says "… This job checks out at `fetch-depth: 0`", the same VALUE for a DIFFERENT subject,
         # so a block-wide replace reds for the wrong reason and a block-wide CHECK stays green over
         # the clause rewritten to the opposite claim (which is how this control was cycle-3 wrong).
+        # ⛔ MUTATED IN PLACE, with the split's separators CAPTURED: re-joining bare pieces strips the
+        # `          # ` prefixes that sit inside the separators, which de-comments the paragraph and
+        # shrinks the comment block — the mutant then red-ed for THAT reason, and a revert to the
+        # block-scoped check left this control green. A control has to corrupt the claim, nothing else.
         _lines = _citing.splitlines()
         _pointer_at = next(
             i for i, line in enumerate(_lines) if re.search(_DE_NUMBERED_POINTER_RE, line)
         )
         _lo, _hi = _comment_block(_lines, _pointer_at)
         _block = "\n".join(_lines[_lo:_hi])
+        _segments = _SENTENCE_SPLIT_RE.split(_block)
+        _separators = _SENTENCE_SPLIT_RE.findall(_block)
         _piece_at = next(
-            k
-            for k, piece in enumerate(re.split(r"(?<=[.;])\s+", _block))
-            if re.search(_DE_NUMBERED_POINTER_RE, piece)
+            k for k, piece in enumerate(_segments) if re.search(_DE_NUMBERED_POINTER_RE, piece)
         )
-        _pieces = re.split(r"(?<=[.;])\s+", _block)
-        _pieces[_piece_at] = _pieces[_piece_at].replace(_declaration, "fetch-depth: 1")
-        _mutated = _lines[:_lo] + "\n".join(_pieces).splitlines() + _lines[_hi:]
+        _segments[_piece_at] = _segments[_piece_at].replace(_declaration, "fetch-depth: 1")
+        _mutated_block = "".join(
+            piece + (_separators[k] if k < len(_separators) else "")
+            for k, piece in enumerate(_segments)
+        )
+        assert len(_mutated_block.splitlines()) == _hi - _lo, (
+            "the sentence mutant changed the block's line count — it is no longer corrupting only "
+            "the claim, so a red would prove nothing about the sentence scope"
+        )
+        _mutated = _lines[:_lo] + _mutated_block.splitlines() + _lines[_hi:]
         assert _de_numbered_cite_problems("\n".join(_mutated), workflow_lines, _entry), (
             "the de-numbered pin no longer sees its OWN sentence rewritten to make the OPPOSITE "
             "claim — it would grade a claim the sentence no longer makes"
+        )
+        # …and the SENTENCE SCOPE is what reds it: after the mutation the BLOCK still states the
+        # declaration (a different sentence does, about a different subject), so a block-scoped check
+        # would be GREEN here. Without this the control cannot tell the two scopes apart.
+        assert _declaration in _mutated_block, (
+            "the sentence mutant removed the declaration from the whole BLOCK, so a block-scoped "
+            "check would red too and this control would not distinguish the scopes it exists for"
         )
         assert _de_numbered_cite_problems(
             _citing, [line.replace(_marker, "_11057 review P2_") for line in workflow_lines], _entry
@@ -4974,6 +5017,38 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         assert _de_numbered_cite_problems(_citing, _sibling_env, _entry), (
             "the declaration search is no longer bounded to the `with:` mapping — a sibling `env:` "
             "key satisfies it, so a checkout cited for depth 0 can be shallow"
+        )
+        # (c) TWO pointers in ONE punctuation piece: the register's marker is its only identity, so
+        # the second pointer is registered nothing. Without this branch that shape is GREEN and the
+        # completeness arm sees nothing (both pointers sit in a block that names the marker).
+        _two_pointers = [
+            "# The required legs CANNOT be routed here: `python-ci.yml:2151` — refused.",
+            "# `" + _declaration + "` is the same call; #9075 review r6 P1 made it too. The"
+            " `python-ci.yml`'s own checkout step,",
+            f"# and `python-ci.yml`'s own note, the one the {_marker} marker names.",
+        ]
+        assert any(
+            "more than one de-numbered pointer" in problem
+            for problem in _de_numbered_cite_problems("\n".join(_two_pointers), workflow_lines, _entry)
+        ), (
+            "the pin no longer refuses TWO de-numbered pointers in one comment block — the "
+            "register's marker cannot say which of them it covers"
+        )
+        # …and nothing else catches that shape: the block names the marker, so the completeness arm
+        # is silent on it. That is why the branch (and this message) has to exist.
+        assert _unregistered_de_numbered_pointers("\n".join(_two_pointers), _entry) == [], (
+            "the completeness arm unexpectedly covers the double-pointer shape — the register branch "
+            "above is then redundant, or the check is no longer the one this control exercises"
+        )
+        # (d) The completeness arm's coverage must be STRUCTURAL (the pointer's own comment block),
+        # not a proximity window: a `#`-only line between the marker and the pointer is what a rewrap
+        # of that paragraph produces, and a ±N-line window then reds the REGISTERED pointer with a
+        # remedy (add a register entry) that is already applied.
+        _rewrapped = _lines[:]
+        _rewrapped.insert(_pointer_at, " " * 10 + "#")
+        assert _unregistered_de_numbered_pointers("\n".join(_rewrapped), _entry) == [], (
+            "a rewrap between the marker and the pointer makes the completeness arm call the "
+            "REGISTERED pointer unregistered — a false RED with no correct operator action"
         )
     # …and the completeness arm's own non-vacuity: emptied of its register it must SEE the pointer
     # (so a green is not it matching nothing), and with the register restored it must see NONE.
