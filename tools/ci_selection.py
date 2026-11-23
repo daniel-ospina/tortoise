@@ -1209,7 +1209,46 @@ SOURCE_PATTERNS = {
             # The `eval` half of the fix is one tuple down (the replay proxy).
             # Pinned by tests/test_ci_selection.py::
             # test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool.
-            "tortoise/temporal_leg.py"),
+            "tortoise/temporal_leg.py",
+            # ⛔ #14237 review (P1, the #6138 class — a doc that GAINED a reader):
+            # `tests/test_11609_door_retirement.py::TestEveryReaderNamesTheLiveListingDoor`
+            # reads this how-to and asserts every `tortoise_*` mention in it is a labelled
+            # migration note, not an instruction — but `docs/` is in `NON_PYTHON_PREFIXES`
+            # and the doc sat in no SOURCE_PATTERNS row, so a DOC-ONLY edit that re-points
+            # the how-to at a retired door filtered to `changed == []` and took the
+            # docs-only early return. Measured before this entry:
+            #   select(["docs/how-to/provision-a-graph-per-end-user.md"]) ->
+            #     surfaces=[] , full=False , 106 files, guard ABSENT
+            # i.e. the guard ran on a `mcp_server.py` diff (FULL matrix, shared module)
+            # and NEVER on the one change class it exists to catch — the reader it protects
+            # would have been told to call a name `tools/list` does not advertise, with
+            # every gate green. Registered against `sdk`, the surface the guard itself is
+            # registered in (`config/ci-surfaces.yml`), the narrower of the two remedies
+            # the review named. ⛔ WHAT IT COSTS WHEN THE DOC CHANGES, MEASURED (#14237
+            # round-2 review P2 asked for the cost; round-3 review P2 corrected the
+            # statement, which had conflated the two leg shapes). Three facts, each from a
+            # different mechanism, so they must not be merged into one number:
+            #   · `select([this doc])` -> surfaces=['sdk'], test_files=221 INCLUDING the
+            #     guard, `full=False`;
+            #   · `slow_run=True` with `slow_selected=3` — the slow leg is diff-SCOPED by
+            #     that list (three of the sdk legs), NOT the 64-file `slow_files` pool it
+            #     also emits (`slow_files` is the declared pool every return path carries,
+            #     and it sizes nothing on a tier-2 PR) — so the nightly backstop is not
+            #     what a doc edit wakes;
+            #   · `carve_out_run=True` runs the WHOLE carve-out pool — 66 files in 3 shard
+            #     jobs — because that leg is diff-GATED but never diff-SIZED
+            #     (`.github/workflows/python-ci.yml:266`). THIS is the real cost of the
+            #     registration, and the one a reader would not guess.
+            # That is the ONE declared exception to the #2147/#2148 "docs-only touches no
+            # slow leg" property — pinned by tests/test_ci_selection.py::
+            # test_the_p7_how_to_selects_its_reader_and_declares_the_cost — and it is
+            # accepted because the alternatives are strictly wider: `tier1` would put the
+            # whole catalogue suite in every PR's smoke leg, and `core` would select the
+            # core pool without selecting the guard. Named as
+            # a CONCRETE file, not a glob — `select()` matches with `startswith` and has no
+            # glob support. If a SECOND doc-reading guard is added later, graduate this to
+            # `tier1` instead of growing this row.
+            "docs/how-to/provision-a-graph-per-end-user.md"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #10605: the MCP CLIENT side — the driver every long-lived consumer

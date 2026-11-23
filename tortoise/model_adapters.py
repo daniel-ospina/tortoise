@@ -106,6 +106,49 @@ def _cache_hit_tokens(usage: object) -> int:
     return int(raw)
 
 
+#: The extraction route runs the flash family NON-REASONING on all three of
+#: its pool members (#1790, pilot #1549). ⛔ NOT "every route", deliberately:
+#: the ASK lane (``build_reader_model``) is out of scope for #14357, and the
+#: eval registry's ``MODELS['deepseek-flash']`` still builds a bare
+#: ``OpenRouterModel`` — that route is #14368, not covered here.
+#:
+#: ONE predicate, THREE pool members (#14357). Before this, the family gate
+#: lived only inside ``DeepSeekDirectModel.complete``, so ``deepseek-direct``
+#: sent ``thinking: disabled`` while the ``openrouter`` and ``venice`` members
+#: of the SAME pool sent no suppression field at all and ran at the model's
+#: default (thinking: high) — the collapse this module records as
+#: *"1500/1500 reasoning tokens, finish_reason=length, ZERO output content"*.
+#: A failover silently changed the extraction's behaviour, and only on the
+#: route nobody watches. Now ``_build_single`` asks THIS predicate for the two
+#: HOP members (``openrouter`` / ``venice``) at build time, so they cannot drift
+#: apart from each other or from the family gate (the gate ↔ MODELS hazard #1790
+#: names). ⛔ The ``deepseek-direct`` member is NOT decided here: it returns
+#: before the predicate and hardcodes ``thinking: disabled`` in its own
+#: ``DeepSeekDirectModel.complete``, which is why the ask lane's primary is
+#: suppressed even though ``suppress_reasoning`` is False there.
+#:
+#: Prefix-agnostic (``deepseek/deepseek-v4-flash`` counts) — a prefixed id must
+#: never bypass the gate — and FAMILY-matched, not literal-matched (#4129):
+#: ``deepseek-v4-flash`` is RETIRED, api.deepseek.com answers 200 to it and
+#: silently serves ``deepseek-flash``, and keying the #1790 thinking-disable on
+#: ONE exact id is what let that rename re-enable thinking with no failing test
+#: to say so. Same family rule as ``analyze._is_deepseek_flash_family``, kept
+#: local because ``model_adapters`` is the module that builds the wire body.
+#: ``deepseek-v4-pro`` is deliberately NOT in the set: it keeps its default (no
+#: collapse evidence — pending verification, #1790).
+_FLASH_FAMILY_IDS: tuple[str, ...] = ("deepseek-v4-flash", "deepseek-flash")
+
+
+def _runs_non_thinking(model_id: str) -> bool:
+    """True → the served id is one this module runs with thinking DISABLED.
+
+    Family-matched on the LAST path segment — dated builds
+    (``deepseek-v4-flash-0731``) and OpenRouter suffixes
+    (``deepseek/deepseek-v4-flash:free``) included."""
+    tail = (model_id or "").rsplit("/", 1)[-1].split(":", 1)[0]
+    return any(tail == i or tail.startswith(i + "-") for i in _FLASH_FAMILY_IDS)
+
+
 class OpenRouterModel:
     """Adapter for the OpenRouter API — supports any model on the platform.
 
@@ -163,6 +206,26 @@ class OpenRouterModel:
         except Exception:
             pass
 
+    def _apply_reasoning_suppression(self, body: dict) -> None:
+        """Write this provider's thinking/reasoning control into ``body``.
+
+        Default (OpenRouter) shape: ``reasoning`` with either a hard budget
+        (``max_tokens``) or ``effort: "none"``. OpenRouter's documented
+        ``reasoning.effort`` enum is
+        ``max | xhigh | high | medium | low | minimal | none`` (docs fetched
+        2026-11-21, https://openrouter.ai/docs/use-cases/reasoning-tokens), so
+        ``{"effort": "none"}`` is the documented "do not think" value on that
+        wire — not an invented field.
+
+        ``thinking_budget > 0`` wins over ``disable_reasoning`` (a bounded
+        reasoning budget is a deliberate spend, and the pre-#14357 precedence
+        is unchanged).
+        """
+        if self.thinking_budget > 0:
+            body["reasoning"] = {"max_tokens": self.thinking_budget}
+        elif self.disable_reasoning:
+            body["reasoning"] = {"effort": "none"}
+
     def complete(self, *, system: str, user: str,
                  max_tokens: int | None = None) -> str:
         headers = {
@@ -198,11 +261,9 @@ class OpenRouterModel:
         # structural override beats the content heuristic.
         if self.json_mode is not False and _should_send_json_mode(system, user):
             body["response_format"] = {"type": "json_object"}
-        # Enable thinking for reasoning models
-        if self.thinking_budget > 0:
-            body["reasoning"] = {"max_tokens": self.thinking_budget}
-        elif self.disable_reasoning:
-            body["reasoning"] = {"effort": "none"}
+        # Thinking control (#14357): the per-PROVIDER wire shape, delegated so
+        # a subclass can send its own documented field.
+        self._apply_reasoning_suppression(body)
 
         r = self._session.post(
             self.base_url, headers=headers, json=body, timeout=(10, 60),
@@ -261,6 +322,37 @@ class VeniceModel(OpenRouterModel):
         super().__init__(model_id, max_tokens=max_tokens,
                          temperature=temperature, **kw)
         self.api_key = os.environ.get(self.key_env, "")
+
+    def _apply_reasoning_suppression(self, body: dict) -> None:
+        """Venice's OWN thinking toggle — not OpenRouter's ``reasoning`` object.
+
+        Venice documents the suppression under ``venice_parameters``:
+        ``disable_thinking`` (boolean, default ``false``) — *"On supported
+        reasoning models, disables thinking and strips reasoning from the
+        response"* (Venice API reference, POST /chat/completions,
+        ``venice_parameters``, fetched 2026-11-21). Its ``deepseek-v4-flash``
+        catalog entry reports ``supportsReasoning: true`` (verified against
+        ``GET /models`` the same day — #4129: a provider's wire shape is only
+        asserted for an id it is confirmed to SERVE), so the default is
+        thinking ON and the member needs the explicit toggle to match the
+        other two.
+
+        Why the native field rather than Venice's OpenAI-compatible
+        ``reasoning: {"effort": "none"}`` (which its schema also accepts):
+        ``disable_thinking`` is the provider's dedicated control AND strips
+        reasoning from the response, so it leaves no thinking text for the
+        S2/S4 parse ladder to trip over. One field per provider, deliberately
+        — sending both would leave it ambiguous which one is load-bearing.
+
+        ``thinking_budget > 0`` keeps the OpenRouter-shaped bounded budget:
+        a budget is a spend decision, not a suppression.
+        """
+        if self.thinking_budget > 0:
+            body["reasoning"] = {"max_tokens": self.thinking_budget}
+        elif self.disable_reasoning:
+            params = dict(body.get("venice_parameters") or {})
+            params["disable_thinking"] = True
+            body["venice_parameters"] = params
 
 
 class DeepSeekDirectModel(OpenRouterModel):
@@ -327,7 +419,10 @@ class DeepSeekDirectModel(OpenRouterModel):
         # keeps its default (no collapse evidence — pending verification).
         # prefix-agnostic: a provider-prefixed id (e.g. "deepseek/deepseek-v4-flash")
         # must not bypass the gate (gate ↔ MODELS drift would re-open #1549).
-        if self.id.rsplit("/", 1)[-1] == "deepseek-v4-flash":
+        # #14357: the SAME predicate now decides the other two pool members'
+        # suppression (``_build_single``) — one source of truth, so the family
+        # gate cannot be extended in one place and missed in the other.
+        if _runs_non_thinking(self.id):
             body["thinking"] = {"type": "disabled"}
         r = self._session.post(
             self.base_url,
@@ -968,11 +1063,20 @@ def resolve_reader_provider(model_id: str) -> tuple[str | None, list[str]]:
 
 
 def _build_routing_model(model_id: str, pool_names: list[str], *,
-                         max_tokens, temperature, json_mode):
+                         max_tokens, temperature, json_mode,
+                         suppress_reasoning: bool):
     """Shared private pool-builder (#2069) — both lanes' RoutingModel /
-    RotatingModel construction (extraction behavior byte-identical)."""
+    RotatingModel construction (extraction behavior byte-identical).
+
+    ``suppress_reasoning`` is the LANE's decision (#14357), never inferred
+    here: ``build_extractor_model`` passes ``True``, ``build_reader_model``
+    passes ``False`` so the ask lane's serving config is untouched. The family
+    gate (``_runs_non_thinking``) is applied inside ``_build_single`` on top of
+    it, so the two are independent and a v4-pro extraction keeps its default.
+    """
     providers = [_build_single(p, model_id, max_tokens=max_tokens,
-                               temperature=temperature, json_mode=json_mode)
+                               temperature=temperature, json_mode=json_mode,
+                               suppress_reasoning=suppress_reasoning)
                  for p in pool_names]
     # Pilot #1549: 3+ configured providers → the rotating pool (spread the
     # sustained load + redundancy); 1-2 → the existing RoutingModel semantics.
@@ -1294,23 +1398,61 @@ def _direct_wire_id(model_id: str) -> str:
 
 
 def _build_single(provider: str, model_id: str, *, max_tokens, temperature,
-                 json_mode: bool | None = None):
+                  json_mode: bool | None = None,
+                  suppress_reasoning: bool):
+    """One pool member. ``suppress_reasoning`` is REQUIRED and keyword-only on
+    purpose: it is the calling lane's decision, and a default would let the
+    next caller silently land back on the thinking-on body #14357 fixed."""
     if provider == "deepseek-direct":
         return DeepSeekDirectModel(
             _direct_wire_id(model_id),
             max_tokens=max_tokens, temperature=temperature,
             json_mode=json_mode)
+    # #14357: on the EXTRACTION lane, EVERY non-deepseek-direct pool member gets
+    # the SAME suppression the direct member hardcodes. Two gates, one place:
+    #
+    #   * ``suppress_reasoning`` — the LANE's decision. ``build_extractor_model``
+    #     passes True; ``build_reader_model`` passes False, so the ask lane's two
+    #     HOP members keep the wire body they had before this change (its scope
+    #     was never #14357's, and a 500-token reader with thinking on is a
+    #     separate, unmeasured product question — not a side effect of this fix).
+    #     ⛔ That sentence is about the hop members only: the ``deepseek-direct``
+    #     member returns above this point and is NOT governed by this flag, and
+    #     its own gate was widened by this same change (it now suppresses for the
+    #     whole flash FAMILY — intended, #4129). ⛔ The ids that NEWLY match are
+    #     the family-prefixed and tailed spellings: ``deepseek/deepseek-flash``, a
+    #     dated build (``deepseek-v4-flash-0731``), an OpenRouter ``:free`` tail.
+    #     ⛔ NOT the bare registry key ``deepseek-flash``: BOTH lanes remap it
+    #     through ``_REGISTRY_KEY_TO_ID`` to ``deepseek/deepseek-v4-flash`` BEFORE
+    #     this member is built, so the pre-#14357 literal gate already suppressed
+    #     it and that spec gains nothing here. Measured on this head — an ask spec
+    #     ``deepseek-flash`` normalizes to ``deepseek/deepseek-v4-flash``, its
+    #     direct wire id is ``deepseek-v4-flash``, and the OLD literal gate matches
+    #     it. Saying it "newly gains the field" was a false claim, caught by
+    #     review in this very block.
+    #   * ``_runs_non_thinking(model_id)`` — the FAMILY gate, so a v4-pro
+    #     extraction still keeps its default on all three (#1790).
+    #
+    # The class default is ``disable_reasoning=False`` — which is exactly where
+    # this rotted: a bare ``OpenRouterModel(...)`` in this branch sent NO
+    # reasoning field, so a failed-over extraction ran thinking-on and collapsed
+    # to ``finish_reason=length`` with zero content (the failure mode this module
+    # records at ``MODELS`` below).
+    suppress = suppress_reasoning and _runs_non_thinking(model_id)
     if provider == "venice":
-        # Venice's catalog serves the documented flash id (docstring). A
-        # wrong id fails LOUD via preflight (config-4xx → fatal gate), never
-        # silently; verify the venice catalog before enabling the pool
-        # (#1549).
+        # Venice's catalog serves the documented flash id: ``GET /models``
+        # lists ``deepseek-v4-flash`` (DeepSeek V4 Flash 0423) with
+        # ``supportsReasoning: true`` — verified live 2026-11-21 (#4129: the
+        # id is confirmed SERVED before its wire shape is asserted). A wrong
+        # id fails LOUD via preflight (config-4xx → fatal gate), never
+        # silently (#1549).
         return VeniceModel(
             _strip_family_prefix(model_id),
             max_tokens=max_tokens, temperature=temperature,
-            json_mode=json_mode)
+            disable_reasoning=suppress, json_mode=json_mode)
     return OpenRouterModel(model_id, max_tokens=max_tokens,
-                           temperature=temperature, json_mode=json_mode)
+                           temperature=temperature,
+                           disable_reasoning=suppress, json_mode=json_mode)
 
 
 # #4992: eligibility reason kinds returned by
@@ -1737,7 +1879,8 @@ def build_extractor_model(model_id: str | None = None, *,
     if not pool_names:
         pool_names = ["openrouter"]  # lenient no-key default (D3)
     return _build_routing_model(model_id, pool_names, max_tokens=max_tokens,
-                                temperature=temperature, json_mode=json_mode)
+                                temperature=temperature, json_mode=json_mode,
+                                suppress_reasoning=True)
 
 
 def build_reader_model(model_id: str | None = None, *,
@@ -1773,4 +1916,30 @@ def build_reader_model(model_id: str | None = None, *,
     model_id = _normalize_ask_model_spec(model_id)
     _primary_name, pool_names = resolve_reader_provider(model_id)
     return _build_routing_model(model_id, pool_names, max_tokens=max_tokens,
-                                temperature=temperature, json_mode=False)
+                                temperature=temperature, json_mode=False,
+                                # #14357 is scoped to the EXTRACTOR: the ask
+                                # lane's two HOP members keep the wire body they
+                                # had before this change, and suppressing them
+                                # would be a real product change on a lane the
+                                # issue never names — its own measured decision,
+                                # not a side effect of the extraction fix.
+                                # ⛔ Its ``deepseek-direct`` member is NOT a hop
+                                # member and is not governed by this flag: it
+                                # hardcodes ``thinking: disabled``, and the gate
+                                # that decides WHICH ids get it was widened here
+                                # to the whole flash family (#4129), so a spec
+                                # naming the family-prefixed form or a dated build
+                                # newly gains the field. ⛔ NOT an OpenRouter
+                                # ``:free`` tail on THIS lane —
+                                # ``_normalize_ask_model_spec`` rejects any
+                                # colon-form spec above, so no ask-lane spec can
+                                # carry one; that id gains the field on the
+                                # EXTRACTOR lane only, which performs no colon
+                                # check.
+                                # ⛔ NOT the bare registry key ``deepseek-flash``:
+                                # both lanes remap it to
+                                # ``deepseek/deepseek-v4-flash``
+                                # (``_REGISTRY_KEY_TO_ID``) before this member is
+                                # built, so the pre-#14357 literal gate already
+                                # suppressed it — that spec gains nothing here.
+                                suppress_reasoning=False)

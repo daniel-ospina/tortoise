@@ -302,9 +302,20 @@ one checkpoint merge under an exclusive flock (no lost updates).
 | `s5_failed` | S5 (embed execution) exception |
 | `entity_resolution_failed` | entity-resolution exception |
 | `s1_chunk_summary` | the "N/M S1 chunks failed" summary line (one bump per summary event) |
+| `reasoning_collapse` | **#14357, HARD — vetoes, never rate-limited.** `_complete`'s yield guard: `finish_reason == "length"` with EMPTY content — the output budget was consumed by hidden reasoning tokens, so the call produced no extraction at all. `_classify_error` decides it by TYPE (`_ReasoningCollapse`), not by status, so it sits OUTSIDE both the 9-class status set (#1524/#4959) and `report.RECOVERABLE_CENSUS_CLASSES`: the eval gate VETOES it (pinned by `tests/test_14357_fallback_thinking.py::test_reasoning_collapse_is_not_a_recoverable_census_class`). An empty answer with `finish_reason == "stop"` is NOT this class — a legitimate empty answer is still returned. |
 
 The invariant `len(errors) == sum(error_census.values())` holds structurally
 (criterion 2) — every `errors.append` site pairs exactly one census class.
+
+⛔ This table names the classes the sections of THIS document introduce; it is
+NOT the full vocabulary, and reading it as exhaustive is how `reasoning_collapse`
+came to be missing here (its own review, #14362). The full set is the
+`_bump_census_class` / `_bump_census` call sites in `tortoise/extractor_v2.py`,
+which also emit stage-producer classes this table does not list
+(`classify_error`, `s4_shape_error`, `gap_fill_shape_error`,
+`classify_later_init_failed`, `entity_identity_held`,
+`chain_enforcement_failed`, `chain_completeness_failed`, and every
+`_classify_error` status class).
 
 **Warning-only telemetry (D7 — NEVER error strings, NEVER in
 `error_census`, `valid` unaffected):** `llm_calls` / `llm_retries` /

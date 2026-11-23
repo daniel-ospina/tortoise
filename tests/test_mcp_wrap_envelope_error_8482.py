@@ -653,6 +653,9 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # linking verb P7 added is object-shaped and enters neither population, so the
     # 10 -> 9 is NOT the `create_edge`/`create_operator` swap. The number is the sweep's
     # own output at that merge (9 typed + 1 union), not a target.
+    # `unions` 2 -> 1 came with P6 and `typed` 10 -> 9 with P7; BOTH are recorded because a
+    # floor that moves without its reason is indistinguishable from a gate quietly widened
+    # to pass.
     floor_typed, floor_unions = 9, 1
     assert typed >= floor_typed and unions >= floor_unions, (
         f"sweep found {typed} typed + {unions} union envelopes; the floors are "
