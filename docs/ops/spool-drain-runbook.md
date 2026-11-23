@@ -129,6 +129,13 @@ uv run python tools/spool_drain_rehearsal.py all      # 4 modes, ~10 min
 uv run python tools/spool_drain_rehearsal.py run --mode head-mock   # or one
 ```
 
+A single-mode `run` re-measures only that mode and MERGES: the other three
+`<mode>.json` files and their summary sections are kept, so you cannot lose the
+committed evidence by re-running one mode against `--out`. `corpus-cost.json` is
+rewritten only when the run drained the WHOLE corpus — `pre-14261` defaults to a
+3-entry slice and `backpressure` to 4, so those keep the recorded cost (and
+refuse when there is none, rather than describe a corpus no mode drained).
+
 The tool, in order: fingerprints the source spool → copies it to a temp dir →
 seeds a local tenant and mints a key → starts `hosted_api` on an ephemeral
 loopback port → runs the REAL `tortoise session drain --retry-terminal` against
@@ -142,7 +149,7 @@ and the printed summary reports the expectations in the table below.
 |---|---|---|
 | `head-keyless` | the drain on a box with no extraction provider | `POST`s == `unfiled` (measured 264 of 265 entries, 1 already filed); `filed_key` == entries MINUS those a `429` parked (measured **215/265**); `terminal 0`; graph `capture_ok 0`, `extracted points 0`, `entities 0`. ⚠️ An unpaced run IS expected to park a share of the corpus on the key budget — that is the Stage 3b finding, not a failure |
 | `head-mock` | the same with the extraction pipeline RUNNING (offline `MockModel`, zero spend) | `POST`s == `unfiled`, all `200`, **zero 504s**, `phase in flight → 0` on its own, extracted points > 0 |
-| `pre-14261` | what the old defect looks like now | `504` with a `stage=capture_*` string (not `stage=unmarked`), entry DEFERRED not discarded |
+| `pre-14261` | what the old defect looks like now | `504` with a `stage=capture_*` string (not `stage=unmarked`). ⛔ The entry is **NOT** deferred: the `504` arrives AFTER the record landed, so the client's confirm path files it — measured `filed_key 3/3`, `backoff_waiting 0`, `attempts_max 0`. A `504` is a lost **response**, not a lost capture, and the spool row above is where you read which |
 | `backpressure` | the `#12992` refusal from ONE drainer against a 1-slot ceiling, and that it is retryable | `429 capture_capacity_saturated`, entries deferred with `attempts` > 0, **terminal 0**, nothing removed |
 
 ⚠️ **`graph extraction.status: stored` is not an observable of this tool** —

@@ -394,19 +394,28 @@ def test_the_committed_summary_carries_no_pre_fix_replay_row() -> None:
         assert "vs settled" in row, row
 
 
-def test_a_rerender_is_idempotent(tmp_path: Path) -> None:
+def test_a_rerender_preserves_the_created_date(tmp_path: Path) -> None:
     """`summary` twice must be a no-op, or the committed bytes cannot be pinned.
 
-    `created` is the one field the artefacts cannot supply, so it is read back
-    from the file being replaced. Before that, every re-render restamped the
-    document to today and no byte-equality pin could ever hold.
+    `created` is the one field the artefacts cannot supply (no `<mode>.json`
+    carries a wall-clock instant), so it is read back from the file being
+    replaced. Before that, every re-render restamped the document to today and no
+    byte-equality pin could ever hold. ⛔ The date is set to a PAST value here on
+    purpose: a same-day re-render would pass the weaker assertion even with the
+    stamp broken, which is how this pin was caught being vacuous.
     """
     out = tmp_path / "evidence"
     _artefacts(out)
+    results = [json.loads((out / f"{mode}.json").read_text(encoding="utf-8"))
+               for mode in rehearsal.MODES]
+    (out / "SUMMARY.md").write_text(
+        rehearsal._summary_document(results, _COST, created="2020-01-01"),
+        encoding="utf-8")
     spool = _live_spool(tmp_path / "live-spool")
     args = ["summary", "--out", str(out), "--spool-src", str(spool)]
     assert rehearsal._run(args) == 0
     first = (out / "SUMMARY.md").read_text(encoding="utf-8")
+    assert "created: 2020-01-01" in first, first[:300]
     assert rehearsal._run(args) == 0
     assert (out / "SUMMARY.md").read_text(encoding="utf-8") == first
 
