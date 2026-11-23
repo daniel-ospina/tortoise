@@ -6085,13 +6085,22 @@ def test_the_ROW_and_SLOT_arms_bless_a_PURE_READ_and_still_catch_a_MUTATOR() -> 
 
     ⛔ THE ARM WAS UNFALSIFIABLE (#14326 round 35 review cycle 8, MEASURED: reverting
     `row_handed`/`slot_handed` to `_PURE_READS` left the file at `43 passed`, and neutering
-    `row_handed` outright left `43 passed` too, while the three shapes `_row_ref`'s docstring
-    names all went GREEN). The exemption those arms take was justified in a commit message and
-    a docstring — and this file's own rule is that a clause no mutant can red is not
-    coverage. The GREEN half is the fix (a pure id mapper reached through a RECORDED row or a
-    holder slot must not be called a mutation); the RED half is what the arm EXISTS for (an
-    unknown callee handed a recorded row can write it, and `compare()` would then read a page
-    the pin never inspected — the #14192 false PASS the `intentional_keep` grant rests on).
+    `row_handed` outright ALSO left `43 passed` — nothing distinguished the exemption from
+    its absence). The exemption was justified only in a commit message and a docstring, and
+    this file's own rule is that a clause no mutant can red is not coverage.
+
+    The GREEN half is the fix: a pure id mapper reached through a RECORDED row or a holder
+    slot must not be reported as a mutation. The RED half is what the arm EXISTS for: an
+    unknown callee handed a recorded row can WRITE it, and `compare()` would then read a page
+    the pin never inspected — the #14192 false PASS the `intentional_keep` grant rests on.
+
+    ⛔ EACH ASSERTION BELOW IS INDIVIDUALLY FALSIFIABLE, and that is the point (#14326 review
+    cycle 9, MEASURED one predicate at a time): reverting ONLY the SLOT arm to `_PURE_READS`
+    reds the second assertion (`[6]`), reverting ONLY the ROW arm reds the first (`[4]`), and
+    `row_handed = False` reds the third (`[]`). Scoped precisely: `_scrub3(per_query)` — the
+    WHOLE list, not a recorded row — stays RED under `row_handed = False` because
+    `_element_handed` catches it, so this test does not claim that shape and the arm is
+    justified by the two it does own.
     """
     assert not _mutations_of("    _rid = _result_id(per_query[-1])\n"), (
         "a PURE id mapper handed a RECORDED row is not a mutation — `_ID_MAPPERS` is in "
