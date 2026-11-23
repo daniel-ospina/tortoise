@@ -2671,7 +2671,8 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
                         continue
                     binds.append((ast.Name(id=name, ctx=ast.Store()), node.subject))
             continue
-        # ⛔ …AND A `with` TARGET (#14326 round 19): `with sys.modules as _x:` binds `_x`        # with no `Assign` node, the third spelling of the same bind. The target binds what
+        # ⛔ …AND A `with` TARGET (#14326 round 19): `with sys.modules as _x:` binds `_x`
+        # with no `Assign` node, the third spelling of the same bind. The target binds what
         # `__enter__` RETURNS, which is not statically knowable in general, so binding it to
         # the CONTEXT EXPRESSION is the over-approximation — and it is the only one that
         # closes the shape, because a call there (`with _cm(sys.modules) as _x:`) binds an
