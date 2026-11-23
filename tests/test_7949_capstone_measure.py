@@ -7568,12 +7568,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("20571", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:20432` now, and its own `hosted_api.py:19589` (`19558` before that) is that SAME guard at an older head — so it is
-        # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
-        # merger to re-point line 82, which is exactly how 236 comes to assert the old
-        # number while 82 moves. Unpinned until the review reverted it green. Only the
-        # current-head number is pinned: the `:18205` beside it is a STAMP read at
-        # `a577d0e25c` and does NOT resolve here, so pinning it would red a true record.
+        # re-states `hosted_api.py:20546` now — the SAME guard the two rows above pin, so this is a
+        # second statement of one hit, and the paragraph it sits in INSTRUCTS the next merger to
+        # re-point line 82, which is exactly how 236 comes to assert the old number while 82 moves.
+        # ⛔ RE-DERIVED AT THE `ff2218b6` FOLD: this clause used to read `20432` with a parenthetical
+        # `hosted_api.py:19589`, and NEITHER address is what the document carries now — `20432` is a
+        # `sessionCaptured` comment, `19589` is a `#4051` comment block that the document does not
+        # mention at all (`grep -c '19589' 03-test-design.md` -> 0), and it was the very number the
+        # rows above had already REJECTED. Unpinned until the review reverted it green. Only the
+        # current-head number is pinned: the `:18205` beside it is a STAMP read at `a577d0e25c` and
+        # does NOT resolve here, so pinning it would red a true record.
         ("03-test-design.md", "`:82`'s `hosted_api.py:", (
             ("20546", "if count + est > max_points:"),
         ), "hosted_api"),
