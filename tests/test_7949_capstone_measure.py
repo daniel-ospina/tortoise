@@ -19344,9 +19344,12 @@ _INDEX_ROW_ANCHORS: tuple[_IndexRowAnchor, ...] = (
         r"`dedup_reviewed IS NULL` is `:(?P<n>\d+)` at THIS head",
         "dedup_reviewed IS NULL",
     ),
-    # ⛔ THE `sdk.py:147` INSERT, typed SEVEN times across the three lines this PR rewrites and
-    # graded by NOTHING (#14386 review round 5, P2 — MEASURED: `:147` -> `:148` on line 102, and
-    # again on line 108's three spellings, each left `485 passed`). `:148` carries
+    # ⛔ THE `sdk.py:147` INSERT, typed on the three lines this PR rewrites and graded by
+    # NOTHING (#14386 review round 5, P2 — MEASURED: `:147` -> `:148` on line 102, and
+    # again on line 108's three spellings, each left `485 passed`). ⛔ THE TOTAL IS NOT TYPED
+    # HERE ANY MORE: an earlier cut said SEVEN and was stale one round later, while the constant
+    # below and the document both held six (#14386 review round 9, P3). `_SDK147_OCCURRENCES` is
+    # the census — read it, never count this comment. `:148` carries
     # `from .live import direction_flows`, NOT the `#14381` insert, so a FALSE figure in this
     # PR's own new prose shipped with no red. Bound here with the same uniqueness rule.
     (
@@ -19605,11 +19608,14 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 
 #: ⛔ THE `sdk.py:147` FIGURES ARE GRADED BY A DECLARED CENSUS, not by one `re.search`
 #: (#14386 review round 6, P2 — MEASURED). Entry 10 of `_INDEX_ROW_ANCHORS` binds the spelling
-#: ``line at `sdk.py:N` is `main`'s own``, which occurs TWICE (both on line 102); the other FIVE
-#: occurrences — on lines 102, 108 and 114 — match that shape not at all. Mutating occurrence 2,
-#: 3 or 6 to `:148` (whose line is `from .live import direction_flows`, NOT the insert) left
-#: `485 passed`. The arm reads one match, so one occurrence was graded out of seven: the
-#: fail-open direction, on prose this PR itself adds.
+#: ``line at `sdk.py:N` is `main`'s own``, which matches ONE occurrence at this head (line 102);
+#: the other statements of the figure — spread over lines 102, 108 and 114 — match that shape not
+#: at all. Mutating them to `:148` (whose line is `from .live import direction_flows`, NOT the
+#: insert) left `485 passed` (round 6 measured that on the second, third and sixth occurrence of
+#: the SEVEN that head's document held — ⛔ `_SDK147_OCCURRENCES` below is the LIVE census, not
+#: that seven, and re-reading a total out of this comment is exactly what went stale: #14386
+#: review round 9, P3). The arm reads ONE match, so one occurrence is graded: the fail-open
+#: direction, on prose this PR itself adds.
 #:
 #: The fix is the shape the sibling tables already use — a DECLARED COUNT. Every occurrence of
 #: the token must still be there, so repointing ANY ONE of them drops the count and reds; the
@@ -19618,9 +19624,11 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 #:
 #: ⛔ AND THE COUNT NEEDS A RIGHT BOUNDARY, or the sentence above is FALSE (#14386 review round 8,
 #: F2 — MEASURED). `doc.count("sdk.py:147")` counts a PREFIX, so `sdk.py:1475` counts as a hit:
-#: entry 10 grades TWO of the seven occurrences, and repointing the other FIVE to `:1475` left the
-#: count at 7 and this arm GREEN — the fail-open direction, on the very guarantee this comment
-#: asserts. The census now matches `sdk\.py:147(?!\d)`, and that mutation is replayed as an
+#: entry 10 graded TWO of the seven occurrences THAT head's document held, and repointing the
+#: other FIVE to `:1475` left the count at 7 and this arm GREEN — the fail-open direction, on the
+#: very guarantee this comment asserts. (Both totals are that head's reading: the live ones are
+#: `_SDK147_OCCURRENCES` and the arm that grades the matches, never this paragraph.) The census
+#: now matches `sdk\.py:147(?!\d)`, and that mutation is replayed as an
 #: assertion in `test_the_index_table_row_states_each_anchor_it_names_at_this_head`, so the
 #: boundary cannot be dropped again without a red.
 _SDK147_NEEDLE = "from .live import canonical_direction"
