@@ -52,6 +52,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 from pathlib import Path
@@ -137,10 +138,31 @@ def _spawn(cmd: list[str], cwd: Path, executable: str | None = None) -> subproce
     `executable=` decouples WHAT RUNS from `argv[0]`: the census/`pkill` name and the
     program are then two different things, which is the only portable way to put an
     arbitrary name in front of a live process (#12039).
+
+    ⛔ THE DECOY'S STDERR IS KEPT, NOT DISCARDED (#14122). It used to go to
+    `subprocess.DEVNULL`, which made the two very different failures produce the SAME
+    message: a decoy the census could not SEE, and a decoy that had already DIED. Both
+    surfaced as `ps -p <pid> -o command=` naming `[comm] <defunct>` and the harness
+    could only say "the harness cannot measure" — true, but silent on the reason. The
+    log is captured per pid so `_await_exec` can print what the child itself said as it
+    went; that is the only thing that can explain WHY it exited.
     """
-    return subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True,
-                            executable=executable)
+    fd, path = tempfile.mkstemp(prefix="decoy-stderr-", suffix=".log")
+    os.close(fd)
+    errlog = Path(path)
+    fh = errlog.open("wb")
+    try:
+        proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.DEVNULL,
+                                stderr=fh, start_new_session=True,
+                                executable=executable)
+    finally:
+        fh.close()
+    _DECOY_STDERR[proc.pid] = errlog
+    return proc
+
+
+#: Captured decoy stderr, keyed by pid (#14122) — see `_spawn`.
+_DECOY_STDERR: dict[int, Path] = {}
 
 
 def _wait_alive(pid: int, timeout: float = 5.0) -> None:
@@ -193,6 +215,28 @@ def _await_exec(pid: int, argv0: str, timeout: float = 5.0) -> None:
         time.sleep(0.05)
     why = (f"the last row read for it named {seen!r}, not {argv0!r}" if seen
            else "the table had no row for it")
+    # ⛔ A ZOMBIE IS NOT A CENSUS GAP — it is a decoy that EXITED (#14122). The kernel
+    # renders an unreaped dead process's command row as `[<comm>] <defunct>` and its
+    # `/proc/<pid>/cmdline` reads EMPTY, so no later sample can EVER name `argv0` again:
+    # this wait burns its whole deadline and then reports "the harness cannot measure",
+    # which is true and useless. Say which of the two it was, and print the decoy's own
+    # captured stderr — the only evidence of WHY it went.
+    if not _pid_alive(pid):
+        log = _DECOY_STDERR.pop(pid, None)
+        said = ""
+        if log is not None:
+            try:
+                said = log.read_text(errors="replace").strip()
+            except OSError:
+                said = ""
+            with contextlib.suppress(OSError):
+                log.unlink()
+        pytest.fail(
+            f"decoy pid {pid} EXITED before any census row could name {argv0!r} — a DEAD "
+            f"DECOY, not a harness that cannot measure ({why}; the decoy's own stderr"
+            + (f" said {said!r}" if said else " was EMPTY")
+            + ")"
+        )
     pytest.fail(
         f"decoy pid {pid} never showed a row starting {argv0!r} — the harness cannot "
         f"measure ({why})"

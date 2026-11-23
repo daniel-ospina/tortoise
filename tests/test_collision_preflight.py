@@ -8809,7 +8809,7 @@ class CollisionPreflightTest(unittest.TestCase):
         try:
             # Precondition: the census the tool uses can SEE it, so a green
             # assertion below cannot be a subprocess race.
-            self._wait_for_pi_cwd(wt)
+            self._wait_for_pi_cwd(wt, proc=proc)
             rc, out = self.run_tool()
         finally:
             proc.terminate()
@@ -9072,7 +9072,7 @@ class CollisionPreflightTest(unittest.TestCase):
         # the stubbed process table the TOOL reads — see `_write_ps_stub`.
         proc = self._start_fake_pi(wt)
         try:
-            self._wait_for_pi_cwd(wt)
+            self._wait_for_pi_cwd(wt, proc=proc)
             rc, out = self.run_tool()
         finally:
             proc.terminate()
@@ -9505,9 +9505,9 @@ class CollisionPreflightTest(unittest.TestCase):
         proc = self._start_fake_pi(wt)
         moved = self.tmp / f"moved-away-{ISSUE}"
         try:
-            self._wait_for_pi_cwd(wt)
+            self._wait_for_pi_cwd(wt, proc=proc)
             os.rename(wt, moved)
-            self._wait_for_pi_cwd(moved)
+            self._wait_for_pi_cwd(moved, proc=proc)
             # The registration now points at a path that no longer exists, so this is the
             # module's OWN advice for a dead record — and it is what erases the last trace.
             _git(self.repo, "worktree", "prune")
@@ -9549,7 +9549,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(head, branch, "the fixture checkout must be on the judged branch")
         proc = self._start_fake_pi(clone)
         try:
-            self._wait_for_pi_cwd(clone)
+            self._wait_for_pi_cwd(clone, proc=proc)
             rc, out = self.run_tool()
         finally:
             proc.terminate()
@@ -9650,27 +9650,64 @@ class CollisionPreflightTest(unittest.TestCase):
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
-    def _wait_for_pi_cwd(self, wt: Path, timeout: float = 10.0) -> None:
+    def _wait_for_pi_cwd(self, wt: Path, timeout: float = 10.0,
+                         proc: subprocess.Popen | None = None) -> None:
         """Block until `fleet_state` can see the fake lane, then assert it did.
 
         Without this the census can run before the child has exec'd, and the test would
         read a real race as a rule failure — a green-below / red-above flake is the
         worst kind of test.
+
+        ⛔ ASK THE QUESTION ABOUT *OUR* LANE (#14122). `pi_processes()` reads the WHOLE
+        host, and four of the six red shards run on a *self-hosted* pool that SHARES
+        ITS HOST WITH THE FLEET — so real lane processes are in that list too. A single
+        unrelated `pi` whose `/proc/<pid>/cwd` the runner's user cannot read (a lane
+        owned by another user, or one that exited mid-read) makes `process_cwds` report
+        it as unattributed, which the tool turns into `process-cwd-unreadable` →
+        INCOMPLETE, while OUR lane is plainly visible. Measured on `test (j)`
+        (run 45164502340, `pi-runner-c5-x64-4`): `process-cwd-unreadable: 1 live pi
+        process(es) could not be attributed`, and this method failed with "the census
+        never saw the fake pi lane" — a true statement about the host, a false one about
+        the fixture. The precondition is about the lane this fixture started, so it must
+        be read from that lane's pid and not from the host's population.
+
+        `proc` is optional (a caller may have only a path). When it IS given, its exit
+        status is read on failure: a fixture that DIED has no readable cwd, so no amount
+        of waiting could attribute it — and saying that is the difference between "the
+        harness cannot measure" and the real reason.
         """
         mod = _tool_module()
         deadline = time.time() + timeout
         want = os.path.realpath(str(wt))
+        pid = proc.pid if proc is not None else None
+        seen: list[int] = []
         while time.time() < deadline:
             procs, err = mod.fleet_state.pi_processes()
             if not err:
-                cwds, cerr = mod.fleet_state.process_cwds(
-                    [int(p["pid"]) for p in procs])
+                pids = [int(p["pid"]) for p in procs]
+                if pid is not None:
+                    pids = [p for p in pids if p == pid]
+                seen = pids
+                cwds, cerr = mod.fleet_state.process_cwds(pids)
                 if not cerr and any(
                         os.path.realpath(c) == want for c in cwds.values()):
                     return
             time.sleep(0.1)
-        self.fail("the process census never saw the fake pi lane — the test cannot "
-                  "discriminate process-cwd liveness")
+        fatal = ""
+        if proc is not None:
+            rc = proc.poll()
+            fatal = (
+                f"; the fake lane pid {pid} EXITED with rc={rc} — a dead process has no "
+                "readable cwd, so no wait could ever attribute it (a DEAD FIXTURE, not a "
+                "census gap)"
+                if rc is not None else
+                f"; the fake lane pid {pid} is still running — so this IS a census gap"
+            )
+        self.fail(
+            "the process census never saw the fake pi lane — the test cannot "
+            "discriminate process-cwd liveness "
+            f"(pi pids the census returned: {seen!r}; wanted cwd {want!r}{fatal})"
+        )
 
     def _wait_cwd_attributable(self, pid: int, wt: Path, timeout: float = 10.0) -> None:
         """Block until the TOOL's OWN cwd reader can attribute `pid` to `wt` (#12039).
