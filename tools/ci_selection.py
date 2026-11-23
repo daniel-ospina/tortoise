@@ -4022,6 +4022,20 @@ TOOL_CARVEOUTS = (
     "tools/embedder_probe.py",
     "tools/calibrate_thresholds.py",
     "tools/pair_label_runner.py",
+    # #14343: the extractor cost instrument. `tools/` is in the flat
+    # NON_PYTHON_PREFIXES tuple, which swallows every tools change before
+    # SOURCE_PATTERNS matching, so a tool-ONLY diff came back
+    # `surfaces: []` and ran NONE of this tool's pins — measured at the head
+    # that added its `--receipts` refusal: `--changed-files
+    # tools/extractor_cost_measure.py` -> surfaces [], full False, and
+    # `test_extractor_cost_measure.py` / `test_extractor_embed_json_14343.py`
+    # absent from the 106 files. That is the #1349/#2938 silent-drop class the
+    # `core` rows for those two suites cite from the other side: the tests were
+    # registered, but nothing SELECTED them on an instrument-only change — the
+    # likeliest change to break its medians, its serialization arithmetic or its
+    # fail-closed refusal. Fail-closed to the full matrix rather than a narrow
+    # surface, because the instrument's own surfaces span core + api + eval.
+    "tools/extractor_cost_measure.py",
     # #2071: the eval-lane ask QA spot-check tools (ask_spotcheck + the
     # consistency/probe harnesses) use the eval judge and own the
     # test_ask_spotcheck_judge.py suite — a spot-check-only change must

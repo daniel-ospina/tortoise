@@ -1,0 +1,268 @@
+{
+ "arm": "cold",
+ "calls_per_doc": {
+  "s1": 1.68,
+  "s2": 1.16,
+  "s4": 1.14,
+  "total": 3.98
+ },
+ "composition_total": 42508.9,
+ "document_term": {
+  "documents": 50,
+  "documents_taking_two_s1_calls": 34,
+  "fitted_slope_x_median_doc": 11249.9,
+  "note": "S1 sends the WHOLE document once per call, and a majority of documents take a second S1 call, so the document is paid for ~2x",
+  "s1_calls_x_median_doc": 8754.5
+ },
+ "documents": 50,
+ "fitted_constant": 45503,
+ "input_fit": {
+  "intercept": 45503,
+  "r2": 0.715,
+  "slope": 2.159
+ },
+ "levers_offline": {
+  "compact_master_render": {
+   "compact_tokens": 2335,
+   "quality_risk": "compact mode story-filters the pack kinds, so a document that misses every trigger word drops to the all-packs fallback and a document that hits one drops the others \u2014 not quality-neutral",
+   "saved_per_doc": 1959.6,
+   "verbose_tokens": 3187
+  },
+  "s1_second_send": {
+   "cause": "S1's narrative cap is 1500 tokens; a story that hits it escalates and re-sends the SAME prompt, so the document is paid for twice",
+   "documents_taking_two_s1_calls": 34,
+   "quality_risk": "a longer narrative is more content, not less \u2014 but it also enlarges the story both later stages re-read, so the net is a measurement, not arithmetic; the story's own growth is NOT sizeable offline",
+   "saved_per_doc_if_one_call": 4651.9,
+   "share_pct": 68.0
+  }
+ },
+ "median_doc_tokens": 5211.0,
+ "output": {
+  "fitted_constant": 22802,
+  "fitted_r2": 0.02,
+  "fitted_slope": 0.18,
+  "mean_per_doc": 24350.5,
+  "reemission_tail": {
+   "s4_docs": 50,
+   "s4_docs_over_6000": 13,
+   "s4_max_per_doc_per_call": 24000,
+   "s4_median_per_doc_per_call": 2942,
+   "share_docs_over_6000_pct": 26.0
+  },
+  "s1_tokens_per_doc": 2798.5,
+  "s2_share": 65.5,
+  "s2_share_of_fitted": 51.2,
+  "s2_tokens_per_doc": 11677.1,
+  "s4_tokens_per_doc": 3353.9,
+  "total_per_doc": 17829.5,
+  "unattributed": 4972.5
+ },
+ "per_call": {
+  "s1": {
+   "completion": 1665.75,
+   "prompt": 7138.0
+  },
+  "s2": {
+   "completion": 10066.5,
+   "prompt": 11509.5
+  },
+  "s4": {
+   "completion": 2942.0,
+   "prompt": 23176.0
+  }
+ },
+ "regions": {
+  "**S1's story, re-sent to S2 and S4**": 5065.8,
+  "**S2's embed list, re-sent to S4**": 14149.1,
+  "chains": 547.4,
+  "date anchor": 653.1,
+  "graph search results (S4)": 128.8,
+  "kind vocabulary (`master_list`)": 7330.1,
+  "mapping rules (`anti_routine`)": 4466.6,
+  "memory granularity (S1 only)": 1550.6,
+  "output schema (`output_contract`)": 2187.3,
+  "pack namespace list (`pack_namespaces`, S2 only)": 0.0,
+  "stage instructions (template prose)": 6430.1
+ },
+ "serialization": {
+  "compact_tokens": 52346,
+  "emissions": 14,
+  "indented_tokens": 77561,
+  "items": 580,
+  "receipts": 7,
+  "rows": [
+   {
+    "arm": "raw",
+    "compact_tokens": 4243,
+    "emission_tokens": 4582,
+    "indented_tokens": 6276,
+    "items": 47,
+    "session": "wp01_quarry_debug",
+    "story_tokens": 1143
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 4851,
+    "emission_tokens": 5266,
+    "indented_tokens": 7165,
+    "items": 51,
+    "session": "wp01_quarry_debug",
+    "story_tokens": 640
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 3815,
+    "emission_tokens": 4860,
+    "indented_tokens": 5833,
+    "items": 45,
+    "session": "wp02_lumen_refactor",
+    "story_tokens": 879
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 4084,
+    "emission_tokens": 4424,
+    "indented_tokens": 5998,
+    "items": 49,
+    "session": "wp02_lumen_refactor",
+    "story_tokens": 653
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 3327,
+    "emission_tokens": 3584,
+    "indented_tokens": 5118,
+    "items": 39,
+    "session": "wp03_ember_design",
+    "story_tokens": 928
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 3872,
+    "emission_tokens": 4130,
+    "indented_tokens": 5626,
+    "items": 46,
+    "session": "wp03_ember_design",
+    "story_tokens": 596
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 2975,
+    "emission_tokens": 3213,
+    "indented_tokens": 4412,
+    "items": 30,
+    "session": "wp04_aurora_perf",
+    "story_tokens": 795
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 3880,
+    "emission_tokens": 4187,
+    "indented_tokens": 5696,
+    "items": 38,
+    "session": "wp04_aurora_perf",
+    "story_tokens": 509
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 4084,
+    "emission_tokens": 4380,
+    "indented_tokens": 6048,
+    "items": 45,
+    "session": "wp05_retro_writeup",
+    "story_tokens": 853
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 5114,
+    "emission_tokens": 5453,
+    "indented_tokens": 7547,
+    "items": 54,
+    "session": "wp05_retro_writeup",
+    "story_tokens": 614
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 3952,
+    "emission_tokens": 4276,
+    "indented_tokens": 5970,
+    "items": 43,
+    "session": "wp06_quarry_rollout",
+    "story_tokens": 840
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 3058,
+    "emission_tokens": 3263,
+    "indented_tokens": 4346,
+    "items": 36,
+    "session": "wp06_quarry_rollout",
+    "story_tokens": 342
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 1704,
+    "emission_tokens": 3384,
+    "indented_tokens": 2566,
+    "items": 20,
+    "session": "wp07_bluepeak_followup",
+    "story_tokens": 893
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 3387,
+    "emission_tokens": 3542,
+    "indented_tokens": 4960,
+    "items": 37,
+    "session": "wp07_bluepeak_followup",
+    "story_tokens": 479
+   }
+  ],
+  "saved_pct": 32.5,
+  "saved_per_emission": 1801,
+  "saved_tokens": 25215,
+  "tokens_per_item": 100.9
+ },
+ "solved": {
+  "embed_list_tokens": 12411.5,
+  "embed_over_emission": 1.23,
+  "story_tokens": 2109.5
+ },
+ "source_transcript": {
+  "documents": 50,
+  "documents_with_a_tail": 9,
+  "tokens_per_call_max": 1976,
+  "tokens_per_call_median": 0.0
+ },
+ "statics": {
+  "envelope": {
+   "clause": 93
+  },
+  "s1": {
+   "date_anchor": 78,
+   "memory_granularity": 923,
+   "template_prose": 629
+  },
+  "s2": {
+   "anti_routine": 1942,
+   "chains_text": 238,
+   "date_anchor": 227,
+   "master_list": 3187,
+   "output_contract": 951,
+   "pack_namespaces": 0,
+   "template_prose": 2762
+  },
+  "s4": {
+   "anti_routine": 1942,
+   "chains_text": 238,
+   "date_anchor": 227,
+   "embed_list_json": 1,
+   "master_list": 3187,
+   "output_contract": 951,
+   "search_results": 113,
+   "story": 0,
+   "template_prose": 1903
+  }
+ },
+ "unattributed": 2994.1
+}

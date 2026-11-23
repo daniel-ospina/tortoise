@@ -11,7 +11,10 @@ re-run without spending money to check itself.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
+import statistics
 import sys
 import tomllib
 from pathlib import Path
@@ -144,8 +147,12 @@ def test_a_failed_item_is_counted_but_never_priced():
 
 def test_allowance_table_derives_documents_from_the_measured_token_count():
     """`#14275`'s 3M-token allowance buys `3M / tokens-per-document` items —
-    the arithmetic that turned ≈200 documents into ~47. It is derived here,
-    never asserted, so a re-measured token count moves the answer."""
+    the arithmetic that turned ≈200 documents into ~46. It is derived here,
+    never asserted, so a re-measured token count moves the answer.
+
+    ⛔ The answer is the FLOOR. `round()` said 47 here, and `47 × 64,000 =
+    3,008,000` is 8,000 tokens PAST the allowance — a capacity column nothing
+    at that tier can buy (review round 4, P2)."""
     rows = [_row(item_tokens=5_000 + i, prompt_tokens=48_000,
                  completion_tokens=16_000) for i in range(5)]
     report = m.build_report(rows)
@@ -156,12 +163,83 @@ def test_allowance_table_derives_documents_from_the_measured_token_count():
     assert per_doc == 64_000
     table = m.allowance_table(cost, per_doc)
     solo = next(a for a in table if a["tier"] == "solo")
-    assert solo["documents"] == round(3_000_000 / 64_000)
-    assert solo["documents"] == 47
+    assert solo["documents"] == 46
+    # the discriminator: the NEAREST integer overruns the allowance, which is
+    # exactly what round() printed and why the cell has to be floored.
+    assert round(3_000_000 / 64_000) == 47
+    assert 47 * 64_000 > 3_000_000 >= 46 * 64_000
     assert solo["usd_peak"] > 0.0
     assert solo["pct_peak"] > 0.0
     free = next(a for a in table if a["tier"] == "free")
     assert free["documents"] == 0 and free["usd_peak"] == 0.0
+
+
+def test_no_allowance_cell_claims_more_than_its_allowance_can_buy():
+    """Every printed count is the FLOOR of allowance ÷ unit cost.
+
+    This is the pin that was MISSING, which is why three overstating cells
+    walked past four review rounds (review round 4, P2 on
+    `docs/evidence/14343-amplify/README.md:320-322`): 50 × 60,201 = 3,010,050
+    at solo's 3M, 399 × 60,201 = 24,020,199 at team's 24M, and 62 × 64,799 =
+    4,017,538 at pro's 4M.
+
+    Checked on the COMMITTED artifacts rather than a fabricated row: the frozen
+    `report.json` the renderer produced, and the hand-written §4/§5 tables in
+    the #14343 bundle that quote it. Restoring `round()` reds it (62 → 61 at
+    pro, 110 → 109 sessions) and so does hand-editing one cell.
+    """
+    committed = json.loads((_EVIDENCE / "report.json").read_text())
+    assert committed["allowances"], "the frozen report carries no allowances"
+    per_doc = committed["costs"]["tokens_per_median_doc"]
+    session_row = next(r for r in committed["costs"]["rows"]
+                       if r["item"] == "median session")
+    per_session = session_row["measured_in"] + session_row["measured_out"]
+    assert (per_doc, per_session) == (64_799, 36_415), (
+        "the measured unit costs moved; re-derive the README tables with this pin")
+
+    for row in committed["allowances"]:
+        if not row["allowance"]:
+            continue
+        for column, unit in (("documents", per_doc), ("sessions", per_session)):
+            got = row[column]
+            assert got == m.affordable_count(row["allowance"], unit), (
+                f"{row['tier']}.{column}={got} is not the floor of "
+                f"{row['allowance']}/{unit}")
+            assert got * unit <= row["allowance"] < (got + 1) * unit, (
+                f"{row['tier']}.{column}={got} × {unit} does not fit "
+                f"{row['allowance']}")
+
+    readme = (_REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+              / "README.md").read_text(encoding="utf-8")
+    allowances = {"solo": 3_000_000, "pro": 4_000_000, "team": 24_000_000}
+    after_tokens = 60_201          # 64,799 − 4,598, this bundle's own Δ row
+
+    # §4: | documents / month · solo (3M) | 46 | 49 | +6.5 % |
+    rows = re.findall(r"^\| documents / month · (solo|pro|team) \(\w+\) "
+                      r"\| (\d+) \| (\d+) \| \+([\d.]+) % \|$",
+                      readme, flags=re.MULTILINE)
+    assert len(rows) == 3, f"§4's capacity rows are gone or malformed: {rows}"
+    for tier, before, after, delta in rows:
+        before, after, delta = int(before), int(after), float(delta)
+        allowance = allowances[tier]
+        assert before == m.affordable_count(allowance, per_doc), tier
+        assert after == m.affordable_count(allowance, after_tokens), tier
+        assert before * per_doc <= allowance < (before + 1) * per_doc
+        assert after * after_tokens <= allowance < (after + 1) * after_tokens
+        assert delta == round(100 * (after / before - 1), 1), (
+            f"{tier}'s Δ is derived from the two cells; restate it when one moves")
+
+    # §5: | solo | 3M | 46 | 66 | 93 |
+    rows5 = re.findall(r"^\| (solo|pro|team) \| \d+M \| (\d+) \| (\d+) "
+                       r"\| (\d+) \|$", readme, flags=re.MULTILINE)
+    assert len(rows5) == 3, f"§5's capacity rows are gone or malformed: {rows5}"
+    for tier, *cells in rows5:
+        allowance = allowances[tier]
+        for cell, unit in zip(cells, (per_doc, 45_000, 32_000), strict=True):
+            cell = int(cell)
+            assert cell * unit <= allowance < (cell + 1) * unit, (
+                f"{tier}: {cell} × {unit} does not fit {allowance} — a capacity "
+                f"cell may round DOWN, never up")
 
 
 def test_the_corpus_is_deterministic_and_carries_the_length_spread():
@@ -200,6 +278,35 @@ def test_the_corpus_seed_actually_selects_the_sample():
     # determinism row above relies on (asserted here against the OTHER seed so
     # the pin cannot pass by both calls being hardcoded to 7).
     assert [r["path"] for r in m.pick_corpus(limit=20, seed=99)] == ninetynine
+
+
+def test_a_non_positive_document_limit_is_an_empty_sample_not_a_traceback():
+    """`--docs 0` is a LEGAL request ("measure no documents"), not a crash.
+
+    ⛔ THE PRE-FIX FAILURE, measured: `rows = sorted(picked.values())[:limit]`
+    is `[]` at `limit=0`, and the landmark guard that follows assigns
+    `rows[-1] = inv[-1]` unguarded — `IndexError: list assignment index out of
+    range`. `--docs` is a bare `type=int` with no positivity check, so `0` and
+    a negative value both reach here, and the caller got a traceback instead of
+    a result (review cycle 13, P3; the guard it was fixed with shipped with no
+    pin, which is this test).
+
+    ⛔ NON-VACUITY ON BOTH SIDES. `limit=0` alone would stay green under a
+    blanket `return []`, so the positive arm below asserts a real corpus is
+    still drawn; and the longest-document guarantee is asserted by the sibling
+    determinism test, which this guard must not disable.
+    """
+    for limit in (0, -1, -50):
+        assert m.pick_corpus(limit=limit) == [], (
+            f"pick_corpus(limit={limit}) must be the empty sample — a request "
+            f"for no documents is a result, not a traceback")
+    # The guard is scoped to a NON-POSITIVE limit: a positive one still selects
+    # a real corpus, so the early return did not swallow the whole function.
+    positive = m.pick_corpus(limit=3)
+    assert positive, "a positive limit must still draw a corpus"
+    assert max(r["tokens"] for r in positive) == max(
+        r["tokens"] for r in m.doc_inventory()), (
+        "the guard must not cost the sample its longest document")
 
 
 def test_a_literal_dollar_is_escaped_outside_code_spans_only():
@@ -650,3 +757,1526 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
             "on the ambient interpreter and `tests/test_extractor_cost_measure.py` is not "
             "in `slow_files` — so its two corpus cases die with `ModuleNotFoundError` "
             f"(#14277). Install line: {line.strip()}")
+
+
+# ── #14343: the decomposition of the two constants ────────────────────────
+#
+# `decompose` answers a different question from `run`: not "how much" but "of
+# what". Its table is the deliverable, so the properties that make it EVIDENCE
+# are pinned here — a table that silently stopped summing, or that attributed
+# a region the prompt does not contain, would read as a result.
+
+def _evidence_rows() -> list[dict]:
+    import json
+
+    path = (_REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
+            / "measurements.jsonl")
+    return [json.loads(line) for line in path.read_text().splitlines()
+            if line.strip()]
+
+
+def test_the_static_regions_of_a_prompt_are_its_own_bytes():
+    """Every spliced region is counted, and the prose is the rest.
+
+    ⛔ A "the parts sum to the render" assertion is VACUOUS as written in the
+    first revision of this file: `_render_regions` defines `template_prose` as
+    `render − Σ(regions)`, so the sum equals the render for ANY region
+    arithmetic — a region dropped or miscounted is absorbed into the prose and
+    the equality still holds. So the exhaustive property is pinned on its two
+    real parts instead:
+
+      1. the region MAP is exactly the renderer's fill map (a spliced value
+         that is not a key is a region attributed to the wrong party);
+      2. each region's size is the size of ITS OWN value (a wrong arithmetic
+         shows up here, not in the residual);
+      3. the prose is the template with the slots EMPTIED — measured
+         independently of the regions, so it can disagree with them.
+    """
+    from tortoise import extractor_v2 as X
+    enc = m._encoding()
+    n = lambda text: len(enc.encode(text or ""))  # noqa: E731
+    statics = m._render_regions()
+    master = X.build_master_list()
+    date = "2026-11-21T00:00:00+00:00"
+    # S1 is the stage whose slots are counted BY HAND (S2/S4 come from the
+    # renderer's own fill map), so a NEW `{slot}` in S1_TMPL is the live risk:
+    # it would render unsubstituted and be counted as prose.
+    assert set(re.findall(r"\{(\w+)\}", X.S1_TMPL)) == {
+        "memory_granularity", "date_anchor"}, (
+        "S1_TMPL grew a placeholder; `_render_regions`' hand-counted S1 branch "
+        "does not know it, so its tokens would be filed as template prose")
+
+    # S1 substitutes with `.replace`; its two slots are real, and the prose is
+    # the template with both slots blanked.
+    granularity = X._granularity_text(master)
+    anchor = X._date_anchor(date)
+    prose_s1 = (X.S1_TMPL.replace("{memory_granularity}", "")
+                .replace("{date_anchor}", ""))
+    assert set(statics["s1"]) == {"memory_granularity", "date_anchor",
+                                  "template_prose"}
+    assert statics["s1"]["memory_granularity"] == n(granularity)
+    assert statics["s1"]["date_anchor"] == n(anchor)
+    assert statics["s1"]["template_prose"] == pytest.approx(n(prose_s1), abs=8)
+
+    # S2/S4: the region map is the renderer's OWN fill map, captured by
+    # wrapping `_fill_template`. Compare each region against an independent
+    # computation of the same value, and the prose against the template with
+    # every slot emptied.
+    captured: list[dict] = []
+    orig = X._fill_template
+
+    def _fill(tmpl, values):
+        captured.append({"tmpl": tmpl, "values": dict(values)})
+        return orig(tmpl, values)
+
+    X._fill_template = _fill
+    try:
+        X.render_s2_prompt(master, session_date=date, story="", edus=None)
+        X.render_s4_prompt("", {}, {}, master, session_date=date, edus=None)
+    finally:
+        X._fill_template = orig
+    for stage, rec in zip(("s2", "s4"), captured, strict=True):
+        # (1) every spliced value is a region, and every region is a spliced
+        # value (plus the prose row) — nothing can hide.
+        assert set(statics[stage]) == set(rec["values"]) | {"template_prose"}, (
+            f"{stage}: region map and fill map disagree — "
+            f"{set(statics[stage]) ^ (set(rec['values']) | {'template_prose'})}")
+        # (2) each region is the size of its own value.
+        for name, value in rec["values"].items():
+            assert statics[stage][name] == n(value), (stage, name)
+        # (3) the prose is measured INDEPENDENTLY: the same template with
+        # every slot emptied, so it cannot be the residual of (2).
+        blank = orig(rec["tmpl"], dict.fromkeys(rec["values"], ""))
+        assert statics[stage]["template_prose"] == pytest.approx(n(blank), abs=12), (
+            f"{stage}: template prose {statics[stage]['template_prose']} vs "
+            f"independently-rendered {n(blank)} — a splice leaked into prose")
+
+
+def test_the_kind_vocabulary_is_a_measured_region_not_prose():
+    """The master render is the region the issue names; it must be separable."""
+    statics = m._render_regions()
+    assert statics["s2"]["master_list"] > 1000, statics["s2"]
+    assert statics["s4"]["master_list"] == statics["s2"]["master_list"], (
+        "S2 and S4 render the SAME vocabulary — two different sizes would mean "
+        "the capture paired a region with the wrong stage")
+
+
+def test_every_document_region_is_charged_once_per_call():
+    """A per-document figure must use the measured call counts, not one call.
+
+    S1 makes more than one call per document (68% of the corpus does), and the
+    static prompt is paid on EACH — a roll-up that assumed one call per stage
+    would understate the constant by ~40% on S1 and by the retry rate on S2/S4.
+    """
+    dec = m.decompose(_evidence_rows())
+    assert dec["calls_per_doc"]["s1"] > 1.0
+    s1_slot = dec["statics"]["s1"]["memory_granularity"]
+    rounds = next(v for k, v in dec["regions"].items()
+                  if k.startswith("memory granularity"))
+    assert rounds == pytest.approx(dec["calls_per_doc"]["s1"] * s1_slot,
+                                   rel=0.02)
+
+
+def test_the_composition_sums_and_states_its_unattributed_remainder():
+    """Every region in the published breakdown is accounted for, and the
+    remainder is disclosed rather than pro-rated.
+
+    ⛔ `composition_total` IS `sum(regions.values())` and `unattributed` IS
+    `fitted - total` (`tools/extractor_cost_measure.py:1940-1942`), so asserting
+    those two relationships is an identity and cannot fail. What CAN fail — and
+    is the property the table needs — is that no region silently goes MISSING
+    from the breakdown (a dropped `regions` entry leaves both identities intact
+    and only shrinks the total), so the labels are pinned exactly.
+    """
+    dec = m.decompose(_evidence_rows())
+    assert set(dec["regions"]) == {
+        "**S2's embed list, re-sent to S4**",
+        "**S1's story, re-sent to S2 and S4**",
+        "kind vocabulary (`master_list`)",
+        # `pack_namespaces` is S2-only and renders EMPTY under the production
+        # default, so its row is 0 in this bundle — but it IS charged into
+        # `s2_sys`, so without a row of its own those tokens leave the
+        # composition and reappear as `unattributed` while the table still
+        # sums (the silent-absorption shape; review notes at `371fd0a22e96`).
+        "pack namespace list (`pack_namespaces`, S2 only)",
+        "stage instructions (template prose)",
+        "mapping rules (`anti_routine`)",
+        "output schema (`output_contract`)",
+        "memory granularity (S1 only)",
+        "date anchor",
+        "chains",
+        "graph search results (S4)"}
+    # The remainder is stated, not hidden: it is the OLS intercept's leverage,
+    # and a table that closed the gap by construction would be a rounder lie.
+    assert abs(dec["unattributed"]) < 0.25 * dec["fitted_constant"]
+
+
+def test_a_static_slot_no_row_charges_is_REFUSED_not_absorbed(monkeypatch):
+    """⛔ THE COVERAGE IS DERIVED FROM THE RENDER, so a NEW fill slot cannot be
+    absorbed silently (`0c06906012f6` review note B).
+
+    The pre-fix state is the one this test replaces: coverage was a per-region
+    hand list, so adding a slot to `render_s2_prompt`/`render_s4_prompt` left the
+    table summing while its tokens became `unattributed` — the `pack_namespaces`
+    shape (`371fd0a22e96`, P3) with no row to miss it.
+
+    ⛔ NON-VACUITY: pre-fix (no `_assert_static_slots_are_covered`) `decompose`
+    RETURNS a decomposition for this mutated render — measured: the assertion
+    below reds on the missing SystemExit, not on a message difference.
+    """
+    real = m._render_regions()
+
+    def _with_a_new_slot():
+        out = {stage: dict(slots) for stage, slots in real.items()}
+        out["s2"]["a_fill_slot_added_tomorrow"] = 41
+        return out
+
+    monkeypatch.setattr(m, "_render_regions", _with_a_new_slot)
+    with pytest.raises(SystemExit) as refused:
+        m.decompose(_evidence_rows())
+    message = str(refused.value)
+    assert "a_fill_slot_added_tomorrow" in message, message
+    assert "41 tokens/call" in message, message
+    assert "_STATIC_ROW_SLOTS" in message, message
+
+
+def test_the_static_slot_table_covers_the_real_render_exactly_once():
+    """Every slot the real render fills is charged by ONE row or declared exempt.
+
+    The five defect classes `_static_slot_problems` names are all reachable and
+    all silent without it: an uncharged slot (`pack_namespaces`), a slot charged
+    twice (double counted), a charged name the render never fills (a typo that
+    `.get(slot, 0)` charges as zero), a slot both charged and exempt, and a
+    STALE exemption left behind by a rename.
+    """
+    statics = m._render_regions()
+    assert m._static_slot_problems(statics) == []
+    # The exemptions are the two documented ones — not a growing list of
+    # convenient holes: `embed_list_json` (the empty `{}` render, 1 token) and
+    # `story` (a blank body renders as the empty string, 0 tokens).
+    assert {stage: sorted(slots) for stage, slots in
+            m._UNCHARGED_STATIC_SLOTS.items()} == {
+        "s4": ["embed_list_json", "story"]}, m._UNCHARGED_STATIC_SLOTS
+    # …and each is still a slot the render really fills, so an exemption cannot
+    # outlive the region it was written for.
+    for stage, slots in m._UNCHARGED_STATIC_SLOTS.items():
+        for slot in slots:
+            assert slot in statics[stage], (stage, slot, statics[stage])
+
+
+def test_a_declared_exemption_for_a_slot_the_render_dropped_is_REFUSED(
+        monkeypatch):
+    """A STALE exemption is a hole with a signature on it: if the render renames
+    `embed_list_json`, the exemption must stop being accepted and the new name
+    must be caught, not inherited."""
+    real = m._render_regions()
+
+    def _renamed():
+        out = {stage: dict(slots) for stage, slots in real.items()}
+        out["s4"]["embed_list_json_v2"] = out["s4"].pop("embed_list_json")
+        return out
+
+    monkeypatch.setattr(m, "_render_regions", _renamed)
+    with pytest.raises(SystemExit) as refused:
+        m.decompose(_evidence_rows())
+    message = str(refused.value)
+    assert "stale exemption" in message, message
+    assert "embed_list_json" in message, message
+    # The renamed slot is caught in its own right, not just as the stale half.
+    assert "embed_list_json_v2" in message, message
+
+
+def test_a_stage_the_corpus_MEASURED_is_REFUSED_when_the_gate_grows(monkeypatch):
+    """⛔ ONE list, or a refusal (`0c06906012f6` review note C).
+
+    `_REQUIRED_STAGES` gates the corpus and the arithmetic names s1/s2/s4 on its
+    own. Two literals that agree by coincidence is the subset-median failure this
+    file keeps removing — but the reachable state is only the one where the new
+    stage IS measured, so this injects real `s5` measurements into every document
+    as well as the member into the gate. A stage the corpus does NOT carry needs
+    no guard: the partial-corpus gate refuses it first.
+
+    ⛔ NON-VACUITY, MEASURED against the pre-fix tool: with `s5` measured on all
+    50 documents and added to `_REQUIRED_STAGES`, `decompose` RETURNS a
+    decomposition in which every number is s1/s2/s4 — the measured stage owns no
+    term at all — while the corpus gate it was added to is satisfied.
+    """
+    rows = json.loads(json.dumps(_evidence_rows()))
+    for row in rows:
+        if row.get("stages"):
+            row["stages"]["s5"] = {"calls": 1, "prompt_tokens": 999,
+                                   "completion_tokens": 99}
+    monkeypatch.setattr(m, "_REQUIRED_STAGES", ("s1", "s2", "s4", "s5"))
+    with pytest.raises(SystemExit) as refused:
+        m.decompose(rows)
+    message = str(refused.value)
+    assert "arithmetic" in message, message
+    assert "s5" in message, message
+
+
+def test_the_pack_namespace_list_is_charged_to_its_own_row(monkeypatch):
+    """`pack_namespaces` is a static region with a row, not absorbed residual.
+
+    ⛔ THE PRE-FIX FAILURE, measured at `371fd0a22e96`: `decompose`'s `regions`
+    map had a term for every static region EXCEPT `pack_namespaces`, while
+    `s2_sys = sum(statics["s2"].values())` — the number the story solve
+    subtracts — includes it. Under the production default the value is 0 (the
+    core-only template is off) so the committed bundle reconciled exactly and
+    NOTHING showed; in a `TORTOISE_CLASSIFY_LATER=1` shell the S2 prompt carries
+    a real pack-namespace list (measured: 18 tokens) and those tokens left the
+    composition, landing in `unattributed` while the table still summed. Both
+    the label-set pin and the loose 25 % residual bound stayed green, which is
+    why this needs its own case in the posture that arms it.
+
+    ⛔ NON-VACUITY: deleting the row reds the label-set pin; reverting it to a
+    CONDITIONAL row (emitted only when non-zero) reds the default-posture leg
+    below, which is the "silent when the condition misfires" shape the row
+    exists to prevent.
+    """
+    # Ambient render switches, pinned as the reproduce pin does: this test is
+    # about ONE posture, and a shell carrying the others would red it with a
+    # message that reads as a tool defect.
+    for knob in ("TORTOISE_S4_DELTA", "TORTOISE_EXTRACTOR_PROMPT",
+                 "TORTOISE_REFERENTIALITY", "TORTOISE_PACKS_DIR"):
+        monkeypatch.delenv(knob, raising=False)
+
+    # Default posture: the row EXISTS and is 0 — an absent row here would mean
+    # the fix was made conditional on the value instead of structural.
+    monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+    default = m.decompose(_evidence_rows())
+    default_row = [k for k in default["regions"] if "pack_namespaces" in k]
+    assert len(default_row) == 1, (
+        f"exactly one pack-namespace row is expected; got {default_row}")
+    assert default["regions"][default_row[0]] == 0, default["regions"]
+
+    # Classify-later posture: the list is real, and the row carries it.
+    monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "1")
+    statics = m._render_regions()
+    namespaces = statics["s2"].get("pack_namespaces", 0)
+    assert namespaces > 0, (
+        "precondition: the core-only S2 render carries a pack-namespace list, "
+        f"got {namespaces} tokens — statics={statics['s2']}")
+    dec = m.decompose(_evidence_rows())
+    row = [k for k in dec["regions"] if "pack_namespaces" in k]
+    assert len(row) == 1, f"the row is missing or duplicated: {row}"
+    assert dec["regions"][row[0]] == pytest.approx(
+        dec["calls_per_doc"]["s2"] * namespaces, abs=0.05), (
+        "the row must be the measured static times the measured S2 call "
+        f"count — got {dec['regions'][row[0]]} for {namespaces} tokens/call "
+        f"× {dec['calls_per_doc']['s2']} calls")
+
+
+def test_the_reemitted_embed_list_is_the_largest_single_region():
+    """#14343's finding, pinned: the biggest input term is the pipeline's OWN
+    emission re-read, not any static instruction set."""
+    dec = m.decompose(_evidence_rows())
+    ranked = list(dec["regions"].items())
+    assert ranked[0][0].startswith("**S2's embed list"), ranked[:3]
+    assert dec["solved"]["embed_over_emission"] > 1.0, (
+        "S4 serializes S2's list at indent=1 and after the normaliser; a ratio "
+        "<= 1 would mean the region is smaller than the emission, which the "
+        "measured prompts contradict")
+
+
+def test_the_output_constant_is_dominated_by_the_mapping_stage():
+    dec = m.decompose(_evidence_rows())
+    assert dec["output"]["s2_share"] > 50.0, dec["output"]
+
+
+def test_decompose_refuses_an_arm_the_evidence_does_not_carry():
+    with pytest.raises(SystemExit):
+        m.decompose(_evidence_rows(), arm="tepid")
+
+
+def test_decompose_refuses_a_corpus_that_lost_a_stage():
+    """A PARTIAL corpus is refused, not decomposed into a complete-looking table.
+
+    ⛔ WITHOUT THIS GATE the medians for a stage are taken over the rows that
+    carried it (`_per_call` skips a row with no calls) while `documents`
+    publishes `len(docs)` — so a corpus that lost S4 on a few documents prints
+    `documents: 50`, and the residual COLLAPSES toward zero, which flatters the
+    very claim the bundle makes ("fit and composition agree to 6.6%"). Measured
+    by dropping S4 from 10 of the committed rows: embed region 14,149 → 16,695,
+    residual 2,994 → 71.5, exit 0, both files written.
+
+    ⛔ NON-VACUOUS BY CONSTRUCTION — the mutation is in the DATA (three real rows
+    lose their S4 measurements), not in a literal the test also asserts, so the
+    pin cannot be satisfied by relabelling. The committed corpus is complete
+    (all 50 rows carry s1/s2/s4 with calls), which is why the unmutated call in
+    the tests above still succeeds.
+    """
+    rows = _evidence_rows()
+    dropped = 0
+    for row in rows:
+        stages = row.get("stages") or {}
+        if (row.get("arm") == "cold" and row.get("kind") == "doc"
+                and not row.get("failed") and stages.get("s4")):
+            del stages["s4"]
+            dropped += 1
+            if dropped == 3:
+                break
+    assert dropped == 3, "the committed corpus no longer carries three S4 rows"
+    with pytest.raises(SystemExit) as exc:
+        m.decompose(rows)
+    message = str(exc.value)
+    assert "PARTIAL" in message, message
+    assert "3 of 50" in message, message
+    assert "s4" in message, message
+
+
+def test_the_documented_reproduce_command_regenerates_the_committed_bundle(
+        monkeypatch):
+    """The bundle's README says these two files are reproducible; pin it.
+
+    An evidence bundle whose own documented command cannot regenerate it is a
+    false pass on the one property the bundle exists to carry. The README used
+    to omit `--receipts`, which silently dropped the whole serialization
+    section — the headline 32.5% finding — while still exiting 0. The command
+    below is the README's, verbatim.
+
+    The one env pin is deliberate: `tests/conftest.py` sets
+    `TORTOISE_S4_DELTA=0` to keep the suite on the LEGACY complete-list
+    contract, while PRODUCTION defaults it ON — and the two render different
+    S4 prose (1,903 vs 1,666 tokens). The bundle was generated under the
+    production default, so the pin is restored here (the pattern conftest
+    documents for exactly this). Without it the comparison fails on the S4
+    statics and the whole embed-list region, and a reader would reasonably
+    conclude the artifacts had rotted.
+    """
+    monkeypatch.delenv("TORTOISE_S4_DELTA", raising=False)
+    # ⛔ The other render switches are AMBIENT too: a dev shell in compact mode
+    # (`TORTOISE_EXTRACTOR_PROMPT=compact`), in classify-later
+    # (`TORTOISE_CLASSIFY_LATER=1`), or with the referentiality contract armed
+    # (`TORTOISE_REFERENTIALITY=1`) renders different S1/S2 statics, and without
+    # these pins the failure would read as a rotted artifact. The bundle was
+    # generated under the production defaults. The `TORTOISE_REFERENTIALITY`
+    # pin is the FOURTH, found by measuring rather than by reading the three the
+    # README named: measured, it moves `output_contract` 951 -> 1,019 and the
+    # S1 story 2,656 -> 2,588. `docs/evidence/7949-capstone/probes/
+    # capstone_measure.py`'s `DOOR_PINNED_OFF` already listed it as an ambient
+    # prompt-contract switch, which is why the `#14343` capstone session — the
+    # one the README sends a re-runner into — is exactly the session that
+    # carries it.
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_PROMPT", raising=False)
+    monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+    monkeypatch.delenv("TORTOISE_REFERENTIALITY", raising=False)
+    # ⛔ The FIFTH is a PATH knob, not a posture flag, which is why the four
+    # above named only flags. `TORTOISE_PACKS_DIR` pointing at a valid
+    # alternative pack tree renders a different `master_list` (3,187 → 2,601)
+    # and `memory_granularity` (923 → 845), so a shell carrying it reds this pin
+    # with the same false-red "the artifact rotted" message the other four were
+    # pinned for (measured, review cycle 6: the set was instrumented and this
+    # was the one name of the nine it consults that still reached the pin).
+    # `packs/` must resolve from the in-tree tree — `tortoise/domain_loader.py`
+    # is where the env leg is read.
+    monkeypatch.delenv("TORTOISE_PACKS_DIR", raising=False)
+    bundle = _REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+    committed = json.loads((bundle / "decomposition.json").read_text())
+    regenerated = m.decompose(
+        m.load_rows(_REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
+                    / "measurements.jsonl"),
+        receipts=(_REPO_ROOT / "tests" / "eval" / "write_path" / "receipts"
+                  / "7947-arms-2026-10-18"))
+    assert regenerated == committed, (
+        "the documented reproduce command no longer regenerates the committed "
+        "decomposition — regenerate the artifact or fix the command")
+    # …and the MARKDOWN too: it is committed and claimed regenerated, so a pin
+    # that only compared the JSON would let it rot in place.
+    assert (m.finalize_markdown(m.render_decompose(regenerated))
+            == (bundle / "decomposition.md").read_text(encoding="utf-8")), (
+        "decomposition.md is stale against the tool — the JSON pin is not "
+        "enough, the markdown is the artifact a reader actually reads")
+
+
+def test_an_explicitly_passed_receipts_path_that_yields_nothing_is_refused(
+        tmp_path):
+    """An explicit `--receipts` that matches nothing must not quietly emit an
+    artifact whose serialization section is missing — that is the same false
+    pass as omitting the flag from the documented command."""
+    with pytest.raises(SystemExit, match="no usable write-path receipts"):
+        m.main([
+            "decompose",
+            "--evidence", str(_REPO_ROOT / "docs" / "evidence"
+                              / "14277-extractor-cost" / "measurements.jsonl"),
+            "--receipts", str(tmp_path / "does-not-exist"),
+            "--out", str(tmp_path / "out.md"),
+            "--json-out", str(tmp_path / "out.json"),
+        ])
+
+
+def test_omitting_the_receipts_flag_is_REFUSED_not_a_quieter_artifact(
+        tmp_path, capsys):
+    """`#14343` review F2: OMITTING `--receipts` used to emit the artifact at exit 0.
+
+    The flag is the only source of the `serialization` section — the 32.5 %
+    finding — so a decomposition without it is the same false pass as a path
+    that matches nothing, only harder to notice: the artifact exists, the
+    headline row is absent, and nothing says so. This bundle demonstrated the
+    defect in its own README, where the reproduce command passed the flag and
+    the `--arm after` recipe did not (two documented commands, opposite
+    postures). The flag is now `required=True`; this pins it, so deleting that
+    cannot bring the silent artifact back.
+    """
+    with pytest.raises(SystemExit) as exc:
+        m.main([
+            "decompose",
+            "--evidence", str(_REPO_ROOT / "docs" / "evidence"
+                              / "14277-extractor-cost" / "measurements.jsonl"),
+            "--out", str(tmp_path / "out.md"),
+        ])
+    assert exc.value.code == 2, (
+        f"argparse must refuse a missing required flag with exit 2, got {exc.value.code}")
+    assert "--receipts" in capsys.readouterr().err, (
+        "the refusal must NAME the missing flag — a bare usage line leaves the "
+        "reader to guess which of the three paths the tool wanted")
+    assert not (tmp_path / "out.md").exists(), (
+        "a refused decompose must write no artifact")
+
+
+def test_the_offline_compose_arm_makes_no_provider_call():
+    """The decomposition must be runnable with no key — that is what makes it
+    reviewable. `--offline` swaps the transport, never the render."""
+    rows = m.compose_one(doc={"path": "synthetic", "tokens": 3,
+                              "text": "one two three"}, live=False)
+    stages = {c["stage"] for c in rows["calls"]}
+    assert stages == {"s1", "s2", "s4"}, stages
+    assert all(c["prompt_tokens"] == 0 for c in rows["calls"]), (
+        "the stub reports no provider counts; a non-zero one would be a "
+        "fabricated measurement")
+    # and the composition still attributes every token of the real render
+    report = m.compose_report([rows])
+    for stage, acc in report["rows"][0]["stages"].items():
+        assert acc["system_tokens"] > 0, stage
+
+
+def test_a_transcript_tail_does_not_blank_the_region_map():
+    """#14343 review finding: S2/S4 append the SOURCE TRANSCRIPT **outside**
+    `_fill_template`, so pairing a call to its render by string EQUALITY
+    silently produced an empty region map for every small item — and the table
+    still summed, because the whole prompt then prints as one prose row.
+
+    The fixture here is deliberately tiny ("one two three": the EDUs fit
+    `_SOURCE_TRANSCRIPT_CAP`, so the tail IS present), and the assertion is on
+    the region map, not on the row count.
+    """
+    art = m.compose_one(doc={"path": "synthetic", "tokens": 3,
+                             "text": "one two three"}, live=False)
+    by_stage = {c["stage"]: c for c in art["calls"]}
+    for stage in ("s2", "s4"):
+        regions = by_stage[stage]["regions"]
+        assert regions, (
+            f"{stage}: the region map is empty — the call was not paired with "
+            f"its render (prefix match, not equality)")
+        assert "master_list" in regions, regions
+        assert regions["master_list"] > 1000, regions
+    # and the tail is attributed to itself rather than to the template: the
+    # EDUs fit the cap, so `_render_source_transcript` returned a block and that
+    # block is a region of its own (a legitimately-empty slot like
+    # `pack_namespaces` in the verbose render is allowed to be 0).
+    assert by_stage["s2"]["regions"].get("source_transcript", 0) > 0, (
+        "the SOURCE TRANSCRIPT tail is missing from the region map — it is "
+        "exactly the part that equality-pairing used to swallow")
+    assert by_stage["s4"]["regions"].get("source_transcript", 0) > 0
+
+
+def test_the_fitted_constant_is_derived_from_the_arm_not_hardcoded():
+    """The bundle's own completion recipe runs `--arm after`; a literal
+    intercept would report the BEFORE constant as the AFTER one and absorb the
+    lever's whole saving into `unattributed`."""
+    rows = _evidence_rows()
+    docs = [r for r in rows if r.get("arm") == "cold" and r.get("kind") == "doc"
+            and not r.get("failed")]
+    cold = m.decompose(rows, arm="cold")
+
+    # ⛔ The first revision of this test was VACUOUS: it relabelled the same
+    # data, so both arms saw identical rows, and the expected value happened to
+    # BE the old literal (45,503) — restoring `fitted = 45_503` left it green.
+    # So mutate the DATA instead: dropping the one high-leverage document moves
+    # this arm's own intercept 45,503 → 30,156, which a literal cannot follow.
+    longest = max(docs, key=lambda r: r["item_tokens"])
+    without = [r for r in rows if r is not longest]
+    lean = m.decompose(without, arm="cold")
+    assert lean["fitted_constant"] != cold["fitted_constant"], (
+        "the fitted constant did not move when the data did — it is a literal")
+    assert cold["fitted_constant"] == round(
+        m._fit([(r["item_tokens"], r["prompt_tokens"]) for r in docs])["intercept"])
+    assert lean["fitted_constant"] == round(
+        m._fit([(r["item_tokens"], r["prompt_tokens"])
+                for r in docs if r is not longest])["intercept"])
+
+    # ⛔ The SLOPE was the same defect one line later: `fitted` came from
+    # `_fit()` while `document_term.fitted_slope_x_median_doc` stayed a literal
+    # `2.159`, so the bundle's own `--arm after` recipe printed the BEFORE
+    # slope as the AFTER arm's. Pinned separately because a green intercept pin
+    # says nothing about it — cycle 3's reviewer caught exactly that gap.
+    for arm_rows, arm in ((rows, cold), (without, lean)):
+        sel = [r for r in arm_rows if r.get("arm") == "cold"
+               and r.get("kind") == "doc" and not r.get("failed")]
+        want = m._fit([(r["item_tokens"], r["prompt_tokens"])
+                       for r in sel])["slope"]
+        assert arm["document_term"]["fitted_slope_x_median_doc"] == round(
+            want * statistics.median([r["item_tokens"] for r in sel]), 1)
+        assert arm["input_fit"]["slope"] == round(want, 3)
+
+
+def test_a_retried_stage_keeps_its_region_map(monkeypatch):
+    """A stage RENDERS ONCE and may CALL TWICE — the retry must still be paired.
+
+    ⛔ `render_s2_prompt` / `render_s4_prompt` are called ONCE per stage, in
+    `run_s2` / `run_s4`, and the rendered system prompt is what they hand to
+    `_complete_parsed` — which re-sends the IDENTICAL `system` on the #2134
+    truncation escalation (the `#2134 one-shot escalation` banner in
+    `_complete_parsed`) and on the #1746 parse re-prompt
+    (`_error_informed_reprompt`). Cited by NAME, never by line: three of the
+    four line numbers this docstring used to carry had rotted onto
+    `from tortoise.config import is_db_uri`, a gap-fill comment, and a
+    `raise _ParseError(`, none of which a reader could check the claim against
+    (measured, review cycle 6). A pairing that CONSUMES the
+    render therefore leaves the retry unmatched: `match` stays None,
+    `regions == {}`, and `render_compose` prints that whole prompt as one
+    `*template prose*` row — the table still sums, so nothing looks wrong.
+
+    This is the shape the offline arm could not previously reach (the stub
+    never retried), which is why the fix shipped without a pin. The stub is
+    made to emit one unparseable S2 response here, which is the real retry
+    trigger.
+    """
+    seen = {"systems": []}
+
+    class _FlakyStub(m._StubModel):
+        def complete(self, *, system, user, max_tokens=None, **kwargs):
+            if (system or "").startswith("You are the GRAPH MAPPER"):
+                seen["systems"].append(system)
+                if len(seen["systems"]) == 1:
+                    # unparseable, finish_reason="stop" ⇒ the #1746 ladder
+                    # re-prompts; a "length" would escalate instead.
+                    return "not the JSON contract, so the parse fails"
+            return super().complete(system=system, user=user, **kwargs)
+
+    monkeypatch.setattr(m, "_StubModel", _FlakyStub)
+    art = m.compose_one(doc={"path": "synthetic", "tokens": 3,
+                             "text": "one two three"}, live=False)
+    s2 = [c for c in art["calls"] if c["stage"] == "s2"]
+    assert len(s2) == 2, (
+        f"the S2 retry never happened ({len(s2)} call(s)) — without it this "
+        f"pin is vacuous and proves nothing about retried stages")
+    # `compose_one` drops `system` from the artifact (it is not part of the
+    # report), so the identity is read from the transport, not the output.
+    assert len(seen["systems"]) == 2, seen["systems"]
+    assert seen["systems"][0] == seen["systems"][1], (
+        "the retry must re-send the IDENTICAL system prompt; if it differs, "
+        "the consumed-once pairing was not the bug this test names")
+    for n, call in enumerate(s2, start=1):
+        assert call["regions"], (
+            f"S2 call {n} of {len(s2)} has an EMPTY region map — the render "
+            f"was consumed by the first call, so this prompt would be printed "
+            f"as one prose row while the table still summed")
+        assert call["regions"].get("master_list", 0) > 1000, call["regions"]
+
+
+def test_the_user_message_is_charged_as_its_own_region():
+    """The user turn is a prompt region, and for S1 it is the whole document.
+
+    ⛔ `render_compose` totals `system_tokens + user_tokens` but counted only
+    the `_fill_template` slots, so the user message — S1's document (~5.2k of
+    a ~5.9k "prose" figure whose real prose is 629), and S2's framed story,
+    the very region `decompose` calls `**S1's story, re-sent to S2 and S4**` —
+    landed in the `*template prose + boundaries*` residual. Same file, two
+    tools, same tokens attributed to two different parties.
+    """
+    # A document-sized user turn, not three words: the finding is that S1's
+    # DOCUMENT was printed as template prose, which only shows at size.
+    text = ("The project moved its release date, then shipped the migration "
+            "ahead of the audit. ") * 120
+    art = m.compose_one(doc={"path": "synthetic", "tokens": 1_800,
+                             "text": text}, live=False)
+    for call in art["calls"]:
+        assert call["regions"].get("user_message") == call["user_tokens"], (
+            f"{call['stage']}: the user turn is not charged as a region "
+            f"(regions={sorted(call['regions'])})")
+        named = sum(call["regions"].values())
+        assert named <= call["system_tokens"] + call["user_tokens"], (
+            f"{call['stage']}: regions claim more than the prompt spent "
+            f"({named} > {call['system_tokens']} + {call['user_tokens']})")
+    report = m.compose_report([art])
+    s1 = report["rows"][0]["stages"]["s1"]
+    prose = (s1["system_tokens"] + s1["user_tokens"]
+             - sum(s1["regions"].values()))
+    assert s1["regions"]["user_message"] > prose, (
+        f"S1's user message is the document and must dominate its prose "
+        f"residual; got user_message={s1['regions']['user_message']} "
+        f"vs prose={prose} — a missing user region hides the document here")
+
+
+# ── the stub marker, and the fold's arithmetic ──────────────────────────────
+# `7b2945619a1e` shipped four behaviour changes — `live` propagated into the
+# report, the OFFLINE banner, `chars_sum` folding instead of `item_chars`, and
+# the `distinct_kinds` union — with NO assertion on any of them: reverting all
+# four left the tree green (measured, review cycle 6). A bundle whose argument is
+# that a stub must never read as a measurement cannot pin that with prose.
+
+def _compose_artifact(*, live: bool, calls: list[dict],
+                     errors: list[str] | None = None) -> dict:
+    """The minimal artifact `compose_report` folds (its own shape, no provider)."""
+    return {"doc": {"path": "synthetic", "item_tokens": 12, "tokens": 12},
+            "live": live, "calls": calls,
+            "pipeline": {"calls": len(calls), "errors": list(errors or [])}}
+
+
+def _call(*, sections: dict, regions: dict | None = None,
+          stage: str = "s2") -> dict:
+    return {"stage": stage, "system_tokens": 3, "user_tokens": 4,
+            "completion_tokens": 5, "regions": regions or {"master_list": 3},
+            "output": {"tokens": 5, "sections": sections}}
+
+
+def _complete_artifact(*, live: bool = True) -> dict:
+    """All three stages observed and no pipeline error — a real measurement."""
+    return _compose_artifact(live=live,
+                             calls=[_call(stage=s, sections={})
+                                    for s in ("s1", "s2", "s4")])
+
+
+def test_a_stub_run_renders_the_marker_and_a_live_run_does_not():
+    """The one property the bundle exists to carry: a stub must SAY it is one.
+
+    Both arms, because an assertion on the stub arm alone would pass for a
+    renderer that always prints the banner — which would devalue every measured
+    table in the same file.
+    """
+    stub = m.compose_report([_compose_artifact(live=False, calls=[_call(sections={})])])
+    live = m.compose_report([_complete_artifact()])
+    assert stub["live"] is False, "a stub artifact must report live=False"
+    assert live["live"] is True, "a measured artifact must report live=True"
+    assert "NOT A MEASUREMENT" in m.render_compose(stub), (
+        "an --offline run rendered WITHOUT the stub marker — the table is then "
+        "byte-shape identical to a measured one, which is the false pass the "
+        "bundle exists to prevent")
+    assert "NOT A MEASUREMENT" not in m.render_compose(live), (
+        "a MEASURED run must not carry the stub marker")
+
+
+def test_a_report_without_a_live_key_renders_as_a_stub():
+    """⛔ FAIL-CLOSED on unknown provenance.
+
+    `report.get("live", True)` rendered a report that does not carry the key
+    with NO marker — the fail-open direction, where unknown provenance reads as
+    a measurement. Latent only because today's one caller always supplies it.
+    """
+    report = m.compose_report([_compose_artifact(live=False, calls=[_call(sections={})])])
+    del report["live"]
+    assert "NOT A MEASUREMENT" in m.render_compose(report), (
+        "a report with NO `live` key rendered without the stub marker — "
+        "unknown provenance must never read as a measurement")
+
+
+def test_merged_sections_add_the_halves_and_union_the_full_kind_histogram():
+    """Two calls fold additively, and `distinct_kinds` is the UNION's size.
+
+    `chars_sum`/`items` are the two additive halves of a per-item mean; the
+    previous revision folded a per-call `item_chars` MEAN and published the sum
+    of two means. And `distinct_kinds` was read off the top-12 display slice, so
+    13 kinds in one call plus 5 more in another published **12** — fewer kinds
+    than EITHER call knew. Both mutations leave the rest of the suite green.
+    """
+    first = _call(sections={"points": {
+        "items": 2, "chars_sum": 100, "tokens": 7,
+        "kinds": {f"k{i}": 1 for i in range(13)}, "distinct_kinds": 13}})
+    second = _call(sections={"points": {
+        "items": 1, "chars_sum": 50, "tokens": 3,
+        "kinds": {f"k{i}": 1 for i in range(13, 18)}, "distinct_kinds": 5}})
+    report = m.compose_report([_compose_artifact(live=True, calls=[first, second])])
+    points = report["rows"][0]["stages"]["s2"]["output"]["sections"]["points"]
+    assert (points["chars_sum"], points["items"]) == (150, 3), (
+        f"chars_sum/items must fold additively, got "
+        f"chars_sum={points['chars_sum']} items={points['items']}")
+    assert len(points["kinds"]) == 18, (
+        f"the merged histogram must carry the full union, got "
+        f"{len(points['kinds'])} kinds — a 12-cap hides kinds a call knew")
+    assert points["distinct_kinds"] == 18, (
+        f"distinct_kinds must be the union's size (18), got "
+        f"{points['distinct_kinds']} — read off the display slice it reports 12")
+    assert points["distinct_kinds"] == len(points["kinds"]), (
+        "the published count and the published histogram must agree")
+
+
+def test_the_rendered_table_reads_the_published_chars_and_kind_keys():
+    """`chars_sum` / `distinct_kinds` must have a READER, not just a JSON home.
+
+    Both keys were published by `_output_structure`/`_merge_sections` and printed by
+    NOTHING — the tables above assert they exist and fold correctly, and a reader who
+    wanted the number had to open the JSON (measured, review cycle 7 P3). A derived key
+    nobody renders is free to be wrong, which is why the module's own comment at
+    `_output_structure` criticises exactly that shape one function over.
+
+    The mutation this reds: drop either `bits.append(...)` arm from `render_compose`.
+    """
+    report = m.compose_report([_compose_artifact(live=True, calls=[_call(sections={
+        "points": {"items": 2, "chars_sum": 100, "tokens": 7,
+                   "kinds": {"a": 1, "b": 1}, "distinct_kinds": 2}})])])
+    table = m.render_compose(report)
+    assert "100 chars" in table, (
+        "the rendered table must READ `chars_sum` — it is published and folded, so a "
+        f"readerless key is a number nothing can see. Table:\n{table}")
+    assert "2 kinds" in table, (
+        "the rendered table must READ `distinct_kinds` — a published count with no "
+        f"reader is the shape the module criticises. Table:\n{table}")
+    assert "2 items" in table and "7 tok" in table, (
+        f"the pre-existing columns must survive the new ones. Table:\n{table}")
+# ── a LIVE run is not automatically a MEASUREMENT ───────────────────────────
+# The provenance gate above tells a STUB transport from a live one and says
+# nothing about a live run whose stages RAISED. `_Recording.complete` appends to
+# `calls` only after the adapter RETURNS, so a failing stage contributes no call
+# — and the rendered table then shows the survivors as the whole run (review
+# cycle 7, P1). Measured on a box with no provider key: three empty tables, no
+# marker, exit 0.
+
+def test_a_live_run_that_lost_a_stage_renders_the_incomplete_marker():
+    """A partial live run must SAY it is partial — the whole point of the bundle.
+
+    Both arms, because a renderer that always prints the banner would devalue
+    every complete table in the same file.
+    """
+    complete = _complete_artifact()
+    assert "INCOMPLETE" not in m.render_compose(m.compose_report([complete])), (
+        "a complete live run must not carry the INCOMPLETE marker")
+
+    # S4 raised: it emitted no call, and the pipeline recorded the error.
+    partial = _complete_artifact()
+    partial["calls"] = [c for c in partial["calls"] if c["stage"] != "s4"]
+    partial["pipeline"] = {"calls": 2, "errors": ["s4: 429 Too Many Requests"]}
+    rendered = m.render_compose(m.compose_report([partial]))
+    assert "INCOMPLETE LIVE RUN" in rendered, (
+        "a live run missing a stage rendered with no marker — the surviving "
+        "rows then read as a smaller, complete measurement")
+    assert "NOT A MEASUREMENT" in rendered, (
+        "the incomplete banner must carry the same refusal as the stub one")
+    assert "`s4`" in rendered, (
+        "the banner must NAME the missing stage, or a reader cannot tell what "
+        "the table omits")
+
+
+def test_a_missing_stage_is_incomplete_even_with_no_pipeline_error():
+    """⛔ FAIL-CLOSED on the call/error bookkeeping, not just on a recorded error.
+
+    A stage can be absent while `errors` is empty (a swallowed exception, or a
+    pipeline that stopped early). An `errors`-only rule would render that run as
+    a measurement, so completeness is its own predicate.
+    """
+    partial = _complete_artifact()
+    partial["calls"] = [c for c in partial["calls"] if c["stage"] != "s1"]
+    partial["pipeline"] = {"calls": 2, "errors": []}
+    report = m.compose_report([partial])
+    assert report["complete"] is False, (
+        "a run missing `s1` with no recorded error must still be incomplete")
+    assert "INCOMPLETE LIVE RUN" in m.render_compose(report)
+
+
+def test_a_report_whose_calls_were_lost_is_incomplete():
+    """The pipeline counted more LLM calls than the instrument recorded."""
+    lost = _complete_artifact()
+    lost["pipeline"] = {"calls": 7, "errors": []}
+    assert m.compose_report([lost])["complete"] is False, (
+        "more pipeline calls than recorded calls means calls were lost")
+
+
+def test_a_retried_stage_is_not_mistaken_for_lost_calls():
+    """⛔ The OVER-BLOCK: `pipeline.calls` counts ATTEMPTS, not successes.
+
+    `_rollup_llm` does `llm_stats["calls"] += stage_stats.get("attempts", 0)`
+    (`tortoise/extractor_v2.py:16719`) and `_complete` sets `attempts=attempt`
+    only on the SUCCESSFUL attempt, so a transient 429/5xx that succeeds on
+    retry adds +1 to `pipeline.calls` with no call recorded by `_Recording`.
+    Comparing the two without the retry count flagged a fully-measured run as
+    INCOMPLETE and made `compose` exit 1 — refusing a valid artifact and
+    sending the next lane to re-spend until it got a retry-free run.
+    """
+    retried = _complete_artifact()
+    retried["pipeline"] = {"calls": 4, "retries": 1, "errors": []}
+    report = m.compose_report([retried])
+    assert report["complete"] is True, (
+        "a run whose only excess is one recorded RETRY is complete")
+    assert "INCOMPLETE" not in m.render_compose(report)
+    # …and the excess is still a verdict when no retry explains it.
+    unexcused = _complete_artifact()
+    unexcused["pipeline"] = {"calls": 4, "retries": 0, "errors": []}
+    assert m.compose_report([unexcused])["complete"] is False, (
+        "an excess that retries do NOT explain is still lost calls")
+
+
+def test_the_compose_command_exits_nonzero_on_an_incomplete_live_run(
+        monkeypatch, tmp_path):
+    """⛔ The exit code is the only machine-readable signal a scripted re-runner
+    has. Deleting the `return 1` in main's `compose` branch left every other pin
+    green while the process reported SUCCESS over a table that says
+    "NOT A MEASUREMENT" (review cycle 7, P2).
+
+    Three arms: a complete live run (0), a live run missing a stage (1), and
+    `--offline` (0 — a documented shape check with its own banner).
+    """
+    monkeypatch.setattr(m, "pick_corpus",
+                        lambda **kw: [{"path": "README.md", "tokens": 10}])
+
+    def _run(artifact, *, offline=False):
+        monkeypatch.setattr(m, "compose_one", lambda **kw: artifact)
+        argv = ["compose", "--doc", "README.md", "--out",
+                str(tmp_path / "compose.json")]
+        if offline:
+            argv.append("--offline")
+        return m.main(argv)
+
+    assert _run(_complete_artifact()) == 0, "a complete live run must exit 0"
+
+    partial = _complete_artifact()
+    partial["calls"] = [c for c in partial["calls"] if c["stage"] != "s4"]
+    partial["pipeline"] = {"calls": 2, "errors": ["s4: 429"]}
+    assert _run(partial) == 1, (
+        "a LIVE run missing a stage must exit non-zero — exit 0 is how a "
+        "failed run wrote an artifact that read as a measurement")
+
+    stub = _compose_artifact(live=False, calls=[_call(sections={})])
+    assert _run(stub, offline=True) == 0, (
+        "--offline is exempt: it is a documented shape check")
+
+
+def test_a_stub_run_is_exempt_from_the_incomplete_marker():
+    """`--offline` is a documented SHAPE check: it has its own banner and must
+    not be double-flagged, or the two markers become indistinguishable."""
+    stub = _compose_artifact(live=False, calls=[_call(sections={})])
+    rendered = m.render_compose(m.compose_report([stub]))
+    assert "OFFLINE / STUB TRANSPORT" in rendered
+    assert "INCOMPLETE LIVE RUN" not in rendered
+
+
+def test_the_source_transcript_tail_is_subtracted_before_the_per_call_medians():
+    """⛔ `_render_regions` renders with `edus=None`, so it carries NO transcript
+    tail — while `render_s2_prompt` / `render_s4_prompt` append
+    `_render_source_transcript(edus)` OUTSIDE `_fill_template` whenever the
+    document's EDU text fits `_SOURCE_TRANSCRIPT_CAP`. The residual solve
+    `story = pc2 - s2_sys - clause` therefore booked that block into
+    "S1's story, re-sent to S2 and S4" until the per-call medians subtracted it.
+
+    ⛔ AND IT WAS UNPINNED: reverting `pc.append(... - tail)` to the raw median
+    and re-running the documented command left every test green, because
+    `test_the_documented_reproduce_command_regenerates_the_committed_bundle`
+    compares artifact-to-code, never code-to-truth (review cycle 7, P1). This is
+    the code-to-truth half: the published per-call figure must be STRICTLY below
+    the raw median it was derived from, and the tail's own count must be the
+    measured one.
+    """
+    rows = m.load_rows(_REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
+                       / "measurements.jsonl")
+    dec = m.decompose(
+        rows,
+        receipts=(_REPO_ROOT / "tests" / "eval" / "write_path" / "receipts"
+                  / "7947-arms-2026-10-18"))
+    assert dec["source_transcript"]["documents_with_a_tail"] == 9, (
+        "the number of corpus documents carrying a SOURCE TRANSCRIPT tail moved "
+        "— re-measure it rather than assuming the subtraction is still right")
+    docs = [r for r in rows
+            if r.get("arm") == "cold" and r.get("kind") == "doc"
+            and not r.get("failed") and (r.get("stages") or {}).get("s2")]
+    raw = statistics.median(
+        r["stages"]["s2"]["prompt_tokens"] / r["stages"]["s2"]["calls"]
+        for r in docs)
+    assert dec["per_call"]["s2"]["prompt"] < raw, (
+        f"the published S2 per-call prompt ({dec['per_call']['s2']['prompt']}) "
+        f"is not below the raw median ({raw}) — the transcript tail is back "
+        f"inside the story row, which is the misattribution this pins out")
+
+
+
+# ── #14343 review cycle 10: the arm is a SETTING, and the setting is
+#    PROCESS-GLOBAL — so it must be installed per BATCH, never per call ────────
+
+def test_embed_mode_reads_the_environment_instead_of_a_label(monkeypatch):
+    """`_embed_mode` must READ the env, not re-encode an arm name.
+
+    The recorded field exists so a mislabelled row is VISIBLE. A value derived
+    from the label (`"compact" if arm == "after" else "indent"`) is a function of
+    that label, so it can never disagree with it — and so can never catch the
+    defect the field was added for. The resolution must be the one production
+    uses (`extractor_v2._embed_json_kwargs`): only `compact` arms it.
+    """
+    for value, expected in ((None, "indent"), ("", "indent"),
+                            ("   ", "indent"), ("garbage", "indent"),
+                            ("indent", "indent"),
+                            ("compact", "compact"), (" COMPACT ", "compact")):
+        if value is None:
+            monkeypatch.delenv(m._TOGGLE, raising=False)
+        else:
+            monkeypatch.setenv(m._TOGGLE, value)
+        assert m._embed_mode() == expected, (
+            f"{value!r} must resolve to {expected!r} — the same resolution "
+            f"`extractor_v2._embed_json_kwargs` uses at call time")
+
+
+def test_the_arm_is_installed_once_per_batch_not_once_per_call(
+        monkeypatch, tmp_path):
+    """⛔ THE REGRESSION THIS PINS (review cycle 10, P2).
+
+    `os.environ` is process-global and shared by every worker thread, so an
+    install wrapped around the SINGLE `measure_one` call lets a `before` thread
+    pop the flag while an `after` thread is inside its own measure. That is a
+    RACE, not an arm — and at the documented `--arms before,after` with the
+    DEFAULT `--workers 6` (4 in this test) it reproduces the original false
+    pass: a before→after delta that is an artefact of thread scheduling.
+
+    So two arms over eight jobs must install each arm's value exactly ONCE, and
+    every row must record the flag its own batch installed.
+
+    ⛔ WHAT THIS DOES AND DOES NOT PROVE. It pins the CONTRACT — one install per
+    arm, env-derived per-row record, ambient restored — and it fails if anyone
+    moves the install back into the per-call path, because the spy would then
+    fire once per JOB (8) instead of once per ARM (2). It does NOT replay the
+    original race itself; a timing-based reproduction would be flaky in both
+    directions and would fail silently on a fast machine.
+    """
+    import os
+    import time
+
+    docs = [{"path": "README.md", "tokens": 10 + i} for i in range(4)]
+    installed: list[str] = []
+
+    def fake_install(arm: str) -> None:
+        installed.append(arm)
+        if arm == "after":
+            os.environ[m._TOGGLE] = "compact"
+        elif arm == "before":
+            os.environ.pop(m._TOGGLE, None)
+
+    def fake_measure(model, conversation, *, session_date):
+        # Hold the call long enough that a per-call install/restore WOULD be
+        # interleaved by another worker thread.
+        time.sleep(0.02)
+        return {"prompt_tokens": 100, "completion_tokens": 10,
+                "cache_hit_tokens": 0}
+
+    monkeypatch.setenv(m._TOGGLE, "garbage")   # ambient must come back
+    monkeypatch.setattr(m, "pick_corpus", lambda limit, seed: docs)
+    monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
+    monkeypatch.setattr(m, "_build_model", lambda: object())
+    monkeypatch.setattr(m, "_install_arm", fake_install)
+    monkeypatch.setattr(m, "measure_one", fake_measure)
+
+    out = tmp_path / "measurements.jsonl"
+    m.run_measurement(out=out, docs_limit=4, sessions_limit=0, workers=4,
+                      seed=1, arms=("before", "after"), arm_gap_s=0.0,
+                      long_split=False)
+
+    # (1) the install is per BATCH — one call per arm, not one per job.
+    assert sorted(installed) == ["after", "before"], (
+        f"the arm must be installed once per BATCH (2 calls for 2 arms), got "
+        f"{installed!r} — an install per JOB is the per-call race (8 jobs)")
+
+    # (2) every row records the flag its OWN arm was installed with. `_job`
+    #     reads it back from the environment, so a batch that installed the
+    #     wrong value — or nothing — shows up here.
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line]
+    assert len(rows) == 8, f"expected 8 rows, got {len(rows)}"
+    assert {r["arm"] for r in rows} == {"before", "after"}
+    for row in rows:
+        want = "compact" if row["arm"] == "after" else "indent"
+        assert row["s4_embed_json"] == want, (
+            f"arm {row['arm']!r} recorded {row['s4_embed_json']!r}, expected "
+            f"{want!r} — the flag was not installed for its batch")
+
+    # (3) the ambient value is restored, so a measurement cannot leak the lever
+    #     into whatever runs next in the same process.
+    assert os.environ.get(m._TOGGLE) == "garbage", (
+        "the ambient TORTOISE_S4_EMBED_JSON was not restored after the run — "
+        "a measurement must not leave the lever armed for the next caller")
+
+
+# ── the table must SUMMARISE, and a share must name its denominator ───────────
+# Review cycle 9, two P3s, both real and both survived seven earlier cycles:
+# (a) the output table printed rows summing to 17,829 against a total of
+# 17,830 — the total was formatted from the UNROUNDED sum while each row came
+# from its own unrounded value, so banker's rounding split them (a column that
+# does not add up, in the one table whose stated rule is "a table that does not
+# sum is not evidence"); (b) the input table's `unattributed` row is a share of
+# the FITTED constant (2,994 / 45,503 = 6.6 %) while the column header says the
+# 42,509 composition, so the column read as 106.6 %. Pinned against the
+# artifact, so a correction to the data moves them and a silent edit reds them.
+
+def _committed_decomposition() -> dict:
+    return json.loads((_REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+                       / "decomposition.json").read_text(encoding="utf-8"))
+
+
+def _committed_markdown() -> str:
+    return (_REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+            / "decomposition.md").read_text(encoding="utf-8")
+
+
+def test_the_output_table_rows_sum_to_its_printed_total():
+    """A column that does not add up is the defect the bundle's rule forbids."""
+    dec = _committed_decomposition()
+    block = _committed_markdown().split(
+        "### The output constant, decomposed", 1)[1]
+    rows, total = [], None
+    fitted, residual = None, None
+    for line in block.splitlines():
+        if not line.startswith("|"):
+            if total is not None:
+                break
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 3 or set(cells[0]) <= {"-"} or cells[0] == "stage":
+            continue
+        if "composition total" in cells[0]:
+            total = int(cells[1].replace(",", "").replace("*", ""))
+            # ⛔ KEEP PARSING — DO NOT `break` HERE. The two rows that make the
+            # column reconcile are BELOW this one, so breaking here left them
+            # unread and the residual defect (the residual formatted from the
+            # unrounded float, giving 17,829 + 4,972 = 22,801 against a fitted
+            # 22,802) passed this test for a whole cycle (review cycle 14, P3).
+            continue
+        if "fitted constant" in cells[0]:
+            fitted = int(cells[1].replace(",", "").replace("*", ""))
+            continue
+        if "unattributed" in cells[0]:
+            residual = int(cells[1].replace(",", "").replace("*", ""))
+            continue
+        if cells[0] in ("s1", "s2", "s4"):
+            rows.append(int(cells[1].replace(",", "")))
+    assert len(rows) == 3, f"the three stage rows must be present, got {rows}"
+    assert total is not None, "the printed composition total must be present"
+    assert sum(rows) == total, (
+        f"the printed stage rows sum to {sum(rows):,} but the printed total is "
+        f"{total:,} — a column that does not add up is the exact defect this "
+        f"bundle's own rule forbids")
+    # …and a reader who ADDS THE WHOLE COLUMN must land on the fitted constant.
+    assert fitted is not None and residual is not None, (
+        f"the printed fitted-constant ({fitted}) and unattributed ({residual}) "
+        f"rows must both be present — they are what the column reconciles to")
+    assert fitted - total == residual, (
+        f"the printed column does not reconcile: {total:,} rows + {residual:,} "
+        f"residual = {total + residual:,}, but the printed fitted constant is "
+        f"{fitted:,} (off by {fitted - total - residual:,}). The residual must be "
+        f"derived from the PRINTED total, not formatted from the unrounded float")
+    # …and the hand-written README copy of this table must carry the same two
+    # numbers. It drifted twice (17,830 / 4,972 while the generated file said
+    # 17,829 / 4,973), because nothing pinned it.
+    readme = (_REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+              / "README.md").read_text(encoding="utf-8")
+    s2 = readme.split("## 2. The output constant, decomposed", 1)[1]
+    assert f"**{total:,}**" in s2, (
+        f"the README's §2 table must print the generated composition total "
+        f"({total:,}) — two different totals for one column is what this pins "
+        f"out")
+    assert f"**{residual:,}**" in s2, (
+        f"the README's §2 table must print the generated residual "
+        f"({residual:,}), not the pre-fix one")
+    # …and the total is the sum of the ROUNDED rows. Formatting the UNROUNDED
+    # sum is precisely how 17,829 became 17,830, so pin the derivation and not
+    # just today's arithmetic.
+    rounded = sum(round(out) for out in
+                  (dec["output"]["s1_tokens_per_doc"],
+                   dec["output"]["s2_tokens_per_doc"],
+                   dec["output"]["s4_tokens_per_doc"]))
+    assert total == rounded, (
+        f"the total must be derived from the rounded rows ({rounded:,}), not "
+        f"from the unrounded sum — that off-by-one is what this pin exists for")
+
+
+def test_the_unattributed_row_names_the_denominator_its_share_is_of():
+    """`unattributed` is the only row in that column on a second denominator."""
+    dec = _committed_decomposition()
+    ev = (_REPO_ROOT / "docs" / "evidence" / "14343-amplify" / "README.md"
+          ).read_text(encoding="utf-8")
+    fit_share = 100.0 * dec["unattributed"] / dec["fitted_constant"]
+    comp_share = 100.0 * dec["unattributed"] / dec["composition_total"]
+    assert f"{fit_share:.1f} %" in ev, (
+        f"the unattributed row is {fit_share:.1f} % of the FITTED constant")
+    assert comp_share > fit_share + 0.2, (
+        "the two denominators must genuinely differ, or this pin proves nothing")
+    assert "of the fitted constant" in ev, (
+        "the unattributed row must NAME its denominator: the column header says "
+        "the composition, and an unlabelled 6.6 % makes the column read as "
+        f"{100.0 + fit_share:.0f} %")
+    assert f"{comp_share:.1f} %" in ev, (
+        "the README must also state what the row would be against the "
+        "composition, so a reader can see the two denominators differ")
+
+def test_a_row_whose_render_missed_its_arm_is_REFUSED_not_mislabelled(
+        monkeypatch, tmp_path):
+    """Recording the observation is not enough on its own.
+
+    Review cycle 10: a corrupted row was "indistinguishable from a good one".
+    Reading the flag back per row makes the corruption VISIBLE in the artifact,
+    but a row still written as a good measurement of its arm is evidence a
+    reader has to distrust rather than evidence the harness refused it. So the
+    two ways the observation can disagree with the arm RAISE, and `run` records
+    the row as FAILED — a row that cannot be attributed to an arm is not a
+    measurement of that arm.
+    """
+    def fake_measure(model, conversation, *, session_date):
+        return {"prompt_tokens": 1, "completion_tokens": 1}
+
+    monkeypatch.setattr(m, "_install_arm", lambda arm: None)   # installs nothing
+    monkeypatch.delenv(m._TOGGLE, raising=False)
+    monkeypatch.setattr(m, "pick_corpus",
+                        lambda limit, seed: [{"path": "README.md", "tokens": 10}])
+    monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
+    monkeypatch.setattr(m, "_build_model", lambda: object())
+    monkeypatch.setattr(m, "measure_one", fake_measure)
+
+    out = tmp_path / "measurements.jsonl"
+    m.run_measurement(out=out, docs_limit=1, sessions_limit=0, workers=1,
+                      seed=1, arms=("after",), arm_gap_s=0.0,
+                      long_split=False)
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line]
+    assert len(rows) == 1
+    assert rows[0]["failed"] is True, rows[0]
+    assert "cannot be attributed to an arm" in rows[0]["error"], rows[0]
+    assert "s4_embed_json" not in rows[0], (
+        "a refused row must not carry an arm's layout as if it had measured it")
+
+
+def test_the_real_install_arm_actually_arms_the_after_batch(monkeypatch, tmp_path):
+    """⛔ THE BATCH TEST ABOVE CANNOT SEE THE ARMING, because it INJECTS it: it
+    monkeypatches `_install_arm` with a `fake_install` that re-implements the
+    function body, so every assertion about "the flag its own arm installed" is
+    made about the fake. MEASURED: replace the real `_install_arm`'s body with
+    `return` — the exact defect this PR exists to fix, "the arm is a label
+    again" — and the whole file reported 71 passed.
+
+    ⛔ AND ONE `run_measurement` CALL CANNOT PIN BOTH HALVES. Each half needs the
+    OPPOSITE ambient posture, and the two postures fight:
+      * `after` is only pinned if the ambient starts DISARMED — otherwise the
+        batch renders `compact` because the ambient says so, with or without
+        any arming (that vacuous "fix" was measured at 74 passed with
+        `os.environ[_TOGGLE] = "compact"` replaced by `pass`).
+      * `before` is only pinned if the ambient starts ARMED — otherwise the
+        batch renders `indent` because the toggle is absent, with or without
+        the `pop` (measured at 74 passed with the `pop` deleted).
+    So: two runs, two out paths (`_existing_rows` would skip the second arm's
+    rows as already done if they shared one file).
+    """
+    def fake_measure(model, conversation, *, session_date):
+        return {"prompt_tokens": 100, "completion_tokens": 10}
+
+    docs = [{"path": "README.md", "tokens": 10 + i} for i in range(2)]
+    monkeypatch.setattr(m, "pick_corpus", lambda limit, seed: docs)
+    monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
+    monkeypatch.setattr(m, "_build_model", lambda: object())
+    monkeypatch.setattr(m, "measure_one", fake_measure)
+    # ⛔ NO setattr on `_install_arm` — the real one must run.
+
+    def _rows(name: str) -> dict[str, dict]:
+        out = tmp_path / name
+        m.run_measurement(out=out, docs_limit=2, sessions_limit=0, workers=1,
+                          seed=1, arms=arms, arm_gap_s=0.0, long_split=False)
+        got = [json.loads(line) for line in out.read_text().splitlines() if line]
+        assert not any(r.get("failed") for r in got), got
+        return {r["arm"]: r for r in got}
+
+    # ── half 1: `after` must ARM it. Ambient DISARMED, so only the arming line
+    # can make the render `compact`.
+    monkeypatch.delenv(m._TOGGLE, raising=False)
+    arms = ("after",)
+    after_rows = _rows("after.jsonl")
+    assert after_rows["after"]["s4_embed_json"] == "compact", (
+        "the `after` arm must ARM the lever: `_install_arm('after')` sets "
+        f"{m._TOGGLE}=compact. Got "
+        f"{after_rows['after'].get('s4_embed_json')!r} from a DISARMED ambient "
+        "— if this is 'indent', the arm is a label again and the before→after "
+        "delta measures nothing")
+
+    # ── half 2: `before` must PIN IT OFF. Ambient ARMED, so only the pop can
+    # make the render `indent`.
+    monkeypatch.setenv(m._TOGGLE, "compact")
+    arms = ("before",)
+    before_rows = _rows("before.jsonl")
+    assert before_rows["before"]["s4_embed_json"] == "indent", (
+        "the `before` arm must POP an ambient `compact` and render today's "
+        f"bytes. Got {before_rows['before'].get('s4_embed_json')!r} — starting "
+        "from `compact` is what makes this assertion real")
+    # …and the ambient `compact` is RESTORED, not left armed or left unset
+    assert os.environ.get(m._TOGGLE) == "compact", (
+        f"the ambient value must come back as it was, got "
+        f"{os.environ.get(m._TOGGLE)!r}")
+
+
+def test_a_lever_that_moves_mid_measurement_is_refused(monkeypatch, tmp_path):
+    """One layout per pipeline run, or the row describes neither."""
+    def flipping_measure(model, conversation, *, session_date):
+        os.environ[m._TOGGLE] = "compact"      # the leak, mid-run
+        return {"prompt_tokens": 1, "completion_tokens": 1}
+
+    monkeypatch.setattr(m, "_install_arm", lambda arm: None)
+    monkeypatch.delenv(m._TOGGLE, raising=False)
+    monkeypatch.setattr(m, "pick_corpus",
+                        lambda limit, seed: [{"path": "README.md", "tokens": 10}])
+    monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
+    monkeypatch.setattr(m, "_build_model", lambda: object())
+    monkeypatch.setattr(m, "measure_one", flipping_measure)
+
+    out = tmp_path / "measurements.jsonl"
+    m.run_measurement(out=out, docs_limit=1, sessions_limit=0, workers=1,
+                      seed=1, arms=("cold",), arm_gap_s=0.0,
+                      long_split=False)
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line]
+    assert rows[0]["failed"] is True, rows[0]
+    assert "moved mid-measurement" in rows[0]["error"], rows[0]
+
+
+def test_the_mode_is_productions_own_resolution_not_a_second_parser(monkeypatch):
+    """`_embed_mode` delegates to the helper the RENDER calls.
+
+    A hand-written copy of the rule (`.strip().lower() == "compact"`) agrees
+    today and is free to drift the first time the toggle grows a spelling — and
+    the drift would surface as a row recording a layout the render did not take.
+    Pinned structurally: whatever `_embed_json_kwargs` resolves to, the recorded
+    mode names it.
+    """
+    from tortoise import extractor_v2 as v2
+    for value in (None, "", "  ", "garbage", "indent", "compact", " COMPACT "):
+        if value is None:
+            monkeypatch.delenv(m._TOGGLE, raising=False)
+        else:
+            monkeypatch.setenv(m._TOGGLE, value)
+        compact = v2._embed_json_kwargs() == {"separators": (",", ":")}
+        assert m._embed_mode() == ("compact" if compact else "indent"), value
+
+    # THE DISCRIMINATOR: with the env armed, move the RENDER's own resolution to
+    # the other layout. A delegation follows it; a second hand-written parser
+    # keeps answering "compact" from the environment and the row would then
+    # record a layout the prompt did not have.
+    monkeypatch.setenv(m._TOGGLE, "compact")
+    monkeypatch.setattr(v2, "_embed_json_kwargs", lambda: {"indent": 1})
+    assert m._embed_mode() == "indent", (
+        "the recorded mode must follow the serialization the render passes to "
+        "json.dumps, not a re-parse of the environment")
+
+
+def test_a_post_call_S4_failure_is_a_note_when_the_call_was_measured():
+    """⛔ THE OVER-BLOCK ONE MARKER OVER from cycle 9's (review cycle 15, P3).
+
+    `capture_session` appends `"S4 failed: …"` from ONE `except` that wraps
+    `run_s4(...)` (`tortoise/extractor_v2.py:15286`) *and* the post-call
+    merge/shape work that follows it (`:15292`–`:15333`), while
+    `_Recording.complete` appends a call only after the adapter RETURNS. So an
+    S4 whose prompt was rendered, sent and measured and whose output then failed
+    to parse or merge carries the marker on a call that WAS measured — and
+    treating the marker as a lost call refused an intact composition and made
+    `main` exit 1 on it.
+
+    This is the assertion the pre-fix code fails: `_LOST_CALL_MARKERS` held
+    `"S4 failed"`, so `complete` came back False for a row in which all three
+    stages reported a call.
+    """
+    noted = _complete_artifact()
+    noted["pipeline"] = {"calls": 3, "retries": 0,
+                         "errors": ["S4 failed: ValueError: bad json — kept S2 "
+                                    "output"]}
+    report = m.compose_report([noted])
+    assert report["complete"] is True, (
+        "an S4 that RETURNED a measured call and then failed to parse must not "
+        "refuse the composition — the prompt was sent and counted")
+    rendered = m.render_compose(report)
+    assert "INCOMPLETE LIVE RUN" not in rendered, (
+        "a post-call S4 failure must not print the incompleteness banner")
+    assert "content-level notes" in rendered, (
+        "…but it must still be DISCLOSED, or the reader is told the emission "
+        "was clean when it was not")
+
+
+def test_a_stage_that_recorded_NO_call_is_still_incomplete():
+    """The fail-closed half of the same change: the CALLS decide, not the marker.
+
+    `"S4 failed"` left `_LOST_CALL_MARKERS`, so the run where S4 genuinely
+    produced nothing must still be refused — by `_REQUIRED_STAGES`, which reads
+    the recorded calls (`compose_report` builds `stages` only from calls, so a
+    call-less stage is absent). Asserted explicitly, because dropping a marker
+    from the lost-call set is only safe while this stays true.
+    """
+    lost = _compose_artifact(live=True,
+                             calls=[_call(stage=s, sections={})
+                                    for s in ("s1", "s2")])
+    lost["pipeline"] = {"calls": 2, "retries": 0,
+                        "errors": ["S4 failed: TimeoutError: read timeout"]}
+    report = m.compose_report([lost])
+    assert report["complete"] is False, (
+        "a stage with NO recorded call must make the run incomplete whatever "
+        "the pipeline error says")
+    assert "INCOMPLETE LIVE RUN" in m.render_compose(report)
+
+
+def test_a_content_level_error_is_a_note_not_an_incompleteness():
+    """⛔ THE OVER-BLOCK two independent reviewers found (review cycle 9, P1).
+
+    `extractor_v2` records errors on calls that RETURNED and were measured: the
+    rung-4 partial accept appends "S4 output partial — truncated tail dropped"
+    (`tortoise/extractor_v2.py:15337`), a malformed section appends
+    "S4 output malformed section … kept S2 output" (`:15292`), as do S2's twin
+    and the post-extraction S5/chain/entity-resolution/classify steps. Treating
+    ANY error as "did not measure" refused a COMPLETE composition and exited 1 —
+    and not clearably by re-running, because README §2's 13 of 50 documents
+    emitting >6,000 S4 completion tokens (max 24,000) is exactly what rung 4 is
+    for, so the documented `compose --out …` exited 1 deterministically on such
+    a `--doc`.
+    """
+    noted = _complete_artifact()
+    noted["pipeline"] = {"calls": 3, "retries": 0, "errors": [
+        "S4 output partial — truncated tail dropped (embed list incomplete)"]}
+    report = m.compose_report([noted])
+    assert report["complete"] is True, (
+        "a content-level error on a call that RETURNED must not refuse the "
+        "composition — the prompt was measured")
+    rendered = m.render_compose(report)
+    assert "INCOMPLETE LIVE RUN" not in rendered, (
+        "a content-level error must not print the incompleteness banner")
+    assert "content-level notes" in rendered, (
+        "…but it must still be DISCLOSED, or the reader is told the emission "
+        "was clean when it was not")
+
+
+def test_an_unknown_arm_is_refused_rather_than_measured(monkeypatch, tmp_path, capsys):
+    """A typo must cost an EXIT CODE, not a 360-call provider run.
+
+    `_install_arm` acts only on `after`/`before`; `cold`/`warm` deliberately
+    inherit the ambient value. Every OTHER token used to fall through with no arm
+    installed and no diagnostic, so `--arms before,After` (a capital) reproduced
+    exactly the failure `_install_arm` exists to prevent: both batches render
+    `indent`, the delta is 0, and `run` exits 0 having measured nothing but the
+    before arm twice (review cycle 11, P3).
+
+    ⛔ TWO THINGS THIS PIN GOT WRONG AND NOW CHECKS (review cycle 12):
+    (a) it asserted only `pytest.raises(SystemExit)`, never `exc.value.code`, so
+        the code's claim of exit **2** was unverified — and `SystemExit("msg")`
+        actually exits **1**, the code this tool also uses for a real run
+        failure, so a caller could not tell a typo from a failed measurement;
+    (b) "proving the refusal is not too broad" asserted the CONSTANT's contents,
+        not that the guard accepts them — so a guard that refused `cold`/`warm`
+        (the tool's own DEFAULT `--arms cold,warm`) kept the suite green. The
+        positive leg below now goes THROUGH the guard.
+    """
+    # stub the work so a regressed refusal cannot spend a real measurement —
+    # without this the mutant took 507 s and executed `measure_one` for real
+    monkeypatch.setattr(m, "pick_corpus", lambda limit, seed: [])
+    monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
+    monkeypatch.setattr(m, "_build_model", lambda: object())
+    monkeypatch.setattr(m, "measure_one",
+                        lambda *a, **k: {"prompt_tokens": 1,
+                                         "completion_tokens": 1})
+
+    for bad in ("before,After", "before,compact", "tepid"):
+        with pytest.raises(SystemExit) as exc:
+            m.main(["run", "--docs", "0", "--arms", bad,
+                    "--out", str(tmp_path / "m.jsonl")])
+        assert exc.value.code == 2, (
+            f"{bad!r} must exit 2 (argparse's usage code), got "
+            f"{exc.value.code!r} — `SystemExit('msg')` exits 1, which is this "
+            f"tool's RUN-FAILURE code")
+    # ⛔ the empty selection is the same class, so it is the same code
+    with pytest.raises(SystemExit) as exc:
+        m.main(["run", "--docs", "0", "--arms", ",",
+                "--out", str(tmp_path / "m2.jsonl")])
+    assert exc.value.code == 2, exc.value.code
+
+    # ⛔ THE MESSAGE AND ITS CHANNEL ARE PART OF THE CONTRACT. A bare exit 2 with
+    # no diagnostic is the "no arm installed AND no diagnostic" failure the
+    # guard exists to remove — a user cannot tell which token was rejected.
+    # Measured (review cycle 13, P3): deleting both stderr writes and keeping
+    # `SystemExit(2)` left this pin green.
+    err = capsys.readouterr().err
+    assert "unknown arm" in err, f"the refusal must SAY what was refused; stderr={err!r}"
+    assert "'After'" in err, f"the refused token must be named; stderr={err!r}"
+    assert "named no arm" in err, (
+        f"the empty selection must say so; stderr={err!r}")
+
+    # ⛔ THE UPPER BOUND IS A SEPARATE ASSERTION FROM THE POSITIVE LEG, and the
+    # positive leg cannot replace it: it proves the four members are ACCEPTED,
+    # never that nothing ELSE is. Measured (review cycle 13, P2): adding
+    # `"lukewarm"` to _ARMS left the suite green, and a member `_install_arm`
+    # does not act on reproduces the cycle-11 defect verbatim (both batches
+    # inherit the ambient, delta 0, `run` exits 0). Keep both bounds.
+    assert sorted(m._ARMS) == ["after", "before", "cold", "warm"], (
+        f"the accepted set must be exactly the four arms, got {sorted(m._ARMS)}")
+
+    # POSITIVE LEG: the accepted set must pass THROUGH the guard. `cold,warm` is
+    # the argument DEFAULT, so a guard that refused them would break the
+    # documented bare invocation — and the constant-only assertion could not see
+    # that. `returncode 0` is the assertion; the stubs above made it cheap.
+    assert m.main(["run", "--docs", "0", "--arms", "cold,warm",
+                   "--out", str(tmp_path / "m3.jsonl")]) == 0, (
+        "the default `--arms cold,warm` must be ACCEPTED by the refusal — a "
+        "guard that refuses the tool's own default is too broad")
+    assert m.main(["run", "--docs", "0", "--arms", "before,after",
+                   "--out", str(tmp_path / "m4.jsonl")]) == 0, (
+        "the two lever arms must pass the guard")
+
+
+def test_the_printed_output_table_closes_arithmetically():
+    """rows → total → residual must reconcile in BOTH artifacts.
+
+    The row/total off-by-one was fixed first, and the residual then still did not
+    close: the generated table printed `unattributed 4,972` against a fitted
+    22,802 and a total of 17,829 (22,802 − 17,829 = 4,973). Fixing the total
+    moved the defect one row down rather than removing it (review cycle 11, P2),
+    so this pin checks the whole chain and both places a reader can land.
+    """
+    dec = _committed_decomposition()
+    out = dec["output"]
+    fitted = out["fitted_constant"]
+    md = _committed_markdown()
+    block = md.split("### The output constant, decomposed", 1)[1]
+    rows, total, residual = [], None, None
+    for line in block.splitlines():
+        if not line.startswith("|"):
+            if residual is not None:
+                break
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 3 or set(cells[0]) <= {"-"} or cells[0] == "stage":
+            continue
+        num = lambda c: int(c.replace(",", "").replace("*", ""))  # noqa: E731
+        if "composition total" in cells[0]:
+            total = num(cells[1])
+        elif cells[0].startswith("*fitted constant"):
+            assert num(cells[1]) == fitted
+        elif "unattributed" in cells[0]:
+            residual = num(cells[1])
+            break
+        elif cells[0] in ("s1", "s2", "s4"):
+            rows.append(num(cells[1]))
+    assert len(rows) == 3 and total is not None and residual is not None, (
+        f"the table must carry three rows, a total and a residual "
+        f"(rows={rows}, total={total}, residual={residual})")
+    assert sum(rows) == total, f"rows {sum(rows):,} != total {total:,}"
+    assert total + residual == fitted, (
+        f"the printed table must close: total {total:,} + unattributed "
+        f"{residual:,} must equal the fitted {fitted:,}, got "
+        f"{total + residual:,}")
+
+    # …and the hand-written README's §2 table, which no generated artifact covers
+    ev = (_REPO_ROOT / "docs" / "evidence" / "14343-amplify" / "README.md"
+          ).read_text(encoding="utf-8")
+    section = ev.split("| stage | completion tokens/doc", 1)[1]
+    rows2, total2, residual2 = [], None, None
+    for line in section.splitlines():
+        if not line.startswith("|"):
+            if residual2 is not None:
+                break
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2 or set(cells[0]) <= {"-"} or cells[0] == "stage":
+            continue
+        num = lambda c: int(c.replace(",", "").replace("*", "").replace("%", ""))  # noqa: E731
+        if "composition total" in cells[0]:
+            total2 = num(cells[1])
+        elif "unattributed" in cells[0]:
+            residual2 = num(cells[1])
+            break
+        elif cells[0].strip("* ") in ("s1", "s2", "s4"):
+            rows2.append(num(cells[1]))
+    assert len(rows2) == 3 and total2 is not None and residual2 is not None, (
+        f"the README §2 table must carry three rows, a total and a residual "
+        f"(rows={rows2}, total={total2}, residual={residual2})")
+    assert sum(rows2) == total2, (
+        f"README §2 rows {sum(rows2):,} != printed total {total2:,}")
+    assert total2 + residual2 == fitted, (
+        f"README §2 must close against the fitted constant: {total2:,} + "
+        f"{residual2:,} != {fitted:,}")
