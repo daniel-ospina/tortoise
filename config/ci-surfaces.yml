@@ -48,26 +48,21 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. At `0fbfbb5b210c` — the `main`
-# this sentence was re-derived on, whose `durations` rows this block does not change — the same
-# verb packs eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i), so
-# `ceil(836.4/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (the merge of
+# `origin/main` `b2d1e9086a` into #14219) the same verb packs eleven shards at 837.1 s
+# (a, b, c, d, e, f, g, h, i, j, k), so
+# `ceil(837.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
-# reading of this pool from 835.5 s to 836.4 s while the SECONDS moved under it, so NO arithmetic
-# MERGES INTO, never carried from the branch that first wrote it. On the tree this sentence was
-# re-derived on (`main` at `4993fa083f`, plus #14371's own `core` registration
-# `tests/test_14371_offline_embed_json.py`, which is the row that re-packed it) the same verb packs
-# six shards at 836.6 s (a, b, c, i, j, k) and five at 836.5 s (d, e, f, g, h), so
-# `ceil(836.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. ⛔ This branch's own `core` row is what moved
-# the partition: on `main` WITHOUT `tests/test_14371_offline_embed_json.py` the same verb packs a
-# different split at the same 836.4/836.3 s, which is why the shard NAMES (not only the seconds) are
-# stated here and graded. ⛔ The MINUTE has stood at 28 m across every reading of this pool from
-# 835.5 s to 836.6 s while the SECONDS moved under it, so NO arithmetic
+# reading of this pool from 835.5 s to 837.1 s while the SECONDS moved under it, so NO arithmetic
 # on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
-# sentence is GRADED below instead of trusted. That map is the union of both parents'
+# sentence is GRADED below instead of trusted. ⛔ **THIS BLOCK WAS SPLICED BY A MERGE, and it is
+# stated once, in one sentence, for that reason.** Both parents had re-derived it — this branch read
+# eight at 836.4 s and three at 836.3 s, `main` read six at 836.6 s and five at 836.5 s — git kept
+# BOTH spellings, and the merged block then claimed four groups where the tree emits one. That is
+# exactly the shape `tests/test_ci_selection.py`'s unread-sentence arm exists to catch, and the
+# repair is the one this block already states: re-derive at the merged tree, never re-merge two
+# re-derivations. That map is the union of both parents'
 # registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
 # (`--emit-push-matrix` lists it in shard c) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
 # matters only because it sits one main fold from rounding again. Re-run `--emit-push-matrix`;
