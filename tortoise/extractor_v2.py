@@ -2320,8 +2320,8 @@ def _complete_parsed(model, system: str, user: str, *,
     user_msg = user
     while attempts <= _PARSE_RETRIES:
         attempts += 1
-        response = _complete(model, system, user_msg,
-                             max_tokens=max_tokens, stats=stats)
+        response, _collapse = _base_complete_holding_collapse(
+            model, system, user_msg, max_tokens, stats, escalate)
         if stats is not None:
             total_attempts += int(stats.get("attempts") or 0)
             total_retries += int(stats.get("retries") or 0)
@@ -2433,6 +2433,16 @@ def _complete_parsed(model, system: str, user: str, *,
                     head = (_parse_canonical_strict(retained_response)
                             or _longest_valid_prefix(retained_response))
                     if head is None:
+                        # #14357: the ESCALATED call produced no content at all
+                        # — that is the collapse, not a truncated parse. Re-raise
+                        # the original so the census class stays
+                        # ``reasoning_collapse``, which the eval gate VETOES;
+                        # wrapping it in ``_ParseError(truncated=True)`` would
+                        # file it as the RECOVERABLE ``truncated_parse_error`` and
+                        # let the gate rate-limit a zero-content extraction —
+                        # the fail-open #14357 exists to close.
+                        if isinstance(e, _ReasoningCollapse) or _collapse:
+                            raise _ReasoningCollapse(str(e)) from e
                         raise _ParseError(
                             str(e), truncated=True, attempt=attempts,
                             excerpt=_error_excerpt(retained_response, None)
@@ -16089,12 +16099,21 @@ def _cap_kwargs(model, max_tokens: int | None, stats: dict | None) -> dict:
     return {}
 
 
-#: The fixed 9-class ``_classify_error`` vocabulary (#1524). Declared as code
-#: (the #1787 ``llm_error_census`` emission contract that also names it has no
-#: code presence — #5526) so a future add/rename is detectable; #4959 reroutes
-#: a 403 WITHIN this set rather than adding a 10th class. This is the
-#: CLASSIFIER's vocabulary ONLY — the census also carries stage-producer
-#: classes outside this set, so never treat it as the census's full vocabulary.
+#: The fixed 9-class **status-mapped** vocabulary (#1524): the ``fatal_*`` /
+#: ``transient_*`` classes ``_classify_error`` derives from an HTTP status (or a
+#: status-less transport error). Declared as code (the #1787
+#: ``llm_error_census`` emission contract that also names it has no code
+#: presence — #5526) so a future add/rename is detectable; #4959 reroutes a 403
+#: WITHIN this set rather than adding a 10th class.
+#:
+#: ⛔ NOT the whole of ``_classify_error``'s return set — do NOT shrink the
+#: function to fit this set. It also returns the ONE class it decides by TYPE,
+#: ``reasoning_collapse`` (#14357, ``_ReasoningCollapse``), which has no status
+#: to map. Normalising that back into these nine (e.g. ``transient_unknown``)
+#: would silently delete the census signal for a collapsed extraction — the
+#: fail-open #14357 exists to close. Also not the census's full vocabulary: the
+#: census carries stage-producer classes (``parse_error``,
+#: ``truncated_parse_error``, ``empty_embed_list``, …) outside it too.
 _LLM_ERROR_CENSUS_CLASSES = frozenset({
     "fatal_401_auth",
     "fatal_402_billing",
@@ -16154,8 +16173,10 @@ def _classify_error(e: BaseException) -> str:
     Stable keys (the report census + retry-then-fix triage read these):
     fatal_401_auth / fatal_402_billing / fatal_403_forbidden / fatal_4xx /
     transient_429_rate_limit / transient_5xx / transient_timeout /
-    transient_network / transient_unknown. ``parse_error`` and ``truncated``
-    are produced by the stage callers, not here.
+    transient_network / transient_unknown. ``parse_error``, ``truncated`` and
+    ``reasoning_collapse`` (#14357) are produced by the stage callers / the
+    yield guard, not by the status mapper — this function is the FIRST branch
+    for the one of them that arrives as a raised exception.
 
     Duck-typed (``e.response.status_code``) so the extractor stays free of a
     hard ``requests`` import. This is the CENSUS-class mapper, NOT the retry
@@ -16181,7 +16202,12 @@ def _classify_error(e: BaseException) -> str:
     The key-limit test itself is ``_is_key_limit_error`` above (its breadth
     caveat included).
 
-    The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``.
+    The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``, or
+    ``reasoning_collapse`` — the ONE class this function decides by TYPE
+    (``_ReasoningCollapse``). ``parse_error`` / ``truncated_parse_error`` are
+    NOT in its return set: nothing here branches on ``_ParseError``; those two
+    are class-decided in ``_bump_census``, which owns them on
+    ``_ParseError``'s ``truncated`` flag.
 
     KNOWN DIVERGENCES from P2's retry taxonomy (both pre-existing, not
     introduced here, and both tracked on #5525, whose root was restated to
@@ -16198,6 +16224,10 @@ def _classify_error(e: BaseException) -> str:
     Neither is changed here (a classifier change is its own concern, #5525),
     and neither is denied here."""
     st = getattr(getattr(e, "response", None), "status_code", None)
+    if isinstance(e, _ReasoningCollapse):
+        # #14357: no status to read — the class is the TYPE's fact, decided by
+        # the yield guard in ``_complete`` (empty content, finish_reason=length).
+        return "reasoning_collapse"
     if st is not None:
         if st == 429:
             return "transient_429_rate_limit"
@@ -16230,12 +16260,41 @@ def _is_fatal_error(e: BaseException) -> bool:
     the same ``fatal_*`` prefix (GATE-1). This is the ABORT decision ONLY.
     The CENSUS class comes from ``_classify_error``, and the two are NOT
     guaranteed to agree — it reads the status from a different attribute and
-    maps 408/425 differently; see its KNOWN DIVERGENCES paragraph."""
+    maps 408/425 differently; see its KNOWN DIVERGENCES paragraph.
+
+    #14357: ``_ReasoningCollapse`` is fatal by TYPE — a re-call sends the SAME
+    prompt with the SAME budget at temperature 0, so a retry re-burns the
+    output budget into hidden reasoning and collapses again; it would only add
+    spend to a call that already returned nothing."""
+    if isinstance(e, _ReasoningCollapse):
+        return True
     try:
         from tortoise.model_adapters import is_fatal
         return is_fatal(e)
     except ImportError:  # pragma: no cover — P2 landed; defensive fallback
         return _classify_error(e).startswith("fatal")
+
+
+class _ReasoningCollapse(RuntimeError):
+    """A call returned EMPTY content with ``finish_reason="length"`` — the
+    reasoning-budget collapse (#14357).
+
+    The signature this module has on the record since pilot #1549: the model
+    reasons by default (thinking: high), spends the whole ``max_tokens`` budget
+    on hidden reasoning tokens, and emits nothing — ``1500/1500 reasoning
+    tokens, finish_reason=length, ZERO output content``. Raised by the yield
+    guard in ``_complete`` so the call is a RECORDED failure rather than a
+    document that silently extracted no facts.
+
+    Fatal by type (``_is_fatal_error``): the retry would resend the identical
+    prompt at temperature 0 with the same budget and collapse identically,
+    buying nothing and billing again.
+
+    Census class: ``reasoning_collapse`` (``_classify_error``). NOTE it is NOT
+    in ``tools/longmem_eval/report.py``'s ``RECOVERABLE_CENSUS_CLASSES`` —
+    deliberately: an extraction that produced zero content is a hard failure,
+    and that gate fails CLOSED on an unknown class, which is the direction
+    this defect needs."""
 
 
 class _ParseError(ValueError):
@@ -16991,7 +17050,7 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
     last exception propagates. Fatal 4xx (401/402/403 + other 4xx, via P2's
     taxonomy) raise immediately with ZERO retries; unknown classes are
     treated as transient (the census records them — the retry-then-fix loop
-    tightens the class, not the code).
+    tightens the class, not the code). ⛔ An EMPTY ``finish_reason="length"`` reply is NOT retried — it raises ``_ReasoningCollapse`` (#14357, census class ``reasoning_collapse``).
 
     ``max_tokens`` bounds the generation (None = caller-applied stage cap;
     0 = documented uncapped escape hatch). ``deadline_s`` defaults to None →
@@ -17090,6 +17149,32 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
                     _rec["truncation_completion_tokens"] = (
                         _rec.get("truncation_completion_tokens", 0)
                         + completion_tokens)
+            # #14357 — the YIELD GUARD, and the reason it lives here rather
+            # than in a retry: ``finish_reason="length"`` with EMPTY content is
+            # the reasoning-collapse signature this module already records
+            # (pilot #1549: "1500/1500 reasoning tokens, finish_reason=length,
+            # ZERO output content"). It is NOT a truncation of a real answer
+            # whose tail was cut — the model produced nothing at all, and
+            # returning it unchanged makes "the document had no facts" and
+            # "the extraction never ran" the SAME observable outcome. Raising
+            # makes the chunk a RECORDED failure (``errors`` +
+            # ``error_census['reasoning_collapse']``) instead of a silent empty
+            # document, without inventing a retry ladder: the caller's S1/S2/S4
+            # handlers already treat an exception as a failed call.
+            #
+            # Only the collapse shape is caught. A NON-EMPTY length-truncated
+            # response keeps the #2134 rung (a cut tail is recoverable); an
+            # EMPTY one is HELD by _complete_parsed's base call and escalated
+            # ONCE, so this raise is what keeps the class reasoning_collapse
+            # when no rung remains. A stop reply is a legitimate empty answer.
+            if truncated and not (resp or "").strip():
+                raise _ReasoningCollapse(
+                    "empty content with finish_reason=length — the output "
+                    "budget was consumed by hidden reasoning tokens "
+                    f"(route={call_provider!r}, model={call_model!r}, "
+                    f"completion_tokens={completion_tokens}, "
+                    f"max_tokens={max_tokens!r}); the call produced no "
+                    "extraction (#14357)")
             return resp
         except BaseException as e:  # noqa: BLE001, RUF100
             if not isinstance(e, Exception):  # never retry SystemExit/KeyboardInterrupt
@@ -19466,3 +19551,45 @@ def _embed_json_mode() -> str:
     arm's setting is refused rather than mislabelled (`#14343` review cycle 10).
     """
     return "indent" if _embed_json_kwargs() == {"indent": 1} else "compact"
+
+
+def _base_complete_holding_collapse(model, system, user, max_tokens, stats,
+                                    escalate):
+    """``_complete`` for ``_complete_parsed``'s BASE call, minus the rung loss.
+
+    ``_complete``'s yield guard raises ``_ReasoningCollapse`` on empty content
+    at ``finish_reason="length"``. That raise is right on a TERMINAL path —
+    but the base call is not terminal. The #2134 one-shot escalation rung
+    below it keys on ``finish == "length"`` and never looks at content, so
+    pre-#14357 an EMPTY base response DID escalate to the 2x budget, and a
+    collapse at the 16K S2/S4 cap is exactly the shape a 32K budget can
+    recover (the pilot's collapse was 1500/1500 — budget-starved, not a
+    fundamentally unanswerable prompt). Raising here therefore deleted a
+    recovery path silently.
+
+    So the collapse is HELD and handed back with the empty response, which
+    re-enters that ladder with the same observable shape the pre-#14357 code
+    had. The ladder's own arms still re-raise the original exception — class
+    ``reasoning_collapse``, never the recoverable ``truncated_parse_error`` —
+    when the ESCALATED call collapses too, and this returns nothing when no
+    rung remains (it re-raises, since the ladder's no-headroom arm would
+    otherwise downgrade the class).
+
+    ``escalate=False`` callers (the kind-classifier adjudication) have no rung
+    to spend, so the collapse is re-raised unchanged for them.
+
+    ⛔ Defined at the END of this module on purpose: every cite in the #7949
+    evidence bundle is a LINE NUMBER into this file, and a helper placed
+    beside ``_complete_parsed`` would move every one of them below it (a
+    measured drift of +25 reds nine cite-pinning tests and silently re-stales
+    every cite no test pins). Appending moves none.
+    """
+    try:
+        return _complete(model, system, user, max_tokens=max_tokens,
+                         stats=stats), None
+    except _ReasoningCollapse:
+        if not escalate:
+            raise
+        if _extractor_escalation_tokens(max_tokens) <= (max_tokens or 0):
+            raise
+        return "", True

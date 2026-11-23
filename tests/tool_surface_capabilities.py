@@ -348,6 +348,20 @@ WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
     # `test_the_container_write_is_declared_weight_bearing` pins that BOTH halves of
     # this win — the site weighs AND the name is declared — stay).
     "create_entity",
+    # ⛔ #11609 lane P7 (#14237 review F1): the relation-decided `link_entities` arm DOES
+    # create a Point — an epistemic relation (`supports`/`refutes`/
+    # `mutuallySupportive`/`mutuallyExclusive`) routes through `SEMANTICS_MECHANISMS` to
+    # `create_operator` — that is the LIVE rule (#14237 N2). `operator=True` is NOT a path
+    # this helper sees: the handler takes an explicit `operator=true` (like any LIST
+    # target) to its OPERATOR arm, which passes `abuse_weight=1` directly. Its `_quota_gated`
+    # site passes `abuse_weight=_link_entities_scalar_abuse_weight`, a CALLABLE for the
+    # same reason `create_entity`'s is: a plain edge (`performs`, `ownedBy`, `IMPL`) writes
+    # no Point and must record 0, or a linking burst of the most ordinary call this door
+    # serves trips R1. Without this row the partition reds on a site that legitimately
+    # weighs (`wrap_site_violations` → `_quota_gated(link_entities)@…: abuse_weight=True`),
+    # and the tempting green is the fail-open one — dropping the weight to match the
+    # declaration — which `test_abuse_integration.py` forbids in so many words.
+    "link_entities",
 })
 
 # #11609 lane C: four retired methods are still SERVED, through doors that call the
@@ -439,7 +453,7 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # wrap site and the map did not follow: its operator arm wraps
     # `_quota_gated(sdk._create_operator, …)` — `_create_operator` is mapped above — and
     # its relation-decided arm wraps `_quota_gated(sdk.link_entities, …)`
-    # (`mcp_server.py:7925`), which was NOT mapped, so the forward arm reported it as an
+    # (`mcp_server.py:7972`), which was NOT mapped, so the forward arm reported it as an
     # unmapped site and that arm had gone red on `main` with nothing repairing it — the
     # same "a permanently red gate enforces nothing" shape the `update_entity` note above
     # records (surfaced as CI `test-slow`'s only failure at the #14232 head: `unmapped
@@ -448,14 +462,25 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # reaches the same node/edge writers and is NOT gated inside the SDK), which is
     # exactly why the pair must be DECLARED here rather than waved through: an entry is
     # what makes the door's write classification checkable.
-    # Measured, not inferred: that door IS in the derived `WRITE_TOOL_NAMES`, so the
-    # binding is unambiguous; the method is NOT in `WEIGHT_BEARING_METHODS` and its site
-    # carries `abuse_weight=False`, the consistent pair the weight arm wants, so no other
-    # declared set moves.
-    # ⛔ The two halves above were added INDEPENDENTLY — #14232 here and the same row on
-    # `main` — in different regions of this map, so the union merge kept BOTH literals:
-    # a duplicate key, repo-wide ruff `F601`, and, had the linter allowed it, Python
-    # silently keeping the LAST. One entry is the whole declaration; this row is it.
+    #
+    # #14237 review N3 adds the other half of the reason: `tortoise_link_entities`
+    # absorbed `tortoise_create_edge` AND `tortoise_create_operator`, so the declaration
+    # was owed the moment it landed — the forward arm reported
+    # `unmapped _quota_gated wrap sites: ['link_entities']` at the BASE commit too
+    # (`test_no_write_tool_counted_as_read` was already red on main in P7's wake). The map
+    # must be live in BOTH directions, so an undeclared write surface is the same stale-gate
+    # defect as a declared one with no wrap site.
+    # ⛔ The two halves above were added INDEPENDENTLY — #14232 on `main` and #14237 here —
+    # in different regions of this map, so a union merge keeps BOTH literals: a duplicate
+    # key, repo-wide ruff `F601`, and, had the linter allowed it, Python silently keeping
+    # the LAST. One entry is the whole declaration; this row is it.
+    # ⚠️ The merged tree does NOT take `main`'s version of this note unchanged: `main`'s
+    # clause "the method is NOT in `WEIGHT_BEARING_METHODS` and its site carries
+    # `abuse_weight=False`" was true only while `main` lacked P7's weighting. Here the
+    # method IS declared in `WEIGHT_BEARING_METHODS` and the site passes
+    # `abuse_weight=_link_entities_scalar_abuse_weight` (`mcp_server.py:7973`) — the
+    # CALLABLE pair `create_entity` uses, because a plain edge creates no Point. Merging
+    # `main`'s clause verbatim would have published the opposite of the tree's state.
     "link_entities": "tortoise_link_entities",
 }
 
