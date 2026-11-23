@@ -191,7 +191,8 @@ Rules that hold regardless of granularity or policy:
     "refs": {"pA": "01J8…", "pB": "01J8…", "src1": "…"}
   },
   "nudges": [],
-  "warnings": []
+  "warnings": [],
+  "relation_declarations": []
 }
 ```
 
@@ -240,6 +241,7 @@ with its primitive result and a `deduped` flag:
   "ids": {"points": ["01J8…"], "entities": [], "sources": [], "connections": [], "refs": {}},
   "nudges": [],
   "warnings": [],
+  "relation_declarations": [],
   "results": [
     {"section": "points", "index": 0, "ref": "pA", "item": {"tags": ["x"]},
      "result": {"id": "01J8…", "pointKind": "statement", "status": "draft", "content": "A implies B"},
@@ -259,6 +261,22 @@ Granular `results[].result` shapes per connection route:
 | Operator route (mitigation / `reify:true` / **plain IMPL/NAND with a plain `:Point` endpoint**) | `{"operator_id": "<id>", "deduped": bool}` |
 | Direct-edge route (operator-less — **no `:Point` endpoint**) | `{"direct_edge": "IMPL", "from": "<pid>", "to": "<pid>", "deduped": bool}` |
 | Relation route | `{"relation": "<pred>", "from": "<id>", "to": "<id>", "deduped": bool}` |
+
+Every row above may also carry two OPTIONAL keys, and they answer DIFFERENT
+questions — a client validating an exact key set must allow them, not require
+them:
+
+- **`relation_declaration`** — the pair judgement for this write (§3.3). Present
+  ONLY when the relation-PAIR leg reported one; absent when it accepted the pair
+  or had nothing to judge ("Absent judgements are silent by design", §3.3).
+- **`warnings`** — the door's warnings for this connection. When the pair leg
+  reports, its per-target entries live here (`undeclared_relation_pair` /
+  `reversed_relation_pair`, §3.3 — `relation_declaration` is only the FIRST of
+  them), but ⛔ the list is NOT pair-only: the `#1934` predicate leg
+  (`undeclared_relation`) and the mechanism leg (`mechanism_mismatch`) append to
+  the same list, so `warnings` can be present with **no**
+  `relation_declaration` beside it. It is absent only when the door warned about
+  nothing at all.
 
 ### 2.4 Both policies
 
@@ -288,6 +306,7 @@ policy):
 | `ids` | `{points[], entities[], sources[], connections[], refs{}}` | The ids/urls the bundle produced or matched, plus the ref table. |
 | `nudges` | `[]` | Advisory only, never enforced. |
 | `warnings` | `["<key>:<ids>:<detail>", …]` | Divergences the engine noticed (never fatal). Each entry is a key-prefixed string — the key is the §3.2 closed-set token, then the affected ids, then any context (colon-delimited). A warning key outside the §3.2 table is a divergence. |
+| `relation_declarations` | `[{outcome, predicate, from, to, target, connection, fromId, toId, …}, …]` | **Always present** (empty when nothing was reported, so the key set is stable). The relation-PAIR leg's verdicts for this bundle's connections, rolled up from the connect doors — see [§3.3](#33-relation_declarations--the-relation-pair-legs-report-14263). It is deliberately NOT a §3.2 warning key: that key set is a CLOSED enumeration whose new members must land in the upstream-authored served skill mirror first, while this field is a report the caller branches on. |
 | `results` | per-item array | Granular mode only. |
 
 `ids["connections"]` descriptor shapes:
@@ -339,6 +358,145 @@ enumeration** — a warning key outside this table is a divergence; report it.
 > `created.entities: 2` and `warnings: []` — and the missing emission is
 > **#10899**. Treat `warnings[]` as a bonus signal, never as your duplicate
 > detector: compare `created` and `ids` across a retry (§15).
+
+### 3.3 `relation_declarations` — the relation-PAIR leg's report (#14263)
+
+The packs declare which **kind pairs** each relation predicate connects. Ingest
+is warn-not-block (`#1934`, governance D1/D2): the connection is written exactly
+as asked and any judgement about the pair is **reported**, never used to refuse.
+That judgement is `out["relation_declarations"]`.
+
+```json
+{
+  "outcome": "undeclared_pair",
+  "predicate": "assignedTo",
+  "from": "dev:api",
+  "to": "dev:database",
+  "target": "01J8…",
+  "connection": "c1",
+  "fromId": "01J8…",
+  "toId": "01J8…",
+  "rule": "relation-pair-not-declared",
+  "declaredFor": [
+    {"fromKind": "pm:card", "toKind": "Subject"},
+    {"fromKind": "venture:actionItem", "toKind": "Subject"}
+  ],
+  "declaredBetweenTheseKinds": ["dependsOn"],
+  "override": null,
+  "undo": "none — the write was stored exactly as asked",
+  "message": "relation 'assignedTo' is not declared between dev:api and dev:database …"
+}
+```
+
+- ⛔ **`rule` is `relation-pair-not-declared`** (or `relation-pair-reversed` for the
+  reverse pair) — `relation_guards.py`'s `RULE_UNDECLARED` / `RULE_REVERSED`. The
+  `undeclared_relation_pair` spelling is the `warnings[]` entry's `code` **for this
+  outcome** (§3.2; a reversed pair carries `reversed_relation_pair` — see the
+  bullet below), a **different field on a different object**; a client that
+  branches on `rule` will never match it against `code` (#14284 review F2).
+  `tests/test_relation_guards_14263.py::TestTheContractExampleIsTheEmittedPayload`
+  compares the nine `STABLE` fields of this block (`outcome`, `predicate`,
+  `from`, `to`, `rule`, `declaredFor`, `declaredBetweenTheseKinds`,
+  `override`, `undo`) to a real emitted payload, so THOSE cannot drift
+  silently — a field ADDED to the payload still needs an
+  example line here. That pin is stronger than the compared set: it ALSO asserts
+  `set(emitted) - {target, connection, fromId, toId, message} == STABLE`, so a
+  field added to the PAYLOAD reds it. What it cannot see is an extra key in THIS
+  example block (round-6 review, P3 — the earlier wording claimed the pin checks
+  only the compared set, i.e. the exact opposite of what it asserts). The example
+  is a FORWARD write, so it carries no `direction` key and the pin additionally
+  asserts that absence. ⛔ `direction` is therefore NOT compared to a payload by
+  that pin (round-7 review, P3 — the earlier wording read as if it were): the
+  reversed value is pinned BEHAVIOURALLY, by
+  `TestTheJudgedPairFollowsTheDeclaredDirection` and the reversed-rollup row in
+  `TestIngestCarriesTheReport`, never against this example.
+- ⛔ **`declaredFor` is what the predicate IS declared for — never the pair being
+  judged.** If it listed this example's own `dev:api -> dev:database` together with
+  `outcome: undeclared_pair`, the block would contradict itself (that was the
+  pre-#14284 draft).
+- **One entry per REPORTED target.** A `to` list with several targets produces
+  one entry per target that was reported, each carrying its own `target` id —
+  the same shape the connect doors return individually. `connection` is the
+  request's `ref` (or the connection index), `fromId`/`toId` are the graph ids.
+- **Absent judgements are silent by design.** An `accept` (the pack declares
+  this predicate for this pair), a re-spelling of a declared predicate (applied
+  silently — the declared spelling is what gets WRITTEN) and every abstention
+  contribute NOTHING. ⚠️ That "applied" half holds on the operator, direct and
+  `create_edge` doors; on a `{"relation": …}` connection a re-spelled predicate
+  is REFUSED by Phase-1 validation (`_check_connection` tests the canonical
+  allow-list), so the same edge that `create_edge("HASPART", …)` writes is
+  rejected here — a route asymmetry filed as #14300, not something this
+  section's silence covers. An empty list is the normal, common case: a bundle of
+  `ownedBy`/`hasPart` edges between declared pairs reports nothing at all.
+- **Every connection ROUTE reports, the relation route included.** A
+  `{"relation": …}` connection is written through the projection primitive, so
+  it reaches no connect door — the rollup computes the same judgement for it
+  (round-3 review of PR #14284, F1: before that it stayed silent for
+  `hasPart`/`dependsOn`/`ownedBy`, all three of which are pack-declared and
+  writable on that route).
+- **`fromId`/`toId` follow the JUDGED orientation**, matching `from`/`to`. On a
+  `direction="<-"` write the relation runs target → source, so the entry
+  carries `direction: "<-"` and `fromId` is the connection's `to` — the two
+  halves of one entry never name different nodes (round-3 review, F2).
+- **`direction` is present ONLY on that reversed case**, and its absence is not
+  "no direction declared". The doors resolve an absent direction to the
+  per-op_type default (`bidirectional` for IMPL, `unidirectional` for NAND)
+  before the pair leg runs, and that resolved value is explicitly *not* a
+  declaration, so echoing it here would publish a provenance the caller never
+  gave. The field therefore means exactly one thing — "the judged ends are the
+  reverse of the argument order" — which is the fact a rollup needs to orient
+  `fromId`/`toId`, and it is withheld otherwise (round-4 review, F3; the example
+  above is a forward write and carries no such key). Read the operator/edge for
+  the stored direction.
+  ⚠️ **Which doors can carry it:** only a write whose direction is resolved AND
+  reversed — `create_direct_edge` and `create_operator`, reached directly or
+  through `link_entities`' `IMPL`/`NAND` and epistemic / `operator=True` arms. A
+  `create_edge` write — which is also `link_entities`' **plain-edge arm** — and a
+  `{"relation": …}` connection take no direction at all, so their entries can
+  never be reversed and never carry the key; `link_entities`' derivation and
+  provenance arms report NO entry (they judge no relation). ⛔ Read an absent key
+  as "the judged orientation is the argument order" — never as a missing field,
+  and never as "the caller declared no direction": the doors resolve a default
+  (`bidirectional`/`unidirectional`) and that value is deliberately NOT published
+  (round-5 review, F1; corrected by round-4 review, F3, which found the earlier
+  wording describing a payload the code no longer emits).
+- **A resubmission that mints nothing is not automatically a resubmission that
+  reports nothing — it depends on whether a DOOR ran, and the ABSORB arm is a
+  third case.** The operator route's exact-dedup arm writes no edge and calls no
+  door, so it carries no fresh judgement — the same reason `ids["connections"]` is
+  stable across a retry. ⛔ The **direct-edge** route is the opposite:
+  `_create_direct_edge` runs on every attempt and judges the pair whether or not
+  the MERGE created anything, so a `reify: false` connection that dedups
+  (`deduped: true`, `created.connections` unchanged) still carries its entry, so
+  THAT route's report is IDEMPOTENT — the same entry on the first write and on
+  every retry. ⛔ Scoped to that route: on the operator route the identical
+  resubmission reports NOTHING (pass 1's entry is not re-emitted, because no door
+  ran), so read stability as per-route, never as a property of the field — a
+  client diffing rollups across a retry must not read a vanished operator-route
+  entry as a graph change. Read the payload as "the pairs this pass JUDGED", never
+  as "the pairs this pass wrote": on the direct route the two differ exactly on a
+  dedup hit (round-8 review, P3, corrected by round-9 review — this bullet
+  previously stated the absolute "a resubmission that mints nothing reports
+  nothing", and then an equally absolute "relation_declarations is STABLE across a
+  retry"; the code contradicts both). ⛔ And the **partial-absorb** arm DOES write:
+  it completes an existing operator's input set with one edge per target it did
+  not already hold, so it judges exactly those newly wired targets and reports
+  them like any other write (round-5 review, P1 — this bullet previously claimed
+  the arm "writes no edge", which was false and left a caller growing an operator
+  uninformed about the pair it had just created).
+- **`warnings[].code` keeps the REVERSED and UNDECLARED states DISTINCT.**
+  A per-connection warning carries `code: "reversed_relation_pair"` when the
+  packs declare this predicate for the REVERSE pair, and
+  `code: "undeclared_relation_pair"` when they declare no relation for the pair
+  at all. `docs/ax/ax-principles.md` §2's rule — *"the reported state must not
+  flatten different failures into one label"* — governs here, and `code` is the
+  field a consumer reads without unrolling `relation_declaration`. (Round-2
+  review of PR #14284, F2: both arrived under one code before this, distinguished
+  only by `outcome`.)
+- **NOT a §3.2 warning key**, on purpose: §3.2 is a closed enumeration whose
+  members are mirrored into the upstream-authored skill, while this is a
+  structured report a client branches on. `warnings` stays the string list it
+  always was.
 
 ---
 

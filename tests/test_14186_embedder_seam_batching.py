@@ -2510,6 +2510,50 @@ def test_every_seam_lever_is_cleared_between_tests():
     assert embed_seam.ENV_WORKER_STARTUP_S in embed_seam.SEAM_ENV_LEVERS
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _arm_a_seam_lever_from_an_outer_scope():
+    """Arm ONE seam lever from an OUTER scope, so the clearing row below has something to clear.
+
+    A module-scoped fixture is instantiated BEFORE any function-scoped one, so
+    ``_isolated_embed_seam`` (conftest, function scope, autouse) runs on top of the value set
+    here — the "a developer or CI shell exported a lever" shape from review F8, moved inside the
+    process so the row that grades it stays hermetic instead of depending on the ambient shell.
+    """
+    name = embed_seam.SEAM_ENV_LEVERS[0]
+    had_it = name in os.environ
+    previous = os.environ.get(name)
+    os.environ[name] = "armed-by-an-outer-scope-fixture"
+    try:
+        yield
+    finally:
+        if had_it:
+            os.environ[name] = previous  # type: ignore[assignment]
+        else:
+            os.environ.pop(name, None)
+
+
+def test_the_autouse_fixture_clears_a_lever_an_outer_scope_armed(request):
+    """The autouse fixture must be GUARDED, not merely present.
+
+    ``test_every_seam_lever_is_cleared_between_tests`` above pins the lever CENSUS against the
+    module's ``ENV_*`` constants — and it stays green with the conftest fixture deleted, because
+    it never asserts that the fixture ran. That left 33 lines of load-bearing test
+    infrastructure (``reset_seam()`` plus ELEVEN levers, cleared before every test in the suite)
+    with no row that reddens when it goes. This row closes it in the two directions the fixture
+    can fail: it must be INSTALLED (``fixturenames`` — deleting it, or dropping ``autouse``, reds
+    here) and it must still CLEAR (the lever the module-scope fixture armed is gone — a fixture
+    that runs but stops clearing reds here too).
+    """
+    assert "_isolated_embed_seam" in request.fixturenames, (
+        "the conftest fixture that isolates the embedder seam did not run for this test — its "
+        "absence is silent, because every other row either sets the lever it needs or resets in "
+        "its own finally, so the damage surfaces as unrelated flakiness elsewhere")
+    armed = embed_seam.SEAM_ENV_LEVERS[0]
+    assert armed not in os.environ, (
+        f"{armed} was armed by a module-scope fixture and survived into this test — the fixture "
+        "ran but stopped clearing the seam's levers, which is the leak review F8 recorded")
+
+
 # ── teardown ────────────────────────────────────────────────────────────────
 
 

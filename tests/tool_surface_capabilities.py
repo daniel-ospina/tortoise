@@ -423,12 +423,19 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # `update_knowledge` above.
 
     "_create_edge": "tortoise_create_edge",
-    # ⛔ #14169 (#11609 P7) added the second `_quota_gated(sdk.link_entities, …)` wrap
-    # site — the relation-decided arm of `tortoise_link_entities` — and did NOT re-key
-    # this map, so the forward arm ("unmapped _quota_gated wrap sites") redded `main`
-    # while the door's own write classification stayed green: exactly the drift this
-    # map exists to catch, caught. The key is the WRAP SITE's method; the label is the
-    # live door, which `_ms.WRITE_TOOL_NAMES` already classifies as a write.
+    # ⛔ #14169 (#11609 P7) and #11609 lane P7 each added a `_quota_gated(sdk.link_entities, …)`
+    # wrap site to the `tortoise_link_entities` container — the relation-decided arm and the
+    # operator arm (which wraps `_quota_gated(sdk._create_operator, …)`, `_create_operator` being
+    # mapped above) — and neither re-keyed this map, so the forward arm ("unmapped
+    # _quota_gated wrap sites") redded `main` while the door's own write classification stayed
+    # green: exactly the drift this map exists to catch, caught. The key is the WRAP SITE's
+    # method; the label is the live door, which `_ms.WRITE_TOOL_NAMES` already classifies as a
+    # write. The wrapper is load-bearing rather than decoration (`mcp_server.py` says so at the
+    # wrap: `sdk.link_entities` reaches the same node/edge writers and is NOT gated inside the
+    # SDK), which is exactly why the site must be DECLARED here rather than waved through: an
+    # entry is what makes the door's write classification checkable. ⛔ ONE entry, both
+    # attributions — a second identical key is an F601 lint red (and Python silently keeps the
+    # last one, so the duplicate carried no runtime meaning either).
     "link_entities": "tortoise_link_entities",
     "_ingest": "tortoise_ingest",
     "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
@@ -440,16 +447,6 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "mine_knowledge_from_session": "tortoise_mine_knowledge_from_session",
     "register_source": "tortoise_register_source",
     "manage_source_trust": "tortoise_manage_source_trust",
-    # ⛔ #11609 lane P7 gave the `tortoise_link_entities` container a SECOND quota-gated
-    # wrap site and the map did not follow: its operator arm wraps
-    # `_quota_gated(sdk._create_operator, …)` — `_create_operator` is mapped above — and
-    # its relation-decided arm wraps `_quota_gated(sdk.link_entities, …)`, which was NOT
-    # mapped, so the forward arm reported it as an unmapped site. The second wrapper
-    # is load-bearing rather than decoration (`mcp_server.py` says so at the wrap:
-    # `sdk.link_entities` reaches the same node/edge writers and is NOT gated inside the
-    # SDK), which is exactly why the pair must be DECLARED here rather than waved
-    # through: an entry is what makes the door's write classification checkable.
-    "link_entities": "tortoise_link_entities",
 }
 
 # Tenant-scoped control-plane labels: a registry mutation whose labels are
