@@ -1519,6 +1519,11 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     `members or _REGISTRY_BUILTINS` reinterprets an EMPTY member set as the REGISTRY set, so
     a caller that meant "resolve nothing" would silently get the registry's answer — the
     empty-set-at-a-construction-site hazard `_RegistryCtx` exists to make impossible.
+    ⛔ NO MUTANT CAN RED THIS, AND THAT IS NOT AN INVITATION TO DELETE IT: it is a guard on a
+    CALL-SITE mistake (measured: reverting to `or` leaves all 43 tests green, because no
+    caller passes an empty set today), not a reach-detection clause. The file's "delete what
+    no mutant can red" rule is about arms that pretend to detect a shape; this one prevents
+    the next lane's empty set from silently meaning its opposite.
 
     ⛔ AND THE FETCHER NAME IS RESOLVABLE (#14326 review cycle 3, EACH MEASURED GREEN while
     the read executed): `_g = getattr; _g(builtins, "exec")(…)` and
@@ -2519,15 +2524,14 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
     # alias), which is this file's own reason for resolving rather than listing — the same
     # machinery the getattr/setattr laundering axis uses, asking a different question.
     _builtins_names, _builtins_dict_names = _builtins_root_names(tree)
-    # ⛔ A `from builtins import <callee> as …` IS A STATIC BIND OF THE CALLEE (#14326 review
-    # cycle 3, EACH MEASURED GREEN while the read executed) — the sibling axis has collected
-    # `imported_builtins` since round 30, so not collecting it here was an in-file asymmetry.
-    _imported_code_names = frozenset(
-        (alias.asname or alias.name)
-        for _n in ast.walk(tree)
-        if isinstance(_n, ast.ImportFrom) and _n.module == "builtins"
-        for alias in _n.names
-        if alias.name in _CODE_EXECUTING_CALLEES)
+    # ⛔ A `from builtins import <callee> as …` NEEDS NO ARM HERE (#14326 merge with the
+    # sibling lane's `490ae765a6`). This function carried one, and a mutant MEASURED it INERT
+    # on the merged tree: `_aliases_of`'s `ImportFrom` arm now resolves that bind for EVERY
+    # axis (its `builtins` member set IS `_CODE_EXECUTING_CALLEES`), so the arm reddened no
+    # row — and the file's own rule is to DELETE a clause no mutant can red rather than leave
+    # it reading as an independent check. The row it pinned is the sibling's
+    # `IMPORTED `exec` (`from builtins import exec as _run`)`; a second row for one clause is
+    # the double-pinning the file declines.
     #: The FETCHER names resolved too: `_g = getattr; _g(builtins, "exec")(…)` and
     #: `_dg = dict; _dg.get(_d, "exec")(…)` were GREEN, and the sibling axis has resolved
     #: `_g = getattr` since round 21 (a hard-coded name there would be the same asymmetry).
@@ -2535,7 +2539,7 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         tree, lambda n: isinstance(n, ast.Name) and n.id == "getattr", loops=True))
     _dict_fetchers = frozenset({"dict"}) | frozenset(_aliases_of(
         tree, lambda n: isinstance(n, ast.Name) and n.id == "dict", loops=True))
-    _code_executing_names = _CODE_EXECUTING_CALLEES | _imported_code_names | frozenset(_aliases_of(
+    _code_executing_names = _CODE_EXECUTING_CALLEES | frozenset(_aliases_of(
         tree,
         lambda n: (isinstance(n, ast.Name) and n.id in _CODE_EXECUTING_CALLEES)
         or (isinstance(n, ast.Attribute) and n.attr in _CODE_EXECUTING_CALLEES
@@ -6496,9 +6500,6 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    _d = builtins.__dict__\n'
             '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
-        "`from builtins import exec as _e`": (
-            '    from builtins import exec as _e\n'
-            '    _e("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         "ALIASED `getattr` fetching `exec`": (
             '    import builtins\n'
             '    _g = getattr\n'
