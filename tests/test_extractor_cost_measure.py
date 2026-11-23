@@ -1255,6 +1255,65 @@ def test_a_report_whose_calls_were_lost_is_incomplete():
         "more pipeline calls than recorded calls means calls were lost")
 
 
+def test_a_retried_stage_is_not_mistaken_for_lost_calls():
+    """⛔ The OVER-BLOCK: `pipeline.calls` counts ATTEMPTS, not successes.
+
+    `_rollup_llm` does `llm_stats["calls"] += stage_stats.get("attempts", 0)`
+    (`tortoise/extractor_v2.py:16719`) and `_complete` sets `attempts=attempt`
+    only on the SUCCESSFUL attempt, so a transient 429/5xx that succeeds on
+    retry adds +1 to `pipeline.calls` with no call recorded by `_Recording`.
+    Comparing the two without the retry count flagged a fully-measured run as
+    INCOMPLETE and made `compose` exit 1 — refusing a valid artifact and
+    sending the next lane to re-spend until it got a retry-free run.
+    """
+    retried = _complete_artifact()
+    retried["pipeline"] = {"calls": 4, "retries": 1, "errors": []}
+    report = m.compose_report([retried])
+    assert report["complete"] is True, (
+        "a run whose only excess is one recorded RETRY is complete")
+    assert "INCOMPLETE" not in m.render_compose(report)
+    # …and the excess is still a verdict when no retry explains it.
+    unexcused = _complete_artifact()
+    unexcused["pipeline"] = {"calls": 4, "retries": 0, "errors": []}
+    assert m.compose_report([unexcused])["complete"] is False, (
+        "an excess that retries do NOT explain is still lost calls")
+
+
+def test_the_compose_command_exits_nonzero_on_an_incomplete_live_run(
+        monkeypatch, tmp_path):
+    """⛔ The exit code is the only machine-readable signal a scripted re-runner
+    has. Deleting the `return 1` in main's `compose` branch left every other pin
+    green while the process reported SUCCESS over a table that says
+    "NOT A MEASUREMENT" (review cycle 7, P2).
+
+    Three arms: a complete live run (0), a live run missing a stage (1), and
+    `--offline` (0 — a documented shape check with its own banner).
+    """
+    monkeypatch.setattr(m, "pick_corpus",
+                        lambda **kw: [{"path": "README.md", "tokens": 10}])
+
+    def _run(artifact, *, offline=False):
+        monkeypatch.setattr(m, "compose_one", lambda **kw: artifact)
+        argv = ["compose", "--doc", "README.md", "--out",
+                str(tmp_path / "compose.json")]
+        if offline:
+            argv.append("--offline")
+        return m.main(argv)
+
+    assert _run(_complete_artifact()) == 0, "a complete live run must exit 0"
+
+    partial = _complete_artifact()
+    partial["calls"] = [c for c in partial["calls"] if c["stage"] != "s4"]
+    partial["pipeline"] = {"calls": 2, "errors": ["s4: 429"]}
+    assert _run(partial) == 1, (
+        "a LIVE run missing a stage must exit non-zero — exit 0 is how a "
+        "failed run wrote an artifact that read as a measurement")
+
+    stub = _compose_artifact(live=False, calls=[_call(sections={})])
+    assert _run(stub, offline=True) == 0, (
+        "--offline is exempt: it is a documented shape check")
+
+
 def test_a_stub_run_is_exempt_from_the_incomplete_marker():
     """`--offline` is a documented SHAPE check: it has its own banner and must
     not be double-flagged, or the two markers become indistinguishable."""
@@ -1262,3 +1321,40 @@ def test_a_stub_run_is_exempt_from_the_incomplete_marker():
     rendered = m.render_compose(m.compose_report([stub]))
     assert "OFFLINE / STUB TRANSPORT" in rendered
     assert "INCOMPLETE LIVE RUN" not in rendered
+
+
+def test_the_source_transcript_tail_is_subtracted_before_the_per_call_medians():
+    """⛔ `_render_regions` renders with `edus=None`, so it carries NO transcript
+    tail — while `render_s2_prompt` / `render_s4_prompt` append
+    `_render_source_transcript(edus)` OUTSIDE `_fill_template` whenever the
+    document's EDU text fits `_SOURCE_TRANSCRIPT_CAP`. The residual solve
+    `story = pc2 - s2_sys - clause` therefore booked that block into
+    "S1's story, re-sent to S2 and S4" until the per-call medians subtracted it.
+
+    ⛔ AND IT WAS UNPINNED: reverting `pc.append(... - tail)` to the raw median
+    and re-running the documented command left every test green, because
+    `test_the_documented_reproduce_command_regenerates_the_committed_bundle`
+    compares artifact-to-code, never code-to-truth (review cycle 7, P1). This is
+    the code-to-truth half: the published per-call figure must be STRICTLY below
+    the raw median it was derived from, and the tail's own count must be the
+    measured one.
+    """
+    rows = m.load_rows(_REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
+                       / "measurements.jsonl")
+    dec = m.decompose(
+        rows,
+        receipts=(_REPO_ROOT / "tests" / "eval" / "write_path" / "receipts"
+                  / "7947-arms-2026-10-18"))
+    assert dec["source_transcript"]["documents_with_a_tail"] == 9, (
+        "the number of corpus documents carrying a SOURCE TRANSCRIPT tail moved "
+        "— re-measure it rather than assuming the subtraction is still right")
+    docs = [r for r in rows
+            if r.get("arm") == "cold" and r.get("kind") == "doc"
+            and not r.get("failed") and (r.get("stages") or {}).get("s2")]
+    raw = statistics.median(
+        r["stages"]["s2"]["prompt_tokens"] / r["stages"]["s2"]["calls"]
+        for r in docs)
+    assert dec["per_call"]["s2"]["prompt"] < raw, (
+        f"the published S2 per-call prompt ({dec['per_call']['s2']['prompt']}) "
+        f"is not below the raw median ({raw}) — the transcript tail is back "
+        f"inside the story row, which is the misattribution this pins out")

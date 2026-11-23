@@ -1615,6 +1615,8 @@ def compose_one(*, doc: dict, master: dict | None = None,
         "session_date": session_date,
         "calls": calls,
         "pipeline": {"calls": out.get("stats", {}).get("llm", {}).get("calls"),
+                     "retries": out.get("stats", {}).get("llm", {}).get(
+                         "retries"),
                      "story_chars": len(out.get("story_arc") or ""),
                      "errors": list(out.get("errors") or [])[:5]},
     }
@@ -1759,9 +1761,15 @@ def _row_complete(row: dict) -> bool:
         return False
     emitted = sum(int(v.get("calls") or 0) for v in stages.values())
     made = pipe.get("calls")
-    # `pipeline.calls` is the pipeline's own LLM counter: it can only EXCEED
-    # what the instrument recorded if calls were lost between the two.
-    return made is None or int(made) <= emitted
+    # ⛔ `pipeline.calls` is the sum of ATTEMPTS, not of successful calls:
+    # `_rollup_llm` does `llm_stats["calls"] += stage_stats.get("attempts", 0)`
+    # (`tortoise/extractor_v2.py:16719`) and `_complete` sets `attempts=attempt`
+    # only on the SUCCESSFUL attempt. So a transient 429/5xx that succeeds on
+    # retry adds +1 here with no call recorded by `_Recording` — and comparing
+    # the two WITHOUT the retry count flagged a fully-measured run as INCOMPLETE
+    # and made `main` exit 1, refusing a valid artifact and sending the next
+    # lane to re-spend until it got a retry-free run (review cycle 7, P2).
+    return made is None or int(made) <= emitted + int(pipe.get("retries") or 0)
 
 
 def _merge_sections(a: dict, b: dict) -> dict:
