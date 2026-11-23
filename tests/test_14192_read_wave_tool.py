@@ -12272,8 +12272,8 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     round-33 review found in the import-path axis: a sentence excusing a lever while naming a
     declaration that did not exist.
 
-    ⛔ AND THE SENTENCE ABOVE WAS TOO BROAD (#14393, MEASURED GREEN **and LIVE** on `23c8b57adb`,
-    ONE node of composition past the arms that ARE closed):
+    ⛔ AND THE SENTENCE THIS ONE REPLACED WAS ALSO TOO BROAD (#14393, MEASURED GREEN **and LIVE**
+    on `23c8b57adb`, ONE node of composition past the arms that ARE closed):
 
         vars(dict).get("get")(builtins.__dict__, "exec")(<read>)
 
