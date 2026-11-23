@@ -5116,6 +5116,29 @@ surfaces:
   # — the `CORE_ALSO` row in `tools/ci_selection.py` is what makes a runner-only
   # diff select this arm at all.
   - test_record_runner.py
+  # #7879 (the epic's own acceptance line) — the CHAIN: a live write reaches the
+  # record AS A ROW WITH ITS VECTOR, and the dense leg answers it with
+  # `mechanism: pgvector`; delete the graph's copy and the record still answers;
+  # delete the RECORD row and the leg reports `scan_fallback` instead. Plus the
+  # runner's own LIVE legs (plan → refusal → apply → no-op), which
+  # `test_record_runner.py` above cannot carry: that suite is DB-FREE by
+  # construction and its comment says so — *"its live proof … is the PR body's,
+  # and its DB-level half belongs to the `test-record-postgres` lane"*. This is
+  # that half.
+  # ⛔ `core` is the arm that carries it, for the reason the rows above state and
+  # MEASURED here: the subjects are `tortoise/record_writer.py`, `tortoise/sdk.py`
+  # and `tortoise/record_vector.py` — the first and the last match no
+  # SOURCE_PATTERN, so a diff to the coverage gate or the live seam takes the
+  # `core` fallback, and `sdk.py` is a `SHARED_MODULES` entry that selects the
+  # FULL matrix anyway. An unregistered file is not merely an `--integrity` red:
+  # NO job collects it, so the epic's acceptance sentence would go back to having
+  # no falsifier — which is the state this file was written to end (measured at
+  # `0fbfbb5b210`: the chain's removal reds 20 write-side cases and exactly ONE
+  # read-side unit pin).
+  # DB-GATED, NOT DB-FREE: every leg skips by name without `TEST_RECORD_DB_URI`,
+  # and `test-record-postgres` lists it, where the leg gate (#9551) fails the job
+  # on ANY skip — which is what makes the armed run real rather than absent.
+  - test_7879_record_chain.py
   # The LIVE half: parity on a real Postgres and S9 with the cache copy
   # destroyed. It needs BOTH stores (`TORTOISE_DB_URI` + `TEST_RECORD_DB_URI`)
   # and no CI job provides both, so it SKIPS VISIBLY (per-test `pytest.skip`,
@@ -15327,6 +15350,7 @@ durations:
   test_reconciliation.py: 0.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.5
   test_record_projection.py: 3.2  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.6
   test_record_runner.py: 0.4  # #7879: an unregistered new test file reds `integrity_problems` on the DURATIONS map too. DB-free. ⛔ No local timing and no CASE COUNT are quoted on purpose — the same rule the rows below state: any figure beside a weight re-stales against the run it came from — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
+  test_7879_record_chain.py: 2.0  # new in #7879 (the epic's acceptance-line guard) — a file a PR ADDS can never carry a CI junit reading yet (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`. ⚠️ MEASURED LOCALLY as context, NOT as the weight: the armed run (`TEST_RECORD_DB_URI` on `pgvector/pgvector:pg16`) measured **8 passed in 129.55 s**, and the unarmed fast-matrix run measures 8 SKIPPED in ~2 s (the module-scope `schema` fixture skips before any work), so 2.0 is right for the shard it is packed in and the armed cost belongs to `test-record-postgres`, not here. ⛔ No local figure is quoted as the weight and no CASE COUNT is quoted on purpose — the same rule the rows above state. `tools/ci_selection.py --integrity` is the authority.
   test_record_reconcile_trigger.py: 2.4  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.2
   test_13337_cache_graph_declaration.py: 4.2  # new in #13337; "a default is not a reading", so the row must EXIST (`api`+`core` above are what put it in `fast_pool()`). What the weight covers: the declaration's source order, the control-plane read's filters, both verbs' flag/whitespace arms and the JSON coordinate are DB-FREE; the store-backed acceptance legs skip without `TEST_RECORD_DB_URI` + `TORTOISE_DB_URI` and are ARMED in `test-record-postgres` — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
   test_record_schema_placement.py: 1.2  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 0.2

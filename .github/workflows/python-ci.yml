@@ -5153,8 +5153,24 @@ jobs:
           # `.[test,postgres]`, so the oracle executes here. Without this line
           # it would run in no CI lane at all, which is the `#9551` "the leg
           # that would catch it never ran" defect one layer down.
+          # #7879: the epic's own acceptance line — *"a live write's dense read
+          # reports the record, not the graph"* — had NO falsifier. Its WRITE half
+          # is pinned by `test_9078_…` (capture) and its READ half by the DB-free
+          # `test_11642_vector_move.py` (the served set) plus the LIVE
+          # `test_11642_vector_move_live.py` (seeded rows), but nothing drove the
+          # chain ONCE from a public write to the dense answer, and nothing could
+          # separate "the record answered" from "the graph answered and the record
+          # happened to hold the same vector" — measured: the two stores return the
+          # SAME id at the SAME distance, so only the leg's own `mechanism` token
+          # tells them apart. So the file is armed HERE, where the DSN and the
+          # driver exist and the leg gate reds on a skip.
+          # Its runner legs also land here rather than in `core`: `test_record_runner.py`
+          # is DB-FREE by construction and its own registration says the DB-level
+          # half belongs to this lane, so plan → refusal → apply → no-op is
+          # executed against the real server instead of described in a PR body.
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
+            tests/test_7879_record_chain.py \
             tests/test_9318_journal_collision.py \
             tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
