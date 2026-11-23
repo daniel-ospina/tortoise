@@ -325,34 +325,87 @@ def test_a_published_flake_id_is_decoded_to_the_id_pytest_printed() -> None:
 
 
 def test_the_nodeid_decode_is_injective_over_the_escapes_pytest_can_write() -> None:
-    """#14366 cycle-2 review P3: an unanchored decode CORRUPTED a correct id.
+    r"""#14366 cycle-4 review P2: the decode must invert ALL of `ascii_escaped`.
 
     pytest's `ascii_escaped` uses `val.encode("unicode_escape")` for a `str`, which
     DOUBLES backslashes, so a parametrize value that is a compiled regex carrying a
-    literal `\\u2014` reaches the raw id as `\\\\u2014`. Measured on the pre-anchor
-    pattern: `_unescape_nodeid(r"a\\\\u2014b")` returned `'a—b'` — it matched the SECOND
-    backslash and turned an id that needed no decoding into a different one, i.e. the
-    fix's own failure mode. `\\\\U` is the arm pytest emits for an ASTRAL value
-    (`'😀'.encode('ascii', 'backslashreplace')` → `b'\\\\U0001f600'`), which neither of the
-    other two arms matches, so an astral parametrize id was still published escaped.
+    literal `\u2014` reaches the raw id as `\\u2014`, and a value carrying a real
+    backslash before an em dash reaches it as `\\\u2014` (an ODD run). `\U` is the
+    arm pytest emits for an ASTRAL value (`'😀'.encode('ascii', 'backslashreplace')`
+    → `b'\U0001f600'`).
 
-    Both are latent at the 2026-11-23 head (the published table carries 0 escaped ids
-    and the one backslash-bearing history id is a genuine single escape), which is
-    why this pin is the artefact rather than a measured red.
+    The pre-fix pattern only inverted `\u`/`\x`/`\U` and used a `(?<!\\)` lookbehind to
+    keep a doubled escape "untouchable" — which is not the same as restoring it: the
+    published id stayed escaped (`tests/test_ci_timing.py` asserted exactly that as
+    intended behaviour, so completing the decode reddened a test), and an odd
+    backslash run left a genuine `\u2014` undecoded because the character before it
+    was `\`. All latent at the 2026-11-23 head (the committed artifact carries 0
+    affected ids), reachable from parametrize values this repo already has.
     """
-    # the ASCII escapes pytest writes are decodable …
+    # every escape `ascii_escaped` can write is decoded …
     assert ci_timing._unescape_nodeid("a\\u2014b") == "a—b"
     assert ci_timing._unescape_nodeid("a\\x41b") == "aAb"
     assert ci_timing._unescape_nodeid("a\\U0001f600b") == "a😀b"
-    # … and a DOUBLED escape is content, not a sequence to decode.
+    assert ci_timing._unescape_nodeid("a\\tb") == "a\tb"
+    assert ci_timing._unescape_nodeid("a\\rb") == "a\rb"
+    assert ci_timing._unescape_nodeid("a\\nb") == "a\nb"
+    # … including the one arm that is a LITERAL. `\\u2014` is what `unicode_escape`
+    # writes for a `\` followed by the TEXT `u2014`, so it decodes back to that text
+    # — the id pytest printed. Leaving it untouched (the pre-fix assertion, below,
+    # used to demand exactly that) is the finding this arm replaces.
     doubled = "a" + "\\\\" + "u2014b"
-    assert ci_timing._unescape_nodeid(doubled) == doubled, (
-        "a doubled backslash is what `unicode_escape` writes for a literal one; "
-        "decoding it rewrites an id that was already correct")
+    assert ci_timing._unescape_nodeid(doubled) == "a" + "\\" + "u2014b", (
+        "`unicode_escape` doubles a literal backslash, so the doubled form decodes "
+        "to one backslash + `u2014b` — the id pytest printed. Returning it unchanged "
+        "publishes an id nothing can look up")
+    # … and an ODD backslash run: a real backslash followed by a real em dash.
+    # A `(?<!\\)` lookbehind skips this `\u2014` (the character before it is `\`),
+    # so the pair rule has to consume `\\` atomically instead.
+    assert ci_timing._unescape_nodeid("\\\\" "\\u2014") == "\\\u2014"
     # Non-vacuity: the fixture ids must actually differ from their decodings, or the
-    # three arms above pass on an identity function.
+    # arms above pass on an identity function.
     assert ci_timing._unescape_nodeid("a\\u2014b") != "a\\u2014b"
     assert ci_timing._unescape_nodeid("plain") == "plain"
+
+
+def test_the_nodeid_decode_inverts_what_pytest_actually_writes() -> None:
+    """The contract is "inverse of `ascii_escaped`", so the pin asks the PRODUCER.
+
+    Restating the alphabet by hand is what let the previous revision ship a partial
+    inverse: the test agreed with the code about which escapes existed. This one
+    takes the escaped form from `_pytest.compat.ascii_escaped` itself — the function
+    whose output reaches the raw `failed_tests` ids — so a change to pytest's escaping
+    (or a missing arm in the decoder) reds here rather than publishing an id that
+    `--collect-only -q` does not print. `pytest` is pinned by `uv.lock`, so the
+    private import is a pinned dependency, not a moving target.
+    """
+    from _pytest.compat import ascii_escaped
+
+    true_ids = [
+        "tests/test_a.py::test_b[x—y]",
+        "tests/test_a.py::test_b[a\\u2014b]",   # literal regex TEXT: doubled by unicode_escape
+        "tests/test_a.py::test_b[\\—]",          # real backslash + em dash: an ODD run
+        "tests/test_a.py::test_b[\\]",           # one backslash
+        "tests/test_a.py::test_b[a\tb]",         # TAB — pytest writes `\t`
+        "tests/test_a.py::test_b[a\rb]",
+        "tests/test_a.py::test_b[a\nb|c]",       # a REAL parametrize value (test_attest_census.py)
+        "tests/test_a.py::test_b[a\x01b]",
+        "tests/test_a.py::test_b[a\x7fb]",
+        "tests/test_a.py::test_b[😀]",
+        "tests/test_a.py::test_b[plain]",
+    ]
+    decoded = [ci_timing._unescape_nodeid(ascii_escaped(t)) for t in true_ids]
+    for true_id, got in zip(true_ids, decoded, strict=True):
+        assert got == true_id, (
+            f"{true_id!r} is escaped by pytest to {ascii_escaped(true_id)!r} and the "
+            f"decoder returned {got!r} — a published id that `--collect-only -q` "
+            "does not print")
+    # Non-vacuity twice over: the fixtures really are escaped, and the decode is
+    # INJECTIVE (distinct ids never collide once decoded — the reason `\t`/`\r`/`\n`
+    # must be decoded too: an undecoded `\t` collides with the decode of a literal
+    # backslash-t id).
+    assert all(ascii_escaped(t) != t for t in true_ids if t != true_ids[-1])
+    assert len(set(decoded)) == len(true_ids)
 
 
 # --- eligible-run selection (ci-timing.yml `find` step) ---------------------
@@ -3829,6 +3882,42 @@ def test_the_flake_table_fences_a_nodeid_that_contains_backticks() -> None:
             f"_md_code_span({text!r}) does not round-trip: it renders "
             f"{ci_timing._md_code_span(text)!r}, which CommonMark parses as "
             f"{_code_spans(ci_timing._md_code_span(text))!r}")
+
+
+def test_a_flake_id_with_control_bytes_cannot_split_the_table_row() -> None:
+    r"""#14366 cycle-4 review P2: decoding `\t`/`\r`/`\n` must not break the table.
+
+    `_unescape_nodeid` now inverts `ascii_escaped`'s three control escapes, and a REAL
+    parametrize value in this repo carries a newline (`tests/test_attest_census.py`
+    parametrizes `"a\nb|c"`). A raw newline inside the cell splits the markdown table
+    row in two — the same failure class (a broken row redding the REQUIRED `docs`
+    check) that the `_md_code_span` fix closed one round earlier — so the JSON keeps
+    the decoded id and the CELL re-escapes it in pytest's own notation.
+    """
+    nodeid = "tests/test_attest_census.py::test_hostile[a\nb|c]"
+    assert "\n" in nodeid, (
+        "the fixture must carry a RAW control byte, or this test is vacuous")
+    flakes = [{"test": nodeid, "run_id": "1",
+               "passed_at": "2026-11-23T05:12:36Z"}]
+    md = ci_timing.render_md(
+        {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
+         "conclusion": "success"},
+        {}, {}, {k: 0 for k in ci_timing.COUNT_KEYS}, False, "4242", [], flakes,
+    )
+    rows = [ln for ln in md.splitlines()
+            if ln.startswith("| ") and "test_hostile" in ln]
+    assert len(rows) == 1, (
+        f"the flake row was split across {len(rows)} lines — a raw newline landed in "
+        "the markdown table cell, which breaks the row and reds the `docs` check")
+    assert rows[0].count(" | ") == 2, f"the row is not three cells: {rows[0]!r}"
+    rendered_cell = rows[0].split(" | ")[0].removeprefix("| ").strip()
+    assert _code_spans(rendered_cell) == [
+        "tests/test_attest_census.py::test_hostile[a\\nb|c]"], (
+        f"the cell renders as {rendered_cell!r}, not as the escape-only form")
+    # The published VALUE (JSON side) keeps the decoded id: it is the lookup key, so
+    # the display escaping must not have leaked into it.
+    assert ci_timing._unescape_nodeid(
+        "tests/test_attest_census.py::test_hostile[a\\nb|c]") == nodeid
 
 
 def test_refresh_durations_is_reproducible(tmp_path: Path) -> None:

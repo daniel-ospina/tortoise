@@ -3827,20 +3827,44 @@ def _dedupe_history(rows: list[dict]) -> list[dict]:
     return out
 
 
-# ⛔ ANCHORED SO IT IS INJECTIVE (#14366 cycle-2 review, P3). pytest's `ascii_escaped`
-# uses `val.encode("unicode_escape")` for a `str`, which DOUBLES backslashes — so a
-# parametrize value that is a compiled regex carrying a literal `\u2014` reaches the
-# raw id as `\\u2014`. Unanchored, `re.sub` matched the SECOND backslash and
-# published `a\—b` for `a\u2014b`: the decode CORRUPTED an id that was already
-# correct. The `(?<!\\)` lookbehind leaves a doubled escape alone. Measured, not
-# assumed: `_unescape_nodeid(r"a\\u2014b")` returned `'a—b'` before this anchor.
-# `\U` (8 hex digits) is the arm pytest emits for an ASTRAL value
+# ⛔ THE DECODE IS THE INVERSE OF `ascii_escaped`, ALL SEVEN ARMS (#14366 cycle-4
+# review, P2). For a `str` pytest runs
+# `val.encode("unicode_escape").decode("ascii", "backslashreplace")` and then
+# `_non_printable_ascii_translate_table`, so the alphabet a stored nodeid can carry
+# is exactly: `\\` (a literal backslash — `unicode_escape` DOUBLES it), `\t`, `\r`,
+# `\n`, `\xXX`, `\uXXXX`, `\UXXXXXXXX`. Verified against the primary source
+# (`_pytest/compat.py`, `_non_printable_ascii_translate_table` maps every byte below
+# 0x20 and 0x7f to `\xXX`, then overrides the three named ones).
+#
+# Two things the previous revision got wrong, both MEASURED on the head module:
+#   * `\\` was never decoded. The lookbehind made a doubled escape UNTOUCHABLE, which
+#     is not the same as restoring it: `a\\u2014b` — the id pytest prints for a
+#     parametrize value that literally contains `\u2014` — came back unchanged, so the
+#     published id was still not an id anything can look up.
+#   * `(?<!\\)` is a PARITY-BLIND rule. For an ODD run (`\\\u2014`: a real backslash
+#     followed by a real em dash) the genuine `\u2014` is preceded by `\`, so it stayed
+#     escaped. Consuming `\\` as a PAIR in this same alternation fixes that by
+#     construction (the scanner consumes two characters atomically, so the next arm
+#     starts after the pair).
+#   * `\t`/`\r`/`\n` are decoded too, and NOT as an optional extra: with `\\` decoded
+#     but `\t` left alone, a real tab (`a\tb`) and a literal backslash-t (`a\\tb` →
+#     `a\tb`) decode to the SAME string, so the decode stops being injective and two
+#     distinct test ids collide in one published row. The control byte that produces
+#     is a RENDER concern (`_md_display_text`), never this function's: this value is
+#     the lookup key and has to be the id pytest printed.
+# `\U` (8 hex digits) is the arm for an ASTRAL value
 # (`.encode("ascii", "backslashreplace")` → `b'\\U0001f600'`), which neither of the
-# other two arms matches — so without it an astral parametrize id was published
-# escaped, contradicting this helper's own "decode what pytest writes" docstring.
+# other arms matches — so without it an astral parametrize id was published escaped.
 _PYTEST_ESCAPE_RE = re.compile(
-    r"(?<!\\)\\u([0-9a-fA-F]{4})|(?<!\\)\\x([0-9a-fA-F]{2})"
-    r"|(?<!\\)\\U([0-9a-fA-F]{8})")
+    r"\\(\\|t|r|n)"
+    r"|\\x([0-9a-fA-F]{2})"
+    r"|\\u([0-9a-fA-F]{4})"
+    r"|\\U([0-9a-fA-F]{8})")
+
+
+#: The four single-character arms: the doubled backslash (a literal one), and the
+#: three named control escapes `ascii_escaped` writes for a tab, CR and LF.
+_PYTEST_NAMED_ESCAPES = {"\\": "\\", "t": "\t", "r": "\r", "n": "\n"}
 
 
 def _unescape_nodeid(nodeid: str) -> str:
@@ -3855,13 +3879,23 @@ def _unescape_nodeid(nodeid: str) -> str:
     file's own `--collect-only -q` prints the decoded text, and 25 of its ids
     carry the escape).
 
+    The contract is the WHOLE alphabet `ascii_escaped` can write — `\\`, `\t`, `\r`,
+    `\n`, `\\xXX`, `\\uXXXX`, `\\UXXXXXXXX` — because a partial inverse with no stated
+    boundary publishes an id that is sometimes the one pytest printed and sometimes
+    not, silently. The three control escapes are decoded here and re-escaped only at
+    the markdown cell (`_md_display_text`); every other arm is decoded and published
+    verbatim.
+
     Applied ONLY where a value is PUBLISHED (`candidate_flakes`' emit). The
     claim logic keeps comparing the RAW strings from `failed_tests`, so the
     emitted table and the JSON cannot disagree with the lists that produced
     them, and a history row written before this fix still matches.
     """
     def _decode(m: re.Match) -> str:
-        return chr(int(m.group(1) or m.group(2) or m.group(3), 16))
+        named = m.group(1)
+        if named is not None:
+            return _PYTEST_NAMED_ESCAPES[named]
+        return chr(int(m.group(2) or m.group(3) or m.group(4), 16))
     return _PYTEST_ESCAPE_RE.sub(_decode, nodeid)
 
 
@@ -3945,6 +3979,32 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
 
 
 # --- rendering --------------------------------------------------------------
+
+# ⛔ A DECODED id can carry a real control byte, and a markdown TABLE CELL cannot
+# (#14366 cycle-4 review, P2). `\t`/`\r`/`\n` are three of the escapes
+# `_unescape_nodeid` inverts, and parametrize values carrying them already exist in
+# this repo (`tests/test_attest_census.py` parametrizes `"a\nb|c"`), so a flake row
+# for such a test would otherwise put a RAW NEWLINE inside the table row: the row
+# splits in two and the required `docs` check reds — the same class of failure the
+# `_md_code_span` repair closed one round earlier. The JSON artifact keeps the
+# decoded id (it IS the lookup key); only the DISPLAY re-escapes, in pytest's own
+# notation, so the cell reads as the escape it is instead of a broken row.
+_CONTROL_DISPLAY = {"\t": "\\t", "\r": "\\r", "\n": "\\n"}
+
+
+def _md_display_text(text: str) -> str:
+    """`text` with control characters re-escaped so a table cell cannot break."""
+    out: list[str] = []
+    for ch in text:
+        named = _CONTROL_DISPLAY.get(ch)
+        if named is not None:
+            out.append(named)
+        elif ord(ch) < 0x20 or ord(ch) == 0x7f:
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
 
 def _md_code_span(text: str) -> str:
     """`text` as a CommonMark code span its own content cannot close.
@@ -4084,8 +4144,12 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
             # parametrize-controlled and can contain backticks, which a
             # single-backtick span cannot hold (19 MD038 findings on the
             # 2026-11-23 render, `docs` red). See the helper's docstring.
+            # ⛔ `_md_display_text` INSIDE the span: the decoded id may carry a real
+            # control byte, and a raw newline would split this table row in two
+            # (see `_md_display_text`). The JSON keeps the decoded id.
             lines.append(
-                f"| {_md_code_span(f['test'])} | `{f['run_id']}` | {cell} |")
+                f"| {_md_code_span(_md_display_text(f['test']))} | "
+                f"`{f['run_id']}` | {cell} |")
     else:
         # Asterisk, not underscore: MD049 (`consistent`) keys on the document's
         # FIRST emphasis, and the `*candidate flake*` blockquote above it is
