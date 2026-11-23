@@ -3886,12 +3886,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     break
                 time.sleep(0.1)
             if proc.pid not in pids:
-                # ⛔ THREE EXITS, SPLIT ON WHAT HAPPENED TO THE FIXTURE (#5049 rules 1 and 4;
-                # measured on `pi-runner-cell3-x64-1` 2026-11-23). A wall-clock expiry must
-                # never produce a FAIL, but the pin's discriminating power is "a `-ww`-less
-                # census misses a LIVE child" — which the `rc is None` exit below still fails.
-                # Those are different facts, and before this split the test could not tell them
-                # apart:
+                # ⛔ FOUR EXITS, SPLIT ON WHAT ACTUALLY HAPPENED TO THE FIXTURE (#5049 rules 1
+                # and 4; measured on `pi-runner-cell3-x64-1` 2026-11-23). A wall-clock expiry
+                # must never fail on a LIVE subject — but it MUST fail when the FIXTURE died on
+                # its own, because the property was then never testable and a skip would be a
+                # permanent green. The pin's discriminating power is "a `-ww`-less census misses
+                # a LIVE child" — which the `rc is None` exit below still fails. Those are
+                # different facts, and before this split the test could not tell them apart:
                 #
                 #   FAILED … test_pi_processes_sees_a_real_long_path_lane — … invisible to the
                 #   census for 10s of polling (pids seen: [1104635]; the table's row for the
