@@ -48,17 +48,16 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On the tree this sentence was
-# re-derived on (`main` at `4993fa083f`, plus #14371's own `core` registration
-# `tests/test_14371_offline_embed_json.py`, which is the row that re-packed it) the same verb packs
-# six shards at 836.6 s (a, b, c, i, j, k) and five at 836.5 s (d, e, f, g, h), so
-# `ceil(836.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
+# `b2d1e908`, i.e. with #14409's `tests/test_14371_offline_embed_json.py` row AND #14434's
+# re-measure both landed) the same verb packs four shards at 836.8 s (a, d, e, k) and seven at
+# 836.7 s (b, c, f, g, h, i, j), so
+# `ceil(836.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. ⛔ This branch's own `core` row is what moved
-# the partition: on `main` WITHOUT `tests/test_14371_offline_embed_json.py` the same verb packs a
-# different split at the same 836.4/836.3 s, which is why the shard NAMES (not only the seconds) are
-# stated here and graded. ⛔ The MINUTE has stood at 28 m across every reading of this pool from
-# 835.5 s to 836.6 s while the SECONDS moved under it, so NO arithmetic
+# agree by construction rather than by a hand re-read. ⛔ The shard NAMES moved WITH the seconds on
+# this re-derivation (they did not on the previous one), which is why both are stated here and
+# graded rather than only the minute. ⛔ The MINUTE has stood at 28 m across every reading of this pool from
+# 835.5 s to 836.8 s while the SECONDS moved under it, so NO arithmetic
 # on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
 # sentence is GRADED below instead of trusted. That map is the union of both parents'
 # registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038

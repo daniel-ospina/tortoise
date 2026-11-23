@@ -257,7 +257,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # document's prose. Of the 18 rows that survive the cut, all 18 are for the six documents above
     # and are otherwise UNCHANGED: three of them were briefly dropped by this cut because a re-cut
     # keyed on the constants misses a row that spells its path literally, which is the anti-shrink
-    # arm doing its job (#14441 review round 1, P1). The arithmetic, measured by AST against
+    # arm doing its job (#14428 review round 1, P1). The arithmetic, measured by AST against
     # `origin/main:tests/test_12184_shifted_cites.py` rather than counted by hand: the base holds 18
     # surviving rows and this head holds 21. The three that are not survivors are `_CENSUS`'s two
     # probe re-points (the cut's own docstring rewrite moved them one line, and this file's rule is
