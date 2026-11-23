@@ -85,8 +85,7 @@ version: 1
 # `tests/test_14371_offline_embed_json.py` alone it packs six at 836.6 s then five at 836.5 s,
 # #14434's `tests/test_7879_record_chain.py` re-packs it to four at 836.8 s then seven at 836.7 s,
 # and #14220's `tests/test_14186_embedder_seam_batching.py` to the two/nine split above — all three
-# rows at the flat 2.0 s `DEFAULT_FAST_WEIGHT`. That is why the shard NAMES (not only the seconds)
-# are stated here and graded.
+# rows at the flat 2.0 s `DEFAULT_FAST_WEIGHT`.
 # ⛔ The MINUTE has stood at 28 m across every reading of this pool from 835.5 s to 837.0 s while
 # the SECONDS moved under it, so NO arithmetic
 # on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the

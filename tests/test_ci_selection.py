@@ -14228,15 +14228,22 @@ def test_the_emission_block_guard_is_not_vacuous():
         f"{ranged}")
     # A SHARD FIGURE the clause parser cannot read is invisible to the row above — and this
     # is not hypothetical: it is the shape the rebase onto `origin/main` on 2026-11-23 actually
-    # produced (the rebase `_EMISSION_UNREAD_SENTENCE_RE` records above; #14430's body measures
-    # it), where the block held this branch's readable clause AND a stale one that spelled a
-    # RANGE of seconds with a semicolon in its name list. The readable clause was graded, the
-    # stale one was graded by nothing, so the guard could sit GREEN over a block stating two
-    # different emissions. ⛔ No sha is named on purpose: the splice existed only in that
-    # rebase's WORKING TREE and no ref in this repo resolves to a tree carrying it (the block
-    # is at no reachable commit), so a sha here would point at nothing. Do not restore one, and
-    # do not substitute a neighbour's head: every other fixture in this test names a commit
-    # that really holds the shape it describes.
+    # produced (`_EMISSION_UNREAD_SENTENCE_RE` records the same event above; #14430's body
+    # measures it), where the block held this branch's readable clause AND a stale one that
+    # spelled a RANGE of seconds with a semicolon in its name list. The readable clause was
+    # graded, the stale one was graded by nothing, so the guard could sit GREEN over a block
+    # stating two different emissions.
+    #
+    # ⛔ CITE A SHA THAT RESOLVES. This comment first cited `b766b779af`, which is in no ref
+    # (`git cat-file -t b766b779af` -> fatal), and was then rewritten to say the splice is at
+    # "no reachable commit" — which is also false, so the correction repeated the very defect it
+    # was removing. Both halves are reachable today, measured with this module's own helpers:
+    # `dc42c55baa` (on `integration/14296-on-new-main`) is the RANGE-with-semicolon spelling —
+    # four parsed groups but FIVE unreadable shard-figure sentences, the fail-open this arm
+    # exists for — and `4b7e6ecaed`, this PR's own `merge=union` of `origin/main` (an ancestor
+    # of this head), states four groups from two parents' readable clauses with no conflict
+    # markers. The `spliced` fixture below is a HAND-BUILT string, not a checkout of either;
+    # the commits are named so the arm is motivated by a shape a reader can go and check.
     spliced = _emission_block_header(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s "
         "(f, g, i),\n"
