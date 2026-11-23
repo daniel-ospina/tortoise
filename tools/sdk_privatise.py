@@ -1851,7 +1851,30 @@ SWEEP_NAMES = 66
 #: ABOVE ARE KEPT, this file's standing ground rule. The pair below is `--repin`'s own output on
 #: the RESOLVED merge tree, never inherited from either parent (they disagree: this branch's
 #: provisional `11881` against `main`'s `11886`) and never arithmetic across them.
-SWEEP_RESIDUE = (11896, "ea44c5f732d2a97d")
+#: ⛔ RE-CUT AT THIS BRANCH'S MERGE WITH `origin/main` `0fbfbb5b210c` — AND THE RE-CUT REPAIRS `main`'s OWN
+#: RED. `main`'s committed pin at that sha is `(11896, "ea44c5f732d2a97d")`, and `--check` on `main`'s OWN
+#: tree there exits 1 with `untyped receivers left alone (deliberate, reported): 11898`: two untyped
+#: receivers landed on `main` between its last re-cut and this head, so `main` is RED on `surface-guard`
+#: before this branch is involved at all. This cut re-derives the pair from the MERGED tree, so it repairs
+#: that red. ⛔ Those two are RECORDED, not attributed: resolving which rows came from where is
+#: `--report --base`'s work, and this block does not claim it (the blocks above state the same convention).
+#: THIS BRANCH'S OWN CONTRIBUTION IS EXACTLY ONE ROW, measured by `--report --base 28ca66878d` on BOTH
+#: trees — `main` `0fbfbb5b210c` reads **11898** over **861** rows, the merged tree reads **11899** over
+#: **862** — and no row was absorbed in either direction:
+#:   * `proj.g.query` **3650 → 3651** (+1), `tortoise/hosted_api.py::_batch_store_for`:
+#:     `_batch_ingest.GraphBatchStore(proj.g.query)`. #14219's batch layer is handed the project handle's
+#:     own door instead of opening a second one — the ordinary-word receiver shape this pin exists to
+#:     DECLARE and deliberately leaves alone, and `typed references still pointing at a public name` is **0**.
+#: ⛔ A SECOND new shape was REMOVED rather than declared, and that is why this branch is +1 and not +2.
+#: `store.list_batches` (+1) was the batch layer's own store method carrying a RETIRED public SDK name
+#: (`#11609`: `tortoise/sdk_retired.py` maps `list_batches` → `list_knowledge`, and
+#: `archive/sdk-methods/12901-sdk-final/list_batches.py` holds the body). The sweep cannot type the
+#: receiver, so it reported the call as residue — CORRECTLY, because a reader who greps the retired name
+#: finds a live call and no way to tell it from the retired surface coming back. The method is now
+#: `list_recent_batches` (the REST handler keeps the route's own name, which is not a receiver call site).
+#: Re-pin only from a tree whose covering suites are green: `--check` exits 0 on the pair below with
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11899, "527d305da858bb14")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

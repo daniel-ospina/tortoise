@@ -17124,7 +17124,7 @@ async def list_batches(org: dict = Depends(get_current_org_gated)):  # noqa: B00
         # caller in production and not only in a test.
         _recover_org_batches(org)
         store = _batch_store_for(org)
-        rows = store.list_batches(org["org_id"], limit=20)
+        rows = store.list_recent_batches(org["org_id"], limit=20)
         counts = store.batch_counts(org["org_id"], [b.batch_id for b in rows])
         return rows, counts
 

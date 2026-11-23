@@ -600,7 +600,20 @@ class BatchStore(Protocol):
 
     def get_batch(self, org_id: str, batch_id: str) -> Batch | None: ...
 
-    def list_batches(self, org_id: str, *, limit: int = 20) -> list[Batch]: ...
+    def list_recent_batches(self, org_id: str, *, limit: int = 20
+                            ) -> list[Batch]:
+        """The org's most recent batches, newest first.
+
+        ⛔ NOT called `list_batches`: that is a RETIRED public SDK name
+        (`#11609` — `tortoise/sdk_retired.py` maps it to `list_knowledge`, and
+        `archive/sdk-methods/12901-sdk-final/list_batches.py` holds the body).
+        Reusing the spelling on a brand-new store object makes
+        `store.list_batches(...)` read as the retired surface coming back, and
+        `tools/sdk_privatise.py` cannot type the receiver, so it reports the
+        call as residue it deliberately leaves alone. The REST handler keeps
+        the route's own name; only this store method avoids it.
+        """
+        ...
 
     def put_item(self, org_id: str, item: BatchItem) -> None: ...
 
@@ -672,7 +685,8 @@ class InMemoryBatchStore:
             b = self._batches.get((org_id, batch_id))
             return _copy_batch(b) if b else None
 
-    def list_batches(self, org_id: str, *, limit: int = 20) -> list[Batch]:
+    def list_recent_batches(self, org_id: str, *, limit: int = 20
+                            ) -> list[Batch]:
         with self._lock:
             rows = [b for (o, _), b in self._batches.items() if o == org_id]
         rows.sort(key=lambda b: b.created_at, reverse=True)
@@ -835,7 +849,8 @@ class GraphBatchStore:
             estimate=_json_loads(est), cancelled_at=cancelled_at or "",
             cancel_reason=cancel_reason or "", corpus_name=corpus or "")
 
-    def list_batches(self, org_id: str, *, limit: int = 20) -> list[Batch]:
+    def list_recent_batches(self, org_id: str, *, limit: int = 20
+                            ) -> list[Batch]:
         rows = self._q(
             f"MATCH (b:{BATCH_LABEL} {{org_id:$org}}) "
             "RETURN b.id, b.state, b.created_at, b.updated_at, "
