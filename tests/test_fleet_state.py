@@ -4400,13 +4400,17 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
             # `1 failed, 5 passed` for the mutant). A pin that goes QUIET on a constant bump is
             # the same false-PASS class this PR removes.
             # ⛔ AND THE CLOCK IS FROZEN ACROSS THE BURST so its SPAN is structurally ZERO, not
-            # merely "one sample". The implementation spends TWO `time()` calls per erroring
-            # sample (`streak_started`, then the span), so a burst long enough to reach a large
-            # `_CENSUS_ERROR_STREAK` would otherwise accumulate `burst * step_s` and trip the
-            # span bound in the CORRECT implementation too — the same silent retirement, moved
-            # from the count axis to the span axis. Freezing makes the arm independent of BOTH
-            # constants: the mutant's from-`poll_started` span is frozen at ≥ the bound (fires),
-            # the streak's own span is frozen at 0 (does not).
+            # merely "one sample". MEASURED per-sample cost of the implementation's own
+            # `time()` calls, on this very poll (probe, `-k census_error`, clock deltas between
+            # consecutive census entries: `Counter({1: 99, 2: 1})`) — every sample costs ONE call
+            # and only the FIRST erroring sample costs TWO, because `streak_started` is guarded
+            # by `err_streak == 0` and then the span is taken. So without the freeze the streak's
+            # own span grows `(k - 1) * step_s` at its k-th erroring sample, and a burst long
+            # enough to reach a large `_CENSUS_ERROR_STREAK` would trip the span bound in the
+            # CORRECT implementation too — the same silent retirement, moved from the count axis
+            # to the span axis. Freezing makes the arm independent of BOTH constants: the
+            # mutant's from-`poll_started` span is frozen at ≥ the bound (fires), the streak's own
+            # span is frozen at 0 (does not).
             if calls["n"] == late:
                 clock.step_s = 0.0
             elif calls["n"] >= late + burst:
