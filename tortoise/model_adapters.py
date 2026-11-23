@@ -106,7 +106,11 @@ def _cache_hit_tokens(usage: object) -> int:
     return int(raw)
 
 
-#: The flash family runs NON-REASONING on every route (#1790, pilot #1549).
+#: The extraction route runs the flash family NON-REASONING on all three of
+#: its pool members (#1790, pilot #1549). ⛔ NOT "every route", deliberately:
+#: the ASK lane (``build_reader_model``) is out of scope for #14357, and the
+#: eval registry's ``MODELS['deepseek-flash']`` still builds a bare
+#: ``OpenRouterModel`` — that route is #14368, not covered here.
 #:
 #: ONE predicate, THREE pool members (#14357). Before this, the family gate
 #: lived only inside ``DeepSeekDirectModel.complete``, so ``deepseek-direct``
@@ -115,9 +119,13 @@ def _cache_hit_tokens(usage: object) -> int:
 #: default (thinking: high) — the collapse this module records as
 #: *"1500/1500 reasoning tokens, finish_reason=length, ZERO output content"*.
 #: A failover silently changed the extraction's behaviour, and only on the
-#: route nobody watches. Now ``_build_single`` asks THIS predicate for every
-#: member, so the three agree by construction rather than by three comments
-#: that can drift apart (the same gate ↔ MODELS drift hazard #1790 names).
+#: route nobody watches. Now ``_build_single`` asks THIS predicate for the two
+#: HOP members (``openrouter`` / ``venice``) at build time, so they cannot drift
+#: apart from each other or from the family gate (the gate ↔ MODELS hazard #1790
+#: names). ⛔ The ``deepseek-direct`` member is NOT decided here: it returns
+#: before the predicate and hardcodes ``thinking: disabled`` in its own
+#: ``DeepSeekDirectModel.complete``, which is why the ask lane's primary is
+#: suppressed even though ``suppress_reasoning`` is False there.
 #:
 #: Prefix-agnostic (``deepseek/deepseek-v4-flash`` counts) — a prefixed id must
 #: never bypass the gate. ``deepseek-v4-pro`` is deliberately NOT in the set:

@@ -6,10 +6,15 @@ so a call that FAILED OVER ran ``deepseek/deepseek-v4-flash`` at the model's
 default (thinking: high) — the failure mode this same module records as
 *"1500/1500 reasoning tokens, finish_reason=length, ZERO output content"*.
 
-⛔ Every assertion below is on the WIRE BODY (the request ``complete()``
+⛔ Every WIRE-BODY assertion below is on the body (the request ``complete()``
 actually posts), never on the constructor: the class default
 (``disable_reasoning=False``) is exactly where this rotted, so an assertion on
 the constructor would have passed forever while the fallback stayed thinking-on.
+That contract is about the six suppression tests (through ``:243``). The tests
+from ``test_empty_length_response_raises_the_yield_guard`` on are the OTHER
+subject — the yield guard in ``extractor_v2._complete`` (its raise, its
+no-retry decision, and the census entry) — and they are not wire-body assertions;
+see the "the yield guard: an empty extraction never reads as no facts" heading.
 """
 from __future__ import annotations
 
