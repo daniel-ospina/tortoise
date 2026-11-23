@@ -739,7 +739,7 @@ committed `durations` map (re-derived from the map, not restated: registering
 `17.28 m` it read before that entry — the `slow_files` membership takes the file out of the fast pool
 and onto the slow pool, which is the whole of the change: the `durations` weight it was given was the
 flat `DEFAULT_FAST_WEIGHT`, so the row then packed identically to no row at all (measured; the 2026-11-16 sweep has since given it a real reading). Since then the 2026-11-23 sweep re-packed the
-slow pool **up** to `8.59 m` → `17.19 m` (it read `8.18 m` → `16.36 m` at the 2026-11-16 head), which is what the pin now recomputes. The
+slow pool **up** to `8.59 m` → `17.19 m` (it read `8.18 m` → `16.36 m` at the 2026-11-16 head). The
 `test_the_documented_slow_wall_restates_the_committed_maps_own_projection` pin recomputes it) — and
 `test_slow_shards_are_duration_packed_and_meet_the_wall_target` holds it to
 `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m
@@ -833,8 +833,10 @@ If the pool grows, invariant 2 permits a larger cap — and that move is not fre
 `measured_pool` literal in the test is the one input that must be edited with the caps (below). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
 shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `3 × 10.5 m ≈ 31.5 m`,
-slow `2 × 8.59 m ≈ 17.19 m` (the `8.59` above is that per-leg figure rounded up from `6.5933 m`
-plus the `2.0 m` setup allowance; the pin recomputes both halves from the map, and both moved on
+slow `2 × 8.5933 m ≈ 17.19 m` (the `8.59` above is that per-leg figure — `6.5933 m` plus the
+`2.0 m` setup allowance, printed as `8.59`, so take the product on the UNROUNDED leg: `2 × 8.59`
+reads 17.18 and is the same ROUNDED-SUM trap this document forbids ~120 lines above; the pin
+recomputes both halves from the map, and both moved on
 the 2026-11-23 sweep, which re-packed the slow pool — they read `8.18 m`/`16.36 m` at the
 2026-11-16 head), carve-out `1 × 9.54 m ≈ 9.54 m`) and compare each against that same
 matrix's uncapped band before trusting the +17.9 m figure above.
