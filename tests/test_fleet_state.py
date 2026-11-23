@@ -4483,9 +4483,14 @@ def test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail() -> None:
     the helper `_drive_long_path_arm` -> `_verdict_or_fail` and is otherwise a superset — but
     main carries NO row that drives the helper with a skipping stub, so its
     `except pytest.skip.Exception: pytest.fail(...)` branch was left UNGRADED. Measured on
-    main's text: `grep -c 'SKIPPED where' tests/test_fleet_state.py` -> 0. Both of main's call
-    sites pass the real fixture, so a simplification of the helper back to a bare
-    `pytest.raises(...)` would restore the hole with nothing red.
+    main's text: `_verdict_or_fail` appears THREE times — one definition and TWO call sites,
+    both passing the real fixture (`lambda: test_pi_processes_sees_a_real_long_path_lane(...)`)
+    — so nothing stubs a skip into it, and a simplification of the helper back to a bare
+    `pytest.raises(...)` would restore the hole with nothing red. (⛔ NOT `grep -c 'SKIPPED
+    where'` -> 0, which an earlier cut of this paragraph printed: that string lives INSIDE the
+    helper, so its count is 1 on ANY tree carrying `_verdict_or_fail`, witness row or not — it
+    cannot support this inference, and the `-> 0` was a reading of the pre-`10d54ad03d8a` tree.
+    Corrected after review.)
 
     ⛔ AND THE WITNESS ITSELF MUST NOT BE ABLE TO PASS BY SKIPPING (the finding that produced the
     form below). Delegating to the helper inside `pytest.raises` measures `passed, 1 skipped`
