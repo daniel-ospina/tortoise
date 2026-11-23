@@ -2,7 +2,7 @@
 acknowledgement gate, per-item status and cancel.
 
 The layer's own semantics are proved in `tests/test_14219_batch_ingest.py`
-(41 tests, no FastAPI). These tests pin the WIRE: what a client gets back, in
+(no FastAPI). These tests pin the WIRE: what a client gets back, in
 what order, and that acceptance does no work.
 
 No DB is touched: the tenant store is replaced with the in-memory one and the
@@ -10,6 +10,8 @@ batch worker's `submit` is stubbed, so a test observes the handler's own
 behaviour (the ordering of write-then-dispatch) rather than a worker's.
 """
 from __future__ import annotations
+
+import contextlib
 
 import pytest
 
@@ -311,7 +313,10 @@ def test_a_drain_that_dies_mid_item_leaves_it_recoverable(store, monkeypatch):
     coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
     rows = store.items(ORG_ID, batch.batch_id)
     assert rows[0].state is bi.BatchItemState.EXTRACTING
-    assert bi.BatchCoordinator(store).recover(ORG_ID) == [batch.batch_id]
+    # A killed process leaves the claim looking LIVE for one window; a restart
+    # by definition has no process worth honouring, so it takes it back at once.
+    assert bi.BatchCoordinator(store).recover(ORG_ID, stale_after_s=0) == [
+        batch.batch_id]
     assert store.items(ORG_ID, batch.batch_id)[0].state is bi.BatchItemState.QUEUED
 
 
@@ -645,6 +650,8 @@ def test_the_first_batch_touch_after_a_boot_resumes_unfinished_work(
         client, store, monkeypatch):
     """BLOCKING 5: `recover()` needs a CALLER, or "a restart resumes" is prose."""
     monkeypatch.setattr(ha, "_BATCH_RECOVERED", set())
+    # The claim the dead process left behind is older than the reclaim window.
+    monkeypatch.setattr(bi, "BATCH_RECLAIM_AFTER_S", 0.0)
     submitted: list[str] = []
     monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
         "ceiling": 2,
@@ -792,7 +799,11 @@ def test_the_first_touch_does_not_requeue_a_batch_a_live_drain_owns(
 
     # With no live drain the same row IS recoverable — the hook still works.
     # (The org was marked recovered by the first call, so it must be cleared:
-    # that idempotence is `recover()`'s own one-scan-per-tenant contract.)
+    # that idempotence is `recover()`'s own one-scan-per-tenant contract.) The
+    # claim must also be STALE: `BATCH_RECLAIM_AFTER_S` is what stops a poll from
+    # taking a claim a PEER process holds, so a dead-in-this-process claim that is
+    # one second old is deliberately left alone by default.
+    monkeypatch.setattr(bi, "BATCH_RECLAIM_AFTER_S", 0.0)
     ha._BATCH_RECOVERED.discard(ORG_ID)
     assert ha._recover_org_batches({"org_id": ORG_ID}) == [batch.batch_id]
     assert store.items(ORG_ID, batch.batch_id)[0].state is (
@@ -918,3 +929,300 @@ def test_cancelling_an_already_finished_batch_does_not_claim_it_was_stopped(
         "the copy must not tell the customer work was stopped and not charged "
         f"over a completed batch: {body['message']!r}")
     assert "already finished" in body["message"]
+
+
+# ── #14415 review round 3: the three blocking findings, pinned ────────────
+def test_a_breakdown_that_hides_the_leftover_still_re_drives(store,
+                                                            monkeypatch):
+    """⛔ ROUND-3 BLOCKING 1: the re-drive was conditional on the read that broke.
+
+    One graph outage spans `settle()`'s read and the `finally`'s own read
+    back-to-back, so `any(not item.terminal ...)` never evaluated and nothing was
+    enqueued — the round-2 wedge, restored. An unreadable leftover is not
+    evidence of completion: it re-drives blind.
+    """
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_batch_item_runner",
+                        lambda sdk, corpus, org_id: (
+                            lambda item: bi.ItemOutcome(bi.BatchItemState.QUEUED,
+                                                        reason="index lock held")))
+
+    coord = bi.BatchCoordinator(store)
+    batch, _items = coord.submit(ORG_ID, ["/d/a.md"])
+    # The batch's first read succeeds and every LATER one fails: the drain claims
+    # the item, then its settle read and the finally's read both blow up.
+    real_items = store.items
+    calls = {"n": 0}
+
+    def flaky_items(org_id, batch_id):
+        calls["n"] += 1
+        if calls["n"] <= 1:
+            return real_items(org_id, batch_id)
+        raise RuntimeError("graph outage")
+
+    monkeypatch.setattr(store, "items", flaky_items)
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert [bid for _org, bid in ha._BATCH_RETRY] == [batch.batch_id], (
+        "a leftover we could not READ must be re-driven, never assumed finished")
+    assert batch.batch_id not in ha._BATCH_DRAINING
+
+
+def test_a_settle_write_that_failed_leaves_the_row_repaired_not_lagging(
+        store, monkeypatch):
+    """⛔ ROUND-3 BLOCKING 1 arm B: all items terminal, `settle()` lost.
+
+    `any(not item.terminal)` is False, so nothing re-drove and nothing repaired:
+    the row sat `accepted` over finished, charged work for the process lifetime —
+    `complete: false`, `pending: 0` — while ONE pass repairs it to `completed`.
+    """
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_batch_item_runner",
+                        lambda sdk, corpus, org_id: (
+                            lambda item: bi.ItemOutcome(bi.BatchItemState.INDEXED,
+                                                        tokens_in=5)))
+
+    coord = bi.BatchCoordinator(store)
+    batch, _items = coord.submit(ORG_ID, ["/d/a.md"])
+    # Every item lands; only the batch row's write fails.
+    real_put_batch = store.put_batch
+    state = {"fail": True}
+
+    def flaky_put_batch(row):
+        if state["fail"]:
+            raise RuntimeError("put_batch timeout")
+        return real_put_batch(row)
+
+    monkeypatch.setattr(store, "put_batch", flaky_put_batch)
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+    state["fail"] = False
+    # The pass could not write the row, so it must remember the batch…
+    assert [bid for _org, bid in ha._BATCH_RETRY] == [batch.batch_id]
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    # …and the repair pass, with the write working again, settles it.
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+    row = store.get_batch(ORG_ID, batch.batch_id)
+    assert row.state is bi.BatchState.COMPLETED, (
+        f"a lagging row over finished work must be repaired, not left {row.state}")
+    assert [bid for _org, bid in ha._BATCH_RETRY] == []
+
+
+def test_a_retry_pass_never_runs_work_on_a_cancelled_batch(store, monkeypatch):
+    """⛔ ROUND-3 BLOCKING 2: the re-drive could spend AFTER a cancel.
+
+    A drain whose terminal write failed left an item `extracting` with
+    attempts=1; `cancel()` leaves such a row alone (it may be a live runner); the
+    retry tick then re-entered the drain and started a THIRD runner call after
+    the cancel the customer was told would not be charged — measured: three
+    runner calls, 3,000 tokens, row `cancelled`, both items `indexed`.
+    """
+    calls: list[str] = []
+
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+
+    def _runner(sdk, corpus, org_id):
+        def _run(item):
+            calls.append(item.item_id)
+            return bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=1000)
+        return _run
+
+    monkeypatch.setattr(ha, "_batch_item_runner", _runner)
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md", "/d/b.md"])
+    # Item 2 is mid-flight when the process's bookkeeping write fails and the
+    # customer, seeing a stuck batch, cancels.
+    coord.advance(ORG_ID, items[1], bi.BatchItemState.EXTRACTING, attempt=True)
+    coord.cancel(ORG_ID, batch.batch_id, reason="stuck, stop it")
+    before = list(calls)
+
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert calls == before, (
+        f"the retry tick ran {len(calls) - len(before)} runner call(s) after a "
+        "cancel — nothing may run and nothing may be charged after it")
+    after = store.items(ORG_ID, batch.batch_id)
+    assert all(i.terminal for i in after), (
+        f"the dead claim must be settled, not stranded non-terminal: "
+        f"{[(i.ref, str(i.state)) for i in after]}")
+    assert all(i.state is bi.BatchItemState.CANCELLED for i in after)
+    assert store.get_batch(ORG_ID, batch.batch_id).state is bi.BatchState.CANCELLED
+    assert [bid for _org, bid in ha._BATCH_RETRY] == [], (
+        "a cancelled batch must not be re-driven at all")
+
+
+def test_a_claim_re_entered_from_extracting_counts_towards_the_ceiling(store,
+                                                                     monkeypatch):
+    """⛔ ROUND-3 BLOCKING 3: the ceiling never fired on a re-entered claim.
+
+    It lived inside `if fresh.state is QUEUED`, so an item re-driven from a dead
+    `extracting` claim never incremented `attempts`: every retry tick called the
+    runner again, spending real tokens the failed advance never recorded.
+    """
+    calls: list[int] = []
+
+    def _runner(item):
+        calls.append(item.attempts)
+        return bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=7)
+
+    store = bi.InMemoryBatchStore()
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+
+    # The terminal write keeps failing, so the item stays `extracting` and is
+    # re-entered by each pass. The ceiling must bound it.
+    real_put_item = store.put_item
+
+    def failing_terminal_write(org_id, item):
+        if item.state in (bi.BatchItemState.INDEXED,):
+            raise RuntimeError("put_item timeout")
+        return real_put_item(org_id, item)
+
+    monkeypatch.setattr(store, "put_item", failing_terminal_write)
+    for _ in range(bi.BATCH_MAX_ATTEMPTS + 2):
+        row = store.items(ORG_ID, batch.batch_id)[0]
+        # The drain's own per-item guard: a bookkeeping failure must not
+        # abandon the rest, and the item keeps whatever state it reached.
+        with contextlib.suppress(RuntimeError):
+            coord.run_item(ORG_ID, row, _runner)
+
+    assert len(calls) <= bi.BATCH_MAX_ATTEMPTS, (
+        f"the runner was called {len(calls)} times for a bound of "
+        f"{bi.BATCH_MAX_ATTEMPTS} — an unbounded re-entry spends invisibly")
+    final = store.items(ORG_ID, batch.batch_id)[0]
+    assert final.state is bi.BatchItemState.FAILED
+    assert "gave up" in final.reason
+
+
+# ── round 2 blockers ───────────────────────────────────────────────────────
+def test_a_failed_acceptance_leaves_NO_rows_for_a_resume_to_adopt(
+        client, store, monkeypatch):
+    """BLOCKING 2: a 503 that says "nothing was accepted" must be TRUE.
+
+    The items are written before the batch row, so a graph timeout mid-loop used
+    to leave them behind: `pending_batches()` listed them and `recover()` adopted
+    them ("the items ARE the record of accepted work") — so documents the
+    customer was told were refused got ingested and paid for, and the retry the
+    503 invited ingested them a second time.
+    """
+    real_put = store.put_item
+    calls = {"n": 0}
+
+    def _flaky(org_id, item):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise TimeoutError("the graph did not answer")
+        return real_put(org_id, item)
+
+    monkeypatch.setattr(store, "put_item", _flaky)
+
+    r = client.post("/v1/batches",
+                    json={"items": [{"ref": f"/docs/{n}.md"} for n in range(5)]})
+    assert r.status_code == 503, r.text
+    assert "nothing was accepted" in r.text
+
+    assert store.pending_batches(ORG_ID) == [], (
+        "the rejected batch's rows survived — the resume scan would adopt and "
+        "drain documents the customer was told were not accepted")
+
+
+def test_the_drain_charges_the_one_meter_when_an_item_reports_tokens(
+        store, monkeypatch):
+    """BLOCKING 1: a batch that spends must move `capture_extraction`."""
+    from tortoise import metering
+
+    charged: list[dict] = []
+    monkeypatch.setattr(metering, "record_capture_usage",
+                        lambda org_id, **kw: charged.append({"org": org_id, **kw}))
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+
+    def _runner(sdk, corpus, org_id, *_a, **_k):
+        return lambda item: bi.ItemOutcome(bi.BatchItemState.INDEXED,
+                                           tokens_in=700, tokens_out=30)
+
+    monkeypatch.setattr(ha, "_batch_item_runner", _runner)
+    coord = bi.BatchCoordinator(store)
+    batch, _ = coord.submit(ORG_ID, ["/d/a.md"])
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert charged == [{"org": ORG_ID, "tokens_in": 700, "tokens_out": 30}], (
+        "an item that spent tokens did not reach the capture meter — the budget "
+        "the owner mandated would be reported as unused forever")
+
+
+def test_a_zero_token_item_makes_no_ledger_call(monkeypatch):
+    """The current indexer spends nothing: a call would mint a phantom capture.
+
+    `capture_calls` is the denominator that keeps a genuinely-free capture
+    distinguishable from an unmeasured one (#3359), so a no-op item must not
+    burn it.
+    """
+    from tortoise import metering
+
+    called: list[dict] = []
+    monkeypatch.setattr(metering, "record_capture_usage",
+                        lambda org_id, **kw: called.append(kw))
+    item = bi.BatchItem(batch_id="b", item_id="b-0", ref="/a.md")
+    assert bi.record_item_spend(ORG_ID, item) == 0
+    assert called == []
+
+
+def test_a_drain_that_leaves_an_item_queued_is_put_back_on_the_retry_tick(
+        store, monkeypatch):
+    """BLOCKING 3: a retryable verdict must not strand the batch forever."""
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_batch_item_runner",
+                        lambda *a, **k: (lambda item: bi.ItemOutcome(
+                            bi.BatchItemState.QUEUED, reason="lock-held")))
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(ha, "_BATCH_RETRY_THREAD", None)
+
+    coord = bi.BatchCoordinator(store)
+    batch, _ = coord.submit(ORG_ID, ["/d/a.md"])
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    rows = store.items(ORG_ID, batch.batch_id)
+    assert rows[0].state is bi.BatchItemState.QUEUED, "retryable, so still work"
+    assert [bid for _org, bid in ha._BATCH_RETRY] == [batch.batch_id], (
+        "the drain left pending work and queued no re-sweep — the batch would "
+        "sit `running` until the process restarted")
+    assert store.get_batch(ORG_ID, batch.batch_id).state is bi.BatchState.RUNNING
+
+
+def test_the_402_sentence_matches_the_numbers_beside_it(client):
+    """NB9: with no configured allowance there IS no overage to confirm."""
+    r = client.post("/v1/batches",
+                    json={"items": [{"ref": f"/d/{n}.md"} for n in range(100)]})
+    assert r.status_code == 402, r.text
+    detail = r.json()["detail"]
+    est = detail["estimate"]
+    assert est["included_tokens"] is None
+    assert est["overage_usd"] == 0.0
+    assert "expected spend" in detail["message"], detail["message"]
+    assert "expected overage" not in detail["message"]
+    assert "usage_measured" in est, (
+        "the receipt must say whether the spend figure beside it is measured")
+
+
+def test_an_unmeasured_usage_read_is_reported_not_read_as_zero(client,
+                                                              monkeypatch):
+    """NB3: `get_capture_usage` never raises — a fault is a ZERO view.
+
+    Reading that zero as "this team has spent nothing" under-reports the spend in
+    the exact figure the owner mandated, so the receipt carries the flag.
+    """
+    from tortoise import metering
+
+    monkeypatch.setattr(metering, "get_capture_usage",
+                        lambda org_id: {"measured": False, "capture_tokens_total": 0,
+                                        "unmeasured_reason": "read_error"})
+    r = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
+    assert r.status_code == 201, r.text
+    assert r.json()["estimate"]["usage_measured"] is False
