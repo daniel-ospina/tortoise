@@ -3812,19 +3812,21 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: ⛔ EVERY `184 passed` / `173 passed` TOTAL IN THIS WHOLE FILE — ABOVE *AND* BELOW, in this
 #: block, in the `_LONG_PATH_STREAK_TIME_CALLS` commentary, in `test_...` bodies and in the
 #: `:51xx` measured notes — IS `main`'s, MEASURED AT `a7baa98d05` (#14387). This tree carries TWO
-#: MORE tests than main, so each of those totals reads TWO HIGHER here and must be re-measured
-#: rather than inherited: PR #14287 restores
+#: MORE tests than main, so those totals are NOT inheritable — RE-MEASURE EACH SITE, because the
+#: delta differs by site (two measured below): PR #14287 restores
 #: `test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail`, which drives `_verdict_or_fail`
 #: with a STUB and never constructs a child, a census or these constants, and adds the `blip` census
 #: ROW (a prior error, a recovery, then a derived late burst — #14287 review P3). So `184 passed` ->
-#: `186 passed` (verified at `K = 6`), `173 passed` -> `175 passed`, and the FAILING count at
-#: `K >= 20` is `12`, not `11`: unlike the stub row, `blip` DOES read this constant (it jumps the
-#: simulated clock by the bound + 1 s), so it joins the failure. ⛔ It does NOT red through the
-#: `calls["n"] > burst_state["started_at"] + burst` assertion — at `K = 20` EVERY one of the 12
-#: params, `blip` included, reds at the GLOBAL premise (b) above ("the death sample must arrive
-#: BEFORE the poll's deadline"), which runs before the poll, so the blip-specific assertion is
-#: never reached (`12 test_fleet_state.py:4811: AssertionError` under `--tb=line`). Attributed
-#: after review, P3: an earlier cut of this note named that later assertion as the mechanism).
+#: `186 passed` (verified at `K = 6`), and the site that records `11 failed, 173 passed` at `K = 1`
+#: reads `12 failed, 174 passed` here (verified) — the passed delta is ONE there, not two, because
+#: that site's run already fails the peer's row as well. The FAILING count at `K >= 20` is `12`, not
+#: `11`: the peer's `blip` row joins the failure set (it jumps the simulated clock by the bound +
+#: 1 s). ⛔ It does NOT red through the `calls["n"] > burst_state["started_at"] + burst` assertion —
+#: at `K = 20` EVERY one of the 12 params, `blip` included, reds at the GLOBAL premise (b) above
+#: ("the death sample must arrive BEFORE the poll's deadline"), which runs BEFORE the poll at
+#: `:4835` (`assert (20 * 0.5) < 10.0`), so no arm-specific assertion is reached at all.
+#: Attributed after review, P3: an earlier cut of this note named that later assertion as the
+#: mechanism.
 _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 
 #: How many `time()` reads span the STREAK at the sample where the count+span conjunction fires
