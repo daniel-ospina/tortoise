@@ -1887,16 +1887,21 @@ SWEEP_NAMES = 66
 #:     pin was cut: `projection.g.query` +2 (a fake control plane's own accessor) and
 #:     `env.update` +1 (a test double's environment) — ordinary-word receivers of exactly the
 #:     kind this pin exists to DECLARE rather than rewrite;
-#:   * THIS branch's +7, measured per file by running `edits_for` over `origin/main`'s blob and
+#:   * THIS branch's +8, measured per file by running `edits_for` over `origin/main`'s blob and
 #:     the branch's for every file the two differ in: `tests/test_14407_alert_delivery.py`
-#:     `storage.delete` +3 and `super().delete` +2 (the migration tests drive `AlertStore`'s
-#:     delete-to-move legs through a `MemoryStorage` subclass), and `tortoise/alert_store.py`
-#:     `self._storage.delete` +2 (the migration's legacy-object release and its rollback).
+#:     `storage.delete` +4 and `super().delete` +2 (the migration tests drive `AlertStore`'s
+#:     delete-to-move legs through a `MemoryStorage` subclass, and the fourth row is the failed
+#:     write/read test a peer lane landed in `d45e2362` while this merge ran), and
+#:     `tortoise/alert_store.py` `self._storage.delete` +2 (the migration's legacy-object release
+#:     and its rollback).
 #: Neither side legitimises a typed reference: every added row is an untyped receiver, and
 #: `typed references still pointing at a public name: 0` on this tree.
-#: `11901 + 7 = 11908` is the CROSS-CHECK of those two measurements, never the source — the pair
-#: below is `--repin`'s own output on THIS resolved tree, and `--check` exits 0 on it.
-SWEEP_RESIDUE = (11908, "288f7b1715d252ba")
+#: `11901 + 8 = 11909` is the CROSS-CHECK of those two measurements, never the source — the pair
+#: below is `--repin`'s own output on THIS resolved tree, and `--check` exits 0 on it. ⛔ The merge
+#: that brought the peer lane's two commits (`439db940`, `d45e2362`) re-measured BOTH halves rather
+#: than adding one row to the last reading: it prints the same `main` tree figure and this branch's
+#: +8, because a peer's test is a new blob on the branch side, not a new `main`.
+SWEEP_RESIDUE = (11909, "55c8de942f8d2747")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1786 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1791 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -285,7 +285,9 @@ def _residue_block() -> str:
     fold's own reading, which is what the graded figure exists to force,
     — and the `#14414` residue re-cut below (`SWEEP_RESIDUE` `11898` → `11908`) appended 21 `#:`
     lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED on this tree at 1786
-    (1765 + those 21) rather than inherited from the fold's reading, which is the same rule again:
+    (1765 + those 21) rather than inherited from the fold's reading, and the peer lane's two
+    commits merged after it (`439db940`, `d45e2362`) moved the pin once more, so the figure is
+    RE-MEASURED again at 1791 rather than adjusted by arithmetic on the last reading:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
