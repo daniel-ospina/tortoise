@@ -32,6 +32,7 @@ map; this file pins that the five names are in it at all).
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -561,3 +562,268 @@ class TestBothLinkArmsAreQuotaGated:
             "the LIST arm reached the operator writer without the quota wrapper")
         assert getattr(seen[1], "__func__", seen[1]) is TortoiseSDK.link_entities, (
             "the SCALAR arm reached the SDK's edge dispatch without the quota wrapper")
+
+
+class TestTheRelationDecidedArmCountsItsPointCreates:
+    """R1 metering: the wrapper checks the cap, but the WEIGHT is a separate claim.
+
+    `_quota_gated(sdk.link_entities, "points")` records no `point_create` at all, and
+    the SCALAR arm can create a Point — `link_entities("supports", a, b)` reaches the
+    SDK's `create_operator` (the meaning's mechanism). That is the whole live rule
+    (#14237 N2): an explicit `operator=true`, like any LIST target, never reaches this
+    arm — the handler routes it to its OPERATOR writer, which weighs `1` directly. So
+    the arm that shipped counted a plain edge correctly and lost the operator half of
+    its own dispatch. A flat `1` would be the opposite error: an
+    ordinary `performs` link would be billed as a Point create, tripping an abuse
+    signal on the most common call this door serves.
+
+    The rule must also not be a SECOND copy of the SDK's dispatch: it is read from the
+    SDK's own `_EPISTEMIC_RELATION_MEANINGS`, or the day a meaning is added the door
+    and the SDK disagree with nothing red.
+    """
+
+    @pytest.mark.parametrize("relation,expected", [
+        ("supports", 1),        # meaning -> SEMANTICS_MECHANISMS -> create_operator
+        ("refutes", 1),
+        ("mutuallySupportive", 1),
+        ("IMPL", 0),            # plain edge on this arm
+        ("performs", 0),
+        ("ownedBy", 0),
+        ("references", 0),
+    ])
+    def test_the_weight_follows_the_SDK_s_own_dispatch_table(self, relation, expected):
+        weight = ms._link_entities_scalar_abuse_weight(
+            {"edge": 1}, (relation, "a", "b"), {})
+        assert weight == expected, (
+            f"{relation!r} was weighted {weight}: an operator Point and a plain edge "
+            "cannot share a weight, or the abuse signal means nothing")
+
+    def test_an_explicit_operator_true_is_routed_to_the_OPERATOR_arm(
+            self, served, monkeypatch):
+        """The routing fact the helper's SCOPE note rests on (#14237 N2).
+
+        The helper keeps an `operator is True` term as belt-and-braces and its SCOPE
+        note says production cannot reach it, because the handler sends an explicit
+        `operator=true` to the OPERATOR writer, which passes `abuse_weight=1`
+        directly. That claim is only worth what its measurement is: asserted here on
+        the OBJECT the handler wraps, and on the WEIGHT it receives.
+        """
+        seen: list = []
+        real = ms._quota_gated
+
+        def spy(fn, resource="points", **kwargs):
+            seen.append((fn, kwargs.get("abuse_weight")))
+            return real(fn, resource, **kwargs)
+
+        monkeypatch.setattr(ms, "_quota_gated", spy)
+        served("_create_operator", {"operator": 1})
+        served("link_entities", {"edge": 1})
+        assert ms.tortoise_link_entities(
+            "supports", "a", "b", operator=True) == {"operator": 1}, (
+            "an explicit operator=true did not write through the operator arm")
+        assert len(seen) == 1, (
+            f"the handler wrapped {len(seen)} writers for one call — an explicit "
+            "operator=true must reach exactly one")
+        writer, weight = seen[0]
+        assert getattr(writer, "__func__", writer) is TortoiseSDK._create_operator, (
+            "an explicit operator=true reached the SDK's relation-decided dispatch — "
+            "if that routing ever moves, this test AND the weight helper's "
+            "'unreachable' SCOPE note must move with it")
+        assert weight == 1, (
+            "the OPERATOR arm weighs its Point create directly; a callable here would "
+            "mean the scalar helper is on a path its own SCOPE note declares "
+            "unreachable")
+
+    def test_an_explicit_operator_true_is_weighted(self):
+        assert ms._link_entities_scalar_abuse_weight(
+            {"": 1}, ("ownedBy", "a", "b"), {"operator": True}) == 1
+
+    @pytest.mark.parametrize("padded", [" supports ", "supports\n", "\tsupports"])
+    def test_a_PADDED_spelling_is_still_an_operator(self, padded):
+        """The helper applies the SDK's OWN normalisation — MEASURED, not assumed.
+
+        `TortoiseSDK.link_entities` opens with `rel = (relation or "").strip()` and
+        decides the arm from `_EPISTEMIC_RELATION_MEANINGS.get(rel.upper())`, so a padded
+        spelling builds a carrying operator exactly as the bare one does. Measured on the
+        REAL dispatch at this head (`TortoiseSDK.__new__` + recorder doors, no graph):
+        `" supports "`, `"supports\n"` and `"\tsupports"` all reach `_create_operator`.
+
+        ⛔ THIS ROW IS THE FAIL-OPEN MUTANT'S ONLY WITNESS. Every param row above spells
+        the meanings EXACTLY, so dropping `.strip()` from the helper — a one-character
+        "simplification" of a line that now looks redundant — leaves all of them green
+        while the padded spellings that DO mint an operator get weighted 0, i.e. the
+        point_create goes unrecorded. That is the same class §1 of this PR exists about,
+        one layer in, so the padding is pinned rather than left to the exact spellings.
+        """
+        assert ms._link_entities_scalar_abuse_weight(
+            {"": 1}, (padded, "a", "b"), {}) == 1, (
+            f"the padded spelling {padded!r} was weighted 0 — the SDK strips before its "
+            "lookup, so this call DOES mint a Point and a 0 here records nothing")
+
+    def test_a_meaning_ADDED_to_the_SDK_is_weighted_without_editing_the_door(
+            self, monkeypatch):
+        """The "read from the SDK, not copied" claim, MEASURED (#14237 r2 review, P2).
+
+        The param rows above are the meanings the SDK declares TODAY, so a hand-copied
+        tuple of those four spellings passes every one of them — which is exactly the
+        parallel-list failure the helper's docstring says it cannot have, left
+        unasserted. This row adds a FIFTH meaning to the SDK's own mapping and requires
+        the door to weight it with no edit here: the copied-list mutant answers 0.
+        """
+        meanings = dict(TortoiseSDK._EPISTEMIC_RELATION_MEANINGS)
+        assert "entails" not in {str(k).lower() for k in meanings}, (
+            "the fixture meaning collides with a live SDK meaning — pick another")
+        meanings["ENTAILS"] = "entails"
+        monkeypatch.setattr(TortoiseSDK, "_EPISTEMIC_RELATION_MEANINGS", meanings)
+        weight = ms._link_entities_scalar_abuse_weight({}, ("entails", "a", "b"), {})
+        assert weight == 1, (
+            "a meaning added to the SDK's own dispatch table was not weighted by the "
+            f"door (got {weight}): the door is reading a COPY of that table, not the "
+            "table itself, so the two can drift with every row here green")
+
+    def test_the_scalar_arm_PASSES_a_weight_to_the_wrapper(self, served, monkeypatch):
+        """Wiring, measured on the OBJECT: the wrapper must RECEIVE the callable.
+
+        ⛔ `inspect.getsource` was the previous form and it is not a gate (#14237 review
+        N1): it includes comments, so `abuse_weight=_link_entities_scalar_abuse_weight`
+        surviving in a COMMENT kept the row green while the call itself was mutated back
+        to passing no weight. `_quota_gated` is spied and the weight's IDENTITY asserted,
+        which is falsifiable by that one edit.
+        """
+        received: list[dict] = []
+        real = ms._quota_gated
+
+        def spy(fn, resource="points", **kwargs):
+            received.append(kwargs)
+            return real(fn, resource, **kwargs)
+
+        monkeypatch.setattr(ms, "_quota_gated", spy)
+        served("link_entities", {"edge": 1})
+        assert ms.tortoise_link_entities("performs", "a", "b") == {"edge": 1}
+        assert len(received) == 1, received
+        assert received[0].get("abuse_weight") is ms._link_entities_scalar_abuse_weight, (
+            "the relation-decided arm is wrapped WITHOUT the derived weight, so the "
+            "operator it can create is never recorded as a point_create — and a "
+            "source-text match cannot see that, so this asserts the object instead")
+
+
+class TestThePreviewReceiptIsNotWiderThanTheDefect:
+    """The review's F5 premise, measured — and the half that is actually true.
+
+    The review reported that a caller of the ADVERTISED `tortoise_delete_knowledge`
+    "gets a receipt naming the retired door". Verifying it against primary source: the
+    preview's `tool` field said `tortoise_delete`, but `tortoise_delete_knowledge`
+    REBUILDS the reply through `_deletion.receipt(...)`, which has no `tool` key and
+    copies only `target`/`found`/`nodes_removed`/`edges_removed`/`nodes`/`edges` from
+    it. So the retired literal never reached a caller — it was a DEAD assignment.
+
+    Both halves are pinned here, because the fix is only honest if the second one stays
+    true: if a future consumer starts forwarding `preview["tool"]` into the receipt, the
+    receipt must be naming the LIVE door, not the retired spelling.
+    """
+
+    def _stub(self, monkeypatch, served, *, resolved=False):
+        """Install the SDK recorder and a projection whose resolution we choose.
+
+        ⛔ `resolved=False` exercises the NOT-FOUND early return (`_preview_result(
+        "tortoise_delete_knowledge", …)`); `resolved=True` exercises the FOUND branch —
+        `out["tool"] = "tortoise_delete_knowledge"` — which is the assignment the P2 fix
+        is actually about and which the not-found stub never reaches (#14237 review F2).
+        """
+        sdk, calls = served("_delete", True)
+
+        class _Proj:
+            @staticmethod
+            def _resolve_entity(*_a, **_k):
+                return [{"label": "Point", "id": "p1"}] if resolved else []
+
+        monkeypatch.setattr(sdk, "_get_proj", lambda: _Proj(), raising=False)
+        if resolved:
+            # The leaf previews walk the graph; this class measures the DISPATCHER's
+            # `tool` field, so the leaves are substituted rather than queried.
+            monkeypatch.setattr(
+                ms, "_preview_delete_point",
+                lambda _sdk, _id: ms._preview_result(
+                    "tortoise_delete_point", "delete", found=True,
+                    target={"id": _id, "label": "Point"},
+                    nodes_removed=1, edges_removed=0, nodes=[_id], edges=[]))
+        return sdk, calls
+
+    @pytest.mark.parametrize("resolved", [False, True], ids=["not-found", "resolved"])
+    def test_the_preview_field_names_the_ADVERTISED_door(self, monkeypatch, served,
+                                                         resolved):
+        """BOTH literals, because they are different assignments.
+
+        The not-found path returns `_preview_result("tortoise_delete_knowledge", …)`;
+        the found path returns a leaf preview and then stamps `out["tool"]`. A stub
+        that only ever answers "not found" pins the first and leaves the second free to
+        revert to the retired spelling with every row green — the false PASS #3442
+        exists to refuse.
+        """
+        sdk, _calls = self._stub(monkeypatch, served, resolved=resolved)
+        preview = ms._preview_delete(sdk, "p1")
+        assert preview["tool"] == "tortoise_delete_knowledge", preview
+        assert preview["tool"] in {t.name for t in TOOL_REGISTRY}, (
+            "the preview names a door the surface does not advertise, so a caller "
+            "following it calls a tool it was never offered")
+
+    @pytest.mark.parametrize("resolved", [False, True], ids=["not-found", "resolved"])
+    def test_the_value_a_caller_can_get_back_names_no_retired_door(self, monkeypatch,
+                                                                   served, resolved):
+        """The fail-open half, made falsifiable.
+
+        ⛔ The previous form asserted `RETIRED_USE_INSTEAD` names never appear in the
+        receipt. That assertion could not fail under ANY revert: `_deletion.receipt`
+        carries no `tool` key, so no preview literal reaches it (measured, #14237 review
+        F2) — dead weight that reads as coverage (#3442 rule 3). And its plain `in`
+        check was wrong in the other direction: `tortoise_delete` is a SUBSTRING of the
+        live `tortoise_delete_knowledge`, so the CORRECT value would have tripped it.
+
+        So it measures the value a future consumer would forward, on the path that
+        produces it: the dispatcher's own `tool` (which reds when either literal is
+        reverted) and the receipt, with a WORD-BOUNDED match so the live door — and any
+        name the surface still advertises — cannot be misread as a retirement.
+
+        ⛔ WHICH HALF IS COVERAGE AND WHICH IS A FORWARD GUARD, MEASURED (#14237 round-5
+        review, P2). The review said the `("receipt", receipt)` row "never reaches a
+        receipt". **Half of that is falsified by primary source**: calling
+        `tortoise_delete_knowledge("p1")` with no `confirmation` takes the preview branch
+        (`mcp_server.py:7144`), that branch DOES build the payload with
+        `_deletion.receipt(...)` (`:7155`), and returns that very dict after overlaying
+        the preview's fields (`:7161-7167`) — so the payload IS the receipt body
+        (`preview is True`, `deleted is False`, a `confirmation` token). What IS true is
+        the sharper half: `:7161-7167` stamps `dry_run` and copies `found`/`target`/
+        `nodes_removed`/`edges_removed`/`nodes`/`edges`, and **never `tool`**, so no
+        preview literal can reach this row — an assertion here could not fail under the
+        revert it names.
+        That is a FORWARD GUARD (the day a consumer starts forwarding `tool`, the receipt
+        must name the live door), not coverage of this diff, and it is written as such
+        below rather than left to read as a second pin. Driven on the preview path on
+        purpose: the confirm path needs a token and destroys a node to inspect a dict
+        whose `tool` key is absent either way.
+        """
+        sdk, calls = self._stub(monkeypatch, served, resolved=resolved)
+        preview = ms._preview_delete(sdk, "p1")
+        receipt = ms.tortoise_delete_knowledge("p1")
+        assert calls == [], "the preview reached the writer"
+        live = {t.name for t in TOOL_REGISTRY}
+        for surface, payload in (("preview", preview), ("receipt", receipt)):
+            named = [
+                name for name in sorted(RETIRED_USE_INSTEAD)
+                if name not in live
+                and re.search(rf"\b{re.escape(name)}\b", str(payload))
+            ]
+            assert not named, (
+                f"the {surface} a caller receives names the retired {named} — the value "
+                "a caller re-calls must be one `tools/list` advertises")
+        # The receipt row above is the forward guard, and THIS is its falsifier: the
+        # overlay stamps `dry_run` and copies six preview fields, never `tool`, which is why
+        # no retired literal can reach a caller (`mcp_server.py:7161-7167`). The day that
+        # changes, this reds and the loop entry becomes real coverage of what it forwards.
+        assert receipt.get("preview") is True and receipt.get("deleted") is False, (
+            f"the `receipt` row no longer inspects a receipt body: {receipt}")
+        assert "tool" not in receipt, (
+            "`tortoise_delete_knowledge`'s preview reply now carries a `tool` field — the "
+            "receipt row above stops being a forward guard and becomes live coverage, so "
+            "re-measure it (and its revert) instead of trusting this note")
+

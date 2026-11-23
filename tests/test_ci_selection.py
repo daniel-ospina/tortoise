@@ -5041,6 +5041,47 @@ def test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool():
         r["surfaces"])
 
 
+def test_the_doc_reader_guard_runs_on_the_doc_it_reads():
+    # #14237 review (P1, the #6138 class — a doc that GAINED a reader).
+    # `tests/test_11609_door_retirement.py::TestEveryReaderNamesTheLiveListingDoor`
+    # READS `docs/how-to/provision-a-graph-per-end-user.md` and asserts every
+    # `tortoise_*` mention in it is a labelled migration note rather than an
+    # instruction — but the doc was in no `SOURCE_PATTERNS` row, and `docs/` is a
+    # `NON_PYTHON_PREFIX`, so `_keep_changed` dropped it, `changed == []`, and
+    # `select()` took the docs-only early return. Measured on the pre-fix tree:
+    #   select(["docs/how-to/provision-a-graph-per-end-user.md"])
+    #     -> surfaces=[] , full=False , 106 files, guard ABSENT
+    # while a `mcp_server.py` diff (SHARED_MODULES -> FULL matrix) ran it. So the
+    # guard was awake on code diffs and asleep on the ONE edit class it exists
+    # for: a how-to that re-points a step at a name `tools/list` does not
+    # advertise would merge green — the reader it protects is the reader who ACTS
+    # on the doc. This pin is the registration's own guard, so deleting the
+    # `SOURCE_PATTERNS["sdk"]` entry reds here instead of silently sleeping.
+    doc = "docs/how-to/provision-a-graph-per-end-user.md"
+    r = _sel([doc])
+
+    def runs(name: str) -> bool:
+        return r["full"] is True or name in r["test_files"]
+
+    assert "sdk" in r["surfaces"], (
+        "a diff to the how-to the retired-name guard READS selects no surface "
+        "(SOURCE_PATTERNS['sdk'] entry removed?) — the guard then never runs on "
+        "the doc edit it exists to catch", r["surfaces"])
+    assert runs("test_11609_door_retirement.py"), (
+        "the how-to-reader guard is not in the selection for a diff to the doc it "
+        "reads (SOURCE_PATTERNS['sdk'] entry removed?)", r["test_files"])
+    # …and the entry must stay CONCRETE: an unrelated prose doc is still not a
+    # python-relevant change, so it keeps taking the docs-only early return
+    # (tier-1 smoke). A `docs/how-to/` prefix here would drag this suite into
+    # every documentation PR.
+    other = _sel(["docs/how-to/some-unrelated-page.md"])
+    assert other["surfaces"] == [], (
+        "an unrelated how-to now selects a surface — the entry for the reader doc "
+        "was widened to a prefix; keep it one concrete path", other["surfaces"])
+    assert "test_11609_door_retirement.py" not in other["test_files"], (
+        "the retired-name guard runs on docs it does not read", other["test_files"])
+
+
 def test_mcp_client_change_keeps_the_core_pool_that_guards_its_words():
     # #10605 / PR #10727 review (P2). `tortoise/mcp_client.py` was registered as
     # an exact SOURCE_PATTERNS["api"] entry so that `tests/test_mcp_client.py`
@@ -7380,6 +7421,41 @@ def test_docs_only_skips_slow_and_carve_out():
         assert r["slow_run"] is False
         assert r["carve_out_run"] is False
         assert r["slow_selected"] == []
+
+
+def test_the_p7_how_to_selects_its_reader_and_declares_the_cost():
+    """#14237 round-2 review (P2), corrected by round 3: the ONE declared exception to
+    `test_docs_only_skips_slow_and_carve_out`'s property.
+
+    Registering the P7 how-to against `sdk` is what makes the guard that READS it run on
+    the doc-only diff it exists for — and `sdk` carries the slow leg and the carve-out
+    pool. ⛔ The two legs cost DIFFERENT things and the comment in `tools/ci_selection.py`
+    must not merge them: the slow leg is diff-SCOPED by `slow_selected` (three files,
+    which is what this pin asserts), while the carve-out leg is diff-GATED but never
+    diff-SIZED, so it runs its whole pool in 3 shard jobs. Pinned here so the cost is
+    declared rather than discovered; every OTHER docs-only path still skips both legs,
+    which is what the pin above says.
+    """
+    doc = "docs/how-to/provision-a-graph-per-end-user.md"
+    r = _sel([doc])
+    assert r["surfaces"] == ["sdk"], (
+        f"{doc} no longer selects the surface its reader guard lives in: "
+        f"{r['surfaces']}")
+    assert "test_11609_door_retirement.py" in r["test_files"], (
+        "the doc no longer selects tests/test_11609_door_retirement.py — the guard "
+        "that asserts every retired name in it is labelled, i.e. the whole point of "
+        "the registration")
+    assert r["full"] is False, (
+        "a docs-only diff must not fall through to the whole matrix")
+    assert r["slow_run"] is True and r["carve_out_run"] is True, (
+        "the declared cost of this registration moved — re-measure it and say so in "
+        "the comment in tools/ci_selection.py, or move the registration")
+    # The THREE-file slow leg is the diff-SCOPED half (`slow_files` is the declared pool
+    # every path emits and sizes nothing here). Pinned by count, not by membership, so a
+    # surface gaining a leg reds here instead of silently widening a docs-only PR.
+    assert len(r["slow_selected"]) == 3, (
+        f"the slow leg this registration wakes changed size: {r['slow_selected']} — "
+        "re-measure the cost in tools/ci_selection.py's comment")
 
 
 def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
@@ -10692,6 +10768,18 @@ ROWED_BY_THIS_FOLD = (
     # reading: the `durations` refresher samples push-to-main runs, so a file a PR ADDS
     # cannot have a junit figure yet (#3400/#4348).
     "test_14185_projection_worker.py",
+    # #14357 (PR #14362) — the extractor fallback's reasoning suppression (the wire body
+    # each pool member actually posts) plus the yield guard for a zero-content
+    # `finish_reason=length` collapse. A file this fold ADDED and registered on `core`
+    # (which is what puts it in `fast_pool()`) and on `eval` (its fail-closed grade pin's
+    # subject, `tools/longmem_eval/report.py`, is an EXACT `eval` SOURCE_PATTERN match).
+    # It shipped NO `durations:` row and `--integrity` stayed green over the absence (the
+    # coverage check is a 0.90 RATIO with headroom) — measured at the #14362 review's
+    # head, the same defect #13110's round-5 and #13422's round-9/10 reviews record
+    # surviving a round. Only this tuple can make the ENTRY-RULE pin see the file at all;
+    # the row it now carries is the flat `DEFAULT_FAST_WEIGHT`, not a local reading, for
+    # the #3400/#4348 reason.
+    "test_14357_fallback_thinking.py",
     # #14343 (this PR) — the S4 embed-serialization lever's own pins (`_embed_json_kwargs`
     # in `tortoise/extractor_v2.py`: the default is the pre-change bytes, garbage cannot
     # coerce, compact changes only the layout, the read is per CALL). A file this fold
@@ -10797,6 +10885,86 @@ def test_the_eviction_suite_is_in_the_entry_rule_set_13123():
         "dropping THIS row from the live map must name exactly this file as rowless; "
         "if another member of the guarded set is missing a row this pin cannot "
         "distinguish that state from the one it guards")
+
+
+def test_the_14357_repair_suite_is_in_the_entry_rule_set_14362():
+    """#14362 non-vacuity: the ENTRY-RULE pin can only see what this set NAMES.
+
+    The #14362 review's Finding 1 measured this state on its own head: the file is
+    registered on `core` + `eval` (so it is in `fast_pool()`) and carried NO
+    `durations:` row, while `--integrity` stayed green because its coverage check is a
+    0.90 RATIO with headroom. A row alone is not enough either — it can be dropped
+    again and nothing reds while the file is absent from this tuple — so membership is
+    pinned in both directions from the LIVE map, the same shape as
+    `test_the_eviction_suite_is_in_the_entry_rule_set_13123` above.
+
+    Red on the pre-fix tree: the file is registered in `config/ci-surfaces.yml` and
+    carries a `durations:` row, but is not in `ROWED_BY_THIS_FOLD`, so the first
+    assertion fails; with the membership added and the row removed, the second fails.
+    """
+    from tools.ci_selection import load_manifest
+    name = "test_14357_fallback_thinking.py"
+    assert name in ROWED_BY_THIS_FOLD, (
+        f"#14362 registers {name} in a fast surface, but it is not in "
+        "ROWED_BY_THIS_FOLD — the ENTRY-RULE pin cannot see it, so dropping its "
+        "`durations:` row would be silent")
+    real = load_manifest()["durations"]
+    assert name in real, (
+        f"#14357 adds {name} to a fast surface but ships no `durations:` row, so it "
+        "packs at the flat default")
+    holed = {k: v for k, v in real.items() if k != name}
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
+        "dropping THIS row from the live map must name exactly this file as rowless; "
+        "if another member of the guarded set is missing a row this pin cannot "
+        "distinguish that state from the one it guards")
+
+
+def test_the_14357_pins_run_on_the_diffs_they_guard_14362():
+    """#14362 review (P2): the suite's TWO surface rows must be pinned by a SELECTION.
+
+    `tests/test_14357_fallback_thinking.py` is registered twice on purpose, and its own
+    comments in `config/ci-surfaces.yml` say why: `core` because its subjects
+    (`tortoise/model_adapters.py`, `tortoise/extractor_v2.py`) are not SHARED_MODULEs and
+    therefore select the default `core` surface, and `eval` because `tools/longmem_eval/report.py`
+    is an EXACT `eval` `SOURCE_PATTERN` match, so a `report.py`-only diff REPLACES the
+    `core` fallback (#2938/#7951) and the `core` row does NOT cover it.
+
+    ⛔ Those two sentences were PROSE, and prose is not a gate — measured at this PR's own
+    review head: with the `core` row deleted, `_sel(["tortoise/model_adapters.py"])` still
+    answers `['core']` with the suite ABSENT from its test files, the entry-rule pins above
+    still pass (they read `ROWED_BY_THIS_FOLD` and the `durations:` map, never this), and
+    `tools/ci_selection.py --integrity` still exits 0 — its coverage check is a 0.90 RATIO
+    with headroom, so it cannot see one file's omission. The same deletion on the `eval`
+    row leaves `_sel(["tools/longmem_eval/report.py"])` green over a diff that adds
+    `reasoning_collapse` straight into `RECOVERABLE_CENSUS_CLASSES`. A one-line manifest
+    edit would then silently disable the wire-body, yield-guard and fail-closed pins on the
+    exact diffs they exist to guard — the #2938/#3154/#4367 silent-drop class.
+
+    Asserts the SELECTION, not the registration (so it reds on the pre-fix state) and
+    iterates every source file this PR edits that selects a surface carrying the suite —
+    because a row can cover one subject and miss another: `tortoise/extractor_v2.py` (the
+    yield guard + census) is a further subject of the suite, and
+    `tools/longmem_eval/run.py` is a file this PR edits whose fingerprint pins live in
+    `tests/longmem_eval/test_vector_arm.py` — its pair is asserted here because the eval
+    row is what puts THAT file's diff on a leg at all, so the same one-line deletion
+    silences it.
+    """
+    name = "test_14357_fallback_thinking.py"
+    for paths, surface in (
+        (["tortoise/model_adapters.py"], "core"),
+        (["tortoise/extractor_v2.py"], "core"),
+        (["tools/longmem_eval/report.py"], "eval"),
+        (["tools/longmem_eval/run.py"], "eval"),
+    ):
+        r = _sel(paths)
+        assert r["surfaces"] == [surface], (
+            f"a {'+'.join(paths)}-only diff selects {r['surfaces']} — expected "
+            f"['{surface}']. If that changed, re-derive this pin rather than widening it: "
+            "the row it protects was placed by which surface those files select")
+        assert name in r["test_files"], (
+            f"a {'+'.join(paths)}-only diff does not run {name}, so the #14357 pins cannot "
+            "fire on the change that breaks them. Either the surface row was dropped "
+            f"(`{surface}`) or the file was renamed (#14362)")
 
 
 def test_the_entry_rule_bites_on_the_two_rows_this_fold_registered():
