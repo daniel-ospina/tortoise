@@ -117,9 +117,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # entry in it and NOTHING red — the document went on naming held addresses over a tree that had
     # moved them, and the reader rule sent the reader to the wrong line. A pin per entry is what turns
     # the list into a guard.
-    (_AUDIT, "`:2922`", _SDK, 2922, "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", '`sdk.py:38171`', "tortoise/sdk.py", 38171, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", '`:38194`', "tortoise/sdk.py", 38194, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    (_AUDIT, "`:2921`", _SDK, 2921, "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"),
+    (_AUDIT, "`sdk.py:37883`", _SDK, 37883, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
+    (_AUDIT, "`:37906`", _SDK, 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     # ⛔ The three rows below pin SITES the pair rows above cannot reach, because those rows carry
     # TABLE/ROW context on purpose (a bare `:37467` is satisfied by the header enumeration or by the
     # proximity paragraph, so the §2.5 rows could be re-pointed alone with nothing red). MEASURED, at
@@ -130,9 +130,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # paragraph above §2.5 carried the same rot in the other direction: it named `:37183` (a `#11702`
     # comment at every head) as the address "the row carries" — the one thing that paragraph says
     # must never disagree with the row.
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", '| `tortoise/sdk.py:38194` |', "tortoise/sdk.py", 38194, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", 'the `-[r]->` walk (`sdk.py:38194`)', "tortoise/sdk.py", 38194, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", 'they are `:38171` and', "tortoise/sdk.py", 38171, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
+    (_AUDIT, "| `tortoise/sdk.py:37906` |", _SDK, 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    (_AUDIT, "the `-[r]->` walk (`sdk.py:37906`)", _SDK, 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    (_AUDIT, "they are `:37883` and", _SDK, 37883, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57209` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is NOT the statement at this
@@ -174,25 +174,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
     # further 194), so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", '`sdk.py:58387` passes `"event"`', "tortoise/sdk.py", 58387, "entity_type=\"event\""),
+    (_AUDIT, '`sdk.py:58099` passes `"event"`', _SDK, 58099, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`mcp_server.py:5250`", _MCP, 5250, "entity_type=entity_type"),
-    # ⛔ §2.5's `:Tag` traversal row cites this address and, until this row, NOTHING read it —
-    # at that head `grep -rn 11281 tests/` returned nothing (it returns this file's own comments
-    # now, which is not a read): the audit document's header promises a reader for every entry it
-    # re-derives, and this one had none. The document cites the query LITERAL's
-    # first line, not the `g.query(` call above it — at THIS head the call is `:11589` and the
-    # literal `:11590`; at the head that row was written for they were `:11280` / `:11281`, and
-    # `#14169` moved both together (its siblings in the same paragraph follow the same
-    # convention — `sdk.py:31533` is the literal while `:31532` is the `rows = proj.g.query(` call;
-    # ⛔ MEASURED THREE TIMES: `#14269` re-derived this clause to `:31554`/`:31553` because the
-    # branch's own `#14260` insert had added `+21` to `sdk.py`; `main`'s `#14290` then moved the
-    # file back to its pin line count, which puts the literal at `:31533` and the call at `:31532`
-    # again — so the `+21` spelling this clause carried is the stale one at THIS head, and it is
-    # re-derived here by content, not offset back by a delta).
-    (_AUDIT, "`mcp_server.py:11597`", _MCP, 11597, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
+    # ⛔ §2.5's `:Tag` traversal row cites `mcp_server.py:11590` and, until this row, NOTHING read
+    # it (`grep -rn 11590 tests/` -> nothing): the audit document's header promises a reader for
+    # every entry it re-derives, and this one had none. `:11280` is the `g.query(` call; the
+    # document cites the query LITERAL's first line, which is `:11590` (its siblings in the same
+    # paragraph follow the same convention — `sdk.py:31533` is the literal while `:31501` is the call).
+    (_AUDIT, "`mcp_server.py:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # ⛔ The SAME address has a SECOND written site — the header enumeration spells it BARE
     # (`` `mcp_server.py:5250`/`:8515`/`:11590` ``), and the §2.5 token above cannot see a bare
     # `:NNNN`. Review at `b9e7822362c6`, P2: reverting ONLY the header half (`:11590` -> `:11280`)
@@ -204,38 +196,48 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # line are pinned per SITE for exactly this reason: `` `:8515` `` and `` `:5720` `` each carry a
     # bare-token row with count 2 (header + §2.5). This row and its count are the site the re-derived
     # §2.5 row left behind.
-    (_AUDIT, "`:11597`", _MCP, 11597, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
-    # 3 -> 2 at the #14169 re-derivation (`b4da1f5c01`), which moved this address `+309`. The tally
-    # was 3 while `#13991`'s own prose added two more BARE sites of it (the header trio, §2.5's
-    # five-address enumeration, and §2.5's provenance sentence); after the move the provenance
-    # sentence still reads the OLD number — it is the record of that correction, not a cite of this
-    # head — and it is DELIBERATELY NOT counted here. The `mcp_server.py:11590` row above (count 1, the
-    # row whose token carries the path rather than a bare `:NNNN`) covers only the §2.5 one-token
-    # spelling; this row covers the bare ones.
-    # 2 -> 4 at the #14246 fix lane: the header now names the address at TWO more bare sites — (a) the
-    # comparability split's non-comparable enumeration, where `mcp_server.py`'s `:11590` is the
-    # ELEVENTH pair that no longer has a line at the pin (so the split has to name it), and (b) §2.5's
-    # head-declaration sentence, which states where it sits at the pin now that the pin's copy of the
-    # file is shorter than the address. MEASURED on this document rather than carried:
-    # `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 4 (the header trio,
-    # the split's enumeration, §2.5's five-address enumeration, §2.5's head-declaration sentence);
-    # `grep -n '`:11281`'` -> the provenance sentence and that head-declaration sentence, neither of
-    # them counted here because neither is a cite of this head. Re-derive before trusting this: a line
-    # number stated in prose drifts exactly like the citations this file pins.
-    # Re-pointing either live spelling alone still reds here, which is the discrimination this row
-    # exists for; the historical `:11281` is reached by no row, deliberately, because it is not a
-    # claim about this head.
+    (_AUDIT, "`:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
+    # 1 -> 4 at the #13998 head: the branch's OWN prose adds three more BARE sites of this same
+    # address (the #13991 merge added two; the non-comparable enumeration in the drift header is the
+    # third, added when `5bb3b32518` re-pointed this address and moved the pair past the pin's
+    # `mcp_server.py`), so the bare-token row DIRECTLY ABOVE (`` `:11590` ``, count 1 -> 4) can no
+    # longer see every spelling of it; the `mcp_server.py:11590` row above it (count 1, unchanged —
+    # the row whose token carries the path, not a bare `:NNNN`) covers only the §2.5 one-token
+    # spelling. Deliberately no "N lines above": that distance moved twice on this branch already,
+    # and a stated count is the defect class this file exists to catch. Measured on the merged document
+    # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
+    # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11590`"))'` -> 4), with the site
+    # lines RE-MEASURED on this document rather than carried — `grep -n '`:11590`' on the MERGED
+    # document gives `:139` / `:203` / `:222` / `:647`. They have moved repeatedly: `main`'s merge
+    # `0656b056d7` shifted two of them, the P2 fix above added +2 to a third, the two-line "five pairs
+    # as two code spans" correction (#13991 review P2-A) shifted every one of them by +2, and this
+    # PR's own edits above them shifted all four again — which is why this block states the
+    # MEASUREMENT and not a delta:
+    #   :142  the drift header's non-comparable enumeration, which names this address among the twelve
+    #         that resolve past the pin's copy of their file (added by #13998; see the count above);
+    #   :206  the header trio above — main's site, the one this row was created for;
+    #   :225  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
+    #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
+    #         `_REDEFINED_13854` one-token counts are not doubled;
+    #   :650  the same branch's §2.5 provenance sentence, `:11280` -> `:11590`.
+    # Re-derive with `grep -n '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
+    # trusting this list on a later head: a line number in prose is exactly the claim this file pins
+    # for the document, and it drifts the same way.
+    # All four name ONE address with ONE meaning, so this is not the `b9e7822362c6` class (two
+    # addresses for one reader). The count is kept at the measured number rather than deleting a
+    # spelling: re-pointing any one of the four now reds here, which is the discrimination the row
+    # exists for.
     (_AUDIT, "`:5720`", _MCP, 5720, "entity_type=entity_type"),
-    (_AUDIT, "`:8522`", _MCP, 8522, "entity_type=entity_type"),
+    (_AUDIT, "`:8515`", _MCP, 8515, "entity_type=entity_type"),
     # ⛔ The four `sdk.py` members of §2.5's `:Tag` row are enumerated in the header as BARE `:NNNN`
     # siblings — a spelling none of the rows above reaches (they all require a path or the one-token
     # form), which is the same one-site-vs-one-string gap the `:11590` header half and `:6989` were:
     # re-pointing any one of them to a stale number left every arm green. One ROW per SITE, pinned by
     # the fragment the header paragraph quotes for it.
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", '`:31595`', "tortoise/sdk.py", 31595, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})"),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", '`:31577`', "tortoise/sdk.py", 31577, "\"MATCH (t:Tag) \""),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", '`:24514`', "tortoise/sdk.py", 24514, "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", '`:24858`', "tortoise/sdk.py", 24858, "MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t"),
+    (_AUDIT, "`:31551`", _SDK, 31551, 'MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})'),
+    (_AUDIT, "`:31533`", _SDK, 31533, '"MATCH (t:Tag) "'),
+    (_AUDIT, "`:24513`", _SDK, 24513, "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "),
+    (_AUDIT, "`:24857`", _SDK, 24857, 'MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t'),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
@@ -248,7 +250,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6990`", _PI, 6990, '("Source", ["_searchText"])'),
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:24627", "tortoise/sdk.py", 24627, "(n:Point {id:$id})-[:TAGGED]->()"),
+    (_AUDIT, "sdk.py:24626", _SDK, 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
+    # ⛔ MERGE RESOLUTION (#14038 fold of `origin/main` `cc936d47db`): `search_engine.py` is NOT touched
+    # by this PR (`git diff --stat origin/main...HEAD -- tortoise/search_engine.py` prints nothing), so
+    # `main`'s `#14278` re-point is the measured one at the merged tree: `:7226` is
+    # `"RETURN op.id, type(r2) AS et, count(other)"` and this branch's pre-merge `:7201` now reads
+    # `# #2490: aligned has_ep gate …` (a COMMENT, measured with `sed -n '7201p'` on the resolved tree).
     (_AUDIT, "search_engine.py:7226", _SE, 7226, "RETURN op.id, type(r2) AS et, count(other)"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3508", _SE, 3508, "``:Source``/``:Document`` row must not contribute"),
@@ -259,16 +266,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `:Document`; `grep -nF 'D10: a document is a ``:Source``, not a'` returns the line ABOVE the
     # `:Document` one, which is how the +35-instead-of-+36 arithmetic was introduced and never caught).
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
-    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "tortoise/sdk.py:37835", "tortoise/sdk.py", 37835, "``:Document`` node)."),
-    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37877` in `_file_human_approval`", "tortoise/sdk.py", 37877, "``:Document`` node)."),
+    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "tortoise/sdk.py:37547", "tortoise/sdk.py", 37547, "``:Document`` node)."),
+    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37589` in `_file_human_approval`", "tortoise/sdk.py", 37589, "``:Document`` node)."),
     # ⛔ The same sentence's OPENING values were pinned by nothing, and a merge resurrected the +21-era
     # siblings over main's corrected ones (`(opening :37548` = a kwarg line, `(opening :37588` = the other
     # docstring) while the two graded headlines stayed right — green pins over a wrong sentence (#14038
     # review, cycle 2). Pinned as the `def` lines they claim to be, and the `:Source` line between them
-    # (`:37834` carries `D10: a document is a ``:Source``, not a` — the line ABOVE `:37835`).
-    (_SUBSTRATE, "(opening `:37815`", _SDK, 37815, "def record_decision"),
-    (_SUBSTRATE, "`:37834` is the `:Source` line", _SDK, 37834, "D10: a document is a ``:Source``, not a"),
-    (_SUBSTRATE, "(opening `:37855`)**)", _SDK, 37855, "def _file_human_approval"),
+    # (`:37546` carries `D10: a document is a ``:Source``, not a` — the line ABOVE `:37547`).
+    (_SUBSTRATE, "(opening `:37527`", _SDK, 37527, "def record_decision"),
+    (_SUBSTRATE, "`:37546` is the `:Source` line", _SDK, 37546, "D10: a document is a ``:Source``, not a"),
+    (_SUBSTRATE, "(opening `:37567`)**)", _SDK, 37567, "def _file_human_approval"),
     # ⛔ And the capability-placement heal pair: the two `hosted_api.py` addresses were re-pointed by
     # DELTA in the merge (+114) onto the operator-stamp statement and a comment line, while the fragment
     # the row quotes (`coalesce(n.is_episodic,false) <> true`) lives 37 lines lower. Pinned by content —
@@ -279,12 +286,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # them pointing at a comment and a receipt builder — and, pinned here, the reason they cannot drift
     # back silently: `:21128` was a comment (the calls are `21433`/`43794`/`43902`), `hosted_api.py`'s
     # `:22529` was inside a receipt builder (the call is `:23062`), and `sdk.py:18872` was a blank `#`
-    # with `:18769` a comment (the extractor PAYLOAD read is `:21394`, `pt` bound at `:21322`).
+    # with `:18769` a comment (the extractor PAYLOAD read is `:21393`, `pt` bound at `:21321`).
     # (`:61999`/`:62019` are re-pointed and pinned by the row-2d pass above; not duplicated here.)
     (_AUDIT, "hosted_api.py:23062", "tortoise/hosted_api.py", 23062, "sdk._find_point_by_content("),
-    (_AUDIT, "sdk.py:21434", _SDK, 21434, "hit_id = self._find_point_by_content("),
-    (_AUDIT, "sdk.py:21394", _SDK, 21394, '_mention_records = pt.get("mentions")'),
-    (_AUDIT, "`:21322`", _SDK, 21322, 'for pt in payload.get("points", []) or []:'),
+    (_AUDIT, "sdk.py:21433", _SDK, 21433, "hit_id = self._find_point_by_content("),
+    (_AUDIT, "sdk.py:21393", _SDK, 21393, '_mention_records = pt.get("mentions")'),
+    (_AUDIT, "`:21321`", _SDK, 21321, 'for pt in payload.get("points", []) or []:'),
     # ⛔ ROW 2d's OWN pass (#14038, cycle 6). Five of the nine addresses this row carried were stale at
     # `28ba95d64d` — measured line by line, `:32395` was the comment `# confidence/weight (they are plain
     # direct-edge attributes).`, `:43479` was `_find_point_by_content`'s docstring prose, `:43416` was
@@ -295,15 +302,15 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # population arms are all blind here (`_resolved_pairs` counts only `path.py:NNNN` and two-code-span
     # spellings, so these bare `:NNNN` continuations move the 345/227/215/167 figures by nothing —
     # measured identical before and after the edit — and a line number is only graded by opening it).
-    # ⛔ `sdk.py:32803` was CORRECT all along: a hand-off table on this PR told lanes to move it to
-    # `:32820`, which is the sibling `any_hash` map INSIDE the same function, not the first map. Pinned
+    # ⛔ `sdk.py:32759` was CORRECT all along: a hand-off table on this PR told lanes to move it to
+    # `:32776`, which is the sibling `any_hash` map INSIDE the same function, not the first map. Pinned
     # so the false-correction shape that table took cannot take it again.
-    (_AUDIT, "sdk.py:32803", _SDK, 32803, '"MATCH (n:Point {content_hash:$ch}) WHERE "'),
-    (_AUDIT, "`:32820`", _SDK, 32820, '"MATCH (n:Point {content_hash:$ch}) WHERE "'),
-    (_AUDIT, "`:44148`", _SDK, 44148, 'f"MATCH (n:Point {{content_hash:$ch}}) WHERE "'),
-    (_AUDIT, "`:44085`", _SDK, 44085, "def _find_point_by_content("),
-    (_AUDIT, "`:32952-32953`", _SDK, 32953, '"RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "'),
-    (_AUDIT, "`:32991`", _SDK, 32991, '"RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "'),
+    (_AUDIT, "sdk.py:32759", _SDK, 32759, '"MATCH (n:Point {content_hash:$ch}) WHERE "'),
+    (_AUDIT, "`:32776`", _SDK, 32776, '"MATCH (n:Point {content_hash:$ch}) WHERE "'),
+    (_AUDIT, "`:43860`", _SDK, 43860, 'f"MATCH (n:Point {{content_hash:$ch}}) WHERE "'),
+    (_AUDIT, "`:43797`", _SDK, 43797, "def _find_point_by_content("),
+    (_AUDIT, "`:32908-32909`", _SDK, 32909, '"RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "'),
+    (_AUDIT, "`:32947`", _SDK, 32947, '"RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "'),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -326,9 +333,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `_TOKEN_OCCURRENCES` entry covered it. ⛔ `#13486` moved the writer under this row, so it is
     # re-derived here to the line that actually carries `search_text = _source_search_text(`
     # (`grep -n 'search_text = _source_search_text(topics=topics)' tortoise/sdk.py`), not carried.
-    (_AUDIT, 'sdk.py:22226', _SDK, 22226, 'search_text = _source_search_text(topics=topics)'),
-    (_AUDIT, 'sdk.py:22268', 'tortoise/sdk.py', 22268, 's.summary=CASE WHEN $sum'),
-    (_AUDIT, '`:22391`', 'tortoise/sdk.py', 22391, 's.summary, s.topics, s.'),
+    (_AUDIT, 'sdk.py:22225', _SDK, 22225, 'search_text = _source_search_text(topics=topics)'),
+    (_AUDIT, 'sdk.py:22267', 'tortoise/sdk.py', 22267, 's.summary=CASE WHEN $sum'),
+    (_AUDIT, '`:22390`', 'tortoise/sdk.py', 22390, 's.summary, s.topics, s.'),
     (_AUDIT, 'hosted_api.py:23615', 'tortoise/hosted_api.py', 23615, 'MERGE (s:Source {url:$did})'),
     (_AUDIT, '`:23427`', 'tortoise/hosted_api.py', 23427, 'def _execute_commit_writes'),
     (_AUDIT, '`:34390`', 'tortoise/hosted_api.py', 34390, 'MERGE (p:PackInstall {namespace: $ns})'),
@@ -381,16 +388,29 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- three re-derived addresses that had NO pin at all, so a `+1` mutation left 441 tests green
     # (review cycle 6, P2-2). `grep -rn '28008\|28372' tests/ tools/` returned nothing before these rows:
     # the guard set is per-token, and an unlisted token is coverage the file only APPEARED to have.
-    ("docs/00_index.md", '`sdk.py:28582` at this head', "tortoise/sdk.py", 28582, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    (_INDEX, '`sdk.py:28581` at this head', _SDK, 28581, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
     # ⛔ #14087 review round 7 (P3): the SAME `00_index.md:118` line writes a SECOND present-tense
     # this-head address — `the bullet is entity_verdict.py:43` — and no arm read it. Its sibling
     # (`sdk.py:28581`, the row above) was pinned, which is exactly how an unpinned neighbour hides:
     # `grep -c 'entity_verdict\.py:43' tests/test_12184_shifted_cites.py` -> 0 before this row, so a
     # re-point or a rotation of `entity_verdict.py` under it would have moved the address with every
     # arm green. One ROW per SITE, never one row per STRING.
-    (_INDEX, "`entity_verdict.py:43`", _EV, 43, "writing `dedup_reviewed='link'` is worse than inert"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", '(`sdk.py:28582`), so any non-NULL', "tortoise/sdk.py", 28582, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", 'called at `sdk.py:28946`', "tortoise/sdk.py", 28946, "result = apply_entity_merge("),
+    (_INDEX, '`entity_verdict.py:43`', _EV, 43, "writing `dedup_reviewed='link'` is worse than inert"),
+    (_EVIDENCE, '(`sdk.py:28581`), so any non-NULL', _SDK, 28581, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
+    (_EVIDENCE, 'called at `sdk.py:28945`', _SDK, 28945, 'result = apply_entity_merge('),
+    # --- row 2d's `:Meta` pair was the last `+21`-class cite in this document, and NOTHING pinned it.
+    # The `#14038` re-cut wrote `sdk.py:62020`/`:62040` at `c5ca268aa96`, where `:62020` WAS the
+    # `MATCH (m:Meta {key:$key}) RETURN m.recordedAt` statement and `:62040` WAS
+    # `def _config_reset_state(`. A later fold took 21 lines out of `sdk.py` above both, so at this
+    # head `:62020` is a DOCSTRING line and `:62040` is the `# #4282 Phase 2` banner — two cites that
+    # read as re-derived and open on prose. Measured, not inferred:
+    # `sed -n '61999p;62019p' tortoise/sdk.py` prints the read and the `def`. Both rows pin the CONTENT
+    # the row's prose claims, because the population arms (`_PIN_EOF_PAIRS`, the census triple) are
+    # INVARIANT under a re-point — they hold every number this pair can be moved to — and the drift
+    # numerator cannot see them either (both sit past the pin's `sdk.py`, so they are non-comparable).
+    # That is the whole uncovered-claim class: only opening the line catches it, so the line is pinned.
+    (_AUDIT, '`sdk.py:61999` (reads)', _SDK, 61999, '"MATCH (m:Meta {key:$key}) RETURN m.recordedAt"'),
+    (_AUDIT, '`sdk.py:62019` (`_config_reset_state`)', _SDK, 62019, 'def _config_reset_state(self) -> dict | None:'),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the vector-index reader table
     # ⛔ The branch's `+147` to `hosted_backup.py` moved `def _index_has_is_operator()` from
     # `origin/main`'s `:2519` to `:2666` (`:2684` is that def's DOCSTRING line, so the `+4` that
@@ -412,7 +432,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # the document still carries the address); measured at this head, each fragment below is the
     # line's own text, and at `ccb49741b2ec` none of the four numbers carries it.
     (_AUDIT, "live.py:667", "tortoise/live.py", 667, 'EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")'),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", 'sdk.py:15874', "tortoise/sdk.py", 15874, "\"MATCH (m:GraphEventMeta) RETURN m.first_seq\""),
+    (_AUDIT, "sdk.py:15873", _SDK, 15873, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
     (_AUDIT, "hosted_backup.py:844", _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
     (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
     # §2.6's row, re-pointed to this head by the same review: the census's `:890`/`:1182`/`:1383` do not land
@@ -453,8 +473,34 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # last, with `:16083` blank. A span token pins only its START, so the short end was invisible to `_PINS`;
     # `test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line` derives the end from the source
     # and grades it.
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", 'sdk.py:16078-16083', "tortoise/sdk.py", 16078, "**JSONL event log (#548):** written when *point* is provided"),
-    (_AUDIT, 'sdk.py:3802', _SDK, 3802, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
+    (_AUDIT, 'sdk.py:16077-16082', _SDK, 16077, '**JSONL event log (#548):** written when *point* is provided'),
+    (_AUDIT, 'sdk.py:3801', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
+    # --- #14038 review cycle 4 (P1): the header's "nine MORE addresses" enumeration names these three
+    # SAME statements as BARE siblings ("`sdk.py`: `:15873`", "§6.3's `sdk.py`: `:16077-16082`",
+    # "and `:3801`"). A bare token is not the string `sdk.py:15873`, so the long-form rows directly
+    # above did NOT grade these three sites: the sentence promised "All nine are pinned by content"
+    # while three of the nine had no row that could redden. The addresses were ALSO stale after the
+    # conflict resolution `4ae073f96e5` — it took `main`'s rows and the branch's paragraph, so the
+    # enumeration kept `:15842`/`:16046-16050`/`:3777` while the rows moved to the spellings that
+    # carry those statements at this head. One ROW per SITE, as this file requires.
+    # NON-VACUOUS, MEASURED both ways: re-pointing the DOC (`:15873`→`:15874`) reds the content arm AND
+    # `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` (the token string is gone); moving
+    # the ROW's line (`15873`→`15874`) reds the content arm and
+    # `test_every_pinned_row_grades_a_line_inside_the_address_its_token_names` — **2 failed, 28 passed**
+    # each way. An earlier form of this comment claimed the token arm "stays green"; it does not.
+    (_AUDIT, '`:15873`', _SDK, 15873, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
+    (_AUDIT, '`:16077-16082`', _SDK, 16077, '**JSONL event log (#548):** written when *point* is provided'),
+    (_AUDIT, '`:3801`', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
+    # ⛔ THREE OF THE SIX BARE SITES IN THAT SAME SENTENCE WERE LEFT UNGRADED, which is the
+    # sentence's own failure one level up: it says "All nine are pinned by content", and `:667`,
+    # `:844` and `:916` had NO row — neither `_SPELLING` (`path.py:NNNN`) nor `_TWO_SPAN`
+    # (`` `path` `` `:NNNN` ``) matches the bare `` `:NNNN` `` form, so nothing else could grade
+    # them either. MEASURED: re-pointing each by `+1` left the whole file green (29 passed) while
+    # the three siblings that DID get rows red immediately — a claim of coverage three sites
+    # short. One ROW per SITE, and the token appears TWICE in the document for each.
+    (_AUDIT, '`:667`', _LIVE, 667, 'EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")'),
+    (_AUDIT, '`:844`', _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
+    (_AUDIT, '`:916`', _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -483,8 +529,8 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     # all six; it is a comment for most, and unrelated CODE for the two that matter most here.
     ("sdk.py:24626", _SDK, 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
     ("search_engine.py:7226", _SE, 7226, "RETURN op.id, type(r2) AS et, count(other)"),
-    ("sdk.py:22268", _SDK, 22268, "s.summary=CASE WHEN $sum"),
-    (":22390", _SDK, 22391, "s.summary, s.topics, s."),
+    ("sdk.py:22267", _SDK, 22267, "s.summary=CASE WHEN $sum"),
+    (":22390", _SDK, 22390, "s.summary, s.topics, s."),
     # ⛔ MERGE RESOLUTION (#14038 fold of `origin/main` `cc936d47db`): `hosted_api.py` IS touched by this
     # PR (+149/−35), so `main`'s pre-branch addresses are the ones that have moved. Measured on the
     # resolved tree: `sed -n '23615p' tortoise/hosted_api.py` -> `"MERGE (s:Source {url:$did}) "` and
@@ -516,18 +562,18 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21451-21453'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21458'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23062'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21434'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21394'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21322`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:32803'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32820`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:44148`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:44085`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32952-32953`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32991`'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37815`'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37834` is the `:Source` line'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37855`)**)'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21433'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21393'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21321`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:32759'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32776`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:43860`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:43797`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32908-32909`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32947`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37527`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37546` is the `:Source` line'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37567`)**)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:667`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:844`'): 2,
@@ -547,40 +593,33 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2724-2726'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2922`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:38171`'): 1,
-    # 3, not 2: the whole-node walk's address is written BARE at three sites — the header's pair
-    # (`sdk.py:37883`/`:37906`), the proximity paragraph's "they are `:37883` and `:37906` now", and
-    # §2.5's distance paragraph ("23 lines below at `:37906`", re-derived from the stale `:37751`).
-    # ⛔ The three spellings are re-pointed WITH the row below (`#14249` review R6, P2): a comment that
-    # still names `:37883`/`:37906` sends a reader to addresses the document no longer carries, and no
-    # arm reads comments — the same silent class this file's neighbouring hunk already records.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:38194`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:38194` |'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:38194`)'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:38171` and'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:58387` passes `"event"`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2921`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37883`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37906`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37906` |'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37906`)'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37883` and'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:58099` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5250`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11597`'): 1,
-    # 4: the header's BARE spelling of the same address, the §2.5 five-address enumeration's bare
-    # site, and the two sites the #14246 fix lane added when it re-measured the comparability split
-    # (`mcp_server.py`'s `:11590` is the ELEVENTH non-comparable pair, so the split must name it, and
-    # §2.5's head-declaration sentence states where it sits at the pin). The spelling that was counted
-    # here before `#14169` moved the address (`:11281`, on the `#13991` provenance sentence) is NOT
-    # counted: that sentence is the record of the correction, not a cite of this head. Measured on this
-    # document: `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 4.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11597`'): 4,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11590`'): 1,
+    # 4: the header's BARE spelling of the same address, the non-comparable enumeration in the drift
+    # header (added by #13998 — `5bb3b32518` re-pointed this address past the pin's `mcp_server.py`,
+    # which is what makes it a member of that set), plus the two BARE sites the #13991 branch itself
+    # adds (§2.5's five-address enumeration and its `:11280` -> `:11590` provenance sentence) — see the
+    # row's own comment for the four line numbers. Measured on the merged document:
+    # `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 4.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11590`'): 4,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5720`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8522`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8515`'): 2,
     # The four bare `sdk.py` `:Tag` siblings the header paragraph enumerates, one occurrence each —
-    # the §2.5 spellings are the one-token keys `sdk.py:31551` etc. and are a different key.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31595`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31577`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24514`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24858`'): 1,
+    # the §2.5 spellings are the one-token keys `sdk.py:31420` etc. and are a different key.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31551`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31533`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24513`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24857`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,
@@ -594,17 +633,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24627'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24626'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7226'): 2,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3508'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3506`'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37835'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37877` in `_file_human_approval`'): 1,
-    # review cycle 2: the four re-points that had no content pin
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'tortoise/sdk.py:38495'): 1,
-    ('docs/00_index.md', 'sdk.py:22074'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'opening `:37815`'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'opening `:37855`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37547'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37589` in `_file_human_approval`'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2945'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'search_engine.py:2787'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:5074'): 1,
@@ -621,9 +655,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # `tortoise/sdk.py` insertion independently landed it (`_PINS` above follows it). So `28019` and
     # `28067` are BOTH tokens the documents no longer carry, and a row for either is a false pin.
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22226'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22268'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22391`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22225'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22267'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22390`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23615'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23427`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:34390`'): 2,
@@ -647,20 +681,20 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`expand_ops` preview at `:7190`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
-    ('docs/00_index.md', '`sdk.py:28582` at this head'): 1,
+    ('docs/00_index.md', '`sdk.py:28581` at this head'): 1,
     # ⛔ #14087 review round 7: the pin row added for the SAME line's other present-tense address.
     # Occurs ONCE in the document (`grep -o 'entity_verdict\.py:43' docs/00_index.md | wc -l` -> 1), so a
     # second site must not appear unannounced.
     ('docs/00_index.md', '`entity_verdict.py:43`'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28582`), so any non-NULL'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28946`'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28581`), so any non-NULL'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28945`'): 1,
     ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2683'): 1,
     # #14043 review, finding 3: the four addresses this revision writes at THIS head. ONE site each
     # except `live.py:667`, which the document names three times (§2.1's table, the dead-pair paragraph
     # and row 2's summary) — all three are the same address, so a re-point at any one of them is what
     # the count is here to red. Measured: `grep -o 'live.py:667' <the document> | wc -l` -> 3.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'live.py:667'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:15874'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:15873'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:916'): 1,
     # §2.6's re-pointed row: `:892` is written twice (the row, and the header's enumeration that promises it is
     # pinned), the other two once each. The count is what reds a re-point at any of them.
@@ -688,8 +722,20 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1292-1301`'): 2,
     # #14043 review (finding 1): one site each in §6.3. Measured on this document:
     # `grep -o -F 'sdk.py:16077-16082' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16078-16083'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3802'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16077-16082'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3801'): 1,
+    # #14038 review cycle 4 (P1): the header's "nine MORE addresses" enumeration names these three
+    # as BARE siblings (one path, then `:NNNN`), which the long-form rows above do NOT cover — a bare
+    # token is not the string `sdk.py:NNNN`, so the three sites could be re-pointed with every
+    # long-form pin green. Measured on this document: `grep -o -F '`:15873`' <doc> | wc -l` -> 1, and
+    # the same for '`:16077-16082`' -> 1 and '`:3801`' -> 1.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:15873`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:16077-16082`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3801`'): 1,
+    # row 2d's `:Meta` pair — one SITE each, written once as a one-token spelling (the two-span forms
+    # at `:135`/`:149` are different spellings and cannot satisfy these counts).
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:61999` (reads)'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:62019` (`_config_reset_state`)'): 1,
 }
 
 
@@ -1743,7 +1789,7 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
     asserts. So the premise is recovered from the document here rather than trusted to the prose.
     """
     _spellings, pairs = _resolved_pairs((REPO / _AUDIT).read_text(encoding="utf-8"))
-    five = [(_SDK, 31595), (_SDK, 31577), (_SDK, 24514), (_SDK, 24858), (_MCP, 11597)]
+    five = [(_SDK, 31551), (_SDK, 31533), (_SDK, 24513), (_SDK, 24857), (_MCP, 11590)]
     missing = [pair for pair in five if pair not in pairs]
     assert not missing, (
         f"the header's §2.5 `:Tag` enumeration says each of these addresses 'already carries its pair "
@@ -1816,13 +1862,12 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
 #: ⛔ NO LITERAL `hosted_api.py:<n>` CITE IS SPELLED IN THESE COMMENTS: `tools/hosted_api_cite_census.py`
 #: greps every tracked file, so a line number written here JOINS the population it measures.
 _NONCOMPARABLE_FRAGMENTS: dict[tuple[str, int], str] = {
-    ("tortoise/sdk.py", 58386): "hybrid = self._tortoise_fts_query(",
-    ("tortoise/sdk.py", 58387): 'entity_type="event"',
-    ("tortoise/sdk.py", 58603): "proj.g.query(",
-    ("tortoise/sdk.py", 58605): "s.turn_count, s.actor_user_id, s.harness,",
-    ("tortoise/sdk.py", 59254): "MATCH (s:Source {url:$url})-[:references]->(n)",
-    ("tortoise/sdk.py", 62585): "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
-    ("tortoise/sdk.py", 62605): "def _config_reset_state(self)",
+    ("tortoise/sdk.py", 58099): 'entity_type="event"',
+    ("tortoise/sdk.py", 58315): "proj.g.query(",
+    ("tortoise/sdk.py", 58317): "s.turn_count, s.actor_user_id, s.harness,",
+    ("tortoise/sdk.py", 58966): "MATCH (s:Source {url:$url})-[:references]->(n)",
+    ("tortoise/sdk.py", 61999): "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
+    ("tortoise/sdk.py", 62019): "def _config_reset_state(self)",
     ("tortoise/search_engine.py", 7193): "CALL { WITH op MATCH (op)-[r2:IMPL|hasPart]-(other:Point)",
     ("tortoise/search_engine.py", 7226): "RETURN op.id, type(r2) AS et, count(other)",
     ("tortoise/search_engine.py", 7600): "MATCH (n:Point)-[r:aboutSubject]->(:Subject) RETURN count(r) AS c",
@@ -3492,13 +3537,13 @@ def test_every_pinned_row_grades_a_line_inside_the_address_its_token_names() -> 
 
 def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
     """Negative control — the SHIPPED pre-fix shape: stale token, correct line, green."""
-    stale = (_AUDIT, "`:31496`", _SDK, 31595, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})")
+    stale = (_AUDIT, "`:31496`", _SDK, 31551, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})")
     problems = _rows_outside_their_token((stale,))
-    assert problems, "a token naming `:31496` must not be allowed to grade line 31595"
-    assert "31496" in problems[0] and "31595" in problems[0], problems[0]
+    assert problems, "a token naming `:31496` must not be allowed to grade line 31551"
+    assert "31496" in problems[0] and "31551" in problems[0], problems[0]
     # The substrate-map row the same review found, in its shipped form.
-    shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37835, "``:Document`` node).")
-    assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37835 must red"
+    shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37547, "``:Document`` node).")
+    assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37547 must red"
     # A range token is accepted on any line INSIDE the range it names (the anchor convention).
     inside = (_AUDIT, "`:7599-7602`", _SE, 7602, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
     assert not _rows_outside_their_token((inside,)), "a line inside the named range must pass"
@@ -3517,10 +3562,10 @@ def test_a_token_naming_two_addresses_does_not_vouch_for_the_hull_between_them()
     """
     between = (_AUDIT, "`:58315`/`:58317`", _SDK, 58337, "rows = proj.g.query(")
     assert _rows_outside_their_token((between,)), (
-        "a token naming :58603 and :58605 must NOT vouch for the line between them"
+        "a token naming :58315 and :58317 must NOT vouch for the line between them"
     )
     # …and each address it DOES name is still accepted, so the tightening rejects only the hull.
-    for named in (58603, 58605):
+    for named in (58315, 58317):
         row = (between[0], between[1], between[2], named, between[4])
         assert not _rows_outside_their_token((row,)), (
             f"{named} is an address the token names, so it must pass"
@@ -3539,7 +3584,7 @@ def test_a_row_whose_token_names_no_address_is_reported_not_skipped() -> None:
     file exists to catch, in prose (the `#14038` cycle-5 review's finding, applied to the count's own
     text rather than to a figure). The arm scans whatever `_PINS ∪ _MAIN_SET_MISSED` holds.
     """
-    unaddressed = (_AUDIT, "`_file_human_approval`", _SDK, 37835, "``:Document`` node).")
+    unaddressed = (_AUDIT, "`_file_human_approval`", _SDK, 37547, "``:Document`` node).")
     assert _rows_outside_their_token((unaddressed,)), (
         "a row whose token names no address must be REPORTED, not skipped"
     )
@@ -3554,7 +3599,7 @@ def test_the_resolve_content_arm_is_unchanged_by_the_token_arm() -> None:
     separate arm was needed instead of a stricter `_resolve`.
     """
     correct_line_wrong_token = (
-        _AUDIT, "`:58605`", _SDK, 58603, "rows = proj.g.query(",
+        _AUDIT, "`:58317`", _SDK, 58315, "rows = proj.g.query(",
     )
     assert _resolve((correct_line_wrong_token,)) == [], (
         "the content arm must stay silent here — that silence is why the token arm exists"
@@ -3683,7 +3728,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # dropped these five rows while keeping their occurrence counts (measured: the merge's own conflict
     # resolution took the older side of this file): five addresses that NOTHING read — the audit's heal
     # scan + its stamp-back (`hosted_api.py:21451-21453` / `:21458`) and the SUBSTRATE sentence's three
-    # OPENING values (`:37815`, `:37546`, `:37855`), which a forward merge had resurrected at +21 while
+    # OPENING values (`:37527`, `:37546`, `:37567`), which a forward merge had resurrected at +21 while
     # the two graded headlines stayed right.
     # 107 -> 109 at the `#14038` fix lane's row-2d pass: the `:Meta` pair (`sdk.py:62020`/`:62040`) was
     # the LAST `+21`-class cite in this document, and it was unobservable to EVERY population arm —
@@ -3694,7 +3739,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # (2d's `_find_point_by_content` callers, 14's payload-`mentions` read and its `pt` binding) are
     # re-pointed by content and pinned — four rows, each anchored on the line its row claims.
     # 113 -> 119 at row 2d's own pass: the row's five remaining stale addresses were re-pointed by
-    # CONTENT and pinned, plus `sdk.py:32803` — which was already correct and which a hand-off table on
+    # CONTENT and pinned, plus `sdk.py:32759` — which was already correct and which a hand-off table on
     # this PR told lanes to MOVE, i.e. the false-correction shape pinned rather than repeated. The
     # population arms are invariant under this edit (measured: 345/227/215/167 and 229/217/157/169
     # identical before and after), which is why only opening the lines can grade it.
@@ -3960,7 +4005,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
         "subject probe `:7025-7028`",
         "`subject_binding_available()` at `:7031-7044`",
         "index note `:3070`;",
-        "`capture_redactions` writer `:2876` (on this tree `:2922`)",
+        "`capture_redactions` writer `:2876` (on this tree `:2921`)",
         "walk `:4780-4784`",
         "operator leg `:6667`",
         "label scan `:4708-4710`",

@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **308** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **309** files scanned |
 | files carrying at least one statement site | **102** |
 | **statement sites (this census)** | **1325** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **873** (589 read, 284 write) |
@@ -36,7 +36,7 @@ this document classifies **statements**.
 | `ddl` | 17 |
 | `unresolved` (statement not statically resolvable) | 105 |
 | non-Cypher door calls (excluded from every shape total) | 266 |
-| **AST door calls** = census + non-Cypher | **1590** |
+| **AST door calls** = census + non-Cypher | **1591** |
 
 > **The finding, with its count: 589 of 1325 product statements (44.5 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
@@ -65,8 +65,8 @@ the box, are:
 
 | mode | statement sites | files | note |
 |---|---|---|---|
-| product surface (this census) | **1324** | **102** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,212** | **855** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,134 / 9,150 / 9,170 / 9,186 here, and only `9,212` reproduces at this tree — the **2,551** files it scans are `main`'s **2,549** at this merge (`588cf7aeb6`) plus this PR's TWO added files (`tortoise/capacity_notice.py`, `tests/test_13998_capacity_notice.py`) — and ⛔ the TESTS file DOES carry one, so `files_with_sites` is NOT identical at both trees: measured with this same tool at each tree (`--all-surface --json`), the base `588cf7aeb6` reads **9,211 / 854 / 2,549** and this head reads **9,212 / 855 / 2,551**, the `+1` being `tests/test_13998_capacity_notice.py:212` (`_RealSeamControlPlane.query`, an `unresolved` statement) while `tortoise/capacity_notice.py` carries none (re-measured after the merges of `2c0d66e2ec`, `69908d006b` and `1b0db0489408` — TWO of which grew it (`2c0d66e2ec` added 2 `.py` files, `1b0db0489408` added 2) and one of which added NONE (`69908d006b`'s `.py` diff is three modifications and no addition, so it grew nothing: an earlier cut of this row said so and that qualifier was lost in a re-cut, which is why it is restored here rather than dropped); the row read 2,539 before the last of those, which is why the figure is re-derived rather than carried) — `tests/` included, which is why these numbers move on a test edit. ⛔ RE-DERIVED, not carried: an earlier revision of this row stated 9,186 / 849 / 2,533 with `main` at 2,527, and all four were stale by the time the branch merged — measured with `uv run python tools/cypher_inventory.py --all-surface --json` at this head, which is the only thing that answers it (the pin cannot: this row is deliberately unpinned). That cut's delta was **+20 sites and +5 carrying files**, enumerated rather than counted, per file with the tool's own parser: `tortoise/outside_view.py` 3, `tortoise/resident_pin.py` 3, `tests/test_14012_outside_view.py` 9, `tests/test_14012_resident_pin.py` 3 and `tests/test_14012_resident_cli.py` 2 — the sixth added file, `tools/resident.py`, carries none. ⛔ RE-MEASURED AGAIN, and the previous cut of this very sentence is the proof the re-derivation rule is load-bearing: it read `+17` / `…outside_view.py` 8 / `+11 added files` — an enumeration summing to 19 beside a claimed delta of 17 — because the sites/files pair had been re-measured while the enumeration and the scanned-file count had not. Every figure here is now `--all-surface --json`'s own output at the head that ships, per file, and `git ls-tree`'s `.py` count for the file delta (⛔ the six files marked "this lane's" above were NOT this lane's: they went to `main` in `e74cf1d13d` (#14161), which took `main` from **2,535** at `dea00903b50f` to 2,541; the merge parent `b4da1f5c01` read **2,542**, `main` had moved to **2,547** by the `#14222` re-cut's merge base `0467ba329d7`, and this branch adds exactly TWO scanned files — measured by `--all-surface` at each tree, not the eleven an earlier cut claimed). ⛔ **RE-MEASURED AT EACH MERGE — this is the FIFTH reading, and the base has moved TWICE since the `#14222` re-cut named `0467ba329d7`:** ⛔ **the base THIS merge actually took is `588cf7aeb6`** (`git merge-base HEAD origin/main`, and an ancestor of this head), which reads **9,211 / 854 / 2,549** with this tool. The previous cut measured at `47e28b549e` (**9,208 / 854 / 2,549**), three sites BEHIND it — `main`'s own advance added exactly those three with no new carrying file — so a figure inherited across EITHER base is three low, and neither reading is a correction to the other. The previous cut named `5e83c2a2f697`, which is now one base behind: `main` added **TWO** `.py` files between them (`git diff --name-status 5e83c2a2f697 0467ba329d7 --diff-filter=A -- '*.py'` → `tools/extractor_cost_measure.py`, `tests/test_extractor_cost_measure.py`), which is exactly why the scanned-file count moved **2,545**→**2,547** while `sites` **9,208** and `files_with_sites` **854** are unchanged — neither new file carries a statement, so it joins the scanned population without joining the carrying one. Every figure below was re-derived at the base that shipped. ⛔ **The Appendix was RED on the PREVIOUS base (`70fbd1a27dd5`) — and `main` had ALREADY repaired it before this merge, so the attribution matters.** The earlier cut of this sentence named `main` as the red one, and at the base this row now names (`588cf7aeb6`) that is false: measured `70fbd1a2`'s committed table against `main`'s, **400** rows differ and **378** of them are `tortoise/sdk.py` (of **386** cited sdk.py rows) — that is `main` RE-CUTTING the staleness its own `sdk.py` growth had created, and `tortoise/sdk.py` reads **62,785** at `70fbd1a27dd5` — the head that growth was read at — while **both** trees here read **62,764** (`#14290` reverted it, so the 62,764 → 62,785 growth predates them and no longer describes the file at either). `main`'s table is GREEN at the base this row names (`588cf7aeb6` prints `25 pinned counts match`), because `main`'s own `--markdown` re-cut shipped with it. Measured `main`'s table against THIS head's, the difference is **243 rows and every one is a LINE SHIFT, none a content change**: all 243 `(file, function, shape, role, verdict, statement)` tuples exist on both sides — **240** in `tortoise/hosted_api.py` and **3** in `tortoise/supabase_control.py`, because this PR inserts 149 lines into the first and edits the second — while the other **1,081** rows are byte-identical and **no row is added or removed**. So this merge's regeneration re-points **243** line numbers, not 378, and the earlier "**379**" figure does not describe this head. ⛔ An earlier cut of this sentence read "**exactly ONE** row differs — the single `tortoise/monitoring.py` row for `_probe_once._run_query`, which sat at `:4823` on `main` and moved when this branch changed that file". All three parts of that were FALSE when measured, and they are kept here as the record rather than deleted: that row is at **`:5318`** on BOTH trees, `tortoise/monitoring.py` is byte-identical to `main` (`git diff --stat origin/main HEAD -- tortoise/monitoring.py` is empty), and 243 rows differ, not one. ⛔ `--check` stays GREEN over all of it, because the pins are scalars and an insertion is not a new statement. (An earlier cut of this row named `10e51693f1`: it is an ANCESTOR of that base, **twelve** commits behind it (`git rev-list --count 10e51693f1..0467ba329d7` = 12), and the figure DID move — it reads **2,545** scanned files (`git ls-tree -r --name-only 10e51693f1 \| grep -c '\.py$'`), not the **2,549** the base this row names reads, because the two `extractor_cost_measure` files postdate it and `#14222`'s `projection_worker` pair postdates those — but a reader who re-derives at the newer sha re-derives at the tree that shipped, which is the only base this rule accepts.): this head reads **9,212 / 855 / 2,551** against the base's **9,211 / 854 / 2,549** — sites and carrying files NOT identical, and the whole delta is this PR's own two added files (`tortoise/capacity_notice.py` scanned with no site; `tests/test_13998_capacity_notice.py` scanned AND carrying the single new site at `:212`). The number beside this row names the tree it does) |
+| product surface (this census) | **1325** | **102** | `tortoise/**/*.py`, test modules excluded |
+| every tracked surface (`--all-surface`) | **9,220** | **856** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,134 / 9,150 / 9,170 / 9,186 here, and only `9,212` reproduces at this tree — the **2,551** files it scans are `main`'s **2,549** at this merge (`588cf7aeb6`) plus this PR's TWO added files (`tortoise/capacity_notice.py`, `tests/test_13998_capacity_notice.py`) — and ⛔ the TESTS file DOES carry one, so `files_with_sites` is NOT identical at both trees: measured with this same tool at each tree (`--all-surface --json`), the base `588cf7aeb6` reads **9,211 / 854 / 2,549** and this head reads **9,212 / 855 / 2,551**, the `+1` being `tests/test_13998_capacity_notice.py:212` (`_RealSeamControlPlane.query`, an `unresolved` statement) while `tortoise/capacity_notice.py` carries none (re-measured after the merges of `2c0d66e2ec`, `69908d006b` and `1b0db0489408` — TWO of which grew it (`2c0d66e2ec` added 2 `.py` files, `1b0db0489408` added 2) and one of which added NONE (`69908d006b`'s `.py` diff is three modifications and no addition, so it grew nothing: an earlier cut of this row said so and that qualifier was lost in a re-cut, which is why it is restored here rather than dropped); the row read 2,539 before the last of those, which is why the figure is re-derived rather than carried) — `tests/` included, which is why these numbers move on a test edit. ⛔ RE-DERIVED, not carried: an earlier revision of this row stated 9,186 / 849 / 2,533 with `main` at 2,527, and all four were stale by the time the branch merged — measured with `uv run python tools/cypher_inventory.py --all-surface --json` at this head, which is the only thing that answers it (the pin cannot: this row is deliberately unpinned). That cut's delta was **+20 sites and +5 carrying files**, enumerated rather than counted, per file with the tool's own parser: `tortoise/outside_view.py` 3, `tortoise/resident_pin.py` 3, `tests/test_14012_outside_view.py` 9, `tests/test_14012_resident_pin.py` 3 and `tests/test_14012_resident_cli.py` 2 — the sixth added file, `tools/resident.py`, carries none. ⛔ RE-MEASURED AGAIN, and the previous cut of this very sentence is the proof the re-derivation rule is load-bearing: it read `+17` / `…outside_view.py` 8 / `+11 added files` — an enumeration summing to 19 beside a claimed delta of 17 — because the sites/files pair had been re-measured while the enumeration and the scanned-file count had not. Every figure here is now `--all-surface --json`'s own output at the head that ships, per file, and `git ls-tree`'s `.py` count for the file delta (⛔ the six files marked "this lane's" above were NOT this lane's: they went to `main` in `e74cf1d13d` (#14161), which took `main` from **2,535** at `dea00903b50f` to 2,541; the merge parent `b4da1f5c01` read **2,542**, `main` had moved to **2,547** by the `#14222` re-cut's merge base `0467ba329d7`, and this branch adds exactly TWO scanned files — measured by `--all-surface` at each tree, not the eleven an earlier cut claimed). ⛔ **RE-MEASURED AT EACH MERGE — this is the FIFTH reading, and the base has moved TWICE since the `#14222` re-cut named `0467ba329d7`:** ⛔ **the base THIS merge actually took is `588cf7aeb6`** (`git merge-base HEAD origin/main`, and an ancestor of this head), which reads **9,211 / 854 / 2,549** with this tool. The previous cut measured at `47e28b549e` (**9,208 / 854 / 2,549**), three sites BEHIND it — `main`'s own advance added exactly those three with no new carrying file — so a figure inherited across EITHER base is three low, and neither reading is a correction to the other. The previous cut named `5e83c2a2f697`, which is now one base behind: `main` added **TWO** `.py` files between them (`git diff --name-status 5e83c2a2f697 0467ba329d7 --diff-filter=A -- '*.py'` → `tools/extractor_cost_measure.py`, `tests/test_extractor_cost_measure.py`), which is exactly why the scanned-file count moved **2,545**→**2,547** while `sites` **9,208** and `files_with_sites` **854** are unchanged — neither new file carries a statement, so it joins the scanned population without joining the carrying one. Every figure below was re-derived at the base that shipped. ⛔ **The Appendix was RED on the PREVIOUS base (`70fbd1a27dd5`) — and `main` had ALREADY repaired it before this merge, so the attribution matters.** The earlier cut of this sentence named `main` as the red one, and at the base this row now names (`588cf7aeb6`) that is false: measured `70fbd1a2`'s committed table against `main`'s, **400** rows differ and **378** of them are `tortoise/sdk.py` (of **386** cited sdk.py rows) — that is `main` RE-CUTTING the staleness its own `sdk.py` growth had created, and `tortoise/sdk.py` reads **62,785** at `70fbd1a27dd5` — the head that growth was read at — while **both** trees here read **62,764** (`#14290` reverted it, so the 62,764 → 62,785 growth predates them and no longer describes the file at either). `main`'s table is GREEN at the base this row names (`588cf7aeb6` prints `25 pinned counts match`), because `main`'s own `--markdown` re-cut shipped with it. Measured `main`'s table against THIS head's, the difference is **243 rows and every one is a LINE SHIFT, none a content change**: all 243 `(file, function, shape, role, verdict, statement)` tuples exist on both sides — **240** in `tortoise/hosted_api.py` and **3** in `tortoise/supabase_control.py`, because this PR inserts 149 lines into the first and edits the second — while the other **1,081** rows are byte-identical and **no row is added or removed**. So this merge's regeneration re-points **243** line numbers, not 378, and the earlier "**379**" figure does not describe this head. ⛔ An earlier cut of this sentence read "**exactly ONE** row differs — the single `tortoise/monitoring.py` row for `_probe_once._run_query`, which sat at `:4823` on `main` and moved when this branch changed that file". All three parts of that were FALSE when measured, and they are kept here as the record rather than deleted: that row is at **`:5318`** on BOTH trees, `tortoise/monitoring.py` is byte-identical to `main` (`git diff --stat origin/main HEAD -- tortoise/monitoring.py` is empty), and 243 rows differ, not one. ⛔ `--check` stays GREEN over all of it, because the pins are scalars and an insertion is not a new statement. (An earlier cut of this row named `10e51693f1`: it is an ANCESTOR of that base, **twelve** commits behind it (`git rev-list --count 10e51693f1..0467ba329d7` = 12), and the figure DID move — it reads **2,545** scanned files (`git ls-tree -r --name-only 10e51693f1 \| grep -c '\.py$'`), not the **2,549** the base this row names reads, because the two `extractor_cost_measure` files postdate it and `#14222`'s `projection_worker` pair postdates those — but a reader who re-derives at the newer sha re-derives at the tree that shipped, which is the only base this rule accepts.): this head reads **9,212 / 855 / 2,551** against the base's **9,211 / 854 / 2,549** — sites and carrying files NOT identical, and the whole delta is this PR's own two added files (`tortoise/capacity_notice.py` scanned with no site; `tests/test_13998_capacity_notice.py` scanned AND carrying the single new site at `:212`). The number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -92,35 +92,35 @@ two reasons given below the block, so the block does not pretend it does:
 
 ```text
 population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
-            (the 308 files the tool reports as `py_files`), scanned as WHOLE TEXT
+            (the 309 files the tool reports as `py_files`), scanned as WHOLE TEXT
 
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,644 occurrences of the door predicate across 112 files
-2,377 occurrences of the verb predicate across 149 files   (upper-bound shape, see below)
+1,645 occurrences of the door predicate across 112 files
+2,379 occurrences of the verb predicate across 149 files   (upper-bound shape, see below)
 
-1,644  regex door-pattern occurrences
+1,645  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,590  occurrences on a line carrying a door CALL          [measured]
+= 1,591  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,590  AST door calls
-= 1324  classified Cypher statements + 266 non-Cypher door calls
+= 1,591  AST door calls
+= 1325  classified Cypher statements + 266 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (308 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (309 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 308 files>` → **1,644** across **112** files: exactly the
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 309 files>` → **1,645** across **112** files: exactly the
 tool's number. A bare `rg … tortoise/` gives **1,650 / 113**, the 6 extra occurrences living in
-the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,644 / 112 on
+the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,645 / 112 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 308 files>` → **2,364** across **148** files, while the tool
-reports 2,377 / 149. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 309 files>` → **2,366** across **148** files, while the tool
+reports 2,379 / 149. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — **ten** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
@@ -132,7 +132,7 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 308 files finds exactly 13 — the verb-at-end-of-line scan alone finds **182**,
+predicate over the same 309 files finds exactly 13 — the verb-at-end-of-line scan alone finds **183**,
 and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
 enumerated, and the other **170** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
@@ -142,18 +142,18 @@ the 182, so the count does not ride on that file — and none of the 13 is an ex
 split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
-(A bare case-sensitive `rg` gives 2,096, and `-i` without the exclusion 2,438 — ⛔ both over
+(A bare case-sensitive `rg` gives 2,096, and `-i` without the exclusion 2,451 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
-number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 308
-`.py` files the same two predicates read **2,091** and **2,364**; with `-t py` and the test-module
-exclusion dropped they read **2,093** and **2,367**. The 69-occurrence 2,367→2,436 gap is entirely
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 309
+`.py` files the same two predicates read **2,093** and **2,366**; with `-t py` and the test-module
+exclusion dropped they read **2,095** and **2,369**. The 82-occurrence 2,369→2,451 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
-`tortoise/pi-hooks/tortoise-capture.test.ts` 14, `tortoise/pi-hooks/store-sync.test.mjs` 3,
+`tortoise/pi-hooks/tortoise-capture.test.ts` 27, `tortoise/pi-hooks/store-sync.test.mjs` 3,
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** and
-the **= 1,590 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+the **= 1,591 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
@@ -217,7 +217,7 @@ placement table — or, for a shape §3 names explicitly, a reopen argued on `#4
 
 | shape | total | roles |
 |---|---|---|
-| `plain` | **872** | read=588, write=284 |
+| `plain` | **873** | read=589, write=284 |
 | `adjacency` | **293** | read=192, write=101 |
 | `ep` | **32** | read=21, write=11 |
 | `ddl` | **17** | ddl=17 |
@@ -236,7 +236,7 @@ migration candidates: `tortoise/projection/__init__.py` loops over `("db.idx.ful
 as a `plain` READ — the one direction a verdict flips. Both of its un-folded spellings classify
 `ddl`, which is what showed the loss was in the folding and not in the DDL arm. They are not
 "probably fine" — they are exactly the sites a flip would have to re-derive by
-hand, so they are counted and named rather than classified by guesswork. 320 further sites
+hand, so they are counted and named rather than classified by guesswork. 321 further sites
 are **partial**: the literal half carries the shape (e.g.
 `"MATCH (op:Point)-[:" + safe_rel + "]->(t)"` is an adjacency read) and the digest shows `{}`/`???`
 where the folded part was.
@@ -984,9 +984,27 @@ the migration metric §0 is about does not move at all. §1's `rg` reconciliatio
 **2,377 / 149**, bare **1,650 / 113**), and Appendix A is regenerated with `--markdown` at this head
 — the two new files' six rows are in it, so a reader can resolve every one.
 
+**The cut the `origin/main` `d2cd8ab06e` fold makes — ONE new scanned file that carries NO
+statement, and ONE new statement site in an existing file.** Re-cut by RUNNING the tool on the
+merged tree, never by arithmetic on the markers. `tortoise/relation_guards.py` (`#14381`) is
+product surface and carries no classified statement, so `files_scanned` 308→**309**; `tortoise/sdk.py`
+gains one `plain` READ — `TortoiseSDK._endpoint_kind_map`'s
+`MATCH (n:{}) WHERE n.id IN $ids RETURN n.id, coalesce(n.pointKind, n…` — which is why `sites`
+1324→**1325**, `plain` 872→**873** (read 588→**589**), `candidates` 588→**589** and `partial`
+320→**321** (the label is interpolated, the shape the `???` marker exists for), while
+`ast_door_calls` 1590→**1591** (= 1325 + 266, `non_cypher_door_calls` **266** unchanged —
+`relation_guards.py` opens no non-Cypher door). `files` **102**, `unresolved` **105**, `adjacency`
+**293**, `ep` **32**, `ddl` **17**, `traversal` **3**, `fulltext` **2** and `plain` write **284** are
+unchanged, because the one new site is a lookup and none of the new code is an edge pattern, an
+epistemic scalar or a DDL statement. §1's `rg` reconciliation is re-measured at this tree as well
+(door **1,645 / 112** whole-text, verb **2,379 / 149**, bare **1,651 / 113**), and Appendix A is
+regenerated with `--markdown` at this head. ⚠️ **This is the third merge in a row on which the
+appendix rotted green unless the doc is re-cut by running the tool** — `main`'s `#14381` added a
+file and a site without touching this doc, so `--check` reported drift the moment the two trees met.
+
 <!-- cypher-inventory:sites = 1325 -->
 <!-- cypher-inventory:files = 102 -->
-<!-- cypher-inventory:files_scanned = 308 -->
+<!-- cypher-inventory:files_scanned = 309 -->
 <!-- cypher-inventory:unresolved = 105 -->
 <!-- cypher-inventory:candidates = 589 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->
@@ -1007,8 +1025,8 @@ the migration metric §0 is about does not move at all. §1's `rg` reconciliatio
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 105 -->
 <!-- cypher-inventory:non_cypher_door_calls = 266 -->
-<!-- cypher-inventory:ast_door_calls = 1590 -->
-<!-- cypher-inventory:partial = 320 -->
+<!-- cypher-inventory:ast_door_calls = 1591 -->
+<!-- cypher-inventory:partial = 321 -->
 
 ---
 

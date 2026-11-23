@@ -310,45 +310,69 @@ is ~0.55 s/shard), so any conclusion quoted
 here MUST name the head it was measured at and re-derive BOTH arms with the verb. ⛔ THE FIX IS NOT TO
 LOWER A WEIGHT: **at `f56aac204ca6`** the three entered at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
-their `durations:` rows, so removing or shrinking those rows changes nothing (measured at `main`'s
-own tree `10e51693f1`: the emission reads **721.0-721.1** with the rows present AND with all three
-dropped — the arm that moves the pack is UNREGISTERING those suites, which reads **720.5-720.6** there
-and **720.6-720.7** at the `10e51693f1` MERGE tree `c0b929403aa9`) — the three files' +6 s
-over 11 shards is what was measured to cross the minute boundary at the earlier head. ⛔ **And
-`#13998`'s registration lands in the SAME pool without a further re-pack**:
-`tests/test_13998_capacity_notice.py` enters at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (it has no
-`durations:` row), and the tree merged with `origin/main` `588cf7ae` (this land's merge, re-emitted here) emits
-**all eleven** shards at **721.6 s**
-(a-k, two runs byte-identical) — `ceil(721.6/60 x 2)` is still **25 m**, the emitted term,
-not a hand count. ⛔ **The EARLIER tree this sentence used to name — the merge with `main`
-`10e51693f1`, `c0b929403aa9` — does NOT read 721.6, and its split is RESTORED here rather than left
-deleted**: re-measured at that sha with the same verb, two runs byte-identical, it emits **four**
-shards at **721.3 s** (a, b, c, i) and **seven** at **721.2 s**, and `ceil(721.3/60 x 2)` is also
-**25 m**. An earlier cut of this paragraph overwrote that split with THIS head's 721.6 while the
-sentence still carried the `10e51693f1` sha — one tree's emission carried under another tree's sha
-is the exact defect class this section exists to record for the minute boundary — and the follow-up
-that claimed to restore the split carried no edit to this file at all, which is why the figure is
-restored here by measurement instead. ⛔ The command this § invites names a **durable** commit, and
-that is deliberate: the follow-up, and the pre-merge merge tree this paragraph's split was emitted
-at (`c0b929403aa9`), are commits on this PR's own branch, and this repo squash-merges with
-`delete_branch_on_merge`, so a cite naming their shas stops resolving the moment the branch lands —
-a RED on the required `docs` job for every PR afterwards, not a missing footnote. The citation below
-is therefore the durable re-derivation arm ALONE — an ancestor of `main` whose command prints
-nothing (`git show --stat 10e51693f1 -- docs/ops/ci-wall-clock.md` is empty) — and it says only
-that: re-deriving never reads a diff. The split's own emission belongs to `c0b929403aa9`, named
-above; it is NOT this cite's tree, and reading it as such is the same one-tree's-numbers-under-
-another-tree's-sha error this paragraph exists to record.
-Nothing grades this number (`grep -rn '721\.' tests/ tools/` finds no pin), so re-derive it
-with `--emit-push-matrix` at the sha the sentence names. The three
-hand-added figures are re-added from the
-emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row above, plus `config/ci-surfaces.yml`'s S=11
-header block, which reads **arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom**, and the
-`test_demo_session_read_exclusion_8290.py` `durations:` row, which repeats 85.0 m against the 90 m
-cap), which is the 1-decimal restatement of the terms' own total, 56.64 m — ⛔ the × 1.5 is taken on
-the UNROUNDED total, 56.64 → 84.96 → **85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying
-the ROUNDED 56.6 instead reads 84.9 m / 5.1 m and overstates the headroom by a tenth of a metre,
-which is how this one sentence came to disagree with the row above it — and the `84.9 / 5.1` this
-sentence itself carried was that same re-derivation, withdrawn here: ⛔ NOT the sum of the four ROUNDED
+their `durations:` rows **there**, so removing or shrinking those rows changed nothing (measured: dropping
+all three `durations:` rows still emitted **721.3** on THAT resolution
+(see the `0467ba32` re-cut below) — so lowering or dropping
+those rows moved NOTHING **at that head**, which is the point of the sentence). ⛔ The premise is
+scoped to that head ON PURPOSE: the 2026-11-23 sweep has since lowered two of the three to `0.1`
+(`test_14012_resident_pin.py`, `test_14012_outside_view.py`; only `test_14012_resident_cli.py`
+is still `2.0`), so on the tree that FOLDS that sweep dropping all three DOES move the worst —
+**835.7 s → 836.0 s**, the 28 m minute unchanged (both measured on the merged tree). ⛔ **The rows were probed a SECOND way on `main`'s own tree `10e51693f1`, and the two probes agree: the emission reads **721.0-721.1** with the rows present AND with all three dropped. The arm that DOES move the pack there is UNREGISTERING those suites, which reads **720.5-720.6** at `10e51693f1` and **720.6-720.7** at the `10e51693f1` MERGE tree `c0b929403aa9**. ⛔ **The EARLIER merge tree the sentence above used to name — `c0b929403aa9` — does NOT read 721.6, and its split is RESTORED here rather than left deleted**: re-measured at that sha with the same verb, two runs byte-identical, it emits **four** shards at **721.3 s** (a, b, c, i) and **seven** at **721.2 s**, and `ceil(721.3/60 x 2)` is also **25 m**. An earlier cut of this paragraph overwrote that split with a later head's 721.6 while the sentence still carried the `10e51693f1` sha — one tree's emission carried under another tree's sha is the exact defect class this section exists to record for the minute boundary — and the follow-up that claimed to restore the split carried no edit to this file at all, which is why the figure is restored here by measurement instead.
+
+⛔ **And `#13998`'s registration lands in the SAME pool without a further re-pack**: `tests/test_13998_capacity_notice.py` enters at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (it has no `durations:` row), and the tree merged with `origin/main` `588cf7ae` (this land's merge, re-emitted here) emits **all eleven** shards at **721.6 s** (a-k, two runs byte-identical) — `ceil(721.6/60 x 2)` is still **25 m**, the emitted term, not a hand count.
+
+⛔ The command this § invites names a **durable** commit, and that is deliberate: the follow-up, and the pre-merge merge tree this paragraph's split was emitted at (`c0b929403aa9`), are commits on this PR's own branch, and this repo squash-merges with `delete_branch_on_merge`, so a cite naming their shas stops resolving the moment the branch lands — a RED on the required `docs` job for every PR afterwards, not a missing footnote. The citation below is therefore the durable re-derivation arm ALONE — an ancestor of `main` whose command prints nothing (`git show --stat 10e51693f1 -- docs/ops/ci-wall-clock.md` is empty) — and it says only that: re-deriving never reads a diff. The split's own emission belongs to `c0b929403aa9`, named above; it is NOT this cite's tree, and reading it as such is the same one-tree's-numbers-under-another- tree's-sha error this paragraph exists to record. Nothing grades the 721.x figure itself (`grep -rn '721\.' tests/ tools/` finds no pin); the LIVE term is graded by the emission, and it is re-derived at this head in the paragraph below. — what moves the term is three more
+files in the pack, +6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is
+applied at the earlier heads. ⛔ **EACH RE-CUT MERGES A DIFFERENT PAIR, SO THE TERM IS READ OFF THE
+RESULTING TREE RATHER THAN INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on the tree that
+merged `origin/main` `b4da1f5c` emitted **25 m on all eleven shards**, the worst at `est_seconds`
+**720.7** (`ceil(720.7/60 x 2)` = 25, re-read after that merge — it emitted 720.6 on the tree before
+it), and the pool it packed held BOTH parents' added suites — `#14012`'s three (shards `d`, `e`, `i`
+— `test_14012_resident_cli`, `test_14012_resident_pin`, `test_14012_outside_view`) and `#14015`'s M5
+`test_miss_rate_m5.py` (shard `d`, beside `resident_cli`) — so no arithmetic on the two parents'
+figures would have predicted the merged reading. ⛔ **THE MERGE WITH `origin/main` `10e51693` IS A
+FURTHER TREE AND MOVES IT AGAIN, so the figure quoted above is HISTORY and not this tree's term:**
+`--emit-push-matrix` on THAT tree emits **25 m on all eleven shards** at a worst `est_seconds` of
+**721.1** (and dropping the three `durations:` rows still reads 721.1 — measured by doing exactly
+that, then restoring the manifest), which is `#14192`'s added suites packing into the same pool.
+⛔ **THE MERGE WITH `origin/main` `0467ba32` IS YET ANOTHER TREE, AND THE FIGURE MOVES AGAIN — so
+`721.1` is HISTORY too, and this document's own lesson now has a third data point:**
+`--emit-push-matrix` at head `f56aac204ca6` emits **25 m on all eleven shards** at a worst
+`est_seconds` of **721.3** (shards `a`, `b`, `c`, `i`; the other seven read 721.2), and dropping
+the same three `durations:` rows still reads **721.3** — re-derived by doing exactly that and
+restoring the manifest. ⛔ Provenance, because that is what this paragraph exists to keep right:
+`f56aac204ca6` is NOT the merge that carried `0467ba32` — its parents are `89b2eff808cb` and
+`52790225a552` (`git rev-list --parents -n1 f56aac204ca6`), and `89b2eff808cb` is the commit that
+merged `origin/main`. Nothing turns on the difference for THIS figure: `config/ci-surfaces.yml`
+is byte-identical across `89b2eff808cb`, `f56aac204ca6` and `0f41e95d3664`
+(`sha256 f5cc27b5d72151ed…`), so all three emit 721.3 — ⛔ **and NOT at this head**, whose map the
+2026-11-23 sweep re-packed; quoting 721.3 against it would be the stale restatement this paragraph
+exists to forbid, and the sweep's own figures are re-derived below. The `+0.2 s` is ONE file: `git log --diff-filter=A
+--name-status 10e51693..0467ba32 -- 'tests/test_*.py'` names exactly one addition,
+`tests/test_extractor_cost_measure.py` (what removing it drops is its `config/ci-surfaces.yml`
+`surfaces: core:` LIST ENTRY — at `f56aac204ca6` the file had NO `durations:` row at all, and the
+18.2 s row that exists at THIS head was created by the same refresh; named, not line-numbered,
+because this refresh moved it, and re-naming the number is the rot `tools/ci_check_repair.py`
+argues against), and removing THAT entry —
+nothing else — drops the worst back to **721.1** (measured, then restored). So the reading is the
+same shape as every earlier one: NO ARITHMETIC ON THE TWO PARENTS' FIGURES WOULD HAVE PREDICTED IT
+(`721.1` on the parent that merged `10e51693`, `721.3` here). ⛔ **THAT SENTENCE IS HISTORY, AND SO
+ARE THE TERMS IT QUOTES**: at `f56aac204ca6` the minute was
+unchanged — `ceil(721.3/60 x 2)` = 25 — so the hand-added trio stood at 56.6 m / 85.0 m / 5.0 m. The
+**2026-11-23 sweep** then re-packed this pool, so that trio is history too: the committed map now
+emits **28 m** on all eleven shards at a worst `est_seconds` of **835.7** — five shards (`a`, `c`, `d`, `e`, `k`) at 835.7 and six at 835.6, two runs byte-identical, which is `main`'s own **835.2** moved by `#13998`'s flat 2.0 s registration, so no arithmetic on the two parents' figures predicts the merged reading — (`ceil(835.7/60 x 2)` = 28), and the trio is **59.6 m / 89.5 m / 0.5 m**. The three
+hand-added figures are re-added from the emitted 28 m: 59.6 m / **89.5 m** / **0.5 m** (the row
+above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 59.64 m,
+x 1.5 = 89.5 m, 0.5 m of headroom**, and the `test_demo_session_read_exclusion_8290.py`
+`durations:` row, which repeats 89.5 m against the 90 m cap), which is the 1-decimal restatement of
+the terms' own total, 59.64 m — ⛔ the × 1.5 is taken on the 2-dp total the committed S=11 header
+block states, 59.64 → 89.46 →
+**89.5 m**, headroom 90 − 89.46 = 0.54 → **0.5 m**: multiplying the 1-dp 59.6 instead reads
+89.4 m / 0.6 m and overstates the headroom by 0.06 m, which is how this one sentence came
+to disagree with the row above it. At the 56.64 m total that clause read `84.9 / 5.1`
+before the `#14183` re-cut withdrew it: ⛔ **THIS PARAGRAPH WAS RESTATED AT 84.9 m / 5.1 m UNTIL THE `#14183`
+RE-CUT** — exactly the ROUNDED-SUM path the clause just above forbids — and `origin/main` and this
+branch corrected it independently, to the same pair — ⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
 first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) rather than the `0.5 m` S=10 had been clearing by. The 2026-11-23 sweep has since moved the trio to `89.5 m / 0.5 m`, and the other two copies (`config/ci-surfaces.yml`'s S=11 header block and the `test_demo_session_read_exclusion_8290.py` row) were re-cut with it. The cap was
