@@ -228,12 +228,22 @@ is host-verified separately in §1.2, by the `createdAt`/`updatedAt` differentia
 $ tortoise doctor --offline      # clean HOME holding ONLY a credential, no local graph
   ⚠️ Graph: health: not used by this setup — you have a hosted credential (credentials.json,
      https://api.premiselabs.co), so your memory lives there and a local graph is not required.
-     Your next step is `tortoise create-point "…"` — the `Hosted` row below says whether that
-     will work. Override: run `tortoise init` only if you ALSO want a local graph.
+     Your next step is `tortoise create-point "…"` — the `Hosted` row below shows whether that
+     will work, or why it could not be checked. Override: run `tortoise init` only if you ALSO
+     want a local graph.
   ✅ Credentials: …/.tortoise/credentials.json — tt_…436f (fingerprint fa5dbb0654f2), …
   ⚠️ Hosted: … not probed (`--offline`); hosted reachability and key validity were NOT tested
 5 pass, 7 warn, 0 fail
 ```
+
+⛔ **The pair above is the point, not an aside.** Read the two rows together: the Graph row
+points at the Hosted row for a verdict, and the Hosted row — in the very mode this bundle
+runs — declines to give one (`not probed … NOT tested`). An earlier cut of the Graph row
+claimed the Hosted row "says whether that will work", which resolves to nothing here; it
+now says *shows whether that will work, or why it could not be checked*, which is true in
+all three states (probed, `--offline`, ungraded). Re-captured after this commit's wording
+change, with a fresh `HOME` holding only `credentials.json`, `--offline` so no request
+leaves the box.
 
 ---
 

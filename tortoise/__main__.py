@@ -6135,9 +6135,10 @@ def _cmd_create_point(args) -> int:
     # (declared in docs/evidence/14424-onboarding/README.md D5), so the next
     # action must name the doors that do — otherwise "Created point: <id>" is a
     # success with no next step, and the memory is never found again.
-    print(f"  Next: search for it — GET {api_url}/v1/search?q=<a word from it> "
-          "(hosted), or the `tortoise_search` MCP tool / "
-          "`TortoiseSDK.search_knowledge` — this CLI has no search verb yet (#14424).")
+    print(f"  Next: search for it — GET {api_url}/v1/search?q=WORD with an "
+          "`Authorization: Bearer $TORTOISE_API_KEY` header (hosted), or the "
+          "`tortoise_search` MCP tool / `TortoiseSDK.search_knowledge` — this "
+          "CLI has no search verb yet (#14424).")
     return 0
 
 
@@ -16316,8 +16317,9 @@ def _cmd_doctor(args):
                     f"so your memory "
                     f"lives there and a local graph is not required. Your next "
                     f"step is `tortoise create-point \"…\"` — the `Hosted` row "
-                    f"below says whether that will work. Override: run "
-                    f"`tortoise init` only if you ALSO want a local graph."
+                    f"below shows whether that will work, or why it could not "
+                    f"be checked. Override: run `tortoise init` only if you "
+                    f"ALSO want a local graph."
                 )
             else:
                 _detail = (
