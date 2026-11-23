@@ -4627,9 +4627,18 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             return (isinstance(arg, (ast.Subscript, ast.Attribute))
                     and bool(_names_in(arg) & holders))
 
-        row_handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
+        # ⛔ THE SAME EXEMPTION AS `handed`, FOR THE OTHER TWO TAINT SETS (#14326 round 35
+        # review cycle 7, MEASURED FALSE-RED: these two are the same question over `rows` and
+        # `holders` — `_row_ref`'s own docstring says "`handed` tests `watched` … the recorded
+        # rows are a SECOND collection" — and they were left at `_PURE_READS` when `handed`
+        # moved to `_PURE_CALLEES`). Measured: `_result_id(per_query[-1])` and a holder slot
+        # holding `results[0]` redded with "an in-place sort/clear" while the IDENTICAL read
+        # through a page ELEMENT was blessed — a false red plus a false diagnosis, and an
+        # in-file asymmetry between three arms that claim one job. Not weakened: an unknown
+        # callee (`def _scrub(row): row["order"].sort(); _scrub(per_query[-1])`) is still RED.
+        row_handed = isinstance(node, ast.Call) and callee not in _PURE_CALLEES and any(
             _row_ref(arg) for arg in list(node.args) + [k.value for k in node.keywords])
-        slot_handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
+        slot_handed = isinstance(node, ast.Call) and callee not in _PURE_CALLEES and any(
             _slot_ref(arg) for arg in list(node.args) + [k.value for k in node.keywords])
         # ⛔ EVERY `receiver` ARM ABOVE IS ALREADY RESOLVED AGAINST THE SET IT BELONGS TO
         # (`muts`, or `muts | holders` for a container slot), so this is a truthiness
