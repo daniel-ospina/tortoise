@@ -2484,7 +2484,7 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
     (fresh-context review, P3, MEASURED): the errexit-ORDERING discrimination — a display
     write aborting the step under `-e` — is NOT what these four cases test. Measured, they
     pass under `bash -c` as well; what reds on a swap is the VALUE pin for `_RUNNER_SHELL`'s
-    own flags in `test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read` (`:2599`),
+    own flags in `test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read` (`:2607`),
     not these cases. They pass under the cycle-1 mutant too, because no command on their
     crash path is
     unguarded (the tool is invoked `… || rc=$?`). The `-e` discrimination for that mutant

@@ -181,8 +181,9 @@ jobs:
           # ⛔ WHAT ACTUALLY PREVENTS THE ABORT, stated precisely because a MUTATION PASS
           # (agent-infra#3442) showed the first version of this comment overclaimed: the
           # `|| true` on the `cat` is the LOAD-BEARING guard — with it in place, moving the
-          # display above this write changes nothing, and the suite correctly stays green
-          # under that mutant (`1 passed`). The ORDERING is defence in depth: it means a
+          # display above this write changes nothing in any state where stdout is OPEN, and
+          # the suite stayed green under that mutant BEFORE case (e) existed (`1 passed`,
+          # history, not a present-tense claim). The ORDERING is defence in depth: it means a
           # future display line that fails for a reason `|| true` does not cover (a failing
           # `echo` on a closed or EPIPE'd stdout) still cannot cost the severity signal,
           # which is the only thing the alert and the round-18 gate read. So: the guard is
