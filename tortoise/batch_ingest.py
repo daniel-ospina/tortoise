@@ -2240,7 +2240,7 @@ class BatchCoordinator:
     # -- resume (brief item 4) -------------------------------------------
     def abandon_dead_claims(
             self, org_id: str, batch_id: str, *,
-            reclaim_after: float = BATCH_RECLAIM_AFTER_S) -> None:
+            reclaim_after: float | None = None) -> None:
         """Settle a CANCELLED batch's claims that NO runner is holding.
 
         ⛔ NOTHING MAY RUN AFTER A CANCEL (#14415 review round 3, BLOCKING 2).
@@ -2284,10 +2284,18 @@ class BatchCoordinator:
         once it is stale — which is the ONE rule this file states, with no
         exception left to get wrong.
         """
+        # ⛔ RESOLVED AT CALL TIME, not bound at import (review round 11, LOW):
+        # the default used to capture `BATCH_RECLAIM_AFTER_S`'s value when the
+        # module loaded, so a test or an operator that narrowed the knob moved the
+        # sibling arms and left THIS one at 900 s — the one place where the "ONE
+        # rule" was spelled two different ways. `recover()`'s `stale_after_s`
+        # already uses this sentinel.
+        window = float(BATCH_RECLAIM_AFTER_S if reclaim_after is None
+                       else reclaim_after)
         for item in self._store.items(org_id, batch_id):
             if item.state in (BatchItemState.EXTRACTING,
                               BatchItemState.EMBEDDED):
-                if _age_seconds(item.updated_at) < reclaim_after:
+                if _age_seconds(item.updated_at) < window:
                     continue
                 released = self.advance(org_id, item, BatchItemState.QUEUED,
                                         reason="cancelled batch, claim released",

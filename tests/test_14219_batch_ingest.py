@@ -9,6 +9,7 @@ acceptance, and the docstring says which.
 from __future__ import annotations
 
 import os
+import re
 import threading
 
 import pytest
@@ -1663,11 +1664,20 @@ def test_every_emitted_statement_is_brace_balanced():
     """
     seen = _every_store_statement()
     assert len(seen) >= 14, f"only {len(seen)} statements reached the store"
-    bad = [s for s in seen if "{{" in s or "}}" in s
-           or s.count("{") != s.count("}")]
+    # ⛔ THREE SHAPES, NOT ONE (#14415 review round 11, LOW). Balanced braces are
+    # not enough: an `f` prefix dropped from `f"WHERE 1=1 {attempts_clause}"`
+    # leaves the braces balanced and emits the literal text `{attempts_clause}`,
+    # which only the ENGINE rejects (`'attempts_clause' not defined`) — and in a
+    # lane with no FalkorDB the engine-dependent test skips, so this guard is the
+    # only protection there. A surviving placeholder is the same class as a
+    # doubled brace: a statement this module did not mean to emit.
+    bad = [s for s in seen
+           if "{{" in s or "}}" in s
+           or s.count("{") != s.count("}")
+           or re.search(r"\{[a-z_][a-z0-9_]*\}", s)]
     assert not bad, (
-        "a statement this module emits is malformed Cypher (unbalanced or "
-        f"doubled braces): {bad[0] if bad else ''}")
+        "a statement this module emits is malformed Cypher (unbalanced, doubled "
+        f"braces, or an un-interpolated placeholder): {bad[0] if bad else ''}")
     assert any("state:$expect}" in s for s in seen), (
         "the compare-and-set statement was not reached — the assertion above "
         "would be vacuous")
