@@ -3713,29 +3713,37 @@ def _css_reaching_decls(css: str, prop: str, compound: str,
                         tokens: tuple[str, ...] = ()) -> list[tuple[str, str]]:
     """Every BASE rule that declares `prop` and can select `compound`.
 
-    The complement of `_css_rules_with_scope`, and the reason it exists: that
-    reader matches a prelude only when it contains the exact selector TEXT and
-    never consults specificity, so a HIGHER-SPECIFICITY rule under a different
-    prelude can override a pinned declaration while every exact-selector row
-    stays green. Measured (#14406 review finding 2): appending
+    `_css_rules_with_scope` matches a prelude only when it NAMES the exact
+    selector text and never consults specificity, so a HIGHER-SPECIFICITY rule
+    under a different prelude can override a pinned declaration while every
+    exact-selector row stays green. Measured (#14406 review round 3): appending
     `.pricing-grid .pricing-card .btn { margin-top: 0 }` — (0,3,0) against the
     pinned `.pricing-card .btn`'s (0,2,0), so it wins at ANY source order —
-    left `test_each_card_is_a_flex_column_and_its_cta_takes_the_slack` GREEN
-    while the rendered CTAs split again.
+    left all three rows of `TestProductTeamsPricingCardCtaBaseline` GREEN while
+    the rendered CTAs split again.
+
+    `test_no_other_rule_takes_the_ctas_slack` answers that for the CTA's
+    slack, as a NEGATIVE invariant (no other rule may set it at all). This
+    reader answers it for the declarations no such row covers — the card's
+    `display`/`flex-direction` and the popular card's `padding-bottom` — as an
+    AGREEMENT invariant: whatever reaches the subject must say the same thing.
+    Measured on the tree before it: `.pricing-grid .pricing-card { display:
+    block }` and `.pricing-grid .pricing-card.popular { padding-bottom:
+    1.75rem }` both left every row in the class GREEN.
 
     "Can select" is decided on the RIGHTMOST compound of each comma part: a
     selector can only select an element the same KIND as its subject, so
-    `.pricing-card` -> `.pricing-card` (any ancestor chain in front of it) is
-    a candidate, while `.features` (a sibling subject) is not. `tokens`
-    narrows it further for a compound that must also carry them
-    (`(".popular",)` for `.pricing-card.popular`). `inside_media` is skipped:
-    a narrow-viewport override is a legitimate re-declaration, not an override
-    of the desktop pin.
+    `.pricing-card` -> `.pricing-card` (any ancestor chain in front of it) is a
+    candidate, while `.features` (a sibling subject) is not. `tokens` narrows
+    it further for a compound that must also carry them (`(".popular",)` for
+    `.pricing-card.popular`). `inside_media` is skipped: a narrow-viewport
+    override is a legitimate re-declaration, not an override of the desktop
+    pin.
 
     This is a SUBJECT test, not a cascade resolver — it does not prove which
     declaration wins, so callers assert that every candidate AGREES with the
     pinned value (a disagreement is either a live override or dead weight the
-    next editor will not be able to tell apart).
+    next editor cannot tell apart).
     """
     out: list[tuple[str, str]] = []
     for prelude, body, inside_media in _css_all_rules(css):
@@ -10322,20 +10330,15 @@ class TestProductTeamsCopy:
     `#13645 item 2` is the title, `#13645 item 3` is "your context", `#13645
     items 4-5` are step 03's heading and body, and `#13645 item 6` is the
     pricing-CTA baseline. They used to read `owner item 1` / `owner item 2`,
-    which collided with THIS repo's other owner item set (both in `#13696`):
-    item 3 is the outcomes/lead measure overhang
-    (`test_the_outcomes_grid_is_never_wider_than_the_prose_above_it`), and item
-    2 is the deleted hairline
+    which collided with THIS repo's other owner item set: `#13696 item 3` is
+    the outcomes/lead measure overhang (`test_the_outcomes_grid_is_never_wider_
+    than_the_prose_above_it`, `test_the_lead_resolves_the_shared_measure_in_the_
+    prose_font`), and `#13696 item 2` is the deleted hairline
     (`test_the_intro_opens_on_the_lead_and_carries_no_rule`). A bare `grep
     "owner item 3"` returned both fixes as one undifferentiated set, so an
     artifact that records four different owner items under two labels could not
-    be resolved back to the decision that owns it.
-    ⛔ The two cites are METHOD NAMES, not line numbers (#14406 review finding
-    6): this paragraph used to carry `(:10396, :10548, :10564, :10599,
-    :10451)`, which at that head were four `item 3` positions and one `item 2`
-    — so the parenthetical attached to item 2 was 80% evidence for item 3, the
-    very conflation it claimed to fix — and every one of them was stale here,
-    pointing a reader at unrelated text. A test name survives an edit above it.
+    be resolved back to the decision that owns it. Named rows, not line
+    numbers: a citation into this file rots on the next edit above it.
 
     ⛔ AND THE TYPOS' ABSENCE IS PINNED SEPARATELY
     (`test_the_pdfs_two_typos_are_absent_from_the_rendered_page`). Without that
@@ -10816,18 +10819,15 @@ class TestProductTeamsCopy:
         and every copy row would stay green.
         """
         compute = _element_by_id(_product_teams_html(), "beat-compute")
-        # ⛔ `\b[^>]*>` rather than a bare `<h2>` (#14406 review finding 5): the
-        # exact-tag reader cannot see `<h2 class="beat-title">`, so the
-        # ORDINARY next edit — giving the new title a class in order to style
-        # it — made this row fail with "#beat-compute has no <h2>" while the
-        # `<h2>` was right there. Fail-closed either way, but a failure message
-        # that names a tag the page carries is the kind of note a maintainer
-        # learns to distrust.
+        # `<h2\b[^>]*>` — the title is the ordinary thing to style, and
+        # `<h2 class="beat-title">` is a `<h2>` that must not read as "has no
+        # <h2>". Fail-closed either way, but a message that denies what is on
+        # the page is the same misattribution class as the rest of this round.
         h2 = re.search(r"<h2\b[^>]*>(.*?)</h2>", compute, re.S)
         assert h2, (
             "#beat-compute has no <h2> — the compute claim reads as a "
-            "continuation of the intro above it, which is the defect the "
-            "owner's item 1 fixes")
+            "continuation of the intro above it, which is the defect "
+            "#13645 item 2 fixes")
         assert _beat_text(h2.group(1)) == self.COMPUTE_H2, (
             f"the compute beat's title reads {_beat_text(h2.group(1))!r}; the "
             f"owner asked for {self.COMPUTE_H2!r} (#13645 item 2)")
@@ -10989,8 +10989,8 @@ class TestProductTeamsCopy:
 class TestProductTeamsPricingCardCtaBaseline:
     """#13645 item 6 — the four pricing CTAs share ONE baseline.
 
-    The report was that the buttons sit at
-    different heights because the tier copy has different lengths. The BOXES
+    The report was that the buttons sit at different heights because the tier
+    copy has different lengths. The BOXES
     were never the problem — `.pricing-grid`'s default `align-items: stretch`
     already gives all four one height (measured 1440x900: every card ran
     304.33 -> 815.72) — the defect was where the CTA sat INSIDE its box:
@@ -11011,17 +11011,32 @@ class TestProductTeamsPricingCardCtaBaseline:
     ⛔ WHY A STATIC PIN FOR A LAYOUT FIX: the failure is invisible to every
     other row here — no copy, no price and no markup changes — so a revert of
     the two declarations would be green everywhere else and the owner would
-    have to report it a second time. The rows below read the WINNING
-    declaration from the COMMENT-BLANKED sheet (`_effective_decl`), because on
-    THIS sheet the comments explain the fix and NAME both declarations: the
-    block above `.pricing-card` says "FLEX COLUMN so the four CTAs share ONE
-    baseline" (`…html:205`) and `` `margin-top: auto` on `.btn` (below)
-    absorbs each card's leftover height `` (`…html:213`) — both OUTSIDE any
-    rule body, so a sheet-wide substring search would stay green with the two
-    declarations deleted. `.pricing-card.popular` additionally carries a
-    comment BETWEEN two of its declarations (`…html:222-226`), so a reader
-    that split the RAW body on `;` would keep that prose in a declaration
-    slot. The blanking is what makes each reader below read a DECLARATION.
+    have to report it a second time.
+
+    ⛔ WHAT THE READER ACTUALLY BUYS (the first draft of this docstring claimed
+    the comment beside the rule says `display: flex` and `margin-top: auto`, so
+    blanking was what stopped the prose satisfying the rows — MEASURED FALSE:
+    the comment says "FLEX COLUMN", and the only `margin-top: auto` in prose is
+    LEADING, above `.pricing-card`, outside any rule body `_effective_decl`
+    reads). Two properties are load-bearing instead: `_effective_decl` returns
+    the LAST declaration in a MATCHED rule body, so an appended override
+    inside the block reds; and matching the prelude keeps the value tied to
+    the selector that owns it.
+
+    ⛔ AND A SUBSTRING SEARCH WOULD BE GREEN ON A BROKEN PAGE: `.pricing-grid`
+    and `.pricing-toggle` both literally carry `display: flex` (`…html:200`,
+    `:204`), so "the sheet contains `display: flex`" is true with
+    `.pricing-card` never made a container at all.
+
+    ⛔ `[-1]` IS LAST-IN-SOURCE-ORDER, NOT THE CASCADE WINNER — specificity is
+    never consulted by `_css_rules_with_scope`, so a higher-specificity rule
+    that names a DIFFERENT selector is invisible here. Measured (#14406 review
+    round 3): appending `.pricing-grid .pricing-card .btn { margin-top: 0 }`
+    — (0,3,0) against the pinned (0,2,0), winning at any order — left all three
+    rows of this class GREEN while the four CTAs split again. `[-1]` is still
+    right for the rule that OWNS the declaration (an appended duplicate of the
+    same selector must win); `test_no_other_rule_takes_the_ctas_slack` closes
+    the competing-selector half.
     """
 
     def test_each_card_is_a_flex_column_and_its_cta_takes_the_slack(self):
@@ -11049,33 +11064,71 @@ class TestProductTeamsPricingCardCtaBaseline:
             "baseline (#13645 item 6). `margin-top: auto` is the mechanism; "
             "without it `display: flex` alone changes nothing a reader sees")
 
-        # ⛔ AN EXACT-SELECTOR READ IS NOT A CASCADE READ (#14406 review
-        # finding 2, measured). `_css_rules_with_scope` matches only a prelude
-        # containing the exact selector TEXT and never consults specificity, so
-        # a HIGHER-SPECIFICITY rule under a different prelude overrides the
-        # pinned declaration while every row above stays green: appending
-        # `.pricing-grid .pricing-card .btn { margin-top: 0 }` — (0,3,0) against
-        # `.pricing-card .btn`'s (0,2,0) — re-split the rendered CTAs with this
-        # row still GREEN. So every BASE rule that can select each subject and
-        # declares the property must AGREE with the pinned value.
+        # The slack half of this cascade question is
+        # `test_no_other_rule_takes_the_ctas_slack`'s (a NEGATIVE invariant).
+        # These three declarations had no such row, so a higher-specificity
+        # selector under a different prelude overrode each one with every row
+        # in this class GREEN — measured on the tree before the loop:
+        # `.pricing-grid .pricing-card { display: block }` and
+        # `.pricing-grid .pricing-card.popular { padding-bottom: 1.75rem }`.
+        # `_css_rules_with_scope` cannot see either, so every base rule that
+        # can SELECT the subject must AGREE with the pinned value.
         for compound, prop, expected in (
                 (".pricing-card", "display", "flex"),
-                (".pricing-card", "flex-direction", "column"),
-                (".btn", "margin-top", "auto")):
-            reaching = _css_reaching_decls(css, prop, compound)
-            disagreeing = [(p, v) for p, v in reaching if v != expected]
-            first = disagreeing[0] if disagreeing else ("", "")
+                (".pricing-card", "flex-direction", "column")):
+            disagreeing = [(p, v) for p, v in _css_reaching_decls(
+                css, prop, compound) if v != expected]
             assert disagreeing == [], (
                 f"a rule that can select `{compound}` declares "
-                f"`{prop}: {first[1]}` ({first[0]!r}), overriding the pinned "
-                f"`{prop}: {expected}`. `_effective_decl` "
+                f"`{prop}: {disagreeing[0][1]}` ({disagreeing[0][0]!r}), "
+                f"overriding the pinned `{prop}: {expected}`. `_effective_decl` "
                 "reads the winning declaration of the rule that NAMES the "
-                "selector, so a higher-specificity override under another "
-                "prelude does not red it — every base rule reaching the "
-                "subject must agree (#14406 review finding 2; measured with "
-                "`.pricing-grid .pricing-card .btn { margin-top: 0 }`, (0,3,0) "
-                "against (0,2,0), which split the four baselines again while "
-                "this row was green)")
+                "selector, so a higher-specificity override under ANOTHER "
+                "prelude does not red it — specificity, not source order, picks "
+                "the winner (#14406 review round 3 P2, the same hole "
+                "`test_no_other_rule_takes_the_ctas_slack` closes for the slack)")
+
+    def test_no_other_rule_takes_the_ctas_slack(self):
+        """No OTHER rule may set the CTA's vertical slack, at ANY specificity.
+
+        `_css_rules_with_scope` matches a prelude that NAMES the exact selector
+        and returns them in source order, so `[-1]` cannot see a rule that
+        reaches the same element through a different, higher-specificity
+        selector. Measured (#14406 review round 3): appending
+        `.pricing-grid .pricing-card .btn { margin-top: 0 }` — (0,3,0) against
+        the pinned (0,2,0), so it wins at any source order — left all three
+        rows of this class GREEN while the rendered CTAs split again. That is a
+        false PASS in the guard whose docstring says the CTA takes the slack.
+
+        So this row reads EVERY top-level rule that can reach a card's CTA and
+        refuses a competing `margin-top` / `margin` shorthand. It does not
+        re-implement the cascade: it states the invariant the page needs — the
+        only rule that may set that slack is the pinned one, and it sets `auto`.
+        """
+        css = _product_teams_html()
+        competing = []
+        for prelude, body, inside_media in _css_all_rules(css):
+            if inside_media:
+                continue
+            targets = [p.strip() for p in prelude.split(",")]
+            if not any(".pricing-card" in t and ".btn" in t for t in targets):
+                continue
+            if "".join(prelude.split()) == ".pricing-card.btn":
+                continue  # the pinned rule itself, asserted above
+            for prop in ("margin-top", "margin"):
+                value = _effective_decl(body, prop)
+                if value is None:
+                    continue
+                if prop == "margin-top" and value == "auto":
+                    continue
+                competing.append((prelude, prop, value))
+        assert not competing, (
+            "another rule sets the pricing CTA's vertical slack, and can starve "
+            f"the pinned `margin-top: auto`: {competing!r}. Specificity, not "
+            "source order, decides which one a browser applies, so a rule like "
+            "`.pricing-grid .pricing-card .btn { margin-top: 0 }` (0,3,0) "
+            "out-ranks the pinned (0,2,0) rule and splits the four baselines "
+            "(#13645 item 6)")
 
     def test_the_popular_cards_thicker_border_does_not_move_its_cta(self):
         """The 2px border eats ONE more px than its siblings' 1px — measured.
@@ -11097,8 +11150,8 @@ class TestProductTeamsPricingCardCtaBaseline:
             "the popular card's bottom inset does not compensate for its 2px "
             "border, so its CTA sits 1px above the other three (measured "
             "744.78 vs 745.78 at 1440x900 — #13645 item 6)")
-        # The same cascade caveat as the row above: `.pricing-card`'s `padding`
-        # shorthand and any higher-specificity `.pricing-card.popular` rule
+        # Same cascade caveat as the flex row above: `.pricing-card`'s `padding`
+        # shorthand and any `.pricing-card.popular` rule under another prelude
         # reach this element without naming this selector text, so every base
         # rule that can select it must agree with the compensating value.
         disagreeing = [(p, v) for p, v in _css_reaching_decls(
@@ -11108,8 +11161,8 @@ class TestProductTeamsPricingCardCtaBaseline:
             f"a rule that can select `.pricing-card.popular` declares "
             f"`padding-bottom: {disagreeing[0][1]}` ({disagreeing[0][0]!r}), "
             "overriding the 1px compensation — the popular card's CTA lands "
-            "1px off the other three (#14406 review finding 2, same "
-            "exact-selector limit as the row above)")
+            "1px off the other three (#14406 review round 3 P2, same "
+            "exact-selector limit as the flex row)")
 
     def test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render(self):
         """`margin-top: auto` aligns the LAST item — so nothing may follow the CTA.
@@ -11119,29 +11172,16 @@ class TestProductTeamsPricingCardCtaBaseline:
         footnote added after it would take the slack and the buttons would
         misalign on one path only (JS visitors) or the other (crawlers).
         """
-        grid = _static_pricing_grid(_served(_product_teams_html()))
-        # ⛔ THE SPLIT IS A POPULATION, SO ITS SIZE IS ASSERTED (#14406 review
-        # finding 3, measured). `str.split('<div class="pricing-card')` finds
-        # NOTHING for a card whose opening tag changes shape — that card is
-        # silently absorbed into its predecessor and cut at the predecessor's
-        # `</div>` — and finds nothing at all when the cards are gone. In both
-        # cases the loop below iterates fewer times (or zero) and PASSES, which
-        # is a green row over a page it never read. Its siblings assert their
-        # non-empty rule lists for the same reason. The count is checked two
-        # ways: against the four tiers the grid is contracted to carry, and
-        # against the ATTRIBUTE-TOLERANT count (`class="[^"]*\bpricing-card\b`,
-        # the reader the funnel legend already uses), so an extra attribute
-        # becomes a MISMATCH rather than a card that quietly stopped being read.
-        cards = grid.split('<div class="pricing-card')[1:]
-        declared = len(re.findall(r'class="[^"]*\bpricing-card\b', grid))
-        assert len(cards) == declared == 4, (
-            f"the split found {len(cards)} pricing cards and the markup declares "
-            f"{declared}, not 4 in both. This row iterates the SPLIT, so a card "
-            "whose opening tag no longer reads exactly `<div class=\"pricing-card` "
-            "is skipped and the row passes over a card it never looked at (the "
-            "tail check then judges the PREVIOUS card). Fix the split or the "
-            "markup — do not relax the counts (#14406 review finding 3)")
-        for chunk in cards:
+        chunks = _static_pricing_grid(_served(_product_teams_html())).split(
+            '<div class="pricing-card')[1:]
+        assert len(chunks) == 4, (
+            "the split found " f"{len(chunks)} card chunk(s) for four cards — it "
+            "needs the opening tag to read `<div class=\"pricing-card`, so a "
+            "card written `<div id=\"card-free\" class=\"pricing-card\">` is "
+            "absorbed into the previous chunk and its CTA is never checked. The "
+            "siblings in this class assert their rule count for the same reason; "
+            "this row iterated a shrinking population silently")
+        for chunk in chunks:
             # Cut the chunk at the CARD's own balanced close: the slice handed in
             # ends at the usage paragraph, so the last chunk would otherwise
             # carry `<p class="pricing-usage">` into the tail and the row would
