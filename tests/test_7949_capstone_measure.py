@@ -7829,11 +7829,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # the END was the blank line before `return OrgInfoResponse(` (`:15526`, call at `:15527`).
         # ⛔ THAT IS HISTORY, NOT THIS HEAD'S: this branch inserts 114 lines into `hosted_api.py`
         # above `point_count`, so the span is `:15945-16022` at this head — START `:15945`, END
-        # the blank line before `return OrgInfoResponse(` at `:15641` — measured by the same two
-        # `grep -n` commands against this working tree, never by adding `+114` to the pair above.
-        # The three offsets (+29 `nodes_used` -> `:15592`, +39 `max_nodes` -> `:15602`, +77 END)
-        # hold EXACTLY from this START too, which is how the numbers below were re-derived
-        # rather than nudged — a uniform +114, and the offsets re-measured rather than assumed.
+        # the blank line before `return OrgInfoResponse(` at `:16022` (the call `:16023`) — measured by
+        # the same two `grep -n` commands against this working tree, never by adding `+114` to the pair
+        # above. The three offsets (+29 `nodes_used` -> `:15974`, +39 `max_nodes` -> `:15984`, +77 END)
+        # hold EXACTLY from this START too, which is how the numbers below were re-derived rather than
+        # nudged — a uniform +114, and the offsets re-measured rather than assumed (⛔ not `:15641`).
         # ⛔ THIS BRANCH REACHED THE SAME PAIR INDEPENDENTLY, by STRUCTURE rather than by an
         # inferred offset, at `32307d0109` — whose PARENT `eefad7c242` still pinned the stale
         # pair against a tree whose own START was already this one. Each of the four anchors was
@@ -18497,7 +18497,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # `hosted_api.py:15449-15526`, while THIS branch inserts 114 lines into `hosted_api.py`
     # above `point_count`, so the merged copy carries `hosted_api.py:15945-16022`
     # (`grep -n 'point_count = await asyncio.to_thread('` -> `:15945` in this tree, `:15826`
-    # on `origin/main`; the END is the blank line before `return OrgInfoResponse(` at `:16023`).
+    # on `origin/main`; the END is the blank line before `return OrgInfoResponse(` at `:16022`,
+    # the call `:16023`). ⛔ The cut before this one moved the number onto the blank line
+    # (`:16023`) and deleted the qualifying ", the call `:16023`", which made the parenthetical
+    # contradict the range it sits in and the graded sentence in `05-verify.md` (#14386 review
+    # round 8, F3 — measured: `sed -n '16022p;16023p'` is the blank line, then the call).
     # The arm below grades the claim against BOTH copies in both directions, so this sentence
     # and the range it names have to move together.
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
@@ -19267,7 +19271,13 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
 #: the same `_D5Needle` shape — and the arm requires the single hit it names. The 4th entry uses
 #: one: `_logger.warning(` alone names 115 lines, but that call's own message line names exactly
 #: one (`grep -nF 'promote_point: temporal target %s for %s no longer' tortoise/sdk.py` -> 28021).
-_INDEX_ROW_ANCHORS: tuple[tuple[str, str, str | tuple[str, ...]], ...] = (
+#: The 4th element is the SOURCE KEY an entry's number is read in (`hosted_api` for the two
+#: `org_info`-span entries, `sdk` for every other) — typed here rather than left to the reader,
+#: because it is the one slot the census below SUBSCRIPTS and a wrong key grades the number
+#: against another file's numbering with no red (#14386 review round 8, note).
+_IndexRowNeedle = str | tuple[str, ...]
+_IndexRowAnchor = tuple[str, str, _IndexRowNeedle] | tuple[str, str, _IndexRowNeedle, str]
+_INDEX_ROW_ANCHORS: tuple[_IndexRowAnchor, ...] = (
     (
         "the dedup-review threshold anchor",
         r"those two anchors are `:(?P<n>\d+)` \(`threshold: float = DEDUP_REVIEW_THRESHOLD,`\)",
@@ -19536,6 +19546,23 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
         "the `docs/00_index.md` row's present-tense anchors are not the lines they name "
         "(#14386 review, P1):\n  - " + "\n  - ".join(failures))
 
+    # ⛔ F2'S NON-VACUITY, proved by REPLAY on a mutated copy of the document rather than argued
+    # in the comment that claims it (#14386 review round 8, P2 — MEASURED). The census counts with
+    # `r"sdk\.py:147(?!\d)"`; entry 10 grades TWO of the seven occurrences, so repointing the
+    # other FIVE to `sdk.py:1475` — a line that is not the `#14381` insert — must red. Under the
+    # `str.count` this arm shipped with, the mutated document still counted SEVEN and the census
+    # returned `[]`, which is why this assertion is here: reverting the boundary reds HERE.
+    _doc_now = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
+    _mutated = _doc_now.replace("sdk.py:147", "sdk.py:1475")
+    assert _mutated != _doc_now, (
+        "the document states no `sdk.py:147` at all, so the F2 replay below would be vacuous — "
+        "re-derive the figure and this arm's population together")
+    assert _sdk147_census_failures(_mutated), (
+        "the `sdk.py:147` census stayed GREEN with EVERY occurrence repointed to `sdk.py:1475`, "
+        "a line that does not carry the `#14381` insert (#14386 review round 8, F2). The count "
+        "is a SUBSTRING test again — no right boundary — so it cannot see a repoint to any "
+        "target whose digits begin `147`. Count with `r'sdk\\.py:147(?!\\d)'`.")
+
 
 
 #: ⛔ THE `sdk.py:147` FIGURES ARE GRADED BY A DECLARED CENSUS, not by one `re.search`
@@ -19550,18 +19577,34 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 #: the token must still be there, so repointing ANY ONE of them drops the count and reds; the
 #: count itself is the census, so deleting a sentence that states the figure also reds. Raise
 #: `_SDK147_OCCURRENCES` deliberately when the document gains another statement of it.
+#:
+#: ⛔ AND THE COUNT NEEDS A RIGHT BOUNDARY, or the sentence above is FALSE (#14386 review round 8,
+#: F2 — MEASURED). `doc.count("sdk.py:147")` counts a PREFIX, so `sdk.py:1475` counts as a hit:
+#: entry 10 grades TWO of the seven occurrences, and repointing the other FIVE to `:1475` left the
+#: count at 7 and this arm GREEN — the fail-open direction, on the very guarantee this comment
+#: asserts. The census now matches `sdk\.py:147(?!\d)`, and that mutation is replayed as an
+#: assertion in `test_the_index_table_row_states_each_anchor_it_names_at_this_head`, so the
+#: boundary cannot be dropped again without a red.
 _SDK147_NEEDLE = "from .live import canonical_direction"
 _SDK147_OCCURRENCES = 7
 
 
-def _sdk147_census_failures() -> list[str]:
-    """Every `sdk.py:147` in the document, and the line it must name (round 6, P2)."""
-    doc = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
+def _sdk147_census_failures(doc_text: str | None = None) -> list[str]:
+    """Every `sdk.py:147` in the document, and the line it must name (round 6, P2).
+
+    `doc_text` lets a caller replay the census over a MUTATED copy of the document — that is how
+    the right boundary below is proved to be load-bearing rather than asserted (#14386 round 8,
+    F2). Default `None` reads the real document.
+    """
+    doc = (doc_text if doc_text is not None
+           else _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8"))
     lines = {key: path.read_text(encoding="utf-8").splitlines()
              for key, path in _EPIC_CITE_SOURCES.items()}["sdk"]
     true_lines = [n for n, line in enumerate(lines, 1) if _SDK147_NEEDLE in line]
     failures: list[str] = []
-    found = doc.count("sdk.py:147")
+    # ⛔ `(?!\d)`, NOT `str.count` (#14386 review round 8, F2 — MEASURED): without the right
+    # boundary `sdk.py:1475` counts, so repointing five of seven occurrences stayed GREEN.
+    found = len(re.findall(r"sdk\.py:147(?!\d)", doc))
     if found != _SDK147_OCCURRENCES:
         failures.append(
             f"the document states `sdk.py:147` {found} time(s), not the declared "
