@@ -1494,6 +1494,28 @@ def _is_dunder_dict_key(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
 # route outside that set escapes. This is the same unbounded class as (a) and (b) — the list
 # of ways to name a callable does not terminate either.
 #
+# ⛔ AND IT IS THE SAME ROUTE ON THE MAPPING AXIS, WHICH IS A SEPARATE ARM (#14326 round 28,
+# MEASURED at `3652689c4`). `_is_sys_dict_mapping` decides `f(sys, "__dict__")` and `vars(sys)`
+# by the same enumerated NAME, so the laundering that reds `getattr(sys, "modules")`'s callee
+# does not red this one. GREEN with the mapping axis's four RESOLVED spellings
+# (`__d = sys.__dict__`, `getattr(sys, "__dict__")`, `_g = getattr` then `_g(sys, "__dict__")`,
+# `vars(sys)`) RED:
+#
+#     __d = object.__getattribute__(sys, "__dict__"); __d["modules"] = {…}
+#     __d = sys.__getattribute__("__dict__"); __d["modules"] = {…}
+#     __d = operator.attrgetter("__dict__")(sys); __d["modules"] = {…}
+#     __d = functools.partial(getattr, sys)("__dict__"); __d["modules"] = {…}
+#     _g = builtins.__dict__["getattr"]; __d = _g(sys, "__dict__"); __d["modules"] = {…}
+#     __d = getattr.__call__(sys, "__dict__"); __d["modules"] = {…}
+#
+# plus each one's `vars` twin (e.g. `_v = builtins.__dict__["vars"]; _v(sys)["modules"]`).
+# NOT chased here either, for the reason this note already gives: the ways to name a callable
+# do not terminate, and the round-24/#14326 P3 shape arm cannot be reused — it is callee-blind
+# only where the FIRST argument is already `sys.__dict__`, and making it callee-blind for
+# `(sys, "__dict__")` would red the pinned-GREEN foreign-`getattr` control
+# (`from mypkg import getattr as _g`), the expensive direction. The fix is the same DYNAMIC
+# identity check named above, not a 29th spelling.
+#
 # ⛔ AND THE SAME FOR `sys` OBTAINED BY A CALL: `importlib.import_module("sys").modules[…]`
 # and `__import__("sys").modules[…]` are GREEN. Contrived (a harness author spells
 # `sys.modules`), and the same argument applies — enumerating the ways to NAME `sys` does not
