@@ -360,9 +360,9 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 **No product code changed. No graph write changed. No record read changed. Nothing deleted.**
 `git diff --name-only origin/main...HEAD -- 'tortoise/*.py'` lists two files —
 `tortoise/activation_scorecard.py` and `tortoise/hosted_api.py` — and every changed line in both is
-a `#` comment (`git diff origin/main...HEAD -- 'tortoise/*.py' | grep -E '^[+-]'` returns **twelve** lines:
-four file headers (`--- a/` / `+++ b/`) plus four removed and four added comment lines — the
-eight body lines are all `#`, so `grep -vE '^(\+\+\+|---) '` leaves nothing that is not a comment): each carries a count this PR re-derived
+a `#` comment (`git diff origin/main...HEAD -- 'tortoise/*.py' | grep -E '^[+-]'` returns **sixteen** lines:
+four file headers (`--- a/` / `+++ b/`) plus six removed and six added comment lines — the
+twelve body lines are all `#`, so `grep -vE '^(\+\+\+|---) '` leaves nothing that is not a comment): each carries a count this PR re-derived
 (`173` distinct cites from `746` targets over `203` files, up from `172` / `744` / `200`), not a
 change to what the code does.
 

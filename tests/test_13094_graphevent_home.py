@@ -1531,18 +1531,26 @@ def test_the_export_scan_cites_open_on_the_statements_they_name():
         f"the README names `hosted_api.py:<n>` {len(all_cites)}x ({all_cites}), not 3x — "
         "either a carrier was dropped or one was added. Both are fine, but this arm scopes the "
         "export-scan claim to the carriers that exist: re-word it deliberately.")
-    expected_anywhere = (
-        "def _export_graph_snapshot", '"GraphEvent" in labels', "events.append(d)",
-    )
+    # ⛔ POSITIONAL, not `any()` (round 8, P2). Every standalone `hosted_api.py:<n>` carrier
+    # in this README names the SCAN — the `def`. The branch and the append are named by bare
+    # `:NNNN` inside the sentence block 1 grades positionally, so an `any(...)` test here
+    # accepts a carrier re-pointed to a SIBLING statement of the same function (`:34346`, the
+    # append) while it still claims the scan: measured, that mutation left
+    # `test_docs_citation_refs.py` (40 passed) and `hosted_api_cite_census.py --check` (exit 0)
+    # green, because `34346` is cited elsewhere so the distinct-target set does not move.
+    assert set(all_cites) == {addresses[0]}, (
+        f"the README's standalone `hosted_api.py:<n>` carriers are {sorted(set(all_cites))}, "
+        f"but the scan they all name is `:{addresses[0]}` (block 1 grades the branch "
+        f"`:{addresses[1]}` and the append `:{addresses[2]}` positionally, as bare `:NNNN`). "
+        "A carrier pointing at a different statement of the same function is the same defect "
+        "as one pointing at another endpoint: re-derive it by content.")
     for address in all_cites:
         assert 0 < address <= len(lines), (
             f"`hosted_api.py:{address}` is out of range ({len(lines)} lines)")
-        assert any(token in lines[address - 1] for token in expected_anywhere), (
-            f"the README names `hosted_api.py:{address}` as an export-scan reader, but that "
-            f"line reads {lines[address - 1].strip()[:100]!r} — neither the def, the "
-            "`:GraphEvent` branch nor the append. Every carrier of this cite must open on the "
-            "statement it claims; re-derive each by content with "
-            "`grep -n 'def _export_graph_snapshot' tortoise/hosted_api.py`.")
+        assert "def _export_graph_snapshot" in lines[address - 1], (
+            f"the README names `hosted_api.py:{address}` as the export scan, but that line "
+            f"reads {lines[address - 1].strip()[:100]!r} — not the `def`. Re-derive by "
+            "content with `grep -n 'def _export_graph_snapshot' tortoise/hosted_api.py`.")
 
     # ⛔ AND THE OTHER CARRIER: `readers.json` is generated from `tools/graphevent_home.py`,
     # which carries the same three numbers as PROSE. A re-point applied to one carrier and
