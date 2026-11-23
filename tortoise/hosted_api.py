@@ -3655,7 +3655,35 @@ async def _lifespan(app):
             # one. Fail-safe: an unset env keeps the pre-warm ON.
             from tortoise.embeddings import _embedder_warmup_enabled
 
-            if _embedder_warmup_enabled():
+            # ⛔ IN-PROCESS ONLY (review F5 at ``76e58a21bb``). With a ``worker``
+            # or ``external`` backing this process never runs a forward pass, so
+            # loading the encoder here buys nothing and costs exactly what the
+            # migration exists to remove: 432 MB resident in the serving process
+            # (3.66 GB with two overlapping loads, #13674) — the WORKER's own
+            # copy is the one the process tree needs. Pre-fix the gate was
+            # ``_embedder_warmup_enabled()`` alone, so the documented migration in
+            # ``docs/infra-runbook.md`` §4.1.1e left two copies resident.
+            #
+            # The boot PAGE-CACHE warm (``entrypoint.sh``, a throwaway process
+            # before ``exec``) is deliberately NOT gated here: it is not resident,
+            # and under ``worker`` it is still useful — the worker loads the same
+            # model from the same interpreter and reads those pages warm.
+            try:
+                from tortoise.embed_seam import encodes_in_process
+
+                seam_encodes_here = encodes_in_process()
+            except Exception as exc:  # never let a lever read block boot
+                _logger.warning(
+                    "embeddings: could not read the embed seam's backing (%s) — "
+                    "keeping the in-process pre-warm", exc)
+                seam_encodes_here = True
+            if not seam_encodes_here:
+                _logger.info(
+                    "embeddings: background pre-warm skipped — the embed seam's "
+                    "encoder does not run in this process (backing=%r), so a "
+                    "local load would only add a second resident copy (#14186)",
+                    os.environ.get("TORTOISE_EMBED_BACKING") or "inprocess")
+            elif _embedder_warmup_enabled():
                 threading.Thread(
                     target=_prewarm_embeddings, name="embedding-prewarm",
                     daemon=True,
@@ -9037,6 +9065,78 @@ def _embedder_health() -> dict:
         return {**dict.fromkeys(_EMBEDDER_HEALTH_KEYS), "error": str(exc)[:200]}
     return {key: status.get(key) for key in _EMBEDDER_HEALTH_KEYS}
 
+#: #14186 — the keys `/health`'s `embed_seam` block must carry. Declared as a
+#: tuple for the same reason ``_EMBEDDER_HEALTH_KEYS`` is: the DEGRADED arm has
+#: to publish the SAME shape as the healthy one, and an ad-hoc short dict is how
+#: a dashboard gets a ``KeyError`` on exactly the path it is reading (PLUS
+#: ``error`` on the degraded arm — an extra key cannot ``KeyError`` a consumer, a
+#: missing one can).
+_EMBED_SEAM_HEALTH_KEYS = (
+    "backing", "max_wait_ms", "max_batch", "timeout_s", "last_decline",
+    "last_decline_age_s", "injected", "backing_state", "latency",
+    "latency_stale", "backings",
+)
+
+
+def _embed_seam_health() -> dict:
+    """#14186: which backing encodes, its bound, and its measured p50/p95.
+
+    Two questions this answers that nothing else on ``/health`` can:
+
+    * **Where does the encode run, right now?** ``backing`` is
+      ``inprocess`` / ``worker`` / ``external`` — the configured choice, so a
+      rollout that intended to move the embedder off the request path is
+      verifyable from outside the process instead of inferred from a latency
+      graph. ``backing_state`` carries the backing's own evidence (the worker's
+      pid and liveness, or the external endpoint's URL) so "worker" is not
+      merely a claim about a string.
+    * **Did batching help, and at what tail cost?** ``latency`` carries the
+      submission/batch/coalesced counts and the **p50/p95** of the collection
+      WAIT and the ENCODE. ⛔ TWO different waits are published and only ONE of
+      them is the bound's proof: ``latency.collect_ms`` is dequeue→fire, the
+      window-attributable wait that ``max_wait_ms`` bounds (bar one scheduling
+      quantum), so ``collect_ms.p95`` next to ``max_wait_ms`` is the reading that
+      answers "is the hard max-wait actually hard". ``latency.wait_ms`` is
+      submission→fire — END-TO-END latency — and it also carries however long a
+      ticket queued behind an in-flight encode, so it is NOT bounded by the
+      window: on the 0 ms ``inprocess`` default every non-zero ``wait_ms``
+      "exceeds" the published bound on a perfectly healthy process (review F5).
+    * ``backings`` lists **all three** with their windows, selected or not. The
+      issue's indicator is p50/p95 **per backing**, and a table that only shows
+      the one already chosen cannot answer "would the other be better" — the
+      question an operator asks before switching.
+
+    ⛔ NEVER RAISES, collects no I/O (#2850): ``seam_status()`` reads process
+    memory and a percentile over a bounded reservoir. It does not spawn a
+    worker, open a socket or call the encoder, so this handler stays as cheap as
+    the embedder block beside it.
+
+    Reported, never folded into ``status``: a deployment serving identical
+    vectors in-process is not degraded, and a ``worker`` backing is not a
+    verdict on health either — the CALLER-facing contract for an unavailable
+    dense leg is ``#2952``'s per-read declaration, which is unchanged.
+    """
+    try:
+        from tortoise.embed_seam import seam_status
+
+        status = seam_status()
+    except Exception as exc:  # a health path must always answer
+        return {**dict.fromkeys(_EMBED_SEAM_HEALTH_KEYS), "error": str(exc)[:200]}
+    block = {key: status.get(key) for key in _EMBED_SEAM_HEALTH_KEYS}
+    # ⛔ ``seam_status()`` NEVER RAISES — it has its OWN degraded arm, returning
+    # every declared key as ``None`` PLUS ``error`` — with ONE exception (review
+    # P3, cycle 8): ``injected`` is answered from module state there, because it is
+    # a fact about this process rather than about the read that failed, so a
+    # degraded block still tells an operator whether a test installed a backing.
+    # The ``except`` above only
+    # catches a RAISE, so the reason that arm carries was silently dropped: the
+    # block arrived as ``backing: null`` with nothing saying why, contradicting
+    # both this file's own comment and the runbook ("every value null, plus
+    # ``error``"). Carry it through — an extra key cannot ``KeyError`` a consumer.
+    if status.get("error") is not None:
+        block["error"] = status["error"]
+    return block
+
 
 @app.get("/health")
 async def health():
@@ -9316,7 +9416,19 @@ async def health():
             # "hybrid retrieval is OFF in production" claim could only be
             # re-measured by a human with a shell on the box. Reported, never
             # folded into `status`: see `_embedder_health`'s docstring.
-            "embedder": _embedder_health()}
+            "embedder": _embedder_health(),
+            # #14186: the embedder SEAM — which backing is serving the encodes,
+            # the collection window it applies, and the p50/p95 the current
+            # backing actually measured (plus the same, empty, for the backings
+            # not selected). Its OWN key rather than more fields on `embedder`:
+            # that block's key set is pinned exactly by
+            # `test_13674_embedder_load_bound_and_reclaim` (an operator's
+            # `jq .embedder.<key>` is a contract), and the seam answers a
+            # DIFFERENT question — "where does the encode run, and is batching
+            # helping" rather than "can the dense leg run at all". Reported,
+            # never folded into `status`: a backing that is merely batched is not
+            # a degraded deployment.
+            "embed_seam": _embed_seam_health()}
 
 
 @app.get("/health/ready")
@@ -53448,7 +53560,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 205 tracked files (751 distinct
+# ABSOLUTE line number from 205 tracked files (753 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
