@@ -12505,9 +12505,14 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # MEASURED, that mutant leaves this row GREEN: on one line the composition's INTERMEDIATE
         # step resolves to `get`, a member of `_BUILTINS_MAPPING_READS`, never to a code-executing
         # name, so an arm-level `_key_at` (as the `copies` arm uses) still answers `None`. Closing
-        # this residual is the TWO-STEP APPLICATION in the census that the note names as new
-        # machinery — which is why the row keeps its GREEN and the assertion below pins that the
-        # read is genuinely APPLIED, so reverting the row to several lines reds the table.
+        # this residual needs the COMPOSED callee to join `launderers`, NOT new machinery: the
+        # census's `copies` arm ALREADY performs the two-step — MEASURED at this head through this
+        # file's own `_pin_refuses`, `_g = dict.__dict__.get; _f = _g("get");
+        # _f(builtins.__dict__, "exec")` is REFUSED (True) and `_f = copy.copy;
+        # _d = _f(__builtins__); _d["exec"](<read>)` REDS (True) — and the class is filed as
+        # `#14449` (#14395 round-4 P2, which falsified the "new machinery" sentence this comment
+        # carried until then). That is why the row keeps its GREEN and the assertion below pins
+        # that the read is genuinely APPLIED, so reverting the row to several lines reds the table.
         "`vars(dict).get(\"get\")(m, \"exec\")` — a read APPLIED, then applied again": (
             'import builtins',
             'vars(dict).get("get")(builtins.__dict__, "exec")'
@@ -12593,12 +12598,16 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # MEASURED GREEN — `refused=False` — at this head and on `origin/main`). The two rows
         # above pinned the `.get` member for the literal namespace and for its `import … as`
         # alias, so the paragraph's guarantee (closing the class must EDIT this table) held for
-        # TWO of the class's eighteen spellings and not the other SIXTEEN — THREE members
+        # TEN of the class's eighteen spellings and not the other EIGHT — THREE members
         # (`.get`, `.pop`, `.setdefault`) × SIX receivers (literal/alias × `.__dict__`, `vars`,
-        # `getattr(…, "__dict__")`). The round-4 review found the eight below still missing (and
-        # MEASURED them GREEN, two spot-checked LIVE: `vars(copy).setdefault("copy") is
-        # copy.copy` → True, and the `getattr` twin likewise), so all sixteen now have rows and a
-        # future partial closure of ANY of them reds one. The class's home is `#14449`.
+        # `getattr(…, "__dict__")`). MEASURED by DERIVING the grid from those two dimensions and
+        # diffing it against this dict's own bindings, not by counting rows: at `9cd89e62800` the
+        # dict carried 32 rows and 10 of the grid; at this head it carries 40 and 18 of 18. The
+        # round-4 review found the eight below still missing (and MEASURED them GREEN, two
+        # spot-checked LIVE: `vars(copy).setdefault("copy") is copy.copy` → True, and the
+        # `getattr` twin likewise), so every one of the eighteen now has a row — and the
+        # completeness assertion below re-derives that grid, so the count cannot drift again.
+        # The class's home is `#14449`.
         # ⛔ THE BOUNDARY, STATED RATHER THAN IMPLIED: this is the class's spelling set for the
         # `copy` module at the two bind depths the refused read-method rows above also pin. An
         # alias of an alias is the same class one bind further and is NOT rowed, for the reason
@@ -12730,6 +12739,30 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         f"callee is a call and whose argument is the read literal — found {len(_applied)} such "
         "call(s). `body()` joins the row's `lines` with a newline, so a row spread over several "
         "entries is several STATEMENTS, and the read is then produced and discarded (#14395)")
+
+    # ⛔ THE COPY-CALLEE GRID IS COMPLETE — ASSERTED, NOT HAND-COUNTED (#14395 round-4 P2). The
+    # paragraph above this table claims the guarantee holds for EVERY spelling of THREE members ×
+    # SIX receivers, and a hand-kept count of that claim has drifted TWICE: the prose said
+    # FOUR-of-EIGHT while the dict carried 10 of the 18, and the round-4 correction then said
+    # TWO-of-SIXTEEN while the dict carried 18 of the 18. So the grid is DERIVED from the two
+    # dimensions the paragraph enumerates and diffed against the rows' own bindings. MEASURED
+    # non-vacuous: on the pre-fix tree (`9cd89e62800`) this assertion reds naming exactly the
+    # eight spellings that commit added; deleting ANY ONE row now reds it naming that spelling.
+    # Without it, "a future partial closure of ANY of them reds one" is unfalsifiable for a
+    # spelling no row carries — the defect class this table exists to delete.
+    _copy_receivers = (
+        "copy.__dict__", "vars(copy)", 'getattr(copy, "__dict__")',
+        "_z.__dict__", "vars(_z)", 'getattr(_z, "__dict__")')
+    _copy_grid = {
+        f"_g = {receiver}{member}"
+        for receiver in _copy_receivers
+        for member in (".get", ".pop", ".setdefault")}
+    _rowed_bindings = {line for lines in declared_residual.values() for line in lines}
+    _unrowed = sorted(_copy_grid - _rowed_bindings)
+    assert not _unrowed, (
+        "the copy-callee class is not fully rowed — a partial closure of an unrowed spelling "
+        f"would red NO row: {_unrowed}. Add a row per spelling, or state the boundary in the "
+        "paragraph above instead of a count this dict does not carry (#14449 is the class's home)")
 
     # ⛔ THE OTHER DIRECTION, so the table cannot be satisfied by an arm that reds everything:
     # each RESOLVED spelling of the same callee must be RED. These mirror rows in
