@@ -1851,7 +1851,32 @@ SWEEP_NAMES = 66
 #: ABOVE ARE KEPT, this file's standing ground rule. The pair below is `--repin`'s own output on
 #: the RESOLVED merge tree, never inherited from either parent (they disagree: this branch's
 #: provisional `11881` against `main`'s `11886`) and never arithmetic across them.
-SWEEP_RESIDUE = (11896, "ea44c5f732d2a97d")
+#: ⛔ RE-PINNED FROM `main`'S DRIFT BY THE `#14342 D1` LANE (#14350, PR #14423), and THIS BRANCH'S
+#: OWN CONTRIBUTION IS ZERO ROWS — measured on three trees, not inferred from a difference.
+#: That lane merges `origin/main` `0fbfbb5b210c` into `fix/14342-d1-drain`, re-cuts the pin on the
+#: resolved tree with `--repin`, and reads **(11898, "8cf59d52af09e536")**. The drift is NOT this
+#: branch's: the SAME observation — observed `(11898, "8cf59d52af09e536")` against a pinned
+#: `(11896, "ea44c5f732d2a97d")` — is printed by `--check` on
+#:   * `origin/main` `0fbfbb5b210c`'s OWN tree (detached worktree), i.e. `main` is red here itself;
+#:   * `1457f7905d`'s OWN tree, the `#14038` squash-merge that CUT the `11896` — so the pair it
+#:     committed is already one step behind the tree it commits, and no later `main` commit moved it;
+#: and this branch adds none of it: its three new files (`tortoise/drain_claim.py`,
+#: `tools/measure_drain_convergence.py`, `tests/test_14350_drain_convergence.py`) carry no
+#: `.query` / `.update` / `.delete` reference AT ALL (`grep -nE '\.(query|update|delete)\b'` → no
+#: match on all three), and the branch's other edits are inside files that already carry their rows.
+#: ⛔ THE +2 IS THEREFORE NOT ATTRIBUTED ROW BY ROW HERE, AND THAT IS STATED RATHER THAN HIDDEN: the
+#: committed pin stores a COUNT and a DIGEST, never the row set, so the rows `#14038` moved cannot be
+#: recovered from the artifact — only re-measured against a tree that predates it. What IS measured
+#: is that the reading is identical on `main`'s own tip and on `#14038`'s own tree, which is what
+#: makes this a repair of `main`'s red rather than a declaration of this branch's rows. The open
+#: roots are `#14308` and `#14294` ("`main` is red on `test (c)`, `test-slow (a)` and
+#: `surface-guard` — three stale-guard roots every PR reproduces"); this block is the same class, a
+#: pin one step behind the tree, and the evidence above is posted there rather than filed as a peer.
+#: ⛔ `surface-guard` is NOT in `DEFERRABLE_LEGS`, so its red travels into the REQUIRED
+#: `python-ci-gate` for EVERY open PR — leaving it is a fleet-wide landing block, not this PR's
+#: inconvenience. `--check` exits 0 on the pair below with
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11898, "8cf59d52af09e536")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

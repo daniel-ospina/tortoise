@@ -83,17 +83,17 @@ The last rows matter as much as the first: on today's main the free server is **
 
 ## Review Scope Contract
 
-- **Class:** `code`
-- **R1** — two concurrent UNTARGETED drains cannot both POST to one spool; the survivor is a no-op that reports who holds it, and it writes no durable status.
-- **R2** — a claim is reclaimed when its holder is provably gone or its lease expires, and a slow holder can never delete a successor's claim.
-- **R3** — a `429` capacity refusal charges no entry (`attempts`, `next_attempt_at_ms` untouched) and ends the pass; the pass retries the *same* entry after a bounded yield.
-- **R4** — no behaviour change for a spool whose box is not saturated and whose drain is the only one running (guarded: the free-server measurement and the existing suites).
-- **R5** — nothing here writes a raw captured turn to the graph, moves extraction into the drain, or changes the spool's on-disk format.
-- **R6** — both legs implement ONE protocol; a divergence is a defect.
+* **Class:** `code`
+* **R1** — two concurrent UNTARGETED drains cannot both POST to one spool; the survivor is a no-op that reports who holds it, and it writes no durable status.
+* **R2** — a claim is reclaimed when its holder is provably gone or its lease expires, and a slow holder can never delete a successor's claim.
+* **R3** — a `429` capacity refusal charges no entry (`attempts`, `next_attempt_at_ms` untouched) and ends the pass; the pass retries the *same* entry after a bounded yield.
+* **R4** — no behaviour change for a spool whose box is not saturated and whose drain is the only one running (guarded: the free-server measurement and the existing suites).
+* **R5** — nothing here writes a raw captured turn to the graph, moves extraction into the drain, or changes the spool's on-disk format.
+* **R6** — both legs implement ONE protocol; a divergence is a defect.
 
 ## Tests
 
-```
+```text
 # 33 cases — the claim protocol, the capacity rule, the falsifier
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
 33 passed
@@ -113,8 +113,9 @@ node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortois
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
 
 Two existing cases needed a stated reason, and neither is weakened:
-- **#12603's confirm-read race** now races a **targeted** filing, because a whole-spool peer is excluded by the claim — and a targeted filing (`session capture`, the shutdown flush) is the only racer left, and a real one.
-- **#2100's quota case** let a never-answering POST hang across a later process, which now correctly reads `heldByClaim`; it releases the wedged pass first and additionally asserts the claim is released — a new invariant.
+
+* **#12603's confirm-read race** now races a **targeted** filing, because a whole-spool peer is excluded by the claim — and a targeted filing (`session capture`, the shutdown flush) is the only racer left, and a real one.
+* **#2100's quota case** let a never-answering POST hang across a later process, which now correctly reads `heldByClaim`; it releases the wedged pass first and additionally asserts the claim is released — a new invariant.
 
 ## Review cycle log
 
@@ -142,17 +143,17 @@ first version of the expiry test was found.
 
 ## Residuals, stated
 
-- **Generation 33 is introduced by this PR and has never shipped**, so its recorded
+* **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at the final head
   (capture half `a2314416…`; the read half's bytes did not move) instead of
   spending a generation 34 on a refinement of the same unreleased seam. From the
   moment 33 reaches `main` the entries are frozen and a byte change needs 34.
-- **A wedged pass holds the claim until its lease (≤120 s).** That is what a lease is; the bound is derived from the transport (`REQUEST_TIMEOUT_MS` 10 s / `urlopen` 30 s), and a real fetch always ends. A hung *mock* does not — which is why the #2100 case above had to release it.
-- **A targeted filing is exempt from the claim.** It is one POST, so the ceiling (1 slot) is respected; the exemption buys the live session's own shutdown filing never being queued behind a backlog.
-- **The Pi leg does not yield on a capacity stop** — it ends the pass and lets the next opportunity continue, because its pass is `await`ed on `session_shutdown` and must not sleep. Both legs charge nothing. This asymmetry is deliberate and is stated in the code.
-- **A non-`capture_capacity_saturated` 429 is also treated as box-level** (status triggers, code names). Narrowing to the typed category would leave the defect alive on any server that does not send one.
-- **`retry_after` is capped at `RETRY_BASE_SECONDS`** when yielding, so a corrupt body cannot park the drain (and hold the claim) for hours.
-- **The convergence measurement is a reproduction of the MECHANISM, not of the production backlog** (60 entries vs 908): this box has no capture spool, and the handoff's counts are per-box.
+* **A wedged pass holds the claim until its lease (≤120 s).** That is what a lease is; the bound is derived from the transport (`REQUEST_TIMEOUT_MS` 10 s / `urlopen` 30 s), and a real fetch always ends. A hung *mock* does not — which is why the #2100 case above had to release it.
+* **A targeted filing is exempt from the claim.** It is one POST, so the ceiling (1 slot) is respected; the exemption buys the live session's own shutdown filing never being queued behind a backlog.
+* **The Pi leg does not yield on a capacity stop** — it ends the pass and lets the next opportunity continue, because its pass is `await`ed on `session_shutdown` and must not sleep. Both legs charge nothing. This asymmetry is deliberate and is stated in the code.
+* **A non-`capture_capacity_saturated` 429 is also treated as box-level** (status triggers, code names). Narrowing to the typed category would leave the defect alive on any server that does not send one.
+* **`retry_after` is capped at `RETRY_BASE_SECONDS`** when yielding, so a corrupt body cannot park the drain (and hold the claim) for hours.
+* **The convergence measurement is a reproduction of the MECHANISM, not of the production backlog** (60 entries vs 908): this box has no capture spool, and the handoff's counts are per-box.
 
 Part of #14342. Closes #14350 (D1) · #12992's starvation half.
 
@@ -160,4 +161,4 @@ Part of #14342. Closes #14350 (D1) · #12992's starvation half.
 
 ## Contribution license
 
-- [x] I donate this contribution under the BSD 3-Clause License (fleet-authored change).
+* [x] I donate this contribution under the BSD 3-Clause License (fleet-authored change).
