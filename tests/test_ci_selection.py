@@ -10671,6 +10671,19 @@ ROWED_BY_THIS_FOLD = (
     # reading: the `durations` refresher samples push-to-main runs, so a file a PR ADDS
     # cannot have a junit figure yet (#3400/#4348).
     "test_14185_projection_worker.py",
+    # #14343 (this PR) — the S4 embed-serialization lever's own pins (`_embed_json_kwargs`
+    # in `tortoise/extractor_v2.py`: the default is the pre-change bytes, garbage cannot
+    # coerce, compact changes only the layout, the read is per CALL). A file this fold
+    # ADDED and registered on `core`, which is what puts it in `fast_pool()`, and it
+    # shipped WITHOUT a `durations:` row — `--integrity` stays green over the absence (a
+    # 0.90 RATIO check with ~70 files of headroom), so nothing reddened and the file packed
+    # at `DEFAULT_FAST_WEIGHT` as an unread default, the #3400 regression this ENTRY RULE
+    # exists for. Found by the review that rebuilt `integrity()`'s predicate from the head
+    # manifest instead of reading the diff; the same defect its two sibling rows above
+    # record surviving a round each. ⛔ The row is the flat `DEFAULT_FAST_WEIGHT`, not a
+    # local reading — the refresher samples push-to-main runs, so a file a PR ADDS cannot
+    # have a junit figure yet (#3400/#4348).
+    "test_extractor_embed_json_14343.py",
 )
 
 
