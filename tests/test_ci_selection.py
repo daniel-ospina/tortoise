@@ -10814,6 +10814,15 @@ ROWED_BY_THIS_FOLD = (
     # `DEFAULT_FAST_WEIGHT`, not a local reading — the refresher samples push-to-main runs,
     # so a file a PR ADDS cannot have a junit figure yet (#3400/#4348).
     "test_14343_embed_list_serialization.py",
+    # #14371 (this PR) — the OFFLINE half of the same lever: the `embed-json` verb's
+    # cells, its arithmetic, its posture/arm guards and its write-or-print contract.
+    # A file this fold ADDED and registered on `core` with its `durations:` row in the
+    # same commit; listed here for the reason every row above states: the ENTRY-RULE
+    # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:`
+    # row and nothing reds when one is dropped. ⛔ The row is the flat
+    # `DEFAULT_FAST_WEIGHT`, not a local reading — the refresher samples push-to-main
+    # runs, so a file a PR ADDS cannot have a junit figure yet (#3400/#4348).
+    "test_14371_offline_embed_json.py",
 )
 
 
