@@ -28,14 +28,14 @@ observable without a drain:
 The next round's findings are pinned below as well: the committed `SUMMARY.md`
 being the byte projection of the committed JSONs (it had gone stale), the
 frontmatter parsing as YAML, a single-mode `run` keeping the other three modes and
-a sliced run refusing to state a cost, every mode stating all three capture knobs,
+a sliced run refusing to state a cost, every mode stating all four capture knobs,
 `head-keyless` refusing to start when a provider key is configured (a knob cannot
 pin that away), and `_org_id`'s 12-character tail.
 """
 from __future__ import annotations
 
-import json
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -468,14 +468,23 @@ def test_the_frontmatter_pin_is_not_vacuous() -> None:
 # ── `run --mode X` may not delete the modes it did not re-measure ───────────
 
 
-def _stub_one_mode(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int | None]]:
-    """Drive `_run`'s tail without a graph, a server or a drain."""
+def _stub_one_mode(monkeypatch: pytest.MonkeyPatch,
+                   digest: str | None = None) -> list[tuple[str, int | None]]:
+    """Drive `_run`'s tail without a graph, a server or a drain.
+
+    `digest` stamps the provenance a REAL mode records (`corpus.source_before`),
+    so a caller grading the cost guard can make its stubs describe the spool they
+    were handed rather than a corpus nobody drained.
+    """
     calls: list[tuple[str, int | None]] = []
 
     def fake(mode: str, *, spool_src: Path, out_dir: Path, limit: int | None,
              replay: bool, nonce: str = "") -> dict:
         calls.append((mode, limit))
         result = _result(mode=mode)
+        if digest is not None:
+            result["corpus"] = {**result["corpus"],
+                                "source_before": {"aggregate_sha256": digest}}
         (out_dir / f"{mode}.json").write_text(
             json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return result
@@ -544,9 +553,10 @@ def test_the_default_all_mode_writes_the_corpus_cost(
     """
     out = tmp_path / "evidence"
     out.mkdir()
-    calls = _stub_one_mode(monkeypatch)
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379/tortoise_test")
     spool = _live_spool(tmp_path / "live-spool")          # 3 entries, not 265
+    calls = _stub_one_mode(
+        monkeypatch, digest=rehearsal._source_fingerprint(spool)["aggregate_sha256"])
 
     assert rehearsal._run(["all", "--out", str(out),
                            "--spool-src", str(spool)]) == 0, (
@@ -566,10 +576,36 @@ def test_the_default_all_mode_writes_the_corpus_cost(
         "command the runbook names")
 
 
+def test_a_cost_describing_a_corpus_no_mode_drained_is_refused(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spool that grows mid-run must not be costed as if the modes drained it.
+
+    The cost is taken from the LIVE spool after every mode ran, while each mode
+    copied the corpus at its own start. A capture box is writing continuously, so
+    `all` on a live spool can price a corpus NO mode drained — printed beside each
+    mode's own `corpus copied: N` with nothing red. The guard compares each
+    full-corpus mode's recorded `source_before` digest with the live one.
+    """
+    out = tmp_path / "evidence"
+    out.mkdir()
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379/tortoise_test")
+    spool = _live_spool(tmp_path / "live-spool")
+    # A digest that is deliberately NOT this spool's: the modes copied something
+    # the live spool no longer is (an entry landed while they ran).
+    _stub_one_mode(monkeypatch, digest="0" * 64)
+
+    with pytest.raises(SystemExit) as exc:
+        rehearsal._run(["all", "--out", str(out), "--spool-src", str(spool)])
+
+    assert "changed while the run was in flight" in str(exc.value), exc.value
+    assert not (out / "corpus-cost.json").exists(), (
+        "a cost that describes a corpus no mode drained was written anyway")
+
+
 # ── every mode states its capture seams, so none inherits the operator's ────
 
 
-def test_every_mode_states_all_three_capture_knobs() -> None:
+def test_every_mode_states_all_four_capture_knobs() -> None:
     """F5: an unset knob is the operator's shell, not the default.
 
     All three are read at module import (or per call) inside `hosted_api`, so a

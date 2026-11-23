@@ -279,9 +279,9 @@ def _serve(argv: list[str] | None = None) -> int:
     # with the ceiling still at 8 — the mode graded the default, not the mode.
     #
     # ⛔ Every knob is set for EVERY mode, including the ones that want the
-    # default value: `_mode_knobs` states all three, because an inherited value is
+    # default value: `_mode_knobs` states all four, because an inherited value is
     # not "the default" — it is the operator's shell. See that function's docstring
-    # for the three measured modes it made grade their own opposite.
+    # for the measured ways it made a mode grade its own opposite.
     os.environ.update(_mode_knobs(args.mode))
 
     import uvicorn
@@ -1114,6 +1114,29 @@ def _run(argv: list[str] | None = None) -> int:
     # beside it. A mode that drained the WHOLE corpus is what licenses a cost.
     writes_cost = any(limit is None for _, limit, _ in plan)
     if writes_cost:
+        # ⛔ The cost is measured from the LIVE spool AFTER every mode ran, while
+        # each mode copied the corpus at its OWN start — so a spool that grows
+        # mid-run (a live capture box does exactly that) yields a cost no mode
+        # drained, printed beside per-mode `corpus copied: N` with nothing red.
+        # That is the class `162e9cd9` closed on the `summary` path. Tie the two
+        # together: every full-corpus mode's own `source_before` digest must still
+        # be the digest the cost is computed from.
+        live = _source_fingerprint(args.spool_src)
+        full = {m for m, lim, _ in plan if lim is None}
+        disagreed = [
+            r.get("mode") for r in fresh
+            if r.get("mode") in full
+            and (((r.get("corpus") or {}).get("source_before") or {})
+                 .get("aggregate_sha256")) != live["aggregate_sha256"]
+        ]
+        if disagreed:
+            raise SystemExit(
+                f"the source spool {args.spool_src} changed while the run was in "
+                f"flight — {disagreed} copied a corpus whose digest is no longer "
+                f"the spool's, so a cost taken now describes a corpus NO mode "
+                f"drained. Re-run against a quiesced spool (stop capture, or run "
+                f"a single mode), and do not read `corpus-cost.json` as this "
+                f"run's")
         cost = _corpus_cost(args.spool_src)
     else:
         cost_path = args.out / "corpus-cost.json"
