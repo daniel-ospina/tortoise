@@ -1501,6 +1501,16 @@ So:
   start-up budget the read DECLINES (bounded, never parked) and the remedy is to raise the lever,
   not to repair the worker. A ticket that waits out its whole bound DOES record `last_decline`
   ("no batch fired for this query within …"), so a wedged collector can no longer read as a boot.
+- ⚠️ **THAT SAME BOUND GOVERNS THE READ LANE TOO — the cold window's whole consequence.**
+  `encode_query` reaches the encoder through `collector.submit`, so a read waits out the boot under
+  the SAME `window + start-up budget + 1 s` (~601 s at the shipped defaults), not the 30 s request
+  budget. The control plane serves reads from `CONTROL_PLANE_READ_WORKERS` = **8** threads
+  (`tortoise/monitoring.py`), so **up to 8 read threads can each park for ~601 s** in the window
+  after a deploy or a lever flip, for as long as `embed_seam.backing_booting()` is true. This is the
+  same bounded-not-parked trade the record-truth writes make (above), stated for reads because it is
+  the one an operator would look for here and not find. ⛔ Read it before calling a post-deploy read
+  hang: a live worker pid in `backing_state` with NO `last_decline` is a boot still landing, while a
+  `last_decline` of `"no batch fired …"` is a wedged collector — the two have opposite remedies.
 - **A `last_decline` on a worker that has been up for minutes is a real fault** — the preload
   finished or it never started, so a decline now is the encoder refusing, not loading. That is when
   the "roll back or repair" instruction below applies.
