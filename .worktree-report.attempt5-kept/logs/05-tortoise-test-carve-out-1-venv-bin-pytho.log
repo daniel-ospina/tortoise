@@ -1,0 +1,2366 @@
+........................................................................ [  4%]
+........................................................................ [  9%]
+........................................................................ [ 14%]
+........................................................................ [ 19%]
+........................................................................ [ 24%]
+........................................................................ [ 29%]
+........................................................................ [ 34%]
+........................................................................ [ 39%]
+........................................................................ [ 44%]
+........................................................................ [ 49%]
+............................................................s........... [ 54%]
+........................................................................ [ 59%]
+........................................................................ [ 64%]
+....................................E.EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE [ 69%]
+EEEEEEEEEEEEEEEEEEEEEEEEEE.EEEEEEEEEEE...EEEEEEEEEEEE.EEE............... [ 74%]
+..............s......................................................... [ 79%]
+...s.................................s.........s...................ss... [ 84%]
+............................................s........................... [ 88%]
+........................................................................ [ 93%]
+........................................................................ [ 98%]
+.................                                                        [100%]
+==================================== ERRORS ====================================
+_________ ERROR at setup of TestLayer1.test_missing_required_field_400 _________
+
+    @pytest.fixture
+    def client():
+        """TestClient with auth override and a temp FalkorDBLite DB.
+    
+        All /v1/* endpoints receive TEST_TEAM as the authenticated team; every
+        TortoiseSDK instance (tenant + registry) shares the same temp DB.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
+            # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+            # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+            # clear at enter; pop-pin → restore __init__ → deterministic anchor
+            # close → clear overrides at exit (replaces the local
+            # _patch/_restore_tortoise_sdk_init copies).
+            with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
+                # #9567 D12 — the org dict is STORE-BACKED, which is what
+                # `get_current_org` guarantees in production and what this
+                # override stands in for. `_check_org_limit` fills any missing
+                # ALLOWANCE key from `quota.resolve_org_limits` on every gated door
+                # (points/documents/sessions), and that resolver reads THIS
+                # registry row — so a store-backed org is the branch production
+                # takes. (A MISSING row is NOT a refusal: since review round 11 the
+                # fill leaves the dict unarmed on `quota.OrgNotFoundError`, because
+                # a cap cannot be armed from a record that does not exist. The row
+                # is kept because it is production's shape, not because the tests
+                # would otherwise 500.) `MERGE` with no properties (the
+                # `tests/test_hosted_api.py` fixture's shape): the resolver then
+                # takes the tier default and emits NO allowance key, so the org
+                # dict the tests override is unchanged.
+                import tortoise.hosted_api as ha_mod
+>               ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    "MERGE (t:Team {id:$id})", params={"id": TEST_ORG_ID})
+
+tests/test_commit_endpoint.py:113: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tortoise/sdk.py:15590: in _get_registry
+    proj = self._get_proj()
+           ^^^^^^^^^^^^^^^^
+tortoise/sdk.py:15468: in _get_proj
+    self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/_embedded.py:262: in _serialized_proj_init
+    return prev(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tortoise/projection/__init__.py:11807: in __init__
+    self.db = guarded_client(
+tortoise/cypher_guard.py:2447: in guarded_client
+    return guarded_client_class(base_client)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tortoise/cypher_guard.py:2403: in __init__
+    super().__init__(*args, **kwargs)
+tortoise/__init__.py:136: in __init__
+    super().__init__(*args, **kwargs)
+.venv/lib/python3.12/site-packages/redislite/falkordb_client.py:99: in __init__
+    self.client = Redis(
+tortoise/embedded_lifecycle.py:2855: in _init
+    original(self, *args, **kwargs)
+tortoise/embedded_lifecycle.py:1197: in __init__
+    original(self, *args, **kwargs)
+.venv/lib/python3.12/site-packages/redislite/client.py:450: in __init__
+    self._load_setting_registry()
+.venv/lib/python3.12/site-packages/redislite/client.py:357: in _load_setting_registry
+    settings = json.load(fh)
+               ^^^^^^^^^^^^^
+/usr/lib/python3.12/json/__init__.py:293: in load
+    return loads(fp.read(),
+/usr/lib/python3.12/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/json/decoder.py:337: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x7f1fec72fd40>, s = '', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+            obj, end = self.scan_once(s, idx)
+        except StopIteration as err:
+>           raise JSONDecodeError("Expecting value", s, err.value) from None
+E           json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+/usr/lib/python3.12/json/decoder.py:355: JSONDecodeError
+------------------------------ Captured log setup ------------------------------
+WARNING  tortoise.monitoring:monitoring.py:8329 #2850: in-process loop-stall self-kill DISABLED (threshold=0.0). The /healthz listener still reports staleness; destructive action belongs to the out-of-band watchdog.
+WARNING  tests._tmpdir_hygiene:_tmpdir_hygiene.py:1304 #7735: leaving /tmp/tt_diz5ktb3/tmph8drrr_b in place — a live server still holds it (Directory not empty); the reaper owns it. Recorded in tempdir-hygiene-end.json, not swallowed.
+WARNING  tortoise.hosted_api:hosted_api.py:2451 event retention sweep skipped: registry graph probe failed
+___________ ERROR at setup of TestLayer1.test_commit_id_mismatch_422 ___________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_commit_id_mismatch_422>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_commit_id_mismatch_422 in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+__________ ERROR at setup of TestLayer1.test_calibration_mismatch_422 __________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_calibration_mismatch_422>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_calibration_mismatch_422 in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+____________ ERROR at setup of TestLayer1.test_51_point_payload_422 ____________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_51_point_payload_422>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_51_point_payload_422 in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+____________ ERROR at setup of TestLayer1.test_exactly_50_points_ok ____________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_exactly_50_points_ok>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_exactly_50_points_ok in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_____________ ERROR at setup of TestLayer1.test_quote_over_200_422 _____________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_quote_over_200_422>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_quote_over_200_422 in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+__________ ERROR at setup of TestLayer1.test_dangling_source_ref_422 ___________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_dangling_source_ref_422>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_dangling_source_ref_422 in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+____________ ERROR at setup of TestLayer1.test_401_unauthenticated _____________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_401_unauthenticated>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_401_unauthenticated in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+__________ ERROR at setup of TestLayer1.test_500_fail_closed_redacted __________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_500_fail_closed_redacted>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_500_fail_closed_redacted in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_______ ERROR at setup of TestPrivacy.test_no_raw_conversation_in_graph ________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_no_raw_conversation_in_graph>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_no_raw_conversation_in_gr in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestPrivacy.test_telemetry_schema_no_text_no_graph_counts_no_judge _
+
+    @pytest.fixture
+    def client():
+        """TestClient with auth override and a temp FalkorDBLite DB.
+    
+        All /v1/* endpoints receive TEST_TEAM as the authenticated team; every
+        TortoiseSDK instance (tenant + registry) shares the same temp DB.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
+            # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+            # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+            # clear at enter; pop-pin → restore __init__ → deterministic anchor
+            # close → clear overrides at exit (replaces the local
+            # _patch/_restore_tortoise_sdk_init copies).
+            with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
+                # #9567 D12 — the org dict is STORE-BACKED, which is what
+                # `get_current_org` guarantees in production and what this
+                # override stands in for. `_check_org_limit` fills any missing
+                # ALLOWANCE key from `quota.resolve_org_limits` on every gated door
+                # (points/documents/sessions), and that resolver reads THIS
+                # registry row — so a store-backed org is the branch production
+                # takes. (A MISSING row is NOT a refusal: since review round 11 the
+                # fill leaves the dict unarmed on `quota.OrgNotFoundError`, because
+                # a cap cannot be armed from a record that does not exist. The row
+                # is kept because it is production's shape, not because the tests
+                # would otherwise 500.) `MERGE` with no properties (the
+                # `tests/test_hosted_api.py` fixture's shape): the resolver then
+                # takes the tier default and emits NO allowance key, so the org
+                # dict the tests override is unchanged.
+                import tortoise.hosted_api as ha_mod
+>               ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    "MERGE (t:Team {id:$id})", params={"id": TEST_ORG_ID})
+
+tests/test_commit_endpoint.py:113: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tortoise/sdk.py:15590: in _get_registry
+    proj = self._get_proj()
+           ^^^^^^^^^^^^^^^^
+tortoise/sdk.py:15468: in _get_proj
+    self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/_embedded.py:262: in _serialized_proj_init
+    return prev(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tortoise/projection/__init__.py:11807: in __init__
+    self.db = guarded_client(
+tortoise/cypher_guard.py:2447: in guarded_client
+    return guarded_client_class(base_client)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tortoise/cypher_guard.py:2403: in __init__
+    super().__init__(*args, **kwargs)
+tortoise/__init__.py:136: in __init__
+    super().__init__(*args, **kwargs)
+.venv/lib/python3.12/site-packages/redislite/falkordb_client.py:99: in __init__
+    self.client = Redis(
+tortoise/embedded_lifecycle.py:2855: in _init
+    original(self, *args, **kwargs)
+tortoise/embedded_lifecycle.py:1197: in __init__
+    original(self, *args, **kwargs)
+.venv/lib/python3.12/site-packages/redislite/client.py:450: in __init__
+    self._load_setting_registry()
+.venv/lib/python3.12/site-packages/redislite/client.py:357: in _load_setting_registry
+    settings = json.load(fh)
+               ^^^^^^^^^^^^^
+/usr/lib/python3.12/json/__init__.py:293: in load
+    return loads(fp.read(),
+/usr/lib/python3.12/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/json/decoder.py:337: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x7f1fec72fd40>, s = '', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+            obj, end = self.scan_once(s, idx)
+        except StopIteration as err:
+>           raise JSONDecodeError("Expecting value", s, err.value) from None
+E           json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+/usr/lib/python3.12/json/decoder.py:355: JSONDecodeError
+------------------------------ Captured log setup ------------------------------
+WARNING  tortoise.monitoring:monitoring.py:8329 #2850: in-process loop-stall self-kill DISABLED (threshold=0.0). The /healthz listener still reports staleness; destructive action belongs to the out-of-band watchdog.
+WARNING  tortoise.hosted_api:hosted_api.py:2451 event retention sweep skipped: registry graph probe failed
+WARNING  tortoise.hosted_api:hosted_api.py:35806 deleted-team purge sweep failed: Expecting value: line 1 column 1 (char 0)
+_________ ERROR at setup of TestPrivacy.test_quote_is_bounded_in_graph _________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_quote_is_bounded_in_graph>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_quote_is_bounded_in_graph in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestMetering.test_write_ops_and_nodes_written_non_duplicate _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_write_ops_and_nodes_written_non_duplicate>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_write_ops_and_nodes_writt in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+____________ ERROR at setup of TestMetering.test_replay_bills_zero _____________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_replay_bills_zero>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_replay_bills_zero in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestMetering.test_held_bills_zero_and_resubmission_bills_one _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_held_bills_zero_and_resubmission_bills_one>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_held_bills_zero_and_resub in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestRateBucket.test_commit_path_gets_dedicated_300_bucket __
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_commit_path_gets_dedicated_300_bucket>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_commit_path_gets_dedicate in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestRateBucket.test_commit_bucket_key_distinct_and_exempt __
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_commit_bucket_key_distinct_and_exempt>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_commit_bucket_key_distinc in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_________ ERROR at setup of TestRateBucket.test_commit_bucket_429_http _________
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_commit_bucket_429_http>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_commit_bucket_429_http in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestConstructPathSmoke.test_construct_payload_commits_end_to_end _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_construct_payload_commits_end_to_end>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_construct_payload_commits in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestEventEndpointNoSpuriousEdges.test_no_spurious_edges_to_unrelated_points _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_no_spurious_edges_to_unrelated_points>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_no_spurious_edges_to_unre in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestReviewTelemetryAndEventEdges.test_keep_ratio_leq_1_and_events_not_dedup _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_keep_ratio_leq_1_and_events_not_dedup>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_keep_ratio_leq_1_and_even in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestReviewTelemetryAndEventEdges.test_event_about_object_edge_created_for_new_entity _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_event_about_object_edge_created_for_new_entity>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_event_about_object_edge_c in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestE1EventStartedAt.test_event_started_at_written_from_payload _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_event_started_at_written_from_payload>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_event_started_at_written_ in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestE1EventStartedAt.test_undated_event_started_at_coalesces_to_captured_at _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_undated_event_started_at_coalesces_to_captured_at>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_undated_event_started_at_ in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestE1EventStartedAt.test_point_when_written_from_payload __
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_point_when_written_from_payload>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_point_when_written_from_p in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+__ ERROR at setup of TestCommitBodySweepCap.test_commit_oversized_chunked_413 __
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_commit_oversized_chunked_413>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_commit_oversized_chunked_ in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestCommitBodySweepCap.test_commit_malformed_400_preserved _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_commit_malformed_400_preserved>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_commit_malformed_400_pres in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+___ ERROR at setup of TestCommitBodySweepCap.test_commit_empty_400_preserved ___
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_commit_empty_400_preserved>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_commit_empty_400_preserve in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_commit_seam_is_inconclusive_on_a_transport_bound_refusal _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_commit_seam_is_inconclusive_on_a_transport_bound_refusal>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_commit_seam_is_inconclusi in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_client_seam_turns_a_w in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test5475CommitDoorKindRefusal.test_unapproved_entity_kind_is_an_actionable_422 _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_unapproved_entity_kind_is_an_actionable_422>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_unapproved_entity_kind_is in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test5475CommitDoorKindRefusal.test_approved_entity_kind_commit_still_succeeds _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_approved_entity_kind_commit_still_succeeds>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_approved_entity_kind_comm in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test9876AmbiguousEntityNameOnCommit.test_a_commit_naming_a_doubly_held_entity_422s_and_writes_nothing _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_commit_naming_a_doubly_held_entity_422s_and_writes_nothing>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_commit_naming_a_doubly_ in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test9876AmbiguousEntityNameOnCommit.test_a_refusal_escaping_the_precheck_is_still_a_422 _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_refusal_escaping_the_precheck_is_still_a_422>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_refusal_escaping_the_pr in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test9876AmbiguousEntityNameOnCommit.test_a_terminal_carrier_beside_a_live_one_is_not_a_refusal _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_terminal_carrier_beside_a_live_one_is_not_a_refusal>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_terminal_carrier_beside in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test9876AmbiguousEntityNameOnCommit.test_an_idempotent_repost_is_never_refused _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_an_idempotent_repost_is_never_refused>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_an_idempotent_repost_is_n in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test9876AboutMentionDisposition.test_a_mention_that_races_an_ambiguous_carrier_records_the_exempt_shape _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_mention_that_races_an_ambiguous_carrier_records_the_exempt_shape>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_mention_that_races_an_a in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_the_tenant_route_cannot_put_the_narrative_back_on_a_source _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_tenant_route_cannot_put_the_narrative_back_on_a_source>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_tenant_route_cannot_p in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_the_allowance_carry_does_not_run_inside_the_per_graph_commit_lock _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_allowance_carry_does_not_run_inside_the_per_graph_commit_lock>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_allowance_carry_does_ in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_the_hoisted_carry_keeps_the_gate_faults_MAPPED_on_this_lane _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_hoisted_carry_keeps_the_gate_faults_MAPPED_on_this_lane>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_hoisted_carry_keeps_t in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test4051ChargeCoversTheLoopShape.test_the_points_empty_loop_shape_is_charged_for_every_node_it_mints _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_points_empty_loop_shape_is_charged_for_every_node_it_mints>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_points_empty_loop_sha in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test4051ChargeCoversTheLoopShape.test_the_endpoint_SPENDS_the_charge_on_the_shared_window _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_endpoint_SPENDS_the_charge_on_the_shared_window>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_endpoint_SPENDS_the_c in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test4051ChargeCoversTheLoopShape.test_a_flat_collection_lane_is_charged_for_every_node_it_mints _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_flat_collection_lane_is_charged_for_every_node_it_mints>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_flat_collection_lane_is in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of Test4051ChargeCoversTheLoopShape.test_the_throttles_residual_reach_is_a_number_not_an_adjective _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_throttles_residual_reach_is_a_number_not_an_adjective>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_throttles_residual_re in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_the_commit_payload_carries_its_mentions_to_the_claim_point _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_commit_payload_carries_its_mentions_to_the_claim_point>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_commit_payload_carrie in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_a_recommit_whose_payload_has_no_mentions_keeps_the_stored_record _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_recommit_whose_payload_has_no_mentions_keeps_the_stored_record>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_recommit_whose_payload_ in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_the_supersede_leg_carries_its_mentions_to_the_superseding_point _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_supersede_leg_carries_its_mentions_to_the_superseding_point>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_supersede_leg_carries in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_the_merge_leg_drops_a_stated_record_and_that_is_declared _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_merge_leg_drops_a_stated_record_and_that_is_declared>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_merge_leg_drops_a_sta in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12244TheHostedAnchorCollapsesAMergedPair.test_a_merged_variant_links_the_survivor_not_the_retired_carrier _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_merged_variant_links_the_survivor_not_the_retired_carrier>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_merged_variant_links_th in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12244TheHostedAnchorCollapsesAMergedPair.test_a_LEGACY_non_string_id_keeps_its_edge _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_LEGACY_non_string_id_keeps_its_edge>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_LEGACY_non_string_id_ke in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12244TheHostedAnchorCollapsesAMergedPair.test_a_STRING_TWIN_of_a_legacy_id_does_not_take_the_edge _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_STRING_TWIN_of_a_legacy_id_does_not_take_the_edge>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_STRING_TWIN_of_a_legacy in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12244TheHostedAnchorCollapsesAMergedPair.test_an_IDLESS_legacy_row_is_ADOPTED_before_the_anchor_runs _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_an_IDLESS_legacy_row_is_ADOPTED_before_the_anchor_runs>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_an_IDLESS_legacy_row_is_A in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12120HostedAboutObjectAnchor.test_a_fold_colliding_about_name_wires_the_hosted_anchor _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_fold_colliding_about_name_wires_the_hosted_anchor>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_fold_colliding_about_na in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12120HostedAboutObjectAnchor.test_a_padded_subject_kind_reference_takes_the_drop_on_both_channels _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_padded_subject_kind_reference_takes_the_drop_on_both_channels>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_padded_subject_kind_ref in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12120HostedAboutObjectAnchor.test_a_padded_SUBJECT_declaration_still_owns_the_attribution _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_padded_SUBJECT_declaration_still_owns_the_attribution>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_padded_SUBJECT_declarat in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12120HostedAboutObjectAnchor.test_an_event_keeps_the_edge_for_an_exact_name_carrier _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_an_event_keeps_the_edge_for_an_exact_name_carrier>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_an_event_keeps_the_edge_f in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12120HostedAboutObjectAnchor.test_two_exact_name_carriers_are_refused_before_the_arm_sees_them _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_two_exact_name_carriers_are_refused_before_the_arm_sees_them>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_two_exact_name_carriers_a in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12120HostedAboutObjectAnchor.test_an_event_skips_a_terminal_exact_name_carrier _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_an_event_skips_a_terminal_exact_name_carrier>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_an_event_skips_a_terminal in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12120HostedAboutObjectAnchor.test_an_event_fold_variant_of_a_subject_kind_name_is_skipped _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_an_event_fold_variant_of_a_subject_kind_name_is_skipped>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_an_event_fold_variant_of_ in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12120HostedAboutObjectAnchor.test_a_fold_variant_of_a_subject_kind_name_skips_the_fold_only_carrier _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_fold_variant_of_a_subject_kind_name_skips_the_fold_only_carrier>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_fold_variant_of_a_subje in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of TestThe12120HostedAboutObjectAnchor.test_an_exact_name_carrier_resolves_to_its_survivor _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_an_exact_name_carrier_resolves_to_its_survivor>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_an_exact_name_carrier_res in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_a_budget_with_no_window_and_no_declaration_is_a_refusal _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_budget_with_no_window_and_no_declaration_is_a_refusal>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_budget_with_no_window_a in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+__ ERROR at setup of test_a_budget_of_zero_is_a_disabled_control_not_a_budget __
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_budget_of_zero_is_a_disabled_control_not_a_budget>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_budget_of_zero_is_a_dis in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_pin_writes_the_declaration_and_reads_back_its_closure _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_pin_writes_the_declaration_and_reads_back_its_closure>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_pin_writes_the_declaratio in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_the_pin_budget_refuses_with_a_declared_message_and_writes_nothing _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_pin_budget_refuses_with_a_declared_message_and_writes_nothing>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_pin_budget_refuses_wi in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_a_hub_above_the_degree_ceiling_is_refused_rather_than_pinned _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_hub_above_the_degree_ceiling_is_refused_rather_than_pinned>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_hub_above_the_degree_ce in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_____ ERROR at setup of test_a_key_the_fast_layer_does_not_hold_is_refused _____
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_key_the_fast_layer_does_not_hold_is_refused>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_key_the_fast_layer_does in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+__ ERROR at setup of test_an_empty_declaration_is_refused_rather_than_written __
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_an_empty_declaration_is_refused_rather_than_written>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_an_empty_declaration_is_r in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_unpin_releases_the_key_and_removes_the_empty_declaration _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_unpin_releases_the_key_and_removes_the_empty_declaration>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_unpin_releases_the_key_an in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_unpinning_a_key_that_is_not_pinned_is_a_no_op_not_a_write _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_unpinning_a_key_that_is_not_pinned_is_a_no_op_not_a_write>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_unpinning_a_key_that_is_n in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_a_pinned_node_and_its_neighbours_survive_a_full_window_cycle _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_pinned_node_and_its_neighbours_survive_a_full_window_cycle>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_pinned_node_and_its_nei in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_the_pin_is_checked_before_the_record_probe_and_the_lease _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_pin_is_checked_before_the_record_probe_and_the_lease>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_pin_is_checked_before in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+__ ERROR at setup of test_a_pin_set_over_its_budget_is_reported_as_a_refusal ___
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_pin_set_over_its_budget_is_reported_as_a_refusal>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_pin_set_over_its_budget in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+____ ERROR at setup of test_an_unreadable_pin_declaration_refuses_the_sweep ____
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_an_unreadable_pin_declaration_refuses_the_sweep>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_an_unreadable_pin_declara in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_a_malformed_declaration_is_unreadable_rather_than_empty _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_malformed_declaration_is_unreadable_rather_than_empty>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_malformed_declaration_i in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_a_missing_declaration_is_the_normal_state_and_pins_nothing _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_missing_declaration_is_the_normal_state_and_pins_nothing>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_missing_declaration_is_ in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_pin_refuses_to_extend_a_population_its_set_does_not_address _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_pin_refuses_to_extend_a_population_its_set_does_not_address>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_pin_refuses_to_extend_a_p in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+__ ERROR at setup of test_unpin_never_rewrites_the_population_a_set_addresses __
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_unpin_never_rewrites_the_population_a_set_addresses>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_unpin_never_rewrites_the_ in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+___ ERROR at setup of test_unpinning_with_nothing_declared_reports_no_write ____
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_unpinning_with_nothing_declared_reports_no_write>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_unpinning_with_nothing_de in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_a_stored_declaration_with_an_injected_label_reads_as_malformed _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_stored_declaration_with_an_injected_label_reads_as_malformed>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_stored_declaration_with in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_pin_refuses_a_list_carrying_a_bad_key_rather_than_applying_part_of_it _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_pin_refuses_a_list_carrying_a_bad_key_rather_than_applying_part_of_it>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_pin_refuses_a_list_carryi in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_unpin_refuses_a_list_carrying_a_bad_key_rather_than_releasing_part_of_it _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_unpin_refuses_a_list_carrying_a_bad_key_rather_than_releasing_part_of_it>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_unpin_refuses_a_list_carr in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_repinning_declared_keys_on_an_over_budget_set_is_refused_not_reported_ok _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_repinning_declared_keys_on_an_over_budget_set_is_refused_not_reported_ok>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_repinning_declared_keys_o in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_a_degree_ceiling_is_a_declaration_time_guard_and_the_budget_is_the_invariant _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_degree_ceiling_is_a_declaration_time_guard_and_the_budget_is_the_invariant>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_degree_ceiling_is_a_dec in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_a_truncated_declaration_is_never_rewritten_by_pin_or_unpin _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_truncated_declaration_is_never_rewritten_by_pin_or_unpin>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_truncated_declaration_i in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_the_read_bound_is_reachable_so_a_truncated_declaration_can_be_released _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_the_read_bound_is_reachable_so_a_truncated_declaration_can_be_released>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_the_read_bound_is_reachab in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+_ ERROR at setup of test_a_malformed_read_bound_refuses_rather_than_falling_back _
+
+fixturedef = <FixtureDef argname='tmp_path' scope='function' baseid=''>
+request = <SubRequest 'tmp_path' for <Function test_a_malformed_read_bound_refuses_rather_than_falling_back>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        if (
+            fixturedef.argname == "event_loop_policy"
+            and fixturedef.func.__module__ != __name__
+        ):
+            warnings.warn(
+                PytestDeprecationWarning(_EVENT_LOOP_POLICY_FIXTURE_DEPRECATION_WARNING),
+            )
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+>               return (yield)
+                        ^^^^^
+E               OSError: could not create numbered dir with prefix test_a_malformed_read_bound_re in /tmp/tt_diz5ktb3/pytest-of-cmux/pytest-0 after 10 tries
+
+.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:924: OSError
+=============================== warnings summary ===============================
+.venv/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /home/cmux/tortoise/.worktrees/fix-14269/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/test_capstone_preregistration_9075.py::test_every_test_name_the_evidence_bundles_cite_exists
+  tests/test_capstone_preregistration_9075.py:2050: SyntaxWarning: invalid escape sequence '\.'
+    """The record pins its document AND the code lines it cites.
+
+tests/test_capstone_preregistration_9075.py::test_every_test_name_the_evidence_bundles_cite_exists
+  tests/test_ci_selection.py:1958: SyntaxWarning: invalid escape sequence '\|'
+    """#9572 review P2-2: a seed-surface pin must run on the module it pins.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+ERROR tests/test_commit_endpoint.py::TestLayer1::test_missing_required_field_400
+ERROR tests/test_commit_endpoint.py::TestLayer1::test_commit_id_mismatch_422
+ERROR tests/test_commit_endpoint.py::TestLayer1::test_calibration_mismatch_422
+ERROR tests/test_commit_endpoint.py::TestLayer1::test_51_point_payload_422 - ...
+ERROR tests/test_commit_endpoint.py::TestLayer1::test_exactly_50_points_ok - ...
+ERROR tests/test_commit_endpoint.py::TestLayer1::test_quote_over_200_422 - OS...
+ERROR tests/test_commit_endpoint.py::TestLayer1::test_dangling_source_ref_422
+ERROR tests/test_commit_endpoint.py::TestLayer1::test_401_unauthenticated - O...
+ERROR tests/test_commit_endpoint.py::TestLayer1::test_500_fail_closed_redacted
+ERROR tests/test_commit_endpoint.py::TestPrivacy::test_no_raw_conversation_in_graph
+ERROR tests/test_commit_endpoint.py::TestPrivacy::test_telemetry_schema_no_text_no_graph_counts_no_judge
+ERROR tests/test_commit_endpoint.py::TestPrivacy::test_quote_is_bounded_in_graph
+ERROR tests/test_commit_endpoint.py::TestMetering::test_write_ops_and_nodes_written_non_duplicate
+ERROR tests/test_commit_endpoint.py::TestMetering::test_replay_bills_zero - O...
+ERROR tests/test_commit_endpoint.py::TestMetering::test_held_bills_zero_and_resubmission_bills_one
+ERROR tests/test_commit_endpoint.py::TestRateBucket::test_commit_path_gets_dedicated_300_bucket
+ERROR tests/test_commit_endpoint.py::TestRateBucket::test_commit_bucket_key_distinct_and_exempt
+ERROR tests/test_commit_endpoint.py::TestRateBucket::test_commit_bucket_429_http
+ERROR tests/test_commit_endpoint.py::TestConstructPathSmoke::test_construct_payload_commits_end_to_end
+ERROR tests/test_commit_endpoint.py::TestEventEndpointNoSpuriousEdges::test_no_spurious_edges_to_unrelated_points
+ERROR tests/test_commit_endpoint.py::TestReviewTelemetryAndEventEdges::test_keep_ratio_leq_1_and_events_not_dedup
+ERROR tests/test_commit_endpoint.py::TestReviewTelemetryAndEventEdges::test_event_about_object_edge_created_for_new_entity
+ERROR tests/test_commit_endpoint.py::TestE1EventStartedAt::test_event_started_at_written_from_payload
+ERROR tests/test_commit_endpoint.py::TestE1EventStartedAt::test_undated_event_started_at_coalesces_to_captured_at
+ERROR tests/test_commit_endpoint.py::TestE1EventStartedAt::test_point_when_written_from_payload
+ERROR tests/test_commit_endpoint.py::TestCommitBodySweepCap::test_commit_oversized_chunked_413
+ERROR tests/test_commit_endpoint.py::TestCommitBodySweepCap::test_commit_malformed_400_preserved
+ERROR tests/test_commit_endpoint.py::TestCommitBodySweepCap::test_commit_empty_400_preserved
+ERROR tests/test_commit_endpoint.py::test_commit_seam_is_inconclusive_on_a_transport_bound_refusal
+ERROR tests/test_commit_endpoint.py::test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip
+ERROR tests/test_commit_endpoint.py::Test5475CommitDoorKindRefusal::test_unapproved_entity_kind_is_an_actionable_422
+ERROR tests/test_commit_endpoint.py::Test5475CommitDoorKindRefusal::test_approved_entity_kind_commit_still_succeeds
+ERROR tests/test_commit_endpoint.py::Test9876AmbiguousEntityNameOnCommit::test_a_commit_naming_a_doubly_held_entity_422s_and_writes_nothing
+ERROR tests/test_commit_endpoint.py::Test9876AmbiguousEntityNameOnCommit::test_a_refusal_escaping_the_precheck_is_still_a_422
+ERROR tests/test_commit_endpoint.py::Test9876AmbiguousEntityNameOnCommit::test_a_terminal_carrier_beside_a_live_one_is_not_a_refusal
+ERROR tests/test_commit_endpoint.py::Test9876AmbiguousEntityNameOnCommit::test_an_idempotent_repost_is_never_refused
+ERROR tests/test_commit_endpoint.py::Test9876AboutMentionDisposition::test_a_mention_that_races_an_ambiguous_carrier_records_the_exempt_shape
+ERROR tests/test_commit_endpoint.py::test_the_tenant_route_cannot_put_the_narrative_back_on_a_source
+ERROR tests/test_commit_endpoint.py::test_the_allowance_carry_does_not_run_inside_the_per_graph_commit_lock
+ERROR tests/test_commit_endpoint.py::test_the_hoisted_carry_keeps_the_gate_faults_MAPPED_on_this_lane
+ERROR tests/test_commit_endpoint.py::Test4051ChargeCoversTheLoopShape::test_the_points_empty_loop_shape_is_charged_for_every_node_it_mints
+ERROR tests/test_commit_endpoint.py::Test4051ChargeCoversTheLoopShape::test_the_endpoint_SPENDS_the_charge_on_the_shared_window
+ERROR tests/test_commit_endpoint.py::Test4051ChargeCoversTheLoopShape::test_a_flat_collection_lane_is_charged_for_every_node_it_mints
+ERROR tests/test_commit_endpoint.py::Test4051ChargeCoversTheLoopShape::test_the_throttles_residual_reach_is_a_number_not_an_adjective
+ERROR tests/test_commit_endpoint.py::test_the_commit_payload_carries_its_mentions_to_the_claim_point
+ERROR tests/test_commit_endpoint.py::test_a_recommit_whose_payload_has_no_mentions_keeps_the_stored_record
+ERROR tests/test_commit_endpoint.py::test_the_supersede_leg_carries_its_mentions_to_the_superseding_point
+ERROR tests/test_commit_endpoint.py::test_the_merge_leg_drops_a_stated_record_and_that_is_declared
+ERROR tests/test_commit_endpoint.py::TestThe12244TheHostedAnchorCollapsesAMergedPair::test_a_merged_variant_links_the_survivor_not_the_retired_carrier
+ERROR tests/test_commit_endpoint.py::TestThe12244TheHostedAnchorCollapsesAMergedPair::test_a_LEGACY_non_string_id_keeps_its_edge
+ERROR tests/test_commit_endpoint.py::TestThe12244TheHostedAnchorCollapsesAMergedPair::test_a_STRING_TWIN_of_a_legacy_id_does_not_take_the_edge
+ERROR tests/test_commit_endpoint.py::TestThe12244TheHostedAnchorCollapsesAMergedPair::test_an_IDLESS_legacy_row_is_ADOPTED_before_the_anchor_runs
+ERROR tests/test_commit_endpoint.py::TestThe12120HostedAboutObjectAnchor::test_a_fold_colliding_about_name_wires_the_hosted_anchor
+ERROR tests/test_commit_endpoint.py::TestThe12120HostedAboutObjectAnchor::test_a_padded_subject_kind_reference_takes_the_drop_on_both_channels
+ERROR tests/test_commit_endpoint.py::TestThe12120HostedAboutObjectAnchor::test_a_padded_SUBJECT_declaration_still_owns_the_attribution
+ERROR tests/test_commit_endpoint.py::TestThe12120HostedAboutObjectAnchor::test_an_event_keeps_the_edge_for_an_exact_name_carrier
+ERROR tests/test_commit_endpoint.py::TestThe12120HostedAboutObjectAnchor::test_two_exact_name_carriers_are_refused_before_the_arm_sees_them
+ERROR tests/test_commit_endpoint.py::TestThe12120HostedAboutObjectAnchor::test_an_event_skips_a_terminal_exact_name_carrier
+ERROR tests/test_commit_endpoint.py::TestThe12120HostedAboutObjectAnchor::test_an_event_fold_variant_of_a_subject_kind_name_is_skipped
+ERROR tests/test_commit_endpoint.py::TestThe12120HostedAboutObjectAnchor::test_a_fold_variant_of_a_subject_kind_name_skips_the_fold_only_carrier
+ERROR tests/test_commit_endpoint.py::TestThe12120HostedAboutObjectAnchor::test_an_exact_name_carrier_resolves_to_its_survivor
+ERROR tests/test_14012_resident_pin.py::test_a_budget_with_no_window_and_no_declaration_is_a_refusal
+ERROR tests/test_14012_resident_pin.py::test_a_budget_of_zero_is_a_disabled_control_not_a_budget
+ERROR tests/test_14012_resident_pin.py::test_pin_writes_the_declaration_and_reads_back_its_closure
+ERROR tests/test_14012_resident_pin.py::test_the_pin_budget_refuses_with_a_declared_message_and_writes_nothing
+ERROR tests/test_14012_resident_pin.py::test_a_hub_above_the_degree_ceiling_is_refused_rather_than_pinned
+ERROR tests/test_14012_resident_pin.py::test_a_key_the_fast_layer_does_not_hold_is_refused
+ERROR tests/test_14012_resident_pin.py::test_an_empty_declaration_is_refused_rather_than_written
+ERROR tests/test_14012_resident_pin.py::test_unpin_releases_the_key_and_removes_the_empty_declaration
+ERROR tests/test_14012_resident_pin.py::test_unpinning_a_key_that_is_not_pinned_is_a_no_op_not_a_write
+ERROR tests/test_14012_resident_pin.py::test_a_pinned_node_and_its_neighbours_survive_a_full_window_cycle
+ERROR tests/test_14012_resident_pin.py::test_the_pin_is_checked_before_the_record_probe_and_the_lease
+ERROR tests/test_14012_resident_pin.py::test_a_pin_set_over_its_budget_is_reported_as_a_refusal
+ERROR tests/test_14012_resident_pin.py::test_an_unreadable_pin_declaration_refuses_the_sweep
+ERROR tests/test_14012_resident_pin.py::test_a_malformed_declaration_is_unreadable_rather_than_empty
+ERROR tests/test_14012_resident_pin.py::test_a_missing_declaration_is_the_normal_state_and_pins_nothing
+ERROR tests/test_14012_resident_pin.py::test_pin_refuses_to_extend_a_population_its_set_does_not_address
+ERROR tests/test_14012_resident_pin.py::test_unpin_never_rewrites_the_population_a_set_addresses
+ERROR tests/test_14012_resident_pin.py::test_unpinning_with_nothing_declared_reports_no_write
+ERROR tests/test_14012_resident_pin.py::test_a_stored_declaration_with_an_injected_label_reads_as_malformed
+ERROR tests/test_14012_resident_pin.py::test_pin_refuses_a_list_carrying_a_bad_key_rather_than_applying_part_of_it
+ERROR tests/test_14012_resident_pin.py::test_unpin_refuses_a_list_carrying_a_bad_key_rather_than_releasing_part_of_it
+ERROR tests/test_14012_resident_pin.py::test_repinning_declared_keys_on_an_over_budget_set_is_refused_not_reported_ok
+ERROR tests/test_14012_resident_pin.py::test_a_degree_ceiling_is_a_declaration_time_guard_and_the_budget_is_the_invariant
+ERROR tests/test_14012_resident_pin.py::test_a_truncated_declaration_is_never_rewritten_by_pin_or_unpin
+ERROR tests/test_14012_resident_pin.py::test_the_read_bound_is_reachable_so_a_truncated_declaration_can_be_released
+ERROR tests/test_14012_resident_pin.py::test_a_malformed_read_bound_refuses_rather_than_falling_back
+1362 passed, 8 skipped, 3 warnings, 87 errors in 463.69s (0:07:43)
+#3752: leaving the private session temp root /tmp/tt_diz5ktb3 in place — a live embedded server holds /tmp/tt_diz5ktb3/tmppu2r07r_: live redis pid 1675869 (the reaper owns it)
