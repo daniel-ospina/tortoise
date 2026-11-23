@@ -778,6 +778,35 @@ class TestTheDistributionsAreExported:
         assert status["backings"][embed_seam.BACKING_WORKER]["selected"] is False
         assert status["backings"][embed_seam.BACKING_EXTERNAL]["selected"] is False
 
+    def test_every_backing_entry_carries_the_SAME_key_set(
+            self, backing, monkeypatch):
+        """The declared stable shape, per entry (review P3).
+
+        ``latency_stale`` used to be written only on the entries that are NOT the
+        live-configured one, so the published shape depended on which lever was
+        set: a consumer reading ``backings.<b>.latency_stale`` got a vanished key
+        under the selected backing and a real one under every other. A declared
+        STABLE shape cannot have a conditional key — the mutant is deleting the
+        seed and restoring the branch-local write, which leaves this row green
+        for the two unselected entries and red for the selected one.
+        """
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        backing()
+        embed_seam.encode_query("x")
+        status = embed_seam.seam_status()
+
+        expected = {"max_wait_ms", "selected", "latency", "latency_stale"}
+        for name, entry in status["backings"].items():
+            assert set(entry) == expected, (
+                f"backings[{name!r}] published {sorted(entry)} — the shape must "
+                "not depend on which backing is selected")
+            # ``latency_stale`` on the live-configured entry is the SAME fact the
+            # top-level flag states, so the two can never disagree.
+            if entry["selected"]:
+                assert entry["latency_stale"] is status["latency_stale"], (
+                    f"backings[{name!r}].latency_stale disagrees with the "
+                    "top-level flag for the backing it describes")
+
     def test_the_selected_backing_publishes_percentiles_and_the_others_null(
             self, backing):
         """Measured percentiles for the backing that ran; ``None`` for the rest.

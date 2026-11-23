@@ -1296,10 +1296,18 @@ The body carries
                            "encode_ms": {"n": 0, "window": 0, "p50": null, "p95": null, "max": null},
                            "batch_size":{"n": 0, "window": 0, "p50": null, "p95": null, "max": null}},
                "latency_stale": false,
-               "backings": {"inprocess": {"max_wait_ms": 0.0,  "selected": true,  "latency": null},
-                            "worker":    {"max_wait_ms": 20.0, "selected": false, "latency": null},
-                            "external":  {"max_wait_ms": 20.0, "selected": false, "latency": null}}}
+               "backings": {"inprocess": {"max_wait_ms": 0.0,  "selected": true,
+                                       "latency": null, "latency_stale": false},
+                            "worker":    {"max_wait_ms": 20.0, "selected": false,
+                                       "latency": null, "latency_stale": false},
+                            "external":  {"max_wait_ms": 20.0, "selected": false,
+                                       "latency": null, "latency_stale": false}}}
 ```
+
+**Every `backings[*]` entry carries the SAME four keys** — `max_wait_ms`, `selected`, `latency`,
+`latency_stale` — whichever backing is selected. The last one answers, per backing, the same
+question the top-level `latency_stale` answers for the live one, so a consumer that reads a fixed
+shape never has to branch on which lever is set.
 
 **`backings` lists all three whatever is selected.** The issue's indicator is p50/p95 **per
 backing**, and a table that only appeared once you had already switched could not answer "would the

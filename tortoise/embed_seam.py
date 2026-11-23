@@ -2166,9 +2166,20 @@ def seam_status() -> dict:
          "latency_stale": false,       # do the two blocks above describe
                                        # the CONFIGURED backing?
          "backings": {                  # EVERY backing, selected or not
-             "inprocess": {"max_wait_ms": 0.0, "selected": true},
-             "worker":    {"max_wait_ms": 20.0, "selected": false},
-             "external":  {"max_wait_ms": 20.0, "selected": false}}}
+             "inprocess": {"max_wait_ms": 0.0, "selected": true,
+                           "latency": {...}, "latency_stale": false},
+             "worker":    {"max_wait_ms": 20.0, "selected": false,
+                           "latency": null, "latency_stale": false},
+             "external":  {"max_wait_ms": 20.0, "selected": false,
+                           "latency": null, "latency_stale": false}}}
+
+    ⛔ EVERY ``backings[*]`` ENTRY CARRIES ALL FOUR KEYS — ``max_wait_ms``,
+    ``selected``, ``latency``, ``latency_stale`` — whichever backing is
+    selected (review P3). ``latency`` is ``null`` until that backing has run in
+    this process, and ``latency_stale`` answers "do these samples belong to a
+    collector that has since been replaced" — the same question the top-level
+    flag answers, per backing. A consumer reading a fixed shape must not have to
+    branch on which lever is set.
 
     ⛔ ``backing`` IS THE CONFIGURED CHOICE — always. The state and the
     distributions are the LIVE backing's, and between a lever flip and the next
@@ -2219,12 +2230,24 @@ def seam_status() -> dict:
             or _backing_name == name)
         per_backing: dict[str, dict] = {}
         for candidate in BACKINGS:
+            # ⛔ THE KEY SET IS THE SAME ON EVERY ENTRY (review P3).
+            # `latency_stale` used to be written only on the entries that are
+            # NOT the live-configured one, so the published shape depended on
+            # which backing was selected: `jq .embed_seam.backings.worker
+            # .latency_stale` answered `false` under `worker` and `true`/
+            # `false` under any other lever. A declared STABLE shape cannot
+            # have a key that appears conditionally, so both keys are seeded
+            # here and each branch only overwrites them.
             entry: dict[str, Any] = {
                 "max_wait_ms": resolve_max_wait_ms(candidate),
                 "selected": candidate == name,
+                "latency": None,
+                "latency_stale": False,
             }
             if candidate == name and _collector is not None \
                     and live_is_configured:
+                # The live collector IS this backing's, and it is the configured
+                # one — so its numbers are current, not stale.
                 entry["latency"] = _collector.snapshot()
             else:
                 # A backing that ran EARLIER in this process keeps its last
