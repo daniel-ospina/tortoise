@@ -893,9 +893,14 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                 # Whether an incident is on record is UNKNOWN when the READ raised:
                 # the write may have filed + pushed first (see above), so the absence
                 # cannot be established. When the read SUCCEEDED and returned a
-                # record, the opposite is the fact — a placeholder record (no
-                # `issue_number`, filing deferred) IS "on record" (`incident_open`
-                # says so) — so that shape must not be described as unknown either.
+                # record, the opposite IS the fact — a number-less record is still a
+                # record (`incident_open` counts it) — but WHY it has no number is
+                # not one cause: `AlertStore` writes a sentinel with
+                # `issue_number: None` when the open-issue SEARCH raised (filing
+                # deferred), when `_file` raised (filing FAILED), and when a
+                # successful CLOSE could not delete the object (a tombstone whose
+                # issue is already resolved). Naming only the first would send a
+                # human looking for a live incident that is already closed.
                 deliver, folded, _ids, _over = _claim_delivery(
                     kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
                 if deliver:
@@ -904,7 +909,9 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         "record is UNKNOWN"
                         if read_failed else
                         " and the record carries no issue number (filing was "
-                        "deferred) — an incident record EXISTS but cannot be named"
+                        "deferred or failed, or it is a resolved incident's "
+                        "leftover sentinel) — an incident record EXISTS but cannot "
+                        "be named"
                     )
                     _deliver_unattributed(
                         kind, org_id, subject, details, folded,

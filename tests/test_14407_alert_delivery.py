@@ -1684,6 +1684,47 @@ def test_an_established_empty_record_still_says_nothing_was_filed(monkeypatch):
     notify.reset_abuse_delivery_for_tests()
 
 
+def test_a_numberless_record_is_named_as_existing_not_unknown(monkeypatch):
+    """The fourth shape: a record EXISTS with no `issue_number` (review cycle 4).
+
+    `AlertStore` writes a number-less sentinel for three different reasons — the
+    open-issue search raised (filing deferred), `_file` raised (filing failed), and a
+    successful CLOSE whose object delete failed (a tombstone). All three are ON
+    record, so the message must say the record exists and why it cannot be named;
+    it must not borrow either neighbouring sentence — "UNKNOWN" (which belongs to a
+    read that raised) or "no incident was filed" (which belongs to an EMPTY read).
+    Without this pin the arm can be collapsed back into the self-refuting UNKNOWN
+    wording with every other test still green.
+    """
+    import tortoise.notify as notify
+
+    class _Store:
+        def open_incident_state(self, kind, subject="", detail=None, writer=None):
+            raise RuntimeError("trailing write failed after filing")
+
+        def incident_record(self, kind, subject=""):
+            return {"issue_number": None, "resolve_failed_at": "2026-11-23T00:00:00Z"}
+
+    sent: list[str] = []
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    notify.notify_abuse("abuse_review_needed", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 900})
+
+    assert len(sent) == 1, sent
+    assert "an incident record EXISTS" in sent[0], sent[0]
+    assert "UNKNOWN" not in sent[0], sent[0]
+    assert "no incident was filed" not in sent[0], sent[0]
+    assert "leftover sentinel" in sent[0], sent[0]
+    notify.reset_abuse_delivery_for_tests()
+
+
 def test_the_absent_channel_reason_names_the_leg_that_is_missing(monkeypatch):
     """`DR_ISSUES_PAT` unset and an unusable `R2_*` set are different fixes.
 
