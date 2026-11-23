@@ -37,6 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise import expansion_merge
 from tortoise.expansion_merge import fuse_expansion_pass
 from tortoise.search_engine import rrf_fusion
 
@@ -150,14 +151,31 @@ def test_repeated_id_within_one_pass_cannot_earn_two_terms():
         f"proves nothing (merged={_ids(merged)}, undeduped={undeduped})")
 
 
-def test_one_empty_side_returns_the_other_unchanged():
+def test_one_empty_side_returns_the_other_unchanged(monkeypatch):
     """Fail-open shape: the helper is only reached with two non-empty passes in
     production, but a lone side must pass through in its own order rather than
-    being fused against nothing."""
+    being fused against nothing.
+
+    ⛔ THE DISCRIMINATOR IS THAT THE FUSION IS NEVER REACHED (review round 6,
+    P3-b). Returning the same rows in the same order is exactly what the FUSED
+    path also does when one side is empty — ``rrf_fusion`` consumes POSITION, so
+    with an empty second list it reproduces the first list's own ranks — so the
+    RETURN VALUES alone cannot distinguish the guard, and the earlier version of
+    this test was green with the guard deleted. Patching ``rrf_fusion`` to raise
+    is what makes deleting ``expansion_merge.py``'s empty-side arm red here."""
     pass1 = [("a", 0.9), ("b", 0.8)]
     assert fuse_expansion_pass(pass1, []) == pass1
     assert fuse_expansion_pass([], pass1) == pass1
     assert fuse_expansion_pass([], []) == []
+
+    def _must_not_be_called(*_args, **_kwargs):
+        raise AssertionError(
+            "a lone side must not be fused against nothing — the empty-side arm "
+            "must short-circuit BEFORE the fusion")
+
+    monkeypatch.setattr(expansion_merge, "rrf_fusion", _must_not_be_called)
+    assert fuse_expansion_pass(pass1, []) == pass1
+    assert fuse_expansion_pass([], pass1) == pass1
 
 
 def test_no_new_expansion_order_when_the_expansion_adds_nothing():
@@ -167,12 +185,35 @@ def test_no_new_expansion_order_when_the_expansion_adds_nothing():
     assert _ids(fuse_expansion_pass(pass1, list(pass1))) == _ids(pass1)
 
 
-def test_deterministic_pure_function_of_the_two_lists():
+def test_pure_function_of_the_two_lists_and_of_nothing_else():
     """#2952's rule, inherited: the merged order is a pure function of the leg
-    CONTENTS, so the same read truncates to the same page."""
+    CONTENTS, so the same read truncates to the same page.
+
+    ⛔ THE TWO DISCRIMINATORS, added in review round 6 (P3-a) because comparing
+    four calls to EACH OTHER is vacuous — any deterministic implementation passes
+    that, including the concatenation this PR removed and ``reversed(fused)``,
+    since the mutant applies to all four calls:
+
+      (i) the exact ORDER is PINNED, not merely repeated. The two legs here are
+          disjoint, so every id earns exactly one term; ids at equal rank tie and
+          ``(-score, id)`` puts the ``p`` before the ``x``. That pin reds BOTH the
+          restored concatenation (every ``x`` first) and ``reversed(fused)``, and
+          it is the only assertion in this file that reds if the two lists reach
+          ``rrf_fusion`` in the wrong ORDER;
+      (ii) the caller's leg lists must come back untouched — a merge that sorts
+           or consumes a caller list in place reds here."""
     pass1 = [(f"p{i}", 1.0 - i / 100) for i in range(7)]
     expanded = [(f"x{i}", 1.0 - i / 100) for i in range(7)]
+    pass1_before, expanded_before = list(pass1), list(expanded)
+
     first = _ids(fuse_expansion_pass(pass1, expanded))
+
+    assert first == [pid for i in range(7) for pid in (f"p{i}", f"x{i}")], (
+        "the fused order must be the rank order with the (-score, id) tiebreak "
+        f"resolving each equal rank — got {first}")
+    assert pass1 == pass1_before and expanded == expanded_before, (
+        "the merge must not reorder or consume the caller's own leg lists in "
+        "place — a sort/pop mutant reds here")
     for _ in range(3):
         assert _ids(fuse_expansion_pass(list(pass1), list(expanded))) == first
 

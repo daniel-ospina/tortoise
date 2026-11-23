@@ -49736,11 +49736,11 @@ class TortoiseSDK:
         passes carry outranks either pass alone (it earns both terms — the entity
         context AGREEING with the query is the signal the expansion exists to
         supply); a pass-1 id can move down only when a candidate out-ranks it in
-        the composed run, or ties it and wins the id tiebreak (#2952) — never
-        because the expansion run had more rows. What is NOT claimed: order
-        preservation. A re-ranked dense leg is the mechanism, not a side effect —
-        and on a lever that ships OFF it stays a decision to be measured, which
-        is what the helper's docstring now measures instead of asserting.
+        the composed run, when one ties it and wins the id tiebreak (#2952), or
+        when an id BOTH passes carry earns two terms. Never because the
+        expansion run had more rows. What is NOT claimed: order preservation — a
+        re-ranked dense leg is the mechanism, not a side effect, and on a lever
+        that ships OFF it stays a decision to be measured, not asserted.
 
         Fail-open (mirrors A4 #2070 / the sparse half): no embedder, an encode
         failure, a query failure or an empty result returns ``None`` and the

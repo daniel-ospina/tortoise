@@ -41,24 +41,27 @@ in this lane and recorded in the PR:
 
 Run::
 
-    TORTOISE_TEST_CARVE_OUT=1 uv run python -m tools.measure_expansion_merge_14344
+    TORTOISE_TEST_CARVE_OUT=1 uv run python tools/measure_expansion_merge_14344.py
 
 Writes ``docs/evidence/14344-expansion-fusion/merge-rule-measurement.json``
 (``--out`` to redirect). Deterministic: one seed, no wall-clock input.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would raise first.
+if sys.version_info < (3, 12):  # noqa: UP036 — deliberate RUNTIME guard
+    raise SystemExit(
+        f"tools/measure_expansion_merge_14344.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/measure_expansion_merge_14344.py`")
+
 import argparse
 import json
 import random
-import sys
 from pathlib import Path
-
-if sys.version_info < (3, 12):  # noqa: UP036 — deliberate RUNTIME guard
-    raise SystemExit(
-        f"requires Python >= 3.12 (got {sys.version_info[0]}."
-        f"{sys.version_info[1]}) — run it as `uv run python -m "
-        f"tools.measure_expansion_merge_14344`")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

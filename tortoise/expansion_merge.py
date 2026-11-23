@@ -68,7 +68,9 @@ def fuse_expansion_pass(
     and the ORDER is not a copy of either pass — an id ranked below a new
     candidate in both passes still lands below it. What changes is the
     BOUND: pass-1 evidence can no longer be displaced by the expansion's
-    LENGTH, only by a candidate that out-ranks it in the expanded run.
+    LENGTH — only by a candidate that out-ranks it in the expanded run, or by
+    an id BOTH passes carry (agreement earns two terms, so a shared candidate
+    can pass an incumbent that out-ranks it in the expanded run).
 
     Scores are carried from the pass that produced the id (``second_pass``
     wins a collision, the order the previous concatenation used), NOT the RRF
