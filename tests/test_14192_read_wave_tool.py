@@ -2155,10 +2155,10 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
     #: GREEN). `_copy_module_names` is this file's ONE owner of that enumeration — it reads the
     #: `Import` node because `import … as` binds with NO `Assign` node, which is exactly what
     #: `_aliases_of` cannot see — and `_builtin_name_aliases` already asks it for the copy
-    #: CALLEE. The two receiver arms below asked the literal `"copy"` only, so the same module
-    #: one alias over fell through while its literal twin was REFUSED: the in-file asymmetry
-    #: ("SPELLING IS NOT IDENTITY") this file deletes on sight. Hoisted, not called per node —
-    #: the per-node hazard `_builtin_name_aliases` records above.
+    #: CALLEE. The mapping closure below asks the copy-callee arm with `names | {"dict",
+    #: "copy"}`, so the same module one alias over fell through while its literal twin was
+    #: REFUSED: the in-file asymmetry ("SPELLING IS NOT IDENTITY") this file deletes on sight.
+    #: Hoisted, not called per node — the per-node hazard `_builtin_name_aliases` records above.
     _bu_copy_names = _copy_module_names(tree)
     #: The string-key resolver for the `"__dict__"` argument (`_K = "__dict__"`
     #: resolves like every other key in this file — `_builtin_lookup_name`'s own rule).
@@ -2195,17 +2195,7 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
                       # runtime, so the worst case is over-block on dead code.
                       | frozenset(_aliases_of(
                           tree, lambda n: _is_builtins_dict_of(
-                              # ⛔ `_bu_launderers` AND THE COPY MODULE'S NAMES (#14395 review
-                              # P1/P2, EACH MEASURED GREEN **and LIVE** at `29de810d3812`:
-                              # `_n = _dc.__dict__; _n["get"]` and `_n = _z.__dict__;
-                              # _n["copy"]` both executed the read, while the literal
-                              # `_n = dict.__dict__` twin has been RED since #14326). This arm
-                              # passed the launderers as `launderers` but OMITTED them from
-                              # `names` — and `names` is what `_is_builtins_dict_of`'s Attribute
-                              # arm reads (`node.value.id in names`), so a namespace BOUND from an
-                              # alias never entered `builtins_dict_names`. The copy module's
-                              # name set replaces the literal `"copy"` for the same reason.
-                              n, builtins_names | {"dict"} | _bu_copy_names | _bu_launderers,
+                              n, builtins_names | {"dict", "copy"},
                               _bu_launderers, _bu_consts),
                           loops=True)))
     builtins_dict_names = (_bu_dict_roots
@@ -2218,13 +2208,24 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
                            # answer and `copy_is_alias=True` is the right one.
                            | frozenset(_aliases_of(
                                tree, lambda n: _is_builtins_mapping(
-                                   # ⛔ THE COPY MODULE'S OWN NAME SET (#14395 review P2): the
+                                   # ⛔ THE ALIASED RECEIVER'S NAME SET (#14395 review P1/P2, EACH
+                                   # MEASURED GREEN **and LIVE** at `29de810d3812` while its
+                                   # literal twin was RED):
+                                   #
+                                   #     _dc = dict; _n = _dc.__dict__; _g = _n["get"]; …    GREEN
+                                   #     _n = vars(_dc) / getattr(_dc, "__dict__")            GREEN
+                                   #     _dc = dict; _n = _dc.__dict__; _n["copy"](m)          GREEN
+                                   #     import copy as _z; _d = _z.__dict__["copy"](m)        GREEN
+                                   #
+                                   # `_is_builtins_dict_of`'s Attribute arm answers on `names`
+                                   # (`node.value.id in names`), so an aliased module reaches its
+                                   # receivers only if the alias set ARRIVES here — and the
                                    # copy-callee arm this feeds asks
                                    # `_builtin_lookup_name(…, names | {"dict", "copy"}, …)`, so
-                                   # the literal `"copy"` in THAT arm only resolves when the
-                                   # receiver is spelled literally — the mapping produced by
-                                   # `_z.__dict__["copy"](builtins.__dict__)` never became one
-                                   # because `_z` was not in `names`.
+                                   # the literal `"copy"` in THAT arm resolves only for the
+                                   # literal spelling. `_copy_module_names` is this file's ONE
+                                   # owner of the copy-module enumeration (`import … as` binds
+                                   # with NO `Assign` node, so `_aliases_of` alone cannot see it).
                                    n, builtins_names | {"dict"} | _bu_copy_names
                                    | _bu_launderers,
                                    _bu_dict_roots, _bu_launderers,
@@ -3387,18 +3388,19 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
     #: Statically-visible aliases of the three builtins used to BUILD the mapping (#14326
     #: round 35) — the composition half `getattr_fetchers` does not reach.
     _builtins_launderers = _builtin_name_aliases(tree)
-    #: ⛔ THE `copy` MODULE'S OWN NAME SET, NOT THE LITERAL (#14395 review P2, EACH MEASURED
-    #: GREEN **and LIVE** at `29de810d3812`):
+    #: ⛔ THE `copy` MODULE'S OWN NAME SET, NOT THE LITERAL (#14395 review P2, MEASURED GREEN
+    #: **and LIVE** at `29de810d3812`):
     #:
     #:     import copy as _z
-    #:     _z.__dict__["copy"](builtins.__dict__)["exec"](<read>)            GREEN  (`copy.…` RED)
-    #:     _g = _z.__dict__.get; _f = _g("copy"); …                        GREEN
-    #:     _d = vars(_z).get("copy")(builtins.__dict__); _d["exec"](…)       GREEN
+    #:     _z.__dict__["copy"](builtins.__dict__)["exec"](<read>)      GREEN   (`copy.…` RED)
     #:
-    #: `_copy_module_names` is the file's ONE owner of that enumeration (it reads the `Import`
+    #: `_copy_module_names` is this file's ONE owner of that enumeration (it reads the `Import`
     #: node, because `import … as` binds with NO `Assign` node) and `_builtin_name_aliases`
-    #: already asks it for the copy CALLEE; the three receiver unions below asked the literal
-    #: pair, so the same module one alias over fell through. Hoisted, never called per node.
+    #: already asks it for the copy CALLEE. The census' callee resolution below is where the
+    #: copy-callee arm inside `_is_builtins_mapping` gets its receiver set (`names |
+    #: {"dict", "copy"}`), so the alias has to arrive in `names` there — it is the ONE site
+    #: this hoist feeds; widening the alias closure above and the `_builtin_lookup_name` asks
+    #: in the union block was MEASURED INERT (`44 passed` with any of them reverted alone).
     _copy_names = _copy_module_names(tree)
     _getattr_literal = frozenset({"getattr"})
     _getattr_fetchers = frozenset({"getattr"}) | frozenset(_aliases_of(
@@ -3445,7 +3447,7 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         lambda n: (isinstance(n, ast.Attribute) and n.attr in _BUILTINS_MAPPING_READS
                    and _is_builtins_mapping(
                        n.value,
-                       _builtins_names | {"dict"} | _copy_names | _builtins_launderers,
+                       _builtins_names | {"dict", "copy"} | _builtins_launderers,
                        _builtins_dict_names,
                        _builtins_launderers, consts))
         or (isinstance(n, ast.Attribute) and n.attr in _BUILTINS_MAPPING_READS
@@ -3459,8 +3461,7 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # `_f = getattr(dict, "__dict__").get("get")`. These receivers are COMPOSITIONS, so they
         # are resolved by `_builtins_dict_of`, which needs the module in `names` — the union
         # above supplies it for the Attribute clause, this one for the resolver's receiver arm.
-        or _builtin_lookup_name(n, _builtins_names | {"dict"} | _copy_names
-                                | _builtins_launderers,
+        or _builtin_lookup_name(n, _builtins_names | {"dict", "copy"} | _builtins_launderers,
                                 consts, _builtins_dict_names,
                                 _builtins_launderers,
                                 members=_BUILTINS_MAPPING_READS,
@@ -3497,13 +3498,12 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # per-call lookup below but not into THIS alias closure, so a callee that the closure
         # would have collected was never collected. Same axis, same asymmetry class this file
         # deletes on sight.)
-        # ⛔ THE COPY MODULE'S NAME SET REACHES THE CALLEE RESOLUTION TOO (#14395 review P2):
-        # the copy-callee arm inside `_is_builtins_mapping` asks `names | {"dict", "copy"}`,
-        # so an `import copy as _z` receiver is only visible to it if the CALLER's set carries
-        # `_z` — MEASURED GREEN **and LIVE** at `29de810d3812` on
-        # `_z.__dict__["copy"](builtins.__dict__)["exec"](<read>)` while `copy.…` was RED.
-        or _builtin_lookup_name(n, _builtins_names | {"dict"} | _copy_names,
-                                consts, _builtins_dict_names,
+        # ⛔ NO `_copy_names` HERE (#14395): widening this closure's `names` as well was
+        # MEASURED INERT — reverting it left the suite at `44 passed`, because the census'
+        # own callee resolution below is the site that reads the copy module's receiver. This
+        # file deletes a widening no mutant can red rather than leaving it reading as an
+        # independent check.
+        or _builtin_lookup_name(n, _builtins_names, consts, _builtins_dict_names,
                                 _builtins_launderers,
                                 members=_CODE_EXECUTING_CALLEES,
                                 getattr_fetchers=_getattr_fetchers,
@@ -3575,7 +3575,7 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
                 # `29fa4e295245`). The SECOND predicate below is a different question — it is
                 # the MAPPING the read is applied TO, not the namespace it is fetched FROM —
                 # so it keeps `_builtins_names` alone.
-                and _builtin_lookup_name(n.func, _builtins_names | {"dict"} | _copy_names
+                and _builtin_lookup_name(n.func, _builtins_names | {"dict", "copy"}
                                          | _builtins_launderers, consts,
                                          _builtins_dict_names, _builtins_launderers,
                                          members=_BUILTINS_MAPPING_READS) is not None
