@@ -1219,9 +1219,20 @@ def test_recover_does_not_steal_a_live_claim():
     batch, items = coord.submit(ORG, ["/a.md"])
     coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
 
-    # The claim was just taken: it looks LIVE, which is the whole point.
-    assert BatchCoordinator(store).recover(ORG) == []
-    assert store.items(ORG, batch.batch_id)[0].state is BatchItemState.EXTRACTING
+    # The claim was just taken: it looks LIVE, which is the whole point. The
+    # claim itself is NOT taken — that is the safety property.
+    # ⛔ `== []` would be the WRONG contract (#14415 review round 5, BLOCKING 1):
+    # "not ours to TAKE" is not "not ours to REPORT". Skipping the batch discards
+    # the decision instead of deferring it, and since `_BATCH_RECOVERED` makes
+    # this scan one-shot per process, the item is then stranded for ever — which
+    # is exactly the ordinary redeploy (a runner in flight, a replacement booting
+    # a second later). The batch is reported so a later pass revisits it; the
+    # drain re-checks the window itself (`run_item`) and leaves the claim alone.
+    assert BatchCoordinator(store).recover(ORG) == [batch.batch_id]
+    row = store.items(ORG, batch.batch_id)[0]
+    assert row.state is BatchItemState.EXTRACTING, (
+        "the live claim must not be requeued")
+    assert row.attempts == 1, "and must not be counted as one of our attempts"
 
     # …and once it is older than the window it IS void and gets taken back.
     assert BatchCoordinator(store).recover(ORG, stale_after_s=0) == [batch.batch_id]

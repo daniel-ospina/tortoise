@@ -703,12 +703,33 @@ def test_the_advertised_inline_bound_is_reachable(client, store, tmp_path,
     assert too_big.status_code == 413, too_big.text
 
 
+def _age_claim(store, org_id, batch_id, item_id,
+               seconds=bi.BATCH_RECLAIM_AFTER_S + 1):
+    """Age a row's claim clock so the reclaim window treats it as DEAD.
+
+    ⛔ Aged, not switched off: `BATCH_RECLAIM_AFTER_S` is the rule under test, and
+    a test that sets the window to 0 is testing a different rule (and would pass
+    even if the guard did not exist). This leaves the real window in place and
+    makes the claim genuinely old.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    item = store.get_item(org_id, batch_id, item_id)
+    item.updated_at = (
+        datetime.now(UTC) - timedelta(seconds=seconds)).isoformat()
+    store.put_item(org_id, item)
+    return item
+
+
 def test_an_embedded_item_can_be_finished_not_re_claimed(store):
     """NB10: `embedded` is a legal starting point, not an illegal re-entry."""
     coord = bi.BatchCoordinator(store)
     _batch, items = coord.submit(ORG_ID, ["/d/a.md"])
     coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
     coord.advance(ORG_ID, items[0], bi.BatchItemState.EMBEDDED)
+    # The claim must be OLD before this pass may re-enter it (a fresh one may
+    # belong to a live peer — #14415 review round 5).
+    _age_claim(store, ORG_ID, items[0].batch_id, items[0].item_id)
     out = coord.run_item(ORG_ID, items[0],
                          lambda i: bi.ItemOutcome(bi.BatchItemState.INDEXED))
     assert out.state is bi.BatchItemState.INDEXED
@@ -1098,6 +1119,9 @@ def test_a_claim_re_entered_from_extracting_counts_towards_the_ceiling(store,
                         failing_terminal_write_if_state)
     for _ in range(bi.BATCH_MAX_ATTEMPTS + 2):
         row = store.items(ORG_ID, batch.batch_id)[0]
+        if row.state in (bi.BatchItemState.EXTRACTING, bi.BatchItemState.EMBEDDED):
+            _age_claim(store, ORG_ID, batch.batch_id, row.item_id)
+            row = store.items(ORG_ID, batch.batch_id)[0]
         # The drain's own per-item guard: a bookkeeping failure must not
         # abandon the rest, and the item keeps whatever state it reached.
         with contextlib.suppress(RuntimeError):
@@ -1338,3 +1362,88 @@ def test_an_unmeasured_usage_read_is_reported_not_read_as_zero(client,
     r = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
     assert r.status_code == 201, r.text
     assert r.json()["estimate"]["usage_measured"] is False
+
+
+# ── #14415 review round 5: the reclaim window's two holes, pinned ─────────
+def test_a_restart_defers_a_fresh_claim_instead_of_discarding_it(store,
+                                                                monkeypatch):
+    """⛔ ROUND-5 BLOCKING 1: a fresh claim deferred is fine; DISCARDED is not.
+
+    The staleness window's premise is "a young claim may belong to a live peer".
+    Applying it by SKIPPING the whole batch threw the decision away: an item in
+    flight when the process died is SECONDS old at the restart that recovers it —
+    the ordinary redeploy — and `_BATCH_RECOVERED` makes that scan one-shot, so
+    the item stayed `extracting` for the process lifetime with the batch reporting
+    `pending > 0` and nothing to re-drive it.
+    """
+    from tortoise import batch_ingest as bi
+
+    monkeypatch.setattr(ha, "_BATCH_RECOVERED", set())
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    submitted: list[str] = []
+    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
+        "ceiling": 2,
+        "submit": staticmethod(lambda fn, *a, **k: submitted.append(a[1]) or True),
+    })())
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+    # …the process dies here, one second later the replacement boots.
+
+    resumed = ha._recover_org_batches({"org_id": ORG_ID})
+
+    assert resumed == [batch.batch_id], (
+        "a batch holding only a FRESH claim must still be resumed, or the claim "
+        "is stranded for ever")
+    assert batch.batch_id in submitted
+    assert store.items(ORG_ID, batch.batch_id)[0].state is (
+        bi.BatchItemState.EXTRACTING), (
+        "the fresh claim itself must NOT be requeued — a peer may hold it")
+
+    # Once the claim is genuinely OLD the same batch becomes reclaimable — the
+    # window is aged, not switched off (see `_age_claim`).
+    _age_claim(store, ORG_ID, batch.batch_id, items[0].item_id)
+    stale = bi.BatchCoordinator(store).recover(ORG_ID)
+    assert stale == [batch.batch_id]
+    assert store.items(ORG_ID, batch.batch_id)[0].state is (
+        bi.BatchItemState.QUEUED), "a stale claim must be requeued for a retry"
+
+
+def test_a_drain_does_not_re_enter_a_peer_s_fresh_claim(store, monkeypatch):
+    """⛔ ROUND-5 BLOCKING 2: the window was per BATCH, the claim is per ITEM.
+
+    With one `queued` sibling the batch was resumed and this drain walked EVERY
+    non-terminal row — including an `extracting` row another instance was inside
+    the runner call on. Two extractions of one document, two graph writes, and
+    (once tokens are metered) charged twice.
+    """
+    from tortoise import batch_ingest as bi
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+
+    def _runner(sdk, corpus, org_id):
+        def _run(item):
+            calls.append(item.item_id)
+            return bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=1)
+        return _run
+
+    monkeypatch.setattr(ha, "_batch_item_runner", _runner)
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/live.md", "/d/queued.md"])
+    claimed, queued = items[0], items[1]
+    # A PEER is inside the runner call on item 0, right now.
+    coord.advance(ORG_ID, claimed, bi.BatchItemState.EXTRACTING, attempt=True)
+
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert calls == [queued.item_id], (
+        f"the drain ran {calls} — a peer's fresh claim must never be re-entered")
+    rows = {i.item_id: i for i in store.items(ORG_ID, batch.batch_id)}
+    assert rows[claimed.item_id].state is bi.BatchItemState.EXTRACTING, (
+        "the peer's claim must be left exactly as the peer left it")
+    assert rows[claimed.item_id].attempts == 1, (
+        "and must not be counted as one of OUR attempts")
+    assert rows[queued.item_id].state is bi.BatchItemState.INDEXED

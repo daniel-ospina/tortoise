@@ -1620,6 +1620,19 @@ class BatchCoordinator:
             fresh = claimed
         elif fresh.state in (BatchItemState.EXTRACTING,
                              BatchItemState.EMBEDDED):
+            # ⛔ A FRESH CLAIM MAY BELONG TO A LIVE PEER — LEAVE IT ALONE
+            # (#14415 review round 5, BLOCKING 2). The staleness window used to
+            # be consulted only in `recover()`, which decides per BATCH; the CLAIM
+            # is per ITEM, so the moment a batch had any `queued` sibling this
+            # drain re-entered an `extracting` row another instance was inside the
+            # runner call on — two extractions of one document, two graph writes,
+            # charged twice. The guard belongs HERE, where the claim is taken.
+            #
+            # ⚠️ DECLARED RESIDUAL (kept from the design): an item that legitimately
+            # runs longer than the window can be re-claimed. A real lease (a
+            # heartbeat on the row) is the fix and needs the drain to refresh it.
+            if _age_seconds(fresh.updated_at) < float(BATCH_RECLAIM_AFTER_S):
+                return fresh
             # ⛔ A RE-ENTERED CLAIM IS AN ATTEMPT TOO (#14415 review round 3,
             # BLOCKING 3). The ceiling above only ran for a `queued` item, so an
             # item re-driven from a DEAD claim (`extracting`/`embedded` — its
@@ -1919,21 +1932,30 @@ class BatchCoordinator:
                 if item.state in (BatchItemState.EXTRACTING,
                                   BatchItemState.EMBEDDED):
                     if _age_seconds(item.updated_at) < window:
-                        continue  # a LIVE claim: not ours to take
+                        # A LIVE claim: not ours to TAKE — but the batch is still
+                        # ours to REPORT (#14415 review round 5, BLOCKING 1).
+                        # Skipping the whole batch here discarded the decision
+                        # instead of deferring it: an item in flight when the
+                        # process died is SECONDS old at the restart that
+                        # recovers it, so the ordinary redeploy stranded it for
+                        # the process lifetime (`_BATCH_RECOVERED` makes this scan
+                        # one-shot). The drain re-checks the window itself
+                        # (`run_item`) and leaves a fresh claim alone, so listing
+                        # the batch is safe: it works the `queued` siblings,
+                        # re-drives the leftover, and the tick revisits until the
+                        # claim is stale enough to reclaim.
+                        continue
                     self.advance(org_id, item, BatchItemState.QUEUED,
                                  reason="resumed after a process restart — "
                                         "requeued for a fresh attempt",
                                  expected=item.state)
                     moved = True
-            # ⛔ Report a batch as RESUMED only when this call actually gave it
-            # work or found work that nobody had claimed (#14219 review round 2,
-            # BLOCKING 5). An item left `extracting` by a LIVE claim is neither:
-            # listing the batch here would hand it to THIS process's worker and
-            # drain a document another process is already extracting — the
-            # double-spend the staleness window above exists to prevent. A
-            # `queued` item with no claim IS ours to work (the deferred queue is
-            # process-local, so a restart is exactly how those get orphaned).
-            if moved or any(i.state is BatchItemState.QUEUED for i in items):
+            # ⛔ Report a batch as RESUMED when this call gave it work, found
+            # unclaimed work, OR found only a fresh claim that a later pass must
+            # revisit (#14415 review round 5, BLOCKING 1 — defer, never discard).
+            # `_drain_batch` refuses to re-enter a fresh claim on its own
+            # (`run_item`), so the peer a fresh claim may belong to is not raced.
+            if moved or any(not i.terminal for i in items):
                 batch.state = BatchState.RESUMING
                 batch.updated_at = stamp
                 self._store.put_batch(batch)
