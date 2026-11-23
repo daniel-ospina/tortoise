@@ -6617,6 +6617,10 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
         _aliases_of(tree, lambda _n: _is_namespace_expr(_n) or _is_module_registry(_n), loops=True)
     )
     launderers = frozenset(_aliases_of(tree, _is_setattr_like, loops=True))
+    # ⛔ A NAME ALIAS OF THE REGISTRY IS THE REGISTRY (#14326 review P1, measured:
+    # `_sm = sys.modules; _sm |= {"tortoise.sdk": _Mirror}` was GREEN while the direct
+    # spelling red — the alias axis, not a new spelling).
+    registry_aliases = frozenset(_aliases_of(tree, _is_module_registry, loops=True))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
@@ -6657,17 +6661,25 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             # guards here enumerate `AugAssign` as a bind form, and an enumeration that took
             # every form EXCEPT it is the exact defect `_str_constants` records.
             target = node.target
-            receiver = (isinstance(target, ast.Attribute) and target.attr == "__dict__") or \
-                (isinstance(target, ast.Name) and target.id in namespaces) or \
-                _is_module_registry(target)
-            if receiver:
-                by_key = set(_mapping_keys_of(node.value, consts)) & {_SDK_CONSTRUCTOR}
-                if by_key:
-                    out.append(
-                        f"line {node.lineno} AUGMENTS `{ast.unparse(target)}` with "
-                        f"`{_SDK_CONSTRUCTOR}` — `|=` on a namespace mapping is the same "
-                        "store as an attribute write, and `run()`'s deferred import "
-                        "resolves it at CALL time (measured GREEN before this arm)")
+            # ⛔ THE KEY AXIS DEPENDS ON THE RECEIVER (#14326 review P1, MEASURED GREEN at
+            # `474d19f2`): a module NAMESPACE (`x.__dict__`, an alias of it) is keyed by the
+            # CLASS NAME, but the IMPORT REGISTRY is keyed by the MODULE NAME — so
+            # `sys.modules |= {"tortoise.sdk": _Mirror}` replaces the class `run()`'s
+            # deferred import resolves and was GREEN while the constructor-keyed spelling was
+            # red. One receiver, two key vocabularies; the filter follows the receiver.
+            keys = set(_mapping_keys_of(node.value, consts))
+            registry = _is_module_registry(target) or (
+                isinstance(target, ast.Name) and target.id in registry_aliases)
+            receiver = registry or (isinstance(target, ast.Attribute)
+                                    and target.attr == "__dict__") or \
+                (isinstance(target, ast.Name) and target.id in namespaces)
+            hit = keys & ({_SHIPPED_MODULE} if registry else {_SDK_CONSTRUCTOR})
+            if receiver and hit:
+                out.append(
+                    f"line {node.lineno} AUGMENTS `{ast.unparse(target)}` with "
+                    f"`{sorted(hit)[0]}` — `|=` on a namespace mapping is the same store as "
+                    "an attribute write, and `run()`'s deferred import resolves it at CALL "
+                    "time (measured GREEN before this arm)")
         elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
@@ -6979,15 +6991,34 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     # Both halves were already resolved by the machinery above — only the STATEMENT KIND was
     # missing, because `AugAssign` carries `.target` singular. Same class as the `.update`
     # arm's missing kwarg spelling: one statement/method over, and the store still lands.
-    for aug in ('_d = _t.__dict__\n_d |= {"TortoiseSDK": _Mirror}\n',
-                '_d = _t.__dict__\n_d |= dict(TortoiseSDK=_Mirror)\n'):
-        got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + aug)
-        assert got and any("AUGMENTS" in g for g in got), (aug, got)
+    # ⛔ EVERY DISJUNCT AND BOTH VALUE SHAPES GETS ITS OWN ROW (#14326 review P1, MEASURED:
+    # deleting the `__dict__`-Attribute disjunct left **35 passed**, because both fail rows
+    # above reach the arm through the NAME-ALIAS disjunct only). And the registry is a
+    # DIFFERENT KEY VOCABULARY — it is keyed by the MODULE name, never by the class name, so
+    # `sys.modules |= {"tortoise.sdk": _Mirror}` was GREEN at `474d19f2` while the
+    # constructor-keyed spelling of the same store was red.
+    aug_levers = {
+        "namespace name-alias, dict display":
+            '_d = _t.__dict__\n_d |= {"TortoiseSDK": _Mirror}\n',
+        "namespace name-alias, `dict(...)` value":
+            '_d = _t.__dict__\n_d |= dict(TortoiseSDK=_Mirror)\n',
+        "namespace ATTRIBUTE (the disjunct no row reached)":
+            '_t.__dict__ |= {"TortoiseSDK": _Mirror}\n',
+        "import registry, MODULE key":
+            'sys.modules |= {"tortoise.sdk": _Mirror}\n',
+        "import registry, MODULE key, via a name alias":
+            '_sm = sys.modules\n_sm |= {"tortoise.sdk": _Mirror}\n',
+    }
+    for name, lever in aug_levers.items():
+        got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
+        assert got and any("AUGMENTS" in g for g in got), (name, lever, got)
 
     # …and the false-red control: `|=` on an ORDINARY container stores a label, not a
     # binding, so the receiver scope is what keeps this green (measured `35 passed`).
-    plain_aug = (shipped + '_ctr = {}\n_ctr |= {"TortoiseSDK": "label"}\n')
-    assert ctor_findings(plain_aug) == []
+    for inert in ('_ctr = {}\n_ctr |= {"TortoiseSDK": "label"}\n',
+                  'sys.modules |= {"tortoise.other": _M}\n',
+                  '_copy = _t.__dict__.copy()\n_copy |= {"TortoiseSDK": _Mirror}\n'):
+        assert ctor_findings(shipped + "class _Mirror:\n    pass\n" + inert) == [], inert
 
     # ⛔ THE `asname` HALF IS ITS OWN CLAUSE (#14326 review P2, measured: deleting it left
     # 31 passed, because the `subclass` row above satisfies the arm's FIRST disjunct).
