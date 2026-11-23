@@ -168,6 +168,21 @@ KNOWN_UNCOVERED = {
     "ci.yml": {
         "ops-harnesses": "runs *.test.sh harnesses that stub `gh` on PATH",
         "repo-harnesses": "runs *.test.sh harnesses that stub `gh` on PATH",
+        # The same shape as `python-ci.yml::manifest-integrity` above, and added for the
+        # same reason: the hazard is per-INVOCATION, and this job's invocation cannot
+        # reach `gh`. `tools/ci_check_repair.py` is a `gh` executor through its REPAIR
+        # arms (`--apply`, `--workflow-state`, `--no-live`/queue reads); this job runs it
+        # only as `--check-doc-citations`, which is stdlib-only — it shells out to `git`
+        # and nothing else (measured: the arm's only `subprocess.run` calls are the three
+        # `git -C … rev-parse …` probes in `doc_citation_defects`). So there is no `gh`
+        # to provision here, exactly as there is none on `--static`. ⚠️ The gap is real
+        # and it is the WHOLE job: if `docs` ever gains a real `gh` command, this row
+        # suppresses the scan for it — the row must be re-read (and the job given the
+        # `runner-tools.sh ensure gh` contract step) rather than carried forward.
+        "docs": (
+            "runs ci_check_repair.py only as --check-doc-citations, which is stdlib+git "
+            "and never shells out to gh (the gh arms are the repair paths, not run here)"
+        ),
     },
 }
 
