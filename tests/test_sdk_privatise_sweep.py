@@ -421,7 +421,7 @@ def _residue_block() -> str:
     restoration had left to 1083, the measured erratum rework below to 1087, the merge with
     `origin/main` `10e51693` — which KEPT both sides' blocks and added the re-measure note — to 1122,
     this branch's merge of `main` `0467ba32` and of a PEER's copy of that same re-cut to 1197, and
-    PR #14283's zero-net re-pin paragraph to 1327; #14284's own merge of `main` `38f2ab7fc594` then
+    PR #14283's zero-net re-pin paragraph to 1328 (main's 1327 plus that paragraph's own line); #14284's own merge of `main` `38f2ab7fc594` then
     KEPT both sides again and re-read 1363 on ITS tree. Every one of those is a reading of the tree
     it NAMES, and this pair-merge keeps both sides at every step for that reason, so the figure
     above is RE-MEASURED on THIS merged tree rather than inherited from either side — which the
