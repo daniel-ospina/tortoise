@@ -1896,8 +1896,12 @@ class AbuseEngine:
         # incident OPEN for the rest of time: the "permanent incident for a
         # recovered condition" this whole fix exists to remove.
         #
-        # The retry is a set lookup on the clean-window path — no store read — so
-        # it costs nothing on the hot path and cannot undo the R2-read reduction.
+        # RECORDING the hint is a set lookup with no store read. The RETRY is not
+        # free: `_evaluate`'s decision to retry is a set lookup plus
+        # `_resolve_retry_due`, and the retry itself pays the same incident reads as
+        # the first attempt (~2 R2 GETs per rule) — which is exactly why it is
+        # spaced by `_EPISODE_RESOLVE_RETRY_BACKOFF_S` and bounded by
+        # `_EPISODE_RESOLVE_RETRY_TTL_S` rather than run on every clean window.
         if resolved:
             self._pending_episode_resolves.pop((org_id, rule), None)
             self._last_resolve_attempt.pop((org_id, rule), None)
