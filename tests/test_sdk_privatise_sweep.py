@@ -409,7 +409,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (__EXTENT__ lines at this head, measured through THIS
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1352 lines at this head, measured through THIS
     function's own walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`, so a
     prose edit that moves the run REDS naming both numbers instead of quietly publishing a stale
     figure, which is what the sentence this one replaces asked a reader to do by hand; re-derive it
@@ -418,13 +418,14 @@ def _residue_block() -> str:
     to 1066 while this sentence still said 985, which was true at `04afeb811d` and 1010 at `main`
     `70fbd1a27dd5` (review of #14258, P3); this re-cut's restoration of the branch's dropped blocks
     took the merged run to 1079, a peer's prose to 1084, dropping the duplicated `#:` separator that
-    restoration had left to 1083, the measured erratum rework below to 1087, and the merge with
-    `origin/main` `10e51693` — which KEPT both sides' blocks and added the re-measure note — to
-    1122; PR #14283's zero-net re-pin paragraph, merged onto that head, took the run to 1078 on ITS
-    own head, and this pair-merge KEEPS both sides at every step for the same reason, so the figure
-    above is RE-MEASURED on THIS merged tree rather than inherited from either side, which the next
-    reflow repeats), AND THE ARMS GRADE ALL OF IT
-    (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
+    restoration had left to 1083, the measured erratum rework below to 1087, the merge with
+    `origin/main` `10e51693` — which KEPT both sides' blocks and added the re-measure note — to 1122,
+    this branch's merge of `main` `0467ba32` and of a PEER's copy of that same re-cut to 1197, and
+    PR #14283's zero-net re-pin paragraph to 1327; #14284's own merge of `main` `38f2ab7fc594` then
+    KEPT both sides again and re-read 1363 on ITS tree. Every one of those is a reading of the tree
+    it NAMES, and this pair-merge keeps both sides at every step for that reason, so the figure
+    above is RE-MEASURED on THIS merged tree rather than inherited from either side — which the
+    next reflow repeats), AND THE ARMS GRADE ALL OF IT    (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
     every NEGATIVE arm below has that whole surface as its grading area, and an honest edit to
