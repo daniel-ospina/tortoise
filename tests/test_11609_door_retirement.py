@@ -1249,12 +1249,20 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         so `Call tortoise_list_graphs&nbsp;(x=1)` — the very `name (args)` shape a plain
     #:         space already reds — was ACCEPTED, because the renderer emits U+00A0. The class
     #:         is now `[^\\S\\n\\r]` ("horizontal whitespace": NBSP, EN SPACE, THIN SPACE …) and
-    #:         never a line terminator. ⚠️ RESIDUAL, stated not tuned: an invisible character
-    #:         INSIDE the name (`tortoise&#8203;_list_graphs`) is still ACCEPTED — closing it
-    #:         means stripping a codepoint class from every judged text before tokenizing, and
-    #:         it is pinned as a declared residual by
-    #:         `test_declared_residual_an_invisible_character_INSIDE_the_name_is_accepted` so
-    #:         this paragraph cannot later be read more narrowly than it behaves.
+    #:         never a line terminator.
+    #:       * ⚠️ *FOUR* SPELLING MECHANISMS: the INVISIBLE CHARACTER (#14237 r18, measured
+    #:         fail-open, and it was a DECLARED residual until it was closed here). A ZWSP /
+    #:         ZWNJ / ZWJ / word-joiner / soft hyphen renders as NOTHING, so it hides the door
+    #:         in two places and each needed its own repair: INSIDE the name
+    #:         (`Call tortoise&#8203;_list_graphs(x=1)`) the tokenizer split it into pieces that
+    #:         are not retired names at all, and BETWEEN the name and its bracket
+    #:         (`Call tortoise_list_graphs&#8203;(x=1)`) the character is not horizontal
+    #:         WHITESPACE — `[^\\S\\n\\r]` does not match U+200B — so the separator run broke and
+    #:         a rendered `name(x=1)` was read as a dead-end note rather than a call. Both were
+    #:         measured ACCEPTED at `63ef683d18`; the residual row that had declared the first
+    #:         one accepted is now the row that pins it RED (its own message asked for exactly
+    #:         that). One codepoint class, declared once: `INVISIBLE` feeds `CALL_FORM`'s
+    #:         separator run and `_strip_invisible`, so the two places cannot drift.
     #:       * the judged UNITS are every leaf block **and the source between them**, so a
     #:         retired name in a link-reference DEFINITION is reached in EVERY spelling. That
     #:         text is in NO block (the parser consumes the definition), which is why R2 already
@@ -1314,6 +1322,19 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 lead = len(token) - len(token.lstrip("_"))
                 yield core, match.start() + lead, match.start() + lead + len(core)
 
+    #: Characters that render as NOTHING — zero-width space, ZWNJ, ZWJ, word joiner, soft
+    #: hyphen, and the BOM/word-joiner alias. Each one, placed inside a retired name or
+    #: between the name and its bracket, leaves the reader looking at the door (or at the
+    #: call) while the SOURCE no longer tokenizes as either (#14237 r18, both shapes measured
+    #: ACCEPTED at `63ef683d18`). Declared ONCE and applied in ONE place — `_strip_invisible`,
+    #: over the JUDGED texts and before tokenizing — which closes BOTH placements: inside the
+    #: name the token splits without it, and between the name and its bracket removing it
+    #: leaves the ordinary `name(` that `CALL_FORM` already matches.
+    #: ⛔ NOT a general "strip all Unicode" rule: NBSP and the other spaces a reader SEES are
+    #: horizontal whitespace, already covered, and are deliberately left visible here.
+    INVISIBLE = "\\u00ad\\u200b\\u200c\\u200d\\u2060\\ufeff"
+    INVISIBLE_RE = re.compile("[" + INVISIBLE + "]")
+
     #: The CommonMark parser IS the block model. A hand-written punctuation/construct table
     #: was tried for four review rounds and every round found another construct it did not
     #: know — a pipe-less table, a list continuation, a nested item, a setext underline, `1)`,
@@ -1336,12 +1357,33 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: renderer emits U+00A0 and the class did not hold it. `[^\S\n\r]` is exactly "horizontal
     #: whitespace": every separator a reader sees as a space (NBSP, EN SPACE, THIN SPACE …),
     #: and neither line terminator, so a newline stays not-a-call by construction.
+    #:
+    #: ⛔ AN INVISIBLE SEPARATOR IS NOT ADDED TO THIS CLASS, ON PURPOSE (#14237 r18). The
+    #: `tortoise_list_graphs&#8203;(x=1)` shape is NOT closed here: widening the separator run
+    #: was MEASURED dead weight — with the invisible character removed from the judged texts
+    #: (`_strip_invisible`) the same occurrence is already RED, because the strip leaves the
+    #: ordinary `name(` this class has always matched. One mechanism, in the one place that
+    #: decides the reader's text, so the two cannot disagree about the same shape.
     CALL_FORM = re.compile(r"(?:[^\S\n\r]*(?:[`*_~]+|</?[A-Za-z][^>]*>))*[^\S\n\r]*\(")
 
     @classmethod
     def is_call_form(cls, text: str, at: int) -> bool:
         """True when the retired name ENDING at ``at`` is written as a CALL."""
         return cls.CALL_FORM.match(text, at) is not None
+
+    @classmethod
+    def _strip_invisible(cls, text: str) -> str:
+        """The text with `INVISIBLE` characters REMOVED — what a reader effectively reads.
+
+        Applied to the JUDGED texts only (`shown` and `rendered`), never to `body`: `body`
+        decides R2's replacement credit and widening it would credit a replacement that
+        carries a hidden character, which is the over-block direction. This normalisation is
+        for DISCOVERY — a retired name split by a character the reader cannot see is the name
+        to that reader (#14237 r18). Offsets are unaffected in any way that matters: every
+        caller uses the return value's own coordinates only for the SIGN of `call_end`, and
+        reports the block's START line, which comes from the original text.
+        """
+        return cls.INVISIBLE_RE.sub("", text)
 
     @staticmethod
     def _inline_text(token, *, breaks: str = " ") -> str:
@@ -1688,7 +1730,8 @@ class TestEveryReaderNamesTheLiveListingDoor:
         # ONE ordered unit list: every leaf block, plus the source the parser placed in none
         # of them. `sort` keeps the reports in SOURCE order, which is what makes this
         # reader's output comparable, line for line, with the raw scan's.
-        units = [(start, end, body, shown, rendered)
+        units = [(start, end, body,
+                  cls._strip_invisible(shown), cls._strip_invisible(rendered))
                  for start, end, body, shown, rendered, _is_html in cls._unit_records(text)]
         for start, stop in cls._unblocked_spans(text):
             raw = text[start:stop]
@@ -1696,9 +1739,11 @@ class TestEveryReaderNamesTheLiveListingDoor:
             # its source with BOTH spelling mechanisms resolved, which is the closest
             # counterpart of what the renderer would make of that source.
             units.append((start, stop, "",
-                          cls._decoded_source(raw, permissive_html=False),
-                          cls._decoded_source(cls._escape_resolution(raw),
-                                              permissive_html=False)))
+                          cls._strip_invisible(
+                              cls._decoded_source(raw, permissive_html=False)),
+                          cls._strip_invisible(
+                              cls._decoded_source(cls._escape_resolution(raw),
+                                                  permissive_html=False))))
         units.sort(key=lambda unit: (unit[0], unit[1]))
         for begin, finish, body, shown, rendered in units:
             raw = text[begin:finish]
@@ -3099,29 +3144,86 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "a call form was graded a dead end as well: "
             f"{self.notes_missing_replacement(text)}")
 
-    def test_declared_residual_an_invisible_character_INSIDE_the_name_is_accepted(self):
-        """⚠️ DECLARED RESIDUAL — the bound of the two fixes above, stated not tuned.
+    @pytest.mark.parametrize("placement", ("inside-the-name", "before-the-bracket"))
+    @pytest.mark.parametrize("codepoint", (0x00AD, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF))
+    def test_an_INVISIBLE_character_hides_neither_the_name_nor_its_bracket(
+            self, codepoint, placement):
+        """The invisible-character class, CLOSED in BOTH places it hid the door (#14237 r18).
 
-        A ZERO-WIDTH character inside the name (`tortoise&#8203;_list_graphs`) renders as the
-        door with an invisible character in it, and it is ACCEPTED: the decoded text tokenizes
-        as `tortoise` + `_list_graphs`, so no reader of this guard sees a retired name. Closing
-        it means stripping a codepoint class (ZWSP/ZWNJ/ZWJ/word-joiner/soft hyphen) from
-        every judged text before tokenizing, which is a wider change than the two spelling
-        fixes this round and buys a shape nobody writes by hand — a name assembled from a
-        character reference for an invisible codepoint.
+        ⛔ THIS ROW REPLACED A DECLARED RESIDUAL, at that row's own instruction ("the
+        invisible-character residual is CLOSED — delete this row and say so in the class
+        comment instead of leaving a stale bound"). It was measured ACCEPTED in TWO
+        placements, and each needed a different repair, so pinning one would have been the
+        exact defect this class comment keeps naming — a stated bound narrower than the
+        behaviour:
 
-        It is pinned here so the class comment cannot later describe the bound more narrowly
-        than it behaves, and so the plain control beside it stays red: the verdict DOES depend
-        on the spelling for this one shape, and that is the honest statement of the residual.
+        * INSIDE the name (`Call tortoise&#8203;_list_graphs(x=1)`) — `name_hits` tokenises on
+          `[A-Za-z0-9_]`, so the split halves are not retired names at all. Closed by
+          `_strip_invisible` over the JUDGED texts (discovery), which is what the old
+          residual named as the repair.
+        * BETWEEN the name and its bracket (`Call tortoise_list_graphs&#8203;(x=1)`) — the
+          name IS discovered here (the plain scan sees it); what failed is that the
+          character is not horizontal WHITESPACE, so `CALL_FORM`'s separator run stopped at it
+          and the occurrence was graded a dead-end note instead of a call. Closed by the SAME
+          `_strip_invisible`, which leaves the ordinary `name(` that `CALL_FORM` already
+          matches — the separator class is deliberately NOT widened, because that widening was
+          measured dead weight (see `CALL_FORM`'s comment).
+
+        A reader sees `tortoise_list_graphs(x=1)` in both cases — the invisible character
+        renders as nothing — so both are copyable calls to the retired door, which R1 forbids
+        absolutely. `placement` is a SEPARATE parameter rather than a loop inside one row so
+        each half reds on its OWN id: a loop would stop at the first failing placement and
+        report one green for the other, which is how a half-covered fix reads as covered.
+        The plain control below is what keeps a green from meaning the row is measuring
+        nothing.
         """
+        reference = f"&#{codepoint};"
         replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
         plain = f"Call tortoise_list_graphs(x=1) for names. {replacement}\n"
-        hidden = f"Call tortoise&#8203;_list_graphs(x=1) for names. {replacement}\n"
+        hidden = {
+            "inside-the-name":
+                f"Call tortoise{reference}_list_graphs(x=1) for names. {replacement}\n",
+            "before-the-bracket":
+                f"Call tortoise_list_graphs{reference}(x=1) for names. {replacement}\n",
+        }[placement]
         assert self.retired_call_forms(plain) == ["tortoise_list_graphs:1"], (
-            f"the plain control no longer reds, so this residual measures nothing: {plain!r}")
-        assert self.retired_call_forms(hidden) == [], (
-            "the invisible-character residual is CLOSED — delete this row and say so in the "
-            f"class comment instead of leaving a stale bound: {self.retired_call_forms(hidden)}")
+            f"the plain control no longer reds, so this row measures nothing: {plain!r}")
+        assert self.retired_call_forms(hidden) == ["tortoise_list_graphs:1"], (
+            f"U+{codepoint:04X} {placement} hid a copyable call to the retired door — the "
+            f"reader sees `tortoise_list_graphs(x=1)` in {hidden!r}, so this is a false PASS "
+            f"of R1: {self.retired_call_forms(hidden)}")
+
+    def test_a_VISIBLE_space_inside_the_name_is_still_a_plain_mention(self):
+        """The bound beside the row above, stated so the codepoint class cannot widen silently.
+
+        `tortoise&#160;_list_graphs` is NOT the retired name to a reader — an NBSP renders as
+        a space, so the sentence shows `tortoise _list_graphs`, which nobody copies as a call
+        to this door. It stays a NON-call mention (R2's question), which is why `INVISIBLE`
+        holds the render-as-nothing codepoints and not NBSP or the other visible spaces:
+        widening it to "all Unicode spaces" would red correct prose for a shape that is not
+        the door.
+        """
+        replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
+        text = f"Call tortoise&#160;_list_graphs(x=1) for names. {replacement}\n"
+        assert self.retired_call_forms(text) == [], (
+            "a VISIBLE space inside the name was read as the door, which is the over-block "
+            f"direction: {self.retired_call_forms(text)}")
+
+    def test_declared_residual_a_LINE_BREAK_inside_the_name_is_accepted(self):
+        """⚠️ DECLARED RESIDUAL — `tortoise_list_\ngraphs(x=1)` is ACCEPTED, and it should be.
+
+        A hard-wrapped name renders as two lines with a space between them
+        (`tortoise_list_ graphs(x=1)`), so the reader is looking at a broken token, not at a
+        command they can copy — the same reason `CALL_FORM` declares a newline never a call.
+        Pinned here so this bound is recorded rather than discovered later: the invisible
+        characters above are invisible to the READER, whereas a line break moves the second
+        half of the name onto another line.
+        """
+        replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
+        text = f"Call tortoise_list_\ngraphs(x=1) for names. {replacement}\n"
+        assert self.retired_call_forms(text) == [], (
+            "the wrapped-name residual is CLOSED — delete this row and say so in the class "
+            f"comment instead of leaving a stale bound: {self.retired_call_forms(text)}")
 
     @pytest.mark.parametrize("relpath", CALL_INSTRUCTION_DOCS)
     def test_no_retired_name_is_offered_as_a_copyable_call(self, relpath):
