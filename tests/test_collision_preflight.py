@@ -8809,7 +8809,7 @@ class CollisionPreflightTest(unittest.TestCase):
         try:
             # Precondition: the census the tool uses can SEE it, so a green
             # assertion below cannot be a subprocess race.
-            self._wait_for_pi_cwd(wt)
+            self._wait_for_pi_cwd(wt, proc=proc)
             rc, out = self.run_tool()
         finally:
             proc.terminate()
@@ -9072,7 +9072,7 @@ class CollisionPreflightTest(unittest.TestCase):
         # the stubbed process table the TOOL reads — see `_write_ps_stub`.
         proc = self._start_fake_pi(wt)
         try:
-            self._wait_for_pi_cwd(wt)
+            self._wait_for_pi_cwd(wt, proc=proc)
             rc, out = self.run_tool()
         finally:
             proc.terminate()
@@ -9505,9 +9505,9 @@ class CollisionPreflightTest(unittest.TestCase):
         proc = self._start_fake_pi(wt)
         moved = self.tmp / f"moved-away-{ISSUE}"
         try:
-            self._wait_for_pi_cwd(wt)
+            self._wait_for_pi_cwd(wt, proc=proc)
             os.rename(wt, moved)
-            self._wait_for_pi_cwd(moved)
+            self._wait_for_pi_cwd(moved, proc=proc)
             # The registration now points at a path that no longer exists, so this is the
             # module's OWN advice for a dead record — and it is what erases the last trace.
             _git(self.repo, "worktree", "prune")
@@ -9549,7 +9549,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(head, branch, "the fixture checkout must be on the judged branch")
         proc = self._start_fake_pi(clone)
         try:
-            self._wait_for_pi_cwd(clone)
+            self._wait_for_pi_cwd(clone, proc=proc)
             rc, out = self.run_tool()
         finally:
             proc.terminate()
@@ -9650,27 +9650,226 @@ class CollisionPreflightTest(unittest.TestCase):
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
-    def _wait_for_pi_cwd(self, wt: Path, timeout: float = 10.0) -> None:
+    def _wait_for_pi_cwd(self, wt: Path, timeout: float = 10.0,
+                         proc: subprocess.Popen | None = None) -> None:
         """Block until `fleet_state` can see the fake lane, then assert it did.
 
         Without this the census can run before the child has exec'd, and the test would
         read a real race as a rule failure — a green-below / red-above flake is the
         worst kind of test.
+
+        ⛔ ASK THE QUESTION ABOUT *OUR* LANE, NOT THE HOST'S POPULATION (#14122).
+        `pi_processes()` reads the WHOLE host, and four of the six red shards run on a
+        *self-hosted* pool that SHARES ITS HOST WITH THE FLEET — so real lane processes
+        are in that list too. What the narrowing removes is a **FALSE POSITIVE**: any
+        OTHER `pi` standing in this fixture's (temp, recycled, sibling-run) worktree
+        satisfies `any(...)` and the precondition goes green without having measured the
+        lane this test started.
+
+        ⛔ AND IT IS **NOT** THE CAUSE OF THE `test (j)` RED — do not record it as one
+        (review of #14388, F1). On the `/proc` path — the one every Linux CI leg takes —
+        `process_cwds` SKIPS a pid whose cwd it cannot read and returns an error string
+        that is unconditionally empty (`tools/fleet_state.py:1596-1599`, `:1627`), and
+        `_pi_pids_from_ps` drops every row from another uid (`:1503`). An unattributable
+        lane is therefore ABSENT from the mapping and cannot make `any(...)` unreachable,
+        and an unrelated lane cannot manufacture `cerr` either: the only way `cerr` is
+        non-empty is a WHOLE-census failure (`ps` timed out or printed nothing), which a
+        narrower population cannot repair. So `test (j)`'s 7 failures still need a cause
+        that exists — that classification is re-opened on #14122, not fixed here.
+
+        `proc` is optional (a caller may have only a path). When it IS given, its exit
+        status is read on failure: a fixture that DIED has no readable cwd, so no amount
+        of waiting could attribute it — and saying that is the difference between "the
+        harness cannot measure" and the real reason.
         """
         mod = _tool_module()
         deadline = time.time() + timeout
         want = os.path.realpath(str(wt))
+        pid = proc.pid if proc is not None else None
+        # ⛔ TWO NAMES, NOT ONE (review of #14388, F3). `seen = pids` was assigned AFTER
+        # the narrowing and then printed as "pi pids the census returned": when the host
+        # answers with a full population and ours is missing, the report read
+        # `returned: []` — a false statement in exactly the case this helper explains,
+        # and it sends the triager to `ps`/`pi_processes` instead of to "our pid is
+        # absent from the population". `returned` is what the census SAID; `matching` is
+        # the subset that is this fixture.
+        returned: list[int] = []
+        matching: list[int] = []
+        # ⛔ AND THE ERROR STRINGS ARE THE ONLY SIGNAL THAT THE CENSUS NEVER ANSWERED
+        # (review of #14388 at b066addf63, P3 — the last open arm of F3/F5). `err` and
+        # `cerr` were computed and thrown away, so a WHOLE-CENSUS failure (`ps` printed
+        # nothing) and a healthy census with no `pi` row — the two classes #14122's re-open
+        # says the next `test (j)` triager must tell apart — printed the SAME sentence,
+        # and the one actionable datum (the census's own error text) was not printed at
+        # all. `pi_processes` reports "produced nothing" as an ERROR, never as an empty
+        # fleet (`tools/fleet_state.py:1479`), so this is the only place that text can
+        # surface.
+        last_err = ""
+        last_cerr = ""
         while time.time() < deadline:
             procs, err = mod.fleet_state.pi_processes()
+            last_err = err
             if not err:
-                cwds, cerr = mod.fleet_state.process_cwds(
-                    [int(p["pid"]) for p in procs])
+                returned = [int(p["pid"]) for p in procs]
+                matching = (returned if pid is None
+                            else [p for p in returned if p == pid])
+                cwds, cerr = mod.fleet_state.process_cwds(matching)
+                last_cerr = cerr
                 if not cerr and any(
                         os.path.realpath(c) == want for c in cwds.values()):
                     return
             time.sleep(0.1)
-        self.fail("the process census never saw the fake pi lane — the test cannot "
-                  "discriminate process-cwd liveness")
+        fatal = ""
+        if last_err:
+            # A CENSUS THAT NEVER ANSWERED IS NOT A GAP IN A CENSUS THAT DID.
+            fatal = (
+                f"; on the last sample the census NEVER ANSWERED (err={last_err!r}) — a "
+                "whole-census failure is not a gap in a population that answered, and no "
+                "narrower population can repair it"
+            )
+        elif last_cerr:
+            # The population answered and the ATTRIBUTION read failed. Same rule: not a gap.
+            fatal = (
+                f"; on the last sample the CWD READER failed (err={last_cerr!r}) — the "
+                "population answered, so what failed is the attribution read, not the census"
+            )
+        elif proc is not None:
+            rc = proc.poll()
+            fatal = (
+                f"; the fake lane pid {pid} EXITED with rc={rc} — a dead process has no "
+                "readable cwd, so no wait could ever attribute it (a DEAD FIXTURE, not a "
+                "census gap)"
+                if rc is not None else
+                f"; the fake lane pid {pid} is still running — so this IS a census gap"
+            )
+        self.fail(
+            "the process census never saw the fake pi lane — the test cannot "
+            "discriminate process-cwd liveness "
+            f"(the census returned: {returned!r} (err={last_err!r}); of those, this "
+            f"fixture's: {matching!r}; cwd reader err={last_cerr!r}; wanted cwd "
+            f"{want!r}{fatal})"
+        )
+
+    def test_the_pi_cwd_precondition_asks_about_our_pid_not_the_hosts_population(self):
+        """⛔ THE NARROWING REMOVES A FALSE POSITIVE — pinned, and it is NOT the (j) cause.
+
+        `_wait_for_pi_cwd` used to accept ANY census pid whose cwd was this fixture's
+        worktree, so on the self-hosted pool — where the host carries real lanes and this
+        fixture's temp path can be one another `pi` happens to stand in — the
+        precondition could go green WITHOUT measuring the lane the test started.
+
+        Non-vacuity: delete the `p == pid` filter and this arm PASSES (the foreign pid's
+        cwd satisfies `any(...)`), so every assertion below reddens.
+
+        The message is pinned in the same breath, because it is the other half of the
+        same change (review F3): what the census RETURNED must be reported next to what
+        matched OUR pid, or `returned: []` blames `ps` for a population that was fine.
+        """
+        me = subprocess.Popen(["/bin/sleep", "30"])
+        foreign = 999999999  # no such process: only the MAPPING decides attribution here
+        want = str(self.tmp)
+        mod = _tool_module()
+
+        def fake_cwds(pids):
+            # ONLY the foreign pid is attributable to this fixture's path.
+            return {int(p): want for p in pids if int(p) == foreign}, ""
+
+        def fake_procs():
+            return [{"pid": me.pid}, {"pid": foreign}], ""
+
+        try:
+            with mock.patch.object(mod.fleet_state, "pi_processes", fake_procs), \
+                 mock.patch.object(mod.fleet_state, "process_cwds", fake_cwds), \
+                 self.assertRaises(AssertionError) as caught:
+                self._wait_for_pi_cwd(self.tmp, timeout=0.3, proc=me)
+        finally:
+            me.kill()
+            me.wait(timeout=10)
+        msg = str(caught.exception)
+        self.assertIn(f"the census returned: [{me.pid}, {foreign}]", msg,
+                      "the report must name what the census SAID, not the filtered list")
+        self.assertIn(f"this fixture's: [{me.pid}]", msg)
+        # The census ANSWERED (err="") and the fixture is alive, so this really is a gap
+        # in a population that answered — the arm the two error tests below must NOT hit.
+        self.assertIn("this IS a census gap", msg)
+
+    def test_the_census_gap_message_never_blames_a_census_that_did_not_answer(self):
+        """⛔ A CENSUS THAT NEVER ANSWERED IS NOT A GAP (#14122's re-open; review P3).
+
+        The two classes the re-open says a `test (j)` triager must tell apart — a
+        whole-census `ps` failure and a healthy population missing our pid — rendered as
+        the same sentence, and the census's own error text was dropped.
+
+        Non-vacuity: stop interpolating `last_err` and the text disappears; drop the
+        `if last_err:` arm and the message claims a gap — each assertion reddens on its own
+        half, so this arm can never pass for the wrong reason.
+        """
+        me = subprocess.Popen(["/bin/sleep", "30"])
+        mod = _tool_module()
+        census_err = "`ps -ww -axo pid=,ppid=,uid=,command=` produced nothing"
+        try:
+            with mock.patch.object(mod.fleet_state, "pi_processes",
+                                   return_value=([], census_err)), \
+                 self.assertRaises(AssertionError) as caught:
+                self._wait_for_pi_cwd(self.tmp, timeout=0.2, proc=me)
+        finally:
+            me.kill()
+            me.wait(timeout=10)
+        msg = str(caught.exception)
+        self.assertIn(census_err, msg,
+                      "the census's own error text is the actionable datum — print it")
+        self.assertIn("NEVER ANSWERED", msg)
+        self.assertNotIn("this IS a census gap", msg,
+                         "a census that produced nothing is not a gap in an answer")
+
+    def test_the_census_gap_message_names_a_cwd_reader_failure(self):
+        """An ATTRIBUTION-read failure is not a census gap either — `cerr` was dropped too.
+
+        Non-vacuity: drop the `elif last_cerr:` arm (or the `cerr` interpolation) and the
+        failure is once again reported as a census gap with no text from the reader.
+        """
+        me = subprocess.Popen(["/bin/sleep", "30"])
+        mod = _tool_module()
+        read_err = "`lsof` could not be run: FileNotFoundError: lsof"
+        try:
+            with mock.patch.object(mod.fleet_state, "pi_processes",
+                                   return_value=([{"pid": me.pid}], "")), \
+                 mock.patch.object(mod.fleet_state, "process_cwds",
+                                   return_value=({}, read_err)), \
+                 self.assertRaises(AssertionError) as caught:
+                self._wait_for_pi_cwd(self.tmp, timeout=0.2, proc=me)
+        finally:
+            me.kill()
+            me.wait(timeout=10)
+        msg = str(caught.exception)
+        self.assertIn(read_err, msg,
+                      "the cwd reader's own error text is the actionable datum — print it")
+        self.assertIn("CWD READER failed", msg)
+        self.assertNotIn("this IS a census gap", msg,
+                         "the population answered — only the attribution read failed")
+
+    def test_the_census_gap_message_says_when_the_fixture_itself_died(self):
+        """A DEAD FIXTURE is not a census gap — the two send a reader to different places.
+
+        A process that exited has no readable cwd, so no amount of waiting attributes it;
+        reporting that as "the census never saw it" makes the next triager chase `ps`.
+        Non-vacuity: drop the `fatal` computation (`fatal = ""`) and the message loses
+        `DEAD FIXTURE`, so this reddens.
+        """
+        mod = _tool_module()
+        dead = subprocess.Popen(["/bin/true"])
+        dead.wait(timeout=10)
+        try:
+            with mock.patch.object(mod.fleet_state, "pi_processes",
+                                   return_value=([], "")), \
+                 self.assertRaises(AssertionError) as caught:
+                self._wait_for_pi_cwd(self.tmp, timeout=0.2, proc=dead)
+        finally:
+            if dead.poll() is None:  # pragma: no cover — /bin/true is already reaped
+                dead.kill()
+        msg = str(caught.exception)
+        self.assertIn("DEAD FIXTURE", msg)
+        self.assertIn(f"pid {dead.pid} EXITED with rc=0", msg)
 
     def _wait_cwd_attributable(self, pid: int, wt: Path, timeout: float = 10.0) -> None:
         """Block until the TOOL's OWN cwd reader can attribute `pid` to `wt` (#12039).
