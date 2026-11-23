@@ -1882,6 +1882,30 @@ SWEEP_NAMES = 66
 #: (11901 / `953c70c0`), so this branch contributes zero rows and the drift arrived on
 #: `main` between the two folds — the same class as the paragraph above, and the same
 #: repair (a tree that does not match its pin reds every PR that merges it).
+#: RE-CUT (11896, "ea44c5f732d2a97d") → (11898, "8cf59d52af09e536") on the `#12039` witness-budget PR,
+#: and the SOURCE IS `main`'S TREE, NOT ITS PIN — the `#14062` recurrence, measured again rather than
+#: assumed: `origin/main` `4993fa083f3f` derives **11898** on its OWN tree (`--repin`, run in a
+#: detached worktree at that commit), so `--check` exits 1 THERE against its own 11896 pin and every
+#: open PR is then graded against a number `main` does not derive. THIS PR'S OWN CONTRIBUTION IS ZERO
+#: ROWS, and that is measured too: its merged tree derives the SAME pair as `main`'s own tree, and
+#: `git diff <merge-base>..HEAD` over the only two files it touches (`MEMORY.md`,
+#: `tests/test_fleet_state.py`) adds no `.query`/`.update`/`.delete` row at all.
+#: WHY THE PIN WAS STALE ON ARRIVAL and not stale from a later drift: the commit that CARRIES 11896
+#: (`1457f7905daa`, `#14038`) derives 11898 on its own tree, and its parent (`a3b0911f2049`, `#14416`)
+#: derives 11887 — so 11896 is the tree of NOTHING in `main`'s first-parent chain. It is nine above the
+#: pre-squash main and two below the squash, i.e. the pair was measured on a branch tree that was never
+#: the merge tree, and two rows landed after that reading. The row-by-row diff `1457f7905daa^` →
+#: `1457f7905daa` (both trees measured, sorted row sets diffed) is `cp.query` 263 → 270 (+7),
+#: `row.update` 59 → 60 (+1), `super().query` 76 → 78 (+2), and ONE SHAPE THAT DID NOT EXIST BEFORE,
+#: `self.plane.query` 0 → 1 (`tests/test_13998_capacity_notice.py:212`, a test double's fake
+#: control-plane): 7+1+2+1 = 11 = 11898 − 11887, which is the cross-check that no row was silently
+#: absorbed. So the two rows the pin misses are among `#14038`'s own, they are DECLARED here rather
+#: than rewritten away (re-pointing an ordinary-word receiver inside a peer's test double would be
+#: sabotage — the `declared_markers.update` precedent), and the one new SHAPE among them is named
+#: above so the next reader does not have to re-derive it.
+#: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
+#: legitimised by the re-cut; the pair below is `--repin`'s own output on THIS tree, never arithmetic
+#: on the last pin, and `--check` exits 0 on it.
 SWEEP_RESIDUE = (11901, "953c70c05b55923b")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
