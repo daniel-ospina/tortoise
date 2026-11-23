@@ -2081,6 +2081,23 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
                       | frozenset(_aliases_of(
                           tree, lambda n: _is_builtins_dict_of(
                               n, builtins_names, _bu_launderers, _bu_consts),
+                          loops=True))
+                      # ⛔ AND A MODULE-NAMESPACE ALIAS (#14326 fail lane, EACH MEASURED GREEN
+                      # and LIVE: `_n = dict.__dict__; _d = _n["copy"](builtins.__dict__)` and
+                      # `_n = dict.__dict__; _g = _n["get"]; _g(builtins.__dict__, "exec")(…)`
+                      # both executed the read, while the ONE-BIND twin of the same mapping one
+                      # module over (`_d = builtins.__dict__`) has been resolved since cycle 3).
+                      # `dict.__dict__` is NOT the builtins mapping, but it IS a namespace whose
+                      # members are the SAME callables this axis enumerates (`dict.get`,
+                      # `dict.copy`), and every consumer of this set asks "can this name reach
+                      # the enumerated callable set" — so it is declared HERE, the one channel
+                      # already threaded to every consumer, rather than widening an eleven-site
+                      # signature. Widening adds reds only: `_n["exec"]` is a `KeyError` at
+                      # runtime, so the worst case is over-block on dead code.
+                      | frozenset(_aliases_of(
+                          tree, lambda n: _is_builtins_dict_of(
+                              n, builtins_names | {"dict", "copy"},
+                              _bu_launderers, _bu_consts),
                           loops=True)))
     builtins_dict_names = (_bu_dict_roots
                            # ⛔ A COPY IS THE MAPPING FOR THIS QUESTION (#14326 round 35,
@@ -2214,10 +2231,19 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                                      names, dict_names, launderers, consts)):
         keys = _string_keys_of(node.args[1], consts) & _members
         return sorted(keys)[0] if keys else None
-    # ⛔ NO SUBSCRIPT-CALLEE ARM HERE (#14326 review cycle 12, MEASURED DEAD: `dict.__dict__[
-    # "get"](m, "exec")` is refused through the ALIAS closure — `_mapping_read_aliases` collects
-    # a Subscript value — so an arm matching a Subscript `func` in this resolver flipped 0 of
-    # 223 rows when deleted. The file deletes a clause no mutant can red.)
+    # ⛔ THE SUBSCRIPT CALLEE IS A RESOLVED FORM TOO (#14326 fail lane, MEASURED GREEN and LIVE
+    # — the note that used to sit here claimed the class was closed and was WRONG):
+    #
+    #     dict.__dict__["get"](m, "exec")(<read>)          GREEN   `dict.get(m, "exec")` RED
+    #     dict.__dict__["__getitem__"](m, "exec")(<read>)   GREEN
+    #     vars(dict)["get"](m, "exec")(<read>)             GREEN   (same for `copy`)
+    #
+    # The INLINE callee is not a BIND, so no alias can exist for it: the deleted arm's
+    # justification ("refused through the ALIAS closure — `_mapping_read_aliases` collects a
+    # Subscript value — flipped 0 of 223 rows") measured the absence of a ROW, not the deadness
+    # of the arm, and it is now falsified by a shape that executes the read. It lives inside the
+    # `copies` arm below because that arm already owns the KEY-POSITION rule these callees share
+    # (`dict.get`-style: mapping first, key SECOND), so the arity is read once.
     # ⛔ AND THE MAPPING'S OWN METHODS, WHICH ARE THE SUBSCRIPT ONE SPELLING OVER (#14326
     # round 35, EACH MEASURED GREEN at `a12902a5d4` while the `m["exec"]` subscript of the
     # IDENTICAL mapping was RED):
@@ -2262,7 +2288,19 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                                      copies=copies) is not None):
         keys = _string_keys_of(node.args[0], consts) & _members
         return sorted(keys)[0] if keys else None
-    if isinstance(node.func, ast.Name) and node.func.id in copies and node.args:
+    if ((isinstance(node.func, ast.Name) and node.func.id in copies)
+            # ⛔ AND THE SAME READ METHOD FETCHED OUT OF A MODULE'S OWN NAMESPACE (#14326 fail
+            # lane). `dict.__dict__["copy"] is dict.copy`, so the member fetched from the
+            # namespace is the enumerated callable; `_is_builtins_mapping` answers the receiver
+            # through `_is_builtins_dict_of`, which already accepts `X.__dict__`, `vars(X)` and
+            # `getattr(X, "__dict__")` — one resolver, not a shape per spelling. The `dict`/
+            # `copy` pair is the set of modules whose namespace holds a member of
+            # `_BUILTINS_MAPPING_READS` or `_COPY_CALLEES`.
+            or (isinstance(node.func, ast.Subscript)
+                and (_string_keys_of(node.func.slice, consts) & _BUILTINS_MAPPING_READS)
+                and _is_builtins_mapping(node.func.value, names | {"dict", "copy"},
+                                         dict_names, launderers, consts))) \
+            and node.args:
         _key_at = 1 if (len(node.args) >= 2
                         and _is_builtins_mapping(_single_star_argument(node.args[0]),
                                                  names, dict_names,
@@ -3262,11 +3300,21 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # executed the read while the INLINE form is REFUSED by the arm that reads a Subscript
         # CALLEE). `dict.get` (an Attribute) has been collected here since round 7; the member
         # fetched out of the module's OWN namespace is the same method, one spelling over.
+        # ⛔ THE RECEIVER IS RESOLVED, NOT SPELLED (#14326 fail lane, EACH MEASURED GREEN and
+        # LIVE while the `__dict__`-only spelling was the sole one refused):
+        #
+        #     _g = dict.__dict__["get"]              RED at the previous head
+        #     _g = vars(dict)["get"]                 GREEN   (`vars(dict)["get"](m,"exec") is exec`)
+        #     _g = getattr(dict, "__dict__")["get"]  GREEN   (same, measured True)
+        #
+        # The arm hard-coded `X.__dict__` while its OWN commit's copy half accepted
+        # `vars(dict)["copy"]` — the in-file asymmetry this file deletes on sight. The resolver
+        # `_is_builtins_dict_of` already answers all three compositions, so the literal test is
+        # replaced by it; `_cfg.__dict__["get"]` stays GREEN (receiver name is not a module).
         or (isinstance(n, ast.Subscript)
             and (_string_keys_of(n.slice, consts) & _BUILTINS_MAPPING_READS)
-            and isinstance(n.value, ast.Attribute) and n.value.attr == "__dict__"
-            and isinstance(n.value.value, ast.Name)
-            and n.value.value.id in {"dict", "copy"}),
+            and _is_builtins_mapping(n.value, _builtins_names | {"dict", "copy"},
+                                     _builtins_dict_names, _builtins_launderers, consts)),
         loops=True))
     _code_executing_names = _CODE_EXECUTING_CALLEES | frozenset(_aliases_of(
         tree,
@@ -7757,6 +7805,46 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a READ METHOD fetched from the module's `__dict__`": (
             '    import builtins\n'
             '    _g = dict.__dict__["get"]\n'
+            '    _g(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ THE INLINE TWINS OF THE ROW ABOVE (#14326 fail lane, EACH MEASURED GREEN **and
+        # LIVE** at `3469136a2f81` while the BOUND spelling was REFUSED — and the note that
+        # claimed this class was covered was falsified by measurement). `dict.__dict__["copy"]
+        # is dict.copy`, so the member fetched out of the module's OWN namespace is the same
+        # enumerated callable, one node shape over: a Subscript CALLEE is not a BIND, so the
+        # alias closure can never see it — it needs its own arm AND its own row.
+        "a READ METHOD INLINE from the module's `__dict__`": (
+            '    import builtins\n'
+            '    m = builtins.__dict__\n'
+            '    dict.__dict__["get"](m, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD INLINE via `vars(<module>)` of the namespace": (
+            '    import builtins\n'
+            '    m = builtins.__dict__\n'
+            '    vars(dict)["get"](m, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ THE RECEIVER SPELLINGS THE `__dict__`-ONLY TEST MISSED (#14326 fail lane, EACH
+        # MEASURED GREEN and LIVE: `vars(dict)["get"](m, "exec") is exec` → True;
+        # `getattr(dict, "__dict__")["get"](m, "exec") is exec` → True). Its own commit's copy
+        # half already accepted `vars(dict)["copy"]`, which is the in-file asymmetry.
+        "a READ METHOD BOUND via `vars(<module>)` of the namespace": (
+            '    import builtins\n'
+            '    _g = vars(dict)["get"]\n'
+            '    _g(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD BOUND via `getattr(<module>, \"__dict__\")`": (
+            '    import builtins\n'
+            '    _g = getattr(dict, "__dict__")["get"]\n'
+            '    _g(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ AND THE ONE-BIND ALIAS OF THE NAMESPACE ITSELF (#14326 fail lane, EACH MEASURED
+        # GREEN and LIVE: `_n = dict.__dict__; _n["copy"](m)["exec"] is exec` → True). The
+        # one-bind alias of the MAPPING one module over (`_d = builtins.__dict__`) has been
+        # resolved since cycle 3, so leaving the NAMESPACE alias raw was the same asymmetry.
+        "a NAMESPACE ALIAS (`_n = dict.__dict__`) holding the copy callee": (
+            '    import builtins\n'
+            '    _n = dict.__dict__\n'
+            '    _d = _n["copy"](builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a NAMESPACE ALIAS (`_n = dict.__dict__`) holding the read method": (
+            '    import builtins\n'
+            '    _n = dict.__dict__\n'
+            '    _g = _n["get"]\n'
             '    _g(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a COPY CALLEE fetched with `getattr` off a MAPPING fetch": (
             '    import builtins\n'
