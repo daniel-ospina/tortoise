@@ -3711,7 +3711,7 @@ def _row_for_pid(pid: int) -> str:
 
     ⚠️ IT IS NOT ONE THING. In caller 1 it is a DIAGNOSTIC interpolated into a failure message;
     in caller 2 it IS the assertion's subject (that test's verdict is `assert row`). Calling it
-    "never an oracle" was true of caller 1 only, and contradicts caller 2 eight lines below.
+    "never an oracle" was true of caller 1 only, and contradicts caller 2 below.
 
     TWO callers (#12039), and BOTH depend on the same ⚠️: `poll()` collects the status and a
     collected child has no row left to quote, so every call site reads the row FIRST.
@@ -3768,6 +3768,17 @@ _CENSUS_ERROR_STREAK = 2
 #: failure on a box whose own `ps -p <pid>` answers is the census; anything shorter is #5049
 #: rule 1 (load must not produce a FAIL).
 _CENSUS_ERROR_MIN_SPAN_S = 2.0
+
+#: How long a census SAMPLE may spend failing before it is a wall-clock expiry rather than a
+#: broken invocation (#12039 cycle 8, P1). `pi_processes()` reads the table through
+#: `_run(..., timeout=30)` (`tools/fleet_state.py`), whose `except Exception: return ""` folds
+#: a `TimeoutExpired` into the SAME empty string as a rejected argument — so the error TEXT
+#: cannot tell load from a census fault, and the only signal that separates them is how long
+#: the sample took. A census whose invocation is wrong fails in milliseconds; one that burned
+#: `_run`'s whole subprocess budget on a loaded box is a `ps` timeout, which is #5049 rule 1
+#: (load must not produce a FAIL). ⚠️ THIS IS `_run`'s TIMEOUT SPELLED HERE because it is not
+#: reachable by import (it is a keyword default on a private helper) — keep the two in step.
+_CENSUS_SAMPLE_TIMEOUT_S = 30.0
 
 
 def _signal_name(num: int) -> str:
@@ -4009,7 +4020,17 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
             streak_started: float | None = None
             pids: list[int] = []
             while True:
+                # ⛔ HOW LONG THE SAMPLE ITSELF TOOK, measured around the call (#12039 cycle 8, P1).
+                # `pi_processes` reads the table through `_run(..., timeout=30)`
+                # (`tools/fleet_state.py`), and `_run`'s `except Exception: return ""` folds a
+                # `TimeoutExpired` into the SAME empty string as a rejected argument. So the error
+                # TEXT cannot tell load from a broken invocation — but the sample's own DURATION
+                # can: a census whose invocation is wrong fails in milliseconds, while a sample
+                # that burned a timeout-scale budget failed on the wall clock. This is the only
+                # signal in the loop that distinguishes them.
+                sample_started = time.time()
                 procs, err = fs.pi_processes()
+                sample_s = time.time() - sample_started
                 if err:
                     # ⛔ A CENSUS ERROR IS NOT A PERMANENT SKIP — BUT ONE SAMPLE IS NOT A VERDICT
                     # (#12039, review rounds 3 and 4). This branch used to skip on ANY census
@@ -4049,6 +4070,27 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                         streak_started = time.time()
                     err_streak += 1
                     streak_span_s = time.time() - streak_started
+                    # ⛔ A WALL-CLOCK EXPIRY INSIDE THE CENSUS IS NOT THE CENSUS'S FAULT
+                    # (#12039 cycle 8, P1). Every census error carries the same string, so a `ps`
+                    # that ran into `_run`'s 30 s timeout and a `ps` that REJECTED an argument are
+                    # indistinguishable by TEXT. Calling the timeout a census fault reds a
+                    # REQUIRED shard for load — the #5049 rule-1 inversion this test exists to
+                    # remove, one layer down. The sample's own DURATION separates them: a census
+                    # whose invocation is wrong fails in milliseconds, a timed-out one burned
+                    # `_run`'s whole budget. ⛔ CHECKED BEFORE THE CONJUNCTION, not inside it: a
+                    # 30 s timeout spends the poll's entire budget on its FIRST sample, so the
+                    # healthy-branch deadline `break` below would otherwise turn it into the
+                    # ALIVE arm's FAIL before the count gate was ever reached (measured).
+                    if sample_s >= _CENSUS_SAMPLE_TIMEOUT_S:
+                        inconclusive(
+                            f"the census itself spent {sample_s:.1f}s failing, so the error "
+                            f"may be a `ps` timeout rather than the census's own invocation",
+                            deadline_s=sample_s,
+                            diagnosis=(
+                                f"The error text is {err!r}, and `pi_processes` returns exactly "
+                                f"that string for a timeout AND for a rejected argument, so the "
+                                f"KIND is only visible in how long the sample took."),
+                        )
                     if (
                         err_streak >= _CENSUS_ERROR_STREAK
                         and streak_span_s >= _CENSUS_ERROR_MIN_SPAN_S
@@ -4236,7 +4278,8 @@ class _FakeChild:
     """A stand-in for the fixture's `Popen`: a scripted `poll()`, no process behind it."""
 
     def __init__(self, rc: int | None) -> None:
-        # An id almost certainly absent from the table, so `os.waitid` raises ECHILD and
+        # A pid that is NOT THIS PROCESS's CHILD, so `os.waitid` raises ECHILD (`ChildProcessError`,
+        # `[Errno 10] No child processes`) and `_child_exited` takes its documented `poll()`
         # `_child_exited` takes its documented `poll()` fallback.
         self.pid = 4_000_001
         self._rc = rc
@@ -4360,9 +4403,17 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
         ),
         (
             "once_slow", True, None, AssertionError, "was ALIVE and invisible to the census",
-            "ONE erroring sample that SPANS the bound by itself is still the load class, because "
-            "the COUNT half of the conjunction has not been reached — without it, a single slow "
-            "`ps` reds a required shard (cycle-7 finding: dropping the count left 175 passed)",
+            "ONE counting sample whose streak span the CLOCK steps past the bound — without the "
+            "COUNT half, a >= _CENSUS_ERROR_MIN_SPAN_S gap between the streak's own two `time()` "
+            "reads reds a required shard (cycle-7: dropping the count left 175 passed; cycle-8: "
+            "the mechanism is the clock, NOT `ps` cost — `streak_started` is taken after "
+            "`pi_processes()` returns, so a slow `ps` is spent before the streak clock starts)",
+        ),
+        (
+            "persistent_slow", True, None, "skip", "INCONCLUSIVE [#5049]",
+            "a census sample that consumes the SPAN BOUND to fail is a wall-clock expiry inside "
+            "`pi_processes` (its `_run` timeout), i.e. load — rule 1 says INCONCLUSIVE, and "
+            "calling it the census's own invocation was the cycle-8 P1",
         ),
         (
             "persistent_beyond_budget", True, None, AssertionError,
@@ -4410,11 +4461,11 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     clock only advances when the code asks it.
     """
     module = sys.modules[__name__]
-    # ⛔ NOT A GLOBAL STEP: `once_slow` exists because the COUNT half of the gate is otherwise
-    # unpinned (measured, #12039 cycle 7 — dropping `err_streak >= _CENSUS_ERROR_STREAK` from the
-    # gate left the whole file `175 passed`). To reach `err_streak == 1` with a span over the bound,
-    # the CLOCK has to be slow, not the census: this clock still returns exactly one counting
-    # sample, and its step is what makes that one sample's own `time()` pair span the bound.
+    # ⛔ NOT A GLOBAL STEP: `once_slow` reads a DESCHEDULING gap — the two adjacent `time()` reads
+    # inside the streak straddle the bound while the sample itself was instant — so its clock is
+    # what is stepped. `persistent_slow` reads a `ps` TIMEOUT instead, where the cost is inside the
+    # census call, and spends the clock there rather than here: a per-call step cannot express the
+    # difference, and conflating the two is what let a `ps` timeout stay a FAIL (cycle 8, P1).
     clock = _FakeClock(step_s=2.5 if census_kind == "once_slow" else 0.1)
     child = _FakeChild(child_rc)
     err = "`ps -ww -axo pid=,ppid=,uid=,command=` produced nothing"
@@ -4430,6 +4481,19 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     # `burst` = how many consecutive errors: at least the count `_CENSUS_ERROR_STREAK` so the COUNT
     # condition is always reachable.
     burst = max(2, _CENSUS_ERROR_STREAK)
+    # ⛔ THE PREMISE THE PLACEMENT RESTS ON, ASSERTED (#12039 cycle 8, P2). `late` grows with
+    # `_CENSUS_ERROR_MIN_SPAN_S`; the poll's own 10 s deadline does not. Past a span bound of about
+    # 9.8 s the burst is placed AFTER the poll has already broken, `assert calls["n"] > late +
+    # burst` then fires on the CORRECT implementation, and this arm reds the very thing it exists
+    # to protect. MEASURED on a copy at `_CENSUS_ERROR_MIN_SPAN_S = 9.8` with the implementation
+    # UNMUTATED: `AssertionError: the poll must keep running after a burst that satisfies the COUNT
+    # but not the SPAN (late=100, burst=2)`. The arm is independent of BOTH constants only while
+    # this holds, so it is pinned rather than assumed. `10.0` is spelled here because it is also a
+    # literal in the code under test (the poll's `deadline`) — pinned, not reachable by import.
+    assert census_kind != "late_pair" or late + burst < 10.0 / step_s, (
+        f"_CENSUS_ERROR_MIN_SPAN_S={_CENSUS_ERROR_MIN_SPAN_S:g} places the late burst at sample "
+        f"{late} (+{burst}), past the poll's own 10.0s deadline — this arm would then red the "
+        f"CORRECT implementation (#12039)")
 
     def _census():
         calls["n"] += 1
@@ -4448,10 +4512,24 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
                 "verdict — it HANGS, which is the failure this arm exists to catch")
             return [], err
         if census_kind == "once_slow":
-            # ONE erroring sample — the same shape as `once`, ridden by a clock whose step is
-            # larger than the span bound. `err_streak` is 1, so the COUNT half is the only thing
-            # between this and a `HarnessDefect` raised on a single slow `ps` (load, rule 1).
+            # ⛔ THE MECHANISM IS THE CLOCK, NOT `ps` (#12039 cycle 8, P2). `streak_started` is
+            # taken AFTER `pi_processes()` returns, so a slow or hung `ps` is spent BEFORE the
+            # streak clock starts and contributes nothing to the span. What can reach the bound
+            # on ONE counting sample is a >= `_CENSUS_ERROR_MIN_SPAN_S` gap between the streak's
+            # two ADJACENT `time()` reads — a descheduled process or a wall-clock step — and the
+            # fake clock is the only affordable way to place it. `err_streak` is 1, so the COUNT
+            # half is the only thing between this and a `HarnessDefect` on a required shard.
             return ([], err) if calls["n"] == 1 else ([], None)
+        if census_kind == "persistent_slow":
+            # One sample that COSTS `_run`'s whole subprocess budget and then fails — the shape of
+            # a `ps` that ran into `_run(..., timeout=30)` (`tools/fleet_state.py`), whose
+            # `except Exception: return ""` folds a `TimeoutExpired` into the SAME empty string as
+            # a broken invocation. Modelled by SPENDING the clock INSIDE the sample, not by raising
+            # the per-call step: `sample_s` is `time.time() - sample_started` around this call, so
+            # the spend is what a real 30 s timeout looks like, while the per-sample step stays
+            # 0.1 s and `once_slow` (a descheduling gap, not a slow `ps`) stays distinguishable.
+            clock.now += _CENSUS_SAMPLE_TIMEOUT_S
+            return [], err
         if census_kind == "late_pair":
             # Healthy samples first, then a burst of consecutive errors, then healthy again.
             # `late` places the burst's FIRST sample just after `_CENSUS_ERROR_MIN_SPAN_S` of
@@ -4485,6 +4563,10 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
             # erroring sample and the second on every later one, so the citation was retired with
             # the shape it described rather than left to mis-predict: `(k - 1) * step_s` says the
             # freeze is unnecessary, the measurement says the correct implementation trips.)
+            # ⛔ AND ONLY WHILE THE SPAN BOUND STAYS BELOW THE POLL'S OWN 10 s DEADLINE (#12039
+            # cycle 8, P2): the premise is ASSERTED above, not assumed — at
+            # `_CENSUS_ERROR_MIN_SPAN_S = 9.8` the placement runs past the break and this arm
+            # reds the CORRECT implementation.
             if calls["n"] == late:
                 clock.step_s = 0.0
             elif calls["n"] >= late + burst:
