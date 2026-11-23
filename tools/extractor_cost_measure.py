@@ -3260,8 +3260,9 @@ def render_embed_json_measurement(m: dict) -> str:
         f"**{lev['solve']['embed_region_per_call']:,.1f}** tokens — the bundle "
         f"prints `12,412`, the same solve at whole-token precision. Every term "
         f"is subtracted because each is charged to its OWN row in the "
-        f"decomposition; omitting the last two gives 14,614.0, which is not "
-        f"this region.",
+        f"decomposition; omitting the last two gives "
+        f"{lev['solve']['s4_prompt_tokens_per_call'] - lev['solve']['s4_static_render_per_call']:,.1f}"
+        ", which is not this region.",
         f"2. S4 takes **{lev['s4_calls_per_doc']}** calls per document "
         f"({corpus['documents']} documents), so the region is "
         f"`{lev['embed_region_per_s4_call']:,.1f} × {lev['s4_calls_per_doc']}` "
@@ -3310,11 +3311,20 @@ def render_embed_json_measurement(m: dict) -> str:
             f"{n * displayed_unit:,.1f} ≤ {b['allowance']:,}`; "
             f"`{n + 1} × {displayed_unit:,.1f} = "
             f"{(n + 1) * displayed_unit:,.1f}` overruns |")
+    #: ⛔ DERIVED, never asserted: the earlier wording claimed the next document
+    #: "overruns by >30k tokens in every tier", which the table right above it
+    #: refutes (solo overruns by 9,955.0, team by 19,440.9). The bound is the
+    #: smallest margin over the three tiers, measured from the same displayed
+    #: unit the rows multiply.
+    min_overrun = min((n + 1) * displayed_unit - b["allowance"]
+                      for b, n in ((b, b["documents_after"])
+                                   for b in m["documents_per_month"]))
     lines += [
         "",
         "The unit above is printed, and multiplied, at 1 dp; the counts are the "
-        "floors of the exact unit, and the next document overruns by >30k tokens "
-        "in every tier, so the display precision cannot flip a cell.",
+        "floors of the exact unit, and the next document overruns by at least "
+        f"`{min_overrun:,.1f}` tokens, so the display precision cannot flip a "
+        "cell.",
         "",
         f"That is **{m['documents_per_month'][0]['documents_after'] - m['documents_per_month'][0]['documents_before']:+d} / "
         f"{m['documents_per_month'][1]['documents_after'] - m['documents_per_month'][1]['documents_before']:+d} / "

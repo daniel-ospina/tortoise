@@ -68,7 +68,7 @@ The arithmetic, in the order it is applied:
 | pro | 4,000,000 | 61 | **66** | `66 × 60,199.1 = 3,973,140.6 ≤ 4,000,000`; `67 × 60,199.1 = 4,033,339.7` overruns |
 | team | 24,000,000 | 370 | **398** | `398 × 60,199.1 = 23,959,241.8 ≤ 24,000,000`; `399 × 60,199.1 = 24,019,440.9` overruns |
 
-The unit above is printed, and multiplied, at 1 dp; the counts are the floors of the exact unit, and the next document overruns by >30k tokens in every tier, so the display precision cannot flip a cell.
+The unit above is printed, and multiplied, at 1 dp; the counts are the floors of the exact unit, and the next document overruns by at least `9,955.0` tokens, so the display precision cannot flip a cell.
 
 That is **+3 / +5 / +28** documents a month (solo / pro / team) — the size of the lever, not a pricing proposal.
 
