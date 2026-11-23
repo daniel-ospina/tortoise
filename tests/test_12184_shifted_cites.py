@@ -1423,6 +1423,31 @@ def test_the_non_comparable_set_is_derived_from_the_pins_file_lengths() -> None:
         "figures from the measured split; do not adjust one to the other."
     )
 
+    # ⛔ THE ONE NUMERAL THE ARMS ABOVE LEAVE UNGRADED: the split's comparable-drift numerator
+    # ("128 of the 221 comparable"). `_SPLIT_DRIFT`'s first group was read by NOBODY — the comparability
+    # arm grades its denominator, its non-comparable numerator and the absent-at-main count, and
+    # `_QUADRUPLE` grades the headline — so `130` sat beside a `138` that no longer decomposed into it for a
+    # whole edition (`130 + 8 == 138` was true of the corpus before this branch's re-point, and the pair of
+    # figures it left behind kept the relation while describing a different document). The identity is the
+    # grader: the two halves must add up to the headline, which is what makes the fourth figure derived
+    # rather than quoted.
+    body = _unbolded(text)
+    drift = _SPLIT_DRIFT.search(body)
+    quad = _QUADRUPLE.search(body)
+    assert drift is not None and quad is not None, (
+        "the split's numerator relation needs both published sentences (the `the drift is N of the M "
+        "comparable, plus S of those T pairs` restatement and the `S spellings → P pairs → C collisions → D "
+        "drifters` headline); one of them no longer parses, so re-point this arm at how it is written now"
+    )
+    comparable_drift, incomparable_drift = _as_int(drift.group(1)), _as_int(drift.group(3))
+    headline = int(quad.group(4))
+    assert comparable_drift + incomparable_drift == headline, (
+        f"the split says {comparable_drift} of the comparable pairs drift and {incomparable_drift} of the "
+        f"non-comparable ones do, which is {comparable_drift + incomparable_drift} — but the headline says "
+        f"{headline} drifters of the {quad.group(5)}. The two halves are the whole population, so a "
+        "re-point that moves a pair across the pin's EOF must move all three figures together"
+    )
+
 
 def test_a_carried_forward_figure_is_reported() -> None:
     """The comparator's negative case, reachable: a stale triple and a broken arithmetic relation red.
