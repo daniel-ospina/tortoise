@@ -363,7 +363,10 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 a `#` comment (`git diff origin/main...HEAD -- 'tortoise/*.py' | grep -E '^[+-]'` returns **sixteen** lines:
 four file headers (`--- a/` / `+++ b/`) plus six removed and six added comment lines — the
 twelve body lines are all `#`, so `grep -vE '^(\+\+\+|---) '` leaves nothing that is not a comment): each carries a count this PR re-derived
-(`173` distinct cites from `746` targets over `203` files, up from `172` / `744` / `200`), not a
+(`162` distinct cites from `727` targets over `203` files, up from `168` / `751` / `205` —
+`uv run python tools/hosted_api_cite_census.py` is the command, and the `173` / `746` / `200` these
+replaced were a PREVIOUS amendment's figures, carried here by a sentence that retargeted the
+diff mechanics and left its numbers behind), not a
 change to what the code does.
 
 ---
