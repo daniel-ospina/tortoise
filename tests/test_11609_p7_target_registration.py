@@ -638,6 +638,28 @@ class TestTheRelationDecidedArmCountsItsPointCreates:
         assert ms._link_entities_scalar_abuse_weight(
             {"": 1}, ("ownedBy", "a", "b"), {"operator": True}) == 1
 
+    @pytest.mark.parametrize("padded", [" supports ", "supports\n", "\tsupports"])
+    def test_a_PADDED_spelling_is_still_an_operator(self, padded):
+        """The helper applies the SDK's OWN normalisation — MEASURED, not assumed.
+
+        `TortoiseSDK.link_entities` opens with `rel = (relation or "").strip()` and
+        decides the arm from `_EPISTEMIC_RELATION_MEANINGS.get(rel.upper())`, so a padded
+        spelling builds a carrying operator exactly as the bare one does. Measured on the
+        REAL dispatch at this head (`TortoiseSDK.__new__` + recorder doors, no graph):
+        `" supports "`, `"supports\n"` and `"\tsupports"` all reach `_create_operator`.
+
+        ⛔ THIS ROW IS THE FAIL-OPEN MUTANT'S ONLY WITNESS. Every param row above spells
+        the meanings EXACTLY, so dropping `.strip()` from the helper — a one-character
+        "simplification" of a line that now looks redundant — leaves all of them green
+        while the padded spellings that DO mint an operator get weighted 0, i.e. the
+        point_create goes unrecorded. That is the same class §1 of this PR exists about,
+        one layer in, so the padding is pinned rather than left to the exact spellings.
+        """
+        assert ms._link_entities_scalar_abuse_weight(
+            {"": 1}, (padded, "a", "b"), {}) == 1, (
+            f"the padded spelling {padded!r} was weighted 0 — the SDK strips before its "
+            "lookup, so this call DOES mint a Point and a 0 here records nothing")
+
     def test_a_meaning_ADDED_to_the_SDK_is_weighted_without_editing_the_door(
             self, monkeypatch):
         """The "read from the SDK, not copied" claim, MEASURED (#14237 r2 review, P2).
