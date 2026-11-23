@@ -5449,12 +5449,19 @@ def test_a_FAILED_rewrite_puts_the_quarantined_bytes_BACK(tmp_path, monkeypatch)
     def _no_space(*_a, **_kw):
         raise OSError(28, "No space left on device")
 
+    real_atomic_write = capture_spool._atomic_write
     monkeypatch.setattr(capture_spool, "_atomic_write", _no_space)
     result = write_spool_entry(root, _snapshot(sid, turns=[
         {"role": "user", "content": "a fresh turn"}]))
     assert result["written"] is False
     assert [d["reason"] for d in result["discards"]] == ["spool_write_failed"]
-    monkeypatch.undo()
+    # Restore ONLY this patch, by name. `monkeypatch.undo()` would revert every
+    # patch this fixture instance made — including the autouse fixture's
+    # `TORTOISE_IMPORT_RECEIPT_DIR` pin (`:53-72`), which exists because the
+    # flush below reaches `_clear_breadcrumb_for` with the ambient environment
+    # and would delete the developer's real breadcrumb. A test must not revoke
+    # the file's hermeticity guarantee to undo its own stub.
+    monkeypatch.setattr(capture_spool, "_atomic_write", real_atomic_write)
 
     assert _log_path(root, sid).read_bytes() == garbage, (
         "the bytes moved aside before the failed write must be back in place")

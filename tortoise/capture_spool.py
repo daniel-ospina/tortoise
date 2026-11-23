@@ -993,14 +993,26 @@ def _quarantine_log(log: Path) -> Path | None:
     that write fails.
 
     NOT re-fileable — the honesty this owes the reader who finds an `.orphan`.
-    The entry key is ``sha256(session_id)[:32]``, and the session id is not
-    recoverable from an orphan on EITHER call site: from `list_spool_metas` the
-    meta that held it is REMOVED, and from `write_spool_entry` the meta at that
-    same key is REWRITTEN to describe the new turns (its digest no longer covers
-    the orphaned bytes, and no version of it ever named them again). The bytes
-    are preserved FOR FORENSICS (grep a lost turn, recover a prefix by hand),
-    not for a retry. The wording here once said "recoverable", which overstated
-    what the name can deliver.
+    The orphan's OWN bytes are what cannot be retried: nothing records which
+    capture they belonged to, and no verb reconstructs it from the log alone.
+    The SESSION ID, though, differs by call site and must not be overstated
+    either way:
+
+    * from `list_spool_metas` it is gone — the corrupt meta (the only copy) is
+      REMOVED;
+    * from `write_spool_entry` it is still there — the sibling
+      ``<key>.meta.json`` at the SAME key remains readable and carries
+      ``session_id`` in cleartext (and on the failed-write path it is not even
+      rewritten). So the id is one directory listing away; what is NOT
+      recoverable is the link from the orphaned BYTES to it, because that
+      meta now describes the NEW turns and its digest covers only them.
+
+    The bytes are preserved FOR FORENSICS (grep a lost turn, recover a prefix by
+    hand), not for a retry. The wording here once said "recoverable", which
+    overstated what the name can deliver; this paragraph then over-corrected to
+    "not recoverable from an orphan on either call site", which was false for
+    the writer path — an overstatement in the opposite direction is the same
+    defect (#14359 review).
 
     ⚠️ AN ORPHAN CARRIES THE MTIME OF THE TRANSCRIPT IT HOLDS (a rename preserves
     it), and `_orphan_paths` evicts oldest-first — correct for the corrupt-meta
@@ -2226,14 +2238,22 @@ def write_spool_entry(
     # #14359: a turn log whose bytes THIS WRITE CANNOT USE is never replaced
     # silently — its bytes are moved aside as an `.orphan` first (the same
     # forensic move a corrupt meta's log gets), so the stored content is never
-    # destroyed without a trace. "Cannot use" is exact, and it is NOT the same
-    # question as "is rewriting":
+    # destroyed without a trace. The gate is the BYTES (never the parse RESULT
+    # alone — a parse is exactly what just failed) plus "could not use them":
     #   * `stored` is EMPTY over a byte-bearing log — the READABLE-meta sibling
     #     of the torn-transcript case (the issue's shape 1): there is a meta, so
-    #     the gate on `prior is not None` never ran, the parse produced nothing,
-    #     and the bytes are the only copy of whatever they hold; and
+    #     the corrupt-meta gate never ran, the parse produced nothing, and the
+    #     bytes are the only copy of whatever they hold (this arm also covers
+    #     `prior is None` over a surviving log); and
     #   * the log does not end on a RECORD BOUNDARY — its torn tail's turn is
     #     counted in no meta and no reader (#3963).
+    # ⚠️ STATED SCOPE, so the sentence above is not read as wider than it is:
+    # the class is "the WHOLE log is unparseable" or "it ends torn" — NOT "any
+    # unparseable line". A log whose prefix parses and which ends on a boundary
+    # (one junk line in the middle) is neither, so a rewrite of it still drops
+    # that line with no orphan. That shape needs a producer that emits it (none
+    # does — both legs serialise turn-by-turn) and it is identical on the base;
+    # widening the gate to catch it would have to give up the rule below.
     # ⛔ A DELIBERATE rewrite — a MAX_TURNS window shift, a branch, a compaction
     # — parsed its predecessor and is replacing it on purpose. That is NOT this
     # class, and it must not be: keeping a copy there spends a whole log of the
@@ -2431,9 +2451,12 @@ def spool_saturated(
     test — prune may delete them, so they are room — while a COUNT overage is
     still only relievable by a filed entry, because prune's orphan pass is
     byte-gated and never touches the count. A quarantined orphan's
-    delivered-ness is still unknowable (``_quarantine_log`` removed the meta,
-    the only copy of ``filed_key``), which is why it is evicted LAST; it is not
-    a reason to call the spool unshrinkable.
+    delivered-ness is still unknowable — under a CORRUPT meta
+    (``_quarantine_log``) the record that carried ``filed_key`` was removed, and
+    under the #14359 write-path quarantine the surviving meta describes the NEW
+    turns, so its ``filed_key`` is not evidence about the orphaned bytes — which
+    is why an orphan is evicted LAST; it is not a reason to call the spool
+    unshrinkable.
 
     PROJECTION. A write path does not ask about the spool as it is, it asks
     whether the write ITSELF can land: pass the entry's post-write size as
@@ -2602,13 +2625,14 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     work and records `spool_saturated` — bounded disk without destroying the
     backlog.
 
-    A quarantined turn log (``_quarantine_log``) has no meta, so it is absent
-    from the meta scan and from ``_entry_bytes``: its bytes are counted HERE and
-    it is evicted (oldest first, by mtime) AFTER the filed-entry pass and before
-    any UNFILED live entry. Without this, the byte ceiling stopped applying the
-    moment a meta was quarantined and the spool could grow past it without bound
-    — one full transcript per corrupt meta, each up to ``max_entry_bytes``
-    (#8531 review). A quarantined log goes LAST of the evictable classes, not
+    A quarantined turn log (``_quarantine_log``) is absent from BOTH accounting
+    paths — ``_orphan_paths`` does not enumerate it into ``metas``, and
+    ``_entry_bytes`` addresses only ``<key>.meta.json`` + ``<key>.turns.jsonl``,
+    never an ``.orphan`` — so its bytes are counted HERE and it is evicted
+    (oldest first, by mtime) AFTER the filed-entry pass and before any UNFILED
+    live entry. Without this, the byte ceiling stopped applying the moment a log
+    was quarantined and the spool could grow past it without bound — one full
+    transcript per quarantine, each up to ``max_entry_bytes`` (#8531 review). A quarantined log goes LAST of the evictable classes, not
     first: a FILED entry's content is already on the wire, so reclaiming it is a
     CERTAIN zero-cost choice, while an orphan's delivered-ness is unknowable
     (``_quarantine_log`` removes the corrupt meta, which was the only copy of
@@ -2693,8 +2717,9 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
             "reason": DISCARD_BYTES_EXCEEDED,
             "detail": (
                 f"spool is {total} bytes > max_total_bytes={bounds.max_total_bytes}"
-                "; evicted a quarantined log (UNREACHABLE: its meta is gone,"
-                " so whether it was ever filed is unknown)"
+                "; evicted a quarantined log (UNREACHABLE: nothing enumerates"
+                " an .orphan, and no writer files one back — whether it was"
+                " ever delivered is unknown)"
             ),
         }))
         with contextlib.suppress(OSError):
