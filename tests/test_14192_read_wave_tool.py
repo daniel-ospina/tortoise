@@ -1465,7 +1465,17 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
     — a `dict` alias called where `getattr` is meant, which is a TypeError and cannot run.
     """
     return frozenset(_aliases_of(
-        tree, lambda n: isinstance(n, ast.Name) and n.id in _REGISTRY_BUILTINS, loops=True))
+        tree,
+        lambda n: (isinstance(n, ast.Name) and n.id in _REGISTRY_BUILTINS)
+        # ⛔ AND THE MODULE-ATTRIBUTE SPELLING (#14326 review cycle 5, MEASURED GREEN:
+        # `from builtins import dict as _dd; _x = _dd(builtins.__dict__)` executed the read
+        # with the pin GREEN, while `_dd = dict` was RED). `builtins.dict` is the same
+        # builtin, and the `ImportFrom` arm synthesizes exactly this Attribute — so without
+        # this disjunct the import spelling binds a name no launderer arm can resolve, one
+        # node-shape from the assignment spelling that works.
+        or (isinstance(n, ast.Attribute) and n.attr in _REGISTRY_BUILTINS
+            and isinstance(n.value, ast.Name) and n.value.id == "builtins"),
+        loops=True))
 
 
 def _is_builtins_dict_of(node: ast.AST, names: frozenset[str],
@@ -1569,10 +1579,15 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                 for part in (node.func.value, *node.args)))):
         return True
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "copy" and len(node.args) == 1
+            and node.func.attr in {"copy", "deepcopy"} and len(node.args) == 1
             and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
-        # the UNBOUND `dict.copy(m)` — the callee is `dict` here, so `node.func.value` is
-        # the constructor and the mapping is argument ONE.
+        # the UNBOUND `dict.copy(m)` / `copy.deepcopy(m)` — the callee is a constructor here,
+        # so `node.func.value` is that constructor and the mapping is argument ONE.
+        # ⛔ `deepcopy` IS THE SAME LEVER (#14326 review cycle 5, MEASURED GREEN: `_x =
+        # copy.deepcopy(builtins.__dict__); _x["exec"](<read>)` executed the read while
+        # `copy.copy(m)` was RED). A deep copy of the mapping still holds the SAME function
+        # objects at its leaves — nothing about the depth changes what reading `exec` out of
+        # it executes — so the arm reads the copy FAMILY, not one member of it.
         return True
     return ((isinstance(node, ast.Name) and node.id in dict_names)
             or _is_builtins_dict_of(node, names, launderers, consts))
@@ -2712,7 +2727,10 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
     # ⛔ A `from builtins import <callee> as …` NEEDS NO ARM HERE (#14326 merge with the
     # sibling lane's `490ae765a6`). This function carried one, and a mutant MEASURED it INERT
     # on the merged tree: `_aliases_of`'s `ImportFrom` arm now resolves that bind for EVERY
-    # axis (its `builtins` member set IS `_CODE_EXECUTING_CALLEES`), so the arm reddened no
+    # axis (its `builtins` member set IS `_CODE_EXECUTING_CALLEES | _REGISTRY_BUILTINS |
+    # {"__dict__"}` — it was `_CODE_EXECUTING_CALLEES` alone until #14326 review cycle 5 added
+    # the FETCHER (`getattr`) and the mapping (`__dict__`) spellings; a lane trusting a stale
+    # note here reverts that widening believing it redundant), so the arm reddened no
     # row — and the file's own rule is to DELETE a clause no mutant can red rather than leave
     # it reading as an independent check. The row it pinned is the sibling's
     # `IMPORTED `exec` (`from builtins import exec as _run`)`; a second row for one clause is
@@ -3448,13 +3466,15 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
         # an arm that enumerates ONE module and TWO members is an in-file asymmetry, not a
         # declared residual (the file's own rule: a statically visible alias is not the
         # "computed at runtime" residual). The member sets below ARE the sets their axes
-        # own (`_PATH_ATTRS`, `_CODE_EXECUTING_CALLEES`), so this is not a second copy of
+        # own (`_PATH_ATTRS`, `_CODE_EXECUTING_CALLEES`, `_REGISTRY_BUILTINS` — plus
+        # `__dict__`, the mapping root both axes read), so this is not a second copy of
         # any list, and a member no axis grades (`from sys import argv as _a`) still binds
         # nothing that can widen a predicate.
         elif isinstance(node, ast.ImportFrom) and node.module in {"sys", "builtins"}:
             _imported_members = (frozenset({"modules", "__dict__"}) | _PATH_ATTRS
                                  if node.module == "sys"
-                                 else _CODE_EXECUTING_CALLEES | _REGISTRY_BUILTINS)
+                                 else _CODE_EXECUTING_CALLEES | _REGISTRY_BUILTINS
+                                 | frozenset({"__dict__"}))
             for alias in node.names:
                 # ⛔ `__dict__` IS BOUND THE SAME WAY (#14326 round 28 P2, MEASURED GREEN:
                 # `from sys import __dict__ as _d; _d["modules"] = {…}` and
@@ -6713,6 +6733,29 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    from builtins import getattr as _g\n'
             '    _g(builtins, "exec")('
             "'results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
+        # ⛔ THE MAPPING IMPORTED FROM THE MODULE, AND ITS TWO REMAINING COPY SPELLINGS
+        # (#14326 review cycle 5, EACH MEASURED GREEN while a third reach executed the read,
+        # EACH with a RED twin one node-shape over): the builtins `ImportFrom` member set
+        # carried `__dict__` for `sys` since round 28 but not for `builtins`, while
+        # `_builtins_root_names`' whole job is to resolve every spelling of that mapping;
+        # `copy.deepcopy(m)` was GREEN while `copy.copy(m)` was RED (a deep copy still holds
+        # the same function objects at its leaves); and the IMPORT arm synthesizes
+        # `builtins.dict`, a node shape `_builtin_name_aliases` could not resolve — so the
+        # imported constructor was GREEN while the assigned one was RED. Deleting
+        # `__dict__` from the member set reds the first row, the `deepcopy` member from either
+        # copy arm the second, and the module-attribute disjunct the third.
+        "MAPPING imported from the module (`from builtins import __dict__`)": (
+            '    from builtins import __dict__ as _d\n'
+            '    _d["exec"]('
+            "'results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
+        "COPY of the mapping via `copy.deepcopy`": (
+            '    import builtins, copy\n'
+            '    _x = copy.deepcopy(builtins.__dict__)\n'
+            '    _x["exec"]("sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "COPY of the mapping via the IMPORTED `dict`": (
+            '    from builtins import dict as _dd\n'
+            '    _x = _dd(builtins.__dict__)\n'
+            '    _x["exec"]("sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         "`builtins.__dict__[\"exec\"]` — the mapping SUBSCRIPT": (
             '    import builtins\n'
             '    builtins.__dict__["exec"]('
