@@ -46,7 +46,7 @@ from tortoise.hosted_backup import MemoryStorage
 class _RecordingStore:
     """A real ``AlertStore`` plus the egress it would perform, recorded."""
 
-    def __init__(self) -> None:
+    def __init__(self, search_open=None) -> None:
         self.pushes: list[str] = []
         self.filed: list[tuple[str, str]] = []
         self.closed: list[int] = []
@@ -57,7 +57,7 @@ class _RecordingStore:
             MemoryStorage(),
             file_issue=self._file,
             close_issue=self._close,
-            search_open=lambda kind, org: [],
+            search_open=search_open or (lambda kind, org: []),
             push_telegram=self.pushes.append,
             issue_open=self._open,
             comment_issue=lambda n, body: self.comments.append((n, body)),
@@ -410,6 +410,44 @@ def test_a_clean_window_with_no_episode_does_no_store_work(monkeypatch):
     assert resolved == [], (
         "a clean window with no episode must not touch the incident store — "
         f"{len(resolved)} resolve call(s) on the request path ({resolved})")
+
+
+def test_an_incident_that_cannot_name_an_issue_still_reaches_the_human(
+        monkeypatch):
+    """An incident OBJECT that carries no issue number is not a delivered alert.
+
+    When the open-issue SEARCH raises, ``_become_filer`` DEFERS: the state is
+    written, ``issue_number`` is left unset, and the store's own push is guarded
+    on holding a number — so nothing reaches the human. Pre-fix the Telegram leg
+    fired independently, so silence here is a REGRESSION, and it lands exactly
+    when filing fails hardest (a search rate limit exhausted by the alert burst
+    this change bounds). Unattributable is allowed; silent is not (#4872).
+    """
+    import tortoise.notify as notify
+
+    def _search_raises(kind, org):
+        raise RuntimeError("GitHub search quota exhausted")
+
+    store = _RecordingStore(search_open=_search_raises)
+    sent: list[str] = []
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (store, ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    for _ in range(20):
+        _flag(notify)
+
+    assert store.pushes == [], "the store cannot push without an issue number"
+    assert len(sent) == 1, (
+        f"the class was MUTED while filing was deferred ({len(sent)} message(s))")
+    assert "Not attributable" in sent[0], sent[0]
+    assert "issue number" in sent[0], sent[0]
+
+    notify.reset_abuse_delivery_for_tests()
 
 
 def test_an_unresolvable_close_never_breaks_the_request_path(monkeypatch):
