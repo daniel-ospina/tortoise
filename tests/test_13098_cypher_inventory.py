@@ -2081,3 +2081,75 @@ def test_no_error_line_command_substitutes_a_backticked_word():
         "a double-quoted echo with a backtick COMMAND-SUBSTITUTES it; single-quote the "
         "message instead:\n" + "\n".join(offenders)
     )
+
+
+def test_the_docs_tables_are_not_broken_across_physical_lines():
+    """A table row is ONE physical line — a hard wrap inside one reds the `docs` gate.
+
+    ⛔ THIS IS NOT HYPOTHETICAL (`#14038`). A lane re-cut one prose cell of §1's
+    `--all-surface` row — the longest row in the document — and the editor wrapped
+    it across three physical lines. `docs` is a REQUIRED context, and the pinned
+    linter reported SIX findings on that single row, all of them the same defect:
+
+    ```
+    CYPHER-INVENTORY.md:69:5170 error MD055 leading_only        (Missing trailing pipe)
+    CYPHER-INVENTORY.md:70:1    error MD055 no_leading_or_trailing
+    CYPHER-INVENTORY.md:70:102  error MD056 Expected: 4; Actual: 1
+    CYPHER-INVENTORY.md:71:1    error MD055 trailing_only
+    CYPHER-INVENTORY.md:71:2377 error MD056 Expected: 4; Actual: 1
+    ```
+
+    ⚠️ `tools/cypher_inventory.py --check` stayed GREEN throughout, and it had to:
+    the pins are scalars and a line break is not a statement. The appendix arm
+    above does not see it either — it compares ROWS, and every row was intact. So
+    the gate that READ the break was the linter, in CI, on the required check —
+    after the push. This arm is the same two rules the linter applies
+    (`MD055` `leading_and_trailing` and `MD056` column count, both enabled by
+    `.markdownlint-cli2.jsonc`'s `default: true`), narrowed to the rows it can
+    decide without the linter: a line that STARTS with `|` must also END with one
+    (a line that starts with `|` is unambiguously a row), and each row of a table
+    must carry the column count its own separator row declares.
+
+    Measured non-vacuous: on the pre-fix blob (`a642d54b8678`) this fails at line
+    69 with `no-trailing` AND `colcount` (4 pipes where the separator declares 5).
+    """
+    doc = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    lines = doc.split("\n")
+
+    def pipes(text: str) -> int:
+        # `\|` renders a literal pipe and does not delimit a cell — the doc uses
+        # that spelling inside an inline `git ls-tree … | grep` command.
+        return re.sub(r"\\\|", "", text).count("|")
+
+    offenders: list[str] = []
+    i = 0
+    while i < len(lines):
+        if not lines[i].strip().startswith("|"):
+            i += 1
+            continue
+        # A table is a maximal run of rows; the line after it is prose again.
+        j = i
+        while j < len(lines) and lines[j].strip().startswith("|"):
+            if not lines[j].rstrip().endswith("|"):
+                offenders.append(
+                    f":{j + 1}: row starts with '|' but does not end with one "
+                    f"(MD055 leading_and_trailing) — {lines[j].strip()[-70:]!r}"
+                )
+            j += 1
+        # The separator row (`|---|---|`) declares how many cells every row has.
+        sep = i + 1
+        if sep < j and set(lines[sep].strip()) <= set("|-: "):
+            declared = pipes(lines[sep])
+            for k in range(i, j):
+                if pipes(lines[k]) != declared:
+                    offenders.append(
+                        f":{k + 1}: {pipes(lines[k]) - 1} cells, separator declares "
+                        f"{declared - 1} (MD056) — {lines[k].strip()[:70]!r}"
+                    )
+        i = j
+
+    assert not offenders, (
+        "a markdown table row in docs/architecture/CYPHER-INVENTORY.md is broken across "
+        "physical lines, which reds the REQUIRED `docs` check as MD055/MD056. A row is "
+        "one line — re-join it rather than re-wrapping it:\n" + "\n".join(offenders)
+    )
