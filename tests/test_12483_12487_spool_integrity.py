@@ -32,6 +32,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tortoise.capture_spool import (
     Bounds,
     Snapshot,
@@ -88,7 +90,25 @@ def _write_turns(root: Path, session_id: str, turns: list[dict]) -> Path:
 
 
 def _lock(path: Path) -> None:
+    """Make ``path`` unreadable — and REFUSE to grade a tautology.
+
+    ``chmod(0o000)`` denies a root user nothing, so on a root runner every row
+    built on this helper would grade a READABLE file while claiming to exercise a
+    read REFUSAL (#14347 review, non-blocking note 2). The premise is asserted at
+    the point it is established instead of assumed: if the read still succeeds,
+    undo the lock and SKIP with the reason, so an unsatisfiable premise reads as
+    a skip and never as a pass.
+    """
     path.chmod(0o000)
+    try:
+        path.read_bytes()
+    except OSError:
+        return
+    path.chmod(0o600)
+    pytest.skip(
+        "chmod(0o000) does not deny this runner's user (root): the 'cannot be"
+        " read' premise these rows rest on cannot be constructed here, so the"
+        " row would grade a READABLE file")
 
 
 def _unlock(path: Path) -> None:
