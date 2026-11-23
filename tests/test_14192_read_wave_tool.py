@@ -1468,6 +1468,23 @@ def _is_dunder_dict_key(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
     return bool(_string_keys_of(node, ctx.consts) & {"__dict__"})
 
 
+def _registry_replacement(target: ast.AST, ctx: _RegistryCtx) -> ast.AST | None:
+    """The part of `target` that REPLACES the registry outright, or None.
+
+    ⛔ THE TARGET IS DESTRUCTURED, NEVER DEEP-WALKED (#14326 round 25): an unpack target stores
+    to each ELEMENT (`sys.modules, _x = {...}, 1`), while a deep `ast.walk` would also find the
+    INNER `sys.modules` attribute of the shipped tool's legitimate
+    `sys.modules[_AB_MODULE] = module` and red it — a false red, the expensive direction here
+    (measured: the walk form left `2 failed, 39 passed` on that shipped line).
+    """
+    elements = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+    for element in elements:
+        if isinstance(element, (ast.Attribute, ast.Subscript)) \
+                and _is_module_registry(element, ctx):
+            return element
+    return None
+
+
 def _is_module_registry(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
     """`sys.modules` — the IMPORT REGISTRY a deferred `from … import …` resolves THROUGH.
 
@@ -7532,12 +7549,19 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     #: already apply (#14326 round 23).
     #: One call, not a loop: `_aliases_of` is a fixpoint internally, so an outer round is
     #: unreachable (measured `41 passed` with the loop collapsed — #14326 round 23).
-    sys_dict_names = frozenset(_aliases_of(
-        tree, lambda _n: _is_sys_dict_mapping(
-            _n, _RegistryCtx(sys_names, frozenset(), consts, frozenset())), loops=True))
     #: Names bound to one of `_REGISTRY_BUILTINS`, so a callee ALIAS resolves (#14326 round 24).
+    #: ⛔ COMPUTED BEFORE `sys_dict_names`, WHICH READS IT (#14326 round 25, MEASURED GREEN:
+    #: building the set with `builtin_aliases=frozenset()` left
+    #: `_g = getattr; __d = _g(sys, "__dict__"); __d["modules"] = {"tortoise.sdk": _Mirror}`
+    #: and its `vars`/`|=`/`.update` siblings GREEN — an alias of the mapping reached through
+    #: an alias of the CALLEE was never collected, so three arms downstream were blind to it).
+    #: A ctx field passed empty at the one site that fills it is exactly the hazard
+    #: `_RegistryCtx` exists to remove, one ordering hop out.
     builtin_aliases = frozenset(_aliases_of(
         tree, lambda _n: isinstance(_n, ast.Name) and _n.id in _REGISTRY_BUILTINS, loops=True))
+    sys_dict_names = frozenset(_aliases_of(
+        tree, lambda _n: _is_sys_dict_mapping(
+            _n, _RegistryCtx(sys_names, frozenset(), consts, builtin_aliases)), loops=True))
     #: ONE object for every resolved-registry question — see `_RegistryCtx` for why the
     #: positional form was a hazard (#14326 round 24).
     ctx = _RegistryCtx(sys_names, sys_dict_names, consts, builtin_aliases)
@@ -7623,10 +7647,18 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
                 # object `run()`'s deferred import resolves is replaced outright, which is the
                 # simplest possible spelling of the premise this pin exists for. The check is
                 # receiver-only, so it cannot red an unrelated store.
-                if (isinstance(target, (ast.Attribute, ast.Subscript))
-                        and _is_module_registry(target, ctx)):
+                # ⛔ AND AN UNPACK TARGET STORES TO EACH ELEMENT (#14326 round 25, MEASURED
+                # GREEN: `sys.modules, _x = {"tortoise.sdk": _Mirror}, 1`, `[sys.modules] = […]`
+                # and `sys.__dict__["modules"], _x = …` each replaced the registry with the pin
+                # GREEN). ELEMENTS ONLY, never `ast.walk(target)`: a deep walk would also visit
+                # the INNER `sys.modules` attribute of the shipped tool's own legitimate
+                # `sys.modules[_AB_MODULE] = module`, which is measured GREEN and must stay so.
+                # (`del` is deliberately not an arm: deleting an entry makes the deferred
+                # import resolve the genuine class, or fail — it cannot install a mirror.)
+                replaced = _registry_replacement(target, ctx)
+                if replaced is not None:
                     out.append(
-                        f"line {node.lineno} REPLACES `{ast.unparse(target)}` — `run()`'s "
+                        f"line {node.lineno} REPLACES `{ast.unparse(replaced)}` — `run()`'s "
                         "deferred `from tortoise.sdk import …` resolves THROUGH this mapping "
                         "at CALL time, so assigning it outright swaps the class without "
                         "naming the constructor (measured GREEN before this arm)")
@@ -7655,6 +7687,16 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
                     out.append(
                         f"line {node.lineno} ASSIGNS `{_SDK_CONSTRUCTOR}` — the receiver "
                         "clause would accept whatever was assigned there as the shipped SDK")
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            # ⛔ A LOOP TARGET IS A STORE TOO (#14326 round 25, MEASURED GREEN:
+            # `for sys.modules in ({"tortoise.sdk": _Mirror},): pass` replaced the registry
+            # with the pin GREEN — every other bind form the file resolves, this one missing).
+            replaced = _registry_replacement(node.target, ctx)
+            if replaced is not None:
+                out.append(
+                    f"line {node.lineno} REPLACES `{ast.unparse(replaced)}` — a `for` target "
+                    "is a store, and rebinding the registry there swaps the class `run()`'s "
+                    "deferred import resolves at CALL time (measured GREEN before this arm)")
         elif isinstance(node, (ast.Call, ast.Subscript)):
             # ⛔ THE SAME STORE, CARRIED AS A STRING / A MAPPING / A PARTIAL (#14326 review
             # P1 — FIVE spellings, EACH MEASURED GREEN at `b6be337`). One root: the store
@@ -8343,6 +8385,25 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'sys.__dict__["modules"] = {"tortoise.sdk": _Mirror}\n',
         "`__d = sys.__dict__` then `__d[\"modules\"] = {…}`":
             '__d = sys.__dict__\n__d["modules"] = {"tortoise.sdk": _Mirror}\n',
+        # ⛔ AND THE UNPACK / LOOP-TARGET SPELLINGS OF THE SAME REPLACEMENT (#14326 round 25,
+        # MEASURED GREEN at `1515591f`: every row below replaced the registry with the pin
+        # GREEN, while the plain `sys.modules = {…}` row was RED). An unpack target stores to
+        # each ELEMENT, and a `for` target is a store with no `Assign` node at all.
+        "`sys.modules, _x = {…}, 1` (UNPACK)":
+            'sys.modules, _x = {"tortoise.sdk": _Mirror}, 1\n',
+        "`[sys.modules] = [{…}]` (LIST unpack)":
+            '[sys.modules] = [{"tortoise.sdk": _Mirror}]\n',
+        "`sys.__dict__[\"modules\"], _x = {…}, 1`":
+            'sys.__dict__["modules"], _x = {"tortoise.sdk": _Mirror}, 1\n',
+        "`for sys.modules in ({…},)` TARGET":
+            'for sys.modules in ({"tortoise.sdk": _Mirror},):\n    pass\n',
+        # ⛔ AND A `sys.__dict__` ALIAS PRODUCED BY AN ALIASED CALLEE (#14326 round 25,
+        # MEASURED GREEN at `1515591f`: `builtin_aliases` was built AFTER `sys_dict_names`, so
+        # the one site that FILLS that field read it empty and three arms downstream were
+        # blind to the alias).
+        "`_g = getattr` then `__d = _g(sys, \"__dict__\")` REPLACES":
+            '_g = getattr\n__d = _g(sys, "__dict__")\n'
+            '__d["modules"] = {"tortoise.sdk": _Mirror}\n',
     }
     for name, lever in registry_replacements.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
@@ -8415,7 +8476,22 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   '_d = dict\n_d.get(_cfg, "modules")["tortoise.sdk"] = _Mirror\n',
                   'x = sys.modules\nprint(len(x))\n',
                   'sys.modules.get(_k)\n',
-                  'dict.update(_cfg, {"tortoise.sdk": _Mirror})\n'):
+                  'dict.update(_cfg, {"tortoise.sdk": _Mirror})\n',
+                  # ⛔ AND THE ROUND-25 CONTROLS. `del` is deliberately NOT an arm — deleting an
+                  # entry makes the deferred import resolve the genuine class, or fail, so it
+                  # cannot install a mirror — and an unpack of ORDINARY names, a loop over
+                  # ordinary names, and the shipped tool's own
+                  # `sys.modules[_AB_MODULE] = module` (a legitimate non-`tortoise.sdk` key)
+                  # must all stay GREEN. The last one is why the REPLACES arm destructures the
+                  # target instead of `ast.walk`-ing it (a deep walk reds it: `2 failed, 39
+                  # passed`, measured).
+                  'del sys.modules["tortoise.sdk"]\n',
+                  'del sys.modules\n',
+                  'sys.modules.clear()\n',
+                  'sys.modules[_AB_MODULE] = module\n',
+                  '_x["modules"] = {"tortoise.sdk": _Mirror}\n',
+                  'a, b = 1, 2\nprint(a, b)\n',
+                  'for _k in ("a", "b"):\n    print(_k)\n'):
         assert ctor_findings(shipped + "class _Mirror:\n    pass\n" + inert) == [], inert
 
     # …and the false-red control: `|=` on an ORDINARY container stores a label, not a
