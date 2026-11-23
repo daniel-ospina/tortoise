@@ -3791,6 +3791,27 @@ def test_signal_name_is_total_over_every_signal_number() -> None:
         assert _signal_name(num) == f"signal {num}"
 
 
+def _ps_answers() -> bool:
+    """Can THIS box's `ps` answer at all? The control for the census's own error path.
+
+    `tools.fleet_state.pi_processes()` reports an error whenever its `ps` call yields nothing,
+    and `_run` folds a refusal, an argument rejection and a timeout into that same empty string.
+    A box with no usable `ps` may legitimately skip this test; a box whose `ps` answers and whose
+    census still fails is the defect the test exists to find. This is the question that tells the
+    two apart, asked about our OWN pid so it cannot depend on the fixture.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(os.getpid()), "-o", "command="],
+            capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover — no `ps` at all
+        return False
+    return bool(out)
+
+
 def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     """End-to-end MATCHER coverage: a real process named `pi` under a long path is found.
 
@@ -3916,11 +3937,25 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
             # basename), so the truncation pin keeps its discriminating power: it takes
             # the FULL deadline and fails, it does not go green.
             deadline = time.time() + 10.0
+            poll_started = time.time()
             pids: list[int] = []
             while True:
                 procs, err = fs.pi_processes()
                 if err:
-                    pytest.skip(f"the process table is unreadable here: {err}")
+                    # ⛔ A BROKEN `ps` MUST NOT BECOME A PERMANENT SKIP (#12039, review round 3).
+                    # This branch used to skip on ANY census error, which fused two different
+                    # facts: a box whose `ps` cannot answer at all (legitimately not this test's
+                    # business), and the CENSUS's own invocation failing on a box whose `ps`
+                    # works — precisely the regression this test exists to catch, and it would be
+                    # green forever (neither static nodeid manifest carries this file; no
+                    # skip-guard trips). So probe `ps` ourselves: if that is empty too, the box
+                    # cannot answer and the skip stands; if it answers, the census is what failed.
+                    if not _ps_answers():
+                        pytest.skip(f"the process table is unreadable here: {err}")
+                    raise HarnessDefect(
+                        f"the census reported an error on a box whose `ps` answers: {err!r} — "
+                        f"`ps -p {os.getpid()} -o command=` answered, so the census's own "
+                        f"invocation is what failed, which is this test's subject")
                 pids = [p["pid"] for p in procs]
                 # ⛔ A DEAD CHILD ENDS THE POLL (#12039 review finding 4a). Liveness was
                 # consulted only AFTER the 10 s deadline burned, so on a box where the child
@@ -3991,7 +4026,8 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                         deadline_s=10.0,
                         diagnosis=(
                             f"The fixture process {proc.pid} was killed by "
-                            f"{_signal_name(-rc)} before "
+                            f"{_signal_name(-rc)} after {(time.time() - poll_started):.2f}s of "
+                            f"the poll (its budget was 10.0s), before "
                             f"the census could observe it; the table's row read {row!r} and the "
                             f"census matched {pids!r}. A killed child has no argv[0] left to "
                             f"match, so the property was never observable and this expiry is "
