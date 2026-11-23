@@ -2853,17 +2853,30 @@ def main(argv: list[str] | None = None) -> int:
         # exists to prevent: both batches render `indent`, the delta is 0, `run`
         # exits 0, and a full provider run (~360 calls) measures nothing. The
         # only trace was the per-row `s4_embed_json` inside measurements.jsonl
-        # (review cycle 11, P3). A typo must cost an exit 2, not a run.
+        # (review cycle 11, P3). A typo must cost an EXIT CODE, not a run.
+        #
+        # ⛔ THE EXIT CODE IS 2, AND THAT HAS TO BE SAID OUT LOUD.
+        # `raise SystemExit("message")` exits **1** and prints the message to
+        # stderr — the same code this tool uses for a real run failure, so a
+        # wrapper or CI step could not tell "you typed the arm wrong" from
+        # "the measurement failed". `SystemExit(int)` makes it argparse's own
+        # usage code, which is what a caller already distinguishes (review
+        # cycle 12, P2 — the comment used to CLAIM exit 2 while the code
+        # produced 1, and the pin never read `exc.value.code`).
         if not arms:
-            raise SystemExit("--arms named no arm (got an empty selection)")
+            print("--arms named no arm (got an empty selection)",
+                  file=sys.stderr)
+            raise SystemExit(2)
         unknown = sorted(set(arms) - _ARMS)
         if unknown:
-            raise SystemExit(
+            print(
                 f"unknown arm(s) {', '.join(repr(a) for a in unknown)}; the "
                 f"closed set is {', '.join(sorted(_ARMS))} — `after`/`before` "
                 f"set the S4 embed-list layout, `cold`/`warm` inherit the "
                 f"ambient value, and anything else would silently measure the "
-                f"same render twice")
+                f"same render twice",
+                file=sys.stderr)
+            raise SystemExit(2)
         return run_measurement(out=args.out, docs_limit=args.docs,
                                sessions_limit=args.sessions,
                                workers=args.workers, seed=args.seed, arms=arms,
