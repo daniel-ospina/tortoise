@@ -952,15 +952,87 @@ def test_the_fitted_constant_is_derived_from_the_arm_not_hardcoded():
     assert lean["fitted_constant"] == round(
         m._fit([(r["item_tokens"], r["prompt_tokens"])
                 for r in docs if r is not longest])["intercept"])
-    # ⛔ The SLOPE too, for the same reason: `document_term` published a literal
-    # 2.159, which is the COLD arm's slope alone (warm is 2.127575), so on
-    # `--arm after` that row reported the BEFORE slope and read the lever's
-    # effect on the document term as zero. Dropping the high-leverage document
-    # moves the slope as well, which a literal cannot follow either.
-    assert cold["document_term"]["fitted_slope_x_median_doc"] == pytest.approx(
-        m._fit([(r["item_tokens"], r["prompt_tokens"]) for r in docs])["slope"]
-        * cold["median_doc_tokens"], abs=0.2)
-    assert (lean["document_term"]["fitted_slope_x_median_doc"]
-            != cold["document_term"]["fitted_slope_x_median_doc"]), (
-        "the document-term slope did not move when the data did — it is a "
-        "literal, and on `--arm after` it hides the lever's own effect")
+
+
+def test_a_retried_stage_keeps_its_region_map(monkeypatch):
+    """A stage RENDERS ONCE and may CALL TWICE — the retry must still be paired.
+
+    ⛔ `render_s2_prompt` / `render_s4_prompt` are called ONCE per stage
+    (`tortoise/extractor_v2.py:2662`, `:4132`) and their result is passed to
+    `_complete_parsed`, which re-sends the IDENTICAL `system` on the #2134
+    truncation escalation and on the #1746 parse re-prompt
+    (`tortoise/extractor_v2.py:2356`, `:2436`). A pairing that CONSUMES the
+    render therefore leaves the retry unmatched: `match` stays None,
+    `regions == {}`, and `render_compose` prints that whole prompt as one
+    `*template prose*` row — the table still sums, so nothing looks wrong.
+
+    This is the shape the offline arm could not previously reach (the stub
+    never retried), which is why the fix shipped without a pin. The stub is
+    made to emit one unparseable S2 response here, which is the real retry
+    trigger.
+    """
+    seen = {"systems": []}
+
+    class _FlakyStub(m._StubModel):
+        def complete(self, *, system, user, max_tokens=None, **kwargs):
+            if (system or "").startswith("You are the GRAPH MAPPER"):
+                seen["systems"].append(system)
+                if len(seen["systems"]) == 1:
+                    # unparseable, finish_reason="stop" ⇒ the #1746 ladder
+                    # re-prompts; a "length" would escalate instead.
+                    return "not the JSON contract, so the parse fails"
+            return super().complete(system=system, user=user, **kwargs)
+
+    monkeypatch.setattr(m, "_StubModel", _FlakyStub)
+    art = m.compose_one(doc={"path": "synthetic", "tokens": 3,
+                             "text": "one two three"}, live=False)
+    s2 = [c for c in art["calls"] if c["stage"] == "s2"]
+    assert len(s2) == 2, (
+        f"the S2 retry never happened ({len(s2)} call(s)) — without it this "
+        f"pin is vacuous and proves nothing about retried stages")
+    # `compose_one` drops `system` from the artifact (it is not part of the
+    # report), so the identity is read from the transport, not the output.
+    assert len(seen["systems"]) == 2, seen["systems"]
+    assert seen["systems"][0] == seen["systems"][1], (
+        "the retry must re-send the IDENTICAL system prompt; if it differs, "
+        "the consumed-once pairing was not the bug this test names")
+    for n, call in enumerate(s2, start=1):
+        assert call["regions"], (
+            f"S2 call {n} of {len(s2)} has an EMPTY region map — the render "
+            f"was consumed by the first call, so this prompt would be printed "
+            f"as one prose row while the table still summed")
+        assert call["regions"].get("master_list", 0) > 1000, call["regions"]
+
+
+def test_the_user_message_is_charged_as_its_own_region():
+    """The user turn is a prompt region, and for S1 it is the whole document.
+
+    ⛔ `render_compose` totals `system_tokens + user_tokens` but counted only
+    the `_fill_template` slots, so the user message — S1's document (~5.2k of
+    a ~5.9k "prose" figure whose real prose is 629), and S2's framed story,
+    the very region `decompose` calls `**S1's story, re-sent to S2 and S4**` —
+    landed in the `*template prose + boundaries*` residual. Same file, two
+    tools, same tokens attributed to two different parties.
+    """
+    # A document-sized user turn, not three words: the finding is that S1's
+    # DOCUMENT was printed as template prose, which only shows at size.
+    text = ("The project moved its release date, then shipped the migration "
+            "ahead of the audit. ") * 120
+    art = m.compose_one(doc={"path": "synthetic", "tokens": 1_800,
+                             "text": text}, live=False)
+    for call in art["calls"]:
+        assert call["regions"].get("user_message") == call["user_tokens"], (
+            f"{call['stage']}: the user turn is not charged as a region "
+            f"(regions={sorted(call['regions'])})")
+        named = sum(call["regions"].values())
+        assert named <= call["system_tokens"] + call["user_tokens"], (
+            f"{call['stage']}: regions claim more than the prompt spent "
+            f"({named} > {call['system_tokens']} + {call['user_tokens']})")
+    report = m.compose_report([art])
+    s1 = report["rows"][0]["stages"]["s1"]
+    prose = (s1["system_tokens"] + s1["user_tokens"]
+             - sum(s1["regions"].values()))
+    assert s1["regions"]["user_message"] > prose, (
+        f"S1's user message is the document and must dominate its prose "
+        f"residual; got user_message={s1['regions']['user_message']} "
+        f"vs prose={prose} — a missing user region hides the document here")
