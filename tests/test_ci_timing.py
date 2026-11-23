@@ -283,129 +283,46 @@ def test_candidate_flakes_across_samples() -> None:
     assert ci_timing.candidate_flakes([history[0]]) == []
 
 
-def test_a_published_flake_id_is_decoded_to_the_id_pytest_printed() -> None:
-    """pytest ESCAPES a non-ASCII parametrize value as `\\uXXXX` in the ids it prints
-    and stores, so the published Test column carried the six literal characters
-    `\\u2014` where the id has an em dash — not a test id, and one nothing can look up
-    (measured on the 2026-11-23 render: the flake table listed
-    `test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards`
-    with `\\u2014` in several of its parametrize ids, and that row's own
-    `--collect-only -q` prints the decoded text).
+def test_a_published_flake_id_is_the_raw_id_pytest_prints_and_collects() -> None:
+    r"""#14366 cycle-4 review P1: the published id is VERBATIM, and that is a correction
+    of a correction.
 
-    Two arms, because the fix must decode the PUBLISHED value without changing what the
-    CLAIM compares:
+    A previous round decoded the pytest escapes out of `candidate_flakes()["test"]`
+    on the premise that the escaped form is not a test id. **The premise is false,
+    and the fix made the artifact worse — measured, not argued:**
 
-    1. the emitted `test` is the DECODED id (pre-fix: the literal `\\u2014`, so this arm
-       reds on the old emit);
-    2. a later sample that still lists the RAW escaped id refutes the claim — which is
-       only possible while the identity test stays on the raw strings the history rows
-       are keyed on, so the decode cannot have silently doubled a row.
+        $ pytest tests/test_7949_capstone_measure.py -q --collect-only | grep -c u2014
+        25                       # ESCAPED; a real em dash appears 0 times
+        $ pytest '<…[\`config/ci-surfaces.yml\` \u2014 155 lines of rows]' --collect-only
+        1 test collected         # the ESCAPED form collects
+        $ pytest '<…[\`config/ci-surfaces.yml\` — 155 lines of rows]' --collect-only
+        no tests collected       # the DECODED form collects NOTHING
+
+    pytest's own durable nodeid agrees — `.pytest_cache/v/cache/lastfailed` keys on
+    the escaped form — so the decoded value was a "lookup key" no lookup accepts,
+    and it also stopped joining to the history rows it came from.
+
+    Two arms, because the contract has two halves: the emitted `test` is the RAW id,
+    AND the claim still compares the RAW id, so a later sample that re-lists it still
+    refutes the claim.
     """
     escaped = ("tests/test_beta.py::test_gamma[<lambda>-`_ONE_ENTRY` "
                "(`re.escape` \\u2014 the filename's `.` is a wildcard unescaped)]")
-    decoded = escaped.replace("\\u2014", "\u2014")
-    assert escaped != decoded, (
-        "the fixture must carry the pytest-ESCAPED id, or both arms are vacuous")
     newer = {"sample_time": "2026-11-23T04:38:02Z", "run_id": "45071394329",
              "created_at": "2026-11-23T04:38:02Z", "failed_tests": []}
     older = {"sample_time": "2026-11-16T04:44:19Z", "run_id": "43792641690",
              "created_at": "2026-11-16T04:44:19Z", "failed_tests": [escaped]}
     flakes = ci_timing.candidate_flakes([newer, older])
-    assert [f["test"] for f in flakes] == [decoded], (
-        "the published flake id is the RAW pytest-escaped id — `\\u2014` is not a test "
-        "id, so the reader cannot look the row up")
+    assert [f["test"] for f in flakes] == [escaped], (
+        "the published flake id was DECODED — pytest prints, stores and collects the "
+        "ESCAPED id, so the decoded form is one no `pytest <id>` accepts and one that "
+        "no longer joins to the history row it came from")
 
     later = dict(newer, sample_time="2026-11-24T00:00:00Z",
                  created_at="2026-11-24T00:00:00Z", failed_tests=[escaped])
     assert ci_timing.candidate_flakes([later, newer, older]) == [], (
-        "a sample stamped at/after the `passed_at` instant still lists the RAW escaped "
-        "id as failing, so the claim must be dropped — if the decode also moved the "
-        "COMPARISON, that refutation is invisible and the table announces a recovery "
-        "the artifact itself contradicts (#9134 review, P1)")
-
-
-def test_the_nodeid_decode_is_injective_over_the_escapes_pytest_can_write() -> None:
-    r"""#14366 cycle-4 review P2: the decode must invert ALL of `ascii_escaped`.
-
-    pytest's `ascii_escaped` uses `val.encode("unicode_escape")` for a `str`, which
-    DOUBLES backslashes, so a parametrize value that is a compiled regex carrying a
-    literal `\u2014` reaches the raw id as `\\u2014`, and a value carrying a real
-    backslash before an em dash reaches it as `\\\u2014` (an ODD run). `\U` is the
-    arm pytest emits for an ASTRAL value (`'😀'.encode('ascii', 'backslashreplace')`
-    → `b'\U0001f600'`).
-
-    The pre-fix pattern only inverted `\u`/`\x`/`\U` and used a `(?<!\\)` lookbehind to
-    keep a doubled escape "untouchable" — which is not the same as restoring it: the
-    published id stayed escaped (`tests/test_ci_timing.py` asserted exactly that as
-    intended behaviour, so completing the decode reddened a test), and an odd
-    backslash run left a genuine `\u2014` undecoded because the character before it
-    was `\`. All latent at the 2026-11-23 head (the committed artifact carries 0
-    affected ids), reachable from parametrize values this repo already has.
-    """
-    # every escape `ascii_escaped` can write is decoded …
-    assert ci_timing._unescape_nodeid("a\\u2014b") == "a—b"
-    assert ci_timing._unescape_nodeid("a\\x41b") == "aAb"
-    assert ci_timing._unescape_nodeid("a\\U0001f600b") == "a😀b"
-    assert ci_timing._unescape_nodeid("a\\tb") == "a\tb"
-    assert ci_timing._unescape_nodeid("a\\rb") == "a\rb"
-    assert ci_timing._unescape_nodeid("a\\nb") == "a\nb"
-    # … including the one arm that is a LITERAL. `\\u2014` is what `unicode_escape`
-    # writes for a `\` followed by the TEXT `u2014`, so it decodes back to that text
-    # — the id pytest printed. Leaving it untouched (the pre-fix assertion, below,
-    # used to demand exactly that) is the finding this arm replaces.
-    doubled = "a" + "\\\\" + "u2014b"
-    assert ci_timing._unescape_nodeid(doubled) == "a" + "\\" + "u2014b", (
-        "`unicode_escape` doubles a literal backslash, so the doubled form decodes "
-        "to one backslash + `u2014b` — the id pytest printed. Returning it unchanged "
-        "publishes an id nothing can look up")
-    # … and an ODD backslash run: a real backslash followed by a real em dash.
-    # A `(?<!\\)` lookbehind skips this `\u2014` (the character before it is `\`),
-    # so the pair rule has to consume `\\` atomically instead.
-    assert ci_timing._unescape_nodeid("\\\\" "\\u2014") == "\\\u2014"
-    # Non-vacuity: the fixture ids must actually differ from their decodings, or the
-    # arms above pass on an identity function.
-    assert ci_timing._unescape_nodeid("a\\u2014b") != "a\\u2014b"
-    assert ci_timing._unescape_nodeid("plain") == "plain"
-
-
-def test_the_nodeid_decode_inverts_what_pytest_actually_writes() -> None:
-    """The contract is "inverse of `ascii_escaped`", so the pin asks the PRODUCER.
-
-    Restating the alphabet by hand is what let the previous revision ship a partial
-    inverse: the test agreed with the code about which escapes existed. This one
-    takes the escaped form from `_pytest.compat.ascii_escaped` itself — the function
-    whose output reaches the raw `failed_tests` ids — so a change to pytest's escaping
-    (or a missing arm in the decoder) reds here rather than publishing an id that
-    `--collect-only -q` does not print. `pytest` is pinned by `uv.lock`, so the
-    private import is a pinned dependency, not a moving target.
-    """
-    from _pytest.compat import ascii_escaped
-
-    true_ids = [
-        "tests/test_a.py::test_b[x—y]",
-        "tests/test_a.py::test_b[a\\u2014b]",   # literal regex TEXT: doubled by unicode_escape
-        "tests/test_a.py::test_b[\\—]",          # real backslash + em dash: an ODD run
-        "tests/test_a.py::test_b[\\]",           # one backslash
-        "tests/test_a.py::test_b[a\tb]",         # TAB — pytest writes `\t`
-        "tests/test_a.py::test_b[a\rb]",
-        "tests/test_a.py::test_b[a\nb|c]",       # a REAL parametrize value (test_attest_census.py)
-        "tests/test_a.py::test_b[a\x01b]",
-        "tests/test_a.py::test_b[a\x7fb]",
-        "tests/test_a.py::test_b[😀]",
-        "tests/test_a.py::test_b[plain]",
-    ]
-    decoded = [ci_timing._unescape_nodeid(ascii_escaped(t)) for t in true_ids]
-    for true_id, got in zip(true_ids, decoded, strict=True):
-        assert got == true_id, (
-            f"{true_id!r} is escaped by pytest to {ascii_escaped(true_id)!r} and the "
-            f"decoder returned {got!r} — a published id that `--collect-only -q` "
-            "does not print")
-    # Non-vacuity twice over: the fixtures really are escaped, and the decode is
-    # INJECTIVE (distinct ids never collide once decoded — the reason `\t`/`\r`/`\n`
-    # must be decoded too: an undecoded `\t` collides with the decode of a literal
-    # backslash-t id).
-    assert all(ascii_escaped(t) != t for t in true_ids if t != true_ids[-1])
-    assert len(set(decoded)) == len(true_ids)
+        "a sample stamped at/after the `passed_at` instant still lists the id as "
+        "failing, so the claim must be dropped (#9134 review, P1)")
 
 
 # --- eligible-run selection (ci-timing.yml `find` step) ---------------------
@@ -3884,19 +3801,26 @@ def test_the_flake_table_fences_a_nodeid_that_contains_backticks() -> None:
             f"{_code_spans(ci_timing._md_code_span(text))!r}")
 
 
-def test_a_flake_id_with_control_bytes_cannot_split_the_table_row() -> None:
-    r"""#14366 cycle-4 review P2: decoding `\t`/`\r`/`\n` must not break the table.
+def test_a_flake_id_with_a_pipe_or_control_byte_cannot_break_the_table_row() -> None:
+    r"""#14366 cycle-4 review P2: a cell cannot hold a control byte or a `|`.
 
-    `_unescape_nodeid` now inverts `ascii_escaped`'s three control escapes, and a REAL
-    parametrize value in this repo carries a newline (`tests/test_attest_census.py`
-    parametrizes `"a\nb|c"`). A raw newline inside the cell splits the markdown table
-    row in two — the same failure class (a broken row redding the REQUIRED `docs`
-    check) that the `_md_code_span` fix closed one round earlier — so the JSON keeps
-    the decoded id and the CELL re-escapes it in pytest's own notation.
+    A nodeid is parametrize-controlled, and a real value in this repo carries both
+    (`tests/test_attest_census.py` parametrizes `"a\nb|c"`). A raw newline splits the
+    markdown row in two; a raw `|` is worse, because it does not split the ROW — it
+    adds a CELL, so the table stays "valid" to the eye while `MD056/table-column-count`
+    reds the required `docs` check. Measured: the bare pipe gives
+    `MD056 … [Expected: 3; Actual: 4]`; `\|` gives `0 issues in 0 files`.
+
+    The JSON keeps the id VERBATIM (it is the lookup key, and the escaped form is the
+    one pytest collects); only the DISPLAY escapes. It escapes the PIPE but NOT the
+    backslash, because the output goes inside a code span where a backslash is
+    literal — escaping it would publish `\\u2014` for an id whose sequence is
+    `\u2014`, corrupting every escaped id, which is most of them.
     """
     nodeid = "tests/test_attest_census.py::test_hostile[a\nb|c]"
-    assert "\n" in nodeid, (
-        "the fixture must carry a RAW control byte, or this test is vacuous")
+    assert "\n" in nodeid and "|" in nodeid, (
+        "the fixture must carry BOTH a raw control byte and a raw pipe, or one arm "
+        "of this pin is vacuous")
     flakes = [{"test": nodeid, "run_id": "1",
                "passed_at": "2026-11-23T05:12:36Z"}]
     md = ci_timing.render_md(
@@ -3904,20 +3828,25 @@ def test_a_flake_id_with_control_bytes_cannot_split_the_table_row() -> None:
          "conclusion": "success"},
         {}, {}, {k: 0 for k in ci_timing.COUNT_KEYS}, False, "4242", [], flakes,
     )
-    rows = [ln for ln in md.splitlines()
-            if ln.startswith("| ") and "test_hostile" in ln]
+    rows = [ln for ln in md.splitlines() if "test_hostile" in ln]
     assert len(rows) == 1, (
         f"the flake row was split across {len(rows)} lines — a raw newline landed in "
         "the markdown table cell, which breaks the row and reds the `docs` check")
-    assert rows[0].count(" | ") == 2, f"the row is not three cells: {rows[0]!r}"
-    rendered_cell = rows[0].split(" | ")[0].removeprefix("| ").strip()
+    row = rows[0]
+    # ⛔ Count UNESCAPED pipes only: `\\|` is cell CONTENT, and a naive
+    # `row.count(" | ")` reads the 4-cell row as a 3-cell one (measured), which is
+    # why the previous arm's assertion passed on the broken row.
+    cells = [c for c in re.split(r"(?<!\\)\|", row.strip().strip("|"))]
+    assert len(cells) == 3, (
+        f"the row is {len(cells)} cells, not 3 — an unescaped `|` in the nodeid added "
+        f"a cell and reds `MD056`: {row!r}")
+    rendered_cell = cells[0].strip()
     assert _code_spans(rendered_cell) == [
-        "tests/test_attest_census.py::test_hostile[a\\nb|c]"], (
+        "tests/test_attest_census.py::test_hostile[a\\nb\\|c]"], (
         f"the cell renders as {rendered_cell!r}, not as the escape-only form")
-    # The published VALUE (JSON side) keeps the decoded id: it is the lookup key, so
-    # the display escaping must not have leaked into it.
-    assert ci_timing._unescape_nodeid(
-        "tests/test_attest_census.py::test_hostile[a\\nb|c]") == nodeid
+    # The published VALUE keeps the id verbatim: it is the lookup key, so neither the
+    # display escaping nor a decode may have leaked into it.
+    assert flakes[0]["test"] == nodeid
 
 
 def test_refresh_durations_is_reproducible(tmp_path: Path) -> None:

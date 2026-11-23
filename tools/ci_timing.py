@@ -3827,76 +3827,24 @@ def _dedupe_history(rows: list[dict]) -> list[dict]:
     return out
 
 
-# ⛔ THE DECODE IS THE INVERSE OF `ascii_escaped`, ALL SEVEN ARMS (#14366 cycle-4
-# review, P2). For a `str` pytest runs
-# `val.encode("unicode_escape").decode("ascii", "backslashreplace")` and then
-# `_non_printable_ascii_translate_table`, so the alphabet a stored nodeid can carry
-# is exactly: `\\` (a literal backslash — `unicode_escape` DOUBLES it), `\t`, `\r`,
-# `\n`, `\xXX`, `\uXXXX`, `\UXXXXXXXX`. Verified against the primary source
-# (`_pytest/compat.py`, `_non_printable_ascii_translate_table` maps every byte below
-# 0x20 and 0x7f to `\xXX`, then overrides the three named ones).
+# ⛔ THE PUBLISHED ID IS THE RAW ONE, AND THAT IS A CORRECTION OF A CORRECTION
+# (#14366 cycle-4 review, P1 — measured, not argued). A previous round "decoded"
+# the pytest escapes out of the published nodeid on the premise that the escaped
+# form is not a test id. The premise is FALSE, and the fix made the artifact
+# WORSE: pytest prints and stores the ESCAPED id, and it is the one that collects.
 #
-# Two things the previous revision got wrong, both MEASURED on the head module:
-#   * `\\` was never decoded. The lookbehind made a doubled escape UNTOUCHABLE, which
-#     is not the same as restoring it: `a\\u2014b` — the id pytest prints for a
-#     parametrize value that literally contains `\u2014` — came back unchanged, so the
-#     published id was still not an id anything can look up.
-#   * `(?<!\\)` is a PARITY-BLIND rule. For an ODD run (`\\\u2014`: a real backslash
-#     followed by a real em dash) the genuine `\u2014` is preceded by `\`, so it stayed
-#     escaped. Consuming `\\` as a PAIR in this same alternation fixes that by
-#     construction (the scanner consumes two characters atomically, so the next arm
-#     starts after the pair).
-#   * `\t`/`\r`/`\n` are decoded too, and NOT as an optional extra: with `\\` decoded
-#     but `\t` left alone, a real tab (`a\tb`) and a literal backslash-t (`a\\tb` →
-#     `a\tb`) decode to the SAME string, so the decode stops being injective and two
-#     distinct test ids collide in one published row. The control byte that produces
-#     is a RENDER concern (`_md_display_text`), never this function's: this value is
-#     the lookup key and has to be the id pytest printed.
-# `\U` (8 hex digits) is the arm for an ASTRAL value
-# (`.encode("ascii", "backslashreplace")` → `b'\\U0001f600'`), which neither of the
-# other arms matches — so without it an astral parametrize id was published escaped.
-_PYTEST_ESCAPE_RE = re.compile(
-    r"\\(\\|t|r|n)"
-    r"|\\x([0-9a-fA-F]{2})"
-    r"|\\u([0-9a-fA-F]{4})"
-    r"|\\U([0-9a-fA-F]{8})")
-
-
-#: The four single-character arms: the doubled backslash (a literal one), and the
-#: three named control escapes `ascii_escaped` writes for a tab, CR and LF.
-_PYTEST_NAMED_ESCAPES = {"\\": "\\", "t": "\t", "r": "\r", "n": "\n"}
-
-
-def _unescape_nodeid(nodeid: str) -> str:
-    """Decode the ASCII escapes pytest writes into a parametrize id.
-
-    pytest escapes a non-ASCII parametrize value as `\\uXXXX` in the ids it
-    prints and stores, so a REAL id whose parameter contains an em dash arrived
-    in the published flake table as the six literal characters `\\u2014` — not a
-    test id, and one nothing can look up. Measured on the 2026-11-23 render:
-    `docs/ci-timing.md:825` carried `\\u2014` where
-    `tests/test_7949_capstone_measure.py`'s parametrize id has an em dash (that
-    file's own `--collect-only -q` prints the decoded text, and 25 of its ids
-    carry the escape).
-
-    The contract is the WHOLE alphabet `ascii_escaped` can write — `\\`, `\t`, `\r`,
-    `\n`, `\\xXX`, `\\uXXXX`, `\\UXXXXXXXX` — because a partial inverse with no stated
-    boundary publishes an id that is sometimes the one pytest printed and sometimes
-    not, silently. The three control escapes are decoded here and re-escaped only at
-    the markdown cell (`_md_display_text`); every other arm is decoded and published
-    verbatim.
-
-    Applied ONLY where a value is PUBLISHED (`candidate_flakes`' emit). The
-    claim logic keeps comparing the RAW strings from `failed_tests`, so the
-    emitted table and the JSON cannot disagree with the lists that produced
-    them, and a history row written before this fix still matches.
-    """
-    def _decode(m: re.Match) -> str:
-        named = m.group(1)
-        if named is not None:
-            return _PYTEST_NAMED_ESCAPES[named]
-        return chr(int(m.group(2) or m.group(3) or m.group(4), 16))
-    return _PYTEST_ESCAPE_RE.sub(_decode, nodeid)
+#   $ pytest tests/test_7949_capstone_measure.py -q --collect-only | grep -c u2014
+#   25                                   # ESCAPED; a real em dash appears 0 times
+#   $ pytest '<…[`config/ci-surfaces.yml` \u2014 155 lines of rows]' --collect-only
+#   1 test collected                     # the ESCAPED form collects
+#   $ pytest '<…[`config/ci-surfaces.yml` — 155 lines of rows]' --collect-only
+#   no tests collected                   # the DECODED form collects NOTHING
+#
+# pytest's own durable nodeid agrees: `.pytest_cache/v/cache/lastfailed` keys on
+# `…[x\\u2014y]`. So `candidate_flakes()["test"]` is published VERBATIM — it is
+# the lookup key, it is what a reader pastes to reproduce the flake, and it is
+# also exactly what the history rows it was derived from carry, which is what
+# keeps the two joinable. Display-only escaping stays in `_md_display_text`.
 
 
 def candidate_flakes(history: list[dict]) -> list[dict]:
@@ -3962,10 +3910,9 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
             if listed_failed_at_or_after(nodeid, newer.get("sample_time"), newer):
                 continue
             out.append({
-                # ⛔ Published value, so it is DECODED (`_unescape_nodeid`): pytest
-                # escapes a non-ASCII parametrize value, and a Test column holding
-                # the literal `\u2014` is not a test id.
-                "test": _unescape_nodeid(nodeid),
+                # ⛔ VERBATIM, never decoded — the escaped form IS the id pytest
+                # printed and the only one that collects. See the block above.
+                "test": nodeid,
                 "failed_at": older.get("sample_time"),
                 "passed_at": newer.get("sample_time"),
                 "run_id": older.get("run_id"),
@@ -3980,20 +3927,33 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
 
 # --- rendering --------------------------------------------------------------
 
-# ⛔ A DECODED id can carry a real control byte, and a markdown TABLE CELL cannot
-# (#14366 cycle-4 review, P2). `\t`/`\r`/`\n` are three of the escapes
-# `_unescape_nodeid` inverts, and parametrize values carrying them already exist in
-# this repo (`tests/test_attest_census.py` parametrizes `"a\nb|c"`), so a flake row
-# for such a test would otherwise put a RAW NEWLINE inside the table row: the row
-# splits in two and the required `docs` check reds — the same class of failure the
-# `_md_code_span` repair closed one round earlier. The JSON artifact keeps the
-# decoded id (it IS the lookup key); only the DISPLAY re-escapes, in pytest's own
-# notation, so the cell reads as the escape it is instead of a broken row.
+# ⛔ A markdown TABLE CELL cannot hold a control byte OR a pipe, and a nodeid is
+# parametrize-controlled (#14366 cycle-4 review, P2). `tests/test_attest_census.py`
+# parametrizes `"a\nb|c"`, so a flake row for such a test would put a RAW NEWLINE
+# inside the table row (it splits in two) or, worse, a `|` that silently turns a
+# 3-column row into a 4-cell one — `MD056/table-column-count`, the required `docs`
+# check red. Measured: escaping the `|` turns `MD056 … [Expected: 3; Actual: 4]`
+# into `0 issues in 0 files`.
+#
+# ⛔ The BACKSLASH is NOT escaped, and that is a deliberate departure from the
+# `tools/attest_census.py` precedent: this helper's output goes INSIDE a code span
+# (`_md_code_span`), where a backslash is LITERAL. Escaping it would publish
+# `\\u2014` for an id whose escape sequence is `\u2014` — i.e. it would corrupt
+# every escaped nodeid, which is most of the ones this table carries. `|` still
+# has to be escaped even inside a span, because a GFM table splits cells BEFORE it
+# parses inline content (measured: `\|` inside a span → `0 issues in 0 files`,
+# the bare `|` → `MD056 … [Expected: 3; Actual: 4]`).
+#
+# ⚠️ The one shape this trades away: an id carrying a literal backslash
+# immediately before a pipe (`\|`) would lose its cell — escaping only the pipe
+# yields `\\|`, which GFM reads as a literal backslash then a separator. No
+# committed id has that shape, and paying it is cheaper than corrupting every
+# `\uXXXX` id, which is the COMMON case here.
 _CONTROL_DISPLAY = {"\t": "\\t", "\r": "\\r", "\n": "\\n"}
 
 
 def _md_display_text(text: str) -> str:
-    """`text` with control characters re-escaped so a table cell cannot break."""
+    """`text` escaped so a markdown table cell cannot break or gain a cell."""
     out: list[str] = []
     for ch in text:
         named = _CONTROL_DISPLAY.get(ch)
@@ -4001,6 +3961,8 @@ def _md_display_text(text: str) -> str:
             out.append(named)
         elif ord(ch) < 0x20 or ord(ch) == 0x7f:
             out.append(f"\\x{ord(ch):02x}")
+        elif ch == "|":
+            out.append("\\|")
         else:
             out.append(ch)
     return "".join(out)
@@ -4144,9 +4106,9 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
             # parametrize-controlled and can contain backticks, which a
             # single-backtick span cannot hold (19 MD038 findings on the
             # 2026-11-23 render, `docs` red). See the helper's docstring.
-            # ⛔ `_md_display_text` INSIDE the span: the decoded id may carry a real
-            # control byte, and a raw newline would split this table row in two
-            # (see `_md_display_text`). The JSON keeps the decoded id.
+            # ⛔ `_md_display_text` INSIDE the span: the id may carry a control
+            # byte or a pipe, either of which breaks this table row (see
+            # `_md_display_text`). The JSON keeps the id verbatim.
             lines.append(
                 f"| {_md_code_span(_md_display_text(f['test']))} | "
                 f"`{f['run_id']}` | {cell} |")

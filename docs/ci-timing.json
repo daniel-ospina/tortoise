@@ -19,7 +19,7 @@
       "passed_at": "2026-11-23T05:52:50Z",
       "passed_run_id": "45071394329",
       "run_id": "43792641690",
-      "test": "tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (`re.escape` \u2014 the filename's `.` is a wildcard unescaped)]"
+      "test": "tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (`re.escape` \\u2014 the filename's `.` is a wildcard unescaped)]"
     },
     {
       "failed_at": "2026-11-16T04:44:19Z",

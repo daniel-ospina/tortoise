@@ -822,7 +822,7 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 |---|---|---|
 | ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_HOLD_NONE` (the clause is negated)]`` | `43792641690` | 2026-11-23T05:52:50Z (`45071394329`) |
 | ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_HOLD_NONE`'s tail lookahead (a qualifier after `hold none`)]`` | `43792641690` | 2026-11-23T05:52:50Z (`45071394329`) |
-| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (`re.escape` — the filename's `.` is a wildcard unescaped)]`` | `43792641690` | 2026-11-23T05:52:50Z (`45071394329`) |
+| ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (`re.escape` \u2014 the filename's `.` is a wildcard unescaped)]`` | `43792641690` | 2026-11-23T05:52:50Z (`45071394329`) |
 | ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (a qualifier AFTER the name)]`` | `43792641690` | 2026-11-23T05:52:50Z (`45071394329`) |
 | ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY` (a quantifier replaces the colon)]`` | `43792641690` | 2026-11-23T05:52:50Z (`45071394329`) |
 | ``tests/test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards[<lambda>-`_ONE_ENTRY`'s tail lookahead (a qualifier between the name and the clause)]`` | `43792641690` | 2026-11-23T05:52:50Z (`45071394329`) |
