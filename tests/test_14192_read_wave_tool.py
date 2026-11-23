@@ -1510,6 +1510,26 @@ def _builtins_module_names(tree: ast.AST) -> frozenset[str]:
         tree, lambda n: isinstance(n, ast.Name) and n.id in roots, loops=True))
 
 
+def _copy_module_names(tree: ast.AST) -> frozenset[str]:
+    """Every name that statically denotes the `copy` MODULE — the root and its aliases.
+
+    ⛔ THE SAME ONE-OWNER PATTERN `_builtins_module_names` carries, for the same reason
+    (#14326 review cycle 7, MEASURED GREEN while the inline spelling was REFUSED):
+    `import copy as _z; _f = _z.deepcopy; _d = _f(builtins.__dict__)` and its `_z.copy` twin
+    both executed the read, because the copy-alias disjunct matched the LITERAL `copy`. An
+    `import ... as` binds with no `Assign` node, so `_aliases_of` alone cannot see it — the
+    root has to be enumerated from the `Import` node and then closed over assignments.
+    """
+    roots = {"copy"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "copy" and alias.asname:
+                    roots.add(alias.asname)
+    return frozenset(roots) | frozenset(_aliases_of(
+        tree, lambda n: isinstance(n, ast.Name) and n.id in roots, loops=True))
+
+
 def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
     """Names STATICALLY bound to one of `_REGISTRY_BUILTINS` — `_gr = getattr`, `_v = vars`.
 
@@ -1525,12 +1545,19 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
     `_builtin_lookup_name` at its own construction site, so consuming it here would be a
     fixpoint. This is a plain transitive name walk, available to every caller.
 
-    ⛔ OVER-MATCHING ACROSS THE THREE IS HARMLESS, as `_REGISTRY_BUILTINS`' own note argues:
-    every arm that consumes this set ALSO requires the builtins MODULE as its receiver and
-    `"__dict__"` as its key, so the only thing the union can red is `_d(builtins, "__dict__")`
-    — a `dict` alias called where `getattr` is meant, which is a TypeError and cannot run.
+    ⛔ OVER-MATCHING ACROSS THE MEMBERS IS HARMLESS, as `_REGISTRY_BUILTINS`' own note argues,
+    BUT THE BOUND IS WIDER THAN THE REGISTRY ARMS' ONE (#14326 review cycle 7, CORRECTED: this
+    note used to claim every consumer also requires the builtins MODULE as receiver and
+    `"__dict__"` as key, which stopped being true when the set began feeding
+    `_is_builtins_mapping`'s alias arm — the mapping in `args[0]`, no key). Measured with the
+    widened set, the only red-able shapes beyond the intended ones are `copy(m)`,
+    `copy(builtins)` and `copy(builtins, "__dict__")`, each a TypeError/SyntaxError at RUNTIME
+    — a `dict` alias called as the copy function, or a copy of a MODULE. 19 legitimate
+    controls were measured GREEN (`copy.deepcopy(cfg)`, `_f = copy.copy; _f(cfg)`, `_v(cfg)`,
+    `getattr(cfg, "__dict__")`, …), so the set reds no working code.
     """
     _module_names = _builtins_module_names(tree)
+    _copy_module_names_ = _copy_module_names(tree)
     return frozenset(_aliases_of(
         tree,
         lambda n: (isinstance(n, ast.Name) and n.id in _REGISTRY_BUILTINS)
@@ -1543,15 +1570,24 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
         # that enumeration, so a literal here would drift again.
         or (isinstance(n, ast.Attribute) and n.attr in _REGISTRY_BUILTINS
             and isinstance(n.value, ast.Name) and n.value.id in _module_names)
-        # ⛔ AND AN ALIAS OF A COPY CALLEE (#14326 review cycle 6, MEASURED GREEN:
-        # `_f = copy.deepcopy; _x = _f(builtins.__dict__)`; also `copy.copy` and `dict.copy`).
-        # The file resolves `_dc = dict` already, so an alias of the callee that COPIES the
-        # mapping is the same one-hop bind, not the declared constructor residual. Restricted
-        # to the module/dict spellings: `<mapping>.copy` bound to a name stays the declared row
+        # ⛔ AND AN ALIAS OF A COPY CALLEE (#14326 review cycles 6-7, MEASURED GREEN:
+        # `_f = copy.deepcopy; _x = _f(builtins.__dict__)`; also `copy.copy`, `dict.copy`, and
+        # — the twin of THIS commit's own fix (#14326 review cycle 7, MEASURED GREEN one node
+        # shape over) — `import copy as _z; _f = _z.deepcopy`). The file resolves `_dc = dict`
+        # already, so an alias of the callee that COPIES the mapping is the same one-hop bind,
+        # not the declared constructor residual. Restricted to the module/dict spellings:
+        # `<mapping>.copy` bound to a name stays the declared row
         # `_c = builtins.__dict__.copy; _c()`.
+        # ⛔ THE RECEIVER IS THE RESOLVED `copy` NAME SET, not the literal (#14326 review cycle
+        # 7): `import copy as _z` binds with NO `Assign` node, so `_aliases_of` cannot see it and
+        # `_copy_module_names` enumerates it the way `_builtins_module_names` does for builtins.
+        # ⛔ NO `ast.Name` DISJUNCT (#14326 review cycle 7, MEASURED INERT: neutering it left
+        # `43 passed` and flipped 0 of 201 rows — a bare `copy(m)` is a TypeError, and the
+        # `ImportFrom` spelling synthesizes the Attribute this disjunct already matches). The
+        # file deletes a clause no mutant can red.
         or (isinstance(n, ast.Attribute) and n.attr in {"copy", "deepcopy"}
-            and isinstance(n.value, ast.Name) and n.value.id in {"copy", "dict"})
-        or (isinstance(n, ast.Name) and n.id in {"copy", "deepcopy"}),
+            and isinstance(n.value, ast.Name)
+            and n.value.id in ({"dict"} | _copy_module_names_)),
         loops=True))
 
 
@@ -1644,7 +1680,15 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                   and (node.func.id == "dict" or node.func.id in launderers))
                  or (isinstance(node.func, ast.Attribute) and node.func.attr == "dict"
                      and isinstance(node.func.value, ast.Name)
-                     and node.func.value.id in names))
+                     and node.func.value.id in names)
+                 # ⛔ AND THE MAPPING-KEY SPELLING OF THE SAME CALLEE (#14326 review cycle 7,
+                 # EACH MEASURED GREEN with a third reach executing the read):
+                 # `__builtins__["dict"](__builtins__)`, `builtins.__dict__["dict"](…)`,
+                 # `vars(builtins)["dict"](…)`. The module-attribute disjunct above is the
+                 # sibling half; `_builtin_lookup_name` already resolves a member fetched out of
+                 # the mapping, so the resolver existed and only the threading was missing.
+                 or _builtin_lookup_name(node.func, names, consts, dict_names, launderers,
+                                         members=frozenset({"dict"})) == "dict")
             and ((len(node.args) == 1
                   and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts))
                  or any(kw.arg is None
@@ -1674,8 +1718,14 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                  # `_f = copy.deepcopy; _f(builtins.__dict__)`, same for `copy.copy`,
                  # `dict.copy` and `from copy import deepcopy`). `launderers` now holds those
                  # binds, so one arm covers the alias of the copy family.
+                 # ⛔ `>= 1`, NOT `== 1` (#14326 review cycle 7, MEASURED GREEN one node shape
+                 # from the INLINE fix in this very commit: `_f = copy.deepcopy;
+                 # _d = _f(builtins.__dict__, {})` — deepcopy's documented positional `memo`
+                 # — executed the read while the inline `>= 1` form was REFUSED). The other
+                 # names in `launderers` are `dict`/`getattr`/`vars` aliases, whose
+                 # two-positional-argument forms are TypeErrors.
                  or (isinstance(node.func, ast.Name) and node.func.id in launderers
-                     and len(node.args) == 1))
+                     and len(node.args) >= 1))
             and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
         # the UNBOUND `dict.copy(m)` / `copy.deepcopy(m)` — the callee is a constructor here,
         # so `node.func.value` is that constructor and the mapping is argument ONE.
@@ -1895,6 +1945,19 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     # the construction site by `_aliases_of`, so no spelling list grows here — and THE KEY'S
     # POSITION IS THE SHAPE, not the set: an UNBOUND `dict.get` alias takes the mapping FIRST
     # (MEASURED: a bound-only arm left `_g = dict.get; _g(m, "exec")` GREEN).
+    # ⛔ AND THE SAME READ METHOD FETCHED WITH `getattr` (#14326 review cycle 7, EACH MEASURED
+    # GREEN with a third reach executing the read): `getattr(builtins.__dict__, "get")("exec")`
+    # — and its `pop` twin — while `getattr(builtins, "exec")` was REFUSED. The member name
+    # is a resolvable literal and the family is this file's OWN bounded set
+    # (`_BUILTINS_MAPPING_READS`), so the `members=` threading was the only missing half: the
+    # arm above resolves exactly this shape for the REGISTRY members.
+    if (isinstance(node.func, ast.Call) and node.args
+            and _builtin_lookup_name(node.func, names, consts, dict_names, launderers,
+                                     members=_BUILTINS_MAPPING_READS,
+                                     getattr_fetchers=getattr_fetchers,
+                                     copies=copies) is not None):
+        keys = _string_keys_of(node.args[0], consts) & _members
+        return sorted(keys)[0] if keys else None
     if isinstance(node.func, ast.Name) and node.func.id in copies and node.args:
         _key_at = 1 if (len(node.args) >= 2
                         and _is_builtins_mapping(node.args[0], names, dict_names,
@@ -2881,7 +2944,14 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
                                             _builtins_launderers, consts))
         or (isinstance(n, ast.Attribute) and n.attr in _BUILTINS_MAPPING_READS
             and isinstance(n.value, ast.Name)
-            and n.value.id in {"dict"} | _builtins_launderers),
+            and n.value.id in {"dict"} | _builtins_launderers)
+        # ⛔ AND THE `getattr` FETCHER, bound to a name first (#14326 review cycle 7, MEASURED
+        # GREEN: `_g = getattr(builtins.__dict__, "get"); _g("exec")(<read>)`). The same
+        # `members=` threading as the inline arm inside `_builtin_lookup_name`.
+        or _builtin_lookup_name(n, _builtins_names, consts, _builtins_dict_names,
+                                _builtins_launderers,
+                                members=_BUILTINS_MAPPING_READS,
+                                getattr_fetchers=_getattr_fetchers) is not None,
         loops=True))
     _code_executing_names = _CODE_EXECUTING_CALLEES | frozenset(_aliases_of(
         tree,
@@ -7111,6 +7181,42 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    _g = dict.get\n'
             '    _g(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        # ⛔ THE TWINS OF THE CLAUSES ABOVE (#14326 review cycle 7, EACH MEASURED GREEN with a
+        # third reach executing the read, EACH one node-shape from a clause added in the SAME
+        # commit — which is why they are rows rather than a note: a fix whose own twin is
+        # untested is a fix that reads as complete and is not):
+        #
+        #     _f = copy.deepcopy; _f(m, {})              the ALIAS arm pinned arity `== 1`
+        #                                               while the inline arm was widened to `>= 1`
+        #     __builtins__["dict"](__builtins__)         the mapping-KEY spelling of the inline
+        #                                               module-attribute callee (`builtins.dict`)
+        #     import copy as _z; _f = _z.deepcopy        the copy-alias receiver was the LITERAL
+        #                                               `copy`; `import ... as` binds no Assign
+        #                                               node, so `_aliases_of` cannot see it
+        #     _g = getattr(m, "get"); _g("exec")         the READ-METHOD aliases matched an
+        #                                               Attribute, never a `getattr` fetch
+        #     getattr(m, "get")("exec")                  … nor its inline twin
+        "an ALIASED copy callee with `deepcopy`'s `memo`": (
+            '    import builtins, copy\n'
+            '    _f = copy.deepcopy\n'
+            '    _d = _f(builtins.__dict__, {})\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`__builtins__[\"dict\"]` — the mapping-KEY spelling of the callee": (
+            '    _d = __builtins__["dict"](__builtins__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "an ALIASED `copy` MODULE (`import copy as _z`)": (
+            '    import builtins, copy as _z\n'
+            '    _f = _z.deepcopy\n'
+            '    _d = _f(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "a READ METHOD fetched with `getattr`, then called": (
+            '    import builtins\n'
+            '    _g = getattr(builtins.__dict__, "get")\n'
+            '    _g("exec")("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "a READ METHOD fetched with `getattr`, INLINE": (
+            '    import builtins\n'
+            '    getattr(builtins.__dict__, "get")("exec")('
+            '"results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         "`builtins.__dict__.__getitem__(\"exec\")`": (
             '    import builtins\n'
             '    builtins.__dict__.__getitem__("exec")('
