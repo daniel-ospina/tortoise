@@ -3827,7 +3827,20 @@ def _dedupe_history(rows: list[dict]) -> list[dict]:
     return out
 
 
-_PYTEST_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})")
+# ⛔ ANCHORED SO IT IS INJECTIVE (#14366 cycle-2 review, P3). pytest's `ascii_escaped`
+# uses `val.encode("unicode_escape")` for a `str`, which DOUBLES backslashes — so a
+# parametrize value that is a compiled regex carrying a literal `\u2014` reaches the
+# raw id as `\\u2014`. Unanchored, `re.sub` matched the SECOND backslash and
+# published `a\—b` for `a\u2014b`: the decode CORRUPTED an id that was already
+# correct. The `(?<!\\)` lookbehind leaves a doubled escape alone. Measured, not
+# assumed: `_unescape_nodeid(r"a\\u2014b")` returned `'a—b'` before this anchor.
+# `\U` (8 hex digits) is the arm pytest emits for an ASTRAL value
+# (`.encode("ascii", "backslashreplace")` → `b'\\U0001f600'`), which neither of the
+# other two arms matches — so without it an astral parametrize id was published
+# escaped, contradicting this helper's own "decode what pytest writes" docstring.
+_PYTEST_ESCAPE_RE = re.compile(
+    r"(?<!\\)\\u([0-9a-fA-F]{4})|(?<!\\)\\x([0-9a-fA-F]{2})"
+    r"|(?<!\\)\\U([0-9a-fA-F]{8})")
 
 
 def _unescape_nodeid(nodeid: str) -> str:
@@ -3848,7 +3861,7 @@ def _unescape_nodeid(nodeid: str) -> str:
     them, and a history row written before this fix still matches.
     """
     def _decode(m: re.Match) -> str:
-        return chr(int(m.group(1) or m.group(2), 16))
+        return chr(int(m.group(1) or m.group(2) or m.group(3), 16))
     return _PYTEST_ESCAPE_RE.sub(_decode, nodeid)
 
 

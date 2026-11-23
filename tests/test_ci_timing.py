@@ -324,6 +324,37 @@ def test_a_published_flake_id_is_decoded_to_the_id_pytest_printed() -> None:
         "the artifact itself contradicts (#9134 review, P1)")
 
 
+def test_the_nodeid_decode_is_injective_over_the_escapes_pytest_can_write() -> None:
+    """#14366 cycle-2 review P3: an unanchored decode CORRUPTED a correct id.
+
+    pytest's `ascii_escaped` uses `val.encode("unicode_escape")` for a `str`, which
+    DOUBLES backslashes, so a parametrize value that is a compiled regex carrying a
+    literal `\\u2014` reaches the raw id as `\\\\u2014`. Measured on the pre-anchor
+    pattern: `_unescape_nodeid(r"a\\\\u2014b")` returned `'a—b'` — it matched the SECOND
+    backslash and turned an id that needed no decoding into a different one, i.e. the
+    fix's own failure mode. `\\\\U` is the arm pytest emits for an ASTRAL value
+    (`'😀'.encode('ascii', 'backslashreplace')` → `b'\\\\U0001f600'`), which neither of the
+    other two arms matches, so an astral parametrize id was still published escaped.
+
+    Both are latent at the 2026-11-23 head (the published table carries 0 escaped ids
+    and the one backslash-bearing history id is a genuine single escape), which is
+    why this pin is the artefact rather than a measured red.
+    """
+    # the ASCII escapes pytest writes are decodable …
+    assert ci_timing._unescape_nodeid("a\\u2014b") == "a—b"
+    assert ci_timing._unescape_nodeid("a\\x41b") == "aAb"
+    assert ci_timing._unescape_nodeid("a\\U0001f600b") == "a😀b"
+    # … and a DOUBLED escape is content, not a sequence to decode.
+    doubled = "a" + "\\\\" + "u2014b"
+    assert ci_timing._unescape_nodeid(doubled) == doubled, (
+        "a doubled backslash is what `unicode_escape` writes for a literal one; "
+        "decoding it rewrites an id that was already correct")
+    # Non-vacuity: the fixture ids must actually differ from their decodings, or the
+    # three arms above pass on an identity function.
+    assert ci_timing._unescape_nodeid("a\\u2014b") != "a\\u2014b"
+    assert ci_timing._unescape_nodeid("plain") == "plain"
+
+
 # --- eligible-run selection (ci-timing.yml `find` step) ---------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
