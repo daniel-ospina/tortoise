@@ -13757,8 +13757,9 @@ def test_the_head_total_guard_is_not_vacuous(tmp_path):
 #: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
 #: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head
 #: above — re-derive them with that verb rather than trusting them", and the same block
-#: had already gone stale twice before this guard (#11298 review cycle 5, #14015) — three
-#: times, counting #14296, which is what this guard is for. A promise in prose is not a
+#: had already gone stale twice before this guard (#11298 review cycle 5, #14015) — four
+#: times, counting #14296 and the #14434 re-pack this guard CAUGHT at its own landing,
+#: which is what this guard is for. A promise in prose is not a
 #: guard, so the sentence is graded against the live emission here instead.
 #:
 #: Shard names are read in BOTH spellings this map uses — an explicit list (`f, h`)
@@ -13937,7 +13938,7 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         "the `fast_shards` header block quotes a `--emit-push-matrix` this tree does "
         f"not emit — stated {groups}, emitted {live_groups}. Re-run the verb and paste "
         "its figures; a carried emission is the class this block exists to warn "
-        "about (and that it has now gone stale on three times).")
+        "about (and that it has now gone stale on four times).")
     assert (ceil_est, ceil_minutes) == (max(live_groups), live_minutes), (
         "the block's watchdog derivation disagrees with the emission — stated "
         f"`ceil({ceil_est}/60 x 2)` = {ceil_minutes} m, emitted worst "

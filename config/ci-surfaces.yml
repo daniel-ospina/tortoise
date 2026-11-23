@@ -15,7 +15,7 @@ version: 1
 # `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
 # S is chosen by that formula on the committed map. What is deliberately NOT
 # restated here is the S-choice ARITHMETIC — it moves with every re-cut, which is
-# how this block went stale three times. Three tests are authoritative, and TWO of
+# how this block went stale four times. Three tests are authoritative, and TWO of
 # them recompute from the map rather than trusting a quoted number: the balance-band
 # test (`test_real_workflow_halves_are_consistent`, whose weights come from
 # `m["durations"]`) and the emission guard
@@ -58,9 +58,20 @@ version: 1
 # and `tests/test_14186_embedder_seam_batching.py` — both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
 # the verb packs two shards at 837.0 s (a, e) and nine at 836.9 s (b, c, d, f, g, h, i, j, k), so
 # `ceil(837.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# MERGES INTO, never carried from the branch that first wrote it. On the tree this sentence was
+# re-derived on (`main` at `b2d1e9086a92`, whose #14409 AND #14434 each added a flat-2.0 s fast-pool
+# row — `tests/test_14371_offline_embed_json.py` and `tests/test_7879_record_chain.py` — and it is
+# those rows that re-pack the bins) the same verb packs
+# seven shards at 836.7 s (b, c, f, g, h, i, j) and four at 836.8 s (a, d, e, k), so
+# `ceil(836.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
 # reading of this pool from 835.5 s to 837.0 s while the SECONDS moved under it, so NO arithmetic
+# agree by construction rather than by a hand re-read. ⛔ Every one of those rows is what moved
+# the partition: strip a `2.0` row and the same verb packs a different split at nearly the same
+# seconds, which is why the shard NAMES (not only the seconds) are stated here and graded. ⛔ The
+# MINUTE has stood at 28 m across every reading of this pool from 835.5 s to 836.8 s while the
+# SECONDS moved under it, so NO arithmetic
 # on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
 # sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a
 # fast file is registered — the packer is greedy, so a seventh file re-packs every bin — which is
@@ -79,6 +90,7 @@ version: 1
 # compares the per-shard sentence above against the live emission (and its own `ceil(...)` operand
 # against the emitted watchdog), so a carried figure reds a required leg instead of shipping, which
 # is how this block went stale three times before (#14296). ⛔ The cap was NOT
+# is how this block went stale four times before (#14296).) ⛔ The cap was NOT
 # moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
 # from the pre-suite terms (those are measurements and file facts).
