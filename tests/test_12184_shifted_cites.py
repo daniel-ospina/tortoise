@@ -568,7 +568,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2724-2726'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2922`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2922`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23551-23553`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23549`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:38171`'): 1,
     # 3, not 2: the whole-node walk's address is written BARE at three sites — the header's pair
     # (`sdk.py:37883`/`:37906`), the proximity paragraph's "they are `:37883` and `:37906` now", and
@@ -849,19 +852,19 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "169 of this document's 229",
-        "dedupes the **345** as-written spellings to 229 — **116**",
-        "345 written spellings → 229 pairs → 116 collisions → 169 drifters of the 229",
+        "171 of this document's 231",
+        "dedupes the **345** as-written spellings to 231 — **114**",
+        "345 written spellings → 231 pairs → 114 collisions → 171 drifters of the 231",
         # ⛔ The ARROW chain and the PROSE form are one claim: the cycle-3 re-cut
         # (`01a3c7072a`) restored the arrow rendering after the population
         # de-duplicated back to 227 pairs, so BOTH are asserted — a doc that
         # publishes one and not the other has lost a site, not just a phrase.
         # ⛔ MERGE RESOLUTION (#14038 fold of `origin/main` `cc936d47db`): these are the BRANCH edition's
         # figures, and they are re-MEASURED true of the resolved document (`_re_derived_drift` at this
-        # tree: `(229, 216, 156, 169, 232, 219, 159, 172)`), which is why `main`'s `234`/`136` pair — the
+        # tree: `(231, 218, 158, 171, 234, 221, 161, 174)`), which is why `main`'s `234`/`136` pair — the
         # figures its OWN edition of the header measured — is not carried here. A figure from another
         # edition of the document is a carried number, which is the failure this arm exists to catch.
-        "**The drift is 169 of those 229.**",
+        "**The drift is 171 of those 231.**",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -4140,7 +4143,7 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     (":28700", "tortoise/sdk.py", 28700, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
     (":30401", "tortoise/sdk.py", 30401, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\",", 3),
     (":30497", "tortoise/sdk.py", 30497, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\"", 3),
-    (":30596", "tortoise/sdk.py", 30596, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 4),
+    (":30596", "tortoise/sdk.py", 30596, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
     (":44469", "tortoise/sdk.py", 44469, "\"RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim\",", 3),
     ("entities.py:1292", "tortoise/projection/entities.py", 1292, "_POINT_JSON_RECORD_PROPS: frozenset = frozenset({\"mentions\"})", 2),
     ("entities.py:2068-2076", "tortoise/projection/entities.py", 2068, "# once. MEASURED at #10389's review head, before this entry: one SDK", 1),
