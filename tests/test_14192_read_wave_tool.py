@@ -7292,6 +7292,87 @@ def _findings_of_run(source: str, predicate) -> list[str]:
     return predicate(run_def)
 
 
+def test_the_ASYNC_for_arms_that_CARRY_the_class_are_pinned_and_the_redundant_ones_are_NAMED() -> None:
+    """The two `ast.AsyncFor` members that are LOAD-BEARING, and the four that are not.
+
+    ⛔ MEASURED AT `45a7d205c7c4` BEFORE THIS ROW EXISTED (#14326 round 18). `ast.AsyncFor`
+    appears in EIGHT code arms of this harness (a ninth occurrence is prose). Dropping it
+    from each in turn and running the whole file:
+
+        :491  `_str_constants` bind tuple          1 failed  (pinned, round 17)
+        :2500 `_aliases_of` loop arm               1 failed  (pinned, `45a7d205`)
+        :2155 `_in_loop`                           39 passed  <- pinned HERE
+        :2230 `_extra_bindings` target collection  39 passed  <- pinned HERE
+        :2970 holders fixpoint                     39 passed  redundant (measured below)
+        :3549 `_per_query_element_mutations` names 39 passed  redundant (measured below)
+        :3562 element-mutation gate                39 passed  redundant (measured below)
+        :3624 derived-element fixpoint             39 passed  redundant (measured below)
+
+    The two this row pins are not tidiness. `_in_loop` decides whether a read sits inside
+    the measurement loop, and `_extra_bindings` finds a SECOND bind of the blessed id
+    mapper — the fail-open #14281 review P1 closed. With the `AsyncFor` member gone, an
+    `async for` body counts as "not in a loop" and an `async for _result_id in …` shadow is
+    invisible, while every gate stays green: a 39-passed arm is a clause no mutant can red,
+    which is the defect class this file deletes clauses for.
+
+    ⛔ THE OTHER FOUR ARE REDUNDANCY, NOT COVERAGE, AND THAT IS MEASURED — not assumed. For
+    the `async` element-mutation lever
+    (`async for _pq in per_query: _pq["order"].sort()`), deleting `ast.AsyncFor` from ANY of
+    :2970 / :3549 / :3562 / :3624 leaves BOTH `_per_query_element_mutations` and
+    `_mutated_after` returning the same hit list (`[4]`) — the sibling arms still catch it.
+    So none of the four is individually reddenable, and pinning one would mean asserting
+    something already asserted. They stay (deleting a fail-closed arm narrows the guard for
+    no gain) and are NAMED here so the next round does not re-derive the same measurement or
+    mistake them for pinned clauses.
+    """
+    # ── `_in_loop`: an `async for` body IS inside a loop ──────────────────────────────
+    async_run = (
+        "async def run(sdk, queries):\n"
+        "    async for _p in queries:\n"
+        "        sdk._tortoise_fts_query(query=_p['query'], limit=10)\n"
+        "    sdk._tortoise_fts_query(query='after', limit=10)\n")
+    tree = ast.parse(async_run)
+    parents = _parents_of(tree)
+    calls = sorted((n for n in ast.walk(tree) if isinstance(n, ast.Call)),
+                   key=lambda n: n.lineno)
+    assert len(calls) == 2, f"the lever should carry two reads, found {len(calls)}"
+    assert _in_loop(calls[0], parents), (
+        "a read inside an `async for` body is not reported as in-loop — `ast.AsyncFor` has "
+        "been dropped from `_in_loop`'s arm, so the pin would look for the measurement read "
+        "outside the loop it actually runs in, and every async shape would be graded against "
+        "the wrong census")
+    # …and the CONTROL, in the other direction: the arm must not answer `True` for a read
+    # that follows the loop. Without this row "always True" reds nothing either.
+    assert not _in_loop(calls[1], parents), (
+        "`_in_loop` reports a read AFTER the loop as inside it — the arm has widened from "
+        "`For`/`AsyncFor` to any statement in the function")
+
+    # ── `_extra_bindings`: an `async for` target is a SECOND BIND too ─────────────────
+    shadow_async = ast.parse(
+        "async def run():\n"
+        "    async for _result_id in range(3):\n"
+        "        print(_result_id)\n")
+    assert _extra_bindings(shadow_async, _ID_MAPPERS), (
+        "an `async for _result_id in …` target is not reported as a second bind of the "
+        "blessed id mapper — `ast.AsyncFor` has been dropped from `_extra_bindings`' target "
+        "arm, and that shadow records a constant page while the `order` element check stays "
+        "satisfied (#14281 review P1's exact fail-open, one node type over)")
+    # The plain spelling is the SAME arm, and it is asserted here so the two cannot drift
+    # apart: a row that pins only the async half leaves the sync half un-reddenable.
+    assert _extra_bindings(
+        ast.parse("def run():\n    for _result_id in range(3):\n        print(_result_id)\n"),
+        _ID_MAPPERS), (
+        "a `for _result_id in …` target is no longer reported as a second bind — the sync "
+        "and async halves of this arm are one clause")
+    # …and the CONTROL: the ONE module-level `def` (either kind) is not a second bind, so
+    # the arm cannot be satisfied by flagging every function that returns a constant.
+    for kind in ("def", "async def"):
+        assert not _extra_bindings(
+            ast.parse(f"{kind} _result_id(r):\n    return r['id']\n"), _ID_MAPPERS), (
+            f"a module-level `{kind} _result_id` alone is reported as a second bind — the "
+            "arm must flag extra bindINGS, not the mapper's own definition")
+
+
 def test_every_argument_clause_reds() -> None:
     """Each `_call_argument_findings` clause must be RED by its own row (#14326 review P1).
 
