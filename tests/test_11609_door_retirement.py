@@ -1411,6 +1411,14 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: wider than the behaviour. THIRTEEN of the 32 are Prepended_Concatenation_Mark (they do
     #: render a mark); NINETEEN are not, they render nothing, and r21's class left them ACCEPTED.
     #: Measured, one row per family: U+FFF9..FFFB and U+13430..1343F.
+    #: ⛔ THE PRIMARY SOURCE SAYS THE SAME THING, and it distinguishes the two classes itself —
+    #: `unicode.org/Public/UCD/latest/ucd/DerivedCoreProperties.txt` (18.0.0, lines 10923-10931)
+    #: derives the property as `+ Cf + Variation_Selector − White_Space` and then subtracts THREE
+    #: groups for DIFFERENT reasons: `− FFF9..FFFB (Interlinear annotation format characters)`,
+    #: `− 13430..13440 (Egyptian hieroglyph format characters)` and
+    #: `− Prepended_Concatenation_Mark (Exceptional format characters that should be visible)`.
+    #: Only the LAST parenthetical is a claim about being seen; the first two are the annotation /
+    #: layout controls this class must still strip.
     #: ⛔ `(?V1)` IS LOAD-BEARING — in V0 syntax `regex` reads `--` as literal characters instead
     #: of set subtraction, and the class then silently measures something else (measured: a flat V0
     #: form STRIPPED the Prepended_Concatenation_Marks and the visible spaces, and a nested
