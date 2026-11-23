@@ -1740,14 +1740,43 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
         # `ImportFrom` spelling synthesizes the Attribute this disjunct already matches). The
         # file deletes a clause no mutant can red.
         or (isinstance(n, ast.Attribute) and n.attr in {"copy", "deepcopy"}
-            and isinstance(n.value, ast.Name)
-            and n.value.id in ({"dict"} | _copy_module_names_))
+            and ((isinstance(n.value, ast.Name)
+                  and n.value.id in ({"dict"} | _copy_module_names_))
+                 # ⛔ AND THE RECEIVER RESOLVED, WHATEVER ITS SHAPE (#14326 review cycle 9,
+                 # EACH MEASURED GREEN: `_f = builtins.dict.copy`, `_f = getattr(builtins.dict,
+                 # "copy")` and `_f = getattr(dict, "copy")` all executed the read while the
+                 # bare `_f = dict.copy` was REFUSED). The receiver was required to be a bare
+                 # `ast.Name`, so every dotted/fetched spelling of the SAME constructor matched
+                 # nothing — and `_builtin_lookup_name` already resolves all of them when asked
+                 # for the one member, so this is one clause rather than a shape per spelling.
+                 # (`_builtin_lookup_name` answers only for a CALL/SUBSCRIPT node, so the
+                 # plain dotted `builtins.dict` needs its own two lines.)
+                 or (isinstance(n.value, ast.Attribute) and n.value.attr == "dict"
+                     and isinstance(n.value.value, ast.Name)
+                     and n.value.value.id in _module_names)
+                 # `getattr(<dotted dict>, "dict")` is the one receiver `_builtin_lookup_name`
+                 # cannot answer for: its `getattr` arm requires a NAME/builtins-mapping
+                 # receiver, and `builtins.dict` is neither (#14326 review cycle 9, MEASURED
+                 # GREEN: `_f = getattr(builtins.dict, "copy")`).
+                 or (isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+                     and n.value.func.id == "getattr" and len(n.value.args) >= 2
+                     and isinstance(n.value.args[0], ast.Attribute)
+                     and n.value.args[0].attr == "dict"
+                     and isinstance(n.value.args[0].value, ast.Name)
+                     and n.value.args[0].value.id in _module_names
+                     and "dict" in _string_keys_of(n.value.args[1], _bu_consts_))
+                 or _builtin_lookup_name(n.value, _module_names, _bu_consts_, frozenset(),
+                                         frozenset(), members=frozenset({"dict"})) == "dict"))
         # ⛔ AND THE COPY CALLEE FETCHED WITH `getattr` (#14326 review cycle 8, MEASURED GREEN:
         # `_f = getattr(_z, "copy")` with `_z = copy` executed the read while `_f = _z.copy`
         # was REFUSED). A `getattr` fetch naming a literal member is statically visible, and
         # `_builtin_lookup_name` already resolves that shape for the registry members — so the
         # same `members=` threading, one member set over.
-        or _builtin_lookup_name(n, _copy_module_names_, _bu_consts_, frozenset(),
+        # ⛔ THE RECEIVER IS THE SIBLING'S OWN SET, INCLUDING `dict` (#14326 review cycle 9,
+        # MEASURED GREEN: `_f = getattr(dict, "copy")` executed the read while the ATTRIBUTE
+        # twin `_f = dict.copy` was REFUSED — the clause above already accepts `dict`, and
+        # passing only the copy-module names here re-opened the asymmetry one spelling over).
+        or _builtin_lookup_name(n, _copy_module_names_ | {"dict"}, _bu_consts_, frozenset(),
                                 frozenset(), members=_COPY_CALLEES,
                                 getattr_fetchers=frozenset({"getattr"})) is not None,
         loops=True))
@@ -1868,6 +1897,20 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
             or (node.func.attr == "__or__" and any(
                 _is_builtins_mapping(part, names, dict_names, launderers, consts)
                 for part in (node.func.value, *node.args)))):
+        return True
+    # ⛔ A COPY CALLEE FETCHED WITH `getattr`, INLINE (#14326 review cycle 9, MEASURED GREEN:
+    # `getattr(_z, "copy")(builtins.__dict__)` and its `deepcopy` twin executed the read while
+    # the BOUND form is refused). Decided by SHAPE, not by a receiver set: the member name is a
+    # resolvable literal out of `_COPY_CALLEES`, so no copy-module name set has to be plumbed
+    # into this predicate (the one-disjunct version that DID need it was measured INERT). A
+    # `getattr(<anything>, "copy")` applied to the builtins mapping returns a copy of it
+    # whatever the receiver is, which is why over-matching here is harmless.
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Call)
+            and isinstance(node.func.func, ast.Name)
+            and node.func.func.id == "getattr" and len(node.func.args) >= 2
+            and (_string_keys_of(node.func.args[1], consts) & _COPY_CALLEES)
+            and node.args
+            and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
         return True
     if (isinstance(node, ast.Call)
             and ((isinstance(node.func, ast.Attribute)
@@ -7465,6 +7508,27 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    _f = getattr(_z, "copy")\n'
             '    _d = _f(builtins.__dict__)\n'
             '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        # ⛔ THE THREE RECEIVER SPELLINGS AROUND THE DECLARED FETCHED-RECEIVER BOUND (#14326
+        # review cycle 9, EACH MEASURED GREEN while its sibling was REFUSED): the `getattr`
+        # copy-fetch omitted the `dict` constructor its ATTRIBUTE sibling already accepted, the
+        # dotted constructor `builtins.dict.copy` matched nothing because the receiver was
+        # required to be a bare `ast.Name`, and the INLINE `getattr(<copy module>, "copy")(m)`
+        # was never read by the copy-callee arm. Each is a NAME/module-root receiver — the class
+        # the declared residual does NOT cover — so each is closed, not declared.
+        "a COPY CALLEE fetched with `getattr` from the `dict` CONSTRUCTOR": (
+            '    import builtins\n'
+            '    _f = getattr(dict, "copy")\n'
+            '    _d = _f(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "a COPY CALLEE on the DOTTED `builtins.dict`": (
+            '    import builtins\n'
+            '    _f = builtins.dict.copy\n'
+            '    _d = _f(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "a COPY CALLEE fetched with `getattr`, INLINE": (
+            '    import builtins, copy as _z\n'
+            '    _d = getattr(_z, "copy")(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         "a REGISTRY builtin fetched OUT OF the mapping, then called": (
             '    import builtins\n'
             '    _dd = vars(builtins)["dict"]\n'
@@ -11413,6 +11477,31 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`(builtins.__dict__,)[0][\"exec\"]`": (
             'import builtins', '_d = (builtins.__dict__,)[0]',
             f'_d["exec"]("results = {read}")'),
+        # ⛔ AND THE ONE BOUND THE ALIAS RESOLVER ACTUALLY HAS (#14326 review cycle 9). This is
+        # not another spelling: it is the SHAPE of the resolver's input. `_builtin_name_aliases`
+        # asks "does this expression resolve to a builtin/copy callee" against NAME SETS
+        # (`_builtins_module_names` / `_copy_module_names`), so a receiver that is itself a
+        # DOTTED or FETCHED expression — `builtins.dict`, `getattr(builtins, "dict")` — cannot
+        # be named by that set and the bind is not resolved:
+        #
+        #     _f = getattr(builtins.dict, "copy"); _x = _f(builtins.__dict__)   GREEN
+        #     _f = getattr(getattr(builtins, "dict"), "copy"); …               GREEN
+        #
+        # MEASURED, and declared rather than closed because closing it means a NAME-SET
+        # argument became an EXPRESSION RESOLVER (“the receiver of a `getattr` may be any
+        # expression, resolved recursively”) — the same unbounded recursion this file refuses
+        # for callees. The three one-hop spellings around it ARE closed and their rows are in
+        # `test_EVERY_static_binding_form_is_a_READ_reach` (`_f = getattr(dict, "copy")`,
+        # `_f = builtins.dict.copy`, `getattr(_z, "copy")(m)` INLINE), which is what makes this
+        # a stated BOUND rather than a hole: the class is named by the shape of the RECEIVER,
+        # and every receiver that is a NAME or a module root is resolved.
+        "`_f = getattr(builtins.dict, \"copy\")` (a FETCHED receiver)": (
+            'import builtins', '_f = getattr(builtins.dict, "copy")',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        "`_f = getattr(getattr(builtins, \"dict\"), \"copy\")`": (
+            'import builtins',
+            '_f = getattr(getattr(builtins, "dict"), "copy")',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
     }
     for label, lines in declared_residual.items():
         assert not refused(*lines), (
