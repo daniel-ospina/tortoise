@@ -13855,13 +13855,12 @@ def test_the_emission_block_guard_is_not_vacuous():
         "distinguish a carried figure from a re-measured one")
     # A sentence is bounded to the header: a shard-count line BELOW `fast_shards:`
     # (the carve-out / slow-leg comments quote their own shard counts) is not this
-    # block's claim and must not be joined into it.
-    assert _emission_block_claims(
-        "fast_shards: 11\n# packs 2 shards at 700.0 s (a, b)\n") is None
-    # ⛔ THE FIXTURE ABOVE IS NOT A WITNESS FOR THE BOUND. `None` arrives there for two
-    # independent reasons — an EMPTY header (bounded) or a missing `ceil(...)` clause (which
-    # the unbounded read also lacks) — so a revert of the truncation passes it. With the ceil
-    # clause present the two implementations disagree, and only the bounded one is right.
+    # block's claim and must not be joined into it. The `ceil(...)` clause is what makes
+    # this fixture a WITNESS for the bound rather than only a True/True: without it
+    # `None` arrives for two independent reasons (an EMPTY bounded header, or a missing
+    # ceil, which the unbounded read also lacks) and a revert of the truncation would
+    # pass. With it, the bounded read returns `None` and the unbounded one returns a
+    # claim — so the row reds on that revert and only that revert.
     assert _emission_block_claims(
         "fast_shards: 11\n# packs 2 shards at 700.0 s (a, b)\n"
         "# `ceil(700.0/60 x 2)` = 24 m\n") is None, (
@@ -13900,6 +13899,19 @@ def test_the_emission_block_guard_is_not_vacuous():
     assert "<est 835.7 stated twice>" in superset_repeat[0][835.7], (
         "a SUPERSET restated at the same est was absorbed — the repeat marker must fire on "
         f"ANY second clause at one est, not only on a subset: {superset_repeat[0][835.7]}")
+    # The RANGE spelling this block ITSELF used at `4ff7964acc` (`a–e, g, i–k`) and
+    # `29a2da4c9c` (`a–e, i, j`) — an arm no other fixture reaches, because every other
+    # sample spells its names out. Without this, `_EMISSION_RANGE_RE` and the `span`
+    # branch could be deleted with both rows still green, and the map's other spelling
+    # would silently become an unread claim (the no-op-gate class this file keeps
+    # re-learning). Measured: neutering the pattern reds this assertion and nothing else.
+    ranged = _emission_block_claims(
+        "# nine shards at 721.8 s (a–e, g, i–k) and two at 721.7 s (f, h)\n"
+        "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
+    assert ranged is not None and ranged[0][721.8] == set("abcdegijk"), (
+        "the RANGE spelling this block used at `4ff7964acc`/`29a2da4c9c` is unread — an arm "
+        "that only reads explicit lists turns the map's other spelling into an unread claim: "
+        f"{ranged}")
 
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
 
