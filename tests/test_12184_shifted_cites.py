@@ -1838,6 +1838,42 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/search_engine.py", 7600): 7071,
     ("tortoise/search_engine.py", 7602): 7071,
 }
+#: The FRAGMENT each non-comparable pair is written to name, at the line the document writes for it.
+#:
+#: WHY THIS EXISTS. Every arm above grades a pair's ADDRESS, never its CONTENT — and these thirteen are
+#: non-comparable precisely because no arm can compare their text against `main` (their files are past the
+#: pin's EOF there too). So for four review rounds the enumeration's promise — "each named at the address
+#: this document writes for it" — was prose. Measured, it was false TWICE on the same head: `hosted_api.py`'s
+#: `:50935` named a demand-dedupe comment while `s.actor_user_id = $uid` sat at `:51493` (stale by 558 lines),
+#: and `sdk.py`'s `:57972` named a docstring line while the `entity_type="event"` FTS call it is paired with
+#: opens at `:58098` at this head (`:58119` was the same pair under the branch's own `+21`, which `main`'s
+#: `#14290` undid) — an address `#13994` had already written one file-length wrong as `57951`, which this
+#: branch then offset by `+21` without resolving, so the error survived a re-derivation that was supposed to
+#: catch it. Both shipped green: `_PIN_EOF_PAIRS` membership is a hand-written table, and a table cannot
+#: notice that the line it names holds something else.
+#:
+#: WHAT IT GRADES. (1) The table's key set IS `_PIN_EOF_PAIRS`'s — a pair that crosses the pin's EOF must
+#: arrive with the fragment a reader can check, so a new non-comparable pair REDS here instead of joining the
+#: population ungraded. (2) Each pair's line at this head CONTAINS its fragment. That is the arm that
+#: reddens when `main` inserts lines above any of these thirteen, which is how both defects arrived: the
+#: non-comparable half is exactly the population no text comparison can protect, so it needs the comparison
+#: its own head can make.
+#: ⛔ NO LITERAL `hosted_api.py:<n>` CITE IS SPELLED IN THESE COMMENTS: `tools/hosted_api_cite_census.py`
+#: greps every tracked file, so a line number written here JOINS the population it measures.
+_NONCOMPARABLE_FRAGMENTS: dict[tuple[str, int], str] = {
+    ("tortoise/sdk.py", 58099): 'entity_type="event"',
+    ("tortoise/sdk.py", 58315): "proj.g.query(",
+    ("tortoise/sdk.py", 58317): "s.turn_count, s.actor_user_id, s.harness,",
+    ("tortoise/sdk.py", 58966): "MATCH (s:Source {url:$url})-[:references]->(n)",
+    ("tortoise/sdk.py", 61999): "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
+    ("tortoise/sdk.py", 62019): "def _config_reset_state(self)",
+    ("tortoise/search_engine.py", 7193): "CALL { WITH op MATCH (op)-[r2:IMPL|hasPart]-(other:Point)",
+    ("tortoise/search_engine.py", 7226): "RETURN op.id, type(r2) AS et, count(other)",
+    ("tortoise/search_engine.py", 7600): "MATCH (n:Point)-[r:aboutSubject]->(:Subject) RETURN count(r) AS c",
+    ("tortoise/search_engine.py", 7602): "MATCH (m:Event)-[r2:aboutSubject]->(:Subject) RETURN count(r2) AS c",
+    ("tortoise/mcp_server.py", 11590): "MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)",
+    ("tortoise/hosted_api.py", 51620): "s.actor_user_id = $uid",
+}
 #: The pin's own file lengths — the MEMBERSHIP RULE behind the split, kept per FILE rather than transcribed
 #: per pair (`git show ccb49741b2ec:<path> | wc -l`). A pair is non-comparable exactly when its line is past
 #: its own file's length at the pin, which is a fact about the census and the pin and nothing else, so it can
@@ -1866,6 +1902,56 @@ _SPLIT_DRIFT = re.compile(r"the drift is (\d+) of the (\d+) comparable, plus (\w
 #: re-point this pattern rather than delete the arm, and the singular is the shape the truth takes
 #: here (`#14038` review cycle 13: exactly one of the twelve is past `main`'s copy of its file).
 _SPLIT_ABSENT_AT_MAIN = re.compile(r"the\s+(\w+) that (?:do|does) not exist at `main` either")
+
+
+_NONCOMPARABLE_PATHS = ("sdk.py", "search_engine.py", "mcp_server.py", "hosted_api.py")
+
+
+def _names_pair(region: str, path: str, line: int) -> bool:
+    """Is `(path, line)` written at its address in `region`, with the PATH bound when it is bare?
+
+    ⛔ A BARE SIBLING NUMBER IS NOT A NAMING ON ITS OWN. The enumeration writes most pairs in the
+    sibling form (`` `search_engine.py`'s `:7170`/`:7201` ``), so a bare number inherits the path from
+    the nearest filename written BEFORE it — otherwise any pair can be "named" by a number belonging
+    to another file, and that shipped green: measured on the shipped document, re-attributing the
+    `:Tag` traversal's sibling number to the OTHER file left the whole suite green, while that number
+    in `hosted_api.py` is an unrelated bookkeeping comment (review cycle 9 — the same fail-open, one
+    level above the fragment check). ⛔ Never spell a concrete `hosted_api.py:<n>` cite in this file:
+    `tools/hosted_api_cite_census.py` greps every tracked file, so the literal JOINS the population
+    it measures and reds `--check`.
+    """
+    filename = path.rsplit("/", 1)[-1]
+    for form in (f"`{path}:{line}`", f"`{filename}:{line}`", f"{path}:{line}"):
+        # ⛔ THE WHOLE-PATH FORMS NEED THE SAME BOUNDARY: an unanchored substring accepted
+        # `other/tortoise/mcp_server.py:<n>` and `nottortoise/...`, the identical "a longer path that
+        # ENDS with this one" hole the bare-sibling arm was just fixed for (measured).
+        if re.search(rf"(?<![\w./-]){re.escape(form)}(?![\w.-])", region):
+            return True
+    bare = f"`:{line}`"
+    start = 0
+    while True:
+        at = region.find(bare, start)
+        if at == -1:
+            return False
+        before = region[:at]
+        # ⛔ A BOUNDARY, NOT A SUBSTRING. A bare `name in before` / `rfind` also matches a LONGER
+        # filename that merely ENDS with the basename — `tests/test_mcp_server.py` bound the sibling
+        # number to `mcp_server.py` and left both arms green (measured; files of that shape exist in
+        # this tree, so the mutant is reachable prose, not a fabricated path).
+        # ⛔ AND IT MUST BE THE WHOLE CODE SPAN: the document writes an owner as `` `sdk.py` ``'s, so
+        # the basename has to sit between backticks. A left-only boundary still let `tests/mcp_server.py`
+        # (a different directory, same basename) stand in for it, and a trailing-boundary-free pattern
+        # let `mcp_server.py.bak` through — both measured green before this.
+        owners = [
+            (m.start(), name)
+            for name in _NONCOMPARABLE_PATHS
+            # the owner opens a code span and then either closes it (`` `sdk.py` ``'s) or carries the
+            # cite (`` `sdk.py:57972` ``) — so `:`/`` ` ``/`'` ends the name, and nothing else may
+            for m in re.finditer(rf"(?<=`){re.escape(name)}(?=[`':])", before)
+        ]
+        if owners and max(owners)[1] == filename:
+            return True
+        start = at + 1
 
 
 def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
@@ -2286,6 +2372,63 @@ def test_the_epic_bundles_i7_prose_cites_the_range_its_row_carries() -> None:
             f"I7 row carries `:{_start}-{_end}`. A citation labelled for this head that disagrees with the "
             "document is the re-derived-number-carried-instead-of-re-derived class: re-derive it from "
             "the row, or label it with the head it was actually taken at.")
+
+def test_every_noncomparable_pair_lands_on_the_fragment_the_header_quotes() -> None:
+    """A non-comparable pair is outside every text comparison, so its own line is the only witness left.
+
+    The population `_PIN_EOF_PAIRS` names is defined by the pin's file lengths, not by content: at `main`
+    those files are shorter than the address, so nothing can compare the cite's text there. That is why
+    `:50935` (a dedupe comment) and `:57972` (the `subjectKind` docstring) both shipped inside a sentence
+    promising every one of them was "re-derived at a head the pin predates". This arm makes the pair name
+    the thing it is written to name, at its own head — the comparison the split's definition removes.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    body = _unbolded(text)
+
+    # (1) the table covers the population, by KEY SET — not by "every table entry is still a pair", which
+    # would let a newly non-comparable pair enter ungraded while the arm stayed green.
+    assert set(_NONCOMPARABLE_FRAGMENTS) == set(_PIN_EOF_PAIRS), (
+        "`_NONCOMPARABLE_FRAGMENTS` and `_PIN_EOF_PAIRS` describe different populations: "
+        f"only in the fragments table {sorted(set(_NONCOMPARABLE_FRAGMENTS) - set(_PIN_EOF_PAIRS))}, "
+        f"only in the split {sorted(set(_PIN_EOF_PAIRS) - set(_NONCOMPARABLE_FRAGMENTS))}. A pair that "
+        "crossed the pin's EOF is compared against nothing, so it must arrive with the fragment its line "
+        "is supposed to hold — add the entry, do not widen the exclusion."
+    )
+
+    # (2) each pair's line at this head holds its fragment, and the header names the pair (the two facts the
+    # enumeration's own sentence promises, checked together so a re-point cannot satisfy one by breaking the
+    # other).
+    start = body.find("that are NOT comparable")
+    end = body.find("past the pin's copy of its file")
+    assert start != -1 and end > start, (
+        "the header no longer publishes the non-comparable enumeration (`that are NOT comparable` at "
+        f"{start}, `past the pin's copy of its file` at {end}) — re-point this arm at how the split is "
+        "published now, do not delete it"
+    )
+    region = body[start:end]
+    problems: list[str] = []
+    for (path, line), fragment in sorted(_NONCOMPARABLE_FRAGMENTS.items()):
+        source = (REPO / path).read_text(encoding="utf-8").splitlines()
+        if line > len(source):
+            problems.append(f"{path}:{line} is past this head's file ({len(source)} lines)")
+            continue
+        if fragment not in source[line - 1]:
+            problems.append(
+                f"{path}:{line} is {source[line - 1].strip()[:70]!r}, not {fragment!r}"
+            )
+        if not _names_pair(region, path, line):
+            problems.append(
+                f"{path}:{line} is not named in the non-comparable enumeration "
+                "(a bare `:NNNN` counts only behind its own path)"
+            )
+    assert not problems, (
+        "the comparability split counts a pair as non-comparable — the one population no text comparison "
+        "reaches — and its address does not hold what the document says it holds:\n  "
+        + "\n  ".join(problems)
+        + "\nRe-derive the pair at this head by CONTENT (`grep -n -F '<fragment>' <path>`) and move the "
+        "header, this table and `_PIN_EOF_PAIRS` together."
+    )
+
 
 def test_the_non_comparable_set_is_derived_from_the_pins_file_lengths() -> None:
     """MEMBERSHIP IS DERIVED, not transcribed — the arm the split was missing.
@@ -3082,8 +3225,234 @@ def test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line() -> None:
         )
 
 
+def _bare_span_ends(doc_text: str, start: int) -> list[int]:
+    """Every END a BARE `:START-END` span opening at *start* states in *doc_text*.
+
+    The `sdk.py:`-qualified sibling above cannot read a bare token, and the
+    `subject_binding_available` cite is written bare (`at `:START-END``), so this is the
+    second spelling of the same question rather than a second definition of "end".
+    """
+    return [int(m.group(1)) for m in re.finditer(rf":{start}-(\d+)", doc_text)]
+
+
+def test_the_subject_binding_range_ends_where_the_function_it_names_ends() -> None:
+    """A span cite must END on a derived boundary of the thing its sentence names.
+
+    `#14269` review (P1 / F3): `CAPABILITY-PLACEMENT-AUDIT.md` cited `:7582-7595` — the last
+    TEXT line — while the docstring closes on `:7596`, and the PR body recorded R3 as having
+    CORRECTED exactly this off-by-one at the previous head (`:7201-7214`, close at `:7215`).
+    A `_PINS` row pins a span's START only, so both a short and a long END were green in every
+    other test in this file: measured on a throwaway copy, mutating the END reddened nothing.
+
+    ⛔ THE BOUNDARY IS THE SENTENCE'S, NOT A HOUSE STYLE. `main`'s edition of this arm asserted
+    the DOCSTRING's closing delimiter, because that edition's paragraph cited a docstring claim.
+    This edition's §2.1 row cites the CONSUMER — "consumed only by `subject_binding_available()`
+    at `:7605-7644`" — and the function's last body line IS `7644` (`return True`), so the
+    docstring close (`7619`) is the WRONG end here: importing `main`'s rule verbatim redded a
+    correct cite and would have "corrected" it to a span that stops before the code the row
+    names. The END is therefore derived as the last non-blank line of the function, and the
+    source of the boundary is stated rather than assumed.
+    """
+    lines = (REPO / "tortoise/search_engine.py").read_text(encoding="utf-8").splitlines()
+    # ⛔ NOT a substring test, and not a bare `next` for the START either. An `in` test is not a
+    # symbol binding: a sibling named `def subject_binding_available_x(` satisfies it, so the arm
+    # would derive a DIFFERENT function's docstring and then report the TARGET's span (measured at
+    # `#14269`: that mutant stayed GREEN). And a `next(...)` with no default raises `StopIteration`
+    # with no message the moment the anchor is gone, pre-empting this arm's own reporting — the
+    # rule this repo records at the `⛔ NOT `next(...)`` block in `tests/test_7949_capstone_measure.py` (agent-infra#3442
+    # rule 2). Both are message-producing asserts now, so every mutant is attributable.
+    defs = [
+        i
+        for i, line in enumerate(lines, 1)
+        if line.lstrip().startswith("def subject_binding_available(")
+    ]
+    assert len(defs) == 1, (
+        "`tortoise/search_engine.py` must carry exactly one `def subject_binding_available(` at "
+        f"its start of line — found {len(defs)} at {defs} — because that line is the START of the "
+        "span this arm grades. A rename or an overload means this arm must be re-pointed, not "
+        "silently graded against whatever matched."
+    )
+    start = defs[0]
+    # The function's last line: the first non-blank line after it that starts at column 0 is the
+    # NEXT top-level statement, so every non-blank line before that belongs to this body.
+    end = None
+    for i in range(start + 1, len(lines) + 1):
+        stripped = lines[i - 1]
+        if stripped.strip() and not stripped.startswith((" ", "\t")):
+            break
+        if stripped.strip():
+            end = i
+    assert end is not None, (
+        f"`search_engine.py:{start}` has no body line after it, so this arm would grade "
+        "nothing — re-point it at the function it is meant to cover."
+    )
+    doc_text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    cited = _bare_span_ends(doc_text, start)
+    assert cited == [end], (
+        f"`CAPABILITY-PLACEMENT-AUDIT.md` cites `:{start}-{cited[0] if cited else '???'}` but the "
+        f"function it names ENDS on `:{end}` — the span must cover the statement its sentence "
+        f"names (`_PINS` pins the START, so a short or long END is green everywhere else here)"
+    )
+    for mutant in (end - 1, end + 1):  # NON-VACUOUS: one short and one long both red
+        tampered = doc_text.replace(f":{start}-{end}", f":{start}-{mutant}")
+        assert _bare_span_ends(tampered, start) != [end], (
+            f"a span end moved to `:{mutant}` still passed this arm"
+        )
+
+
 #: The numeric span a cite token names: `:START` or `:START-END`.
 _TOKEN_SPAN = re.compile(r":(\d+)(?:-(\d+))?")
+
+
+_HOSTED = "tortoise/hosted_api.py"
+
+#: ⛔ A RANGE CITE MUST CONTAIN THE CODE ITS OWN SENTENCE NAMES — measured at the head this arm
+#: was written at: the three paragraphs that carry `turn_max_index`'s `graph` verdict all cited a
+#: range that was the prior-turn-count reader's DOCSTRING ending at `try:`. Everything the
+#: sentences claim sits AFTER it — the walk, the predicate and the composition
+#: (`total = int(nodes or 0)`, `total = max(total, mark + 1)`) — so a reader who follows the cite
+#: lands on prose and a `try:` and cannot verify one word of the claim. That is the `+21`-class
+#: defect one indirection out: the range RESOLVES (it is neither blank nor past EOF), so every arm
+#: in this file was green on it; only reading the number's own sentence sees it. The fragment lines
+#: are RESOLVED BY CONTENT, never typed, so a
+#: `hosted_api.py` edit moves the expectation with the code instead of rotting the arm.
+_PRIOR_COUNT_CLAIMS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # the sentence's own words                    the code span that sentence therefore claims
+    (
+        "COMPOSED site",
+        ("OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point) ", "total = max(total, mark + 1)"),
+    ),
+    (
+        "IS composed with the walk",
+        ("total = int(nodes or 0)", "total = max(total, mark + 1)"),
+    ),
+    (
+        "mark/count comparison over the",
+        ("WHERE t.is_episodic = true ", "total = max(total, mark + 1)"),
+    ),
+)
+
+#: The `hosted_api.py:START-END` spellings the audit document uses for that reader, plus the
+#: one-line `hosted_api.py:NNNN` form. The one-line form is accepted because a repair that cites the
+#: SINGLE line carrying the composition is correct — it covers the code its sentence names — and an
+#: arm that refused it reported "cites no `hosted_api.py` range", i.e. a false red that reads as an
+#: absent address rather than as a form this arm does not parse (review finding, measured: feeding a
+#: one-line cite of the composition line — `total = max(total, mark + 1)` — yielded
+#: `graded=0, problems=3`).
+#: ⛔ NO LITERAL CITE IS SPELLED IN THIS COMMENT, and that is load-bearing: the census
+#: (`tools/hosted_api_cite_census.py`) `git grep`s EVERY tracked file, so a line number written
+#: here JOINS the population it measures and reds `--check` — measured on this very edit, which
+#: moved `distinct_targets` and `above_pivot` by one each and was caught by
+#: `test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure`.
+_AUDIT_HOSTED_SPAN = re.compile(r"hosted_api\.py:(\d+)(?:-(\d+))?")
+
+
+def _prior_count_cite_problems(doc_text: str, src_lines: list[str]) -> tuple[list[str], int]:
+    """Wrong ranges among the prior-turn-count paragraphs, and how many were graded.
+
+    The graded population is counted so an EMPTY one cannot pass: a document that drops the
+    phrases would otherwise skip its way to green, which is the fail-open this population guard
+    exists to refuse.
+    """
+    problems: list[str] = []
+    graded = 0
+    paragraphs = doc_text.split("\n\n")
+    for phrase, fragments in _PRIOR_COUNT_CLAIMS:
+        naming = [para for para in paragraphs if phrase in para]
+        if not naming:
+            problems.append(
+                f"the audit document carries no paragraph containing {phrase!r} — this arm grades "
+                "the three that justify `turn_max_index`'s `graph` verdict; re-point the arm "
+                "rather than letting it pass on an empty population"
+            )
+            continue
+        for para in naming:
+            # A bare `hosted_api.py:NNNN` is a ONE-LINE span, not an unreadable cite.
+            spans = [(int(a), int(b) if b else int(a)) for a, b in _AUDIT_HOSTED_SPAN.findall(para)]
+            if not spans:
+                problems.append(
+                    f"the paragraph naming {phrase!r} cites no `hosted_api.py` address, so its "
+                    "claim rests on no address this arm can read (it parses `START-END` and "
+                    "`START`; any other spelling is an address it does not see)"
+                )
+                continue
+            for fragment in fragments:
+                hits = [i for i, line in enumerate(src_lines, 1) if fragment in line]
+                if len(hits) != 1:
+                    problems.append(
+                        f"{_HOSTED}: {fragment!r} matches {len(hits)} lines ({hits}) — the "
+                        "witness must resolve to ONE line or this arm cannot bind it"
+                    )
+                    continue
+                target = hits[0]
+                if not any(first <= target <= last for first, last in spans):
+                    problems.append(
+                        f"the paragraph naming {phrase!r} cites {spans}, but its sentence names "
+                        f"{fragment!r}, which is at `{_HOSTED}:{target}` — OUTSIDE that range. "
+                        "A range that resolves onto the right FILE is not a verified cite: the "
+                        "reader lands on a docstring and cannot see the code the claim is about."
+                    )
+            graded += 1
+    return problems, graded
+
+
+def test_the_prior_turn_count_cites_contain_the_composition_their_sentences_name() -> None:
+    """The cite must cover the code its sentence names, not merely resolve into the file.
+
+    NON-VACUITY, MEASURED THREE WAYS on the shipped tree: (a) the pre-fix spelling shipped as the
+    negative control below reds this arm on all three paragraphs; (b) an END short of the
+    composition (`-45610`) reds it; (c) a doc that drops the phrases reds on the empty population
+    instead of passing unread.
+    """
+    doc_text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    src_lines = (REPO / _HOSTED).read_text(encoding="utf-8").splitlines()
+    problems, graded = _prior_count_cite_problems(doc_text, src_lines)
+    assert not problems, "\n".join(problems)
+    assert graded == len(_PRIOR_COUNT_CLAIMS), (
+        f"graded {graded} paragraph(s), expected one per claim in `_PRIOR_COUNT_CLAIMS` "
+        f"({len(_PRIOR_COUNT_CLAIMS)}) — a duplicate or dropped paragraph moves this arm's "
+        "population, so re-point it rather than letting the count drift"
+    )
+    # (a) the spelling that SHIPPED before the fix: every paragraph cited the docstring's tail.
+    # ⛔ THE CONTROL IS BUILT FROM THE DOCUMENT'S OWN MATCH, never from a typed cite: the census
+    # (`tools/hosted_api_cite_census.py`) greps every tracked file, so a literal here JOINS the
+    # population it measures and reds `--check` (measured on the first cut of this arm, which moved
+    # the distinct-target total by two).
+    naming = next((p for p in doc_text.split("\n\n") if _PRIOR_COUNT_CLAIMS[0][0] in p), None)
+    assert naming is not None, (
+        f"no paragraph carries {_PRIOR_COUNT_CLAIMS[0][0]!r}, so this arm's negative controls "
+        "cannot be built — re-point the population rather than deleting the controls"
+    )
+    ranges = [
+        (int(first), int(last))
+        for first, last in _AUDIT_HOSTED_SPAN.findall(naming)
+        if last and int(last) > int(first)
+    ]
+    assert ranges, (
+        "the paragraph this arm grades cites no `hosted_api.py` RANGE, so a short-END control "
+        "cannot be built"
+    )
+    begin, end = max(ranges, key=lambda span: span[1] - span[0])
+    shipped = f"hosted_api.py:{begin}-{end}"
+    pre_fix = doc_text.replace(shipped, f"hosted_api.py:{begin - 13}-{end - 13}")
+    assert pre_fix != doc_text, (
+        "the pre-fix control could not be built — this document no longer cites the repaired "
+        "range at all, so the negative control below would grade an unchanged document"
+    )
+    control, _ = _prior_count_cite_problems(pre_fix, src_lines)
+    assert control, "the pre-fix range still passed this arm — it is vacuous"
+    # (b) one END short: the last line the sentences name sits at the range's END, so `-1`
+    # excludes it and the arm must report the paragraph.
+    short_end, _ = _prior_count_cite_problems(
+        doc_text.replace(shipped, f"hosted_api.py:{begin}-{end - 1}"), src_lines
+    )
+    assert short_end, "a range ending one line short of the composition still passed"
+    # (c) empty population is REPORTED, never skipped.
+    empty, graded_empty = _prior_count_cite_problems("no claims here\n\nstill none", src_lines)
+    assert empty and graded_empty == 0, (
+        "a document carrying none of the claims was not reported — the arm would go green on "
+        "the phrases being deleted"
+    )
 
 
 def _token_spans(token: str) -> list[tuple[int, int]]:
@@ -3773,6 +4142,64 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     (":3339", "tortoise/projection/entities.py", 3339, "for key in self._POINT_DENY - self._POINT_HANDLED:", 2),
     (":3389", "tortoise/projection/entities.py", 3389, "or key in self._POINT_DENY or key in self._META_KEYS:", 2),
 )
+
+
+_PUBLISHED_TABLE_FIGURES = re.compile(r"holds \*\*(\d+)\*\* rows over (\d+) distinct lines")
+
+
+def _published_table_figures(text: str) -> tuple[int, int]:
+    """The `_REDEFINED_13854` row count and distinct-line count the audit document PUBLISHES.
+
+    DERIVED from the document, never typed: the paragraph states both figures so a reader does not
+    have to count, and the point of the arm below is that the sentence and the table cannot
+    disagree. `main`'s `#14269` review found the same paragraph stating "now pins all 34 by
+    content" over a 33-row table — a typed figure with no arm beside it, inside the one paragraph
+    whose whole subject is figures nothing grades. A regex that stops matching is a FAILURE
+    (message-producing assert), not a silent zero.
+    """
+    match = _PUBLISHED_TABLE_FIGURES.search(text)
+    assert match is not None, (
+        "`docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` no longer publishes the table's size in "
+        'the graded form ("holds **N** rows over M distinct lines") — re-point this reader at the '
+        "sentence that states it rather than dropping the arm"
+    )
+    return int(match.group(1)), int(match.group(2))
+
+
+def test_the_redefined_13854_figures_are_the_ones_the_document_publishes() -> None:
+    """`_REDEFINED_13854`'s size is a PUBLISHED figure, so it gets an arm (#14269 review).
+
+    `main`'s edition of this arm pinned `len(_REDEFINED_13854)` against `**36 rows, which is the
+    TABLE's own length`; this edition's paragraph was rewritten around its own census, so the
+    sentence a reader consults is `holds **N** rows over M distinct lines`. Importing the old arm's
+    literal would have asserted a population this table does not have, so the shape is re-pointed at
+    the sentence this edition publishes — the figure stays DERIVED from the document, which is what
+    makes the two unable to drift apart.
+
+    NON-VACUOUS in both directions, measured by tampering with a copy of the document text rather
+    than with the table: a stated row count one above the table's, and a stated distinct-line count
+    one below it, must each be refused. A count that only compared itself to itself would pass both.
+    """
+    distinct = len({line for _token, _path, line, _fragment, _expected in _REDEFINED_13854})
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    rows, lines = _published_table_figures(text)
+    assert rows == len(_REDEFINED_13854), (
+        f"`{_AUDIT}` publishes `**{rows} rows**` for this table while `_REDEFINED_13854` holds "
+        f"{len(_REDEFINED_13854)} — the figure the document states and the figure the arm reads "
+        "must be the same one, which is what this arm is for"
+    )
+    assert lines == distinct, (
+        f"`{_AUDIT}` publishes `{lines} distinct lines` for this table's rows while they anchor "
+        f"{distinct} distinct lines — re-derive the sentence, do not re-count by eye"
+    )
+    for tampered_rows, tampered_lines in ((rows + 1, lines), (rows, lines - 1)):
+        tampered = _PUBLISHED_TABLE_FIGURES.sub(
+            f"holds **{tampered_rows}** rows over {tampered_lines} distinct lines", text
+        )
+        assert _published_table_figures(tampered) != (rows, lines), (
+            f"a document stating {tampered_rows} rows / {tampered_lines} distinct lines still "
+            "satisfied this arm, so it grades nothing"
+        )
 
 
 def test_the_13854_cite_families_open_on_the_line_they_quote() -> None:
