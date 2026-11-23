@@ -76,7 +76,8 @@ same registry-read class by inference (the relay there marks it) — so
 the module that still runs sync FalkorDB I/O inline is enumerated in
 ``_KNOWN_INLINE_ROUTE_RESIDUAL`` / ``_KNOWN_INLINE_HELPER_RESIDUAL`` below —
 that is the declared, non-silent residual (it includes the per-request
-``get_current_org`` auth dependency and ``_capture_session_impl``). The AST pin
+``get_current_org`` auth dependency and ``_capture_session_impl`` /
+``_report_capture``). The AST pin
 fails on a NEW inline site, which is the "the class cannot silently return"
 guard; the residual is burned down under #3718 (kept open via #2924).
 
@@ -1681,9 +1682,26 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
 #: dependency `get_current_org` (6 sites, the single highest-traffic one), the
-#: membership/owner gates, the capture path (`_capture_session_impl`) and the
+#: membership/owner gates, the capture path (`_capture_session_impl` AND the
+#: `_report_capture` report half #14232 split out of it) and the
 #: registry/backup helpers. `_lifespan` was a member until #3718 residual 3
 #: off-loaded its `_control_plane_source` resolve.
+#:
+#: #14232 — WHY BOTH HALVES ARE NAMED. The ACK split moved the extraction's
+#: report half into a NESTED ``async def _report_capture`` inside
+#: ``_capture_session_impl``. This scan walks every ``AsyncFunctionDef``
+#: including nested ones, so the nested body is enumerated under its OWN name
+#: while ``ast.walk`` over the outer body still reports the same two lines —
+#: the residual entry above covered the OUTER name only, so the nested one
+#: arrived undeclared and this pin reddened (#14261, CI `test (a)`: "async
+#: body/bodies [('_report_capture', [22482, 22512])] ... are NOT in the declared
+#: residual"). Declaring it is NOT new debt: the two sites are the same two
+#: SDK constructions (``_org_sdk`` / ``_org_sdk_from_name``) the outer body
+#: was already declared for, and the #7500 constraint is why they cannot move
+#: — ``_make_sdk`` may not be constructed in a worker thread, while every
+#: graph READ on that path already rides ``_run_off_loop`` /
+#: ``_CAPTURE_EXECUTOR``. ``_extract_capture`` (the other half) has ZERO
+#: inline hits and is correctly absent from every residual set.
 #:
 #: `_run_indexing` is here (not in `_OFFLOADED_ASYNC_BODIES`) because, after
 #: #4709, sites in its OWN body still run on the loop, and they are declared
@@ -1713,7 +1731,8 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: Same declared residual; same burn-down. Scanned rather than ignored because a
 #: dependency body is still ON the loop.
 _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
-    "get_current_org", "_capture_session_impl", "_user_memberships",
+    "get_current_org", "_capture_session_impl", "_report_capture",
+    "_user_memberships",
     "_membership_org", "_org_node", "_count_active_free_memberships",
     "_owned_free_org_ids", "_create_org_registry_lane",
     "_apply_graph_recording_override", "_apply_graph_rename", "_graph_row_probe",

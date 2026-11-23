@@ -58624,7 +58624,12 @@ class TortoiseSDK:
             # mark the capture MERGE writes and the fold restores, so the record
             # read can see a missing tail.
             "s.client_captured_at, s.client_captured_at_source, s.capture_lane, "
-            "s.turn_max_index",
+            "s.turn_max_index, "
+            # #14232: APPENDED (sess[13]/sess[14]) — the in-flight extraction
+            # phase pair. Appended LAST for the reason this projection's header
+            # gives: `list_sessions` and this read build dicts POSITIONALLY, so a
+            # column inserted earlier silently re-binds every column after it.
+            "s.capture_extraction_phase, s.capture_extraction_phase_at",
             params={"sid": session_id},
         ).result_set
         if not rows:
@@ -58792,7 +58797,10 @@ class TortoiseSDK:
             # parity contract consumes the shared declaration, so this key is
             # part of the SDK read by construction rather than a second
             # opinion).
-            "extraction": session_extraction_status(sess[7], sess[8]),
+            # #14232: sess[13]/sess[14] — column 12 of THIS read is
+            # `turn_max_index`, so the phase pair follows it.
+            "extraction": session_extraction_status(
+                sess[7], sess[8], phase=sess[13], phase_at=sess[14]),
             # #3516 §B / #3515 piece 12: the floor's inputs + the producer lane.
             # sess[9..11] — they follow #3520's columns, which hold 7 and 8.
             "client_captured_at": sess[9],
