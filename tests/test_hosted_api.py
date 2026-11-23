@@ -9563,14 +9563,37 @@ class TestSearchOffloadConcurrency:
     the offload at the HANDLER level — TestClient serializes, so an HTTP-level
     test cannot demonstrate overlap."""
 
-    def test_two_concurrent_searches_overlap_on_thread_pool(self, monkeypatch):
-        """Two concurrent searches whose encode blocks on a shared barrier must
-        complete in ~1x encode time, not 2x — proving they run on worker
-        threads, not serialized on the event loop. With the offload removed,
-        the first encode blocks the loop, the barrier times out (3s), and the
-        wall-time bound fails in ~4.5s (the discriminator)."""
+    def test_concurrent_searches_keep_the_event_loop_free(self, monkeypatch):
+        """#1676: ``search`` offloads its encode, so the event loop keeps turning.
+
+        ⛔ THE DISCRIMINATOR IS NO LONGER "two encodes overlap" (#14186). The
+        seam puts every query encode behind ONE collector thread — deliberately,
+        and stated in ``embed_seam``'s DEFAULT POSTURE: the encoder is pinned to
+        one intra-op thread (#10296), so N concurrent encodes buy N× contention,
+        not N× throughput. Two concurrent searches therefore SERIALISE their
+        encodes while their WAITS still happen off the loop, so the old "~1x
+        encode time" bound reddens a correct process. Measured at
+        ``195139c2c3da``: 4.51 s against the 1.5 s cap — two solo encodes behind
+        a barrier that was waiting for two parties, the first paying its 3 s
+        timeout. (It passes on ``origin/main`` because there the two encodes run
+        concurrently.)
+
+        What #1676 actually requires, and what this row pins, is that the encode
+        never runs ON the event loop: a ticker coroutine must keep getting turns
+        while the encodes are in flight. Remove the offload (call the SDK inline
+        instead of awaiting ``_read_offload``) and ``encode`` blocks the loop for
+        its whole 0.5 s, twice, so the ticker's turns COLLAPSE — measured 6-10 of
+        the 20 required, never 0, because the loop still turns between the two
+        blocking reads — and this row reddens. That is the pre-fix failure the row
+        exists for, and unlike the wall-time bound it does not depend on how many
+        encodes run at once.
+
+        The stub is deliberately NOT a barrier any more: a cross-encode
+        rendezvous now DEADLOCKS the design it is supposed to test rather than
+        detecting a missing offload.
+        """
         import asyncio
-        import threading
+        import contextlib
         import time
 
         import numpy as np
@@ -9578,15 +9601,19 @@ class TestSearchOffloadConcurrency:
         import tortoise.hosted_api as ha_mod
         from tortoise.embeddings import EmbeddingModel
 
-        barrier = threading.Barrier(2, timeout=3)
+        encode_calls: list[int] = []
 
         class _SlowEmbedder:
-            """Stub whose encode blocks on the shared barrier + sleeps, then
-            returns a valid 384-dim vector (matches bge-small-en-v1.5)."""
+            """Stub whose encode BLOCKS for 0.5 s, then returns one row per text.
+
+            ⛔ ``len(texts)`` rows, not 1: the seam may hand several texts to a
+            single call, and ``InProcessBacking.encode`` refuses a short answer
+            loudly ("returned 1 row(s) for 2 text(s)").
+            """
             def encode(self, texts, **kwargs):
+                encode_calls.append(len(texts))
                 time.sleep(0.5)
-                barrier.wait()
-                return np.zeros((1, 384), dtype=np.float32)
+                return np.zeros((len(texts), 384), dtype=np.float32)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -9600,27 +9627,52 @@ class TestSearchOffloadConcurrency:
                 # or hit the socket before it appears.
                 pre = ha_mod._make_sdk(namespace=TEST_ORG_ID)
                 pre._get_proj()  # eager: ensure the daemon socket is up
-                # Install the stub AFTER the pre-warm so the pre-warm doesn't
-                # consume/break the shared barrier.
+                # Install the stub AFTER the pre-warm: the pre-warm loads the
+                # real model and would otherwise be answered by the 0.5 s stub
+                # (slow, and one encode call that belongs to no search).
                 monkeypatch.setattr(EmbeddingModel, "get",
                                     lambda: _SlowEmbedder())
 
-                async def _run():
-                    from tortoise.hosted_api import search
-                    t0 = time.monotonic()
-                    await asyncio.wait_for(asyncio.gather(
-                        search("falkordb traversal", limit=10, org=TEST_TEAM),
-                        search("graph performance", limit=10, org=_SECOND_TEAM),
-                    ), timeout=15)
-                    return time.monotonic() - t0
+                async def _run() -> list[float]:
+                    ticks: list[float] = []
 
-                elapsed = asyncio.run(_run())
-                # Overlap: ~0.5s (one encode window) + small overhead, well
-                # under 2x (1.0s+). Cap 1.5s clears the measured cold path
-                # (0.91s) without flaking green code.
-                assert 0.4 <= elapsed < 1.5, f"searches did not overlap: {elapsed:.2f}s"
+                    async def _ticker() -> None:
+                        while True:
+                            ticks.append(time.monotonic())
+                            await asyncio.sleep(0.01)
+
+                    ticker = asyncio.create_task(_ticker())
+                    try:
+                        from tortoise.hosted_api import search
+                        await asyncio.wait_for(asyncio.gather(
+                            search("falkordb traversal", limit=10, org=TEST_TEAM),
+                            search("graph performance", limit=10, org=_SECOND_TEAM),
+                        ), timeout=30)
+                    finally:
+                        ticker.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await ticker
+                    return ticks
+
+                ticks = asyncio.run(_run())
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
+
+        # Anti-vacuity FIRST: both searches must actually have reached the
+        # encoder. A read that degraded to keyword-only never encodes, and would
+        # then satisfy the ticker assertion while proving nothing about the
+        # offload. Counted in TEXTS, not calls: with a 0 ms window the collector
+        # may legitimately collapse both into one batch.
+        assert sum(encode_calls) >= 2, (
+            f"only {sum(encode_calls)} text(s) reached the encoder "
+            f"({encode_calls}) — a keyword-only degrade would pass the ticker "
+            "assertion vacuously")
+        # 0.5 s of blocking encode is ~50 ticks at 10 ms. 20 leaves 4x headroom
+        # for a loaded runner, while a BLOCKED loop yields ~0.
+        assert len(ticks) >= 20, (
+            "the event loop stopped turning while search encoded "
+            f"({len(ticks)} tick(s) for {encode_calls} encode call(s)) — the "
+            "encode is running ON the loop, not on a ``read`` pool thread")
 
     def test_search_degrades_to_fts_when_embedder_unavailable(self, monkeypatch):
         """#1676: with the embedder absent (get -> None), search must return
