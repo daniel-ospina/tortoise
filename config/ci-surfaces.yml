@@ -81,10 +81,6 @@ version: 1
 # moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
 # from the pre-suite terms (those are measurements and file facts).
-# is how this block went stale three times before (#14296).) ⛔ The cap was NOT
-# moved: raising it re-opens `#3239`'s stale-head exposure, and the SUM grew
-# from the POOL, not from the pre-suite terms (those are measurements and file
-# facts).
 #
 # The 1.25x balance band is enforced by `--integrity`'s
 # `workflow_halves_issues()`, which recomputes the ratio from the committed map
