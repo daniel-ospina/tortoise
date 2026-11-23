@@ -1185,7 +1185,7 @@ jobs:
           # ⛔ `16` IS THE LIVE VALUE CARRIED ACROSS, NOT A NEW CEILING. `8` is
           # the code default (`hosted_api._CAPTURE_MAX_IN_FLIGHT`), and a deploy
           # that silently reverted to it would re-open the 429 that parked 500+
-          # sessions (#12992 / #11892). `16` is also the clamp ceiling
+          # sessions (#12992: a 724 → 908 entry backlog inside one session). `16` is also the clamp ceiling
           # (`max(1, min(_int_env(..., 8), 16))`), so this entry cannot exceed
           # it. Carrying a value across settles NOTHING about policy: raising the
           # in-flight ceiling is explicitly not #12992's fix (epic #14342), the

@@ -984,7 +984,7 @@ one session were refused on an idle-looking box, and the investigation into them
 The body carries
 
 ```json
-"capture": {"in_flight": 0, "max_in_flight": 8, "workers": 4, "capacity_refused_total": 0,
+"capture": {"in_flight": 0, "max_in_flight": 16, "workers": 4, "capacity_refused_total": 0,
             "last_refused_at": null, "refusing": false, "refusal_window_s": 300.0,
             "code": "capture_capacity_saturated", "retry_after": 30, "error": null}
 ```
@@ -1006,11 +1006,14 @@ Four properties, because each is a different misread:
 - **`workers` is NOT `max_in_flight`.** The gate ADMITS **16** on the hosted app
   (`TORTOISE_CAPTURE_IN_FLIGHT`, a process-global int that defaults to 8, is
   clamped `[1, 16]`, and is staged at `16` by `deploy-hosted.yml` — #12992)
-  while the pool RUNS 4 (`TORTOISE_CAPTURE_WORKERS`, clamped `[1, 8]`), so up to
-  four admitted captures hold their slots while queued behind running
-  extractions. `16 slots` does not mean sixteen extractions at once. (The 8 vs 4
-  default pair is what `tests/test_12992_capture_capacity_typed_refusal.py`
-  pins; the app reads the staged 16, which is also the clamp ceiling.)
+  while the pool RUNS 4 (`TORTOISE_CAPTURE_WORKERS`, clamped `[1, 8]`). Admission
+  is a SLOT counter, released only when the extraction ends — not a worker slot —
+  so on the hosted app up to **twelve** admitted captures can be holding slots
+  queued behind the four running ones (`16 − 4`). `16 slots` does not mean
+  sixteen extractions at once, and it does not mean four are waiting: it is
+  twelve. (The 8-vs-4 DEFAULT pair — four waiting — is what
+  `tests/test_12992_capture_capacity_typed_refusal.py` pins; the app reads the
+  staged 16, which is also the clamp ceiling.)
 - **A slot outlives the request.** The transport wait bound is 10 s, and a capture that breaches it
   is abandoned by the CLIENT while its worker keeps the slot until the extraction ends (up to ~800 s
   at a 16K budget). So a steady `in_flight` with a low arrival rate is the signature of long
