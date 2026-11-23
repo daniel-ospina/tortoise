@@ -2445,7 +2445,12 @@ def _loop_target_sources(iterable: ast.AST) -> list[ast.AST]:
     so a spread of a dict LITERAL is expanded and a spread of anything else binds it.
     ⛔ AND THE RESIDUAL IS NAMED, NOT IMPLIED: an iterable whose elements this does not
     expand — a `IfExp`/`BoolOp`/`BinOp` over literals, a comprehension or generator, a
-    subscript — binds the container expression, so every SHAPE predicate
+    subscript, or a NESTED literal (only a `Starred` element is spliced: `((sys.modules,),)`
+    binds the INNER TUPLE, not `sys.modules`, so `for _x in ((sys.modules,),)` is GREEN while
+    `for _x in (sys.modules,)` is RED — MEASURED at `57735ab47947`; harmless in fact, `|=` on a
+    tuple raises `TypeError`, so that shape cannot be a working mirror lever, but the
+    enumeration must not read as exhaustive when it is not) — binds the container expression,
+    so every SHAPE predicate
     (`_is_module_registry`, `_is_namespace_expr`, `_is_setattr_like`) is blind to it. It is
     deliberately NOT enumerated here (the power-set blow-up the `_str_constants` note
     measures). It is pinned GREEN, and named, by
@@ -7416,41 +7421,56 @@ def _findings_of_run(source: str, predicate) -> list[str]:
 
 
 def test_the_ASYNC_for_arms_that_CARRY_the_class_are_pinned_and_the_redundant_ones_are_NAMED() -> None:
-    """The two `ast.AsyncFor` members that are LOAD-BEARING, and the four that are not.
+    """The two `ast.AsyncFor` members THIS ROW pins, and the eight it does not.
 
-    ⛔ MEASURED AT `45a7d205c7c4` BEFORE THIS ROW EXISTED (#14326 round 18). `ast.AsyncFor`
-    appears in EIGHT code arms of this harness. Dropping it from each in turn and running the
-    whole file:
+    ⛔ MEASURED AT `57735ab47947` (this file, 41 rows). `ast.AsyncFor` appears in TEN code
+    arms of this harness — counted by walking the AST for every `Attribute(attr="AsyncFor")`
+    whose enclosing function is a harness arm, never by grepping prose. Dropping it from each
+    arm in turn and running the whole file:
 
-        `_str_constants` bind tuple            1 failed  (pinned, round 17)
-        `_aliases_of` loop arm                 1 failed  (pinned, `45a7d205`)
-        `_in_loop`                             39 passed  <- pinned HERE
-        `_extra_bindings` target collection    39 passed  <- pinned HERE
-        holders fixpoint (in `_mutated_after`) 39 passed  redundant (measured below)
-        `_per_query_element_mutations`: names  39 passed  redundant (measured below)
-        `_per_query_element_mutations`: gate   39 passed  redundant (measured below)
-        `_per_query_element_mutations`: deriv. 39 passed  redundant (measured below)
+        `_str_constants` bind tuple            1 failed   pinned, round 17
+        `_rebound_callee_names`                41 passed  redundant (re-measured below)
+        `_in_loop`                             1 failed   <- pinned HERE
+        `_extra_bindings` target collection    1 failed   <- pinned HERE
+        `_aliases_of` loop arm                 1 failed   pinned, `45a7d205`
+        holders fixpoint (in `_mutated_after`) 41 passed  redundant (re-measured below)
+        `_per_query_element_mutations`: names  41 passed  redundant (re-measured below)
+        `_per_query_element_mutations`: gate   41 passed  redundant (re-measured below)
+        `_per_query_element_mutations`: deriv. 41 passed  redundant (re-measured below)
+        `_rebound_after`                       41 passed  redundant (re-measured below)
+
+    ⛔ THIS HEADER SAID "EIGHT code arms" AND "the four that are not" AND WAS FALSE (#14326
+    round 19 P2). The census behind it missed `_rebound_callee_names` and `_rebound_after`, so
+    the sole completeness claim in the one row whose purpose is "so the next round does not
+    mistake them for pinned clauses" was short by two arms — the stale/false-claim class this
+    file deletes clauses for, and a map with two holes in it is that class. Both omissions are
+    REDUNDANT (each measured `41 passed` at this head, so no fail-open hides behind them):
+    what was wrong was the COUNT, not the guard. The eight non-THIS-row arms are 2 pinned by
+    sibling rows + 6 redundant = 8, and 2 + 8 = the ten the census now names.
 
     ⛔ THE ARMS ARE NAMED, NOT NUMBERED, ON PURPOSE. A `:NNNN` in this docstring is the drift
-    class this file keeps being cured of: the numbers in this table were `45a7d205`'s, and a
-    peer commit (`9b48318e`, round 18) moved four of them before this row was even pushed. Read
-    the arm by the function it lives in; re-grep the arm before quoting a line.
+    class this file keeps being cured of: the numbers in the first version of this table were
+    `45a7d205`'s, and a peer commit (`9b48318e`, round 18) moved four of them before this row
+    was even pushed. Read the arm by the function it lives in; re-grep the arm before quoting
+    a line.
 
     The two this row pins are not tidiness. `_in_loop` decides whether a read sits inside
     the measurement loop, and `_extra_bindings` finds a SECOND bind of the blessed id
     mapper — the fail-open #14281 review P1 closed. With the `AsyncFor` member gone, an
     `async for` body counts as "not in a loop" and an `async for _result_id in …` shadow is
-    invisible, while every gate stays green: a 39-passed arm is a clause no mutant can red,
-    which is the defect class this file deletes clauses for.
+    invisible, while every gate stays green: an arm whose deletion leaves the file fully
+    green is a clause no mutant can red, which is the defect class this file deletes clauses
+    for.
 
-    ⛔ THE OTHER FOUR ARE REDUNDANCY, NOT COVERAGE, AND THAT IS MEASURED — not assumed. For
+    ⛔ THE OTHER SIX ARE REDUNDANCY, NOT COVERAGE, AND THAT IS MEASURED — not assumed. For
     the `async` element-mutation lever
     (`async for _pq in per_query: _pq["order"].sort()`), deleting `ast.AsyncFor` from ANY of
     the four arms in `_mutated_after`'s holders fixpoint or
     `_per_query_element_mutations` leaves BOTH `_per_query_element_mutations` and
     `_mutated_after` returning the same hit list (`[4]`) — the sibling arms still catch it.
-    Re-measured at `9b48318e`: the same four deletions, the same `41 passed`. So none of the
-    four is individually reddenable, and pinning one would mean asserting something already
+    Re-measured at `57735ab47947`: those four deletions AND the two the old census missed —
+    `_rebound_callee_names` and `_rebound_after` — each leave `41 passed`. So none of the six
+    is individually reddenable, and pinning one would mean asserting something already
     asserted. They stay (deleting a fail-closed arm narrows the guard for no gain) and are
     NAMED here so the next round does not re-derive the same measurement or mistake them for
     pinned clauses.
@@ -7891,6 +7911,13 @@ def test_the_ALIAS_axis_iterable_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "call": 'for _x in list((sys.modules,)):\n    _x |= {"tortoise.sdk": _Mirror}\n',
         "subscript":
             'for _x in ((sys.modules,),)[0]:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        # ⛔ THE NESTED LITERAL IS A RESIDUAL TOO, AND THIS TABLE DID NOT NAME IT (#14326
+        # round 19 P3, MEASURED at `57735ab47947`: GREEN here, `RED` one nesting shallower).
+        # Only a `*`/`**` element is spliced; a PLAIN nested container is one element, so the
+        # target binds the inner tuple. Harmless in fact — `|=` on a tuple raises `TypeError`
+        # — but the enumeration this table pins must name it or it reads as exhaustive.
+        "nested literal (only a STARRED element is spliced)":
+            'for _x in ((sys.modules,),):\n    _x |= {"tortoise.sdk": _Mirror}\n',
     }
     for name, lever in residual.items():
         assert not reds(lever), ("declared residual went CLOSED without this table being "
