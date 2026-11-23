@@ -20,9 +20,11 @@ onto the unrelated note below it.
 WHAT THIS FILE NO LONGER CARRIES (2026-11-23, the test-bureaucracy cut)
 ----------------------------------------------------------------------
 The retired centre of this file was `docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`:
-69 of its 87 rows pinned that one document, and ~3,100 lines of apparatus around them graded
-its prose (its header's own enumeration, its re-measured figures, its section-by-section
-cite families, its `main`-set census). That document is a CENSUS — the audit's own verdict
+101 of the 119 rows it held at the rebased base (`origin/main` `0fbfbb5b210c`) pinned
+that one document — 88 naming the `_AUDIT` constant, thirteen spelling the path
+literally — and ~3,100 lines of apparatus around them graded its prose (its header's own
+enumeration, its re-measured figures, its section-by-section cite families, its
+`main`-set census). That document is a CENSUS — the audit's own verdict
 (`#11081`, comment 7107649723, row B2) is *"none — it is a census of where capabilities
 sit"*, i.e. a documentation defect and never a product break. Its cost is the pin loop itself:
 208 line-pinned cites meant every lane that inserted above one had to re-derive the table
@@ -37,6 +39,20 @@ surviving document is retired here with them:
 `test_the_13102_addendum_states_the_consume_pair_at_this_head`. That document is the `#7949`
 bundle's, and its sentence-pins are B4's work, not this file's — say it plainly rather than
 pretending every retired arm graded a document that no longer exists.
+
+⚠️ RETIRED ARMS THAT DO **NOT** GRADE THE DELETED DOCUMENT ARE NOT RETIRED BY B2, and this
+file had to be told that by a fresh reviewer (round 4). Two families were restored after
+being dropped with the apparatus, because their subjects survive:
+
+- **The token-span arm and its four controls.** They grade `_PINS` — the table this cut keeps
+  — not the deleted document's prose. `_rows_outside_their_token` refuses a row that pins one
+  address while grading another, which is the shape that shipped green once
+  (`":37534`"` grading 37547) and which the content arm alone cannot see.
+- **The `#7949` bundle cross-file arm** (`test_the_epic_bundles_i7_prose_cites_the_range_...`).
+  Its subjects are `04-plan.md` and `tests/test_7949_capstone_measure.py`, both surviving; it
+  needs no `_AUDIT` row and no pin, and it was green at this head.
+
+A cut is scoped by what it deletes, not by where the code happened to sit.
 
 ⚠️ ONE CROSS-DOCUMENT ARM IS **NOT** RETIRED: it grades two SURVIVING documents
 (`docs/00_index.md` and `docs/architecture/ENTITY-VERDICT-BANDS.md`), it is named by neither
@@ -219,14 +235,15 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE, _INDEX, _PLAN_4997}
-    # 87 -> 21 at the test-bureaucracy cut: 69 of the 87 rows pinned the deleted
+    # 119 -> 21 at the test-bureaucracy cut: 101 of the 119 rows held at `origin/main`
+    # `0fbfbb5b210c` pinned the deleted
     # `CAPABILITY-PLACEMENT-AUDIT.md` (counted BY DOCUMENT, which is why the number is larger than
-    # the 53 that name the `_AUDIT` constant — sixteen rows spell that path literally), and the
+    # the 88 that name the `_AUDIT` constant — thirteen rows spell that path literally), and the
     # audit-derived census/enumeration rows around them went with the apparatus that graded that
     # document's prose. Of the 18 rows that survive the cut, all 18 are for the six documents above
     # and are otherwise UNCHANGED: three of them were briefly dropped by this cut because a re-cut
     # keyed on the constants misses a row that spells its path literally, which is the anti-shrink
-    # arm doing its job (#14441 review round 1, P1). Two pairs are ADDITIONS, not survivors: the
+    # arm doing its job (#14441 review round 1, P1). Three rows are ADOPTIONS, not survivors: the
     # cut's own docstring rewrite moved the probe file's two cites by one line (`_CENSUS` +2), and the
     # `origin/main` rebase adopted `SUBSTRATE-REBUILD-MAP.md`'s `:37834` row (`#14038` review cycle 2),
     # which grades a SURVIVING document and so is not part of what B2 cuts. `sdk.py:22074` is also
@@ -300,3 +317,244 @@ def test_the_dedup_filter_is_one_address_in_both_documents_that_promise_it() -> 
         f"{target[int(bands_addr) - 1].strip()[:100]!r} — agreeing on the wrong line is still wrong, and "
         "it is the reason this arm checks content as well as agreement."
     )
+
+
+#: Every address a TOKEN names, as `(first, last)` spans. One span per match, never the hull of
+#: a token's numbers — see `_token_spans`.
+_TOKEN_SPAN = re.compile(r":(\d+)(?:-(\d+))?")
+
+
+def _token_spans(token: str) -> list[tuple[int, int]]:
+    """EVERY address the *token* names, as `(first, last)` spans — empty when it names none.
+
+    One span per address match, never the hull of a token's numbers: a token naming two
+    unrelated addresses (`:58603`/`:58605`) names two lines, NOT the line between them. Taking
+    `min..max` over every number turned such a token into a range, so the arm accepted the `58604`
+    the token never mentions — the exact false PASS this arm exists to refuse, one indirection
+    further out. Measured at this head: 0 of the surviving rows carries more than one address, so
+    no row's verdict moves; only the door the next row could have walked through is closed.
+
+    ⛔ RESTORED (round 4, P1) after the test-bureaucracy cut dropped it with the deleted
+    document's apparatus. It grades `_PINS`, which SURVIVES: the subject is the pin table, not
+    the census. Only its `_MAIN_SET_MISSED` leg is gone, because that table died with the
+    document it described.
+    """
+    return [
+        (int(match.group(1)), int(match.group(2) or match.group(1)))
+        for match in _TOKEN_SPAN.finditer(token)
+    ]
+
+
+def _rows_outside_their_token(rows) -> list[str]:
+    """Rows whose graded line is NOT inside the address the row's OWN token names.
+
+    *rows* is `_PINS`' 5-tuples; only the token, the target and the graded line are read.
+    """
+    problems: list[str] = []
+    for row in rows:
+        token, target_rel, line = row[1], row[2], row[3]
+        spans = _token_spans(token)
+        if not spans:
+            # A row whose token names NO address cannot be checked by this arm, so passing it
+            # silently would be the arm vouching for a claim it never read (fail-open).
+            problems.append(
+                f"{target_rel}: the row pins `{token}`, which names NO line address, so this "
+                f"arm cannot check the line it GRADES ({line}) — an unverifiable row passes by "
+                "being unreadable, which is a fail-open in a gate. Give the token the address "
+                "the fragment sits on."
+            )
+            continue
+        if any(first <= line <= last for first, last in spans):
+            continue
+        named = " / ".join(
+            f"{first}" if first == last else f"{first}..{last}" for first, last in spans
+        )
+        problems.append(
+            f"{target_rel}: the row pins `{token}`, which names {named}, but it "
+            f"GRADES line {line} — a graded line outside its own token is a DEFENDER: the "
+            "content arm opens the line the fragment lives on while the token arm only asks "
+            "whether the string occurs anywhere in the document, so a document that names a "
+            "stale address for that line stays green. Re-point the DOCUMENT to the address the "
+            "fragment actually sits on, then re-point this row to the same number."
+        )
+    return problems
+
+
+def test_every_pinned_row_grades_a_line_inside_the_address_its_token_names() -> None:
+    """The token IS the claim: a row that grades some other line defends a stale cite.
+
+    MEASURED, and shipped in the reviewed tree: two rows pinned a STALE address while grading the
+    CORRECT line — `(":31496", sdk.py, 31551)` for the §2.5 `:Tag` header entry and
+    `(":37534` in `_file_human_approval`", sdk.py, 37547)` in the substrate map. Both arms were
+    green: `_resolve`'s content arm opened `31551` / `37547` (where the fragment is), and its token
+    arm only asks whether the token string occurs SOMEWHERE in the document (it did). So the
+    document could name an address 55 lines above the statement it describes — the `#13290` class this
+    file exists to stop — with nothing red.
+
+    A RANGE is anchored on the line inside it that carries the fragment (the file's stated
+    convention), so the arm accepts any line in `START..END`; a single-value token must grade that
+    value exactly, and a token naming SEVERAL addresses accepts only a line one of them names —
+    never the hull between them, and never nothing at all (the two fail-open doors the controls
+    below re-open).
+
+    Non-vacuity is the negative controls below, which re-introduce the shipped shapes.
+    """
+    problems = _rows_outside_their_token(_PINS)
+    assert not problems, "\n".join(problems)
+
+
+def test_every_pinned_token_occurs_exactly_once_in_its_document() -> None:
+    """One pin, one SITE — a token occurring twice can have one site re-pointed with nothing red.
+
+    This is the surviving half of `_TOKEN_OCCURRENCES` (round 4, P1). That table carried per-token
+    counts AND a `declared == pinned` set equality; the set equality is subsumed by `_PINS`, but the
+    COUNT was not, and the anti-shrink arm cannot express it: a row deleted and another added inside
+    the same document set satisfies both `docs == {six}` and `len(_PINS) == 21`. Measured at this head:
+    all 21 tokens occur exactly once, so the invariant is green and load-bearing rather than
+    aspirational.
+
+    ⛔ DERIVED, not transcribed: no count is written down here, because a transcribed count is the
+    figure-rot class this file exists to catch (a table of 21 literals would be stale the moment a
+    document legitimately mentions a site twice). The remedy for a genuine second mention is the
+    file's own convention — carry enough TABLE context in the token to make it unique, and pin the
+    second site as its own row.
+    """
+    repeated = []
+    for doc_rel, token, _target, _line, _frag in _PINS:
+        count = (REPO / doc_rel).read_text(encoding="utf-8").count(token)
+        if count != 1:
+            repeated.append(
+                f"{doc_rel}: `{token}` occurs {count}x, not 1x — one site can now be re-pointed "
+                "alone while this pin stays green. Make the token specific enough to name one site "
+                "(add its table/sentence context), or pin each site as its own row."
+            )
+    assert not repeated, "\n".join(repeated)
+
+
+def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
+    """Negative control — the SHIPPED pre-fix shape: stale token, correct line, green.
+
+    The synthetic rows name `_SUBSTRATE` rather than `_AUDIT` (the deleted document) because
+    `_rows_outside_their_token` reads only the token, target and line; the doc field is carried for
+    the error message. The `:37534` row below is the REAL shipped one, from the surviving
+    `SUBSTRATE-REBUILD-MAP.md`.
+    """
+    stale = (_SUBSTRATE, "`:31496`", _SDK, 31551, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})")
+    problems = _rows_outside_their_token((stale,))
+    assert problems, "a token naming `:31496` must not be allowed to grade line 31551"
+    assert "31496" in problems[0] and "31551" in problems[0], problems[0]
+    # The substrate-map row the same review found, in its shipped form.
+    shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37547, "``:Document`` node).")
+    assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37547 must red"
+    # A range token is accepted on any line INSIDE the range it names (the anchor convention).
+    inside = (_SUBSTRATE, "`:7599-7602`", _SE, 7602, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
+    assert not _rows_outside_their_token((inside,)), "a line inside the named range must pass"
+
+
+def test_a_token_naming_two_addresses_does_not_vouch_for_the_hull_between_them() -> None:
+    """Negative control — the fail-open `min..max` left in this arm, re-opened here.
+
+    On the PRE-FIX code `_token_span` returned `(min(numbers), max(numbers))` over EVERY number a
+    token carries, so a token naming two unrelated addresses became a range spanning the gap: the
+    arm accepted the `58604` neither address names. That is the same false PASS this arm exists to
+    refuse — a row asserting an address the document does not carry — so it is refused here rather
+    than recorded as a residual.
+    """
+    between = (_SUBSTRATE, "`:58603`/`:58605`", _SDK, 58604, "rows = proj.g.query(")
+    assert _rows_outside_their_token((between,)), (
+        "a token naming :58603 and :58605 must NOT vouch for the line between them"
+    )
+    # …and each address it DOES name is still accepted, so the tightening rejects only the hull.
+    for named in (58603, 58605):
+        row = (between[0], between[1], between[2], named, between[4])
+        assert not _rows_outside_their_token((row,)), (
+            f"{named} is an address the token names, so it must pass"
+        )
+
+
+def test_a_row_whose_token_names_no_address_is_reported_not_skipped() -> None:
+    """Negative control — an unreadable row must not pass by being unreadable.
+
+    On the PRE-FIX code `_token_span` returned `None` for a token with no digits and the loop
+    `continue`d, so such a row was silently exempt from the arm — the gate vouching for a claim it
+    never read.
+
+    ⛔ NO ROW COUNT HERE ON PURPOSE: an earlier form said "0 of 112", then a peer lane added three
+    `_PINS` rows and the sentence was silently two rows stale — the same unverified-literal class this
+    file exists to catch, in prose. The arm scans whatever `_PINS` holds.
+    """
+    unaddressed = (_SUBSTRATE, "`_file_human_approval`", _SDK, 37547, "``:Document`` node).")
+    assert _rows_outside_their_token((unaddressed,)), (
+        "a row whose token names no address must be REPORTED, not skipped"
+    )
+
+
+def test_the_resolve_content_arm_is_unchanged_by_the_token_arm() -> None:
+    """The two arms are independent: a row can be content-correct AND token-stale.
+
+    `_resolve` answers two questions — does the token still occur, and does the GRADED line carry
+    the fragment — and a row that pins one address while grading another satisfies BOTH (the token
+    exists, and the graded line does carry the fragment). That is what the shipped rows
+    demonstrated, and why a separate arm was needed instead of a stricter `_resolve`.
+
+    Built from REAL surviving artifacts rather than a synthetic token: `SUBSTRATE-REBUILD-MAP.md`
+    carries both `:3506` and `search_engine.py:3508`, and line 3508 is the line that carries the
+    fragment, so this row is exactly the shape — content arm silent, token arm red.
+    """
+    correct_line_wrong_token = (
+        _SUBSTRATE, "`:3506`", _SE, 3508, "``:Source``/``:Document`` row must not contribute",
+    )
+    assert _resolve((correct_line_wrong_token,)) == [], (
+        "the content arm must stay silent here — that silence is why the token arm exists"
+    )
+    assert _rows_outside_their_token((correct_line_wrong_token,)), (
+        "the token arm must red on the same row the content arm passes"
+    )
+
+
+def test_the_epic_bundles_i7_prose_cites_the_range_its_row_carries() -> None:
+    """Prose that quotes a document's line range must be the range the document carries at THIS head.
+
+    ⛔ WHY THIS CROSS-FILE ARM EXISTS (#14038 review cycle 13, P3). `04-plan.md`'s I7 row is graded
+    structurally in `tests/test_7949_capstone_measure.py`, which parses whatever range the row carries —
+    so the COMMENT BLOCKS beside that guard, which quote the same range in prose, were graded by nothing.
+    They read `:15557-15634` while the row had already been re-derived to `:15563-15640` by the commit
+    that moved it, and the same blocks still attributed the move to "this branch's own 108 inserted
+    lines" when `hosted_api.py` grows 114 against `main`. That is this file's own subject one level down:
+    a figure re-measured in one place and CARRIED in another.
+
+    ⛔ IT LIVES HERE, NOT THERE, on purpose: `test_7949_capstone_measure.py`'s `durations` row pins that
+    file's own `^def test_` count in handwritten prose, so adding a case there would demand a re-write of
+    that row's long enumeration for no benefit — and an arm placed INSIDE the existing bundle test would
+    be INERT the moment that function reds — and a guard that is dead exactly when its sibling is
+    failing is the shape this file exists to catch, whatever the cause of the sibling's red.
+
+    Head-free on purpose: the rule is "the citation labelled `at this head` equals the row's", so it
+    needs no history, no `main` and no pin — and it cannot pass by agreeing with itself, because the ROW
+    is the authority and the COMMENT is the claim.
+
+    ⛔ RESTORED (round 4, P1) after the test-bureaucracy cut dropped it with the deleted document's
+    apparatus: it grades two SURVIVING files, it has no `_AUDIT` dependency, and it was green at this
+    head when run. B2 retires the census document's arms, not every arm that happened to sit nearby.
+    """
+    _plan = REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md"
+    _rows = [ln for ln in _plan.read_text(encoding="utf-8").splitlines() if "| **I7** |" in ln]
+    assert len(_rows) == 1, (
+        f"I7 must be exactly ONE line of `04-plan.md` to scope its range cite to, found {len(_rows)} — "
+        "re-word this guard rather than letting it bind the easier of two")
+    _cite = re.search(r"`hosted_api\.py:(\d+)-(\d+)`", _rows[0])
+    assert _cite is not None, (
+        "`04-plan.md` I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
+        "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
+    _start, _end = int(_cite.group(1)), int(_cite.group(2))
+    _src = (REPO / "tests/test_7949_capstone_measure.py").read_text(encoding="utf-8")
+    _here = re.findall(r"`:(\d+)-(\d+)` at this head", _src)
+    assert _here, (
+        "no `:START-END` in the bundle test is labelled `at this head`, so this arm cannot run — keep the "
+        "label on the citation that names the CURRENT head's range, do not delete the arm")
+    for _start_s, _end_s in _here:
+        assert (int(_start_s), int(_end_s)) == (_start, _end), (
+            f"the bundle test calls `:{_start_s}-{_end_s}` the range 'at this head', but `04-plan.md`'s "
+            f"I7 row carries `:{_start}-{_end}`. A citation labelled for this head that disagrees with the "
+            "document is the re-derived-number-carried-instead-of-re-derived class: re-derive it from "
+            "the row, or label it with the head it was actually taken at.")
