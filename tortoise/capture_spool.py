@@ -925,13 +925,14 @@ def _entry_bytes(root: Path, session_id: str) -> int:
 def _orphan_paths(root: Path) -> list[Path]:
     """Quarantined turn logs in the entries dir, OLDEST first.
 
-    ``_quarantine_log`` moves a corrupt-meta entry's transcript aside as
-    ``<key>.turns.jsonl.orphan[N]``. Nothing else reads that name, so without
-    this accounting the bytes are invisible to ``_entry_bytes`` and to the meta
-    scan: the spool could grow past ``max_total_bytes`` without bound the moment
-    a meta was quarantined (#8531 review). A rename preserves mtime, so an
-    orphan carries the age of the transcript it holds and oldest-first eviction
-    is deterministic.
+    ``_quarantine_log`` moves an entry's transcript aside as
+    ``<key>.turns.jsonl.orphan[N]`` when its bytes are unusable — under a corrupt
+    meta (#7708) or under a rewrite that could not use them (#14359). Nothing
+    else reads that name, so without this accounting the bytes are invisible to
+    ``_entry_bytes`` and to the meta scan: the spool could grow past
+    ``max_total_bytes`` without bound the moment a meta was quarantined (#8531
+    review). A rename preserves mtime, so an orphan carries the age of the
+    transcript it holds and oldest-first eviction is deterministic.
     """
     d = _entries_dir(root)
     try:
@@ -975,20 +976,38 @@ def _turn_log_has_content(root: Path, session_id: str) -> bool:
 def _quarantine_log(log: Path) -> Path | None:
     """Move a turn log ASIDE instead of unlinking it — kept FOR FORENSICS.
 
-    Used by `list_spool_metas` when the META is corrupt: the transcript has
-    nothing to do with the corruption and is the only copy, so deleting it turns
-    a bad `meta.json` into permanent data loss (#7708). An empty/absent log is
-    removed (nothing to keep); a log with bytes is renamed to
-    ``<name>.turns.jsonl.orphan`` with a numeric suffix so an earlier orphan is
-    never clobbered. Best-effort: a rename failure leaves the log in place,
-    which is still better than deleting it.
+    TWO call sites, one rule: bytes no writer could use are never destroyed.
 
-    NOT re-fileable — the honesty this owes the reader who finds an `.orphan`:
-    the entry's key is ``sha256(session_id)[:32]`` and the corrupt meta (the only
-    copy of the session id) is REMOVED, so no verb can reconstruct the session
-    id the server needs. The bytes are preserved FOR FORENSICS (grep a lost turn,
-    recover a prefix by hand), not for a retry. The wording here once said
-    "recoverable", which overstated what the name can deliver.
+    * `list_spool_metas` when the META is corrupt — the transcript has nothing
+      to do with the corruption and is the only copy, so deleting it turns a
+      bad `meta.json` into permanent data loss (#7708);
+    * :func:`write_spool_entry` when a non-extending rewrite is about to replace
+      a log it CANNOT use (the readable-meta zero-parse shape, or a torn tail —
+      #14359). A DELIBERATE rewrite is not that case and is not quarantined.
+
+    An empty/absent log is removed (nothing to keep); a log with bytes is renamed
+    to ``<name>.turns.jsonl.orphan`` with a numeric suffix so an earlier orphan
+    is never clobbered. Best-effort: a rename failure leaves the log in place,
+    which is still better than deleting it. Returns the orphan path (or None), so
+    a caller that moves the log aside BEFORE a write can put the bytes back when
+    that write fails.
+
+    NOT re-fileable — the honesty this owes the reader who finds an `.orphan`.
+    The entry key is ``sha256(session_id)[:32]``, and the session id is not
+    recoverable from an orphan on EITHER call site: from `list_spool_metas` the
+    meta that held it is REMOVED, and from `write_spool_entry` the meta at that
+    same key is REWRITTEN to describe the new turns (its digest no longer covers
+    the orphaned bytes, and no version of it ever named them again). The bytes
+    are preserved FOR FORENSICS (grep a lost turn, recover a prefix by hand),
+    not for a retry. The wording here once said "recoverable", which overstated
+    what the name can deliver.
+
+    ⚠️ AN ORPHAN CARRIES THE MTIME OF THE TRANSCRIPT IT HOLDS (a rename preserves
+    it), and `_orphan_paths` evicts oldest-first — correct for the corrupt-meta
+    class, whose age is real. Nothing else creates an orphan any more: the
+    window-shift class that would have carried a GOOD log's newest mtime is the
+    one the #14359 gate deliberately excludes, so this ordering cannot be
+    inverted by routine rewrites.
     """
     if _file_size(log) <= 0:
         with contextlib.suppress(OSError):
@@ -2204,13 +2223,31 @@ def write_spool_entry(
                 "bytes": (_entry_bytes(root, snapshot.session_id) if prior else 0),
                 "discards": discards}
 
-    # #14359: a log that holds bytes but parses to ZERO turns is unusable, yet
-    # the rewrite below would replace it silently. Keep those bytes as an
-    # `.orphan` first (the same forensic move a corrupt meta's log gets), so
-    # the stored content is never destroyed without a trace. Gated on the
-    # BYTES, not on the parse, and on a non-extending rewrite only.
-    if not extends and _turn_log_has_content(root, snapshot.session_id):
-        _quarantine_log(log_path)
+    # #14359: a turn log whose bytes THIS WRITE CANNOT USE is never replaced
+    # silently — its bytes are moved aside as an `.orphan` first (the same
+    # forensic move a corrupt meta's log gets), so the stored content is never
+    # destroyed without a trace. "Cannot use" is exact, and it is NOT the same
+    # question as "is rewriting":
+    #   * `stored` is EMPTY over a byte-bearing log — the READABLE-meta sibling
+    #     of the torn-transcript case (the issue's shape 1): there is a meta, so
+    #     the gate on `prior is not None` never ran, the parse produced nothing,
+    #     and the bytes are the only copy of whatever they hold; and
+    #   * the log does not end on a RECORD BOUNDARY — its torn tail's turn is
+    #     counted in no meta and no reader (#3963).
+    # ⛔ A DELIBERATE rewrite — a MAX_TURNS window shift, a branch, a compaction
+    # — parsed its predecessor and is replacing it on purpose. That is NOT this
+    # class, and it must not be: keeping a copy there spends a whole log of the
+    # byte ceiling on every turn of a long session (measured: 40 rewrites of a
+    # 110 KB log leave 4.39 MB of orphans against 110 KB live), and because
+    # `prune_spool` only reclaims orphans under a ceiling, that litter then makes
+    # the spool evict ANOTHER session's FILED entry to pay for a copy nothing
+    # lost. The gate is therefore the BYTES (never the parse RESULT alone — a
+    # parse is exactly what just failed) PLUS "could not use them".
+    unusable_bytes = (
+        _turn_log_has_content(root, snapshot.session_id)
+        and (not stored or not _log_has_complete_records(log_path)))
+    quarantined = (_quarantine_log(log_path)
+                   if not extends and unusable_bytes else None)
     try:
         if extends:
             fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -2222,6 +2259,19 @@ def write_spool_entry(
             _atomic_write(log_path, log_text)
         _atomic_write(meta_path, meta_text)
     except OSError as exc:
+        # The rewrite did NOT land — so put BACK anything moved aside above.
+        # An ABSENT log is the drain's PROVABLY-EMPTY arm (`_flush_one` records
+        # `transcript_empty` and UNLINKS the entry), so leaving it absent would
+        # let our own failed write convert a fileable capture into a deletion
+        # that reports "there was nothing to keep" — the false-reason class this
+        # module exists to close (#14359 review). Taken only while the log is
+        # still absent: a replacement that DID land is never clobbered by the
+        # old bytes, and a restore that itself fails leaves the bytes in the
+        # orphan (still better than deleting them).
+        if quarantined is not None \
+                and not _turn_log_has_content(root, snapshot.session_id):
+            with contextlib.suppress(OSError):
+                os.replace(quarantined, log_path)
         # A filesystem failure (full disk, read-only home) is a LOSS — record
         # it with a reason rather than returning an empty discard list.
         discards.append(record_discard(root, {
@@ -2401,6 +2451,18 @@ def spool_saturated(
 
     One spool directory, two legs: the Pi leg's ``spoolSaturated`` is the twin
     and states the same rule.
+
+    ⚠️ STATED RESIDUAL (#14359 review): the twins now differ on ONE input, the
+    one no writer produces — a hand-placed meta whose ``session_id`` field does
+    not match its own file name. This leg sums ``_entry_bytes`` per DISTINCT
+    session_id (and ``prune_spool`` does the same, so the two agree about one
+    spool); ``saturatedForMetas`` in ``tortoise/pi-hooks/tortoise-capture.ts``
+    still reduces per META, so on that input this leg can answer "not saturated"
+    where the Pi leg answers "saturated". It is recorded rather than mirrored
+    here because a behaviour change in the shipped TS seam moves the pi install
+    contract generation, which makes every installed copy read ``stale-artifact``
+    — a blast radius this arithmetic fix does not earn. The Pi half (this one and
+    the #14359 shape-1 quarantine, which that leg still lacks) is its own issue.
     """
     metas, _ = list_spool_metas(root, repair=repair)
     return _saturated_for_metas(
@@ -2565,7 +2627,18 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
         key=lambda m: (0 if _entry_is_filed(m) else 1, *_age_key(m)),
     )
     count = len(metas)
-    total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
+    # #14359: ONE count per DISTINCT session_id — the same arithmetic
+    # `_saturated_for_metas` uses, and it has to be the same or the two
+    # predicates disagree about one spool. Two metas naming one session address
+    # the SAME files, so a per-META sum invented bytes that are not on disk: with
+    # a duplicate meta, promotion (per-session) admits a write the spool can hold
+    # while this loop (per-meta) believes it is over the byte ceiling and evicts
+    # a FILED entry to pay for a copy that does not exist. `entry_bytes` is also
+    # what the eviction decrements, so a second meta naming an already-evicted
+    # session can never be spent twice.
+    entry_bytes = {sid: _entry_bytes(root, sid)
+                   for sid in {m["session_id"] for m in metas}}
+    total = sum(entry_bytes.values())
     total += sum(_file_size(path) for path in orphans)
     # The quarantined-log pass runs AFTER the filed-entry pass below, never
     # before it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on
@@ -2588,7 +2661,9 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
         # #6388 ranking; this makes it the whole candidate set.
         if not _entry_is_filed(meta):
             continue
-        size = _entry_bytes(root, meta["session_id"])
+        # Popped, not looked up: the bytes leave `total` at most ONCE however
+        # many metas name this session (#14359).
+        size = entry_bytes.pop(meta["session_id"], 0)
         # #6388: name the CLASS of loss. The discard line is the only surface a
         # cap eviction has, and "spool has 1001 entries" alone read (fairly, from
         # that text) as "something was dropped", with no way to tell the safe
