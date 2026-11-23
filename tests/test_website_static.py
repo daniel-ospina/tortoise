@@ -10280,11 +10280,14 @@ class TestProductTeamsCopy:
     items 4-5` are step 03's heading and body, and `#13645 item 6` is the
     pricing-CTA baseline. They used to read `owner item 1` / `owner item 2`,
     which collided with THIS repo's other owner item set: `#13696 item 3` is
-    the outcomes/lead measure overhang, and `#13696 item 2` is the deleted
-    hairline (`:10396`, `:10548`, `:10564`, `:10599`, `:10451`). A bare `grep
+    the outcomes/lead measure overhang (`test_the_outcomes_grid_is_never_wider_
+    than_the_prose_above_it`, `test_the_lead_resolves_the_shared_measure_in_the_
+    prose_font`), and `#13696 item 2` is the deleted hairline
+    (`test_the_intro_opens_on_the_lead_and_carries_no_rule`). A bare `grep
     "owner item 3"` returned both fixes as one undifferentiated set, so an
     artifact that records four different owner items under two labels could not
-    be resolved back to the decision that owns it.
+    be resolved back to the decision that owns it. Named rows, not line
+    numbers: a citation into this file rots on the next edit above it.
 
     ⛔ AND THE TYPOS' ABSENCE IS PINNED SEPARATELY
     (`test_the_pdfs_two_typos_are_absent_from_the_rendered_page`). Without that
@@ -10768,8 +10771,8 @@ class TestProductTeamsCopy:
         h2 = re.search(r"<h2>(.*?)</h2>", compute, re.S)
         assert h2, (
             "#beat-compute has no <h2> — the compute claim reads as a "
-            "continuation of the intro above it, which is the defect the "
-            "owner's item 1 fixes")
+            "continuation of the intro above it, which is the defect "
+            "#13645 item 2 fixes")
         assert _beat_text(h2.group(1)) == self.COMPUTE_H2, (
             f"the compute beat's title reads {_beat_text(h2.group(1))!r}; the "
             f"owner asked for {self.COMPUTE_H2!r} (#13645 item 2)")
@@ -10931,8 +10934,8 @@ class TestProductTeamsCopy:
 class TestProductTeamsPricingCardCtaBaseline:
     """#13645 item 6 — the four pricing CTAs share ONE baseline.
 
-    The report was that the buttons sit at
-    different heights because the tier copy has different lengths. The BOXES
+    The report was that the buttons sit at different heights because the tier
+    copy has different lengths. The BOXES
     were never the problem — `.pricing-grid`'s default `align-items: stretch`
     already gives all four one height (measured 1440x900: every card ran
     304.33 -> 815.72) — the defect was where the CTA sat INSIDE its box:
