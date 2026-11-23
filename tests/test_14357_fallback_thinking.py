@@ -10,11 +10,14 @@ default (thinking: high) — the failure mode this same module records as
 actually posts), never on the constructor: the class default
 (``disable_reasoning=False``) is exactly where this rotted, so an assertion on
 the constructor would have passed forever while the fallback stayed thinking-on.
-That contract is about the six suppression tests (through ``:243``). The tests
-from ``test_empty_length_response_raises_the_yield_guard`` on are the OTHER
-subject — the yield guard in ``extractor_v2._complete`` (its raise, its
-no-retry decision, and the census entry) — and they are not wire-body assertions;
-see the "the yield guard: an empty extraction never reads as no facts" heading.
+That contract is about the suppression tests ABOVE the
+"the yield guard: an empty extraction never reads as no facts" heading. The
+tests below that heading are the OTHER subject — the yield guard in
+``extractor_v2._complete`` (its raise, its no-retry decision, and the census
+entry) — and they are not wire-body assertions.
+
+⛔ Cite that boundary by the heading, never by a line number or a case count:
+this file grows, and a pinned ordinal went three tests stale in one round.
 """
 from __future__ import annotations
 
