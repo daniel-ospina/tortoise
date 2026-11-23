@@ -63,6 +63,145 @@
   "output schema (`output_contract`)": 2187.3,
   "stage instructions (template prose)": 6430.1
  },
+ "serialization": {
+  "compact_tokens": 52346,
+  "emissions": 14,
+  "indented_tokens": 77561,
+  "items": 580,
+  "receipts": 7,
+  "rows": [
+   {
+    "arm": "raw",
+    "compact_tokens": 4243,
+    "emission_tokens": 4582,
+    "indented_tokens": 6276,
+    "items": 47,
+    "session": "wp01_quarry_debug",
+    "story_tokens": 1143
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 4851,
+    "emission_tokens": 5266,
+    "indented_tokens": 7165,
+    "items": 51,
+    "session": "wp01_quarry_debug",
+    "story_tokens": 640
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 3815,
+    "emission_tokens": 4860,
+    "indented_tokens": 5833,
+    "items": 45,
+    "session": "wp02_lumen_refactor",
+    "story_tokens": 879
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 4084,
+    "emission_tokens": 4424,
+    "indented_tokens": 5998,
+    "items": 49,
+    "session": "wp02_lumen_refactor",
+    "story_tokens": 653
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 3327,
+    "emission_tokens": 3584,
+    "indented_tokens": 5118,
+    "items": 39,
+    "session": "wp03_ember_design",
+    "story_tokens": 928
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 3872,
+    "emission_tokens": 4130,
+    "indented_tokens": 5626,
+    "items": 46,
+    "session": "wp03_ember_design",
+    "story_tokens": 596
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 2975,
+    "emission_tokens": 3213,
+    "indented_tokens": 4412,
+    "items": 30,
+    "session": "wp04_aurora_perf",
+    "story_tokens": 795
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 3880,
+    "emission_tokens": 4187,
+    "indented_tokens": 5696,
+    "items": 38,
+    "session": "wp04_aurora_perf",
+    "story_tokens": 509
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 4084,
+    "emission_tokens": 4380,
+    "indented_tokens": 6048,
+    "items": 45,
+    "session": "wp05_retro_writeup",
+    "story_tokens": 853
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 5114,
+    "emission_tokens": 5453,
+    "indented_tokens": 7547,
+    "items": 54,
+    "session": "wp05_retro_writeup",
+    "story_tokens": 614
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 3952,
+    "emission_tokens": 4276,
+    "indented_tokens": 5970,
+    "items": 43,
+    "session": "wp06_quarry_rollout",
+    "story_tokens": 840
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 3058,
+    "emission_tokens": 3263,
+    "indented_tokens": 4346,
+    "items": 36,
+    "session": "wp06_quarry_rollout",
+    "story_tokens": 342
+   },
+   {
+    "arm": "raw",
+    "compact_tokens": 1704,
+    "emission_tokens": 3384,
+    "indented_tokens": 2566,
+    "items": 20,
+    "session": "wp07_bluepeak_followup",
+    "story_tokens": 893
+   },
+   {
+    "arm": "narrative",
+    "compact_tokens": 3387,
+    "emission_tokens": 3542,
+    "indented_tokens": 4960,
+    "items": 37,
+    "session": "wp07_bluepeak_followup",
+    "story_tokens": 479
+   }
+  ],
+  "saved_pct": 32.5,
+  "saved_per_emission": 1801,
+  "saved_tokens": 25215,
+  "tokens_per_item": 100.9
+ },
  "solved": {
   "embed_list_tokens": 12425.0,
   "embed_over_emission": 1.23,

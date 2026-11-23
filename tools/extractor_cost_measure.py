@@ -1834,7 +1834,8 @@ def _render_regions() -> dict[str, dict[str, int]]:
     return out
 
 
-def decompose(rows: list[dict], *, arm: str = "cold") -> dict:
+def decompose(rows: list[dict], *, arm: str = "cold",
+              receipts: Path | None = None) -> dict:
     """Attribute the two fitted constants of #14295 to the regions that make
     them (#14343).
 
@@ -1952,6 +1953,7 @@ def decompose(rows: list[dict], *, arm: str = "cold") -> dict:
         },
         "levers_offline": _offline_levers(statics, c1, c2, c4, t_med,
                                           two_call_share, oc2),
+        "serialization": serialization_lever(receipts) if receipts else {},
     }
 
 
@@ -1998,6 +2000,88 @@ def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
                          "sizeable offline"),
     }
     return out
+
+
+def serialization_lever(receipts: Path) -> dict:
+    """#14343: the `indent=1` tax on S4's embed-list region, measured on REAL
+    emissions.
+
+    The one place in the pipeline where a token count can be cut with the
+    JSON's CONTENT unchanged: S4's prompt re-serializes S2's list, and
+    ``indent=1`` writes a newline + a space per key/line. The write-path
+    receipts (`tests/eval/write_path/receipts/*/*.arms.json`) carry the real
+    S2 emissions, so both serializations are computed on the same data — this
+    is a measurement, not an estimate from a synthetic list.
+    """
+    enc = _encoding()
+    rows = []
+    for path in sorted(receipts.glob("*.arms.json")):
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for arm, embed in (rec.get("embed_list") or {}).items():
+            if not isinstance(embed, dict):
+                continue
+            items = sum(len(v) for v in embed.values() if isinstance(v, list))
+            if not items:
+                continue
+            indented = len(enc.encode(json.dumps(embed, indent=1)))
+            compact = len(enc.encode(json.dumps(embed, separators=(",", ":"))))
+            stats = (rec.get("s2_stats") or {}).get(arm) or {}
+            rows.append({"session": path.name.split(".")[0], "arm": arm,
+                         "items": items,
+                         "indented_tokens": indented,
+                         "compact_tokens": compact,
+                         "emission_tokens": stats.get("completion_tokens"),
+                         "story_tokens": len(enc.encode(
+                             (rec.get("stories") or {}).get(arm) or ""))})
+    if not rows:
+        return {}
+    ti = sum(r["indented_tokens"] for r in rows)
+    tc = sum(r["compact_tokens"] for r in rows)
+    emissions = [r["emission_tokens"] for r in rows if r["emission_tokens"]]
+    return {
+        "receipts": len({r["session"] for r in rows}),
+        "emissions": len(rows),
+        "items": sum(r["items"] for r in rows),
+        "indented_tokens": ti,
+        "compact_tokens": tc,
+        "saved_tokens": ti - tc,
+        "saved_pct": round(100.0 * (ti - tc) / ti, 1) if ti else None,
+        "saved_per_emission": round((ti - tc) / len(rows)),
+        "tokens_per_item": (round(sum(emissions) / sum(r["items"] for r in rows), 1)
+                            if emissions else None),
+        "rows": rows,
+    }
+
+
+def render_serialization_lever(lev: dict) -> str:
+    if not lev:
+        return ""
+    lines = ["### The one information-neutral lever: `indent=1` on S4's "
+             "embed-list region", ""]
+    lines.append(
+        f"Measured on **{lev['receipts']} real sessions / {lev['emissions']} "
+        f"emissions / {lev['items']} items** from "
+        f"`tests/eval/write_path/receipts/`: the list S4 re-reads costs "
+        f"**{lev['indented_tokens']:,}** tokens as today's `indent=1` dump and "
+        f"**{lev['compact_tokens']:,}** with compact separators — "
+        f"**{lev['saved_tokens']:,} tokens ({lev['saved_pct']}%) that are pure "
+        f"whitespace**, {lev['saved_per_emission']:,} per emission. "
+        f"S2's own emission is {lev['tokens_per_item']} completion tokens per "
+        f"item, so the re-serialized copy is ~1.3x the emission it copies.")
+    lines.append("")
+    lines.append("| session | arm | items | emission | `indent=1` | compact | "
+                 "saved |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for r in lev["rows"]:
+        lines.append(f"| {r['session']} | {r['arm']} | {r['items']} | "
+                     f"{r['emission_tokens'] or '—'} | {r['indented_tokens']:,} | "
+                     f"{r['compact_tokens']:,} | "
+                     f"{r['indented_tokens'] - r['compact_tokens']:,} |")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def render_decompose(dec: dict) -> str:
@@ -2067,6 +2151,8 @@ def render_decompose(dec: dict) -> str:
             "the document: the item COUNT is what moves, and a document's "
             "length barely moves it (R²=0.000 on S2's input fit).")
         lines.append("")
+    if dec.get("serialization"):
+        lines.append(render_serialization_lever(dec["serialization"]))
     if dec.get("levers_offline"):
         lines.append("### Candidate levers, sized offline")
         lines.append("")
@@ -2141,6 +2227,9 @@ def main(argv: list[str] | None = None) -> int:
     dec.add_argument("--out", required=True, type=Path)
     dec.add_argument("--json-out", type=Path)
     dec.add_argument("--arm", default="cold")
+    dec.add_argument("--receipts", type=Path, default=None,
+                     help="dir of write-path `*.arms.json` receipts carrying "
+                          "real S2 emissions (sizes the serialization lever)")
 
     args = ap.parse_args(argv)
     if args.cmd == "run":
@@ -2159,7 +2248,8 @@ def main(argv: list[str] | None = None) -> int:
                                split_max_turns=args.split_max_turns,
                                split_only=args.split_only)
     if args.cmd == "decompose":
-        decomposition = decompose(load_rows(args.evidence), arm=args.arm)
+        decomposition = decompose(load_rows(args.evidence), arm=args.arm,
+                                  receipts=args.receipts)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(finalize_markdown(render_decompose(decomposition)),
                             encoding="utf-8")

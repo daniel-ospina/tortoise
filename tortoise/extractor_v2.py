@@ -1174,6 +1174,39 @@ def _s4_delta_enabled() -> bool:
     return env_flag("TORTOISE_S4_DELTA", True)
 
 
+def _embed_json_kwargs() -> dict:
+    """#14343: how S4's prompt serializes S2's embed list — the ONE lever this
+    issue's composition table points at that is information-neutral.
+
+    The composition of the input constant (#14343, `docs/evidence/14343-amplify`)
+    says the largest single region is **S2's embed list re-sent to S4** —
+    14,164 of 45,503 tokens, 32.5%. Measured on the 14 real S2 emissions in
+    `tests/eval/write_path/receipts/7947-arms-2026-10-18` (580 items), **32.5% of
+    that JSON is `indent=1` whitespace**: 77,561 tokens indented vs 52,346 with
+    compact separators, i.e. **1,801 tokens per emission** (the ratio is stable —
+    29.6–35.0% across all 14). The list's CONTENT is byte-identical either way;
+    only the layout differs.
+
+    ⛔ DEFAULT = ``indent=1``, i.e. TODAY'S BYTES. The saving is measured; the
+    EFFECT ON EXTRACTION QUALITY IS NOT, because the arbiter for that (`#7949`'s
+    E1/E2/E3/E4 bars) needs a provider key and the box this was measured on has
+    none. Shipping a prompt-bytes change default-ON on an unrun quality bar is
+    the trade `#14343` forbids, so the lever ships ARMED-ABLE, not armed:
+    set ``TORTOISE_S4_EMBED_JSON=compact`` to take the 1,801 tokens/emission
+    and re-run the capstone corpus in the same session to prove the bars hold.
+
+    Returns the ``json.dumps`` keywords — ``{"indent": 1}`` is the pre-#14343
+    call, byte-for-byte, so an unset flag renders identically.
+
+    GARBAGE → the default (indent), per the #4097 tristate contract: a typo can
+    never silently move a production prompt.
+    """
+    mode = (os.environ.get("TORTOISE_S4_EMBED_JSON") or "").strip().lower()
+    if mode == "compact":
+        return {"separators": (",", ":")}
+    return {"indent": 1}
+
+
 def _vet_enabled() -> bool:
     """#5005: the call-time S2.2 VET toggle.
 
@@ -4059,7 +4092,10 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
         "chains_text": chains,
         "anti_routine": _s2s4_rules(master, core_only=core_only),
         "search_results": _render_search_results(search),
-        "embed_list_json": json.dumps(embed_list, indent=1),
+        # #14343: `indent=1` costs 32.5% of this region in whitespace (measured
+        # on 14 real emissions). Default unchanged; `TORTOISE_S4_EMBED_JSON=
+        # compact` arms the saving — see `_embed_json_separators`.
+        "embed_list_json": json.dumps(embed_list, **_embed_json_kwargs()),
         "date_anchor": _date_anchor(session_date, include_emission_rules=True),
         "output_contract": contract,
         # #10311: the STORY is verbatim session narrative, so it is the second

@@ -146,12 +146,18 @@ So S1's per-document input is `1.68 × (1,630 static + T)` and the mechanism tha
 
 | lever | size | quality-neutral? |
 |---|---|---|
-| **Bound / shape S2's emission** (the 14,164-token re-read is `items × ~227 tokens`) | the dominant term by construction: cutting the item count or the record shape by 30 % removes ~4,200 output + ~5,100 S4 input per document | **NO** — the records carry E2/E3 provenance; this is the `#7949` trade, and it is a measurement, not arithmetic |
+| **`indent=1` → compact separators on S4's `embed_list_json`** — ⚠️ **SHIPPED, default OFF** | **−4,603 tokens/doc (−7.1 %)**: 32.5 % of the 14,164-token region | **Information-neutral**: the list's content is byte-identical, only its layout differs. ⚠️ The *formatting* effect on the model is unmeasured here (§0), which is exactly why the default is today's bytes |
+| **Bound / shape S2's emission** (the 14,164-token re-read is `items × ~101 tokens`) | dominant by construction: −30 % of the record removes ~3,500 output + ~4,200 S4 input per document | **NO** — half of each record is E2/E3 provenance (`quote`, `search_keys`, `slots`); this is the `#7949` trade, and it is a measurement, not arithmetic |
 | compact kind render (`TORTOISE_EXTRACTOR_PROMPT=compact`) | **−1,960 tokens/doc** (master render 3,187 → 2,335 per call × 2.30 mapping calls) | **NO** — compact mode **story-filters** the pack kinds: a document that misses every trigger word falls back to all packs, one that hits a single trigger drops the other packs. That is a vocabulary-visibility change, i.e. exactly the class of change `#7949` arbitrates. It is also already-shipped, opt-in, and off. |
 | S1 truncation double-send | **−4,652 tokens/doc** (68 % × (T + 1,630)) | **NO** — a longer narrative is *more* content, but the story then grows inside both later prompts (6,109 tokens/doc today), so the net is a measurement, not arithmetic |
-| `indent=1` → compact separators on S4's `embed_list_json` | bounded by the 1.23× gap (≈2,400 tokens/doc, 5 %) | arguably yes (pure whitespace), **but unverifiable here**: it changes prompt bytes and the `#7949` bar cannot be run without a key |
+**One lever was shipped, disarmed.** `TORTOISE_S4_EMBED_JSON=compact` switches S4's
+embed-list serialization from `indent=1` to compact separators — the one change whose *content*
+is provably identical. It is measured exactly below, and it ships **off**, because a prompt
+whose bytes changed is a prompt whose effect on extraction is unmeasured, and `#7949` is the
+arbiter of that. Arming it is one environment variable, on a box with a key, in the same session
+as the capstone re-run.
 
-**Nothing was shipped.** Every lever above changes either the vocabulary the model sees or
+Everything else was **not shipped**. Every lever above changes either the vocabulary the model sees or
 the bytes of a prompt, and the capstone bar (`#7949` E1 volume / E2 correctness / E3
 provenance / E4 operator edges) **cannot be re-run on this box** (§0). The brief's own rule
 governs: *"A reduction that costs extraction quality is a different (worse) decision — report
@@ -180,6 +186,39 @@ tool says so in its output).
 
 ---
 
+## 4a. The one information-neutral lever, measured on real emissions
+
+The write-path receipts (`tests/eval/write_path/receipts/7947-arms-2026-10-18/*.arms.json`,
+the same 7 sessions `#1789` measured) carry the **real S2 embed lists**, so both
+serializations are computed on the same data — 14 emissions, **580 items**:
+
+| | tokens |
+|---|---|
+| `json.dumps(embed_list, indent=1)` — today | **77,561** |
+| `json.dumps(embed_list, separators=(",", ":"))` | **52,346** |
+| **pure whitespace** | **25,215 (32.5 %)**, 1,801 per emission |
+
+The ratio is stable across every emission (29.6 %–35.0 %), so it is a property of the
+serialization, not of one session. S2's own emission is **100.9 completion tokens per item**,
+so the re-serialized copy is ~1.3× the emission it copies: the whitespace is *added* by the
+prompt builder, not by the model.
+
+**Before → after, in the measured unit.** The document corpus's embed region is
+12,425 tokens per S4 call (solved in §1) — about twice the receipts' ~5,540, because a
+document yields a longer list. Applying the measured 32.5 % ratio to it:
+
+| | before | after (flag armed) | Δ |
+|---|---|---|---|
+| input tokens / median document | 48,461 | 43,858 | −4,603 |
+| output tokens / median document | 16,338 | 16,338 (unchanged by construction) | 0 |
+| **tokens / median document** | **64,799** | **60,196** | **−7.1 %** |
+| documents / month · solo (3M) | 46 | 50 | +8.7 % |
+| documents / month · pro (4M) | 62 | 66 | +6.5 % |
+| documents / month · team (24M) | 370 | 399 | +7.8 % |
+
+⚠️ The output column is "unchanged *by construction*" — the input to S4 changed, so what S4
+*emits* is the thing the capstone measures, and it has not been measured here.
+
 ## 5. Tokens per document, and what it buys
 
 Unchanged by this bundle, and re-stated so the lever's value is on the record. From
@@ -193,4 +232,6 @@ Unchanged by this bundle, and re-stated so the lever's value is on the record. F
 
 A 30 % cut — which the composition says is available *in principle* (S2's re-read plus the
 kind vocabulary alone are 49 % of the input constant) — is worth **+43 %** documents per
-allowance. That is the number `#14275` should be re-quoted at once a lever is measured green.
+allowance. The one lever shipped here (disarmed) is worth **+8 %** on its own. **Neither is
+quotable as a plan until the capstone re-runs green**: what is measured here is the size of
+the lever, not its safety.
