@@ -7711,7 +7711,15 @@ def _generator_filter_findings(key: str, gen: ast.comprehension) -> list[str]:
     return []
 
 
-def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx) -> bool:
+def _is_import_path_object(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
+    """`sys.path` / `sys.meta_path` / `sys.path_hooks` — the search path OBJECT."""
+    return (isinstance(node, ast.Attribute)
+            and node.attr in {"path", "meta_path", "path_hooks"}
+            and _is_sys_ref(node.value, ctx.sys_names))
+
+
+def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx,
+                             path_names: frozenset[str] = frozenset()) -> bool:
     """A write to the IMPORT SEARCH PATH — `sys.path` / `sys.meta_path` / `sys.path_hooks`.
 
     ⛔ THE AXIS THE PIN HAD NO VIEW OF (#14326 round 29 P2, MEASURED GREEN). Every other arm
@@ -7727,14 +7735,43 @@ def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx) -> bool:
     _PATH_ATTRS = {"path", "meta_path", "path_hooks"}
     if isinstance(node, ast.Call):
         func = node.func
-        if (isinstance(func, ast.Attribute) and func.attr in
-                {"insert", "append", "extend", "remove", "clear"}
-                and isinstance(func.value, ast.Attribute)
-                and func.value.attr in _PATH_ATTRS
-                and _is_sys_ref(func.value.value, ctx.sys_names)):
+        # ⛔ ONLY WHAT ADDS TO THE SEARCH PATH (#14326 round 31 P3, MEASURED). `remove`/
+        # `clear`/`pop` shorten the path; they cannot point the import at an attacker
+        # directory, and red-ing them redded ordinary teardown
+        # (`sys.path.remove(_REPO_ROOT); del sys.modules["tortoise.sdk"]`) while the identical
+        # `sys.path.pop(0)` stayed GREEN — so the verdict was an accident of vocabulary, not a
+        # decision. `__init__`/`__setitem__`/`__iadd__` ARE additions and stay.
+        if (isinstance(func, ast.Attribute)
+                # ⛔ `__init__` IS NOT HERE: mutation-tested VACUOUS (#14326 round 31), because the
+                # `sys.path.__init__(…)` / `list.__init__(sys.path, …)` spellings are caught by
+                # the arguments-first arm below. The first set is ADDITIONS by receiver.
+                and func.attr in {"insert", "append", "extend"}
+                and (_is_import_path_object(func.value, ctx)
+                     # ⛔ A NAME ALIAS OF THE PATH IS THE PATH (#14326 round 31 P2, MEASURED
+                     # GREEN end-to-end: `_p = sys.path; _p.insert(0, "/tmp/evil")` resolved a
+                     # planted class). This is NOT a "finder/path shape" — it is the plain
+                     # one-bind alias axis `_aliases_of` already resolves for the registry and
+                     # every other object here, so no residual can cover it.
+                     or (isinstance(func.value, ast.Name)
+                         and func.value.id in path_names))):
             return True
-        # `sys.path.__setitem__(…)` / `sys.path[0:0] = […]` are the same write
-        if (isinstance(func, ast.Attribute) and func.attr in {"__setitem__", "__iadd__"}
+        # ⛔ `setattr(sys, "path", …)` IS THE SAME WRITE (#14326 round 31 P2, MEASURED GREEN
+        # end-to-end). The file already owns a `launderers` axis for exactly this spelling on
+        # the attribute-set axis; the search path needs it too.
+        if (_callee_names_of(func) & ({"setattr"} | ctx.builtin_aliases)
+                and len(node.args) >= 2 and _is_sys_ref(node.args[0], ctx.sys_names)
+                and (_string_keys_of(node.args[1], ctx.consts) & _PATH_ATTRS)):
+            return True
+        # `sys.path.__setitem__(…)` / `list.__init__(sys.path, […])` are the same write
+        if (isinstance(func, ast.Attribute) and func.attr in {"__init__", "__setitem__", "__iadd__"}
+                and node.args and isinstance(node.args[0], (ast.Attribute, ast.Subscript))):
+            # `list.__init__(sys.path, …)` — the UNBOUND spelling: the path is args[0]
+            _unbound = node.args[0]
+            _ub = _unbound.value if isinstance(_unbound, ast.Subscript) else _unbound
+            if (isinstance(_ub, ast.Attribute) and _ub.attr in _PATH_ATTRS
+                    and _is_sys_ref(_ub.value, ctx.sys_names)):
+                return True
+        if (isinstance(func, ast.Attribute) and func.attr in {"__init__", "__setitem__", "__iadd__"}
                 and isinstance(func.value, (ast.Attribute, ast.Subscript))):
             base = func.value.value if isinstance(func.value, ast.Subscript) else func.value
             if (isinstance(base, ast.Attribute) and base.attr in _PATH_ATTRS
@@ -7824,7 +7861,12 @@ def _empties_the_registry(node: ast.AST, ctx: _RegistryCtx,
         return False
     if isinstance(node, ast.Call):
         func = node.func
-        # `clear()` / `popitem()` empty EVERYTHING, so they always take the target with them.
+        # ⛔ `clear()` empties EVERYTHING; `popitem()` does NOT — it removes ONE ARBITRARY
+        # entry (MEASURED: 73 -> 72 on `sys.modules`), which round 30 wrongly described as
+        # "empty EVERYTHING, so they always take the target with them". It is kept in this
+        # set because the arbitrary entry CAN be the target, so red-ing is the safe direction
+        # for a clause that cannot be proven safe — but the mechanism is now stated as what it
+        # is, and a row pins it rather than leaving it reachable-but-unmeasured.
         if (isinstance(func, ast.Attribute) and func.attr in {"clear", "popitem"}
                 and _is_reg(func.value)):
             return True
@@ -8071,7 +8113,13 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
                 # REPLACES *and* as a keyed store for one node), which is the property rows
                 # assert with `any(…)` and so cannot pin.
                 continue
-            hit = keys & ({_SHIPPED_MODULE} if registry else {_SDK_CONSTRUCTOR})
+            # ⛔ AND AN ANCESTOR IS THE TARGET HERE TOO (#14326 round 31 P2, MEASURED GREEN:
+            # `sys.modules |= {"tortoise": _pkg}` followed by `del sys.modules["tortoise.sdk"]`
+            # re-executed the planted package's `sdk.py`). The exact-key test above was fixed
+            # one statement kind over and this twin was missed — the same asymmetry, twice.
+            hit = {k for k in keys
+                   if (k in ({_SHIPPED_MODULE} if registry else {_SDK_CONSTRUCTOR})
+                       or (registry and _SHIPPED_MODULE.startswith(k + ".")))}
             if receiver and hit:
                 out.append(
                     f"line {node.lineno} AUGMENTS `{ast.unparse(target)}` with "
@@ -8210,7 +8258,17 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
                 # binds no class. `__builtins__["TortoiseSDK"]` is not a lever either:
                 # `run()`'s own `from … import` binds a LOCAL that shadows a builtin).
                 keys |= _string_keys_of(node.slice, consts)
-            hits = keys & {_SDK_CONSTRUCTOR, _SHIPPED_MODULE}
+            # ⛔ AN ANCESTOR OF THE DEFERRED TARGET IS THE TARGET (#14326 round 31 P2,
+            # MEASURED GREEN end-to-end): `sys.modules["tortoise"] = _pkg` followed by
+            # `del sys.modules["tortoise.sdk"]` re-executed `tortoise/sdk.py` from the planted
+            # package's `__path__` — with no `sys.path` touch at all — and the pin stayed
+            # GREEN, as it did for the `|=` and `__setitem__` spellings. The rule the DELETE
+            # axis already applies (only an ancestor forces the re-execution, because the
+            # dotted import walks each prefix) is one axis over from here, and this arm was
+            # still testing EXACT keys only — the in-file asymmetry this lane keeps removing.
+            hits = {k for k in keys
+                    if k in {_SDK_CONSTRUCTOR, _SHIPPED_MODULE}
+                    or _SHIPPED_MODULE.startswith(k + ".")}
             if not hits:
                 continue
             if isinstance(node, ast.Call) and _is_setattr_family(node.func, launderers):
@@ -8245,9 +8303,11 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     # residual. Coarse here can only over-RED code that simultaneously rewrites the import
     # path and drops the package from the cache while the pin is watching, which is the
     # premise itself.
+    path_names = frozenset(_aliases_of(tree, lambda _n: _is_import_path_object(_n, ctx),
+                                       loops=True))
     _path_mutations = [
         node for node in ast.walk(tree)
-        if _is_import_path_mutation(node, ctx)]
+        if _is_import_path_mutation(node, ctx, path_names)]
     _dels = [
         node for node in ast.walk(tree)
         if _empties_the_registry(node, ctx, registry_aliases)]
@@ -9166,6 +9226,18 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         # The assign branch tested the BASE of the target instead of the target, so a plain
         # assign was dead code; `clear`/`pop` empty the registry without being a `Delete` node;
         # and an alias of the registry was not the registry on this axis.
+        "`sys.path.__init__(...)` + `del`":
+            'sys.path.__init__(["/tmp/evil"] + sys.path)\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`list.__init__(sys.path, ...)` unbound + `del`":
+            'list.__init__(sys.path, ["/tmp/evil"] + sys.path)\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`setattr(sys, \"path\", ...)` + `del`":
+            'setattr(sys, "path", ["/tmp/evil"] + sys.path)\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "a plain ALIAS `_p = sys.path` then `_p.insert` + `del`":
+            '_p = sys.path\n_p.insert(0, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
         "`sys.path = [...] + sys.path` + `del`":
             'sys.path = ["/tmp/evil"] + sys.path\n'
             'del sys.modules["tortoise"], sys.modules["tortoise.sdk"]\n',
@@ -9201,6 +9273,23 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     for name, lever in path_levers.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
         assert got and any("import search path" in g for g in got), (name, lever, got)
+    # ⛔ AN ANCESTOR OF THE DEFERRED TARGET IS THE TARGET (#14326 round 31 P2). The DELETE axis
+    # already applied this rule; the store and `|=` arms still tested EXACT keys, so
+    # `sys.modules["tortoise"] = _pkg` (or the `|=` twin) followed by
+    # `del sys.modules["tortoise.sdk"]` re-executed the planted package's `sdk.py` with the pin
+    # GREEN. These land on the string-key arm, so they carry its message.
+    ancestor_stores = {
+        "ancestor registry STORE + `del` of the target":
+            'sys.modules["tortoise"] = _pkg\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "ancestor registry `|=` + `del` of the target":
+            'sys.modules |= {"tortoise": _pkg}\n'
+            'del sys.modules["tortoise.sdk"]\n',
+    }
+    for name, lever in ancestor_stores.items():
+        got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
+        assert got and any("under a string key" in g or "AUGMENTS" in g for g in got), \
+            (name, lever, got)
     # ⛔ THE CALL SITES THE `sys_dict_names` THREADING ACTUALLY FEEDS (#14326 round 24, each
     # RED at `bce008ce`): the review emptied three of the five sites and the file stayed at
     # `41 passed`, so the threading was load-bearing and unpinned. `_RegistryCtx` removes the
@@ -9331,6 +9420,13 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   # registration. `from tortoise.sdk import …` never resolves through it, so
                   # nothing re-imports and there is no lever. Only an ANCESTOR (`tortoise`,
                   # `tortoise.sdk`) forces the re-execution.
+                  # ⛔ AND A SHORTENING OF THE PATH IS NOT A MUTATION THAT CAN INSTALL A MIRROR
+                  # (#14326 round 31 P3): `remove`/`clear`/`pop` were graded as "rewrites the
+                  # import path", so ordinary teardown red — while the identical `pop(0)` was
+                  # GREEN, i.e. the verdict was an accident of vocabulary. Only ADDITIONS count.
+                  'sys.path.remove(_REPO_ROOT)\ndel sys.modules["tortoise.sdk"]\n',
+                  'sys.path.clear()\ndel sys.modules["tortoise.sdk"]\n',
+                  'sys.path.pop(0)\ndel sys.modules["tortoise.sdk"]\n',
                   'sys.path.insert(0, "/tmp/evil")\nsys.modules.pop(_AB_MODULE, None)\n',
                   'sys.path.insert(0, "/tmp/evil")\ndel sys.modules[_AB_MODULE]\n',
                   'sys.modules[_AB_MODULE] = module\n',
