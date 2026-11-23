@@ -27,7 +27,8 @@ enumeration, its re-measured figures, its section-by-section cite families, its
 `main`-set census). That document is a CENSUS — the audit's own verdict
 (`#11081`, comment 7107649723, row B2) is *"none — it is a census of where capabilities
 sit"*, i.e. a documentation defect and never a product break. Its cost is the pin loop itself:
-208 line-pinned cites meant every lane that inserted above one had to re-derive the table
+B2's own count is **208** line-pinned cites, so every lane that inserted above one had to
+re-derive the table
 (the audit's own figure for that loop is ~45 runner-hours/day), and at this head two OPEN
 PRs still carry hunks into this document and this file (`#14296`, `#14140`, read with
 `gh pr list --json files`). `#14038` is the third, and it is MERGED — its merge
@@ -55,6 +56,17 @@ being dropped with the apparatus, because their subjects survive:
   needs no `_AUDIT` row and no pin, and it was green at this head.
 
 A cut is scoped by what it deletes, not by where the code happened to sit.
+
+⛔ AND TWO `_PINS`-GRADING ARMS WERE DROPPED WITHOUT REPLACEMENT, which round 4 did not say
+and round 6 caught. `test_a_def_range_pin_ends_on_the_functions_own_last_line` and
+`test_a_row_that_claims_the_COUNT_leg_pins_a_line_that_aggregates` both scan `_PINS`, so their
+SUBJECT survives — but their population does not: measured against this head's 21 rows, the
+`def`-anchored range pins are **0** and the `COUNT`-claiming rows are **0** (every such row lived
+in the deleted document), and both arms carry a non-vacuity floor (`assert checked`) that would
+red on an empty population. So they could not survive verbatim, and re-pointing them at a
+population that does not exist would be a gate vouching for a claim it never read. Recorded here
+rather than dropped silently, because "an arm vanished and nobody said why" is the next
+reviewer's whole problem.
 
 ⚠️ ONE CROSS-DOCUMENT ARM IS **NOT** RETIRED: it grades two SURVIVING documents
 (`docs/00_index.md` and `docs/architecture/ENTITY-VERDICT-BANDS.md`), it is named by neither

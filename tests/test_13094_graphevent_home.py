@@ -1470,6 +1470,85 @@ def test_the_committed_census_is_the_verbs_own_output():
         "docs/evidence/13094-graphevent/readers.json` rather than hand-editing")
 
 
+def test_the_export_scan_cites_open_on_the_statements_they_name():
+    """The README's `_export_graph_snapshot` cites must open on what they claim.
+
+    ⛔ WHY THIS EXISTS (PR #14428 review round 6, P2 — and it is the defect that PR
+    was ABOUT, surviving inside its own fix). Those three addresses had been
+    re-pointed by an OFFSET rather than re-derived, and landed 105 lines above the
+    function — on the membership-role endpoint — with every gate green: the
+    `readers.json == the verb's bytes` arm compares ARTIFACT to TOOL (both carried
+    the same wrong numbers, because the numbers are prose), and
+    `test_docs_citation_refs.py` is presence-and-blank-line only, so "a shift onto a
+    DIFFERENT non-blank line stays green". A cite is a claim about a line; only
+    opening the line grades it.
+
+    DERIVED from the README, never hardcoded: the addresses are read out of the
+    sentence that makes the claim, so a legitimate re-derivation of all three
+    together keeps this arm true, while moving one by a delta reds it.
+    """
+    readme = (REPO_ROOT / "docs" / "evidence" / "13094-graphevent" / "README.md"
+              ).read_text(encoding="utf-8")
+    # The sentence WRAPS in the markdown, so it is read off the flattened paragraph —
+    # a per-LINE search sees the def and none of the two continuations (measured while
+    # writing this arm).
+    flat = re.sub(r"\s+", " ", readme)
+    start = flat.find("whole-graph scan is `hosted_api.py:")
+    assert start >= 0, (
+        "the README's export-scan sentence is gone or reworded past recognition — "
+        "re-word this arm deliberately, do not delete it: it is the only thing that "
+        "opens these addresses")
+    addresses = [int(n) for n in re.findall(r":(\d+)", flat[start:start + 260])]
+    assert len(addresses) == 3, (
+        f"the export-scan sentence must name THREE addresses (the def, the "
+        f"`:GraphEvent` branch and the append), found {addresses}")
+    lines = (REPO_ROOT / "tortoise" / "hosted_api.py").read_text(
+        encoding="utf-8").splitlines()
+    for address, expected in zip(
+        addresses,
+        ("def _export_graph_snapshot", '"GraphEvent" in labels', "events.append(d)"),
+        strict=True,
+    ):
+        assert 0 < address <= len(lines), (
+            f"`hosted_api.py:{address}` is out of range ({len(lines)} lines) — the "
+            "file shrank under the cite")
+        actual = lines[address - 1]
+        assert expected in actual, (
+            f"the README cites `hosted_api.py:{address}` for {expected!r}, but that "
+            f"line reads {actual.strip()[:100]!r}. RE-DERIVE BY CONTENT, never by "
+            "delta: grep -n 'def _export_graph_snapshot' tortoise/hosted_api.py, then "
+            "the branch and the append inside its body")
+    # ⛔ AND THE OTHER CARRIER: `readers.json` is generated from `tools/graphevent_home.py`,
+    # which carries the same three numbers as PROSE. A re-point applied to one carrier and
+    # not the other is the split-carrier failure this PR's own body names, and the
+    # `readers.json == the verb's bytes` arm above cannot see it — both sides are the tool.
+    # So the two carriers are compared to each other here, on addresses this arm derived
+    # from the README rather than from either of them.
+    verb = _tool().readers_report()
+    why = next(
+        (row["why"] for row in verb["readers"] if "_export_graph_snapshot" in row.get("why", "")),
+        None,
+    )
+    assert why is not None, (
+        "no `readers` row's `why` names `_export_graph_snapshot` any more — the export "
+        "hole the README describes is now censused (good) or the prose dropped it "
+        "(re-word this arm deliberately)")
+    # Same flatten-and-window read as the README, because the `why` string names other
+    # files' addresses (hosted_backup.py's) BEFORE this sentence.
+    tool_start = why.find("whole-graph scan is `hosted_api.py:")
+    assert tool_start >= 0, (
+        "`readers.json`'s `why` no longer carries the export-scan sentence this README "
+        "mirrors — re-word BOTH carriers rather than deleting the comparison")
+    tool_addresses = [
+        int(n) for n in re.findall(r":(\d+)", why[tool_start:tool_start + 260])
+    ]
+    assert tool_addresses == addresses, (
+        f"the README cites {addresses} for the export scan but `readers.json`'s own "
+        f"`why` (emitted by `tools/graphevent_home.py`) cites {tool_addresses}. One "
+        "carrier was re-pointed and the other left behind: re-derive BOTH from "
+        "`tortoise/hosted_api.py` in the same change.")
+
+
 def test_the_evidence_docs_pin_count_is_this_files_own_count():
     """The doc's "N pins" must BE the number of pins — the count drifted once.
 
