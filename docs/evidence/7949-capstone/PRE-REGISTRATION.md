@@ -3285,19 +3285,26 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   denominator are the ones this record froze. The two `if items:` gates this tree carries are
   `:15254` and `:15407`; the two fail-open `except` arms are `:15267` and `:15418`; the
   `_run_vet_pass` calls are `:18056` (S2) and `:15383` (union).
-- **⛔ The cites were re-derived, not `+10`-ed.** `git diff -U0` over
-  `tortoise/extractor_v2.py` was turned into a line map and every cite was re-resolved through it;
-  `19,386` of `19,396` base lines map to a byte-identical head line, and the 10 that do not are
-  `:16092`–`:16097`, `:16157`, `:16158`, `:16184`, `:16233` — the EDITED blocks themselves, so a
-  cite that lands on edited code was caught rather
-  than silently moved. **Counting convention**, stated so a re-measurer reproduces the pair rather
-  than a near neighbour: for EVERY base line `n`, compare `base[n]` with `head[n + d]`, where `d` is
-  the number of lines the change inserts or deletes ABOVE `n` — a pure insertion *after* `n` does not
-  shift `n`. An earlier revision of this paragraph reported `19,383`/`13` and added `:2435`, `:16200`
-  and `:17092` to the differing set; all three are byte-identical at their own positions
-  (`base[2435] == head[2435]`, `base[16200] == head[16226]`, `base[17092] == head[17151]`) and
-  appeared only because the insertion immediately after them was charged to them — a boundary
-  off-by-one, corrected here.
+- **⛔ The cites were re-derived, not `+10`-ed.** `git diff -U0 ff2218b6a7..HEAD --
+  tortoise/extractor_v2.py` (the pre-`#14357` tree, **19,396** lines — the base is NAMED, so a
+  re-measurer reproduces the comparison instead of guessing which tree the base was) was turned into
+  a line map and every cite was re-resolved through it; `19,385` of those `19,396` base lines land
+  on a byte-identical head line, and the **11** that do not are exactly the base lines a hunk EDITS:
+  `:16092`–`:16097`, `:16157`, `:16158`, `:16184`, `:16233` — and `:16994`, the `_complete` docstring
+  line `093d82ac97` appended its raise note to IN PLACE, a one-line REPLACEMENT whose net delta is
+  `0`, so it shifts nothing and is still caught rather than passed as unmoved. A cite that lands on
+  edited code was therefore caught rather than silently moved. **Counting convention**, stated so a
+  re-measurer reproduces the pair rather than a near neighbour: for EVERY base line `n`, compare
+  `base[n]` with `head[n + d]`, where `d` is the number of lines the change inserts or deletes ABOVE
+  `n` — a pure insertion *after* `n` does not shift `n`, and a base line a hunk REPLACES is compared
+  with the replacement. ⛔ **The count moves with the tree, so it is stated per tree and never
+  inherited:** this paragraph reported `19,383`/`13` first, then `19,386`/`10`, and now
+  `19,385`/`11`. The first charged the insertion *after* `:2435`, `:16200` and `:17092` to those
+  lines (`base[2435] == head[2435]`, `base[16200] == head[16226]`, `base[17092] == head[17151]` —
+  all three byte-identical at their own positions, a boundary off-by-one); the second was measured
+  before `093d82ac97` edited `:16994`, which is the eleventh. Both earlier pairs are recorded here
+  rather than overwritten: a count that silently changes with the tree is how each previous revision
+  went wrong, and §10.40's rule is that a number in this document is re-MEASURED, never carried.
 - **⛔ The bundle's frozen cites stayed frozen, and NOT because the map spares them.** `:8278-8285`
   and `:8288-8292` sit BELOW the first hunk (which inserts after `:2435`), so the line
   map DOES move them `+10`. They are left alone because they live inside a `_BUNDLE_HISTORICAL`
