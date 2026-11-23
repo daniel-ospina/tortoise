@@ -18,7 +18,13 @@ WHAT THE FIX IS, AND WHAT IT IS NOT.
   door, a full replay, the reconciler, the backfill tools). When the position
   row was absorbed, the guard asks the DATABASE whether the surviving row is a
   record this write CONTINUES — `event_type`, content (Postgres's own jsonb
-  `IS DISTINCT FROM`) and `recorded_at`, in one query it answers itself.
+  `IS DISTINCT FROM`) and `recorded_at`, in one query it answers itself — and
+  then, for a pair that matches on type AND capture, reads the two payloads it
+  got back for **CONTRADICTING identities** (`_identity_evidence`, plain Python
+  over those payloads, #9318). A contradiction falls through to the refusal; the
+  other three states (`agrees`, `one_sided`, `none`) keep the silent drift
+  reading, which is why the gate is an ALLOW-LIST and not a `!= "disagrees"`
+  deny-list.
 * It is **not** a schema change. No column, no table, no allocator: journal
   identity in the key is the REPAIR, and it is `#12894`'s decision, deliberately
   not taken here (two designs of one ordinal is the duplication this lane
@@ -26,8 +32,9 @@ WHAT THE FIX IS, AND WHAT IT IS NOT.
   `tests/test_record_writer_seam.py::test_the_default_position_reproduces_the_previous_plan`
   remains a true pin.
 * It is **not** a violation of idempotency. A genuine replay — same position,
-  same content AND the same capture time — stays a SILENT no-op: no exception,
-  no counter, no log line.
+  same content, and (when this write carries a `ts`) the same capture time; a
+  `ts`-less replay compares no instant at all — stays a SILENT no-op: no
+  exception, no counter, no log line.
   That polarity is asserted in BOTH directions here, and the DB-free arms assert
   it too, because a guard that turned every replay into an error would be a
   worse defect than the one being fixed, and the DB legs skip where no Postgres
@@ -37,7 +44,13 @@ THE FALSIFIERS. `test_two_durable_journals_at_one_ordinal_are_refused_not_absorb
 reds on the pre-#9318 tree with `outcome=APPLIED` for the second journal and
 `journal_event` holding ONE row whose payload names journal A. Its sibling
 `test_a_genuine_replay_of_one_journal_stays_a_silent_no_op` reds on an
-over-eager guard — one that fired on `rowcount == 0` alone.
+over-eager guard — one that fired on `rowcount == 0` alone. And
+`test_two_journals_sharing_a_capture_instant_are_refused_not_absorbed` is the
+falsifier for the COLLISION'S SILENT HALF (#9318): two journals whose records
+share `event_type` AND the capture instant, differing only in identity, were
+absorbed by the drift arm — measured on the pre-fix tree as `applied=True` with
+`_layer_keys == ["obj-a", "obj-b"]` — and it is the reason the identity gate
+exists at all.
 
 THE DATABASE. Set `TEST_RECORD_DB_URI` to a throwaway Postgres carrying the
 record migrations (the `test-record-postgres` job does it, and asserts the legs
@@ -49,9 +62,11 @@ superuser would red on the role gate instead of testing anything.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -188,9 +203,17 @@ def _stored(event_type: Any, payload: Any, *, same_type: bool = True,
     re-stales every time a round adds one, which is what an earlier "the two
     ACCEPTANCE legs" did at six). Composing the row explicitly is also what keeps the
     drift split (#12904 P0-1) visible in every test — `same_type` and
-    `same_capture` are the two facts the verdict turns on, so a leg that wants a
-    COLLISION has to say which of them differed, and one that wants DRIFT says
-    both match.
+    `same_capture` are the two facts THIS HELPER composes, so a leg that wants a
+    COLLISION on either of them says which differed.
+
+    ⛔ THEY ARE NOT THE WHOLE VERDICT (#9318). The gate reads four facts —
+    `same_type and same_capture and ts is not None and identity_state in
+    _SILENT_IDENTITY_STATES` — and the last two are NOT this helper's to state:
+    `ts` is the candidate record's own key (a `ts`-less leg simply omits it), and
+    the identity state is DERIVED from the two payloads the caller already
+    passes. So `same_type=True, same_capture=True` is a COLLISION when those
+    payloads name contradicting identities and DRIFT when they do not, and a leg
+    that reads only these two columns is reading half the verdict.
 
     `same_capture=False` is the default because a second durable journal's record
     brings its OWN capture time — that is what makes the position a collision
@@ -296,10 +319,12 @@ def test_a_re_derived_record_replays_SILENTLY() -> None:
     DRIFT READING, which the verdict ADMITS. It is a reading, not evidence of
     identity: it says only that two writes named one instant, and `ts` is a
     per-record value the emission path supplies, not one the position derives —
-    which is why the mirror shape (two DIFFERENT records at one
-    capture instant) is admitted too — that leg is
-    `test_a_same_capture_instant_pair_is_ADMITTED_not_detected`, and the class
-    docstring's mirror residual names the cost. The verdict here is a SILENT
+    which is why the arm is GATED on the identity evidence (#9318): the mirror
+    shape (two DIFFERENT records at one capture instant) refuses as soon as the
+    payloads name contradicting identities, and this leg's payload keeps its
+    `id`, so `agrees` keeps it on the silent repair path. See
+    `test_a_same_capture_instant_pair_is_REFUSED_when_the_identities_disagree`
+    for the other arm. The verdict here is a SILENT
     no-op: no exception, no counter, no log line.
 
     ⛔ THIS LEG REPLACES ONE THAT PINNED THE OPPOSITE (#12904 P0-1).
@@ -325,62 +350,198 @@ def test_a_re_derived_record_replays_SILENTLY() -> None:
     assert conn.conflict_reads == 1, (
         "the guard did not ask the collision question — this leg would then pass "
         "by never exercising the code under test")
+    state, _detail = rp._identity_evidence(_payload_of(re_derived),
+                                          _payload_of(RECORD_A))
+    assert state == "agrees", (
+        f"this leg's premise is a positive coordinate match and it read {state!r} "
+        f"— without the premise it keeps passing for a pair that is silent for "
+        f"the `none` reason, leaving the `agrees` route uncovered")
     assert dict(monitoring.record_write_failure_counts()) == before, (
         "a re-derivation was COUNTED as a refusal — the record's own repair "
         "story is then version-pinned to the tree that wrote the row")
 
 
-def test_a_same_capture_instant_pair_is_ADMITTED_not_detected() -> None:
-    """THE DECLARED MIRROR RESIDUAL: a different record at one capture instant.
+def test_a_same_capture_instant_pair_is_REFUSED_when_the_identities_disagree() -> None:
+    """THE MIRROR RESIDUAL, CLOSED (#9318, the RECOMMENDATION this leg pinned as open).
 
-    ⛔ THIS LEG PINS AN ADMISSION, NOT A DETECTION. Read this docstring before
-    "fixing" it to expect a refusal: the drift arm (#12904 P0-1) returns silently
-    on `same_type and same_capture`, and identical `recorded_at` is NOT evidence
-    of identity — it says only that two writes named one instant, and `ts` is a
-    per-record value the EMISSION path supplies (`_journal_row` binds
-    `record.get("ts")`; `_emit_event` accepts a `recorded_ts`, minting
-    `now_iso()` only when none is given), so nothing ties the instant to the
-    record's identity, and TWO DIFFERENT records captured at the same instant
-    are absorbed: `RECORD_A` against a probe
-    differing in `id` and `name`, `same_type` and `same_capture` both true.
+    ⛔ THIS LEG USED TO PIN AN ADMISSION, AND THE ADMISSION WAS THE DEFECT. It
+    read `test_a_same_capture_instant_pair_is_ADMITTED_not_detected` and asserted
+    that a pair differing ONLY in payload, at one capture instant, was absorbed
+    SILENTLY — no exception, no counter, no log line — while the guard held the
+    refuting evidence (`obj-a` stored, `obj-b` probed) and discarded it unread.
+    That is #9318's own defect shape committed by the guard built to detect it:
+    the second record's LAYER rows were applied and COMMITTED under the first
+    record's position row.
 
-    `main` (post-#12904) REFUSED this pair (payload differs ⇒ collision), so this
-    is the one shape the drift split widens the silent window by. It is admitted
-    rather than closed HERE because closing it — refusing when
-    `_identity_evidence` answers `disagrees` — is a SEMANTICS change to #12904's
-    verdict, which belongs to that decision's owner; `#12894`'s journal identity
-    in the key retires it outright.
+    Why the drift arm could not see it: `same_type and same_capture` is a
+    COORDINATE match, not identity evidence. Identical `recorded_at` says only
+    that two writes named one instant, and `ts` is a per-record value the
+    EMISSION path supplies (`_journal_row` binds `record.get("ts")`;
+    `_emit_event` accepts a `recorded_ts`, minting `now_iso()` only when none is
+    given) — so nothing ties an instant to a record's identity, and two
+    independent mints can land on the same microsecond.
 
-    The leg is NOT vacuous: it asserts the guard HOLDS the refuting evidence and
-    discards it, so a tree that starts refusing reds here as a change to a
-    stated decision, and one that stops asking the collision question reds on
-    `conflict_reads`.
+    THE CHANGE (#9318 option B, the recommendation recorded on that issue): the
+    drift reading is now taken only when the identity evidence does NOT
+    contradict. `disagrees` falls through to the ordinary refusal; `agrees`
+    (the common re-derivation, same node id), `one_sided` and `none` keep the
+    silent repair path unchanged — `test_a_re_derived_record_replays_SILENTLY`,
+    `test_a_same_capture_pair_with_no_comparable_identity_stays_SILENT` and
+    `test_a_ONE_SIDED_identity_at_one_instant_stays_SILENT` are the other arm of
+    this boundary. ⚠️ The one legitimate re-derivation this DOES
+    refuse is the shape that re-KEYED a shared identity value at the same
+    instant: the durable line is the only evidence, and it reads identically to
+    a second journal's record, so the class states it as a false-red shape
+    rather than claiming no legitimate replay can be refused.
+
+    #12894's journal identity in the key retires the guard outright, because two
+    journals can then no longer meet at one position at all. Until then this is
+    the arm that keeps such a meeting from being silent.
     """
     probe = dict(RECORD_A, id="obj-b", name="corpus B document")
     assert probe != RECORD_A, "the two records must actually differ"
-    # The guard HOLDS the evidence it discards — measured on the payloads the
-    # absorbed row and this write would carry, so the leg cannot pass on a shape
-    # where the identities merely fail to contradict.
+    # The premise, measured on the payloads the absorbed row and this write would
+    # carry: the identities contradict, so this leg cannot pass on a shape where
+    # they merely fail to contradict.
     state, detail = rp._identity_evidence(_payload_of(probe),
                                           _payload_of(RECORD_A))
     assert state == "disagrees", (
         f"the identity verdict no longer contradicts at equal capture "
         f"({state}: {detail}) — this leg's premise moved, so re-measure the "
-        f"mirror residual rather than deleting the leg")
+        f"contradiction before deleting the leg (this leg IS the mirror shape "
+        f"#9318 closed)")
     conn = Absorbed(stored=_stored("ObjectRegistered", _payload_of(RECORD_A),
                                   same_capture=True))
-    before = dict(monitoring.record_write_failure_counts())
 
-    report = rp.replay([probe], conn, org_id=ORG, graph_id=GRAPH)
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([probe], conn, org_id=ORG, graph_id=GRAPH)
 
-    assert report.events == 1
     assert conn.conflict_reads == 1, (
         "the guard did not ask the collision question — this leg would then pass "
         "by never exercising the code under test")
-    assert dict(monitoring.record_write_failure_counts()) == before, (
-        "an equal-capture pair was COUNTED — that is the drift arm refusing, "
-        "which re-opens #12904 P0-1; if the refusal is deliberate, the residual "
-        "in `JournalPositionCollision` and its owner decision move FIRST")
+    assert excinfo.value.identity_state == "disagrees"
+    assert excinfo.value.capture_state == "matches", (
+        "the refusal must still report that the two sides were captured at the "
+        "same instant — that coordinate is what made this shape invisible")
+    message = str(excinfo.value)
+    assert "CAPTURED at the same instant" in message, (
+        "the `matches` state prints no capture clause, so the refusal reads as "
+        "one cause (a second journal) while the arm's own facts exclude the "
+        "capture-time story")
+    assert "obj-a" in message and "obj-b" in message
+    for record in (RECORD_A, probe):
+        assert record["name"] not in message, (
+            "the refusal leaked payload CONTENT (a document title) — the class "
+            "docstring promises the line is content-free")
+
+
+def test_a_one_record_RE_KEYED_at_one_instant_is_the_DECLARED_false_red() -> None:
+    """Residual shape (c), PINNED: a legitimate re-derivation the gate refuses.
+
+    The identity gate's cost is stated in the class docstring rather than
+    implied — a ONE-record re-derivation that re-keyed its own `id` at the same
+    capture instant is refused, because the durable line cannot tell it from a
+    second journal's record. ⛔ That cost had no leg (review round 15): the class
+    says BOTH non-drift shapes refuse and that one of them is a false red, and
+    nothing in the suite decided which sentence was true, so a later cut could
+    have "fixed" the false red by deleting the gate and no test would have
+    noticed — the absorption would look like a return to the old behaviour.
+
+    The payload here differs ONLY in the identity value: same type, same `ts`
+    (so the same `recorded_at`), same everything else. That is precisely the
+    shape `disagrees` cannot distinguish from two records.
+    """
+    re_keyed = dict(_payload_of(RECORD_A), id="obj-a-REKEYED")
+    state, detail = rp._identity_evidence(re_keyed, _payload_of(RECORD_A))
+    assert state == "disagrees", (
+        f"this leg's premise is a contradicted identity ({state}: {detail})")
+    difference = {k for k in set(re_keyed) | set(_payload_of(RECORD_A))
+                  if re_keyed.get(k) != _payload_of(RECORD_A).get(k)}
+    assert difference == {"id"}, (
+        f"the ONLY difference must be the identity value — got {sorted(difference)}; "
+        f"with anything else moved this leg pins the ordinary collision instead")
+
+    conn = Absorbed(stored=_stored("ObjectRegistered", _payload_of(RECORD_A),
+                                  same_capture=True))
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([dict(RECORD_A, id="obj-a-REKEYED")], conn,
+                  org_id=ORG, graph_id=GRAPH)
+
+    # ⛔ REFUSED, and the message still names BOTH causes: the gate acts on the
+    # fact, and cannot say which story produced it.
+    assert excinfo.value.identity_state == "disagrees"
+    assert "obj-a-REKEYED" in str(excinfo.value)
+
+
+def test_a_same_capture_pair_with_no_comparable_identity_stays_SILENT() -> None:
+    """The OTHER half of the boundary: silence where nothing contradicts.
+
+    `none` is not a disagreement. A pair carrying no comparable identity key (a
+    type whose payload is audit-only, or one whose derivation never wrote an id)
+    still takes the drift reading, exactly as `agrees` does — so the closure
+    above cannot turn every equal-instant payload difference into a refusal. If
+    this leg reds, the closure went too far and #12904 P0-1 is re-opened.
+    """
+    # `IngestStarted` is audit-only: its payload carries neither `id` nor
+    # `eventId` nor `node_key` nor `session_id`, so nothing on either side is
+    # comparable — the pair is `none`, not `disagrees`.
+    stored_record = {"type": "IngestStarted", "ts": "2026-11-15T00:00:00Z",
+                     "event_id": "evt-a", "run_id": "run-1",
+                     "source_id": "u1"}
+    probe_record = dict(stored_record, run_id="run-2", event_id="evt-b")
+    state, _detail = rp._identity_evidence(_payload_of(probe_record),
+                                          _payload_of(stored_record))
+    assert state == "none", (
+        f"this leg needs a pair with no comparable identity ({state}) — its "
+        f"premise moved, re-measure before deleting it")
+    assert _payload_of(probe_record) != _payload_of(stored_record), (
+        "the payloads must actually differ, or the conflict query would return "
+        "no row and this leg would pass without reaching the drift arm")
+    conn = Absorbed(stored=_stored("IngestStarted", _payload_of(stored_record),
+                                  same_capture=True))
+
+    report = rp.replay([probe_record], conn, org_id=ORG, graph_id=GRAPH)
+
+    assert report.events == 1
+    assert conn.conflict_reads == 1, (
+        "the guard did not ask the collision question — this leg would then "
+        "pass by never exercising the arm under test")
+
+
+def test_a_ONE_SIDED_identity_at_one_instant_stays_SILENT() -> None:
+    """`one_sided` is the third state the drift arm keeps — pinned behaviourally.
+
+    A derivation change that ADDS (or drops) an identity field leaves one side of
+    the comparison naming it and the other silent — the shape
+    `_identity_evidence` answers `one_sided` for. Refusing it would make those
+    positions un-replayable, which is #12904 P0-1; absorbing it is the drift
+    reading. The `none` sibling above covers the pair where NEITHER side names an
+    identity, and `test_a_re_derived_record_replays_SILENTLY` covers `agrees`;
+    this leg is the third state, driven through `replay()` rather than asserted
+    on `_identity_evidence` alone, so a future tightening of the gate to
+    `agrees`/`none` reds HERE instead of passing on the unit legs.
+    """
+    # The durable row was written by a derivation that emitted NO `id`; this
+    # write's payload carries one. Everything else about the record is equal
+    # (`type` matches, the payload otherwise differs only by that id).
+    stored_payload = {k: v for k, v in _payload_of(RECORD_A).items()
+                      if k != "id"}
+    state, _detail = rp._identity_evidence(_payload_of(RECORD_A), stored_payload)
+    assert state == "one_sided", (
+        f"this leg needs one side to name an identity and the other not "
+        f"({state}) — its premise moved, re-measure before deleting it")
+    assert _payload_of(RECORD_A) != stored_payload, (
+        "the payloads must actually differ, or the conflict query would return "
+        "no row and this leg would pass without reaching the drift arm")
+    conn = Absorbed(stored=_stored("ObjectRegistered", stored_payload,
+                                  same_capture=True))
+
+    report = rp.replay([RECORD_A], conn, org_id=ORG, graph_id=GRAPH)
+
+    assert report.events == 1
+    assert conn.conflict_reads == 1, (
+        "the guard did not ask the collision question — this leg would then "
+        "pass by never exercising the arm under test")
 
 
 def test_two_payloads_with_no_comparable_identity_say_so() -> None:
@@ -409,7 +570,8 @@ def test_a_shared_NODE_id_with_two_record_types_is_not_one_record() -> None:
     object came back as "the SAME record", which is the cycle-1 defect mirrored
     — a cause asserted that the evidence cannot support. No state names a cause
     now; the message names both causes and the reading says only what the ids
-    do, which here is that the write's payload carries no identity at all.
+    do — and here the two payloads do share one `id`, which is exactly why a
+    shared coordinate is not enough to name a cause.
     """
     conn = Absorbed(stored=_stored("EntityMutated", _payload_of(RECORD_A),
                                    same_type=False))
@@ -424,6 +586,44 @@ def test_a_shared_NODE_id_with_two_record_types_is_not_one_record() -> None:
     message = str(excinfo.value)
     assert "they share id=obj-a" in message
     assert "second durable journal" in message
+
+
+def test_the_refusal_reports_NO_fact_it_was_not_given() -> None:
+    """The message contract: never assert a measurement nobody took (#9318 16/18).
+
+    Two contracts, both of which used to be claims with no leg — measured by
+    restoring the old code and watching the file stay green:
+
+    * `identity_state` / `identity_detail` / `capture_state` are REQUIRED keyword
+      arguments, so a construction cannot INHERIT a state that renders a
+      measured fact (`unknown` prints "This write carries no `ts`"; `none` prints
+      "no identity key is comparable"). A default is exactly how a caller with
+      nothing to report ends up reporting something.
+    * Every render branch GUARDS a missing `identity_detail`: interpolating it
+      unguarded printed `they share None` / `they disagree on None` — a claim
+      about the payloads — and the live door's own leg constructs that exact
+      shape, so it went into an operator WARNING on every run.
+
+    ⛔ A caller with no detail gets a statement about the READING, never about
+    the payloads.
+    """
+    params = inspect.signature(rp.JournalPositionCollision).parameters
+    for name in ("identity_state", "identity_detail", "capture_state"):
+        assert params[name].default is inspect.Parameter.empty, (
+            f"{name} has a default ({params[name].default!r}) — a construction can "
+            f"then inherit a state that RENDERS a measurement nobody took")
+
+    base = dict(org_id=ORG, graph_id=GRAPH, seq=1, event_type="ObjectRegistered",
+                payload_digest="sha256:aaaaaaaaaaaa", payload_bytes=65,
+                stored_event_type="ObjectRegistered",
+                stored_payload_digest="sha256:bbbbbbbbbbbb",
+                stored_payload_bytes=70, capture_state="matches")
+    for state in ("agrees", "disagrees", "one_sided", "none", "rekeyed"):
+        message = str(rp.JournalPositionCollision(
+            **base, identity_state=state, identity_detail=None))
+        assert "None" not in message, (
+            f"identity_state={state!r} with no detail rendered {message!r} — the "
+            f"line asserts something about the payloads that nobody measured")
 
 
 def test_a_NESTED_payload_identity_is_read() -> None:
@@ -828,6 +1028,81 @@ def test_the_capture_arm_cannot_fire_when_this_write_carries_no_ts() -> None:
     assert conn.conflict_reads == 1
 
 
+def test_a_TS_LESS_write_at_a_moved_payload_is_REFUSED() -> None:
+    """The FOURTH refusal arm: a comparison this write cannot make (#9318).
+
+    A `ts`-less write whose conflict query SELECTED a row — so its payload or
+    type differs from the surviving row's — is refused, because the capture
+    comparison the drift reading would need cannot be made at all. The message
+    says which arm fired (`capture_state="unknown"`, its own clause) and names
+    no cause, because it cannot know one.
+
+    ⛔ THIS LEG WAS MISSING while the `durations` row for this file claimed the
+    arm was covered (review round 9, P1): every DB-free refusal leg carried a
+    `ts`, and `rg 'unknown'` over this file returned nothing — so a rewrite that
+    admitted a `ts`-less pair with a moved payload reddened nothing here.
+    """
+    ts_less = {k: v for k, v in RECORD_B.items() if k != "ts"}
+    conn = Absorbed(stored=_stored("ObjectRegistered", _payload_of(RECORD_A)))
+    before = dict(monitoring.record_write_failure_counts())
+
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([ts_less], conn, org_id=ORG, graph_id=GRAPH)
+
+    message = str(excinfo.value)
+    assert conn.conflict_reads == 1, (
+        "the guard did not ask the collision question — this leg would then pass "
+        "by never exercising the code under test")
+    assert excinfo.value.capture_state == "unknown", (
+        f"a `ts`-less refusal reported capture_state={excinfo.value.capture_state!r} "
+        f"— the arm that fired here is the one with no comparison to make")
+    assert "carries no `ts`" in message, (
+        "the refusal does not say that this write's capture time could not be "
+        "compared, so a reader would supply the capture-time story the facts "
+        "exclude")
+    assert "position 1" in message and "sha256:" in message
+    assert dict(monitoring.record_write_failure_counts()) == before, (
+        "a replay-level refusal moved a process counter — the counter is the "
+        "DOOR's channel (`journal_collision` on `RecordWrite`), not `replay`'s")
+
+
+def test_an_UNENUMERATED_identity_state_REFUSES_rather_than_commits(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """THE POLARITY, PINNED (#9318 round 10, P2): silence is EARNED.
+
+    The gate is an ALLOW-LIST over `_SILENT_IDENTITY_STATES`, and without this
+    leg the allow-list and a `identity_state != "disagrees"` deny-list are
+    behaviourally IDENTICAL — every enumerated state behaves the same under both
+    (measured: reverting the conjunct left this file at 33 passed, 7 skipped).
+    So the form could be undone by any future edit with nothing red, which is
+    the fail-open default this guard exists to end: a fifth state, a spelling
+    drift or a `None` would be absorbed silently, and the write would COMMIT a
+    second record's layer rows under the first record's position row.
+
+    The lie is driven through `replay()` itself, with the identity read replaced
+    by a state nobody enumerated — the shape a later edit would produce.
+    """
+    assert set(rp._SILENT_IDENTITY_STATES) == {"agrees", "one_sided", "none"}, (
+        "the silent set moved — each state must be named deliberately")
+    monkeypatch.setattr(rp, "_identity_evidence",
+                        lambda *_a, **_k: ("rekeyed", "a state nobody named"))
+    conn = Absorbed(stored=_stored("ObjectRegistered", _payload_of(RECORD_A),
+                                   same_capture=True))
+
+    with pytest.raises(rp.JournalPositionCollision) as excinfo:
+        rp.replay([RECORD_B], conn, org_id=ORG, graph_id=GRAPH)
+
+    # ⛔ AND THE MESSAGE MAY NOT FABRICATE `none` (#9318 round 17): the renderer's
+    # default branch used to print "no identity key is comparable between them"
+    # for any state it did not enumerate, discarding the detail the caller DID
+    # supply — a claim about the payloads contradicted by the measurement in hand.
+    message = str(excinfo.value)
+    assert "a state nobody named" in message, (
+        f"the refusal discarded the identity detail it was handed: {message}")
+    assert "no identity key is comparable" not in message, (
+        f"an unenumerated state rendered `none`'s sentence: {message}")
+
+
 def test_a_different_event_type_alone_is_a_collision() -> None:
     """The verdict does not hang on the payload being comparable.
 
@@ -854,14 +1129,20 @@ def test_a_different_event_type_at_the_SAME_capture_instant_is_still_a_collision
     """DRIFT REQUIRES THE SAME TYPE: `same_type` is a conjunct, not a courtesy.
 
     A row of a DIFFERENT type at the SAME capture instant is a COLLISION. The
-    drift arm reads `same_type and same_capture and ts is not None`, and this leg
-    is what pins the FIRST conjunct — before it, no leg did: the other two
+    drift arm reads `same_type and same_capture and ts is not None and
+    identity_state in _SILENT_IDENTITY_STATES` — an ALLOW-LIST of
+    `("agrees", "one_sided", "none")`, not a `!= "disagrees"` deny-list, because
+    silence is EARNED here (#9318: the identity conjunct is pinned by
+    `test_a_same_capture_instant_pair_is_REFUSED_when_the_identities_disagree` and
+    `test_an_UNENUMERATED_identity_state_REFUSES_rather_than_commits`, both ABOVE),
+    and this leg is what pins the FIRST conjunct — before it, no leg did: the other two
     type-difference legs (`test_a_different_event_type_alone_is_a_collision`,
     `test_a_shared_NODE_id_with_two_record_types_is_not_one_record`) pass
     `same_capture=False` and take the collision path regardless, and every
     same-capture leg compares same-type records. Drop `same_type` and a record
-    whose TYPE changed is silently absorbed — a wider silent window than the
-    declared mirror residual, which at least requires the same type.
+    whose TYPE changed is silently absorbed — a window WIDER than the residual
+    the class docstring still declares (`⚠️ WHAT STILL CANNOT BE SEEN`), which at
+    least requires the same type and non-contradicting identities.
     """
     conn = Absorbed(stored=_stored("PointAdded", _payload_of(RECORD_A),
                                   same_type=False, same_capture=True))
@@ -900,9 +1181,13 @@ def test_the_position_statement_carries_no_schema_ask() -> None:
     legitimate old-journal replays into refusals.** An earlier wording said the
     guard would "simply never fire" after #12894 — backwards, because after the
     key change a conflict IS same-journal-same-seq, so a payload difference
-    there is this record's own drift, which the drift arm absorbs SILENTLY; what
-    the guard would still REFUSE is the moved-capture-time and `ts`-less shapes —
-    legitimate replays of ONE journal, turned into refusals.
+    there is this record's own drift — and a drift whose identities still AGREE
+    (or are `one_sided` / `none`) is absorbed SILENTLY; what
+    the guard would still REFUSE is the moved-capture-time, re-keyed-identity and
+    `ts`-less shapes —
+    legitimate replays of ONE journal, turned into refusals. ⚠️ That set is the
+    class docstring's THREE false-red shapes (`record_projection.py`,
+    "the remaining false-red subset"); keep the two lists identical.
     ⛔ AND THIS PIN CARRIES THE TWO READINGS TOO, not #12894 alone (review P2):
     a red here means EITHER that the key gained journal identity (#12894, so the
     pin is DELETED with the guard) OR that the STATEMENT WAS RESHAPED — which is
@@ -1036,7 +1321,11 @@ def test_the_live_door_reports_a_collision_as_its_own_refusal(
             org_id=ORG, graph_id=GRAPH, seq=1,
             event_type="ObjectRegistered", payload_digest="sha256:aaaaaaaaaaaa",
             payload_bytes=65, stored_event_type="PointAdded",
-            stored_payload_digest="sha256:bbbbbbbbbbbb", stored_payload_bytes=70)
+            stored_payload_digest="sha256:bbbbbbbbbbbb", stored_payload_bytes=70,
+            # ⛔ BOTH STATES ARE STATED (#9318 round 16): they render sentences
+            # about what was measured, so a construction may not inherit one.
+            identity_state="disagrees", identity_detail=None,
+            capture_state="differs")
 
     monkeypatch.setattr(rp, "replay", _boom)
     _arm(monkeypatch, conn)
@@ -1136,6 +1425,25 @@ def _journal_rows(admin: Any, tenant: tuple[str, str]) -> list[tuple[int, str, d
             "SELECT seq, event_type, payload FROM public.journal_event "
             "WHERE org_id = %s AND graph_id = %s ORDER BY seq", (org, graph))
         return [(seq, event_type, payload) for seq, event_type, payload in cur.fetchall()]
+
+
+def _journal_captures(admin: Any, tenant: tuple[str, str]) -> list[str]:
+    """`recorded_at` per position row, as ISO text — the assertion's view of the capture.
+
+    ⚠️ Not "what the drift arm reads": the arm reads Postgres's `same_capture`
+    boolean, computed in the conflict query. This is the raw column beside it.
+    """
+    org, graph = tenant
+    with admin.cursor() as cur:
+        cur.execute(
+            "SELECT recorded_at FROM public.journal_event "
+            "WHERE org_id = %s AND graph_id = %s ORDER BY seq", (org, graph))
+        # ⛔ NORMALISED TO UTC, not rendered in the server's session zone: the
+        # column is `timestamptz`, so `isoformat()` alone is a GUC-dependent
+        # string and the assertion would red on any non-UTC Postgres (measured:
+        # under `TimeZone='Europe/Madrid'` the same instant renders `+01:00`).
+        return [instant.astimezone(UTC).isoformat()
+                for (instant,) in cur.fetchall()]
 
 
 def _layer_keys(admin: Any, table: str, tenant: tuple[str, str]) -> list[str]:
@@ -1286,10 +1594,12 @@ def test_a_re_derived_payload_is_silent_on_a_real_database(
     `return`s WITHOUT raising, so this write reaches its own `commit()` and every
     layer statement it re-derived LANDS — asserted here only for the position
     row (append-only, unchanged), which is why the layer effect is stated rather
-    than pinned. For the same-type drift case that is the repair (the row moves to
-    the new derivation); for the mirror residual it is the cost: the second
-    record's LAYER rows are applied and committed while its position row is
-    dropped — the mis-index shape #9318 exists to stop.
+    than pinned. That is the repair story for a same-type re-derivation.
+    ⛔ THE MIRROR SHAPE IS NO LONGER THE COST OF THAT: two records sharing an
+    instant whose payloads name CONTRADICTING identities are REFUSED (#9318), so
+    their layer rows never commit —
+    `test_two_journals_sharing_a_capture_instant_are_refused_not_absorbed`
+    asserts exactly that for the DB.
     """
     admin, tenant, _, _ = record_tenant
     journal = EventLog(tmp_path / "corpus" / ".events.jsonl")
@@ -1302,6 +1612,10 @@ def test_a_re_derived_payload_is_silent_on_a_real_database(
     # with one field's value changed — a derivation that now emits something
     # other than what that row holds.
     re_derived = dict(RECORD_A, name="corpus A document (re-derived)")
+    state, _detail = rp._identity_evidence(_payload_of(re_derived),
+                                          _payload_of(RECORD_A))
+    assert state == "agrees", (
+        f"this leg's premise is a positive coordinate match and it read {state!r}")
     second = rw.write_live_record(re_derived, seq=seq)
 
     assert second is not None
@@ -1363,8 +1677,10 @@ def test_a_different_event_type_at_the_SAME_payload_and_capture_is_refused(
     ⛔ THIS IS THE ONLY SHAPE WHERE `event_type IS DISTINCT FROM %s::text` IS THE
     DISJUNCT THAT SELECTS THE ROW, and until this leg existed that arm had ZERO
     behavioural coverage: appending `AND FALSE` to it (literal text and the
-    9-placeholder count preserved) left the whole file green, DB legs included —
-    measured, 35 passed. Both stub legs named for the type arm drive the
+    9-placeholder count preserved) left the file green on the DB-FREE lane —
+    measured at that round, 35 passed / 7 skipped, and ⛔ that census is why the
+    count is quoted as a pair rather than as "passed": the DB legs SKIP there, so
+    nothing they cover can move, and the armed equivalent is a different run. Both stub legs named for the type arm drive the
     `Absorbed` fake, whose cursor answers with `self._conn.stored` WITHOUT
     evaluating the SQL (`THE FAKE CANNOT EVALUATE THE SQL`), so neither can
     discriminate the arm at all. ⛔ Not because a capture-time difference would
@@ -1419,3 +1735,110 @@ def test_a_different_event_type_at_the_SAME_payload_and_capture_is_refused(
     assert rows[0][1] == RECORD_A["type"], (
         "the surviving position row must still hold the FIRST write's type — a "
         "refused collision may not rewrite an append-only row")
+
+
+def test_two_journals_sharing_a_capture_instant_are_refused_not_absorbed(
+        record_tenant, tmp_path: Path,
+        caplog: pytest.LogCaptureFixture) -> None:
+    """THE SILENT-ABSORPTION ACCEPTANCE LEG (#9318, the mirror residual).
+
+    Two DISTINCT durable `EventLog` files under ONE record tenant, one record
+    appended from each — so both journals number their record `1` — and the pair
+    shares `event_type` AND the CAPTURE INSTANT (`recorded_at`), differing only
+    in the record's own identity (`id`).
+
+    ⛔ THAT COMBINATION IS THE ONE THE DRIFT ARM READ AS "the same record,
+    re-derived", so before this leg's fix the second journal's write reported
+    `APPLIED`, no counter moved, no line was logged, `journal_event` kept ONE
+    row naming journal A — and journal B's LAYER rows were COMMITTED underneath
+    it. That is the mis-index #9318 exists to stop, and it is the shape the
+    issue's own decision comment asked whether to close (recommendation: B).
+
+    The reachability argument is the issue's, not this leg's: `ts` is supplied by
+    the EMISSION path (`_journal_row` binds `record.get("ts")`;
+    `_emit_event` accepts a `recorded_ts` and mints `now_iso()` only when none
+    is given), so nothing ties an instant to a record's identity — two
+    independent mints on one microsecond, or a caller handing ONE clock reading
+    to several records, land on one `recorded_at` with different content.
+    ⚠️ NOT "two corpus roots mining one document carry its frontmatter date as
+    `ts`" (an earlier wording here): a document's date rides the PAYLOAD
+    (`createdAt`, caller-owned, and in NEITHER envelope set — it survives the
+    payload filter rather than becoming a `ts`), while `ts` is a clock mint on
+    every producer — the reachability is the microsecond collision
+    and the shared reading, not a frontmatter date.
+
+    ⛔ On the pre-fix tree this leg reds at `write_b.applied is False` (it is
+    True) and then at `_layer_keys == ["obj-a"]` (it is
+    `["obj-a", "obj-b"]` — journal B's object row committed under journal A's
+    position row). Measured, both.
+    """
+    admin, tenant, _, _ = record_tenant
+
+    journal_a = EventLog(tmp_path / "corpus-a" / ".events.jsonl")
+    journal_b = EventLog(tmp_path / "corpus-b" / ".events.jsonl")
+    # ONE capture instant for both records, and ONE difference: the identity.
+    # ⛔ `RECORD_B` would move the name as well (review round 21, P2), so the
+    # pair is built from `RECORD_A` with only the id replaced — otherwise the
+    # docstring's "differing only in the record's own identity" is false and the
+    # leg pins the ordinary content collision alongside the gate.
+    first = dict(RECORD_A, ts="2026-11-15T00:00:00Z", event_id="evt-a")
+    second = dict(RECORD_A, ts=first["ts"], id="obj-b", event_id="evt-b")
+    seq_a = journal_a.append(first)
+    seq_b = journal_b.append(second)
+    assert (seq_a, seq_b) == (1, 1), (
+        "the reproduction needs both journals numbered from 1 — that is the "
+        "collision; if this changed, the ordinal's source moved (#9190)")
+    # ⛔ THE LEG'S OWN PREMISE, asserted rather than described (review round 9,
+    # P2): the pair must reach the guard as same-type, same-capture and
+    # CONTRADICTING. Without that, a refusal from the CAPTURE arm satisfies this
+    # leg while the identity gate is deleted.
+    assert first["type"] == second["type"]
+    assert first["ts"] == second["ts"], "the pair no longer shares a capture instant"
+    moved = {k for k in set(_payload_of(first)) | set(_payload_of(second))
+             if _payload_of(first).get(k) != _payload_of(second).get(k)}
+    assert moved == {"id"}, (
+        f"the ONLY difference must be the identity value — got {sorted(moved)}; "
+        f"with the name moved too this leg pins the content collision, not the gate")
+    assert rp._identity_evidence(second, first)[0] == "disagrees", (
+        "the pair no longer contradicts on identity — the leg is then named for "
+        "an arm it does not exercise")
+
+    write_a = rw.write_live_record(first, seq=seq_a)
+    assert write_a is not None and write_a.applied, write_a
+    before = monitoring.record_write_failure_counts().get("journal_collision", 0)
+    with caplog.at_level(logging.WARNING):
+        write_b = rw.write_live_record(second, seq=seq_b)
+
+    # ── the loud failure, on the arm that used to be silent ────────────────
+    assert write_b is not None
+    assert write_b.applied is False, (
+        "two durable journals meeting at one position, sharing a type and a "
+        "capture instant but naming DIFFERENT records, were reported APPLIED — "
+        "that is the silent absorption #9318 exists to end")
+    assert write_b.refusal == "journal_collision"
+    assert monitoring.record_write_failure_counts().get(
+        "journal_collision", 0) == before + 1, (
+        "the refusal did not reach the `journal_collision` counter, so an "
+        "operator reading the record's health would see nothing wrong")
+    assert "journal_collision" in caplog.text
+
+    # ── and journal B's content is NOT committed under journal A's row ─────
+    rows = _journal_rows(admin, tenant)
+    assert len(rows) == 1, (
+        f"journal_event holds {len(rows)} position row(s) for two journals: "
+        f"{rows!r} — a second row here means the key gained journal identity, "
+        f"which is #12894's decision, not this guard's")
+    seq, event_type, payload = rows[0]
+    assert seq == 1 and event_type == "ObjectRegistered"
+    assert payload["id"] == "obj-a", (
+        f"the surviving position row names {payload['id']!r}, not journal A's "
+        f"'obj-a' — `journal_event` is append-only by trigger (#9318)")
+    assert _layer_keys(admin, "object", tenant) == ["obj-a"], (
+        "the refused record's LAYER rows landed under another record's position "
+        "row — that is the mis-index this guard exists to prevent, and it was "
+        "committed with no exception and no counter before this leg")
+    # …and the surviving row really was CAPTURED at the shared instant, so the
+    # refusal above cannot have come from the capture arm (#9318 round 9).
+    assert _journal_captures(admin, tenant) == ["2026-11-15T00:00:00+00:00"], (
+        "the surviving row's `recorded_at` is not the shared instant — the "
+        "capture arm could then explain this refusal on its own")
