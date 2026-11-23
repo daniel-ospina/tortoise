@@ -1797,7 +1797,7 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
                  # and the ONE mapping root that needs no import is only a mapping when it is
                  # in `dict_names`. Passing an empty set here made the class's own stated
                  # reason false for its nearest spelling; the file hard-codes this root in the
-                 # copy-closure for exactly the same reason (`_bu_mapping_roots`).
+                 # copy-closure for exactly the same reason (`_bu_dict_roots`).
                  # (A hand-rolled `getattr(<dotted dict>, "dict")` disjunct lived here and is
                  # DELETED, MEASURED INERT: it matched `getattr(builtins.dict, "dict").copy`,
                  # which is an `AttributeError` — `type` has no `dict` — so it could fire on
@@ -1828,14 +1828,21 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
         or (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
             and n.func.id == "getattr" and len(n.args) >= 2
             and (_string_keys_of(n.args[1], _bu_consts_) & _COPY_CALLEES)
-            and ((isinstance(n.args[0], ast.Name)
-                  and n.args[0].id in ({"dict"} | _copy_module_names_))
-                 or (isinstance(n.args[0], ast.Attribute) and n.args[0].attr == "dict"
+            # ⛔ NO BARE-NAME DISJUNCT HERE (#14326 review cycle 11, MEASURED: it duplicated the
+            # sibling clause above, which already accepts `args[0].id in (names | dict_names)`.
+            # Deleting it flipped 0 rows, and deleting the SIBLING instead left the file green
+            # — i.e. the union was load-bearing while neither half was independently pinned.
+            # The sibling is the owner; this clause covers only the receiver SHAPES it cannot.)
+            and ((isinstance(n.args[0], ast.Attribute) and n.args[0].attr == "dict"
                      and isinstance(n.args[0].value, ast.Name)
                      and n.args[0].value.id in _module_names)
                  or _builtin_lookup_name(n.args[0], _module_names, _bu_consts_,
                                          frozenset({"__builtins__"}), frozenset(),
-                                         members=frozenset({"dict"}) | _COPY_CALLEES)
+                                         # ⛔ `_COPY_CALLEES` REMOVED FROM THE SET (#14326 review
+                                         # cycle 11, MEASURED DEAD: reverting it flipped 0 of 221
+                                         # rows and 0 declared rows — a receiver that resolves
+                                         # to a copy-callee NAME is the sibling's question).
+                                         members=frozenset({"dict"}))
                  is not None)),
         loops=True))
 
@@ -11710,6 +11717,28 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
             f'_d["exec"]("results = {read}")'),
         "`(builtins.__dict__,)[0][\"exec\"]`": (
             'import builtins', '_d = (builtins.__dict__,)[0]',
+            f'_d["exec"]("results = {read}")'),
+        # ⛔ AND THE `__getattribute__` / `__call__` DUNDER FAMILY (#14326 review cycle 11,
+        # EACH MEASURED GREEN **and LIVE**: `_d = builtins.__getattribute__("exec")` executes
+        # the read). This is the SAME class the REGISTRY axis already declares at its
+        # `_is_modules_key` note ("`object.__getattribute__(…)`, `getattr.__call__`,
+        # `builtins.__getattribute__(\"getattr\")` — all MEASURED GREEN"), and it is NOT a
+        # delta regression; declaring it here is what makes the two axes agree instead of the
+        # code-execution axis reading as if it covered the family.
+        # ⛔ WHY IT IS A DECLARATION AND NOT A ONE-ARGUMENT FIX (MEASURED): the fetcher arm
+        # requires `len(args) >= 2`, and the bound `__getattribute__(name)` form is ARITY ONE —
+        # `_builtin_lookup_name(builtins.__getattribute__("exec"), ...,
+        # getattr_fetchers={"getattr", "__getattribute__"})` still returns `None`. Closing it
+        # means teaching the fetcher arm a second ARITY, i.e. a different question ("which
+        # member does this one-argument dunder fetch"), not another spelling of the same one.
+        "`_d = builtins.__getattribute__(\"exec\")`": (
+            'import builtins', '_d = builtins.__getattribute__("exec")',
+            f'_d("results = {read}")'),
+        "`_f = builtins.__getattribute__(\"dict\").copy`": (
+            'import builtins', '_f = builtins.__getattribute__("dict").copy',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        "`_d = dict.copy.__call__(builtins.__dict__)`": (
+            'import builtins', '_d = dict.copy.__call__(builtins.__dict__)',
             f'_d["exec"]("results = {read}")'),
         # ⛔ THE "FETCHED RECEIVER" ROW THAT USED TO BE DECLARED HERE IS NOW CLOSED (#14326
         # review cycle 10, and the declaration was MEASURED DISHONEST before that): the class
