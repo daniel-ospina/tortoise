@@ -8017,13 +8017,23 @@ def test_a_PRODUCT_that_outgrows_its_budget_REFUSES_instead_of_spinning() -> Non
     # refusal, while the JOIN forms refused the identical operand shape). Both paths are
     # asserted because BOTH were unbudgeted and they are separate functions; a mutation that
     # only re-opens one of them must red here rather than pass on the other's coverage.
+    #
+    # ⛔ AND THE ROW PINS THE CLAUSE, NOT THE EXCEPTION TYPE (#14326 review cycle 7, MEASURED).
+    # The BIND row was VACUOUS as first written: reverting ONLY `_values`' budget left all 43
+    # green, because `_check_budget` (:719) refuses the same shape by COUNT (4913 >
+    # `_VALUE_MAX_PER_NAME`=512) with the SAME exception class — so `pytest.raises(...)` was
+    # satisfied by a different clause than the one the comment above claims. Both rows now
+    # match the budget's own message, and with that `match=` the reverted `_values` reds here
+    # (measured: `DID NOT MATCH`), while the two messages stay distinguishable
+    # ("would build more than 4096" vs "has more statically possible values than …").
     _plus_many = ",".join(f"'v{i}'" for i in range(17))
-    with pytest.raises(_ResolutionDidNotConverge):
+    _budget_msg = rf"would build more than {_PRODUCT_MAX_COMBINATIONS} concatenations"
+    with pytest.raises(_ResolutionDidNotConverge, match=_budget_msg):
         _read_reach(_pin_source(
             f"    _N = {{{_plus_many}}}\n"
             '    getattr(sdk, _N + _N + _N)'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'))
-    with pytest.raises(_ResolutionDidNotConverge):
+    with pytest.raises(_ResolutionDidNotConverge, match=_budget_msg):
         _read_reach(_pin_source(
             f"    _N = {{{_plus_many}}}\n"
             "    _s = _N + _N + _N\n"
