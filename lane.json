@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14343-amplify-1795407517-p648401-1e5d2cea",
+  "_sha": "3856614e9e91280b0c0dfa1623e743fffdfe0f34",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14343-amplify.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/14343-amplification"
+    },
+    {
+      "kind": "sha",
+      "value": "371fd0a22e964e398b6df1ca32f8437141884514"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14343-amplify"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 33385,
+  "ended_at": 1795440902,
+  "exit_code": 0,
+  "heartbeat_at": 1795440902,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14343-amplify-1795407517-p648401-1e5d2cea",
+  "lease_until": 1795477502,
+  "pid": 648401,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795407517,
+  "state": "DONE",
+  "tag": "14343-amplify",
+  "worktree": "/home/cmux/tortoise/.worktrees/14343-amplify"
+}
