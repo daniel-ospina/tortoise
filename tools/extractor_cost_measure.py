@@ -1443,7 +1443,8 @@ def _output_structure(text: str) -> dict:
         return out
     try:
         parsed = _parse_json_robust(text)
-    except Exception:  # a narrative emission is not a defect
+    except Exception:
+        # a narrative emission is not a defect — S1 emits prose, not JSON
         parsed = None
     if not isinstance(parsed, dict):
         # S1's narrative: report its shape rather than pretending it is JSON.
@@ -1979,7 +1980,8 @@ def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
                              "hits one drops the others — not "
                              "quality-neutral"),
         }
-    except Exception as exc:  # the lever's absence is a result
+    except Exception as exc:
+        # the lever's absence is a RESULT, not a crash: report it as one
         out["compact_master_render"] = {"error": f"{type(exc).__name__}: {exc}"}
     out["s1_second_send"] = {
         "cause": (f"S1's narrative cap is {X._S1_MAX_TOKENS} tokens; a story "

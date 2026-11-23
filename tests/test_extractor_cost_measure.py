@@ -660,12 +660,11 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
 # a region the prompt does not contain, would read as a result.
 
 def _evidence_rows() -> list[dict]:
-    import json as _json
+    import json
 
-    from tools.extractor_cost_measure import build_report  # noqa: F401
     path = (_REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
             / "measurements.jsonl")
-    return [_json.loads(line) for line in path.read_text().splitlines()
+    return [json.loads(line) for line in path.read_text().splitlines()
             if line.strip()]
 
 
