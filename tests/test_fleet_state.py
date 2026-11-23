@@ -3697,10 +3697,12 @@ def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
 def _row_for_pid(pid: int) -> str:
     """The `command=` text a census would read for ONE pid — a DIAGNOSTIC, never an oracle.
 
-    Only ever called on a failure path (#12039): when the poll above times out, what
-    settles the cause in one run is whether the table holds the fixture at all, holds
-    it under a truncated argv[0], or does not hold it at all. `""` means the table has
-    no row for the pid.
+    Only ever called on a failure path (#12039): when the poll ends without the census seeing
+    the fixture's pid — the deadline expiring, or the child dying early — what settles the
+    cause in one run is whether the table holds the fixture at all, holds it under a
+    truncated argv[0], or does not hold it at all. `""` means the table has no row for the
+    pid. ⚠️ Called BEFORE `proc.poll()` by the test, on purpose: `poll()` collects the child
+    and a collected child has no row left to quote.
     """
     import subprocess  # no module-level import in this file; the caller imports it too
 
@@ -3750,9 +3752,14 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     census cannot see a live lane. Verified red with the flag removed.
 
     A real process carrying an arbitrary argv[0] (never a `#!` script — the kernel
-    rewrites argv[0] to the interpreter, which `_pi_pids_from_ps` documents). SKIPS only
-    where the process table cannot be read at all (reported as an error by the reader),
-    so a box without that does not red a census that is fine.
+    rewrites argv[0] to the interpreter, which `_pi_pids_from_ps` documents). SKIPS on TWO
+    paths and no more: where the process table cannot be read at all (reported as an error by
+    the reader), so a box without that does not red a census that is fine, **or** where an
+    OUTSIDE signal killed the fixture's child while the poll ran (`_OUTSIDE_SIGNALS` — the OOM
+    killer, an orphan sweep, the shard's own timeout; a killed child has no `argv[0]` for any
+    census to match). Everything else stays a FAIL: a clean exit means the fixture never ran its
+    command, and a CRASH signal (SIGSEGV/SIGABRT/…) means the interpreter under it died — both
+    are the test substrate's fault, not the box's. See the exits far below.
 
     ⛔ IT IS NOT A COPY OF `sleep` ANY MORE (measured on the `ubuntu-26.04` hosted
     runner `GitHub Actions 1000848497`, `test (c)`, head `70116a870dbb`). On that image
