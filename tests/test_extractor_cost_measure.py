@@ -205,6 +205,35 @@ def test_the_corpus_seed_actually_selects_the_sample():
     assert [r["path"] for r in m.pick_corpus(limit=20, seed=99)] == ninetynine
 
 
+def test_a_non_positive_document_limit_is_an_empty_sample_not_a_traceback():
+    """`--docs 0` is a LEGAL request ("measure no documents"), not a crash.
+
+    ⛔ THE PRE-FIX FAILURE, measured: `rows = sorted(picked.values())[:limit]`
+    is `[]` at `limit=0`, and the landmark guard that follows assigns
+    `rows[-1] = inv[-1]` unguarded — `IndexError: list assignment index out of
+    range`. `--docs` is a bare `type=int` with no positivity check, so `0` and
+    a negative value both reach here, and the caller got a traceback instead of
+    a result (review cycle 13, P3; the guard it was fixed with shipped with no
+    pin, which is this test).
+
+    ⛔ NON-VACUITY ON BOTH SIDES. `limit=0` alone would stay green under a
+    blanket `return []`, so the positive arm below asserts a real corpus is
+    still drawn; and the longest-document guarantee is asserted by the sibling
+    determinism test, which this guard must not disable.
+    """
+    for limit in (0, -1, -50):
+        assert m.pick_corpus(limit=limit) == [], (
+            f"pick_corpus(limit={limit}) must be the empty sample — a request "
+            f"for no documents is a result, not a traceback")
+    # The guard is scoped to a NON-POSITIVE limit: a positive one still selects
+    # a real corpus, so the early return did not swallow the whole function.
+    positive = m.pick_corpus(limit=3)
+    assert positive, "a positive limit must still draw a corpus"
+    assert max(r["tokens"] for r in positive) == max(
+        r["tokens"] for r in m.doc_inventory()), (
+        "the guard must not cost the sample its longest document")
+
+
 def test_a_literal_dollar_is_escaped_outside_code_spans_only():
     """MD037/MD038 came from bare `$` figures, not from the sentence they
     landed on (#14295).
