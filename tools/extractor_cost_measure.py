@@ -1722,11 +1722,46 @@ def compose_report(artifacts: list[dict]) -> dict:
                                        + out.get("tokens", 0))
             acc["output"]["sections"] = _merge_sections(
                 acc["output"].get("sections") or {}, out.get("sections") or {})
-        rows.append({"doc": art["doc"], "stages": per_stage})
+        rows.append({"doc": art["doc"], "stages": per_stage,
+                     "pipeline": art.get("pipeline") or {}})
     # ⛔ `live` is propagated or the renderer cannot tell a stub run from a
     # measured one, and the report is the artifact a reader quotes.
-    return {"rows": rows,
-            "live": all(a.get("live", False) for a in artifacts)}
+    live = all(a.get("live", False) for a in artifacts)
+    return {"rows": rows, "live": live,
+            "complete": all(_row_complete(r) for r in rows) if rows else False}
+
+
+#: The stages a complete measurement must have observed. A stage that RAISED is
+#: not a stage that measured: `_Recording.complete` appends to `calls` only
+#: after the adapter RETURNS, so a failing stage contributes no call at all and
+#: the table would show the surviving stages as if they were the whole run.
+_REQUIRED_STAGES = ("s1", "s2", "s4")
+
+
+def _row_complete(row: dict) -> bool:
+    """Whether a `compose` row is a measurement rather than a partial run.
+
+    ⛔ THE FAIL-OPEN THIS CLOSES (review cycle 7, P1). The provenance gate above
+    distinguishes a stub transport from a live one, and says nothing about a
+    live run whose stages FAILED. Measured on a box with no provider key — the
+    exact state the evidence README documents — every call raised
+    `401 Unauthorized`, so `calls` was empty, `pipeline.errors` held three
+    entries, and the rendered output was a header plus three empty tables with
+    **no marker at all** and exit 0. A partial run is worse: S1+S2 rendering
+    with S4 (the stage whose embed-list region is this bundle's subject) simply
+    absent reads as a smaller, complete measurement.
+    """
+    pipe = row.get("pipeline") or {}
+    if pipe.get("errors"):
+        return False
+    stages = row.get("stages") or {}
+    if not all(stages.get(s) for s in _REQUIRED_STAGES):
+        return False
+    emitted = sum(int(v.get("calls") or 0) for v in stages.values())
+    made = pipe.get("calls")
+    # `pipeline.calls` is the pipeline's own LLM counter: it can only EXCEED
+    # what the instrument recorded if calls were lost between the two.
+    return made is None or int(made) <= emitted
 
 
 def _merge_sections(a: dict, b: dict) -> dict:
@@ -1791,6 +1826,31 @@ def render_compose(report: dict) -> str:
             "and the emission shapes below are real render output, but every "
             "`completion` figure is the stub's, not a model's. Re-run without "
             "`--offline` on a box with a provider key before quoting any of it.")
+        lines.append("")
+    elif report.get("complete") is not True:
+        # ⛔ A LIVE run is not automatically a MEASUREMENT (review cycle 7, P1).
+        # A stage that raised appends no call, keeps the surviving stages
+        # looking measured, and — before this branch — printed no marker and
+        # exited 0. Name the stages that are missing and the errors the
+        # pipeline itself recorded, so the table cannot be quoted as partial.
+        missing = sorted({s for row in report.get("rows") or []
+                          for s in _REQUIRED_STAGES
+                          if not (row.get("stages") or {}).get(s)})
+        errs = [e for row in report.get("rows") or []
+                for e in ((row.get("pipeline") or {}).get("errors") or [])]
+        lines.append(
+            "⚠️ **INCOMPLETE LIVE RUN — NOT A MEASUREMENT.** The table below is "
+            "missing stage(s) or recorded pipeline errors, so it is a partial "
+            "run, not a decomposition: "
+            + (", ".join(f"`{s}`" for s in missing) if missing
+               else "no stage is missing, but calls were lost")
+            + ".")
+        for err in errs[:5]:
+            lines.append(f"* pipeline error: `{err}`")
+        lines.append("")
+        lines.append("A stage that RAISES emits no call, so the surviving rows "
+                     "read as if they were the whole run. Re-run to a "
+                     "complete artifact before quoting any figure here.")
         lines.append("")
     for row in report["rows"]:
         lines.append(f"### `{row['doc']['path']}` — "
@@ -1961,8 +2021,24 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     # The two dynamic regions, solved from the measured per-call prompts. The
     # story is S1's own emission seen by the next stage; the embed list is
     # S2's emission re-serialized into S4's prompt.
+    # ⛔ BOTH STAGES PAY THE #10311 ENVELOPE, and it is charged to the STORY
+    # row, not left inside `embed` (review cycle 7, P2). S2's story is a USER
+    # message (`_render_untrusted_block("S1 STORY", story)`), and S4's story
+    # slot is wrapped by the same call inside its template. The statics above
+    # render with `story=""`, and an empty body renders as the EMPTY STRING
+    # (`_render_untrusted_block("S1 STORY", "")` is 0 tokens, measured), so
+    # `s4_sys` contains NO story envelope — while a real S4 prompt carries
+    # envelope+body. Subtracting only the body therefore dumped each S4 call's
+    # 93-token envelope into `**S2's embed list**`, ~106 tokens/doc on the
+    # bundle's headline row.
+    #
+    # The two rows therefore get: the body from both stages, and the envelope
+    # from both stages. S2's own envelope was previously in the UNATTRIBUTED
+    # residual (it is known, so it does not belong there) — hence the
+    # composition total rises by (c2 + c4) x clause and the residual falls by
+    # the same, which is what makes §1's fit-vs-composition agreement tighter.
     story = max(0.0, pc2 - s2_sys - clause)
-    embed = max(0.0, pc4 - s4_sys - story)
+    embed = max(0.0, pc4 - s4_sys - story - clause)
 
     regions = {
         # (label, tokens/doc, what it is, provenance)
@@ -1983,7 +2059,7 @@ def decompose(rows: list[dict], *, arm: str = "cold",
         "date anchor": c1 * statics["s1"]["date_anchor"]
         + c2 * statics["s2"]["date_anchor"] + c4 * statics["s4"]["date_anchor"],
         "graph search results (S4)": c4 * statics["s4"].get("search_results", 0),
-        "**S1's story, re-sent to S2 and S4**": (c2 + c4) * story,
+        "**S1's story, re-sent to S2 and S4**": (c2 + c4) * (story + clause),
         "**S2's embed list, re-sent to S4**": (c4 * embed),
     }
     total = sum(regions.values())
@@ -2468,9 +2544,21 @@ def main(argv: list[str] | None = None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(art, indent=1, sort_keys=True),
                             encoding="utf-8")
-        table = render_compose(compose_report([art]))
+        report = compose_report([art])
+        table = render_compose(report)
         sys.stdout.write(table)
         sys.stderr.write(f"\ncompose artifact: {args.out}\n")
+        # ⛔ A LIVE run that did not measure every stage must not exit 0: the
+        # exit code is the only machine-readable signal a scripted re-runner
+        # has, and returning 0 here is how a 401-only run wrote an artifact that
+        # read as a measurement (review cycle 7, P1). `--offline` is exempt —
+        # a stub is a documented SHAPE check and its banner says so.
+        if not args.offline and report.get("complete") is not True:
+            sys.stderr.write(
+                "compose: INCOMPLETE — not every stage measured (see the "
+                "INCOMPLETE banner above). The artifact is written for "
+                "diagnosis, but it is NOT a measurement.\n")
+            return 1
         return 0
     rows = load_rows(args.out)
     report = report_from_rows(rows)

@@ -23,23 +23,23 @@ arm `cold` · 50 documents · median document 5,211.0 tokens · calls/doc 3.98 (
 
 | region | tokens/doc | share |
 |---|---|---|
-| **S2's embed list, re-sent to S4** | 14,164 | 32.5% |
+| **S2's embed list, re-sent to S4** | 14,058 | 32.2% |
 | kind vocabulary (`master_list`) | 7,330 | 16.8% |
-| stage instructions (template prose) | 6,430 | 14.8% |
-| **S1's story, re-sent to S2 and S4** | 6,109 | 14.0% |
-| mapping rules (`anti_routine`) | 4,467 | 10.3% |
+| stage instructions (template prose) | 6,430 | 14.7% |
+| **S1's story, re-sent to S2 and S4** | 6,323 | 14.5% |
+| mapping rules (`anti_routine`) | 4,467 | 10.2% |
 | output schema (`output_contract`) | 2,187 | 5.0% |
 | memory granularity (S1 only) | 1,551 | 3.6% |
 | date anchor | 653 | 1.5% |
 | chains | 547 | 1.3% |
 | graph search results (S4) | 129 | 0.3% |
-| **composition total** | **43,567** | 100.0% |
+| **composition total** | **43,675** | 100.0% |
 | *fitted constant (this arm's own intercept)* | 45,503 | — |
-| *unattributed (fit intercept − composition)* | 1,936 | — |
+| *unattributed (fit intercept − composition)* | 1,828 | — |
 
 The document itself is NOT in that table: it is the fit's slope, 8,754 tokens/doc (1.68 × 5,211.0) against the fitted 11,250. S1 sends the WHOLE document once per call, and a majority of documents take a second S1 call, so the document is paid for ~2x — 34 of 50 documents here.
 
-Solved dynamic regions: the S1 story is **2,656** tokens as the later stages see it, and S2's embed list is re-serialized into S4's prompt at **12,425** tokens — 1.23× S2's own emission.
+Solved dynamic regions: the S1 story is **2,656** tokens as the later stages see it, and S2's embed list is re-serialized into S4's prompt at **12,332** tokens — 1.23× S2's own emission.
 
 ### The output constant, decomposed
 
