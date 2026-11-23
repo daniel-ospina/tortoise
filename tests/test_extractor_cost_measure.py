@@ -1599,6 +1599,52 @@ def test_a_row_whose_render_missed_its_arm_is_REFUSED_not_mislabelled(
         "a refused row must not carry an arm's layout as if it had measured it")
 
 
+def test_the_real_install_arm_actually_arms_the_after_batch(monkeypatch, tmp_path):
+    """⛔ THE BATCH TEST ABOVE CANNOT SEE THE ARMING, because it INJECTS the
+    arming: it monkeypatches `_install_arm` with a `fake_install` that
+    re-implements the function body, so every assertion about "the flag its own
+    arm installed" is made about the fake. Measured (review cycle 11, BLOCKING):
+    replace the real `_install_arm`'s body with `return` — the exact defect this
+    PR exists to fix, "the arm is a label again" — and the whole file reports
+    71 passed. The one line that makes the `after` arm an arm
+    (`os.environ[_TOGGLE] = "compact"`) was pinned by NOTHING, so the
+    before→after table could silently return to being the before arm twice.
+
+    This pin therefore runs the REAL function end to end and asserts the row the
+    production code writes: `after` must render `compact`, `before` must render
+    `indent`. It reds on the mutation above.
+    """
+    def fake_measure(model, conversation, *, session_date):
+        return {"prompt_tokens": 100, "completion_tokens": 10}
+
+    docs = [{"path": "README.md", "tokens": 10 + i} for i in range(2)]
+    monkeypatch.delenv(m._TOGGLE, raising=False)
+    monkeypatch.setattr(m, "pick_corpus", lambda limit, seed: docs)
+    monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
+    monkeypatch.setattr(m, "_build_model", lambda: object())
+    monkeypatch.setattr(m, "measure_one", fake_measure)
+    # ⛔ NO setattr on `_install_arm` — the real one must run.
+
+    out = tmp_path / "measurements.jsonl"
+    m.run_measurement(out=out, docs_limit=2, sessions_limit=0, workers=1,
+                      seed=1, arms=("before", "after"), arm_gap_s=0.0,
+                      long_split=False)
+
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line]
+    by_arm = {r["arm"]: r for r in rows}
+    assert set(by_arm) == {"before", "after"}, sorted(by_arm)
+    assert not any(r.get("failed") for r in rows), rows
+    assert by_arm["after"]["s4_embed_json"] == "compact", (
+        "the `after` arm must ARM the lever: `_install_arm('after')` sets "
+        f"{m._TOGGLE}=compact. Got "
+        f"{by_arm['after'].get('s4_embed_json')!r} — if this is 'indent', the "
+        "arm is a label again and the before→after delta measures nothing")
+    assert by_arm["before"]["s4_embed_json"] == "indent", (
+        "the `before` arm must pin the lever OFF, recording today's bytes")
+    # the ambient value is restored, so a later non-lever arm is not armed
+    assert m._TOGGLE not in os.environ
+
+
 def test_a_lever_that_moves_mid_measurement_is_refused(monkeypatch, tmp_path):
     """One layout per pipeline run, or the row describes neither."""
     def flipping_measure(model, conversation, *, session_date):
@@ -1690,3 +1736,96 @@ def test_a_content_level_error_is_a_note_not_an_incompleteness():
     assert "content-level notes" in rendered, (
         "…but it must still be DISCLOSED, or the reader is told the emission "
         "was clean when it was not")
+
+
+def test_an_unknown_arm_is_refused_rather_than_measured(monkeypatch, tmp_path):
+    """A typo must cost an exit, not a 360-call provider run.
+
+    `_install_arm` acts only on `after`/`before`; `cold`/`warm` deliberately
+    inherit the ambient value. Every OTHER token used to fall through with no arm
+    installed and no diagnostic, so `--arms before,After` (a capital) reproduced
+    exactly the failure `_install_arm` exists to prevent: both batches render
+    `indent`, the delta is 0, and `run` exits 0 having measured nothing but the
+    before arm twice (review cycle 11, P3).
+    """
+    for bad in ("before,After", "before,compact", "tepid"):
+        with pytest.raises(SystemExit) as exc:
+            m.main(["run", "--docs", "1", "--arms", bad,
+                    "--out", str(tmp_path / "m.jsonl")])
+        assert "unknown arm" in str(exc.value), (bad, str(exc.value))
+    # …and the closed set is accepted (proving the refusal is not too broad).
+    assert sorted(m._ARMS) == ["after", "before", "cold", "warm"], (
+        f"the accepted set must be exactly the four arms, got {sorted(m._ARMS)}")
+
+
+def test_the_printed_output_table_closes_arithmetically():
+    """rows → total → residual must reconcile in BOTH artifacts.
+
+    The row/total off-by-one was fixed first, and the residual then still did not
+    close: the generated table printed `unattributed 4,972` against a fitted
+    22,802 and a total of 17,829 (22,802 − 17,829 = 4,973). Fixing the total
+    moved the defect one row down rather than removing it (review cycle 11, P2),
+    so this pin checks the whole chain and both places a reader can land.
+    """
+    dec = _committed_decomposition()
+    out = dec["output"]
+    fitted = out["fitted_constant"]
+    md = _committed_markdown()
+    block = md.split("### The output constant, decomposed", 1)[1]
+    rows, total, residual = [], None, None
+    for line in block.splitlines():
+        if not line.startswith("|"):
+            if residual is not None:
+                break
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 3 or set(cells[0]) <= {"-"} or cells[0] == "stage":
+            continue
+        num = lambda c: int(c.replace(",", "").replace("*", ""))  # noqa: E731
+        if "composition total" in cells[0]:
+            total = num(cells[1])
+        elif cells[0].startswith("*fitted constant"):
+            assert num(cells[1]) == fitted
+        elif "unattributed" in cells[0]:
+            residual = num(cells[1])
+            break
+        elif cells[0] in ("s1", "s2", "s4"):
+            rows.append(num(cells[1]))
+    assert len(rows) == 3 and total is not None and residual is not None, (
+        f"the table must carry three rows, a total and a residual "
+        f"(rows={rows}, total={total}, residual={residual})")
+    assert sum(rows) == total, f"rows {sum(rows):,} != total {total:,}"
+    assert total + residual == fitted, (
+        f"the printed table must close: total {total:,} + unattributed "
+        f"{residual:,} must equal the fitted {fitted:,}, got "
+        f"{total + residual:,}")
+
+    # …and the hand-written README's §2 table, which no generated artifact covers
+    ev = (_REPO_ROOT / "docs" / "evidence" / "14343-amplify" / "README.md"
+          ).read_text(encoding="utf-8")
+    section = ev.split("| stage | completion tokens/doc", 1)[1]
+    rows2, total2, residual2 = [], None, None
+    for line in section.splitlines():
+        if not line.startswith("|"):
+            if residual2 is not None:
+                break
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2 or set(cells[0]) <= {"-"} or cells[0] == "stage":
+            continue
+        num = lambda c: int(c.replace(",", "").replace("*", "").replace("%", ""))  # noqa: E731
+        if "composition total" in cells[0]:
+            total2 = num(cells[1])
+        elif "unattributed" in cells[0]:
+            residual2 = num(cells[1])
+            break
+        elif cells[0].strip("* ") in ("s1", "s2", "s4"):
+            rows2.append(num(cells[1]))
+    assert len(rows2) == 3 and total2 is not None and residual2 is not None, (
+        f"the README §2 table must carry three rows, a total and a residual "
+        f"(rows={rows2}, total={total2}, residual={residual2})")
+    assert sum(rows2) == total2, (
+        f"README §2 rows {sum(rows2):,} != printed total {total2:,}")
+    assert total2 + residual2 == fitted, (
+        f"README §2 must close against the fitted constant: {total2:,} + "
+        f"{residual2:,} != {fitted:,}")

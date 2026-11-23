@@ -321,6 +321,11 @@ _TOGGLE = "TORTOISE_S4_EMBED_JSON"
 #: the ambient value.
 _ARM_LAYOUT = {"after": "compact", "before": "indent"}
 
+#: The CLOSED set of arm names the tool understands: the two that move the lever
+#: plus the two cache-ladder arms that deliberately inherit the ambient value.
+#: `--arms` refuses anything else — see the refusal in `main()`.
+_ARMS = frozenset(_ARM_LAYOUT) | {"cold", "warm"}
+
 
 def _embed_mode() -> str:
     """The serialization `render_s4_prompt` will really use — production's own
@@ -2816,6 +2821,25 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{row['tokens']:>7}  session {row['path']}")
             return 0
         arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
+        # ⛔ REFUSE AN ARM THE TOOL DOES NOT UNDERSTAND. `_install_arm` acts only
+        # on `after`/`before`; `cold`/`warm` deliberately inherit the ambient
+        # value. ANY other token used to fall through with no arm installed and
+        # no diagnostic — so `--arms before,After` (a capital) or
+        # `--arms before,compact` reproduced exactly the failure `_install_arm`
+        # exists to prevent: both batches render `indent`, the delta is 0, `run`
+        # exits 0, and a full provider run (~360 calls) measures nothing. The
+        # only trace was the per-row `s4_embed_json` inside measurements.jsonl
+        # (review cycle 11, P3). A typo must cost an exit 2, not a run.
+        if not arms:
+            raise SystemExit("--arms named no arm (got an empty selection)")
+        unknown = sorted(set(arms) - _ARMS)
+        if unknown:
+            raise SystemExit(
+                f"unknown arm(s) {', '.join(repr(a) for a in unknown)}; the "
+                f"closed set is {', '.join(sorted(_ARMS))} — `after`/`before` "
+                f"set the S4 embed-list layout, `cold`/`warm` inherit the "
+                f"ambient value, and anything else would silently measure the "
+                f"same render twice")
         return run_measurement(out=args.out, docs_limit=args.docs,
                                sessions_limit=args.sessions,
                                workers=args.workers, seed=args.seed, arms=arms,
