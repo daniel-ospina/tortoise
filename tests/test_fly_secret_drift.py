@@ -5174,7 +5174,7 @@ class TestTheMitigationLedger:
         space-delimited accumulator. Drop either delimiter and `FOO_BAR` also matches
         `FOO`, so a ledger entry for `TORTOISE_BACKUP_KEY_PREVIOUS` would suppress
         `TORTOISE_BACKUP_KEY` as well — a REAL pair in this payload
-        (`deploy-hosted.yml:1231` / `:1236`, pinned by
+        (`deploy-hosted.yml:1266` / `:1271`, pinned by
         `tests/test_deploy_workflow.py::test_every_citation_of_the_backup_key_pair_resolves`),
         where the previous backup key is the
         entry an operator is most likely to write after a rotation. The consequence
