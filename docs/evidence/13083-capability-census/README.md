@@ -12,7 +12,7 @@ ownedBy: epistemic-team
 
 # `#13083` — what each stored shape costs the graph
 
-**Measured:** 2026-11-17, at head `6850b74c14` (the head both JSONs record as `tree.git_head`; the audit's base is
+**Measured:** 2026-11-17, at head `6850b74c14` (the head both JSONs record as `tree.git_head`; the deleted `CAPABILITY-PLACEMENT-AUDIT.md`'s base is
 `8762578f8c` = `origin/main` at dispatch, where the probe does not yet exist — the JSON's `tree.git_head` is
 the authority for what ran, and it names this branch), private lane
 `docker://:@127.0.0.1:16397/tortoise_test_matrix` (`tools/test_lane.py`). Instrument:
@@ -82,7 +82,8 @@ lane is the population a `record_only` move would remove from.
    this branch, so the figure is not re-derivable and has been dropped rather than left standing as
    something a reader would try (and fail) to reproduce. The drift is run-dependent and has been both larger and
    far smaller than the
-   90,000 B payload delta, so `used_memory` is **not used for any figure** in this record or the audit. Only
+   90,000 B payload delta, so `used_memory` is **not used for any figure** in this record or in
+`CAPABILITY-PLACEMENT-AUDIT.md` (deleted; see the note above). Only
    the deterministic rendered-size numbers are quoted.
 4. **Nine shape-groups are declared UNEXERCISED rather than counted as zero**: `:Meta`, `:WhySnapshot`,
    `:Tag`, `:ContextSubscription`, `:CommitRecord`, `:DeliveryReceipt`, `:OnboardingState`/`:OnboardingStep`,
