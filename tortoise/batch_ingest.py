@@ -1337,8 +1337,8 @@ def record_item_spend(org_id: str, *, tokens_in: int = 0,
     double-charges a retried item (measured: pass 1 `queued` with 100 tokens, pass
     2 `indexed` with 100 → 200 on the meter while the status surface said 100)
     and re-charges a row a peer settled. :meth:`BatchCoordinator.run_item` puts
-    exactly the landed call's figures on ``item.charge_tokens``, which is not
-    persisted, so the same spend cannot be charged twice.
+    exactly the landed call's figures on ``item.charge_in``/``charge_out``,
+    which are not persisted, so the same spend cannot be charged twice.
 
     ``calls=0``: a batch item is NOT a capture call, and this layer has no
     measured price for one. That keeps ``capture_calls`` (the denominator that
@@ -2170,8 +2170,9 @@ class BatchCoordinator:
         return batch, self._store.items(org_id, batch_id)
 
     # -- resume (brief item 4) -------------------------------------------
-    def abandon_dead_claims(self, org_id: str, batch_id: str, *,
-                            reclaim_after: float | None = None) -> None:
+    def abandon_dead_claims(
+            self, org_id: str, batch_id: str, *,
+            reclaim_after: float = BATCH_RECLAIM_AFTER_S) -> None:
         """Settle a CANCELLED batch's claims that NO runner is holding.
 
         ⛔ NOTHING MAY RUN AFTER A CANCEL (#14415 review round 3, BLOCKING 2).
@@ -2201,20 +2202,24 @@ class BatchCoordinator:
         and `_resume_batch` do; the re-scan returns and settles it once it is
         stale, which is the ONE rule this file states.
 
-        ``reclaim_after`` is how a caller states what it knows: ``None`` means
-        "nothing I know of is running these claims" (a process start, where every
-        claim belongs to a dead predecessor), and a number means "a claim younger
-        than this may belong to a live peer" — the recovery re-scan passes
-        :data:`BATCH_RECLAIM_AFTER_S`. ⚠️ DECLARED RESIDUAL: the in-process drain
-        path still passes ``None``, so it settles a claim a PEER REPLICA may be
-        holding — the same 15-minute-window-not-a-lease residual this module
-        already declares, and the reason the window exists at all.
+        ⛔ THE WINDOW APPLIES ON **EVERY** ARM, INCLUDING "BOOT" (#14415 review
+        round 9, HIGH, then round 10 HIGH). The first cut of this fix let a
+        caller pass ``None`` for "nothing I know of is running" — and the caller
+        used it on a tenant's FIRST scan in the process. That premise is false on
+        a rolling deploy: the first scan of the NEW replica runs while the OLD
+        replica is still inside the runner (measured: claim age 0.00 s, settled,
+        the peer's `indexed` became unreachable, its 730 tokens billed and the
+        document dropped — the exact defect the arm was added to close). "First
+        scan" is not "boot" either: `_BATCH_SCAN` evicts, and an evicted tenant
+        re-enters that arm mid-life. So the window is not optional here: a FRESH
+        claim is never touched by ANY caller, and it is settled by a later scan
+        once it is stale — which is the ONE rule this file states, with no
+        exception left to get wrong.
         """
         for item in self._store.items(org_id, batch_id):
             if item.state in (BatchItemState.EXTRACTING,
                               BatchItemState.EMBEDDED):
-                if (reclaim_after is not None
-                        and _age_seconds(item.updated_at) < reclaim_after):
+                if _age_seconds(item.updated_at) < reclaim_after:
                     continue
                 released = self.advance(org_id, item, BatchItemState.QUEUED,
                                         reason="cancelled batch, claim released",
@@ -2232,8 +2237,7 @@ class BatchCoordinator:
     def recover(self, org_id: str, *,
                 live_batches: Collection[str] | Callable[[str], bool] = (),
                 stale_after_s: float | None = None,
-                limit: int = 50, offset: int = 0,
-                settle_fresh_claims: bool = True) -> list[str]:
+                limit: int = 50, offset: int = 0) -> list[str]:
         """Re-open every batch with unfinished items. Returns the batch ids.
 
         ⛔ **What "recoverable" has to mean.** An item found ``extracting`` (or
@@ -2330,10 +2334,9 @@ class BatchCoordinator:
                 # would destroy the outcome of work that is still running.
                 continue
             try:
-                moved = self._resume_batch(
-                    org_id, batch_id, reclaim_after=reclaim_after,
-                    stamp=stamp,
-                    settle_fresh_claims=settle_fresh_claims)
+                moved = self._resume_batch(org_id, batch_id,
+                                           reclaim_after=reclaim_after,
+                                           stamp=stamp)
             except Exception:
                 _logger.exception("batch %s: recovery of this batch failed; "
                                   "continuing the scan", batch_id)
@@ -2343,8 +2346,7 @@ class BatchCoordinator:
         return resumed
 
     def _resume_batch(self, org_id: str, batch_id: str, *,
-                      reclaim_after: float, stamp: str,
-                      settle_fresh_claims: bool) -> bool | None:
+                      reclaim_after: float, stamp: str) -> bool | None:
         """Re-open ONE batch. Returns ``True`` when reported, ``None`` when not.
 
         Split out of :meth:`recover` so ONE batch's read fault cannot abort the
@@ -2374,9 +2376,8 @@ class BatchCoordinator:
             # resolved — an inert row). At boot nothing is running, so its claim
             # is void: settle it ``cancelled``, without inventing token counts for
             # a run we cannot observe.
-            self.abandon_dead_claims(
-                org_id, batch_id,
-                reclaim_after=None if settle_fresh_claims else reclaim_after)
+            self.abandon_dead_claims(org_id, batch_id,
+                                     reclaim_after=reclaim_after)
             return None
         # ⛔ The `resuming` write below is a compare-and-set against the states a
         # resume may legally start from (review round 5, P1 — the third

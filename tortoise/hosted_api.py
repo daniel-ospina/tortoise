@@ -17120,17 +17120,19 @@ def _recover_org_batches(org: dict) -> list[str]:
             with _BATCH_DRAINING_LOCK:
                 return candidate in _BATCH_DRAINING
 
-        # ⛔ A FIRST SCAN IN THIS PROCESS MAY SETTLE FRESH CLAIMS; A RE-SCAN MAY
-        # NOT (#14415 review round 9, HIGH). `last == 0.0` is exactly "this
-        # process has never scanned this tenant", i.e. the boot case, where every
-        # existing claim belongs to a predecessor that is gone — that is what
-        # settles a cancelled batch's stranded rows. Every later scan is on a
-        # live deployment, where a claim younger than the reclaim window may be
-        # held by a PEER REPLICA: settling it drops that runner's outcome and
-        # bills the spend for a document the cancel copy promised to keep.
+        # ⛔ NO "FIRST SCAN" EXCEPTION (#14415 review round 10, HIGH). An earlier
+        # cut let a tenant's FIRST scan settle fresh claims, on the theory that a
+        # first scan means "boot, so every claim belongs to a dead predecessor".
+        # Measured false on the case that matters: on a ROLLING DEPLOY the new
+        # replica's first scan runs while the OLD replica is still inside the
+        # runner (claim age 0.00 s), so it settled that live claim, the peer's
+        # `indexed` became unreachable, and its 730 tokens were billed for a
+        # document the cancel copy promised to keep. `_BATCH_SCAN` evicts too, so
+        # "first scan" is not even "start of process". The claim window is applied
+        # on every arm; a stranded row is settled by a later scan once it is
+        # stale.
         resumed = coord.recover(org_id, live_batches=_is_live, offset=offset,
-                                limit=_BATCH_RECOVER_LIMIT,
-                                settle_fresh_claims=not last)
+                                limit=_BATCH_RECOVER_LIMIT)
     except Exception:
         _logger.exception("batch recovery failed for team %s", org_id)
         with _BATCH_RETRY_LOCK:
@@ -17485,16 +17487,33 @@ async def create_batch(body: BatchRequest,
         # act on. The disclosure the owner decided (2026-11-23 §4) is kept — the
         # batch is still refused until acknowledged — and what changes is that the
         # sentence says which of the two situations it is.
+        # ⛔ THREE cases, not two (#14415 recut review, P2). `overage_tokens` is
+        # `max(0, estimate - headroom)`, so a PUBLISHED allowance with headroom
+        # ≥ the estimate prices the overage at ZERO while
+        # `acknowledgement_required` still fires on the ESTIMATE alone
+        # (batch_ingest.py:452 vs :426-428) — an org on a 10M allowance posting
+        # 47 items (3,045,553 tokens, over the 3M floor) would be refused 402 and
+        # told to confirm "about 0 tokens (about $0.00)". The two-branch version
+        # reported every published allowance as if it were exceeded, and it
+        # reintroduced through the unpriced arm's sibling exactly the
+        # unactionable "confirm a zero" instruction round 4 removed. Latent only
+        # while no tier publishes `max_extraction_tokens` (#14275), and
+        # load-bearing on the first head that does.
         if est.included_tokens is None:
             overage_copy = (
                 " This batch is large enough that it may exceed your plan's "
                 "included extraction allowance, and that allowance is not "
                 "priced against your plan yet — so the figure to confirm is "
                 "the expected spend on this work, not a measured amount.")
-        else:
+        elif est.overage_tokens > 0:
             overage_copy = (
                 f" Expected overage: about {est.overage_tokens:,} tokens "
                 f"(about ${est.overage_usd:,.2f}).")
+        else:
+            overage_copy = (
+                " This batch is large enough to be confirmed before it runs; "
+                "your plan's included extraction allowance covers the whole "
+                "of it, so no overage is expected.")
         raise HTTPException(
             status_code=402,
             detail={

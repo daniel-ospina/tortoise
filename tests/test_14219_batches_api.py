@@ -1077,6 +1077,15 @@ def test_a_retry_pass_never_runs_work_on_a_cancelled_batch(store, monkeypatch):
     # customer, seeing a stuck batch, cancels.
     coord.advance(ORG_ID, items[1], bi.BatchItemState.EXTRACTING, attempt=True)
     coord.cancel(ORG_ID, batch.batch_id, reason="stuck, stop it")
+    # ⛔ THE CLAIM IS AGED, because the reclaim window now applies to EVERY caller
+    # (#14415 review round 10): a 0 s claim may belong to a live runner — on a
+    # rolling deploy the old replica's work is still in flight — so it is left
+    # alone and a later pass settles it once stale. This test is about the cancel
+    # STOPPING work and the row not stranding; the stale claim is what proves the
+    # second half.
+    dead = store.get_item(ORG_ID, batch.batch_id, items[1].item_id)
+    dead.updated_at = "2000-01-01T00:00:00+00:00"
+    store.put_item(ORG_ID, dead)
     before = list(calls)
 
     ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
@@ -1387,6 +1396,46 @@ def test_the_402_sentence_matches_the_numbers_beside_it(client):
     assert "expected overage" not in detail["message"]
     assert "usage_measured" in est, (
         "the receipt must say whether the spend figure beside it is measured")
+
+
+def test_a_published_allowance_that_COVERS_the_batch_is_not_called_an_overage(
+        client, monkeypatch):
+    """⛔ RECUT REVIEW P2: `included_tokens is not None` is not the same as
+    "the estimate exceeds it".
+
+    `acknowledgement_required` fires on the ESTIMATE alone (>= the 3M floor),
+    while `overage_tokens` is `max(0, estimate - headroom)`. So the moment a
+    tier publishes `max_extraction_tokens` with headroom over the estimate, the
+    refusal told the customer to confirm "about 0 tokens (about $0.00)" — the
+    same unactionable instruction round 4 removed, reintroduced through the
+    sibling branch it did not add.
+
+    47 items x 64,799 = 3,045,553 tokens: over the 3M acknowledgement floor, and
+    fully inside a 10M allowance, so the overage is exactly ZERO. This test FAILS
+    on the pre-fix code, which printed "Expected overage: about 0 tokens".
+    """
+    async def _with_allowance(org, resource, **kwargs):
+        return {"max_extraction_tokens": 10_000_000}
+
+    monkeypatch.setattr(ha, "_carry_allowances_off_loop", _with_allowance)
+    r = client.post("/v1/batches",
+                    json={"items": [{"ref": f"/docs/{n}.md"} for n in range(47)]})
+    assert r.status_code == 402, r.text
+    detail = r.json()["detail"]
+    est = detail["estimate"]
+    # The premise of the test, asserted rather than assumed: a published
+    # allowance with zero overage is the state the fix exists for.
+    assert est["included_tokens"] == 10_000_000, est
+    assert est["estimated_tokens"] >= 3_000_000, est
+    assert est["overage_tokens"] == 0, est
+    assert est["overage_usd"] == 0.0, est
+    assert "about 0 tokens" not in detail["message"], (
+        "the copy names a zero overage the payload reports as $0.00: "
+        f"{detail['message']}")
+    assert "$0.00" not in detail["message"], detail["message"]
+    assert "no overage is expected" in detail["message"], detail["message"]
+    # The refusal itself is unchanged: owner §4 still requires the ack.
+    assert "acknowledge_overage" in detail["message"]
 
 
 def test_an_unmeasured_usage_read_is_reported_not_read_as_zero(client,
@@ -1743,6 +1792,15 @@ def test_a_peer_settling_the_same_state_is_not_charged_by_this_pass(store,
     assert (out.charge_in, out.charge_out) == (700, 0), (
         "this pass lost the settle, so it must mark exactly its own spend for "
         f"the meter — got {(out.charge_in, out.charge_out)}")
+    # ⛔ AND THE ROW CARRIES IT TOO (#14415 review round 10, MEDIUM). Without this
+    # line the suite stays green when `if landed:` is replaced by the state
+    # inference the test's own docstring refutes: measured under that mutation the
+    # row reads 0/0 while the meter bills 700 — the round-8 bill/receipt
+    # disagreement, restored and unnoticed.
+    row = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
+    assert row.tokens_in + row.tokens_out == 700, (
+        f"the row reports {row.tokens_in + row.tokens_out} while the meter bills "
+        "700 — receipt and bill disagree")
     if out.charge_in or out.charge_out:
         bi.record_item_spend(ORG_ID, tokens_in=out.charge_in,
                             tokens_out=out.charge_out)
