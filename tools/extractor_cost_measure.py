@@ -1879,6 +1879,14 @@ def compose_report(artifacts: list[dict]) -> dict:
 #: not a stage that measured: `_Recording.complete` appends to `calls` only
 #: after the adapter RETURNS, so a failing stage contributes no call at all and
 #: the table would show the surviving stages as if they were the whole run.
+#: Error signatures that mean a stage produced NO call — a lost call, and the
+#: only pipeline errors that make a `compose` row incomplete. Everything else
+#: `extractor_v2` records (a truncated tail it dropped, a malformed section it
+#: kept past, a failed S5/chain/entity-resolution/classify step) is recorded on a
+#: call that RETURNED and was measured, so it is a note and not a verdict.
+_LOST_CALL_MARKERS = ("chunk failed", "S2 failed", "S4 failed",
+                      "no embed list produced")
+
 _REQUIRED_STAGES = ("s1", "s2", "s4")
 
 
@@ -1894,9 +1902,25 @@ def _row_complete(row: dict) -> bool:
     **no marker at all** and exit 0. A partial run is worse: S1+S2 rendering
     with S4 (the stage whose embed-list region is this bundle's subject) simply
     absent reads as a smaller, complete measurement.
+
+    ⛔ AND THE GUARD IS SCOPED TO ERRORS THAT EXPLAIN A LOST CALL (review cycle 9,
+    P1 — two independent reviewers). `extractor_v2` records errors on calls that
+    RETURNED and were fully measured: rung-4 partial accept appends
+    `"S4 output partial — truncated tail dropped"` (`tortoise/extractor_v2.py:15337`),
+    `"S4 output malformed section … kept S2 output"` (`:15292`) and the S2 twin
+    (`:17929`) are the same, as are the post-extraction `S5 failed` / `chain …` /
+    `entity resolution failed` / `classify(union) failed` entries. Treating ANY
+    error as "did not measure" refused a complete composition and exited 1 — and
+    it is not clearable by re-running, because README §2's 13 of 50 documents
+    averaging >6,000 S4 completion tokens (max 24,000) is exactly what rung 4
+    exists for, so the documented `compose --out …` exits 1 DETERMINISTICALLY on
+    such a `--doc`. The fail-open this block exists for is still closed by the
+    missing-stage test and the retry-aware call count below; a content-level
+    error is a NOTE, not an incompleteness.
     """
     pipe = row.get("pipeline") or {}
-    if pipe.get("errors"):
+    if any(marker in err for err in (pipe.get("errors") or [])
+           for marker in _LOST_CALL_MARKERS):
         return False
     stages = row.get("stages") or {}
     if not all(stages.get(s) for s in _REQUIRED_STAGES):
@@ -1993,7 +2017,8 @@ def render_compose(report: dict) -> str:
             "missing stage(s) or recorded pipeline errors, so it is a partial "
             "run, not a decomposition: "
             + (", ".join(f"`{s}`" for s in missing) if missing
-               else "no stage is missing, but calls were lost")
+               else "every stage reported, but the pipeline counted calls the "
+                    "instrument never saw complete")
             + ".")
         for err in errs[:5]:
             lines.append(f"* pipeline error: `{err}`")
@@ -2002,6 +2027,23 @@ def render_compose(report: dict) -> str:
                      "read as if they were the whole run. Re-run to a "
                      "complete artifact before quoting any figure here.")
         lines.append("")
+    else:
+        # ⛔ A CONTENT-LEVEL note, not a verdict (review cycle 9, P1). These are
+        # recorded on calls that RETURNED and were measured — a truncated tail
+        # the rung-4 partial accept dropped, a malformed section the pipeline
+        # kept past, a failed S5/chain/entity-resolution/classify step. They do
+        # not cost a call and must not flip `complete`, but a reader still
+        # deserves to know the emission was not clean.
+        notes = [e for row in report.get("rows") or []
+                 for e in ((row.get("pipeline") or {}).get("errors") or [])]
+        if notes:
+            lines.append("ℹ️ **Measured, with content-level notes.** Every stage "
+                         "reported and every prompt was measured; the pipeline "
+                         "recorded the following on calls that RETURNED, so they "
+                         "do not affect the composition:")
+            for note in notes[:5]:
+                lines.append(f"* {note}")
+            lines.append("")
     for row in report["rows"]:
         lines.append(f"### `{row['doc']['path']}` — "
                      f"{row['doc']['item_tokens']} tokens")
