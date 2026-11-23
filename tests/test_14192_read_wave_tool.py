@@ -1215,15 +1215,42 @@ def _single_star_argument(node: ast.AST | None) -> ast.AST | None:
     `dict.copy`/`{}.__or__`) and the fetch family (`_g = dict.get; _g(*(m,), "exec")`).
 
     Only a LITERAL operand can be spliced (`_f(*(_rest))` is the declared residual, and it
-    comes back unchanged), and only a spread of EXACTLY ONE element is the same call:
-    `_f(*(m, {}))` is `_f(m, {})` — two arguments, a TypeError for every callee in this
-    family — so it must stay GREEN rather than be red-ed by over-application.
+    comes back unchanged), and only a spread of EXACTLY ONE element is unwrapped HERE,
+    because this helper answers "which single expression is argument ZERO".
+
+    ⛔ THE CLAIM THAT A MULTI-ELEMENT SPREAD IS ALWAYS A TypeError WAS FALSE (#14326 review
+    cycle 14, MEASURED GREEN **and LIVE**: `copy.deepcopy(*(builtins.__dict__, {}))` — the
+    documented positional `memo` — and `dict.get(*(m, "exec"))` both executed the read, while
+    their un-starred twins were REFUSED). It is a TypeError for the ONE-positional callees
+    (`dict`, `copy.copy`, `{}.__or__`) and NOT for the two-positional ones (`copy.deepcopy`,
+    every member of `_BUILTINS_MAPPING_READS`), so a multi-element literal splice is unwrapped
+    into real POSITIONS by `_spliced_positions` for the arms that read argument ONE.
     """
     if isinstance(node, ast.Starred):
         spliced = _spread_elements([node])
         if len(spliced) == 1:
             return spliced[0]
     return node
+
+
+def _spliced_positions(args: list[ast.AST]) -> list[ast.AST]:
+    """The call's POSITIONS, with every literal `*` splice unwrapped into its elements.
+
+    `_f(*(m, {}))` is `_f(m, {})`: TWO arguments, and for a callee that takes a second
+    positional (`copy.deepcopy(m, memo)`, `dict.get(m, key)`) that is a real call, not the
+    TypeError the one-positional argument made it look like (#14326 review cycle 14). Only a
+    literal tuple/list is spliced, and a `Starred` nested inside one is left alone — the
+    same bound `_spread_elements` carries.
+    """
+    out: list[ast.AST] = []
+    for arg in args:
+        if (isinstance(arg, ast.Starred)
+                and isinstance(arg.value, (ast.Tuple, ast.List))
+                and not any(isinstance(elt, ast.Starred) for elt in arg.value.elts)):
+            out.extend(arg.value.elts)
+        else:
+            out.append(arg)
+    return out
 
 
 def _indexed_values(values: list, index: ast.AST) -> list:
@@ -1983,7 +2010,12 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)) and (
             (node.func.attr == "copy"
              and _is_builtins_mapping(node.func.value, names, dict_names, launderers, consts))
-            or (node.func.attr == "__or__" and any(
+            # ⛔ AND `__ior__`, ITS AUG-ASSIGN TWIN (#14326 review cycle 14, MEASURED GREEN
+            # **and LIVE**: `_d = {}` then `_d |= builtins.__dict__`, and
+            # `{}.__ior__(m)` — both return the LHS holding the mapping's members, which is a
+            # copy in the same sense `{} | m` is). `__ior__` is already an enumerated dunder in
+            # `_REGISTRY_MUTATORS`; the `BinOp`/`__or__` pair had no aug-assign half.
+            or (node.func.attr in {"__or__", "__ior__"} and any(
                 _is_builtins_mapping(_single_star_argument(part), names, dict_names,
                                      launderers, consts)
                 for part in (node.func.value, *node.args)))):
@@ -2006,13 +2038,18 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
             and node.args
             and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
         return True
+    _positions = _spliced_positions(node.args) if isinstance(node, ast.Call) else []
     if (isinstance(node, ast.Call)
             and ((isinstance(node.func, ast.Attribute)
                   # ⛔ `deepcopy` TAKES A SECOND, DOCUMENTED ARGUMENT (#14326 review cycle 6,
                   # MEASURED GREEN with `copy.deepcopy(builtins.__dict__, {})` — the positional
                   # `memo` — while the bare one-argument form was REFUSED).
-                  and ((node.func.attr == "copy" and len(node.args) == 1)
-                       or (node.func.attr == "deepcopy" and len(node.args) >= 1)))
+                  # ⛔ ON THE SPLICED POSITIONS (#14326 review cycle 14: `copy.deepcopy(
+                  # *(builtins.__dict__, {}))` — the documented positional `memo` behind a
+                  # two-element literal splice — was GREEN while the un-starred twin was
+                  # REFUSED). `len(args)` on the RAW node counts a splice as one argument.
+                  and ((node.func.attr == "copy" and len(_positions) == 1)
+                       or (node.func.attr == "deepcopy" and len(_positions) >= 1)))
                  # ⛔ AND THE ALIASED CALLEE (#14326 review cycle 6, MEASURED GREEN:
                  # `_f = copy.deepcopy; _f(builtins.__dict__)`, same for `copy.copy`,
                  # `dict.copy` and `from copy import deepcopy`). `launderers` now holds those
@@ -2024,7 +2061,7 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                  # names in `launderers` are `dict`/`getattr`/`vars` aliases, whose
                  # two-positional-argument forms are TypeErrors.
                  or (isinstance(node.func, ast.Name) and node.func.id in launderers
-                     and len(node.args) >= 1)
+                     and len(_positions) >= 1)
                  # ⛔ AND THE COPY CALLEE REACHED AS A NAMESPACE MEMBER (#14326 review cycle 12,
                  # EACH MEASURED GREEN **and LIVE** while the BOUND twin was REFUSED — the
                  # in-file asymmetry by this file's own definition):
@@ -2040,14 +2077,18 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                  or (_builtin_lookup_name(node.func, names | {"dict", "copy"}, consts,
                                           dict_names, launderers,
                                           members=_COPY_CALLEES) is not None
-                     and len(node.args) >= 1))
+                     and len(_positions) >= 1))
             # ⛔ AND THE ONE-ELEMENT `*` SPREAD OF THE SAME ARGUMENT (#14326 review round 9,
             # EACH MEASURED GREEN and LIVE at `cb87c7c8cb`: `_f = dict; _d =
             # _f(*(builtins.__dict__,))` / `copy.copy(*[m])` / `dict.copy(*((m,)))` /
             # `{}.__or__(*(m,))` all yielded the mapping, `_d["exec"]` the real `exec`, and
             # the read executed — while the un-starred twin was REFUSED). One owner for the
             # unwrap, so the arity and the argument are read the same way.
-            and _is_builtins_mapping(_single_star_argument(node.args[0]),
+            # ⛔ AND ON THE SPLICED POSITIONS, so a multi-element literal splice reaches the
+            # same argument (#14326 review cycle 14). `_single_star_argument` still owns the
+            # one-element unwrap used by the `__or__` arm above.
+            and _positions
+            and _is_builtins_mapping(_positions[0],
                                      names, dict_names, launderers, consts)):
         # the UNBOUND `dict.copy(m)` / `copy.deepcopy(m)` — the callee is a constructor here,
         # so `node.func.value` is that constructor and the mapping is argument ONE.
@@ -2214,14 +2255,19 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
         # ⛔ THE RECEIVER MAY BE THE MAPPING ITSELF (#14326 review cycle 3, measured):
         # `getattr(_d, "exec")` with `_d = builtins.__dict__` was GREEN. `dict_names` already
         # holds every resolved spelling of that mapping, so the receiver accepts either set.
-        if (len(node.args) >= 2
-                and ((isinstance(node.args[0], ast.Name)
-                      and node.args[0].id in (names | dict_names))
-                     or _is_builtins_mapping(node.args[0], names, dict_names, launderers,
-                                             consts))):
-            keys = _string_keys_of(node.args[1], consts) & _members
-            return sorted(keys)[0] if keys else None
-        return None
+        # ⛔ ON THE SPLICED POSITIONS (#14326 review cycle 14, MEASURED GREEN **and LIVE**:
+        # `getattr(*(_m, "get"))("exec")(<read>)` — a two-element literal splice — while
+        # the un-starred twin is REFUSED). `len(node.args)` counts the splice as ONE argument,
+        # so the arm never looked at the name position at all.
+        _positions = _spliced_positions(node.args)
+        if (len(_positions) < 2
+                or not ((isinstance(_positions[0], ast.Name)
+                         and _positions[0].id in (names | dict_names))
+                        or _is_builtins_mapping(_positions[0], names, dict_names,
+                                                launderers, consts))):
+            return None
+        keys = _string_keys_of(_positions[1], consts) & _members
+        return sorted(keys)[0] if keys else None
     # ⛔ THE UNBOUND SPELLINGS DECIDE BY ARGUMENT SHAPE, NOT BY CALLEE (#14326 round 35, and
     # MEASURED: the sibling lane's `attr == "get"` + `value.id in dict_fetchers` form left
     # `dict.pop(builtins.__dict__, "exec")` and `dict.setdefault(builtins.__dict__, "exec")`
@@ -2231,12 +2277,19 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     # lambda, `operator.getitem`, `_dg = dict.get`, an alias of an alias): the shape is the
     # identity. `_d = dict; _d.pop(...)` and `builtins.dict.pop(...)` come free.
     if (isinstance(node.func, ast.Attribute)
-            and node.func.attr in _BUILTINS_MAPPING_READS
-            and len(node.args) >= 2
-            and _is_builtins_mapping(_single_star_argument(node.args[0]),
-                                     names, dict_names, launderers, consts)):
-        keys = _string_keys_of(node.args[1], consts) & _members
-        return sorted(keys)[0] if keys else None
+            and node.func.attr in _BUILTINS_MAPPING_READS):
+        # ⛔ AND THE MULTI-ELEMENT LITERAL SPLICE (#14326 review cycle 14, MEASURED GREEN
+        # **and LIVE**: `dict.get(*(_m, "exec"))(<read>)` while `dict.get(_m, "exec")` is
+        # REFUSED). The raw `args` count the splice as one position, so the key was never read.
+        # ⛔ NO EARLY `return None` (#14326 review cycle 14, MEASURED: an early return when the
+        # shape did not match blocked the LATER arms and turned the pinned RED
+        # `builtins.__dict__.get("exec")(<read>)` — a BOUND `.get` with ONE argument — GREEN.
+        # This arm answers only what it is asked; anything else FALLS THROUGH.)
+        _positions = _spliced_positions(node.args)
+        if (len(_positions) >= 2
+                and _is_builtins_mapping(_positions[0], names, dict_names, launderers, consts)):
+            keys = _string_keys_of(_positions[1], consts) & _members
+            return sorted(keys)[0] if keys else None
     # ⛔ NO SUBSCRIPT-CALLEE ARM HERE — AND THE EARLIER "MEASURED DEAD" READING OF THIS WAS
     # WRONG (#14326 review cycle 13 falsified it). An arm matching `Call(func=Subscript)` here
     # flipped 0 rows because THIS RESOLVER IS NEVER HANDED A `Call`: the census passes `n.func`,
@@ -3368,14 +3421,18 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # repairs. ⛔ It is a CALL-SITE shape, not a resolver arm: an arm added to
         # `_builtin_lookup_name` for `Call(func=Subscript)` flipped 0 rows, because the resolver is
         # handed `n.func`, never the Call.
-        if (isinstance(n.func, ast.Subscript) and len(n.args) >= 2
+        # ⛔ ON THE SPLICED POSITIONS TOO (#14326 review cycle 14: `dict.__dict__["get"](
+        # *(m, "exec"))` — a two-element literal splice — was GREEN while the positional
+        # form is REFUSED, because the raw `args` count the splice as one argument).
+        _inline_positions = _spliced_positions(n.args)
+        if (isinstance(n.func, ast.Subscript) and len(_inline_positions) >= 2
                 and _builtin_lookup_name(n.func, _builtins_names | {"dict", "copy"}, consts,
                                          _builtins_dict_names, _builtins_launderers,
                                          members=_BUILTINS_MAPPING_READS) is not None
-                and _is_builtins_mapping(_single_star_argument(n.args[0]),
+                and _is_builtins_mapping(_inline_positions[0],
                                          _builtins_names, _builtins_dict_names,
                                          _builtins_launderers, consts)
-                and (_string_keys_of(n.args[1], consts) & _code_executing_names)):
+                and (_string_keys_of(_inline_positions[1], consts) & _code_executing_names)):
             out.append(n)
             continue
         if _callee in _code_executing_names or \
@@ -4008,7 +4065,14 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
         if isinstance(node, ast.Assign):
             targets: list[ast.AST] = list(node.targets)
             value: ast.AST = node.value
-        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+        # ⛔ `AugAssign` IS THE SAME BIND — the ASSIGN spelling one operator over (#14326 review
+        # cycle 14, MEASURED GREEN **and LIVE**: `_d = {}` then `_d |= builtins.__dict__` left
+        # `_d` unresolved, while the one-line `{}.__ior__(m)` is REFUSED and `{} | m` has been
+        # refused since round 9 — the aug-assign spelling of the SAME copy). `_str_constants` has
+        # carried this bind form since round 19; this fixpoint, which is what `dict_names` is
+        # built from, did not.
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) \
+                and node.value is not None:
             targets, value = [node.target], node.value
         elif loops and isinstance(node, (ast.For, ast.AsyncFor)):
             for source in _loop_target_sources(node.iter):
@@ -7804,6 +7868,35 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # as `builtins.dict` fell through every one of them while `builtins.dict.copy` was an
         # already-REFUSED row. Three rows so each half (inline callee, bound copy alias, bound
         # read method) is red-ed by its own clause.
+        # ⛔ THE MULTI-ELEMENT LITERAL SPLICE, AND THE AUG-ASSIGN COPY (#14326 review cycle 14,
+        # EACH MEASURED GREEN **and LIVE**): every arm read `node.args`, which counts a splice
+        # as ONE position, so the second slot was never looked at — and `_d |= m` is the
+        # assign spelling of the `{} | m` copy. Each row reds its own clause.
+        "a COPY CALLEE behind a two-element literal splice": (
+            '    import builtins, copy\n'
+            '    _d = copy.deepcopy(*(builtins.__dict__, {}))\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD behind a two-element literal splice": (
+            '    import builtins\n'
+            '    dict.get(*(builtins.__dict__, "exec"))'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a FETCHER behind a two-element literal splice": (
+            '    import builtins\n'
+            '    _g = getattr(*(builtins.__dict__, "get"))\n'
+            '    _g("exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a NAMESPACE-SUBSCRIPT read method behind a literal splice": (
+            '    import builtins\n'
+            '    dict.__dict__["get"](*(builtins.__dict__, "exec"))'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY bound by `|=`": (
+            '    import builtins\n'
+            '    _d = {}\n'
+            '    _d |= builtins.__dict__\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY by the `__ior__` dunder": (
+            '    import builtins\n'
+            '    _d = {}.__ior__(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a COPY CALLEE fetched from `builtins.dict.__dict__`": (
             '    import builtins\n'
             '    _d = builtins.dict.__dict__["copy"](builtins.__dict__)\n'
