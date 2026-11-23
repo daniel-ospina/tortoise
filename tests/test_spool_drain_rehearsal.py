@@ -24,6 +24,13 @@ observable without a drain:
   credited the replay with extraction that landed while waiting);
 * `summary` re-renders the prose from the recorded `corpus-cost.json` and never
   re-measures the live spool.
+
+The next round's findings are pinned below as well: the committed `SUMMARY.md`
+being the byte projection of the committed JSONs (it had gone stale), the
+frontmatter parsing as YAML, a single-mode `run` keeping the other three modes and
+a sliced run refusing to state a cost, every mode stating all three capture knobs,
+`head-keyless` refusing to start when a provider key is configured (a knob cannot
+pin that away), and `_org_id`'s 12-character tail.
 """
 from __future__ import annotations
 
@@ -549,6 +556,35 @@ def test_every_mode_states_all_three_capture_knobs() -> None:
     # value are the ones an ambient environment polluted.
     assert rehearsal._mode_knobs("head-keyless")["TORTOISE_SESSION_LLM_MOCK"] == "0"
     assert rehearsal._mode_knobs("head-mock")["TORTOISE_CAPTURE_IN_FLIGHT"] == "8"
+
+
+def test_head_keyless_refuses_to_start_when_a_provider_key_is_configured() -> None:
+    """The FOURTH consequence of ambient pollution: no knob can pin it away.
+
+    `TORTOISE_SESSION_LLM_MOCK=0` says "do not mock"; it does not say "there is no
+    provider". With a provider key in the environment the drain runs REAL
+    extraction (real spend) under a label whose whole claim is "no extraction
+    provider", and `head-keyless.json` stops reproducing — so the child must stop
+    rather than produce a measurement of a different mode.
+
+    `hosted_api._llm_provider_available()` is the product's one reading of that
+    question; the refusal takes its answer, so this pin needs no provider key, no
+    app import and no server.
+    """
+    with pytest.raises(SystemExit) as exc:
+        rehearsal._assert_keyless(True)
+    assert "head-keyless requires NO extraction provider" in str(exc.value)
+    assert "head-mock" in str(exc.value), (
+        "the refusal must name the remedy, not just the condition")
+    # Non-vacuity: the keyless box the mode exists for is NOT refused.
+    rehearsal._assert_keyless(False)
+    # ...and the refusal is WIRED: a helper nothing calls refuses nothing. A
+    # mutant that deletes the call from `_serve` leaves this line red instead of
+    # leaving a `head-keyless` that happily extracts on a keyed box.
+    import inspect
+
+    assert "_assert_keyless(ha._llm_provider_available())" in inspect.getsource(
+        rehearsal._serve), "_serve no longer asserts the keyless label"
 
 
 # ── the tenant id must always be a UUID-shaped tail ─────────────────────────

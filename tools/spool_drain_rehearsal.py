@@ -37,7 +37,7 @@ MODES
 -----
 | mode | server | spools | what it answers |
 |---|---|---|---|
-| `head-keyless` | HEAD, no extraction provider | one copy, 2 passes | the drain as a keyless box runs it: ACK path, store-only extraction |
+| `head-keyless` | HEAD, no extraction provider (refuses to start if one is configured) | one copy, 2 passes | the drain as a keyless box runs it: ACK path, store-only extraction |
 | `head-mock` | HEAD + `TORTOISE_SESSION_LLM_MOCK=1` | one copy, 2 passes | the same, with the extraction pipeline actually running (offline, zero spend) |
 | `pre-14261` | ACK join window disabled + a 12 s extraction | 3 entries | what the 504 looked like, and what `stage=` says now |
 | `backpressure` | `TORTOISE_CAPTURE_IN_FLIGHT=1`, slow mock extraction | ONE copy, ONE serial drainer | the `capture_capacity_saturated` 429, and how the drain classifies it |
@@ -212,6 +212,10 @@ def _mode_knobs(mode: str) -> dict[str, str]:
       `_slow_extraction` seam inert, because the method it patches
       (`_extract_session_v2`) is the v2 lane only.
 
+    A fourth consequence no knob can fix — an ambient PROVIDER KEY, which makes
+    `head-keyless` extract for real under a label that says keyless — is refused
+    at startup by `_assert_keyless`.
+
     Setting all three explicitly is what makes the recorded `<mode>.json`
     reproducible on another box; the effective trio is written into it
     (`capture_env`) so a polluted run is distinguishable after the fact.
@@ -270,6 +274,15 @@ def _serve(argv: list[str] | None = None) -> int:
 
     import tortoise.hosted_api as ha
 
+    # ⛔ The `head-keyless` label is a claim about the extraction path, and the
+    # knobs above only PIN the mock: a provider key in the ambient environment
+    # still lets the capture run REAL extraction (real spend) under a label that
+    # says keyless, and the evidence in `head-keyless.json` stops reproducing.
+    # The third measured consequence of ambient pollution is the only one no
+    # knob can fix, so it fails closed and names the remedy.
+    if args.mode == "head-keyless":
+        _assert_keyless(ha._llm_provider_available())
+
     if args.mode == "pre-14261":
         ha._capture_ack_ceiling_s = lambda: 3600.0  # REHEARSAL SEAM (see docstring)
         _slow_extraction(PRE_BOUND_EXTRACTION_DELAY_S)
@@ -279,6 +292,25 @@ def _serve(argv: list[str] | None = None) -> int:
     _install_observer(ha.app, Path(args.log))
     uvicorn.run(ha.app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
+
+
+def _assert_keyless(provider_available: bool) -> None:
+    """`head-keyless` means NO provider — refuse rather than measure another mode.
+
+    Split out from `_serve` so the refusal is assertable without importing the
+    app or starting a server: `hosted_api._llm_provider_available()` is the ONLY
+    reading of that question in the product, and it is read here rather than
+    re-derived (with `TORTOISE_SESSION_LLM_MOCK=0` pinned, it answers purely from
+    the provider keys).
+    """
+    if provider_available:
+        raise SystemExit(
+            "head-keyless requires NO extraction provider, but one is configured "
+            "in this environment (a provider API key is set). This mode would "
+            "extract for real under a label that says keyless — spending on the "
+            "tool whose whole subject is extraction spend, and writing evidence "
+            "that no longer reproduces. Unset the provider key, or run "
+            "`--mode head-mock` for the extracting path.")
 
 
 def _slow_extraction(delay_s: float) -> None:

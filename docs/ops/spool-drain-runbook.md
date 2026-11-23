@@ -166,6 +166,19 @@ this rehearsal produced (Stage 3b). A `head-keyless` run that files everything
 means the corpus was small enough to stay under 100 POST/min, not that the
 drain behaves differently.
 
+⚠️ **Every mode STATES the three capture knobs instead of inheriting them**, and
+`head-keyless` refuses to start when a provider key is configured. Both are the
+same lesson measured three ways: an ambient `TORTOISE_SESSION_LLM_MOCK=1` made
+`head-keyless` mock-extract, an ambient `TORTOISE_CAPTURE_IN_FLIGHT=1` put
+`head-mock` on a 1-slot ceiling with `capture_capacity_saturated` 429s (the mode
+whose claim is zero 429s), and an ambient `TORTOISE_SESSION_EXTRACTOR=m2` left
+`pre-14261`'s slow-extraction seam inert. A provider key is the fourth and the one
+no knob can pin away — it would run REAL extraction (real spend) under a label
+that says keyless — so that mode stops and names the remedy (unset the key, or
+use `head-mock`). What each run executed under is recorded in `<mode>.json` as
+`capture_env`, so a polluted run is visible afterwards instead of being a silent
+measurement of another mode.
+
 **Rollback:** none — nothing outside the temp dir and the throwaway graph was
 written.
 
