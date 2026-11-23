@@ -7761,6 +7761,44 @@ def tortoise_delete_entity(id: str, dry_run: bool = False) -> dict | bool:
         return _safe(_preview_delete_entity, _get_org_sdk(), id)
     return _safe(_get_org_sdk()._delete_entity__svc, id)
 
+def _link_entities_scalar_abuse_weight(result, args, kwargs) -> int:
+    """R1 point-create weight for `tortoise_link_entities`' RELATION-DECIDED arm.
+
+    `1` when that call built a carrying OPERATOR, `0` otherwise. The asymmetry is
+    the handler's own: the LIST/`operator=True` arm always writes one operator
+    (`abuse_weight=1`), while the scalar arm — the only arm that reaches this
+    helper — writes one only for an EPISTEMIC RELATION and a plain edge everywhere
+    else (the `operator=True` term in the rule below is belt-and-braces, not a
+    live path; the SCOPE note says why). So a blanket `1` would bill a linking
+    burst of plain edges as Point creates — a false abuse signal on the most
+    ordinary call this door serves — and a blanket `0` (the state this replaces)
+    would let the operator half of the SAME call go uncounted, which is the
+    metering gap the wrapper was added for.
+
+    ⛔ The rule is READ from the SDK, not copied (#4170): `_EPISTEMIC_RELATION_MEANINGS`
+    is the very mapping `TortoiseSDK.link_entities` dispatches on, and `operator=True`
+    is the one other term in that dispatch that reaches `create_operator`. A second,
+    hand-maintained list here would silently disagree with the SDK the day a meaning
+    is added — the parallel-list failure this door's own history is made of.
+
+    ⚠️ SCOPE, MEASURED (#14237 review N2) — the `operator is True` term is UNREACHABLE
+    from this door: `tortoise_link_entities` routes an explicit `operator=true` (and any
+    LIST target) to the OPERATOR arm, which passes `abuse_weight=1` directly and never
+    reaches this helper. The live rule here is "an epistemic relation", full stop. The
+    term is KEPT as belt-and-braces — it cannot add a wrong weight, and it keeps the
+    helper honest if the arm split ever moves — but nothing should read it as a path
+    production takes: `test_an_explicit_operator_true_is_weighted` exercises the helper
+    in isolation, not a call the handler can make.
+    """
+    relation = args[0] if args else kwargs.get("relation")
+    try:
+        upper = str(relation or "").strip().upper()
+        epistemic = getattr(TortoiseSDK, "_EPISTEMIC_RELATION_MEANINGS", None) or {}
+    except Exception:  # metering must never block the write
+        return 0
+    return 1 if (upper in epistemic or kwargs.get("operator") is True) else 0
+
+
 def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
                            target_ids: Any = None,
                            operator: Any = None,
@@ -7929,7 +7967,17 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
             "RELATION itself is the meaning (e.g. relation='supports'), so it has no "
             "slot here — name the meaning as the relation instead of dropping it."),
             "code": ERR_INVALID})
-    return _safe(_quota_gated(sdk.link_entities, "points"),
+    # ⛔ THE WEIGHT IS DERIVED, NOT ASSUMED (#11609 P7 review, P1 — the metering half
+    # the wrapper alone does not close). `_quota_gated` without `abuse_weight` checks
+    # the cap and counts the write op, but records NO point_create — and this arm DOES
+    # create a Point whenever the relation is epistemic (`link_entities("supports", a, b)`
+    # -> `create_operator`). An explicit `operator=true` does NOT reach this arm — it
+    # takes the OPERATOR arm above, which weighs 1 directly — so "an epistemic relation"
+    # is the whole live rule here. Passing a flat 1 would over-count the plain-edge
+    # majority; passing none under-counts the operator half. The helper reads the SDK's
+    # own dispatch table, so the two spellings cannot drift.
+    return _safe(_quota_gated(sdk.link_entities, "points",
+                              abuse_weight=_link_entities_scalar_abuse_weight),
                  relation, from_id, targets[0],
                  operator=op_flag, direction=direction, confidence=confidence,
                  weight=weight, label=label, batch_id=batch_id,
@@ -11703,13 +11751,23 @@ def _preview_delete(sdk, id: str) -> dict:
     writer does (`TortoiseSDK._delete`, the method the live door binds), then preview
     the branch it would take.
 
-    ⛔ THE RECEIPT NAMES THE LIVE DOOR (#11609 P7 review, P2). It used to hard-code
-    `tortoise_delete` — the spelling this batch RETIRED forward into
-    `tortoise_delete_knowledge` — so a caller of the ADVERTISED door got back a
-    receipt whose `tool` field was the retired name, i.e. precisely the value such a
-    caller would naturally re-call, and the old name is absent from `tools/list`.
-    Both spellings still reach this preview (the retired shim forwards to the live
-    handler), so a receipt naming the advertisement is honest for either caller.
+    ⛔ THE PREVIEW'S `tool` NAMES THE LIVE DOOR (#11609 P7 review, P2). It used to
+    hard-code `tortoise_delete` — the spelling this batch RETIRED forward into
+    `tortoise_delete_knowledge` — i.e. the value a caller would naturally re-call,
+    while the old name is absent from `tools/list` and so cannot be re-called by a
+    tool-grant client. Both spellings still reach this preview (the retired shim
+    forwards to the live handler), so naming the advertisement is honest for either
+    caller.
+
+    ⚠️ SCOPE, MEASURED — the finding's premise was WIDER than the defect (see
+    `TestThePreviewReceiptIsNotWiderThanTheDefect`). The review said the CALLER's
+    receipt carried the retired name; it did not. `tortoise_delete_knowledge` REBUILDS
+    the reply through `_deletion.receipt(...)`, which carries no `tool` key at all and
+    copies only `target`/`found`/`nodes_removed`/`edges_removed`/`nodes`/`edges` from
+    this dict — so the literal was a DEAD assignment, one future consumer away from the
+    reported bug, never the live one. Recorded because a fix whose stated blast radius
+    is larger than the real one teaches the next reader a false fact about the
+    destructive path's receipt.
 
     #4649: the resolution is the SAME OR-set as the writer's — `by_url=True`
     included. Without it a url-keyed `:Source` (no `id`, minted by

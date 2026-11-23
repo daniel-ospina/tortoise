@@ -2063,7 +2063,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_link_entities
-  served_from: tortoise/mcp_server.py:a8451f8648b07546
+  served_from: tortoise/mcp_server.py:255a23a267d6c0bd
   served_attributes: dfc0f40718e48217
   family: graph
   family_rank: 2
