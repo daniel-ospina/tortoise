@@ -125,7 +125,7 @@ document text once **per call**, and 34 of 50 documents take a **second** S1 cal
 | *fitted constant (this arm's own intercept)* | *22,802* | — | |
 | **unattributed** | **4,973** | 27.9 % of the composition · 21.8 % of the fitted constant | |
 
-**Two estimators, both reported — the 4,972 is not noise, and it is a result.** The rows are
+**Two estimators, both reported — the 4,973 is not noise, and it is a result.** The rows are
 per-call **medians** × the measured call counts (the median document's shape). The fitted
 constant is the intercept of this arm's own per-document fit, and output's fit is essentially
 flat (slope 0.180, R² 0.020), so that intercept sits near the **mean** output per document
@@ -141,12 +141,12 @@ mean (5,532) is 1.9× the median. (Those are DOCUMENTS, not calls — one entry 
 That tail is why `#14295` reported 7,102 output tokens per S4 call while the median is 2,942:
 it is not "S4 costs 7k", it is "S4 costs 3k on three quarters of documents and 10–24k on the
 other quarter", and a quarter of documents is where the gap between the mean and the median —
-i.e. most of the 4,972 above — comes from. `#1789`
+i.e. most of the 4,973 above — comes from. `#1789`
 measured the delta contract's *aggregate* saving on 26-turn sessions; this is the same
 contract on **documents**, and it is not uniformly complying. That is a finding of this bundle,
 not a lever: it is a re-emission of the embed list, which is the `#7949` channel.
 
-⚠️ **Reconciliation with §4a/§5.** §2's 17,830 is `Σ(calls × median per call)`; §4a/§5's
+⚠️ **Reconciliation with §4a/§5.** §2's 17,829 is `Σ(calls × median per call)`; §4a/§5's
 16,338 is the **median of the per-document totals**. They are different estimators of the same
 quantity and agree to 9 %; neither is a typo, and the fitted constant (22,802) is a third. The
 headline bill in §5 uses the median-of-totals because that is the number `#14295` measured
