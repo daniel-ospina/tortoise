@@ -1929,16 +1929,23 @@ def _is_builtins_dict_of(node: ast.AST, names: frozenset[str],
                                    launderers, members=frozenset({"dict", "copy"})) is not None
     if not isinstance(node, ast.Call):
         return False
+    # ⛔ ON THE SPLICED POSITIONS (#14326 review cycle 15, EACH MEASURED GREEN **and LIVE**:
+    # `vars(*(builtins,))`, `getattr(*(builtins, "__dict__"))` and the inline
+    # `vars(*(builtins,))["exec"](<read>)` all executed the read while their positional twins
+    # are REFUSED). This predicate was the one composition arm the cycle-14 splice fix missed:
+    # it read `node.args`, where a two-element splice is ONE argument, so the module name in
+    # position ZERO was invisible.
+    _positions = _spliced_positions(node.args)
     if (isinstance(node.func, ast.Name)
             and (node.func.id == "vars" or node.func.id in launderers)
-            and len(node.args) == 1 and isinstance(node.args[0], ast.Name)
-            and node.args[0].id in names):
+            and len(_positions) == 1 and isinstance(_positions[0], ast.Name)
+            and _positions[0].id in names):
         return True
     return bool(isinstance(node.func, ast.Name)
                 and (node.func.id == "getattr" or node.func.id in launderers)
-                and len(node.args) >= 2 and isinstance(node.args[0], ast.Name)
-                and node.args[0].id in names
-                and "__dict__" in _string_keys_of(node.args[1], consts))
+                and len(_positions) >= 2 and isinstance(_positions[0], ast.Name)
+                and _positions[0].id in names
+                and "__dict__" in _string_keys_of(_positions[1], consts))
 
 
 #: The mapping METHODS that RETURN the member stored under a key. `get`/`pop`/`setdefault`
@@ -2057,12 +2064,16 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                   # ⛔ `deepcopy` TAKES A SECOND, DOCUMENTED ARGUMENT (#14326 review cycle 6,
                   # MEASURED GREEN with `copy.deepcopy(builtins.__dict__, {})` — the positional
                   # `memo` — while the bare one-argument form was REFUSED).
-                  # ⛔ ON THE SPLICED POSITIONS (#14326 review cycle 14: `copy.deepcopy(
-                  # *(builtins.__dict__, {}))` — the documented positional `memo` behind a
-                  # two-element literal splice — was GREEN while the un-starred twin was
-                  # REFUSED). `len(args)` on the RAW node counts a splice as one argument.
-                  and ((node.func.attr == "copy" and len(_positions) == 1)
-                       or (node.func.attr == "deepcopy" and len(_positions) >= 1)))
+                  # ⛔ THE ARITY IS READ ON THE RAW NODE, AND THAT IS MEASURED (#14326 review
+                  # cycle 15): `len(_positions)` and `len(node.args)` differ only for a
+                  # multi-element splice, and `copy.copy(*(m, {}))` / `copy.deepcopy(*(m, {}))`
+                  # — the only inputs where they disagree — are a TypeError and a REAL CALL
+                  # respectively. Cycle 14 changed both tokens; the `deepcopy` half is
+                  # unpinnable no-op and was REVERTED, because no row can distinguish it and
+                  # this file deletes what no mutant can red. What actually closed the shape is
+                  # the POSITION read below (`_positions[0]`), which its own row reds.
+                  and ((node.func.attr == "copy" and len(node.args) == 1)
+                       or (node.func.attr == "deepcopy" and len(node.args) >= 1)))
                  # ⛔ AND THE ALIASED CALLEE (#14326 review cycle 6, MEASURED GREEN:
                  # `_f = copy.deepcopy; _f(builtins.__dict__)`, same for `copy.copy`,
                  # `dict.copy` and `from copy import deepcopy`). `launderers` now holds those
@@ -2074,7 +2085,7 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                  # names in `launderers` are `dict`/`getattr`/`vars` aliases, whose
                  # two-positional-argument forms are TypeErrors.
                  or (isinstance(node.func, ast.Name) and node.func.id in launderers
-                     and len(_positions) >= 1)
+                     and len(node.args) >= 1)
                  # ⛔ AND THE COPY CALLEE REACHED AS A NAMESPACE MEMBER (#14326 review cycle 12,
                  # EACH MEASURED GREEN **and LIVE** while the BOUND twin was REFUSED — the
                  # in-file asymmetry by this file's own definition):
@@ -2090,7 +2101,7 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                  or (_builtin_lookup_name(node.func, names | {"dict", "copy"}, consts,
                                           dict_names, launderers,
                                           members=_COPY_CALLEES) is not None
-                     and len(_positions) >= 1))
+                     and len(node.args) >= 1))
             # ⛔ AND THE ONE-ELEMENT `*` SPREAD OF THE SAME ARGUMENT (#14326 review round 9,
             # EACH MEASURED GREEN and LIVE at `cb87c7c8cb`: `_f = dict; _d =
             # _f(*(builtins.__dict__,))` / `copy.copy(*[m])` / `dict.copy(*((m,)))` /
@@ -7910,6 +7921,18 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # EACH MEASURED GREEN **and LIVE**): every arm read `node.args`, which counts a splice
         # as ONE position, so the second slot was never looked at — and `_d |= m` is the
         # assign spelling of the `{} | m` copy. Each row reds its own clause.
+        # ⛔ THE MAPPING COMPOSITION BEHIND A SPLICE (#14326 review cycle 15, EACH MEASURED
+        # GREEN **and LIVE**): `_is_builtins_dict_of` read the raw `args`, so a two-element
+        # literal splice hid the module name in position zero and `vars(*(builtins,))` composed
+        # the mapping anyway.
+        "a MAPPING composed by `vars` behind a literal splice": (
+            '    import builtins\n'
+            '    _d = vars(*(builtins,))\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a MAPPING composed by `getattr` behind a literal splice": (
+            '    import builtins\n'
+            '    _d = getattr(*(builtins, "__dict__"))\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a COPY CALLEE behind a two-element literal splice": (
             '    import builtins, copy\n'
             '    _d = copy.deepcopy(*(builtins.__dict__, {}))\n'
