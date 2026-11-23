@@ -1120,7 +1120,13 @@ def _run(argv: list[str] | None = None) -> int:
         # drained, printed beside per-mode `corpus copied: N` with nothing red.
         # That is the class `162e9cd9` closed on the `summary` path. Tie the two
         # together: every full-corpus mode's own `source_before` digest must still
-        # be the digest the cost is computed from.
+        # be the digest the cost was computed from — and the fingerprint is taken
+        # AFTER `_corpus_cost` (which tokenises the whole spool, so it is the long
+        # window), because a digest read BEFORE the measurement attests a corpus
+        # the measurement did not see. Measured in that order: an entry appended
+        # during `_corpus_cost` exited 0 with `sessions: 4` while every mode had
+        # attested 3.
+        cost = _corpus_cost(args.spool_src)
         live = _source_fingerprint(args.spool_src)
         full = {m for m, lim, _ in plan if lim is None}
         disagreed = [
@@ -1134,10 +1140,11 @@ def _run(argv: list[str] | None = None) -> int:
                 f"the source spool {args.spool_src} changed while the run was in "
                 f"flight — {disagreed} copied a corpus whose digest is no longer "
                 f"the spool's, so a cost taken now describes a corpus NO mode "
-                f"drained. Re-run against a quiesced spool (stop capture, or run "
-                f"a single mode), and do not read `corpus-cost.json` as this "
+                f"drained. Re-run against a quiesced spool (stop capture), or run "
+                f"a SLICED mode (`--mode pre-14261`, which reuses the recorded "
+                f"cost instead of measuring one) — a full-corpus mode would hit "
+                f"this same refusal. Do not read `corpus-cost.json` as this "
                 f"run's")
-        cost = _corpus_cost(args.spool_src)
     else:
         cost_path = args.out / "corpus-cost.json"
         if not cost_path.exists():

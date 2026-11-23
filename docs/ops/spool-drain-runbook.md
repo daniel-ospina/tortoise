@@ -277,8 +277,8 @@ uv run tortoise session drain --retry-terminal 2>&1 | tee /tmp/drain-$(date -u +
 | 1 | terminal re-arm | `spool drain: cleared terminal state on N entries` | N is any number (0 is normal) | — |
 | 2 | POST batch | the per-request records — in a REHEARSAL the instrument's `requests.jsonl` (installed by `tools/spool_drain_rehearsal.py`, **not** by the drain); on a real drain the summary's `F`/`D` (row 4), because `session drain` prints aggregates plus per-entry lines only for `discarded` and `probe_refusals` (`tortoise/__main__.py:9840-9861`) and has no per-POST output | rehearsing: no `5xx`/`504` among the recorded POSTs. ⛔ Never a 5xx storm / wrong host / limiter, a real drain shows it only as `D > 0` (row 4) — a real drain has no "all 200" to read | `504` → extraction outran the ack window; ⛔ the record may have LANDED anyway — measured `filed 3, deferred 0`, `filed_key 3/3` — the confirm path files it, so check `filed_key` before re-running. A `504` is a lost **response**, not a lost capture |
 | 3 | ACK honesty | `spool drain: outcome unrecorded N (…)` | N may equal the filed count — this is the ACK path saying extraction is behind the answer | ⛔ not a failure. It becomes one only if it is still `N` after Stage 5 |
-| 4 | drain summary | `spool drain: filed F, deferred D, skipped S (N waiting on backoff), held back H, probe refusals P, terminal T, discarded X`. ⛔ Re-run the Stage −1 count immediately BEFORE the pass: `unfiled` below means unfiled **at this pass's start**, not at Stage −1 | **the accounting holds** — `F + D + N + H + P + T + X == unfiled` — **and** `X == T == P == 0` — **and** either `unfiled == 0` (nothing to file → PASS) or `D == 0` with `F > 0` (every entry this pass attempted, it filed) | ⛔ **`D > 0` is NOT a pass**: a refusal this pass, which must be justified against the class table below — a `429` key budget is the benign one and means the pace was wrong (Stage 3b); a `5xx`, an auth failure or the wrong host refuses identically (`classify_failure` sorts all of them `retry`, `capture_spool.py:663-670`), so the arithmetic ALONE cannot tell a paced run from a failed one — `F 214, D 50` and `F 1, D 263` are the same shape. ⛔ **`F == 0 and D > 0` → FAIL. ⛔ `F == 0 and D == 0 and N > 0` → NOT a pass and NOT a failure: the backlog is PARKED (all `N` held by backoff) — wait out the window; do not re-run. ⛔ A broken accounting identity (`F + D + N + H + P + T + X != unfiled`) is a FAIL |
-| 5 | completion (no client action) | `GET /v1/sessions/{id}` → 2xx, `extraction.outcome_known: true`, no `phase` — for ids taken from the SPOOL (`session_id` in each entry's `.meta.json` whose `filed_at` is newer than the pass start), ⛔ not from the drain's output: the summary is aggregates only and the only id-carrying line (`spool drain: outcome unrecorded N`) prints at most three (`__main__.py:9872-9885`) | **every newly-filed session you sample is terminal**, and ⛔ *no id can be named* is itself a FAIL — a drain that filed nothing has nothing to prove here, and naming none is how this row certifies nothing | still `phase` after minutes → extraction worker stuck; the capture is still durable — do NOT re-drain blindly. A `404` on an id the spool just stamped is the wrong target / record gap, not a slow worker |
+| 4 | drain summary | `spool drain: filed F, deferred D, skipped S (N waiting on backoff), held back H, probe refusals P, terminal T, discarded X`. ⛔ Re-run the Stage −1 count immediately BEFORE the pass: `unfiled` below means unfiled **at this pass's start**. ⛔ And if **no** `spool drain: filed …` line was printed at all, this row has no observable: read which line came instead — `capture declined` (consent off, exit 0), `no user-global .tortoise config — nothing to file`, or an exception — and grade that as NOT a pass | **the accounting holds** — `F + D + N + H + T + X == unfiled` (`P` is already inside `H`, do not count it twice) — **and** `X == T == 0` — **and** either `unfiled == 0` (nothing to file), or **`D == N == H == 0` with `F > 0`**: everything this pass attempted, it filed, and nothing is left parked | ⛔ **PASS here is not DONE** — the drain is complete only when a re-read shows `unfiled == 0` (Stage 4). ⛔ **`D > 0` is NOT a pass**: a refusal this pass, which must be justified against the class table below — a `429` key budget is the benign one and means the pace was wrong (Stage 3b); a `5xx`, an auth failure or the wrong host refuses identically (`classify_failure` sorts all of them `retry`, `capture_spool.py:663-670`), so the arithmetic ALONE cannot tell a paced run from a failed one — `F 214, D 50` and `F 1, D 263` are the same shape. ⛔ **`F == 0 and D == 0` with `N + H > 0` → NOT a pass and NOT a failure: the backlog is PARKED** — wait out the window; do not re-run. ⛔ **`F == 0 and D > 0` → FAIL.** ⛔ A residual in the identity needs a name before it is a failure: a second drainer (the SessionStart hook is one) moves entries into `skipped`, and a capture landing mid-pass makes the sum exceed `unfiled`; reconcile the residual against `S`'s components and the entries spooled during the pass, and only then call it broken |
+| 5 | completion (no client action) | `GET /v1/sessions/{id}` → 2xx, `extraction.outcome_known: true`, no `phase` — for ids taken from the SPOOL (`session_id` in each entry's `.meta.json` whose `filed_at` is newer than the pass start), ⛔ not from the drain's output: the summary is aggregates only and the only id-carrying line (`spool drain: outcome unrecorded N`) prints at most three (`__main__.py:9872-9885`) | **every newly-filed session you sample is terminal.** ⛔ *No id can be named* is a FAIL **when this pass reported `F > 0`** — naming none is how this row certifies nothing; when `F == 0` there is nothing to sample and row 4's parked verdict governs | still `phase` after minutes → extraction worker stuck; the capture is still durable — do NOT re-drain blindly. A `404` on an id the spool just stamped is the wrong target / record gap, not a slow worker |
 | 6 | the record | TWO reads: (a) the SPOOL — re-run Stage −1's script, which is cap-free; (b) the SERVER — `GET /v1/sessions/{id}` for the ids row 5 sampled | **`filed + unfiled == entries` still holds and `unfiled` fell by `F`** (a CAS miss — a live turn appending mid-POST — leaves one entry unfiled on purpose, `capture_spool.py:4320-4322`, so grade `unfiled_after == unfiled_before − F + misses` and say which entries missed) **and every sampled id answers 2xx on the server** | ⛔ **a `filed_key` rise with no server answer is a FAIL, not a pass**: `filed_key` is stamped from the client's own 2xx (`capture_spool.py:4254`), so a wrong-but-healthy host, or a server that ACKs and stores no Session, satisfies every client-side criterion — the read-back is the only check that the record landed where you pointed. A `404` → stop and report on `#14342` D2 (record gap) **or** re-check the host. ⛔ Never a session count from `GET /v1/sessions`: it is `ORDER BY s.created_at DESC LIMIT 50` with no pagination (`hosted_api.py:26181`), so it cannot show a 264-entry delta in either direction |
 | 7 | idempotency | run the drain a second time, then the same two reads as row 6 | **`filed_key` count and the sampled ids' 2xx answers do not change** (seconds, not minutes). ⛔ Not the drain's summary line: `__main__.py:9849` prints `spool drain: filed …` only when something was attempted, held, discarded or terminal, so a CLEAN second pass prints only `cleared terminal state on 0 entries — retrying` — success is silence, not a `filed 0` line. ⛔ And `filed 0` on a second pass is also what a PARKED backlog prints (`filed 0, deferred 0, skipped 265 (50 waiting on backoff)` is this PR's own `head-keyless` pass 2) — the difference is `N`, so read it before concluding | a second drain that re-POSTs / raises `filed_key` = the `capture_key` short-circuit is broken |
 
@@ -403,30 +403,51 @@ can never fire. It is not a stricter check; it is a check that always fails.
 **Compare transcript digests, not the tree.**
 
 ```bash
-# 2. every session the drain filed answers on the SERVER — the ids come from the
+# this stage runs in its OWN shell, so re-state the path (Stage 0 set it, this
+# shell never saw it) — an empty $SPOOL here reads a RELATIVE `entries/` and
+# samples nothing, silently.
+SPOOL="${TORTOISE_CAPTURE_SPOOL_DIR:-$HOME/.tortoise/capture-spool}"
+
+# ⛔ PASSTART must be captured BEFORE the drain (end of Stage 2) — it is what makes
+# this a read-back of THIS pass. `filed_at` is an ISO-8601 UTC string written in
+# the same CAS as `filed_key` (`capture_spool.py:4274`), so a fixed-width
+# `date -u` string compares lexicographically: PASSTART=$(date -u +%Y-%m-%dT%H:%M:%S)
+#
+# 2. every session THIS DRAIN filed answers on the SERVER — the ids come from the
 #    spool (each entry's `.meta.json` carries `session_id`), never from the drain's
-#    aggregate line. ⛔ Do NOT grade a session COUNT from `GET /v1/sessions`: the
-#    endpoint is `ORDER BY s.created_at DESC LIMIT 50` with no pagination
-#    (`hosted_api.py:26181`), so on any box holding ≥50 sessions it answers 50
-#    before and after a 264-entry drain.
-for id in $(python3 - "$SPOOL" <<'PY'
-import json, sys, pathlib
+#    aggregate line. ⛔ Filter on `filed_at` FIRST and sample AFTER: a sample taken
+#    first can return nothing (and then the loop below certifies nothing) or return
+#    entries an EARLIER drain filed, which prove nothing about this pass.
+#    ⛔ Do NOT grade a session COUNT from `GET /v1/sessions`: the endpoint is
+#    `ORDER BY s.created_at DESC LIMIT 50` with no pagination (`hosted_api.py:26181`),
+#    so on any box holding ≥50 sessions it answers 50 before and after the drain.
+ids=$(python3 - "$SPOOL" "$PASSTART" <<'PY'
+import json, pathlib, sys
 root = pathlib.Path(sys.argv[1], "entries")
-for meta in sorted(root.glob("*.meta.json"))[:10]:      # a sample of 10
-    m = json.loads(meta.read_text())
-    if m.get("filed_key"):
-        print(m["session_id"])
+start = sys.argv[2]                       # lexicographic, both `%Y-%m-%dT%H:%M:%S`
+hits = [m for m in (json.loads(q.read_text())
+                    for q in sorted(root.glob("*.meta.json")))
+        if m.get("filed_key") and str(m.get("filed_at") or "") >= start]
+print(f"# newly filed this pass: {len(hits)}", file=sys.stderr)
+for m in hits[:10]:
+    print(m["session_id"])
 PY
-); do
+)
+echo "# sampled: $(printf '%s\n' $ids | grep -c .) of the newly filed"
+for id in $ids; do
   printf '%s -> ' "$id"
   curl -sS -o /dev/null -w '%{http_code}\n' \
     -H "Authorization: Bearer $TORTOISE_API_KEY" "$TORTOISE_API_URL/v1/sessions/$id"
 done
 ```
 
-**Pass:** transcript digest identical; every sampled id answers `200`;
-`discarded == 0`. ⛔ A sampled id answering `404` is the record gap (`#14342` D2)
-or the wrong host — either way the drain did not land where you pointed it.
+**Pass:** transcript digest identical; **at least one** id sampled and every one
+answers `200`; `discarded == 0`; and — the COMPLETION criterion no other row
+states — a re-run of the Stage −1 count shows **`unfiled == 0`**. ⛔ An empty
+sample is a FAIL when the pass reported `F > 0` (the read-back certified nothing);
+when `F == 0` row 4's parked verdict governs instead. A sampled id answering `404`
+is the record gap (`#14342` D2) or the wrong host — either way the drain did not
+land where you pointed it.
 
 ---
 
@@ -493,7 +514,7 @@ and files everything".
 | Symptom | What it is | Do this |
 |---|---|---|
 | `spool drain: capture declined` | consent off — the drain did nothing | `export TORTOISE_CAPTURE=1`, re-run |
-| `filed 0` everything | consent, auth, or an unreachable URL | ⛔ three different lines, only one of them `nothing filed`: consent prints `spool drain: capture declined — …` (exit **0**, a no-op); auth/URL failures print the ordinary summary as `filed 0, deferred N` / `terminal N` / `discarded N`; `spool drain: nothing filed — …` comes from the blanket exception handler and means a config/crash case. `tortoise session verify` reads the install |
+| `filed 0` everything | consent, auth, or an unreachable URL | ⛔ FOUR different lines, and only one of them says `nothing filed`: consent prints `spool drain: capture declined — …` (exit **0**, a no-op); an unresolved identity prints `spool drain: no user-global .tortoise config — nothing to file` (`__main__.py:9493`); auth/URL failures print the ordinary summary as `filed 0, deferred N` / `terminal N` / `discarded N`; and `spool drain: nothing filed — …` comes from the blanket exception handler (config/crash). Read which one printed before concluding `tortoise session verify` reads the install |
 | `404`/`401` on every POST | wrong host or a read-only key | re-check `TORTOISE_API_URL`; re-run the capture-POST probe in Stage 3 (NOT `gh_write_preflight.py` — that one proves the GitHub credential) |
 | `429 Rate limit exceeded. 100 points/minute per API key.` | the KEY's request budget, not the capture ceiling | wait 60 s; drain slower / in batches (Stage 3b). Entries are deferred, not lost |
 | `429 capture_capacity_saturated` | the in-flight ceiling (`#12992`): the previous capture's extraction still holds its slot | wait (`retry_after` 30 s); drain with ONE drainer paced under its own extraction latency (that is `#14342` D1). The rehearsal reproduced this with ONE drainer, so it is not evidence that a second client is needed to hit it |
