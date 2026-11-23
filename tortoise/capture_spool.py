@@ -904,9 +904,15 @@ def capacity_refusal(outcome: PostOutcome) -> dict | None:
     # a saturation signal by construction.
     if status != 429 and not typed:
         return None
+    # ⛔ THE SERVER'S OWN CATEGORY WINS WHEN IT SENT ONE. The capture lane has a
+    # SECOND 429 — ``ingest_rate_limited`` (``hosted_api._ingest_rate_limited``) —
+    # and relabelling it ``capture_capacity_saturated`` would name a category the
+    # server never sent, disagreeing with its own ``/health`` counter about the same
+    # refusal (found in review). The status still makes it BOX-level for the
+    # charging rule, which is the part that matters here; the code only NAMES it.
     refusal: dict = {
         "status": status if status is not None else 429,
-        "code": CAPTURE_CAPACITY_CODE,
+        "code": _parsed_refusal_code(detail) or CAPTURE_CAPACITY_CODE,
     }
     retry_after = _retry_after_seconds(detail)
     if retry_after is not None:
@@ -914,6 +920,31 @@ def capacity_refusal(outcome: PostOutcome) -> dict | None:
     if detail:
         refusal["detail"] = detail
     return refusal
+
+
+def _parsed_refusal_code(detail: str) -> str | None:
+    """The server's machine-readable ``detail.code``, or ``None``.
+
+    TOTAL: an unparseable body, a JSON scalar, a missing/nested/absent code, or a
+    non-string value all answer ``None`` (the caller then names the class itself).
+    Deliberately narrow to a STRING code — an operator-readable line and a durable
+    status field both embed it, so a dict or a number would corrupt their grammar.
+    """
+    if not detail:
+        return None
+    try:
+        parsed = json.loads(detail)
+    except (ValueError, TypeError):
+        return None
+    node: object = parsed
+    for _ in range(2):  # {"detail": {...}} and {"detail": {"detail": {...}}}
+        if not isinstance(node, dict):
+            return None
+        code = node.get("code")
+        if isinstance(code, str) and code:
+            return code
+        node = node.get("detail")
+    return None
 
 
 def _retry_after_seconds(detail: str) -> float | None:
@@ -4042,7 +4073,12 @@ def _record_capture_status(root: Path, summary: FlushSummary) -> None:
     spool and the credential on each line, never stored.
     """
     quota = summary.quota
-    capacity = summary.capacity
+    # ⛔ `capacity_stopped`, NOT `capacity is not None`: the dict remembers that a
+    # refusal HAPPENED during the pass, and a pass that yielded once and then filed
+    # everything was recorded as `blocked`/429 anyway — a cause the box no longer
+    # had (found in review). The record states the box's state at the END of the
+    # pass; the console line below tells the same story from the same flag.
+    capacity = summary.capacity if summary.capacity_stopped else None
     if quota is not None:
         status = quota.get("status")
         record: dict = {

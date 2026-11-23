@@ -7625,7 +7625,7 @@ test("#14350: an EXPIRED claim is taken over; a LIVE one is honoured", async () 
 test("#14350: three staleness rules, all fail-closed toward NOT stealing", async () => {
   const now = 1000;
   const live = {
-    version: 1, token: "t", leg: "pi", pid: process.pid,
+    version: DRAIN_CLAIM_VERSION, token: "t", leg: "pi", pid: process.pid,
     host: "box-a", boot_id: "boot-1", started_at: 0, expires_at: 2000,
   };
   // Rule 1 — unattributable.
@@ -7742,7 +7742,7 @@ test("#14350: a takedown never disposes of a claim it did not judge", async () =
   // MUTATION THAT REDS THIS: go back to compare-then-unlink.
   const spool = tmpSpool();
   const staleBytes = `${JSON.stringify({
-    version: 1, token: "gone", leg: "pi", pid: 999999999,
+    version: DRAIN_CLAIM_VERSION, token: "gone", leg: "pi", pid: 999999999,
     host: "box-a", boot_id: "boot-1", started_at: 0, expires_at: 1,
   })}\n`;
   writeFileSync(join(spool, "drain.claim"), staleBytes);
@@ -7774,7 +7774,7 @@ test("#14350: readDrainClaim is never STRICTER than claimIsStale", async () => {
   // MUTATION THAT REDS THIS: require `typeof token === "string"` again.
   const spool = tmpSpool();
   writeFileSync(join(spool, "drain.claim"), `${JSON.stringify({
-    version: 1, leg: "pi", pid: process.pid, host: "x",
+    version: DRAIN_CLAIM_VERSION, leg: "pi", pid: process.pid, host: "x",
     started_at: 0, expires_at: Date.now() + 60_000,
   })}\n`);
   const record = readDrainClaim(spool);
@@ -7783,4 +7783,39 @@ test("#14350: readDrainClaim is never STRICTER than claimIsStale", async () => {
     claimIsStale(record, { nowMs: Date.now() }), false,
     "…and the same record is judged live, so the two must agree",
   );
+});
+
+test("#14350: a DIRECTORY at the claim path is cleared, not a permanent block", async () => {
+  // `linkSync` fails EEXIST at a directory, nothing reads it as a claim, so rule 1
+  // says stale — and `continue` would re-link into EEXIST on every attempt, making
+  // EVERY later pass report "somebody holds this spool" with no identity, forever.
+  // MUTATION THAT REDS THIS: restore `if (raw === undefined) continue;`.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "drain.claim"), { recursive: true });
+  const claim = acquireDrainClaim(spool, { leg: "pi" });
+  assert.ok(claim, "a directory is not a holder — it must not block the drain");
+  claim.release();
+});
+
+test("#14350: a slow holder's release leaves a SUCCESSOR's claim alone", async () => {
+  // The restore path: the takedown moves whatever is at the path aside and compares
+  // in quarantine, so a release by a holder whose lease expired — after a successor
+  // installed its own claim — must put the SUCCESSOR's bytes back.
+  // ⛔ This is the Python twin's `test_a_SUCCESSORS_claim_survives_a_slow_holders_release`,
+  // absent here: deleting the `linkSync` restore left this suite 240/240 green
+  // (found in review), i.e. the whole restore path was untested on this leg.
+  // MUTATION THAT REDS THIS: drop the `linkSync(quarantine, path)` in
+  // `disposeQuarantine`.
+  const spool = tmpSpool();
+  const slow = acquireDrainClaim(spool, { leg: "python", nowMs: 1000, ttlMs: 60 });
+  assert.ok(slow);
+  const successor = acquireDrainClaim(spool, { leg: "pi", nowMs: 1100, ttlMs: 60 });
+  assert.ok(successor, "the lease expired, so the peer may take over");
+  const successorToken = successor.token;
+  assert.equal(slow.release(), false, "the token is no longer ours");
+  const onDisk = readDrainClaim(spool);
+  assert.ok(onDisk, "the successor's claim must still exist");
+  assert.equal(onDisk.token, successorToken, "the successor's claim must SURVIVE");
+  assert.equal(successor.renew(1110), true, "and remain renewable");
+  successor.release();
 });

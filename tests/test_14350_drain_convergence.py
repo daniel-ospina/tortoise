@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -187,6 +189,16 @@ def test_a_LIVE_holders_claim_is_honoured_and_never_deleted(tmp_path):
     claim.release()
 
 
+def _ms(seconds: float) -> float:
+    """Seconds -> the claim's ON-DISK unit (milliseconds; see TIMESTAMP_UNIT_MS).
+
+    Every hand-built record in this module goes through here, so a test can never
+    quietly disagree with the unit the code writes — the mismatch that let each leg
+    steal the other's live claim.
+    """
+    return seconds * drain_claim.TIMESTAMP_UNIT_MS
+
+
 def test_a_reboot_makes_a_same_hosts_claim_stale(tmp_path):
     """A rebooted box can REUSE a pid, and a reused pid is not the holder.
 
@@ -195,9 +207,9 @@ def test_a_reboot_makes_a_same_hosts_claim_stale(tmp_path):
     runs again).
     """
     record = {
-        "version": 1, "token": "t", "leg": "pi", "pid": os.getpid(),
-        "host": "box-a", "boot_id": "boot-1",
-        "started_at": 0.0, "expires_at": time.time() + 600.0,
+        "version": drain_claim.CLAIM_VERSION, "token": "t", "leg": "pi",
+        "pid": os.getpid(), "host": "box-a", "boot_id": "boot-1",
+        "started_at": 0.0, "expires_at": _ms(time.time() + 600.0),
     }
     assert drain_claim.claim_is_stale(
         record, now_s=time.time(), host="box-a", boot_id="boot-1") is False
@@ -213,9 +225,9 @@ def test_a_FOREIGN_hosts_claim_is_judged_by_the_lease_only(tmp_path):
     that happens to be dead then steals a claim the real holder still holds).
     """
     record = {
-        "version": 1, "token": "t", "leg": "python", "pid": 999_999_999,
-        "host": "another-box", "boot_id": "boot-9",
-        "started_at": 0.0, "expires_at": 2000.0,
+        "version": drain_claim.CLAIM_VERSION, "token": "t", "leg": "python",
+        "pid": 999_999_999, "host": "another-box", "boot_id": "boot-9",
+        "started_at": 0.0, "expires_at": _ms(2000.0),
     }
     assert drain_claim.claim_is_stale(
         record, now_s=1000.0, host="box-a", boot_id="boot-1") is False
@@ -658,7 +670,7 @@ def test_an_EXPIRED_lease_is_never_RESURRECTED_by_its_own_holder(tmp_path):
     assert claim.renew(now_s=1200.0) is False, (
         "an expired lease is not renewable — that is how a peer's takeover gets "
         "silently overwritten")
-    assert drain_claim.read_claim(root)["expires_at"] <= 1200.0, (
+    assert drain_claim.read_claim(root)["expires_at"] <= _ms(1200.0), (
         "the record must not have been pushed into the future")
     # And a peer may then take it, as it always could.
     successor = drain_claim.acquire(root, leg="pi", now=1201.0, ttl_s=60.0)
@@ -712,7 +724,7 @@ def test_a_FUTURE_version_claim_is_unattributable_not_reinterpreted(tmp_path):
     record = {
         "version": drain_claim.CLAIM_VERSION + 1, "token": "t", "leg": "pi",
         "pid": os.getpid(), "host": "box-a", "boot_id": "boot-1",
-        "started_at": 0.0, "expires_at": time.time() + 600.0,
+        "started_at": 0.0, "expires_at": _ms(time.time() + 600.0),
     }
     assert drain_claim.claim_is_stale(record, now_s=time.time()) is True
 
@@ -792,3 +804,202 @@ def test_a_crashed_takers_quarantine_is_COLLECTED_by_the_scratch_sweeper(
         "an abandoned quarantine must be swept like any other scratch file; "
         "otherwise the spool root grows a file per crash, forever: "
         f"{sorted(p.name for p in root.iterdir())}")
+
+
+# ── THE CROSS-LEG CONTRACT ─────────────────────────────────────────────────
+#
+# ⛔ The two legs write ONE file and each has its own predicate, so the protocol
+# is only as good as their AGREEMENT — and nothing tested that agreement. A
+# reviewer found the consequence: Python wrote `expires_at` in SECONDS while the
+# Pi leg wrote MILLISECONDS, so each leg read the other's live claim as long
+# expired and STOLE it (two drainers), and a Pi claim read by Python was live for
+# ~55,000 years (a permanent block). Both legs' suites were green, because each
+# only ever built records in its OWN unit.
+
+_NODE = shutil.which("node")
+_TS_LEG = Path(__file__).resolve().parent.parent / "tortoise/pi-hooks/tortoise-capture.ts"
+
+
+def _ts_verdict(root: Path) -> dict:
+    """Ask the REAL TypeScript leg what it makes of the claim at ``root``.
+
+    Runs the shipped predicate, not a re-implementation: a Python copy of the TS
+    rules would agree with the Python rules by construction and prove nothing.
+    """
+    script = (
+        'import { acquireDrainClaim, claimIsStale, readDrainClaim } from %s;\n'
+        'const dir = process.env.CLAIM_DIR;\n'
+        'const rec = readDrainClaim(dir);\n'
+        'const stolen = acquireDrainClaim(dir, { leg: "pi" });\n'
+        'process.stdout.write(JSON.stringify({\n'
+        '  readable: !!rec,\n'
+        '  stale: claimIsStale(rec, { nowMs: Date.now() }),\n'
+        '  stole: !!stolen,\n'
+        '  seconds_scale: rec ? rec.expires_at < 1e11 : null,\n'
+        '  version: rec ? rec.version : null,\n'
+        '}));\n' % json_dumps(_TS_LEG.as_posix())
+    )
+    # `node -e` shifts argv (the script is argv[0]), so the path goes through the
+    # environment: an off-by-one here would make the test pass against the WRONG
+    # directory, which is the class of failure this test exists to catch.
+    out = subprocess.run([_NODE, "--input-type=module", "-e", script],
+                         capture_output=True, text=True, timeout=120,
+                         env={**os.environ, "CLAIM_DIR": str(root)})
+    assert out.returncode == 0, out.stderr[-2000:]
+    return json.loads(out.stdout)
+
+
+def json_dumps(value: str) -> str:
+    return json.dumps(value)
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed on this box")
+def test_the_PI_LEG_honours_a_LIVE_python_claim(tmp_path):
+    """A live Python claim must read as LIVE to the Pi leg, and must not be stolen.
+
+    THIS IS THE TEST WHOSE ABSENCE LET THE P0 SHIP: the unit of `expires_at` was
+    seconds here and milliseconds there, every other test built records in its own
+    leg's unit, and each leg therefore stole the other's live claim.
+
+    MUTATION THAT REDS THIS: write seconds again (`now_s + ttl_s`), or drop
+    TIMESTAMP_UNIT_MS from `claim_is_stale`.
+    """
+    root = tmp_path / "spool"
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None
+    verdict = _ts_verdict(root)
+    assert verdict["readable"] is True, "the Pi leg must be able to read our record"
+    assert verdict["version"] == drain_claim.CLAIM_VERSION
+    assert verdict["stale"] is False, (
+        "a LIVE python claim read as STALE by the Pi leg — the unit mismatch is "
+        "back (seconds vs milliseconds), and the Pi leg will steal it")
+    assert verdict["stole"] is False, (
+        "the Pi leg STOLE a live python claim — two drainers, the defect D1 removes")
+    claim.release()
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed on this box")
+def test_a_PI_claim_is_read_in_the_SAME_UNIT_by_both_legs(tmp_path):
+    """The reverse direction: a record the Pi leg writes must be judged by the same
+    clock here.
+
+    A millisecond record read by a seconds-based predicate is live for ~55,000
+    years — the "a stale claim is never a permanent block" rule, inverted.
+
+    MUTATION THAT REDS THIS: compare `now_s >= expires` (drop the conversion).
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True, exist_ok=True)
+    script = (
+        'import { acquireDrainClaim } from %s;\n'
+        'const c = acquireDrainClaim(process.env.CLAIM_DIR, { leg: "pi", ttlMs: 60000 });\n'
+        'process.stdout.write(JSON.stringify({ ok: !!c }));\n' % json_dumps(_TS_LEG.as_posix())
+    )
+    out = subprocess.run([_NODE, "--input-type=module", "-e", script],
+                         capture_output=True, text=True, timeout=120,
+                         env={**os.environ, "CLAIM_DIR": str(root)})
+    assert out.returncode == 0, out.stderr[-2000:]
+    record = drain_claim.read_claim(root)
+    assert record is not None, "the Pi leg's claim must be readable here"
+    # Its lease is 60 s: LIVE now, and EXPIRED one minute later. A unit mismatch
+    # shows up as one of those two failing.
+    now_s = time.time()
+    assert drain_claim.claim_is_stale(record, now_s=now_s) is False, (
+        "a live Pi claim read as stale here")
+    assert drain_claim.claim_is_stale(record, now_s=now_s + 120) is True, (
+        "a Pi claim never expires here — that is the permanent-block direction of "
+        "the unit mismatch")
+    # The magnitude IS the contract: the lease is ~60 s, so on the millisecond
+    # clock this is ~now_ms, and on a seconds clock it would be ~now_ms/1000. A
+    # ratio rather than a magic constant, so the test cannot drift with the clock.
+    ratio = record["expires_at"] / (time.time() * drain_claim.TIMESTAMP_UNIT_MS)
+    assert 0.999 < ratio < 1.01, (
+        f"expires_at is on a different clock than the Pi leg writes (ratio {ratio:.4f}) "
+        "— the on-disk unit is MILLISECONDS (TIMESTAMP_UNIT_MS), and a mismatch lets "
+        "each leg steal the other's live claim")
+
+
+# ── An UNREADABLE claim must not become a permanent block ─────────────────
+
+
+def test_a_DIRECTORY_at_the_claim_path_is_cleared_not_honoured(tmp_path):
+    """Corruption at the claim path must be CLEARED, not read as a holder.
+
+    `link` fails `EEXIST` at a directory, nothing can read it as a claim, and rule
+    1 therefore says "stale" — but the takeover path used to need readable bytes,
+    so it never ran: both attempts re-`link`ed into `EEXIST`, `acquire` returned
+    `None`, and EVERY later pass reported "another drainer holds this spool" with
+    no identity, forever. That is the permanent block #14350 forbids, in its worst
+    form (measured in review).
+
+    MUTATION THAT REDS THIS: restore `if existing is None: continue`.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    (root / "drain.claim").mkdir()
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None, "a directory is not a holder — it must not block the drain"
+    claim.release()
+
+
+def test_a_DANGLING_SYMLINK_at_the_claim_path_is_cleared_not_followed(tmp_path):
+    """A symlink is removed as a LINK, so this can never reach outside the spool.
+
+    MUTATION THAT REDS THIS: `path.unlink()` without the symlink branch is fine;
+    `path.resolve()` or `os.remove(path.read_bytes())` is not — this pins that the
+    removal does not follow the link.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("must not be touched")
+    (root / "drain.claim").symlink_to(outside)
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None, "a symlink is corruption, not a holder"
+    assert outside.read_text() == "must not be touched", "the target was followed"
+    claim.release()
+
+
+def test_an_UNCLEARABLE_claim_path_is_reported_UNAVAILABLE_not_silent(tmp_path):
+    """When the obstruction cannot be cleared, the drain must SAY so (and run
+    unclaimed), never report contention.
+
+    A non-empty directory is the case: deleting unknown content is the worse error,
+    so it is left alone — and the caller must then be told "the claim is
+    unavailable", because `None` means "another drainer holds it" and the operator
+    line would name a holder that does not exist.
+
+    MUTATION THAT REDS THIS: return `None` instead of raising (the pass then skips
+    the spool forever while claiming somebody else is draining it).
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    (root / "drain.claim").mkdir()
+    (root / "drain.claim" / "keep").write_text("x")
+    with pytest.raises(drain_claim.DrainClaimUnavailable):
+        drain_claim.acquire(root, leg="python")
+    assert (root / "drain.claim" / "keep").exists(), "unknown content must not be deleted"
+
+
+def test_a_pass_that_RECOVERS_from_a_capacity_refusal_is_not_recorded_BLOCKED(tmp_path):
+    """A refusal that the pass then got past is not the box's END state.
+
+    `_flush_claimed` clears `capacity_stopped` before it retries, but `summary.capacity`
+    stayed set — and `_record_capture_status` keyed on it, so a pass that yielded
+    once and then filed EVERYTHING wrote a durable `blocked` + 429. With anything
+    left queued for an unrelated reason, `session health` then rendered
+    `capture: BLOCKED (n queued, 429 capture capacity)` — a cause the box no longer
+    had (found in review).
+
+    MUTATION THAT REDS THIS: key `_record_capture_status` on `summary.capacity is
+    not None` again (drop the `capacity_stopped` gate).
+    """
+    root = _spool(tmp_path, sessions=3)
+    post, state = _capacity(refusals=1)  # one refusal, then the box is free
+    summary = flush_spool(root, post, now=1000.0, sleep=lambda _s: None)
+    assert summary.filed == 3, "the pass recovered and filed everything"
+    assert summary.capacity_stopped is False
+    assert summary.capacity is not None, "the refusal is still MEASURED"
+    status = read_capture_status(root)
+    assert (status or {}).get("state") != "blocked", (
+        f"a recovered pass recorded {status!r} — the box is not blocked")

@@ -41,7 +41,8 @@ stale claim is re-verifiable, not a permanent block".
    claim cannot be honoured (nothing says when it ends) and cannot be trusted
    either. Treated as stale. A claim file is written complete before it is
    visible (see below), so this only ever describes corruption or a foreign file.
-2. **Expired** — ``now >= expires_at``. This is the ONLY rule that applies to a
+2. **Expired** — ``now >= expires_at`` (``expires_at`` is MILLISECONDS on disk,
+   ``now`` is seconds — the predicate does the conversion). This is the ONLY rule that applies to a
    claim written on another host (a copied spool): this box cannot check that
    host's pids.
 3. **Dead holder** — same ``host`` AND same ``boot_id`` (a rebooted box can
@@ -99,7 +100,22 @@ CLAIM_NAME = "drain.claim"
 
 #: Bumped only if a field's MEANING changes. A record whose version is unknown
 #: is unattributable (staleness rule 1), never assumed compatible.
-CLAIM_VERSION = 1
+#:
+#: ⛔ v2 = the timestamps are MILLISECONDS (see `TIMESTAMP_UNIT_MS`). v1 wrote
+#: SECONDS here while the Pi leg wrote milliseconds, so each leg read the other's
+#: live claim as long expired and STOLE it — two drainers, which is the defect
+#: this whole module removes (found in review, measured across processes: a live
+#: Python claim read `stale` to the real TypeScript predicate). Bumping the
+#: version is what makes a surviving v1 record SAFE: rule 1 treats it as
+#: unattributable, so it is reclaimed by lease rather than misevaluated by 1000x.
+#: Generation 33 has not shipped, so both legs move together.
+CLAIM_VERSION = 2
+
+#: The claim's on-disk timestamps are milliseconds since the epoch. Both legs must
+#: agree — `Date.now()` is ms in the Pi leg, `time.time()` is SECONDS in Python,
+#: and the mismatch is silent — so the unit lives in ONE named constant that both
+#: write through and a cross-leg test pins.
+TIMESTAMP_UNIT_MS = 1000.0
 
 #: How long a claim stays valid without a refresh — DERIVED from the transport,
 #: not chosen for comfort. The longest single step a live drain can spend between
@@ -206,7 +222,7 @@ def claim_is_stale(
     expires = _finite(record.get("expires_at"))
     if expires is None:
         return True  # rule 1: nothing says when it ends
-    if now_s >= expires:
+    if now_s * TIMESTAMP_UNIT_MS >= expires:
         return True  # rule 2: expired (the only rule for a foreign host)
     if host is None:
         return False
@@ -364,8 +380,10 @@ class DrainClaim:
             "pid": os.getpid(),
             "host": _host(),
             "boot_id": _boot_id(),
-            "started_at": self._issued_at,
-            "expires_at": now_s + self.ttl_s,
+            # ON-DISK UNIT IS MILLISECONDS (TIMESTAMP_UNIT_MS): the Pi leg's
+            # `Date.now()` is ms, and a unit mismatch between the legs is silent.
+            "started_at": self._issued_at * TIMESTAMP_UNIT_MS,
+            "expires_at": (now_s + self.ttl_s) * TIMESTAMP_UNIT_MS,
         }
 
     def renew(self, now_s: float | None = None) -> bool:
@@ -389,12 +407,25 @@ class DrainClaim:
         if current is None or current.get("token") != self.token:
             return False
         expires = _finite(current.get("expires_at"))
-        if expires is not None and now >= expires:
+        if expires is not None and now * TIMESTAMP_UNIT_MS >= expires:
             return False
         try:
             _write_claim_atomic(self.path, self.record(now))
         except OSError:
             return _claim_still_ours(self.path, self.token)
+        # ⛔ VERIFY AFTER WRITING. `_write_claim_atomic` REPLACES the inode, and the
+        # read above is not a compare: a peer whose takeover landed between that
+        # read and this replace had its fresh claim overwritten — `renew` would
+        # return True while two drainers exist (found in review). The realistic
+        # trigger is a run of failed renewals (`_claim_still_ours` keeps the pass
+        # going on the un-refreshed lease), after which the first write that
+        # succeeds is the clobbering one. Reading back converts that race into
+        # "we are no longer the holder", which the caller already handles by
+        # stopping — and it also covers a peer that took over between the replace
+        # and now.
+        written = read_claim(self.path.parent)
+        if written is None or written.get("token") != self.token:
+            return False
         self._issued_at = now
         self._renewed_at = now
         return True
@@ -447,6 +478,33 @@ class DrainClaimUnavailable(RuntimeError):
     spool — and refusing to run would hide that report, which is the false-PASS
     direction this codebase treats as the worse error.
     """
+
+
+def _clear_unusable_claim_path(path: Path) -> bool:
+    """Remove something at the claim path that is not a readable claim.
+
+    A DIRECTORY, a socket or a dangling symlink at `<spool>/drain.claim` is
+    corruption, not a holder: `link` fails `EEXIST` at it, nothing can read it as a
+    claim, and leaving it there blocks every future drain FOREVER — which is the
+    "a stale claim is re-verifiable, not a permanent block" rule #14350 states,
+    failing in the worst direction. Measured: a directory there made every pass
+    report "another drainer holds this spool" with NO identity, and nothing ever
+    removed it.
+
+    A symlink is removed WITHOUT following it (`unlink` on the link), so this can
+    never reach through to a target outside the spool. A non-empty directory that
+    refuses `rmdir` is left alone and reported: deleting unknown content is the
+    worse error, and the caller's answer for that is :class:`DrainClaimUnavailable`
+    ("run unclaimed, and SAY so") rather than a silent block.
+    """
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+            return True
+        path.rmdir()  # an EMPTY directory; refuses `ENOTEMPTY` otherwise
+        return True
+    except OSError:
+        return False
 
 
 def acquire(
@@ -504,6 +562,15 @@ def acquire(
                                 boot_id=boot_id, alive=alive):
                 return None
             if existing is None:
+                # The path EXISTS but cannot be read as a claim (a directory, a
+                # dangling symlink, `EACCES`). Rule 1 already says it is stale, and
+                # the ONE thing this must not do is `continue` into a permanent
+                # block: both attempts would re-`link` into `EEXIST` and the caller
+                # would read `None` as contention forever.
+                if not _clear_unusable_claim_path(path):
+                    raise DrainClaimUnavailable(
+                        f"{path} exists and cannot be read as a claim, and cannot "
+                        "be cleared — the spool root is not writable by this process")
                 continue
             # ATOMIC TAKEDOWN, then verify in quarantine: see `_takedown`. The
             # previous read-compare-unlink let two contenders delete each other's
@@ -547,7 +614,14 @@ class DrainClaimHeld:
 
     @property
     def expires_at(self) -> float | None:
-        return _finite(self.record.get("expires_at"))
+        """The lease end, in SECONDS, for human-facing surfaces.
+
+        The record stores milliseconds (TIMESTAMP_UNIT_MS); every consumer that
+        formats or compares a time in seconds goes through here, so the unit is
+        converted in ONE place.
+        """
+        value = _finite(self.record.get("expires_at"))
+        return None if value is None else value / TIMESTAMP_UNIT_MS
 
     def line(self, root: Path) -> str:
         """One operator-readable sentence naming WHO holds it and until when."""

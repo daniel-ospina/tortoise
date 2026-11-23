@@ -9847,7 +9847,10 @@ def _cmd_session_drain(api_key: str, api_url: str,
         print("spool drain: this pass no longer held the drain claim (a peer took "
               "it over) — stopping rather than draining twice",
               file=_sys.stderr)
-    if summary.capacity is not None:
+    if summary.capacity is not None and summary.capacity_stopped:
+        # ⛔ `capacity_stopped`, not just `capacity`: a pass that was refused once
+        # and then FILED everything has nothing to report — saying "pass ended"
+        # about it would describe a state the box had for one POST (review finding).
         yields = (f" after {summary.capacity_yields} yield"
                   f"{'s' if summary.capacity_yields != 1 else ''}"
                   if summary.capacity_yields else "")

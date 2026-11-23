@@ -293,6 +293,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmdirSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -513,8 +514,15 @@ export const DRAIN_CLAIM_TTL_MS = 120_000;
  * value, because a format this build does not know must never be interpreted by
  * today's semantics (the whole point of a version field, and the trait that was
  * missing when review found it read nowhere).
+ *
+ * ⛔ v2 = the timestamps are MILLISECONDS, which is what THIS leg always wrote.
+ * v1 was written in SECONDS by the Python leg, so each leg read the other's live
+ * claim as long expired and STOLE it — two drainers, the exact defect the claim
+ * removes (found in review; measured across processes against the real
+ * predicate). Bumping the version is what makes a surviving v1 record SAFE: it is
+ * unattributable (rule 1) rather than misevaluated by a factor of 1000.
  */
-export const DRAIN_CLAIM_VERSION = 1;
+export const DRAIN_CLAIM_VERSION = 2;
 
 export interface DrainClaimRecord {
   version: number;
@@ -5265,6 +5273,33 @@ function disposeQuarantine(
 }
 
 /**
+ * Remove something at the claim path that is not a readable claim.
+ *
+ * A DIRECTORY, a socket or a dangling symlink there is corruption, not a holder:
+ * `linkSync` fails `EEXIST` at it, nothing reads it as a claim, and leaving it
+ * blocks every future drain forever — the "a stale claim is re-verifiable, not a
+ * permanent block" rule, failing in its worst direction.
+ *
+ * A symlink is removed WITHOUT following it, so this cannot reach outside the
+ * spool. A non-empty directory is left alone (`ENOTEMPTY`): deleting unknown
+ * content is the worse error, and the caller's answer is to run unclaimed and SAY
+ * so. Mirrors `drain_claim._clear_unusable_claim_path`.
+ */
+function clearUnusableClaimPath(path: string): boolean {
+  try {
+    const st = lstatSync(path);
+    if (st.isSymbolicLink() || st.isFile()) {
+      unlinkSync(path);
+      return true;
+    }
+    rmdirSync(path);  // an EMPTY directory; refuses ENOTEMPTY otherwise
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Take the spool's drain claim, or `undefined` when another holder has it.
  *
  * `undefined` is NOT an error: it is the correct answer for the second of two
@@ -5339,7 +5374,16 @@ export function acquireDrainClaim(
         parsed = undefined;
       }
       if (!claimIsStale(parsed, { nowMs, host, bootId, alive })) return undefined;
-      if (raw === undefined) continue;
+      if (raw === undefined) {
+        // The path EXISTS but cannot be read as a claim (a directory, a dangling
+        // symlink, `EACCES`). Rule 1 already says it is stale, and `continue`
+        // would re-`link` into `EEXIST` on every attempt — a PERMANENT block,
+        // which #14350 forbids (the Python twin had exactly this defect; found in
+        // review). Clear the obstruction; if that is impossible, report
+        // UNCLAIMED-AND-UNAVAILABLE rather than "somebody holds it".
+        if (!clearUnusableClaimPath(path)) return undefined;
+        continue;
+      }
       // ATOMIC TAKEDOWN, then verify in quarantine — see `takedownClaim`.
       const moved = takedownClaim(path, token);
       if (!moved) continue;  // a peer moved it first; the next attempt decides
@@ -5384,6 +5428,12 @@ export function acquireDrainClaim(
           const still = readDrainClaim(dir);
           return !!still && still.token === token;
         }
+        // ⛔ VERIFY AFTER WRITING (the Python twin states the reasoning): the write
+        // REPLACES the inode and the read above is not a compare, so a peer's
+        // takeover landing in that window would have its fresh claim overwritten
+        // while this returns `true` — two drainers (found in review).
+        const written = readDrainClaim(dir);
+        if (!written || written.token !== token) return false;
         renewedAt = at;
         return true;
       },
