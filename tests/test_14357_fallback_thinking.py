@@ -646,3 +646,56 @@ def test_s1_collapse_at_both_budgets_stays_reasoning_collapse():
             v2.run_s1(m, "1: user: we decided X", stats={})
         assert m.budgets == [1500, 32000], m.budgets
         assert v2._classify_error(ei.value) == "reasoning_collapse", ei.value
+
+
+def test_s1_empty_escalated_reply_is_not_a_recovery():
+    """#14412 review round 2 (P1) — an EMPTY escalated reply is not a recovery.
+
+    ``_complete``'s yield guard raises only on ``length`` + EMPTY, so an
+    escalated call that returns ``""`` at ``finish_reason="stop"`` (or on an
+    adapter that reports no finish reason) arrives as an ordinary return. Pre
+    #14357 that arm was unreachable from a collapsed base — the base raise
+    fired first — so holding the collapse made it reachable, and left unguarded
+    it filed ``""`` as ``escalated_recovered``: the chunk joined the compiled
+    story with ``failed_chunks == 0``, no ``error_census`` class, and
+    ``compile_stories`` split ``""`` into zero sentences. A zero-content chunk
+    certified as SUCCESS is the fail-open #14357 exists to close.
+
+    Both arms are pinned here: the ladder-level raise, and the record-level
+    outcome the issue's acceptance half names (``failed_chunks`` + census).
+    """
+    class _BaseCollapsesEscEmptyStop:
+        last_finish_reason = "length"
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def __init__(self):
+            self.budgets: list[int] = []
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.budgets.append(max_tokens)
+            if (max_tokens or 0) >= 32000:
+                # NOT a collapse by _complete's rule (finish is not "length"),
+                # so the yield guard does not fire and the arm is reached.
+                self.last_finish_reason = "stop"
+                self.last_completion_tokens = 0
+                return ""
+            self.last_finish_reason = "length"
+            self.last_completion_tokens = 1500
+            return ""
+
+    m = _BaseCollapsesEscEmptyStop()
+    with pytest.raises(v2._ReasoningCollapse) as ei:
+        v2.run_s1(m, "1: user: we decided X", stats={})
+    assert m.budgets == [1500, 32000], m.budgets
+    assert v2._classify_error(ei.value) == "reasoning_collapse", ei.value
+
+    # …and the record-level half: the chunk is a RECORDED failure, so the eval
+    # gate vetoes instead of certifying a run whose facts vanished.
+    out = v2.extract_session_v2(_BaseCollapsesEscEmptyStop(), [
+        {"role": "user", "content": "we decided X"},
+        {"role": "assistant", "content": "the plan is durable"},
+    ])
+    assert out["error_census"]["reasoning_collapse"] == 1
+    assert any("S1 chunk failed" in e for e in out["errors"])
+    assert out["embed_list"] == {}
