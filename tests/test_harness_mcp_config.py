@@ -1179,6 +1179,19 @@ class TestDocsPageAndSkillConfig:
             "the row must not name a RETIRED tool (#3883 class) — a tool-grant "
             "client cannot call one; #11609 retired this door into "
             "tortoise_graph_overview(section=\"graphs\")")
+        # ⛔ AND THE RETIRED-NAME RULE IS GENERIC, not one literal (#14038 review, P3):
+        # the named-literal check above only refuses `tortoise_list_graphs`, so a row
+        # that started naming ANY OTHER retired door — `tortoise_overview`,
+        # `tortoise_health`, whatever the next retirement is — passed this pin while
+        # looking covered. The sweep reads every `tortoise_*` name out of the row and
+        # requires the WHOLE retired set to be absent, which is the #3883 class the
+        # branch's guard existed for; the literal assertions above stay because they
+        # also pin the CONTAINER's presence and the alias's retirement.
+        named_tools = set(re.findall(r"tortoise_[a-z_]+", row))
+        assert not (named_tools & retired), (
+            "the row must not name a RETIRED tool (#3883 class) — a tool-grant "
+            f"client cannot call one; retired names in the row: "
+            f"{sorted(named_tools & retired)}")
         assert "tortoise_list_graphs" in retired, (
             "this pin permits the alias in prose only while it is retired — if "
             "#11609's retirement is ever reversed, revisit the assertion above "
