@@ -18803,9 +18803,14 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     # ⛔ AND FOLDING THIS INTO THE HONOURS CASE ABOVE — the tidier shape, and the one that
     # file's own convention prefers (`test_the_merge_head_honours_line_is_what_that_head_
     # carries` already reads this same blob and already skips with the measured remedy) — is
-    # NOT available: that case sits above `:16615`, so moving this arm into it would insert
-    # lines above the derivation line and re-stale the record's two cites. Named here rather
-    # than left for the next lane to rediscover (14183 delta review, P3).
+    # NOT available: that case sits above the derivation line, so folding this arm into it
+    # would insert lines above it and re-stale the record's two cites. ⛔ NO LINE NUMBER IS
+    # TYPED HERE (review finding P3): the earlier form said `:16615`, which was the
+    # derivation line at the head that wrote it and is `:16639` now that this diff's own
+    # `+24` rows sit above it — the exact "a typed value re-stales the moment a row is
+    # added above it" rot the neighbouring paragraph warns about. The rule is stated; the
+    # value stays DERIVED, never restated.
+    # Named here rather than left for the next lane to rediscover (14183 delta review, P3).
     _d5 = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
     _registry = re.search(
         r"`sdk\.py:(?P<merge>\d+)` is `_registry_cache = PackRegistry\(packs_dir\)` "
