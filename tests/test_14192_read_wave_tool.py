@@ -291,12 +291,6 @@ _PRODUCT_MAX_COMBINATIONS = 4096
 _VALUE_MAX_CHARS_PER_NAME = 8192
 _VALUE_MAX_PER_NAME = 512
 
-#: Applications a bind inside statically-sized loops may accumulate before the product
-#: budget decides (#14326 round 15). A literal iterable of 4 elements nested twice is 16;
-#: 64 covers any realistic loop nest, and anything beyond it trips `_VALUE_MAX_*` instead —
-#: the count is an over-approximation bound, never the guard itself.
-_ACCRUAL_MAX_REPS = 64
-
 
 def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     """Every statically POSSIBLE string literal each name may hold, anywhere in the file.
@@ -428,48 +422,48 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     #: reach was refused=False, i.e. the pin passed while the lever shipped. Order is the
     #: semantics: staging is an over-approximation only if it runs in the order the runtime
     #: does.
-    #: ⛔ A BIND INSIDE A LOOP RUNS MANY TIMES, SO APPLYING IT ONCE UNDER-APPROXIMATES
-    #: (#14326 round 15, MEASURED as a FAIL-OPEN): `_S = "_tortoise"` then
-    #: `for _p in ("_fts", "_query"): _S = _S + _p` builds `_tortoise_fts_query` at runtime,
-    #: a one-application pass resolved to `{'_tortoise','_tortoise_fts','_tortoise_query'}`
-    #: — the built string ABSENT — and a third `kind="statement"` reach was `refuses=False`.
-    #: The iteration count of a LITERAL iterable is statically visible (this file's own
-    #: `for`-target arm says so), so the count multiplies the applications. A loop over a
-    #: NAME/attribute/call is NOT countable: that case applies once and stays the declared
-    #: residual pinned below, exactly like `_CFG["read"]` — declared, not silent.
-    accruals: list[tuple[int, int, str, ast.Name, ast.AST, int]] = []
-    _parents = _parents_of(tree)
-
-    def _literal_len(iterable: ast.AST) -> int:
-        """How many values a literal iterable hands its `for` target; 1 when unknowable."""
-        if isinstance(iterable, (ast.Tuple, ast.List, ast.Set)):
-            return max(len(iterable.elts), 1)
-        if isinstance(iterable, ast.Dict):
-            return max(len(iterable.keys), 1)
-        return 1
-
-    def _loop_reps(node: ast.AST) -> int:
-        """Applications the runtime may make to this bind, from its enclosing loops."""
-        reps = 1
-        current: ast.AST | None = node
-        while current is not None:
-            if isinstance(current, (ast.For, ast.AsyncFor, ast.comprehension)):
-                reps *= _literal_len(current.iter)
-            current = _parents.get(id(current))
-        return min(reps, _ACCRUAL_MAX_REPS)
+    #: ⛔ THE APPLIED-COUNT CLASS IS A DECLARED RESIDUAL, AND THE DECLARATION IS A
+    #: MEASUREMENT (#14326 round 16). A bind inside a loop can run many times, and this pass
+    #: applies it ONCE, so a name built over several iterations is resolved only to its
+    #: first step:
+    #:
+    #:     _S = "_tortoise"
+    #:     for _p in ("_fts", "_query"): _S = _S + _p   ->  {'_tortoise','_tortoise_fts','_tortoise_query'}
+    #:
+    #: `_tortoise_fts_query` is ABSENT and a lever-carrying reach over `_S` is NOT refused.
+    #: ENUMERATING the count was implemented and REVERTED, because the product is the power
+    #: set, not the answer: a 5-element literal loop needs 3,125 spellings (5^5), and a
+    #: perfectly ordinary accumulation in the artifact under test
+    #:
+    #:     _order = ""
+    #:     for _col in ("arm_id", "qid", "rank", "score", "leg"):
+    #:         _order = _order + _col + ", "
+    #:
+    #: made `_str_constants` raise `_ResolutionDidNotConverge` — a FALSE RED on inert code,
+    #: which is the failure class this whole pin exists to remove (measured: the pin ran 1
+    #: failed / 36 passed over that source). A guard that refuses ordinary code is worse than
+    #: one that under-approximates: the first reds every PR, the second is named here.
+    #:
+    #: SO THE CLASS IS NAMED, NOT SILENT, and it is wider than "a loop": the applied count is
+    #: not enumerated for a `For`/`AsyncFor` body, a comprehension's element OR `if` clause, a
+    #: `while` body, or a loop whose iterable is a NAME, an attribute, a call or a STARRED
+    #: literal (`for _p in (*("_fts","_query"),)`). Each is pinned GREEN below by
+    #: `test_an_accumulation_over_several_iterations_is_the_DECLARED_residual`, so a later
+    #: change that starts resolving them must edit the note instead of leaving it stale.
+    accruals: list[tuple[int, int, str, ast.Name, ast.AST]] = []
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if _self_referential(target, node.value):
-                    accruals.append((node.lineno, node.col_offset, "expr",
-                                     target, node.value, _loop_reps(node)))
+                    accruals.append(
+                        (node.lineno, node.col_offset, "expr", target, node.value))
                 else:
                     binds.append((target, node.value))
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
             if _self_referential(node.target, node.value):
                 accruals.append((node.lineno, node.col_offset, "expr",
-                                 node.target, node.value, _loop_reps(node)))
+                                 node.target, node.value))
             else:
                 binds.append((node.target, node.value))
         # ⛔ AN AUGMENTED BIND IS A BIND (#14326 review at `a29f3cd8`, MEASURED GREEN at
@@ -483,7 +477,7 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
                 and isinstance(node.op, ast.Add)):
             accruals.append((node.lineno, node.col_offset, "aug",
-                             node.target, node.value, _loop_reps(node)))
+                             node.target, node.value))
         # ⛔ A `for`/COMPREHENSION TARGET IS A BIND TOO (#14279 review F1): the spelling
         # carries no `Assign` node at all, so no assignment arm above could ever see it.
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
@@ -794,18 +788,17 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     # computes the product against the map as it stands for BOTH spellings, so the only
     # difference between them here is that `+=` names only the RHS while `=` carries the
     # whole expression.
-    for _lineno, _col, kind, _target, _value, _reps in sorted(
+    for _lineno, _col, kind, _target, _value in sorted(
             accruals, key=lambda item: (item[0], item[1])):
-        for _ in range(_reps):
-            _acc = out.get(_target.id)
-            if _acc is None:
-                _acc = out[_target.id] = set()
-            if kind == "aug":
-                _bases = set(_acc)
-                _acc |= {base + suffix for base in _bases for suffix in _values(_value)}
-            else:
-                _acc |= _values(_value)
-            _check_budget(_target.id, _acc)
+        _acc = out.get(_target.id)
+        if _acc is None:
+            _acc = out[_target.id] = set()
+        if kind == "aug":
+            _bases = set(_acc)
+            _acc |= {base + suffix for base in _bases for suffix in _values(_value)}
+        else:
+            _acc |= _values(_value)
+        _check_budget(_target.id, _acc)
     _fixpoint()
     return {name: frozenset(values) for name, values in out.items() if values}
 
@@ -5109,21 +5102,73 @@ def test_the_CONCAT_doubling_and_the_ONE_TOKEN_repetition_REFUSE() -> None:
             'def run():\n    _s = "_tortoise"\n    _s = _s * 999999999999\n'))
 
 
-def test_a_loop_over_a_NAME_stays_the_DECLARED_residual() -> None:
-    """A loop whose iterable is not a literal applies ONCE — declared, and pinned GREEN.
+def test_an_accumulation_over_several_ITERATIONS_is_the_DECLARED_residual() -> None:
+    """Every shape whose APPLIED COUNT is not enumerated is named, and pinned GREEN.
 
-    ⛔ THIS IS A BOUNDARY, NOT A HOLE. The count of applications is statically visible only
-    for a literal iterable (`_literal_len`); for a NAME, an attribute or a call it is not,
-    and guessing high would over-accumulate every legitimate SQL-ish `while` loop in the file
-    into a refusal. The residual is named in `_str_constants`' docstring beside
-    `_CFG["read"]`, and this row keeps it VISIBLE: if a later change starts resolving it, the
-    assertion tells the author to delete the residual note instead of leaving a stale one.
+    ⛔ THE DECLARATION IS A MEASUREMENT, NOT A DODGE (#14326 round 16). Applying a bind once
+    under-approximates a loop body — `_S = "_tortoise"` then
+    `for _p in ("_fts", "_query"): _S = _S + _p` builds `_tortoise_fts_query` and resolves to
+    `{'_tortoise','_tortoise_fts','_tortoise_query'}`, so a lever-carrying reach over `_S` is
+    not refused. ENUMERATING the count was implemented and REVERTED: the product is the power
+    set (a 5-element loop needs 5^5 = 3,125 spellings), and a plain accumulation
+
+        _order = ""
+        for _col in ("arm_id", "qid", "rank", "score", "leg"):
+            _order = _order + _col + ", "
+
+    then made `_str_constants` RAISE `_ResolutionDidNotConverge` — a FALSE RED on inert code,
+    the exact class this pin exists to remove (measured: 1 failed / 36 passed over it). A
+    guard that refuses ordinary code reds every PR; one that under-approximates is named.
+
+    Each row below is a DIFFERENT spelling of that same un-enumerated count, and each is
+    pinned GREEN so the note cannot go stale: if a later change starts resolving one, the
+    assertion fails and the author updates the docstring with it.
     """
-    body = ('    _SEQ = ("_fts", "_query")\n    _S = "_tortoise"\n'
-            '    for _p in _SEQ:\n        _S = _S + _p\n'
-            '    getattr(sdk, _S)(query=queries[0]["query"], limit=10, kind="statement")\n')
-    consts = _str_constants(ast.parse("def run():\n" + body.split("    getattr")[0]))
-    assert "_tortoise_fts_query" not in consts["_S"]
+    cases = {
+        "literal `for` body": ('    _S = "_tortoise"\n'
+                               '    for _p in ("_fts", "_query"):\n'
+                               '        _S = _S + _p\n'),
+        "`+=` in a `for` body": ('    _S = "_tortoise"\n'
+                                 '    for _p in ("_fts", "_query"):\n'
+                                 '        _S += _p\n'),
+        "loop over a NAME": ('    _SEQ = ("_fts", "_query")\n    _S = "_tortoise"\n'
+                             '    for _p in _SEQ:\n        _S = _S + _p\n'),
+        "STARRED literal iterable": ('    _S = "_tortoise"\n'
+                                     '    for _p in (*("_fts", "_query"),):\n'
+                                     '        _S = _S + _p\n'),
+        "comprehension ELEMENT (a walrus)": ('    _S = "_tortoise"\n'
+                                             '    [(_S := _S + _p) for _p in ("_fts", "_query")]\n'),
+        "`while` body": ('    _S = "_tortoise"\n    _n = 0\n'
+                         '    while _n < 2:\n        _S = _S + "_fts"\n        _n += 1\n'),
+    }
+    for label, source in cases.items():
+        consts = _str_constants(ast.parse("def run():\n" + source))
+        assert "_tortoise_fts_query" not in consts.get("_S", frozenset()), label
+
+
+def test_the_pin_DOES_NOT_REFUSE_on_ordinary_loop_accumulation() -> None:
+    """The false-red half: a `", ".join`-style order clause must resolve, not raise.
+
+    ⛔ MEASURED REGRESSION (#14326 round 16): while the applied count WAS enumerated, this
+    exact snippet — lifted from the shape `tools/read_wave_latency.py` uses to build an
+    `order_by` clause — made `_str_constants` raise `_ResolutionDidNotConverge` and the pin
+    report `1 failed, 36 passed`. An inert accumulation is not a read and must not cost a
+    verification run. This row keeps that regression out: it fails if the product budget ever
+    starts firing on ordinary loops again.
+    """
+    consts = _str_constants(ast.parse(
+        'def _order_clause():\n'
+        '    _order = ""\n'
+        '    for _col in ("arm_id", "qid", "rank", "score", "leg"):\n'
+        '        _order = _order + _col + ", "\n'
+        '    return _order.rstrip(", ")\n'))
+    assert consts["_order"], "the accumulation must resolve to at least its first step"
+    # ...and the same loop standing INERT beside the real read must not change the verdict.
+    body = ('    _order = ""\n'
+            '    for _col in ("arm_id", "qid", "rank", "score", "leg"):\n'
+            '        _order = _order + _col + ", "\n'
+            '    logging.info(_order)\n')
+    assert _pin_refuses(_pin_source(body)) is False
 
 
 def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
@@ -5264,21 +5309,6 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # the two-phase apply produced: with every `+=` staged BEFORE every `=`, the product
         # of `_S = _S + "_query"` never saw `_tortoise_fts`, so the name the code actually
         # builds was missing from the set and this reach was refused=False (measured).
-        # ⛔ A BIND INSIDE A LOOP RUNS MANY TIMES (#14326 round 15, MEASURED GREEN while a
-        # single application was assumed): `for _p in ("_fts", "_query"): _S = _S + _p`
-        # builds `_tortoise_fts_query`, and one application resolved only the FIRST step, so
-        # the name the code ends at was absent and this reach was refused=False. The count
-        # comes from the literal iterable — the same "iteration over a literal is statically
-        # visible" rule this file already applies to `for` TARGETS — and both spellings of
-        # the accumulation are here because each is a separate arm.
-        "loop body, `=` accumulation": (
-            '    _S = "_tortoise"\n    for _p in ("_fts", "_query"):\n'
-            '        _S = _S + _p\n'
-            f'    {reach.format(name="_S")}\n'),
-        "loop body, `+=` accumulation": (
-            '    _S = "_tortoise"\n    for _p in ("_fts", "_query"):\n'
-            '        _S += _p\n'
-            f'    {reach.format(name="_S")}\n'),
         "`+=` THEN a self-referential `=`": (
             '    _S = "_tortoise"\n    _S += "_fts"\n    _S = _S + "_query"\n'
             f'    {reach.format(name="_S")}\n'),
