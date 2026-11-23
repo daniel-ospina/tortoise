@@ -217,6 +217,7 @@ uv run python tools/extractor_cost_measure.py run --docs 50 --arms before,after 
     --out docs/evidence/14343-amplify/measurements.jsonl
 uv run python tools/extractor_cost_measure.py decompose \
     --evidence docs/evidence/14343-amplify/measurements.jsonl --arm after \
+    --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
     --out docs/evidence/14343-amplify/decomposition-after.md
 ```
 

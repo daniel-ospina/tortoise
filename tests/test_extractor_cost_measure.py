@@ -883,6 +883,35 @@ def test_an_explicitly_passed_receipts_path_that_yields_nothing_is_refused(
         ])
 
 
+def test_omitting_the_receipts_flag_is_REFUSED_not_a_quieter_artifact(
+        tmp_path, capsys):
+    """`#14343` review F2: OMITTING `--receipts` used to emit the artifact at exit 0.
+
+    The flag is the only source of the `serialization` section — the 32.5 %
+    finding — so a decomposition without it is the same false pass as a path
+    that matches nothing, only harder to notice: the artifact exists, the
+    headline row is absent, and nothing says so. This bundle demonstrated the
+    defect in its own README, where the reproduce command passed the flag and
+    the `--arm after` recipe did not (two documented commands, opposite
+    postures). The flag is now `required=True`; this pins it, so deleting that
+    cannot bring the silent artifact back.
+    """
+    with pytest.raises(SystemExit) as exc:
+        m.main([
+            "decompose",
+            "--evidence", str(_REPO_ROOT / "docs" / "evidence"
+                              / "14277-extractor-cost" / "measurements.jsonl"),
+            "--out", str(tmp_path / "out.md"),
+        ])
+    assert exc.value.code == 2, (
+        f"argparse must refuse a missing required flag with exit 2, got {exc.value.code}")
+    assert "--receipts" in capsys.readouterr().err, (
+        "the refusal must NAME the missing flag — a bare usage line leaves the "
+        "reader to guess which of the three paths the tool wanted")
+    assert not (tmp_path / "out.md").exists(), (
+        "a refused decompose must write no artifact")
+
+
 def test_the_offline_compose_arm_makes_no_provider_call():
     """The decomposition must be runnable with no key — that is what makes it
     reviewable. `--offline` swaps the transport, never the render."""

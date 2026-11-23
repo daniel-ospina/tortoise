@@ -72,8 +72,20 @@ def _classify_later_off(monkeypatch):
     four reds that say nothing about the framing. Same posture as
     ``tests/test_extractor_v2.py``. Pinned by
     ``test_the_file_is_immune_to_an_ambient_classify_later``.
+
+    ``TORTOISE_S4_EMBED_JSON`` is the second ambient render switch this file is
+    exposed to and is pinned here for the same reason: `#14343` ships it
+    ARMED-ABLE (`compact` re-serialises S4's embed list with `(",", ":")`
+    separators) and `tortoise/extractor_v2.py` / `.env.example` both tell a lane
+    to arm it *in the same session as a capstone run*. A lane that does so then
+    runs this file and got a red from the `embed_list_json` case — an indented
+    `json.dumps` cannot be a substring of its compact form — which says nothing
+    about the framing. Measured: `TORTOISE_S4_EMBED_JSON=compact pytest
+    tests/test_extractor_prompt_framing_10311.py` reds 1 case pre-fixture. Pinned
+    by ``test_the_file_is_immune_to_an_ambient_s4_embed_json``.
     """
     monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+    monkeypatch.delenv("TORTOISE_S4_EMBED_JSON", raising=False)
 
 
 # ── the fixtures ────────────────────────────────────────────────────────────
@@ -665,6 +677,33 @@ def test_the_file_is_immune_to_an_ambient_classify_later():
 
 
 # ── 4. drops-the-clause-reddens ─────────────────────────────────────────────
+
+def test_the_file_is_immune_to_an_ambient_s4_embed_json():
+    """The OTHER ambient render switch must not decide this file's verdict.
+
+    `#14343`'s lever is documented for arming IN THE SAME SESSION as a capstone
+    run (`tortoise/extractor_v2.py` and `.env.example` both say so), and a lane
+    that arms it then runs this suite. With `TORTOISE_S4_EMBED_JSON=compact`
+    armed, `render_s4_prompt` serialises the embed list with `(",", ":")`
+    separators, so the indented `json.dumps(..., indent=1)` the `embed_list_json`
+    case expects is not a substring of the prompt and
+    ``test_an_earlier_region_cannot_re_expand_the_story_slot[embed_list_json]``
+    reds — measured pre-fixture, against a change that touches nothing this file
+    asserts. The autouse fixture removes the var, so the verdict is about the
+    framing and not about the caller's shell.
+    """
+    assert os.environ.get("TORTOISE_S4_EMBED_JSON") is None, (
+        "the autouse fixture must have removed the ambient flag before any"
+        " render ran — otherwise the embed-list round-trip above is a"
+        " property of the caller's shell")
+    # …and the renderer agrees with the disarmed default: the indented bytes the
+    # round-trip case pins are what a render actually produces here.
+    embed_list = {"points": [{"content": "x"}]}
+    prompt = v2.render_s4_prompt("STORY", {"points": []}, embed_list)
+    assert json.dumps(embed_list, indent=1) in prompt, (
+        "an unset flag must render the pre-#14343 bytes — the lever is"
+        " disarmed by default and the fixture must keep it that way")
+
 
 def _prompt_properties(prompt: str, label: str) -> set[str]:
     clause = _clause(label)

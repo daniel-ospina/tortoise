@@ -2344,9 +2344,13 @@ def main(argv: list[str] | None = None) -> int:
     dec.add_argument("--out", required=True, type=Path)
     dec.add_argument("--json-out", type=Path)
     dec.add_argument("--arm", default="cold")
-    dec.add_argument("--receipts", type=Path, default=None,
+    dec.add_argument("--receipts", required=True, type=Path,
                      help="dir of write-path `*.arms.json` receipts carrying "
-                          "real S2 emissions (sizes the serialization lever)")
+                          "real S2 emissions (sizes the serialization lever). "
+                          "REQUIRED: it is the only source of the artifact's "
+                          "serialization section (the 32.5%% finding), so a "
+                          "decomposition without it is a false pass, not a "
+                          "shorter report")
 
     args = ap.parse_args(argv)
     if args.cmd == "run":
@@ -2370,8 +2374,11 @@ def main(argv: list[str] | None = None) -> int:
         # A `--receipts` path that yielded NOTHING is a user error, and the
         # artifact it would produce is one whose serialization section (the
         # headline 32.5% finding) is silently absent — the exact false pass
-        # this bundle exists to carry. Refuse instead of writing it.
-        if args.receipts is not None and not decomposition.get("serialization"):
+        # this bundle exists to carry. Refuse instead of writing it. The flag
+        # itself is `required=True` for the same reason: an OMITTED one used to
+        # emit that same artifact at exit 0, and this bundle's two documented
+        # commands disagreed about it (one passed it, one did not).
+        if not decomposition.get("serialization"):
             raise SystemExit(
                 f"no usable write-path receipts in {args.receipts} — refusing "
                 "to emit an artifact whose serialization section is missing")

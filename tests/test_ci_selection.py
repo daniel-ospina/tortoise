@@ -6911,6 +6911,23 @@ def test_edge_census_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_extractor_cost_measure_tool_change_fails_closed_to_full():
+    # `#14343`: tools/extractor_cost_measure.py owns
+    # tests/test_extractor_cost_measure.py and the lever's own
+    # tests/test_extractor_embed_json_14343.py. Same silent-drop class as the
+    # carve-outs above, and it was MEASURED on both arms, not predicted: with
+    # the TOOL_CARVEOUTS entry, `--changed-files tools/extractor_cost_measure.py`
+    # returns the FULL matrix (`test_files == "ALL"`); with the entry deleted it
+    # returns `surfaces: []`, `full: false` and a 106-file list holding NEITHER
+    # suite, so the instrument's own pins would never run on the PR that changes
+    # the instrument. No SOURCE_PATTERNS entry matches the path, so it takes the
+    # unknown-path branch -> full matrix (fail closed).
+    r = _sel(["tools/extractor_cost_measure.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_embedded_evidence_tool_change_fails_closed_to_full():
     # #3827: tools/embedded_evidence.py owns tests/test_embedded_evidence.py.
     # Same silent-drop class as the preflight carve-out above: the flat "tools/"
