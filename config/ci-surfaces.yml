@@ -658,10 +658,13 @@ surfaces:
   - test_abuse.py
   - test_abuse_integration.py
   # #14407: the abuse NOTIFICATION delivery contract (attributable + rate-bounded).
-  # Registered on `api` beside `test_abuse.py` because `tortoise/abuse.py` is an
-  # `api` source — a `notify.py`-only diff would otherwise sleep it — and again on
-  # `core` beside `test_notify.py` for the `notify.py` half (dual registration is
-  # deliberate; a same-surface duplicate is not).
+  # Dual-registered, one arm per half of the change: this `api` entry sits beside
+  # `test_abuse.py` (the abuse-ENGINE half, which is what this surface already
+  # exercises — the earlier wording claimed `tortoise/abuse.py` was an `api`
+  # source and it is not: it falls through to `core`), and the `core` entry beside
+  # `test_notify.py` covers the `notify.py` half, so a `notify.py`-only diff does
+  # not sleep the suite. Two DISTINCT surfaces are deliberate; a same-surface
+  # duplicate is not.
   - test_14407_alert_delivery.py
   # #10156: the `api` arm of the dual registration. `tortoise/hosted_api.py` (the
   # `GET /v1/team/alerts` feed and the new `POST /v1/team/alerts/ack` route with
