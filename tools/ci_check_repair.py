@@ -2943,10 +2943,12 @@ def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
                     f"{rel}: `{DOC_CITATION_BASE}` does not resolve in this checkout, "
                     f"so whether `{ref}` SURVIVES a squash-merge cannot be answered "
                     "— the citation is UNVERIFIED, not disproved"]
-            # The RESOLVED sha, not the raw token: `merge-base --is-ancestor` does not
-            # peel `^{commit}` the way the probe above does, so a bare abbreviation that
-            # happens to be ambiguous would exit 128 and be reported as UNVERIFIED
-            # instead of the DEFECT it is (a cite whose own command cannot run).
+            # The RESOLVED sha, not the raw token. This is a defensive tidy, NOT a fix
+            # for an observed failure: an ambiguous token never reaches here (the
+            # `rev-parse --verify` probe above fails first and returns the DEFECT), and
+            # a mutant that passes the raw token returns the same verdict — measured.
+            # It is kept so the two probes cannot disagree about which object they mean
+            # if the resolve arm ever starts accepting a bare prefix.
             resolved = probe.stdout.strip()
             anc = subprocess.run(
                 ["git", "-C", str(root), "merge-base", "--is-ancestor", resolved,
