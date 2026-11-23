@@ -4687,19 +4687,31 @@ def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
     exists for rather than passing vacuously.
     """
     doc = test_pi_processes_sees_a_real_long_path_lane.__doc__ or ""
+    # ⛔ GRADE THE TAXONOMY, NOT THE WHOLE DOCSTRING (#12039 cycle 9, P1). The count paragraph below
+    # ENUMERATES every token this guard asserts — it lists them to say the guard pins them by NAME —
+    # so asserting against the whole docstring made the guard VACUOUS: measured at this head,
+    # deleting the ENTIRE four-arm taxonomy (all four FAIL classifications and the skip paths, 1171
+    # chars) left it PASSING, because that enumeration alone satisfies all six tokens. A guard that
+    # cannot fail is the false-PASS class this PR exists to remove, so the split is part of the pin:
+    # the boundary must exist, or this guard has nothing to grade and must say so.
+    taxonomy, marker, _count_paragraph = doc.partition("THE COUNT IS PART OF THE CONTRACT")
+    assert marker, (
+        "the header no longer separates its taxonomy from the count paragraph, so this guard "
+        "cannot tell the prose that PUBLISHES the rule from the prose that DESCRIBES the guard — "
+        "re-derive the boundary rather than deleting it (#12039)")
     # The third FAIL arm, named by the constant that decides it — and the STREAK is the point:
     # one lost `ps` under load is the box (#5049 rule 1), not the census.
-    assert "_CENSUS_ERROR_STREAK" in doc, (
+    assert "_CENSUS_ERROR_STREAK" in taxonomy, (
         "the header stopped naming the census-error FAIL arm, so a reader re-deriving the skip "
         "rule from it can reinstate `pytest.skip(...)` on any census error (#12039)")
     # And the census-error SKIP is narrowed, never "the table cannot be read" on its own.
-    assert "_ps_answers" in doc, (
+    assert "_ps_answers" in taxonomy, (
         "the header's census-error skip must also require `_ps_answers()` to come back empty; "
         "`where the process table cannot be read at all` alone is the permanent-green drift")
     # And the FAIL boundary is a CONJUNCTION, not a sample count (#12039 cycle 4). Without this
     # token the header can state "N consecutive samples" alone, and a reader re-deriving the gate
     # from it writes the count-only form — the mutation that redded `late_pair` with `over 0.20s`.
-    assert "_CENSUS_ERROR_MIN_SPAN_S" in doc, (
+    assert "_CENSUS_ERROR_MIN_SPAN_S" in taxonomy, (
         "the header stopped naming the SPAN half of the census-error FAIL boundary, so the rule "
         "it publishes is the count-only gate the code does not implement (#12039)")
     # ⛔ AND THE TWO SKIP-PATH CONSTANTS (#12039 cycle 9, P2). A third skip path landed and the
@@ -4707,7 +4719,7 @@ def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
     # contract one paragraph below it. The count is guarded here the only way it can be: by NAME,
     # because a guard cannot count what a future reader is free to re-word.
     for const in ("_CENSUS_SAMPLE_TIMEOUT_S", "_CENSUS_ERROR_BUDGET_SHARE_S"):
-        assert const in doc, (
+        assert const in taxonomy, (
             f"the header stopped naming {const}, so a reader re-deriving the verdict rules from "
             f"it cannot see that a slow / budget-consuming census SKIPS instead of reding — the "
             f"drift the paragraph calling the count 'part of the contract' exists to forbid "
@@ -4717,7 +4729,7 @@ def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
     # `tests/_verdict.py` — which says a wall-clock expiry is *never* a product-defect FAIL — has
     # nothing but this word to tell a raised departure from an oversight, and the "fix" for an
     # oversight is exactly the skip that makes the `-ww` regression green forever.
-    assert "OVERRIDES" in doc, (
+    assert "OVERRIDES" in taxonomy, (
         "the header stopped declaring that the ALIVE arm OVERRIDES #5049 rule 1, so a reader "
         "holding `tests/_verdict.py` reads a FAILING wall-clock expiry as an oversight and "
         "turns it into a skip — the permanent green this file's arms exist to prevent (#12039)")
