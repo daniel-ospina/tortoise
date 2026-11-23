@@ -3816,7 +3816,7 @@ def _child_exited(proc) -> bool:
         return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
     except AttributeError:  # pragma: no cover — POSIX waitid absent
         return proc.poll() is not None
-    except (ChildProcessError, OSError):  # pragma: no cover — not our child / already reaped
+    except (ChildProcessError, OSError):  # ECHILD — every hermetic arm (their pid is no child)
         return proc.poll() is not None
 
 
@@ -3861,7 +3861,7 @@ def _ps_answers() -> bool:
             ["ps", "-p", str(os.getpid()), "-o", "command="],
             capture_output=True, text=True, timeout=60,
         ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):  # pragma: no cover — no `ps` at all
+    except (OSError, subprocess.SubprocessError):  # `ps` absent/unusable — driven by its own test
         return False
     return bool(out)
 
@@ -4339,6 +4339,15 @@ class _FakeChild:
     def poll(self) -> int | None:
         return self._rc
 
+    def die_with(self, rc: int) -> None:
+        """Become a DEAD child from now on — ALIVE until this is called.
+
+        The `death_after_streak` arm needs a child that is live while the census streak
+        qualifies and dies on the sample the count+span gate would fire: the only state in which
+        the ORDER of `_child_exited` against that gate is observable (#12039 cycle 10, P2).
+        """
+        self._rc = rc
+
     def terminate(self) -> None:
         return None
 
@@ -4455,6 +4464,19 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
             "no usable `ps` on this box is that box's limitation, not the census's",
         ),
         (
+            "death_after_streak", True, -9, "skip", "INCONCLUSIVE [#5049]",
+            "a child that dies on the very sample where the census streak has ALREADY qualified "
+            "is classified by the FIXTURE's death, not by the census — `_child_exited` must stay "
+            "ABOVE the count+span conjunction. ⛔ THE ORDERING WAS PINNED BY NOTHING (cycle-10 "
+            "P2): the plain `persistent`/`-9` row has the child dead from sample 1, so both "
+            "orders break before the gate is reached and moving the check BELOW the conjunction "
+            "left the whole file green (measured here: the ordering mutant applied with this arm "
+            "removed -> 183 passed). Here it reds: the child is live "
+            "while the streak starts and dies exactly where the gate would fire, so the shipped "
+            "order yields the outside-signal skip and the swapped order a HarnessDefect — the "
+            "2026-11-23 misattribution this PR exists to remove",
+        ),
+        (
             "once", True, None, AssertionError, "was ALIVE and invisible to the census",
             "ONE isolated `ps` death is the load class (#5049 rule 1) and must not red the shard",
         ),
@@ -4531,8 +4553,9 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
                                                 which is the 2026-11-23 class this PR removes.
 
     The harness also pins the streak's SPAN: the fake clock advances one `step_s` per `time()`
-    call (`0.1 s`, except `once_slow`'s `2.5 s` — that slow clock is what makes ONE sample span the
-    bound, and is how the COUNT half stays pinned), so the verdict may only fire after
+    call (`0.1 s`, except the two arms whose own premise sets it — `once_slow`'s and
+    `death_after_streak`'s DERIVED steps, which are what make ONE sample span the bound and are
+    how the COUNT half stays pinned), so the verdict may only fire after
     `_CENSUS_ERROR_MIN_SPAN_S` of simulated failure, and the assertion below fails a
     sample-count-only rule. Hermetic throughout: no child is spawned, `ps` never runs, and the
     clock only advances when the code asks it.
@@ -4543,16 +4566,46 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     # what is stepped. `persistent_slow` reads a `ps` TIMEOUT instead, where the cost is inside the
     # census call, and spends the clock there rather than here: a per-call step cannot express the
     # difference, and conflating the two is what let a `ps` timeout stay a FAIL (cycle 8, P1).
-    # ⛔ DERIVED FROM THE CONSTANT, never the literal 2.5 (#12039 cycle 10, P2): a hard step retires
+    # ⛔ DERIVED FROM THE CONSTANTS, never the literal 2.5 (#12039 cycle 10): a hard step retires
     # the COUNT-half pin the moment `_CENSUS_ERROR_MIN_SPAN_S` is raised past it — measured, at
-    # `_CENSUS_ERROR_MIN_SPAN_S = 2.6` with the count half deleted the whole file stayed green. The
-    # premise (one sample's own span clears the bound) is asserted, not assumed.
-    once_slow_step_s = _CENSUS_ERROR_MIN_SPAN_S * 1.25
+    # `_CENSUS_ERROR_MIN_SPAN_S = 2.6` with the count half deleted the whole file stayed green.
+    # ⛔ AND DERIVED FROM THE PREMISE, NOT FROM A RATIO (#12039 cycle 10, P1). `* 1.25` alone holds
+    # only premise (a) — one sample's own `time()` pair clears the bound — and it went RED on the
+    # CORRECT implementation for every `_CENSUS_ERROR_MIN_SPAN_S` in 0.2 .. 1.33 (measured on
+    # copies, implementation UNMUTATED, only the constant changed). Premise (b) is that the FIRST
+    # erroring sample spends the poll's WHOLE 10 s budget, so `healthy_samples` stays 0 and the
+    # verdict is this row's skip: that needs `6 x step >= 10.0`, because the two reads taken before
+    # the loop plus the first sample's own five `time()` calls are what carry the clock to
+    # `deadline`. Without (b) the poll took a HEALTHY sample and landed in the ALIVE arm where this
+    # row requires the skip — a false red produced by LOWERING a documented load-sensitivity
+    # constant, the same #5049 rule-1 inversion cycle 9 fixed on the raising axis.
+    once_slow_step_s = max(_CENSUS_ERROR_MIN_SPAN_S * 1.25, 10.0 / 6 + 0.1)
     assert once_slow_step_s > _CENSUS_ERROR_MIN_SPAN_S, (
-        "the `once_slow` step must place ONE erroring sample's own `time()` pair past "
-        "_CENSUS_ERROR_MIN_SPAN_S, or the COUNT half is unpinnable")
-    clock = _FakeClock(step_s=once_slow_step_s if census_kind == "once_slow" else 0.1)
-    child = _FakeChild(child_rc)
+        "premise (a): the `once_slow` step must place ONE erroring sample's own `time()` pair "
+        "past _CENSUS_ERROR_MIN_SPAN_S, or the COUNT half is unpinnable")
+    assert 6 * once_slow_step_s >= 10.0, (
+        "premise (b): the step must also carry the poll's 10 s budget out on ONE erroring "
+        "sample — `deadline = time.time() + 10.0` in the test body — or `once_slow` never reaches "
+        "the never-answered skip and this row reds the CORRECT implementation")
+    # ⛔ `death_after_streak` NEEDS ITS OWN STEP, from its own premise (#12039 cycle 10, P2): the
+    # child dies on the sample where the streak QUALIFIES, so the span the conjunction would read
+    # there is five `time()` calls long and must already clear the bound — otherwise the ordering
+    # this arm exists to pin is never exercised and the arm is vacuous. Derived, so raising the
+    # constant cannot silently make it so. The `+ 0.1` is margin for the two reads taken before
+    # the loop; it is deliberately NOT large enough to reach the poll's deadline, which would break
+    # the loop before the death sample.
+    death_step_s = _CENSUS_ERROR_MIN_SPAN_S / 5 + 0.1
+    if census_kind == "once_slow":
+        arm_step_s = once_slow_step_s
+    elif census_kind == "death_after_streak":
+        arm_step_s = death_step_s
+    else:
+        arm_step_s = 0.1
+    clock = _FakeClock(step_s=arm_step_s)
+    # `death_after_streak` must start ALIVE and die MID-POLL: its subject is the ORDER of the
+    # child check against the census conjunction, and that order is only observable while the
+    # child is still live as the streak qualifies.
+    child = _FakeChild(None if census_kind == "death_after_streak" else child_rc)
     err = "`ps -ww -axo pid=,ppid=,uid=,command=` produced nothing"
     calls = {"n": 0}
     # DERIVED from the constants, never literal (see the `late_pair` arm below): a literal burst
@@ -4684,6 +4737,20 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
             if clock.step_s == 0.0:
                 clock.step_s = step_s
             return [], None
+        if census_kind == "death_after_streak":
+            # ⛔ THE FIXTURE DIES WHERE THE GATE WOULD FIRE (#12039 cycle 10, P2). Sample 1 errors
+            # while the child is ALIVE, so the streak STARTS and no arm can classify the death
+            # yet; on sample 2 the child dies (SIGKILL — an OOM sweep's first signal) on the same
+            # sample the count+span conjunction has just been satisfied. Shipped order:
+            # `_child_exited` breaks first, so the four exits below classify a BOX-caused kill and
+            # the verdict is the outside-signal INCONCLUSIVE. Move that check below the
+            # conjunction and this sample raises `HarnessDefect` instead — a required shard red
+            # for what the box did, at the exact moment the census was also broken.
+            if calls["n"] == 1:
+                return [], err
+            assert child_rc is not None
+            child.die_with(child_rc)
+            return [], err
         return ([], err) if calls["n"] == 1 else ([], None)
 
     class _Completed:
