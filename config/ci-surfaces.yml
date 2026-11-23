@@ -48,28 +48,22 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On the tree this sentence was
-# re-derived on (`main` at `4993fa083f`, plus #14371's own `core` registration
-# `tests/test_14371_offline_embed_json.py`, which is the row that re-packed it) the same verb packs
-# six shards at 836.6 s (a, b, c, i, j, k) and five at 836.5 s (d, e, f, g, h), so
-# MERGES INTO, never carried from the branch that first wrote it. At `0fbfbb5b210c` — the `main`
-# this sentence was re-derived on, whose `durations` rows this block does not change — the same
-# verb packs six shards at 836.6 s (a, b, c, i, j, k) and five at 836.5 s (d, e, f, g, h), so
-# `ceil(836.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
+# `b2d1e9086a92`, whose #14371 and #13998 `core` rows are both in the map, plus #14407's own dual
+# registration of `tests/test_14407_alert_delivery.py`) the same verb packs nine shards at 836.9 s
+# (b, c, d, f, g, h, i, j, k) and two at 837.0 s (a, e), so
+# `ceil(837.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. ⛔ This branch's own `core` row is what moved
-# the partition: on `main` WITHOUT `tests/test_14371_offline_embed_json.py` the same verb packs a
-# different split at the same 836.4/836.3 s, which is why the shard NAMES (not only the seconds) are
-# stated here and graded. ⛔ The MINUTE has stood at 28 m across every reading of this pool from
-# 835.5 s to 836.6 s while the SECONDS moved under it, so NO arithmetic
+# agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
+# reading of this pool from 835.5 s to 837.0 s while the SECONDS moved under it, so NO arithmetic
 # on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
 # sentence is GRADED below instead of trusted. That map is the union of both parents'
 # registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
 # (`--emit-push-matrix` lists it in shard c) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
 # matters only because it sits one main fold from rounding again. #14407 registered
 # `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
-# `test_notify`) and its 30-odd cases moved the partition from 836.4/836.3 s to 836.6/836.5 s —
-# the minute did not move (28 m either way), which is exactly why the SECONDS are the graded claim.
+# `test_notify`), and that registration is part of the partition stated above — the minute did not
+# move (28 m either way), which is exactly why the SECONDS are the graded claim.
 # Re-run `--emit-push-matrix`; never carry the last revision's minute.
 #
 # The history, so a reader can see the direction: the 2026-11-16 durations sweep re-packed the same
