@@ -48,23 +48,19 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On the tree this sentence was
-# re-derived on (`origin/main` at `b2d1e9086a` merged into this branch, i.e. #14371's own `core`
-# registration beside main's seven newer test commits) the same verb packs
-# two shards at 837.0 s (a, e) and nine at 836.9 s (b–d, f–k), so
-# `ceil(837.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. ⛔ This branch's own `core` row is what moved
-# the partition: on `main` WITHOUT `tests/test_14371_offline_embed_json.py` the same verb packs a
-# different split at the same 836.4/836.3 s, which is why the shard NAMES (not only the seconds) are
-# stated here and graded. ⛔ The MINUTE has stood at 28 m across every reading of this pool from
-# 835.5 s to 837.0 s while the SECONDS moved under it, so NO arithmetic
-# on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
-# sentence is GRADED below instead of trusted. That map is the union of both parents'
-# registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
-# (`--emit-push-matrix` lists it in shard c) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
-# matters only because it sits one main fold from rounding again. Re-run `--emit-push-matrix`;
-# never carry the last revision's minute.
+# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`origin/main`
+# `43182ac09a` merged into `fix/14344-expansion`) the verb packs
+# eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k) — every bin at ONE figure, so there is
+# no split to state, and ⛔ the NAMES are still stated and graded because the packer is greedy: a
+# single newly-registered fast file re-packs every bin, so a carried split is the class this block
+# exists to warn about. `ceil(837.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
+# SLOWEST shard's), and the same emission prints `watchdog_minutes: 28` with
+# `watchdog_headroom: 2.01`, so the two agree by construction rather than by a hand re-read.
+# ⛔ The MINUTE has stood at 28 m across every reading of this pool from 835.5 s to 837.1 s while the
+# SECONDS moved under it, so NO arithmetic on the minute can catch a carried figure — only the
+# `est_seconds` partition can, which is why the sentence is GRADED below instead of trusted.
+# Re-run `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or
+# split.
 #
 # The history, so a reader can see the direction: the 2026-11-16 durations sweep re-packed the same
 # 11 shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,
@@ -77,7 +73,7 @@ version: 1
 # `tests/test_ci_selection.py::test_the_fast_shards_header_block_states_the_measured_emission`
 # compares the per-shard sentence above against the live emission (and its own `ceil(...)` operand
 # against the emitted watchdog), so a carried figure reds a required leg instead of shipping, which
-# is how this block went stale three times before (#14296).) ⛔ The cap was NOT
+# is how this block went stale three times before (#14296). ⛔ The cap was NOT
 # moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
 # from the pre-suite terms (those are measurements and file facts).
@@ -462,6 +458,16 @@ surfaces:
   # FULL matrix and selects this file either way. DB-FREE: doubles and the gate's
   # own `meters=` seam.
   - test_13829_cache_cap_at_fold.py  # #13829: dual: core
+  # #14186: the `api` arm of the TRIPLE registration (core/api/eval). Each arm
+  # exists because a DIFFERENT surface owns a module this suite guards, and a
+  # named SOURCE_PATTERNS match REPLACES the `core` fallback in `select()` — so a
+  # `core`-only row would leave the suite unselected on the diffs it exists for.
+  # MEASURED with the shipped selector: `tortoise/hosted_api.py` ->
+  # `['api', 'onboarding']` (this row); `tortoise/embed_seam.py` /
+  # `tortoise/embed_worker.py` -> `['core']` (the `core` row);
+  # `tortoise/embeddings.py` -> `['eval']` (the `eval` row). `tortoise/sdk.py` is
+  # a SHARED_MODULES entry, so its own diff already forces the full matrix.
+  - test_14186_embedder_seam_batching.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -3023,6 +3029,13 @@ surfaces:
   # so a second `core` row on the merge result is a `duplicate_entries()` gate failure.
   - test_14002_record_only_journal.py
   - test_expansion_fusion_14344.py
+  # #14186: the `core` arm of the TRIPLE registration (core/api/eval), and the
+  # one `--register` mints by default. LOAD-BEARING, not a rider on the other
+  # two: the seam's two primary subjects (`tortoise/embed_seam.py`,
+  # `tortoise/embed_worker.py`) both resolve `['core']` and carry no
+  # SOURCE_PATTERN of their own, so without this row a diff to either — the
+  # whole point of the suite — selects nothing.
+  - test_14186_embedder_seam_batching.py
   - test_14371_offline_embed_json.py
   - test_extractor_cost_measure.py
   # #14343: the S4 embed-serialization lever's own pins (`_embed_json_kwargs` in
@@ -11619,6 +11632,12 @@ surfaces:
   # load-bound derivation pin and the reclaim guard are only reached on an
   # `embeddings.py`-only diff through this row.
   - test_13674_embedder_load_bound_and_reclaim.py
+  # #14186: the `eval` arm of the TRIPLE registration (core/api/eval) — the same
+  # shape and reason as the #13674 row directly above: this surface owns
+  # `tortoise/embeddings.py`, and that named match REPLACES the `core` fallback,
+  # so an `embeddings.py`-only diff (the `compute_embeddings` / read-embed wiring
+  # this suite pins) is reached through this row and nowhere else.
+  - test_14186_embedder_seam_batching.py
   # #2517 (C4): the source-session re-injection rules + E2E — dual-registered
   # because a change to tools/longmem_eval/ selects `eval`, and the arm is
   # wired there (the hermetic rules leg also passes in the eval lane).
