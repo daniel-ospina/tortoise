@@ -22,7 +22,7 @@ WHAT THIS FILE PINS, and what each pin would be FALSE without:
    * a payload-only emit writes a `:GraphEvent` row and **no journal row at all**
      (`_emit_event` returns before the JSONL half when it has no ``point``/``id``/
      ``turns``), so the record's stream is short by construction for the
-     hard-delete lane — the shape `#13083` §6.3 named and this test EXECUTES,
+     hard-delete lane — the shape the `#13083` census named and this test EXECUTES,
      with a POSITIVE CONTROL beside it (an emit that carries a point DOES journal)
      so the empty half cannot pass for a fixture that never bound a journal;
    * the two stores' `seq`s are different coordinates (`:GraphEvent.seq` is the
@@ -74,7 +74,7 @@ MEASURE = (REPO_ROOT / "docs" / "evidence" / "13094-graphevent"
            / "measure_graphevent_residency.py")
 
 #: Capability words a reader would have to need for the shape to stay resident.
-#: The vocabulary is the audit's own (`#13083` §2): the four capabilities only a
+#: The vocabulary is the audit's own (the `#13083` census): the four capabilities only a
 #: graph engine provides, plus EP state. The PREDICATE lives in the tool, not
 #: here — a check whose vocabulary the checked module does not own is a second
 #: definition that drifts. This tuple is the EXPECTED set, pinned against the
@@ -134,15 +134,14 @@ CAPABILITY_CONTROLS = (
     # literal expectation here fixes arm PRECEDENCE, not just detection.
     ("re-spaced directed adjacency",
      "MATCH (e:GraphEvent) - [r:T]-> (p)", "cypher:-["),
-    # the live EP / belief walk CAPABILITY-PLACEMENT-AUDIT.md quotes in its §2.1 `:Point` table's
-    # EP-walk row (sourced from `ep.py:1620-1632`), with its `{label}` placeholder FILLED BY
-    # `GraphEvent` — a label the walk is never swept over (`live.py:667`'s `EPISTEMIC_LABELS` is
+    # the live EP / belief walk, with its `{label}` placeholder FILLED BY `GraphEvent` — a label
+    # the walk is never swept over (`live.py:667`'s `EPISTEMIC_LABELS` is
     # Point/Subject/Object/Event), so this row pins the SHAPE the capability arms must catch, not a
-    # placement claim. ⛔ Named by SECTION and row, never as a `:NNNN` address into that document:
-    # the audit is a file this very PR grows, so a bare line number here went stale by this diff's
-    # own insertions (the EP-walk row is `:410` on `main` and `:433` here — re-measured by
-    # `grep -n 'ep.py:1620-1632'`, and the delta is this PR's own header rows; #14183 review
-    # P3) and a lane re-deriving from it lands on a blank line. The document's own §2.1 anchors it.
+    # placement claim. The walk itself is `tortoise/ep.py:1620-1632` (`epistemic_label_queries`); it
+    # used to be quoted through the `#13083` census's `:Point` table, whose document was deleted on
+    # 2026-11-23 (`#11081` audit row B2) — read the shape from the source
+    # (`sed -n '1620,1632p' tortoise/ep.py`, or grep for `epistemic_label_queries`), never from a
+    # prose document's row address.
     ("EP walk",
      "MATCH (a:GraphEvent) WHERE a.id IN $ids WITH * MATCH (a)-[r:IMPL|NAND]-(b)",
      "cypher:-["),
@@ -531,7 +530,7 @@ def test_a_payload_only_emit_writes_the_store_and_no_journal_record(tmp_path):
 
     A re-point onto `journal_event` would therefore drop this event from every
     subscriber while the stream still looked complete. That is not an off-by-one
-    cursor; it is a missing event type, which is why `#13083` §6.3 refused to
+    cursor; it is a missing event type, which is why the `#13083` census refused to
     call the move a "feed re-pointing".
 
     ⛔ THE POSITIVE CONTROL IS PART OF THE PIN. Without it, `journal_rows == []`
@@ -598,7 +597,7 @@ def test_the_two_stores_seq_coordinates_are_deliberately_different():
 def test_the_change_feed_has_no_record_home_in_the_projection_registries():
     """`NODE_TABLES`/`KEY_PROPERTY` do not name the shape — and must not start.
 
-    Adding it is the route `#13083` §5.2 prescribes ("give it a `NODE_TABLES`
+    Adding it is the route the `#13083` census prescribes ("give it a `NODE_TABLES`
     record home with a tier column"), so this pin exists to make that route
     REFUSE with its reason instead of looking like unfinished work.
     """
@@ -686,7 +685,7 @@ def test_the_superset_verdict_names_a_missing_type_and_a_missing_row():
     Two deficits, deliberately different, because they carry different remedies:
 
     * a TYPE the record never carries (a subscriber sees a complete-looking,
-      silently SHORT stream — the failure `#13083` §6.3 calls the worse one);
+      silently SHORT stream — the failure the `#13083` census calls the worse one);
     * a ROW inside a type the record does carry (a lost event, not a lost
       vocabulary).
     """

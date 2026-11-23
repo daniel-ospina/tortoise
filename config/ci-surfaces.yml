@@ -12238,8 +12238,8 @@ tier1:
 # JSON/markdown reads plus the in-memory corpus.
 - test_text_gate_13099.py
 # #12184: the shifted-evidence-cite pin (`core` above). Every document it guards is
-# under `docs/` — `CAPABILITY-PLACEMENT-AUDIT.md`, `SUBSTRATE-REBUILD-MAP.md`, the
-# #12298 M3 recall brief and the #13083 census README — and `docs/` is in
+# under `docs/` — `SUBSTRATE-REBUILD-MAP.md`, the #12298 M3 recall brief, the #13083
+# census README, `ENTITY-VERDICT-BANDS.md`, `00_index.md`, the #4997 plan — and `docs/` is in
 # NON_PYTHON_PREFIXES while none of them matches a SOURCE_PATTERNS entry, so a
 # docs-only diff takes the early return and selects NO surface: measured at this
 # head, `--changed-files docs/architecture/SUBSTRATE-REBUILD-MAP.md` ->
