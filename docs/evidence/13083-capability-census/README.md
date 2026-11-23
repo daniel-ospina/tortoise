@@ -26,10 +26,17 @@ re-run at that head.
 **The tree to reproduce these figures from is the commit that contains the probe AND both JSONs** (they land
 together), not the sha inside the JSON. The audit's base is `8762578f8c`.
 
-**Why this file exists.** The capability audit
-(`docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`) states which READERS touch each shape. Its byte
-columns come from here, and this is the home for the method, the arms and — most importantly — the
-**limits of the instrument**, so a reader cannot take a payload figure for a residency figure.
+**Why this file exists.** The capability audit (`#13083`) SPECIFIED a per-shape reader census, and that
+census was committed as `docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` — deleted on 2026-11-23 under
+the test-bureaucracy cut (`#11081`, audit row B2: a census of where capabilities sit, whose 208
+line-pinned cites a `git merge-tree` measurement named as a conflict source). The deletion took that
+document's prose with it: its **18-row population, its verdict table and its section numbering exist
+only in git history** (`git show <sha-before-this-cut>:docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`)
+— plus the plan, the review gaps and a handful of ROW-LEVEL decisions in `#13083`'s comments, which do
+NOT carry the population or the verdict table. What is committed, measurable and reproducible is HERE,
+and this README does not depend on the deleted document's prose. Its byte columns come from here, and
+this is the home for the method, the arms and — most importantly — the **limits of the instrument**, so
+a reader cannot take a payload figure for a residency figure.
 
 ## The corpus
 
@@ -37,8 +44,8 @@ Fixed and synthetic: 6 sessions × 10 turns × 1,500 characters with a determini
 vector per turn (the production embedding width), **plus** one public capture through
 `sdk._capture_session` (mock extractor, hermetic), one of each of `Source`/`Event`/`Object`/`Subject`
 created through their SDK doors, **and one standalone `:Point`** via
-`sdk.create_point("statement", …)` (`probe_shape_bytes.py:286`) — which is why the audit reconciles
-§1 row 1's `:Point` count of 66 as "60 turn points + claims". Same ids, same texts, same vectors in both arms — reproducible on any
+`sdk.create_point("statement", …)` (`probe_shape_bytes.py:287`) — which is how the `#13083` census reconciles
+its `:Point` count of 66 as "60 turn points + claims". Same ids, same texts, same vectors in both arms — reproducible on any
 machine, and never a snapshot of tenant data.
 
 Record **unarmed** in both arms, so a capture's turns land as NODES. That is deliberate: the fallback
@@ -80,17 +87,17 @@ lane is the population a `record_only` move would remove from.
 4. **Nine shape-groups are declared UNEXERCISED rather than counted as zero**: `:Meta`, `:WhySnapshot`,
    `:Tag`, `:ContextSubscription`, `:CommitRecord`, `:DeliveryReceipt`, `:OnboardingState`/`:OnboardingStep`,
    `:PackManifest`, and the
-   `:Batch`/`:PipelineStage`/`:PackInstall`/`:PackSelection` group. These are the audit's §1 rows **10–17** — the
-   same 13 labels, presented here as nine groups because `:PackManifest` is split out of the audit's row 15
-   (it has its own reader set at `pack_manifest_store.py:524`, `:539`, `export.py:133`). ⚠️ The retired
-   `:Document` label is **not** in this list: it is in the audit's *not-censused* row (18), because a
+   `:Batch`/`:PipelineStage`/`:PackInstall`/`:PackSelection` group. These are the **13 labels** the `#13083` census
+   declared unexercised, presented here as nine groups because `:PackManifest` is split out of that last
+   group (it has its own reader set at `pack_manifest_store.py:524`, `:539`, `export.py:133`). ⚠️ The
+   retired `:Document` label is **not** in this list: the `#13083` census carried it as *not-censused*, because a
    post-D10 graph has relabelled it to `:Source` and it therefore has no placement verdict to leave unexercised.
    The corpus does not create any of these, so this
    document has no measurement of them — which is a gap in the evidence, not a claim that they are free.
-   (`:Tag` is `graph`-verdicted in the audit; it is unexercised **here**, which is a coverage gap, not a
+   (`:Tag` is a `graph`-verdicted shape; it is unexercised **here**, which is a coverage gap, not a
    `record_only` verdict.)
 5. **The instrument wipes its graph before seeding — `MATCH (n) DETACH DELETE n` at
-   `probe_shape_bytes.py:195` — and what stops that reaching a tenant graph is the repo's L2 rule, not this
+   `probe_shape_bytes.py:196` — and what stops that reaching a tenant graph is the repo's L2 rule, not this
    document.** The wipe goes through `proj.g`, which is a `_GuardedGraph` (`tortoise/projection/__init__.py:11727`),
    and `_is_bulk_wipe` runs in its `query` and classifies that statement as a whole-graph wipe, refused on any
    graph name that is not a disposable test graph. `--namespace` is not a way in either: `TortoiseSDK` maps
@@ -127,7 +134,9 @@ and deterministic; the residency figure is **unmeasured**.
 in `tests/test_cache_projection.py` (`:186-195`, `:243-246`) refuse the declaration until it is widened
 with a tail-only category — a decision belonging to `#10429`, which owns this route. The MECHANISM does
 honour the entry (`_props_from_row`'s `tail_denied` is the plain forbidden set plus its spellings,
-`cache_projection.py:2776`). See the audit's §5.1.
+`cache_projection.py:2776`). ⛔ The move is still WITHDRAWN: the passage that argued for it was §5.1 of
+the census document, deleted on 2026-11-23 (`#11081` audit row B2, reachable in git history), and the
+pins above are the authority that keeps it withdrawn.
 
 ## Per-shape census (single run, `before` arm)
 
