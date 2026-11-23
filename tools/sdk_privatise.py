@@ -1851,8 +1851,8 @@ SWEEP_NAMES = 66
 #: ABOVE ARE KEPT, this file's standing ground rule. The pair below is `--repin`'s own output on
 #: the RESOLVED merge tree, never inherited from either parent (they disagree: this branch's
 #: provisional `11881` against `main`'s `11886`) and never arithmetic across them.
-#: ⛔ RE-PINNED FOR `main`'s OWN DRIFT ON THE REBASED TREE (#14395). Rebased onto `origin/main`
-#: `0fbfbb5b210`, `--repin` reads **11898** (`8cf59d52af09e536`) over this pin's `11896` — and
+#: ⛔ RE-PINNED FOR `main`'s OWN DRIFT ON THE REBASED TREE (#14395). `--repin` on this branch's
+#: tree reads **11898** (`8cf59d52af09e536`) over this pin's `11896` — and
 #: **`origin/main`'s OWN tree reads that same `(11898, '8cf59d52af09e536')`**, measured by running
 #: `--repin` in a detached worktree at `0fbfbb5b210` with no branch content in it, where `--check`
 #: exits **1** naming the identical observed/pinned pair. `python-ci.yml`'s "The privatisation
