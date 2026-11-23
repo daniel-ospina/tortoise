@@ -1918,6 +1918,53 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
 #: legitimised by the re-cut; the pair below is `--repin`'s own output on THIS tree, never arithmetic
 #: on the last pin, and `--check` exits 0 on it.
+#: ⛔ MERGED `origin/main` `953c299c9b1f` INTO THIS BRANCH — BOTH SIDES' BLOCKS KEPT, this file's
+#: standing ground rule (the same one the `11881`/`11886` fold above records). AND `main` HAS SINCE
+#: LANDED THE SAME PAIR ON ITS OWN: `#14423` (`da82ece4226b`, the `#14350 D1` lane) re-cut
+#: `SWEEP_RESIDUE` to (11901, "953c70c05b55923b") from ITS tree, so the value below survives this
+#: rebase UNCHANGED and the rebase itself contributes ZERO rows. Two lanes reaching the same pair on
+#: different trees, days apart, without seeing each other's work is the cross-check the `#14062`
+#: class wants rather than a redundancy — and it is why this rebase needed no re-pin.
+#: WHAT THIS BLOCK STILL ADDS is the one thing `main`'s own `#14423` block above explicitly
+#: DECLINES: the row-level attribution of the +3 (`env.update` +1, `projection.g.query` +2, all in
+#: `tests/test_7879_record_chain.py`), measured by diffing both sorted row sets in full. That block
+#: says row-level attribution "is NOT CLAIMED here … only re-measured against a tree that predates
+#: it" — the measurements below ARE that re-measurement.
+#: RE-CUT ON `main` ITSELF (11898, "8cf59d52af09e536") → (11901, "953c70c05b55923b"), the `#14062`
+#: class — `main` was RED here, not a PR, and THE TABLE BELOW IS A SAMPLE OF THAT SPAN, NOT ITS
+#: LENGTH: the last commit on `main`'s first-parent chain that `--check` exits 0 on is `9d6d2e347fd`
+#: (pin `(11886, "0fc02dac32dfe1dd")` against a tree deriving 11886), and EVERY commit after it reds,
+#: beginning with `a3b0911f2049` (#14416 — pin 11886, tree 11887, which the `#14038` block above
+#: already records). The span is re-measured with `git log --first-parent 9d6d2e347fd..origin/main`
+#: rather than restated here, because it grows every time `main` moves and a fixed count is exactly
+#: the stale-figure defect this section exists to avoid. Measured in a detached
+#: worktree, one `--repin`/`--check` per commit, pin read from the file on each (`main`'s first-parent
+#: chain, oldest first): at `4993fa083f3f` pin **11896** against a tree deriving **11898** — already two
+#: short; at `67774cdec66` unchanged, 11896 against 11898; at `b2d1e9086a9` the tree moves to **11901**
+#: while the pin stays 11896; at `bbe54363ad6`, `main` immediately before `#14394` landed, still 11896
+#: against 11901 — five short; at `43182ac09a7` (`#14394`'s squash) the pin finally reads **11898**, the
+#: value correct for ITS OWN branch tree (`1de5fa4cfbbc` derives 11898) but three short of the tree it
+#: landed on. CI runs exactly `python3 tools/sdk_privatise.py --check` in the REQUIRED `surface-guard`
+#: job, and `--check` grades the RESOLVED MERGE TREE, so that red is inherited by every open PR on rows
+#: no PR author wrote. The pair below closes the whole gap in one step, and `--check` exits 0 on it —
+#: as does `main`'s own independently measured pair from `#14423` (see the fold note above).
+#: THE +3 SINCE 11898 IS `b2d1e9086a9` (`#14434`), and it is FULLY ATTRIBUTED rather than assumed: the
+#: sorted row sets were diffed in full on both trees (861 rows each side,
+#: `--report --base 28ca66878d7c --top 1000`, run at `1de5fa4cfbbc` — whose tree derives 11898 — and at
+#: the merge tree `5f6e3da6a0aa`, which derives 11901) — `env.update` 101 → 102 (+1, one
+#: `env.update(env_extra or {})` over a subprocess env) and `projection.g.query` 24 → 26 (+2, a count
+#: and a `DETACH DELETE` against a live projection), NO OTHER SHAPE MOVED and none decreased. All three
+#: are in the ONE file `#14434` added, `tests/test_7879_record_chain.py` — confirmed by grepping the
+#: added lines of `1de5fa4cfbbc..5f6e3da6a0aa`, which is the only place either line appears new — so
+#: 1+2 = 3 = 11901 − 11898 is a cross-check rather than a story, the same shape of arithmetic the
+#: `#14038` block above uses. The rows are DECLARED, never rewritten: re-pointing an ordinary-word
+#: receiver inside a peer's test helper would be sabotage (the `declared_markers.update` precedent).
+#: WHY THE 11896 → 11898 STEP DID NOT ALREADY FIX IT, so the next reader does not re-derive the race:
+#: `#14394` DID notice the red and DID re-cut the pin — but against its own merge tree, and its base
+#: moved three rows between that cut and the squash, so the squash carried a reading that was true of
+#: the branch and false of `main`. Nothing was mis-measured; the pin is only as current as the tree the
+#: cutting lane last saw, and `--check` grades a tree that keeps moving under it.
+#: `typed references still pointing at a public name: 0` here too, and `--check` exits 0 on the pair.
 SWEEP_RESIDUE = (11901, "953c70c05b55923b")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
