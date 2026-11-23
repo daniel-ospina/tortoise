@@ -1009,8 +1009,12 @@ def test_a_settle_write_that_failed_leaves_the_row_repaired_not_lagging(
 
     coord = bi.BatchCoordinator(store)
     batch, _items = coord.submit(ORG_ID, ["/d/a.md"])
-    # Every item lands; only the batch row's write fails.
+    # Every item lands; only the batch row's write fails. Both writers are
+    # faulted: `settle()` writes through `put_batch_if_state` (the batch row's
+    # compare-and-set, #14415 review round 5), so faulting `put_batch` alone
+    # would let the settle land and the test would prove nothing.
     real_put_batch = store.put_batch
+    real_put_batch_if_state = store.put_batch_if_state
     state = {"fail": True}
 
     def flaky_put_batch(row):
@@ -1018,7 +1022,13 @@ def test_a_settle_write_that_failed_leaves_the_row_repaired_not_lagging(
             raise RuntimeError("put_batch timeout")
         return real_put_batch(row)
 
+    def flaky_put_batch_if_state(row, expected):
+        if state["fail"]:
+            raise RuntimeError("put_batch_if_state timeout")
+        return real_put_batch_if_state(row, expected)
+
     monkeypatch.setattr(store, "put_batch", flaky_put_batch)
+    monkeypatch.setattr(store, "put_batch_if_state", flaky_put_batch_if_state)
     ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
     state["fail"] = False
     # The pass could not write the row, so it must remember the batch…
@@ -1109,7 +1119,8 @@ def test_a_claim_re_entered_from_extracting_counts_towards_the_ceiling(store,
             raise RuntimeError("put_item timeout")
         return real_put_item(org_id, item)
 
-    def failing_terminal_write_if_state(org_id, item, expected):
+    def failing_terminal_write_if_state(org_id, item, expected,
+                                        expected_attempts=None):
         if item.state in (bi.BatchItemState.INDEXED,):
             raise RuntimeError("put_item_if_state timeout")
         return real_put_item_if_state(org_id, item, expected)
@@ -1483,3 +1494,96 @@ def test_a_peer_s_fresh_claim_is_not_metered_by_this_process(store, monkeypatch)
     assert charged == [], (
         f"this process charged {charged} tokens for work a peer ran — the meter "
         "must fire only for items THIS call settled")
+
+
+def test_an_item_that_names_a_url_is_refused_at_acceptance(client):
+    """⛔ ROUND-5 REVIEW P2: the URL refusal was a claim with no code.
+
+    The docstring promised a fetch, then promised a refusal; neither existed.
+    `ref` was copied verbatim into `submit`, so `https://…` became a relative path
+    under the org root — ACCEPTED with 201, then dead inside the indexer with a
+    storage message the customer could not act on. A refusal has to be an HTTP
+    answer at acceptance, and it must name the reason.
+    """
+    r = client.post("/v1/batches",
+                    json={"items": [{"ref": "https://evil.example/x.md"}]})
+    assert r.status_code == 422, r.text
+    detail = r.json()["detail"]
+    assert detail["error_code"] == "BATCH_REF_URL_NOT_SUPPORTED"
+    assert detail["refs"] == ["https://evil.example/x.md"]
+    assert "does not fetch URLs" in detail["message"]
+    assert "nothing was charged" in detail["message"]
+
+    # A relative PATH is still accepted — the refusal is about the scheme, not
+    # about "looks unusual".
+    ok = client.post("/v1/batches", json={"items": [{"ref": "contracts/a.md"}]})
+    assert ok.status_code == 201, ok.text
+
+
+def test_a_settle_racing_a_cancel_never_overwrites_the_cancellation(store,
+                                                                   monkeypatch):
+    """⛔ ROUND-5 REVIEW P2: the BATCH row had no compare-and-set.
+
+    `settle()` reads the batch, derives a state from the items, then writes — so a
+    `cancel()` landing in that window was overwritten by `partial`, which is
+    TERMINAL: `pending_batches()` no longer selected the row, so nothing ever
+    repaired it and the customer's `cancelled_at`/`cancel_reason` were erased on a
+    billing-visible surface, permanently.
+    """
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/done.md", "/todo.md"])
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.INDEXED, tokens_in=10)
+
+    real_items = store.items
+    state = {"cancel": True}
+
+    def items_then_cancel(org_id, batch_id):
+        rows = real_items(org_id, batch_id)
+        if state["cancel"]:
+            state["cancel"] = False
+            # The customer cancels EXACTLY between settle's row read and its
+            # derived write — the window the row-level CAS closes.
+            bi.BatchCoordinator(store).cancel(org_id, batch_id,
+                                              reason="cancelled by the customer")
+            return real_items(org_id, batch_id)
+        return rows
+
+    monkeypatch.setattr(store, "items", items_then_cancel)
+    settled = coord.settle(ORG_ID, batch.batch_id)
+    monkeypatch.undo()
+
+    row = store.get_batch(ORG_ID, batch.batch_id)
+    assert row.state is bi.BatchState.CANCELLED, (
+        "a derived terminal state overwrote a customer cancel — the batch now "
+        f"reads {row.state} with cancelled_at={row.cancelled_at!r}")
+    assert row.cancelled_at, "the cancellation timestamp was erased"
+    assert settled.state is bi.BatchState.CANCELLED
+
+
+def test_the_413_detail_names_the_configured_cap_not_the_default(monkeypatch):
+    """⛔ ROUND-5 REVIEW P3: the refusal lied about the number it enforced.
+
+    The cap is env-overridable, but the detail was a static "(4 MiB)" — so an org
+    running a 1 MiB cap was told its 2 MiB body exceeded 4 MiB, and an 8 MiB cap
+    was understated. The message must name the RESOLVED bound.
+    """
+    from tortoise import batch_ingest as bi_mod
+
+    assert "4 MiB" in bi_mod.inline_413_detail(4 * 1024 * 1024)
+    assert "1 MiB" in bi_mod.inline_413_detail(1024 * 1024)
+    assert "8 MiB" in bi_mod.inline_413_detail(8 * 1024 * 1024)
+    assert "1024 bytes" in bi_mod.inline_413_detail(1024)
+
+    monkeypatch.setenv("TORTOISE_BATCH_MAX_INLINE_BYTES", str(1024 * 1024))
+    assert ha._batch_cap_bytes() == 1024 * 1024, (
+        "the cap the middleware registers must follow the env, or the refusal "
+        "names a bound it does not enforce")
+
+
+def test_the_acceptance_copy_says_one_hour_not_1_hours(client):
+    """⛔ ROUND-5 REVIEW P3: the string a single-document customer actually gets."""
+    body = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]}).json()
+    message = body.get("message") or body.get("copy") or ""
+    assert "in 1 hour," in message, body
+    assert "1 hours" not in message, body

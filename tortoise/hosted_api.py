@@ -4041,6 +4041,12 @@ app = FastAPI(title="Tortoise Hosted API", version=tortoise.__version__, lifespa
 # the `/v1/sessions` capture override. Note `/v1/team/keys` is exempt by EXACT
 # path (the handler-capped POST) — the PATCH on `/v1/team/keys/{key_id}` is a
 # pydantic-body route and stays covered by the default cap.
+def _batch_cap_bytes() -> int:
+    """The RESOLVED inline-body cap for a batch — env first, then the default."""
+    return max(1024, _int_env("TORTOISE_BATCH_MAX_INLINE_BYTES",
+                              _batch_ingest.BATCH_MAX_INLINE_BYTES))
+
+
 _APP_BODY_CAP_EXEMPT_REGEXES = (
     # #2032 sweep sites (per-site caps live at each call site).
     re.compile(r"^/v1/register/?$"),
@@ -4086,9 +4092,11 @@ app.add_middleware(
         # below this registration, which runs at import time, so the same
         # expression is spelled once here rather than referenced.
         "/v1/batches": (
-            max(1024, _int_env("TORTOISE_BATCH_MAX_INLINE_BYTES",
-                               _batch_ingest.BATCH_MAX_INLINE_BYTES)),
-            _batch_ingest.BATCH_INLINE_413_DETAIL,
+            _batch_cap_bytes(),
+            # ⛔ THE REFUSAL NAMES THE CAP IT WAS CONFIGURED WITH (#14415 review
+            # round 5, P3): the detail used to be a static "(4 MiB)", so an org
+            # running a 1 MiB cap was told its 2 MiB body exceeded 4 MiB.
+            _batch_ingest.inline_413_detail(_batch_cap_bytes()),
         ),
     },
     exempt_prefixes=("/mcp", "/internal", "/v1/internal"),
@@ -16570,6 +16578,11 @@ _BATCH_ALLOWANCE_RESOURCE = "sessions"
 #: knob on top of it was silently ignored by the middleware, so it advertised a
 #: limit change it could not deliver (#14219 review round 2, NB1).
 
+#: `scheme://…` — what a caller means by "a URL". Deliberately shape-based: the
+#: point is to REFUSE anything shaped like a remote location, not to validate
+#: URLs, because the accepted form is a path under the org's storage.
+_URL_SHAPED = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
 #: The batch worker's OWN pool (see `batch_ingest.BATCH_ITEMS_IN_FLIGHT` for why
 #: the bound is 2 and why it must not be the capture pool). Created at import so
 #: a burst of batches cannot allocate an unbounded number of pools; disposed on
@@ -17010,15 +17023,17 @@ def _drain_batch(org: dict, batch_id: str) -> None:
                 # BLOCKING 1). Zero-token items (everything the current per-file
                 # indexer produces) make no ledger call — see `record_item_spend`.
                 #
-                # ⛔ AND ONLY WHEN THIS CALL SETTLED THE ITEM (#14415 review
-                # round 6, HIGH). `run_item` returns a FRESH CLAIM untouched when
-                # a peer may hold it (the reclaim window), and that row can carry
-                # a peer's interim tokens from a staged runner — metering it
-                # charged 500 tokens per tick, five passes over a 900 s window,
-                # for work this process never ran. A non-terminal return is "I
-                # did nothing here", which owes the ledger nothing.
-                if done.terminal:
-                    _batch_ingest.record_item_spend(org["org_id"], done)
+                # ⛔ THE CHARGE LIVES IN `run_item`, NOT HERE (#14415 review
+                # round 5, HIGH). `run_item` returns a ROW, and that row may be a
+                # peer's: its `tokens_in/out` are cumulative facts owned by
+                # whoever settled it, so metering the return value billed one
+                # document's tokens twice whenever a peer settled an item between
+                # this drain's snapshot and the run — 120 000 charged for 60 000
+                # spent, with no second runner at all. Only `run_item` knows
+                # whether ITS OWN write landed and what THIS pass spent, so the
+                # charge happens there (`_advance_landed` + explicit deltas) and
+                # charging here as well double-bills every item.
+                _ = done  # the row is the status surface's, not the ledger's
             except Exception:
                 # ⛔ ONE ITEM'S FAILURE MUST NOT ABANDON THE REST (#14219
                 # review, NB1). A graph-timeout on a bookkeeping statement used
@@ -17272,6 +17287,28 @@ async def create_batch(body: BatchRequest,
                 "estimate": est_dict,
             })
 
+    # ⛔ AN ITEM THAT NAMES A URL IS REFUSED **HERE**, NOT LATER (#14415 review
+    # round 5, P2). The model's docstring used to promise a fetch, then (round 4)
+    # promised a refusal — and neither existed: `ref` was copied verbatim into
+    # `submit`, so `https://…` became a relative path under the org root, was
+    # ACCEPTED with 201, and died inside the indexer with a storage message. A
+    # refusal the customer can act on has to be an HTTP answer at acceptance.
+    # (This API never fetches a caller-named URL: that is an SSRF surface, and an
+    # egress allow-list is not a substitute for not fetching.)
+    bad_refs = [it.ref for it in body.items
+                if _URL_SHAPED.match(str(it.ref or ""))]
+    if bad_refs:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": "BATCH_REF_URL_NOT_SUPPORTED",
+                "message": "a batch item must name a document under this team's "
+                           "storage (a path), or carry its text. This API does "
+                           "not fetch URLs — nothing was accepted and nothing "
+                           "was charged.",
+                "refs": bad_refs[:10],
+            })
+
     refs = [it.ref for it in body.items]
     contents = [it.text for it in body.items]
     names = [it.name or "" for it in body.items]
@@ -17428,6 +17465,17 @@ async def cancel_batch(batch_id: str,
         body["message"] = (
             "Cancelled. Work that had not started will not run and is not "
             "charged; documents already processed are kept.")
+    elif any(not i.terminal for i in items):
+        # ⛔ NOT every non-cancelled answer is "already finished" (#14415 review
+        # round 5, BLOCKING 1). A live claim is the one case where the cancel
+        # legitimately stops nothing — the runner is mid-call, and killing it
+        # would spend the tokens AND throw the result away — so the copy must say
+        # that, instead of telling a customer their unfinished batch completed.
+        body["message"] = (
+            "Cancel received. Work that had not started will not run and is not "
+            "charged. One or more documents are being processed right now: they "
+            "will finish, their result is kept, and they are charged because "
+            "their tokens were already spent.")
     else:
         body["message"] = (
             "This batch had already finished, so nothing was stopped — every "

@@ -466,7 +466,10 @@ def test_copy_is_the_owners_sentence_and_leaks_no_provider_mechanics():
 
 def test_copy_never_promises_less_than_an_hour():
     """A sub-hour estimate rounds UP, never down: a late promise beats a broken one."""
-    assert "1 hours" in customer_copy(0.1)
+    assert "in 1 hour," in customer_copy(0.1), (
+        "the sub-hour batch a customer actually sends must not read "
+        f"'1 hours': {customer_copy(0.1)!r}")
+    assert "in 2 hours," in customer_copy(1.2)
     assert "2 hours" in customer_copy(1.01)
 
 
@@ -1092,7 +1095,7 @@ def test_a_cancel_between_the_read_and_the_claim_does_not_run_the_runner():
     real_cas = store.put_item_if_state
     fired = {"done": False}
 
-    def cancelling_cas(org_id, item, expected):
+    def cancelling_cas(org_id, item, expected, expected_attempts=None):
         if (not fired["done"] and expected is BatchItemState.QUEUED
                 and item.state is BatchItemState.EXTRACTING):
             fired["done"] = True
@@ -1283,3 +1286,128 @@ def test_a_rejected_acceptance_discards_its_own_rows_and_staged_files(tmp_path):
     staged = base / "_batches"
     assert not staged.exists() or not any(staged.iterdir()), (
         "the rejected batch's staged files were left on disk")
+
+
+# ── round 5: the claim's IDENTITY, and a cancel over a dead claim ──────────
+def test_two_reclaimers_cannot_both_win_the_same_stale_row():
+    """⛔ ROUND-5 REVIEW P1, reproduced: two drains, one stale claim, TWO charges.
+
+    A re-claim that writes `state = <the state it read>` has a compare key equal
+    to the value it writes back, so BOTH re-claimers matched and both ran the
+    runner — one document extracted twice and billed twice (measured on the
+    pre-fix tree: 2 runner calls, 120 000 tokens charged for 60 000 spent).
+
+    The re-claim is now two state-CHANGING compare-and-sets (void the dead claim,
+    then claim it), so exactly one drain can walk the pair and the loser returns
+    before the runner.
+    """
+    store = InMemoryBatchStore()
+    batch, items = BatchCoordinator(store).submit(ORG, ["/a.md"])
+    claimed = BatchCoordinator(store).advance(
+        ORG, items[0], BatchItemState.EXTRACTING, attempt=True,
+        expected=BatchItemState.QUEUED, expected_attempts=0)
+    stale = store.get_item(ORG, batch.batch_id, claimed.item_id)
+    stale.updated_at = _ancient_stamp()      # the claim's runner died long ago
+    store.put_item(ORG, stale)
+
+    calls: list[str] = []
+
+    def runner(item: BatchItem) -> ItemOutcome:
+        calls.append(item.item_id)
+        return ItemOutcome(BatchItemState.INDEXED, tokens_in=60_000)
+
+    # Two coordinators, as two processes; each reads the SAME stale row.
+    a_row = store.get_item(ORG, batch.batch_id, claimed.item_id)
+    b_row = store.get_item(ORG, batch.batch_id, claimed.item_id)
+    first, second = BatchCoordinator(store), BatchCoordinator(store)
+    first.run_item(ORG, a_row, runner)
+    second.run_item(ORG, b_row, runner)
+
+    assert calls == [claimed.item_id], (
+        "one document was run twice over two drains — the stale claim was "
+        f"re-entered by both (calls={calls}), which bills the customer twice")
+    final = store.items(ORG, batch.batch_id)[0]
+    assert final.state is BatchItemState.INDEXED
+    assert final.attempts == 2, (
+        "the re-claim must count as an attempt, so the ceiling bounds a poison "
+        f"item (attempts={final.attempts})")
+
+
+def test_put_item_if_state_compares_the_claim_identity_in_the_inmemory_store():
+    """The compare, on the store that the concurrency tests actually drive."""
+    store = InMemoryBatchStore()
+    batch, items = store_items_helper(store)
+    row = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    assert row.attempts == 0
+    row.attempts = 1
+    store.put_item(ORG, row)          # the ROW's identity has moved
+    assert store.put_item_if_state(ORG, row, BatchItemState.QUEUED,
+                                   expected_attempts=0) is False, (
+        "the CAS matched a row whose attempt count had already moved")
+    assert store.put_item_if_state(ORG, row, BatchItemState.QUEUED,
+                                   expected_attempts=1) is True
+
+
+def test_the_graph_cas_names_the_attempt_count_only_when_asked():
+    """The production compare, pinned on the statement: identity in the pattern."""
+    item = BatchItem(batch_id="b1", item_id="b1-0", ref="/d/a.md",
+                     state=BatchItemState.EXTRACTING, attempts=1,
+                     updated_at="t")
+    rec = _Recorder(answers=[[]])
+    GraphBatchStore(rec).put_item_if_state(ORG, item, BatchItemState.QUEUED,
+                                           expected_attempts=0)
+    cypher = rec.statements[-1]
+    assert "i.attempts = $expect_attempts" in cypher, cypher
+    assert rec.params[-1]["expect_attempts"] == 0
+
+    rec2 = _Recorder(answers=[[["b1-0"]]])
+    GraphBatchStore(rec2).put_item_if_state(ORG, item, BatchItemState.QUEUED)
+    assert "expect_attempts" not in rec2.statements[-1]
+    assert "expect_attempts" not in rec2.params[-1]
+
+
+def test_a_cancel_stops_a_dead_claim_instead_of_reporting_the_batch_finished(
+        monkeypatch):
+    """⛔ ROUND-5 REVIEW P1, reproduced: `attempts == 0` is UNREACHABLE.
+
+    Every writer of `extracting` increments `attempts`, so the documented
+    "dead claim → stopped for free" arm never ran: a batch whose only
+    non-terminal item was a dead claim cancelled to `stopped = False`, the route
+    answered "already finished", and the next status poll's `recover()` requeued
+    and RAN the document — charging tokens after the customer cancelled.
+
+    The test is the claim's AGE now, so a stale claim is stopped and a fresh one
+    is left alone (its tokens are already being spent).
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/dead.md", "/live.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG, items[1], BatchItemState.EXTRACTING, attempt=True)
+
+    rows = store.items(ORG, batch.batch_id)
+    stale, fresh = rows[0], rows[1]
+    stale.updated_at = _ancient_stamp()
+    store.put_item(ORG, stale)
+
+    stopped_batch, after = coord.cancel(ORG, batch.batch_id, reason="customer")
+    by_ref = {i.ref: i for i in after}
+    assert by_ref["/dead.md"].state is BatchItemState.CANCELLED, (
+        "a dead claim survived a cancel — the batch would run and charge after "
+        "the customer stopped it")
+    assert by_ref["/dead.md"].tokens_in == 0
+    assert by_ref["/live.md"].state is BatchItemState.EXTRACTING, (
+        "a LIVE claim must be left alone: its tokens are already being spent")
+    assert stopped_batch.state is BatchState.CANCELLED
+    assert stopped_batch.cancelled_at, "the row says nothing was stopped"
+
+
+def _ancient_stamp() -> str:
+    """A claim stamp far older than any reclaim window."""
+    from datetime import UTC, datetime, timedelta
+    return (datetime.now(UTC) - timedelta(days=3)).isoformat()
+
+
+def store_items_helper(store):
+    coord = BatchCoordinator(store)
+    return coord.submit(ORG, ["/a.md"])
