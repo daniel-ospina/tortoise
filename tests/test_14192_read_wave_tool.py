@@ -1456,6 +1456,24 @@ class _RegistryCtx(NamedTuple):
     sys_dict_names: frozenset[str]
     consts: dict[str, frozenset[str]]
     builtin_aliases: frozenset[str]
+    #: Names bound to `dict.get` / `dict.__getitem__` (#14326 round 25 P1). A ctx field for the
+    #: same reason as every other: a call site cannot pass it "partly".
+    dict_readers: frozenset[str]
+
+
+def _is_dict_reader_ref(node: ast.AST) -> bool:
+    """`dict.get` / `dict.__getitem__` — the UNBOUND read of a mapping, carried as a VALUE.
+
+    ⛔ ONE HOP FURTHER THAN THE RECEIVER CLAUSE (#14326 round 25 P1, MEASURED GREEN at
+    `7508592c24`: `_dg = dict.get; _dg(sys.__dict__, "modules")[…] = …` inserted the entry
+    while the literal `dict.get(sys.__dict__, "modules")[…]` was RED). Here the callee is a
+    NAME, so the attribute-shaped arm never sees the call at all — the same hop
+    `_is_setattr_like`/`launderers` already resolve for `setattr`, applied to the registry
+    READ rather than the registry WRITE.
+    """
+    return bool(isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name) and node.value.id == "dict"
+                and node.attr in {"get", "__getitem__"})
 
 
 def _is_modules_key(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
@@ -1546,10 +1564,21 @@ def _is_module_registry(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
     # unbound twins (`_REGISTRY_MUTATORS` with `offset=1`); the READ axis is the surviving
     # asymmetry, and both are `dict.get(sys.__dict__, "modules") is sys.modules` at runtime.
     return bool(isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"get", "__getitem__"}
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id in ({"dict"} | ctx.builtin_aliases)
+                and (
+                    # The BOUND spelling, `X.get(<sys dict>, "modules")`. ⛔ THE RECEIVER IS
+                    # NOT WHAT IS READ (#14326 round 25 P1, MEASURED: round 24's
+                    # `node.func.value.id in ({"dict"} | ctx.builtin_aliases)` clause made a
+                    # store into the registry GREEN through `builtins.dict.get`, while
+                    # `X.get(sys.__dict__, "modules") is sys.modules` is `True` for EVERY
+                    # spelling of the receiver — `args[0]`/`args[1]` choose the mapping). The
+                    # clause is GONE; `_is_sys_dict_mapping(node.args[0])` already restricts
+                    # the read to sys's own mapping, which is what makes it the registry.
+                    (isinstance(node.func, ast.Attribute)
+                     and node.func.attr in {"get", "__getitem__"})
+                    # …and the UNBOUND spelling CARRIED IN A NAME (`_dg = dict.get`).
+                    or (isinstance(node.func, ast.Name)
+                        and node.func.id in ctx.dict_readers)
+                )
                 # The arity guard keeps `node.args[1]` from an IndexError on a 1-arg
                 # `dict.get(<mapping>)`; it is unreachable-by-mutant and SAID SO (#14326
                 # round 24, MEASURED: relaxing it also left `41 passed`).
@@ -7559,12 +7588,17 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     #: `_RegistryCtx` exists to remove, one ordering hop out.
     builtin_aliases = frozenset(_aliases_of(
         tree, lambda _n: isinstance(_n, ast.Name) and _n.id in _REGISTRY_BUILTINS, loops=True))
+    #: The UNBOUND read carried in a name (#14326 round 25 P1). Built BEFORE `sys_dict_names`
+    #: for the same ordering reason `builtin_aliases` is — a ctx field passed empty at the one
+    #: site that fills it is the hazard `_RegistryCtx` exists to remove.
+    dict_readers = frozenset(_aliases_of(tree, _is_dict_reader_ref, loops=True))
     sys_dict_names = frozenset(_aliases_of(
         tree, lambda _n: _is_sys_dict_mapping(
-            _n, _RegistryCtx(sys_names, frozenset(), consts, builtin_aliases)), loops=True))
+            _n, _RegistryCtx(sys_names, frozenset(), consts, builtin_aliases,
+                             dict_readers)), loops=True))
     #: ONE object for every resolved-registry question — see `_RegistryCtx` for why the
     #: positional form was a hazard (#14326 round 24).
-    ctx = _RegistryCtx(sys_names, sys_dict_names, consts, builtin_aliases)
+    ctx = _RegistryCtx(sys_names, sys_dict_names, consts, builtin_aliases, dict_readers)
     # The namespace MAPPINGS, plus the IMPORT REGISTRY `from tortoise.sdk import …`
     # resolves THROUGH (`sys.modules`), each with its one-bind aliases resolved.
     namespaces = frozenset(
@@ -8307,6 +8341,21 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         # vocabulary as the rest of the file; the narrowing is untouched (every form is still
         # pinned to `sys`), and the inert controls below prove the key resolution does not
         # compose past an unrelated module.
+        # ⛔ THE UNBOUND READ'S RECEIVER IS NOT WHAT IS READ (#14326 round 25 P1, MEASURED
+        # GREEN at `7508592c24` while the literal `dict.get` twin was RED):
+        # `X.get(sys.__dict__, "modules") is sys.modules` is `True` for EVERY spelling of the
+        # receiver, because `args[0]`/`args[1]` choose the mapping. Round 24 narrowed the arm
+        # to `dict`/`builtin_aliases` and then pinned that narrowing with a "control" row —
+        # the blessed-fail-open shape this predicate's own docstring names. These rows red if
+        # the receiver clause ever comes back; the last two are the CALLEE carried in a name,
+        # which the attribute-shaped arm cannot see at all.
+        "UNBOUND `.get` through `builtins.dict`":
+            'builtins.dict.get(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
+        "UNBOUND `dict.get` CARRIED in a name":
+            '_dg = dict.get\n_dg(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
+        "UNBOUND `dict.__getitem__` CARRIED in a name":
+            '_di = dict.__getitem__\n'
+            '_di(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
         "`getattr` with a NAME-CARRIED attribute":
             '_a = "modules"\ngetattr(sys, _a)["tortoise.sdk"] = _Mirror\n',
         "`getattr` with a literal-only `+` attribute":
@@ -8442,11 +8491,12 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   # unrelated module's own `modules` attribute reddened a pin that exists to
                   # protect a different object, which is the expensive direction here).
                   'other.modules["tortoise.sdk"] = _Mirror\n',
-                  # ⛔ AND THE `dict`-BY-NAME CONTROL (#14326 round 24, MEASURED: without it,
-                  # deleting `node.func.value.id == "dict"` from the unbound-read arm left
-                  # `1 passed` — the clause was unpinned, so a later "simplification" could
-                  # red this innocent receiver with the suite still green).
-                  '_dm.get(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
+                  # ⛔ AND THE UNRELATED-RECEIVER CONTROLS for the unbound-read arm (#14326
+                  # round 25): dropping the receiver clause must not red an ordinary mapping
+                  # lookup. Both choose a DIFFERENT mapping, so they are not the registry read
+                  # and must stay GREEN.
+                  'dict.get(_cfg, "modules")["tortoise.sdk"] = _Mirror\n',
+                  '_cfg.get("modules")["tortoise.sdk"] = _Mirror\n',
                   # ⛔ AND THE ALIAS/COMPOSITION CONTROLS FOR ROUND 22, for the same reason: an
                   # assignment alias of ANOTHER module, and the `__dict__` compositions on
                   # one, must all stay GREEN or the narrowing has been lost.
