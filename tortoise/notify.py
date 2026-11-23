@@ -507,6 +507,9 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
 
     Releasing the DELIVERY window happens even when no incident channel can be
     built (the ledger is local), then the incident is resolved when there is one.
+    With a store, the release waits for a CONFIRMED end: a clean window that only
+    counts one observation of the #3146 recovery window is not an ended episode,
+    so it neither resolves nor re-arms (see the `skipped_window` gate below).
 
     Returns True when every close that was attempted succeeded (or there was
     nothing to close), False when any of them RAISED: a failed close re-raises by
@@ -537,18 +540,24 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
     # removes, and a stale OPEN incident is visible while a wrong ✅ is not. The
     # runbook row names the legacy path as the manual close.
     subjects = (subject,)
-    # ...and BOTH KIND spellings: the delivery ledger is armed by the event kind,
-    # so releasing only the incident kind left `abuse_flag`'s window armed across
-    # episodes (see `_episode_delivery_kinds`).
-    for kind in _episode_delivery_kinds():
-        for subj in subjects:
-            release_abuse_delivery(kind, subj)
+    # The DELIVERY window is re-armed only by a CONFIRMED episode end — see the
+    # `skipped_window` gate below. A release on every clean evaluation would
+    # undo the episode bound for a rule that hovers at its threshold: each
+    # crossing would re-arm the ledger and page a reminder, so the 24h reminder
+    # window would degenerate back into one message per crossing.
+    #
+    # The no-channel shape keeps the old behaviour below (the ledger is local
+    # and is the ONLY delivery there is, so an ended episode must re-arm it).
     store, reason = _abuse_alert_store()
     if store is None:
+        for kind in _episode_delivery_kinds():
+            for subj in subjects:
+                release_abuse_delivery(kind, subj)
         logger.debug("abuse episode end: no incident channel (%s) — delivery "
                      "re-armed only (%s/%s)", reason, org_id, rule)
         return True
     ok = True
+    skipped_window = False
     for kind in kinds:
         for subj in subjects:
             try:
@@ -584,10 +593,24 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
             #     not clear it (fresh, or owned by another writer, `#3127`).
             if outcome in (ResolveOutcome.SKIPPED_WINDOW, ResolveOutcome.SKIPPED_FRESH):
                 ok = False
+                if outcome is ResolveOutcome.SKIPPED_WINDOW:
+                    skipped_window = True
                 logger.info(
                     "abuse episode end: %s (%s) not resolved yet (%s) — staying "
                     "pending so a later clean window completes the recovery window",
                     kind, subj, getattr(outcome, "name", outcome))
+    # BOTH KIND spellings: the delivery ledger is armed by the event kind, so
+    # releasing only the incident kind left `abuse_flag`'s window armed across
+    # episodes (see `_episode_delivery_kinds`).
+    #
+    # NOT released while the recovery window is unsatisfied: this clean window is
+    # observation k of `resolve_streak`, so the EPISODE has not ended — and
+    # re-arming the ledger here would page a reminder on every crossing of a rule
+    # hovering at its threshold, which is the volume this whole change bounds.
+    if not skipped_window:
+        for kind in _episode_delivery_kinds():
+            for subj in subjects:
+                release_abuse_delivery(kind, subj)
     return ok
 
 

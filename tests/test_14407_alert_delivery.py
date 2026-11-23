@@ -232,9 +232,75 @@ def test_an_adopted_legacy_incident_is_not_closed_by_the_other_rules_window(
         "another rule's clean window closed this incident (false all-clear): "
         f"{delivered.closed} — and the next detection would re-file it")
 
-    # rule A's own episode end still resolves it (the recovery path works).
+    # rule A's own episode end still resolves it (the recovery path works) —
+    # after the recovery window: #3146 applies to the abuse kinds, so ONE clean
+    # observation is observation 1 of DR_RECOVERY_STREAK and the close lands on
+    # the second (the engine's pending-retry supplies it in production).
+    notify.resolve_abuse_episode("org-a", "point_create")
+    assert delivered.closed == [], (
+        "one clean observation closed the incident — the #3146 recovery window "
+        f"is not applied to an abuse kind ({delivered.closed})")
     notify.resolve_abuse_episode("org-a", "point_create")
     assert delivered.closed == [1], delivered.closed
+
+
+def test_a_rule_flapping_at_its_threshold_files_one_incident(delivered):
+    """#3146 for the ABUSE plane: a boundary-hovering rule must not churn.
+
+    R1 is a bounded sliding-window measurement, so an org whose hourly burst
+    sits just above/below the threshold crosses it repeatedly. With
+    ``resolve_streak=1`` (the pre-fix declaration) EVERY crossing was a full
+    episode: the clean window closed the issue, released the flag claim and
+    re-armed delivery, so the next burst re-flagged, found no LIVE issue and
+    filed a NEW one — one issue open/close pair plus a 🚨/✅ pair per crossing,
+    i.e. up to ~2× the pre-fix chat volume on the exact shape #14407 bounds.
+
+    With the declared window, a single clean observation keeps the incident
+    pending, and the re-flag in between is a ``DEDUP`` whose
+    ``_note_still_unhealthy`` resets the count — so the flap collapses to ONE
+    incident with no resolution announced.
+    """
+
+    class _FlappingStore:
+        """R1's window hovering at the threshold: burst → ages out → burst."""
+
+        def __init__(self) -> None:
+            self.over = True
+            self.flag = None
+            self.flag_clears = 0
+
+        def window_sum(self, org_id, rule, window_s, now):
+            return 600 if self.over else 0
+
+        def latest_flag_at(self, org_id, rule):
+            return self.flag
+
+        def flag_org(self, org_id, rule, details, now=None):
+            self.flag = now
+
+        def flag_clear(self, org_id, rule, now=None):
+            self.flag = None
+            self.flag_clears += 1
+
+    engine_store = _FlappingStore()
+    engine = AbuseEngine(engine_store)
+    # Each step advances only a minute, so the flag stays INSIDE its staging
+    # window and this test measures the episode bound, not the stage-2 escalation.
+    clock = [datetime.now(timezone.utc)]  # noqa: UP017
+    for _ in range(5):
+        engine_store.over = True          # the burst: over threshold
+        engine._evaluate("org-a", "point_create", 500, 3600, clock[0])
+        clock[0] = clock[0] + timedelta(seconds=60)
+        engine_store.over = False         # the burst ages out: window clean
+        engine._evaluate("org-a", "point_create", 500, 3600, clock[0])
+        clock[0] = clock[0] + timedelta(seconds=60)
+
+    assert len(delivered.filed) == 1, (
+        "a rule hovering at its threshold filed an issue per crossing: "
+        f"{len(delivered.filed)} issues for ONE condition")
+    assert delivered.closed == [], (
+        f"a single clean observation resolved a flapping incident ({delivered.closed})")
+    assert len(delivered.pushes) == 1, delivered.pushes
 
 
 def test_a_new_episode_re_fires_exactly_once(delivered):
@@ -245,7 +311,11 @@ def test_a_new_episode_re_fires_exactly_once(delivered):
         _flag(notify)
     assert len(delivered.pushes) == 1
 
-    # the engine observed the rule's window clean → episode over (see abuse.py)
+    # The engine observed the rule's window go clean → episode over (see abuse.py).
+    # The close needs the #3146 recovery window: DR_RECOVERY_STREAK consecutive
+    # clean observations, so resolve twice (in production the second is the
+    # engine's pending retry, ~1h later).
+    notify.resolve_abuse_episode("org-a", "point_create")
     notify.resolve_abuse_episode("org-a", "point_create")
     assert delivered.closed == [1], "the episode-end close is the recovery path"
 
@@ -301,6 +371,8 @@ def test_resolution_announces_before_it_deletes(delivered):
     import tortoise.notify as notify
 
     _flag(notify)
+    # TWO clean observations: the #3146 recovery window is DR_RECOVERY_STREAK.
+    notify.resolve_abuse_episode("org-a", "point_create")
     notify.resolve_abuse_episode("org-a", "point_create")
     assert any("resolved" in p for p in delivered.pushes), delivered.pushes
 
@@ -1121,34 +1193,52 @@ def test_a_missing_incident_channel_delivers_anyway_and_names_the_reason(
 
 # ── 5. the engine owns the episode, so it must end it ───────────────────────
 
-class _CleanWindowStore:
-    """An abuse store whose window has just gone clean with a flag on record."""
-
-    def __init__(self) -> None:
-        self.cleared: list[tuple[str, str]] = []
-
-    def window_sum(self, org_id, rule, window_s, now):
-        return 0
-
-    def latest_flag_at(self, org_id, rule):
-        return datetime.now(timezone.utc) - timedelta(hours=2)  # noqa: UP017
-
-    def flag_clear(self, org_id, rule, now=None):
-        self.cleared.append((org_id, rule))
-
-
 def test_episode_end_resolves_the_abuse_incidents(delivered, monkeypatch):
     """Pre-fix nothing ever resolved an abuse incident: the sentinel and its
     issue stayed open for the rest of time, which is why no incident search can
-    attribute a month-old recurrence (#9944's shape)."""
-    import tortoise.notify as notify
+    attribute a month-old recurrence (#9944's shape).
 
+    #3146: the episode end is the drain of the condition, not the whole recovery
+    window — ONE clean observation must not close an incident for a rule that
+    hovers at its threshold, so the close lands on observation
+    ``DR_RECOVERY_STREAK`` (the engine's pending retry supplies the second, ~1h
+    later).
+    """
+    import tortoise.notify as notify
+    from tortoise.abuse import _EPISODE_RESOLVE_RETRY_BACKOFF_S
+
+    class _CleanWindowStore:
+        """A clean window with a flag on record, and a DURABLE clear (like R2)."""
+
+        def __init__(self) -> None:
+            self.cleared: list[tuple[str, str]] = []
+            self.flagged = True
+
+        def window_sum(self, org_id, rule, window_s, now):
+            return 0
+
+        def latest_flag_at(self, org_id, rule):
+            return (datetime.now(timezone.utc)  # noqa: UP017
+                    if self.flagged else None)
+
+        def flag_clear(self, org_id, rule, now=None):
+            self.cleared.append((org_id, rule))
+            self.flagged = False
+
+    clock = [datetime.now(timezone.utc)]  # noqa: UP017
+    monkeypatch.setattr("tortoise.abuse._utcnow", lambda: clock[0])
     engine = AbuseEngine(_CleanWindowStore())
     _flag(notify)
     assert delivered.filed, "the alert must have filed its incident first"
 
-    engine._evaluate("org-a", "point_create", 500, 3600,
-                     datetime.now(timezone.utc))  # noqa: UP017
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])
+    assert delivered.closed == [], (
+        "one clean window closed the incident — the #3146 recovery window is "
+        f"not applied to the abuse kinds ({delivered.closed})")
+
+    # Observation 2, past the retry backoff so the engine's pending resolve runs.
+    clock[0] = clock[0] + timedelta(seconds=_EPISODE_RESOLVE_RETRY_BACKOFF_S + 1)
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])
 
     assert delivered.closed == [1], "the episode-end close is the recovery path"
     titles = [t for t, _ in delivered.filed]

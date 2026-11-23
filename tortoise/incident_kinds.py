@@ -390,8 +390,23 @@ SPECS: dict[str, KindSpec] = {
     KIND_ABUSE_ENFORCEMENT_FAULT: _spec(
         WRITER_UNSPECIFIED, manual_close=True,
         meaning="an abuse enforcement ACTION could not be applied (#4872)"),
+    #: #14407: the two kinds a RULE EPISODE can file, and both carry the #3146
+    #: recovery window.
+    #:
+    #: Their recovery condition is R1/R2's own bounded SLIDING-WINDOW
+    #: measurement (`count over the last window_s` against a threshold) — the
+    #: exact shape `DR_RECOVERY_STREAK` exists for. Without the window, one
+    #: healthy reading ended the episode: the incident was closed, its delivery
+    #: ledger re-armed, and the flag episode released, so a rule hovering at its
+    #: threshold produced an issue open/close pair AND a 🚨/✅ pair per crossing
+    #: (`alert_store.resolve_incident_state`'s `#3146` clause names that
+    #: consequence verbatim). Two consecutive clean observations collapse the
+    #: flap to ONE incident: the re-flag between them is a ``DEDUP``, which resets
+    #: the count at the open path (`_note_still_unhealthy`), and the engine's
+    #: pending-resolve retry supplies observation 2 ~1h later.
     KIND_ABUSE_REVIEW_NEEDED: _spec(
         WRITER_UNSPECIFIED, manual_close=True, legacy_lowercase=True,
+        resolve_streak=DR_RECOVERY_STREAK,
         meaning="persistent breach: human review, not suspension (#5425)"),
     #: #14407: the stage-1 flag's incident. ``manual_close`` stays TRUE for the
     #: same reason as its siblings: the engine closes it at episode end
@@ -400,6 +415,7 @@ SPECS: dict[str, KindSpec] = {
     #: operator procedure remains a real path.
     KIND_ABUSE_FLAG_RAISED: _spec(
         WRITER_UNSPECIFIED, manual_close=True,
+        resolve_streak=DR_RECOVERY_STREAK,
         meaning="an abuse rule FLAGGED the org (stage 1); alert is deduped per "
                 "episode, and the engine resolves it at episode end (#14407)"),
     KIND_ABUSE_SUSPENDED: _spec(
