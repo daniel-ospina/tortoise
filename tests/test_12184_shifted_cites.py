@@ -1387,7 +1387,7 @@ def test_the_non_comparable_set_is_derived_from_the_pins_file_lengths() -> None:
 
     NON-VACUOUS: on `058f5555b4`'s edition of the document the derived set is 11 pairs while this table now
     holds 13, so the first arm reds; and flipping one document number across an EOF (e.g. `:7193` ->
-    `:7190`, which IS comparable at 7,071 lines) removes it from the derived set and reds the same arm.
+    `:7050`, which IS comparable at 7,071 lines) removes it from the derived set and reds the same arm.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     _spellings, pairs = _resolved_pairs(text)
