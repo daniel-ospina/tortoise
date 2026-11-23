@@ -12553,6 +12553,79 @@ def test_every_python_ci_job_carries_an_outer_cap():
         f"(docs/ops/ci-wall-clock.md), not from the default.")
 
 
+# A job whose pytest step carries a LITERAL watchdog is capped against it here. The
+# ORDER arm below is why this survived the durations-map arithmetic cut (B7): the
+# watchdog is the bound that PRINTS the pass/fail counts, so a cap BENEATH it
+# silently restores #798's death mode — the runner cancels the step and the log
+# tail with it — while everything still reads green beforehand. That is a shape
+# invariant about the workflow, not a restatement of any production formula, so it
+# is not B7's arithmetic to cut.
+_PYTEST_WATCHDOG_RE = re.compile(r"timeout -s INT -k \d+ (\d+)m")
+
+
+def _literal_pytest_watchdog(job: dict) -> int | None:
+    """The job's in-step watchdog in minutes, or None when it is not a
+    literal. The fast shards pass `${{ matrix.watchdog_minutes }}m`, which is
+    derived by `tools.ci_selection.shard_watchdog_minutes` — it has no literal
+    here, so it is covered by the ceiling assertion instead."""
+    for step in job.get("steps", []):
+        hit = _PYTEST_WATCHDOG_RE.search(step.get("run", ""))
+        if hit:
+            return int(hit.group(1))
+    return None
+
+
+def test_every_bounded_pytest_job_caps_above_its_watchdog():
+    """#3239: a pytest job whose in-step watchdog kills it must ALSO carry an
+    outer `timeout-minutes` strictly above that watchdog.
+
+    Both halves are load-bearing and both had been broken: test-track-b ran
+    pytest under a 20m watchdog with NO job cap (GitHub's 360m default), and
+    the fast shards' derived watchdog can reach `WATCHDOG_CEILING_MIN`."""
+    wf = _load_python_ci()
+    jobs = wf["jobs"]
+    bounded = {}
+    for name, job in jobs.items():
+        watchdog = _literal_pytest_watchdog(job)
+        if watchdog is None:
+            continue
+        cap = job.get("timeout-minutes")
+        assert isinstance(cap, int), (
+            f"{name}: runs pytest under a {watchdog}m in-step watchdog but has "
+            f"no `timeout-minutes` cap — GitHub's 360m default then holds the "
+            f"per-PR concurrency slot for a hung job (#3239)")
+        assert watchdog < cap, (
+            f"{name}: the in-step watchdog ({watchdog}m) must stay BELOW the "
+            f"outer cap ({cap}m), or the runner kills the step before it can "
+            f"print its pass/fail counts (#798)")
+        bounded[name] = (watchdog, cap)
+    # W37: `test-carve-out` is a SHARDED job, so its pytest step carries no
+    # literal watchdog — it carries `${{ matrix.watchdog_minutes }}m`, derived
+    # per shard by `tools.ci_selection.shard_watchdog_minutes`. The ORDER
+    # invariant is therefore asserted against the LARGEST watchdog the selector
+    # actually emits, which is the value the literal cap must clear. A static
+    # `in bounded` membership check would have gone vacuous the moment the job
+    # became a matrix.
+    idx = _carve_matrix()
+    carve_cap = jobs["test-carve-out"].get("timeout-minutes")
+    assert isinstance(carve_cap, int), (
+        "the carve-out job needs a literal `timeout-minutes` — without one it "
+        "falls back to GitHub's 360m default and a hung shard holds the per-PR "
+        "concurrency slot for six hours (#3239)")
+    worst = max(e["watchdog_minutes"] for e in idx["include"])
+    assert worst < carve_cap, (
+        f"the carve-out's largest per-shard watchdog ({worst}m) must stay "
+        f"BELOW its outer cap ({carve_cap}m), or the runner kills the step "
+        f"before it can print its pass/fail counts (#798)")
+    # The fast shards' watchdog is per-shard, clamped by the selector at
+    # WATCHDOG_CEILING_MIN — so the cap must clear that ceiling, not a literal.
+    fast_cap = jobs["test"].get("timeout-minutes")
+    assert isinstance(fast_cap, int) and fast_cap > WATCHDOG_CEILING_MIN, (
+        f"the fast job's cap ({fast_cap}) must clear the selector's "
+        f"WATCHDOG_CEILING_MIN ({WATCHDOG_CEILING_MIN}) — a per-shard "
+        f"watchdog may legitimately reach it (#6135/#3239)")
+
+
 def test_every_required_merge_check_carries_an_outer_cap():
     """A job EMITTING a required merge context must carry a literal cap.
 
