@@ -291,6 +291,12 @@ _PRODUCT_MAX_COMBINATIONS = 4096
 _VALUE_MAX_CHARS_PER_NAME = 8192
 _VALUE_MAX_PER_NAME = 512
 
+#: Applications a bind inside statically-sized loops may accumulate before the product
+#: budget decides (#14326 round 15). A literal iterable of 4 elements nested twice is 16;
+#: 64 covers any realistic loop nest, and anything beyond it trips `_VALUE_MAX_*` instead —
+#: the count is an over-approximation bound, never the guard itself.
+_ACCRUAL_MAX_REPS = 64
+
 
 def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     """Every statically POSSIBLE string literal each name may hold, anywhere in the file.
@@ -416,19 +422,48 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     #: reach was refused=False, i.e. the pin passed while the lever shipped. Order is the
     #: semantics: staging is an over-approximation only if it runs in the order the runtime
     #: does.
-    accruals: list[tuple[int, int, str, ast.Name, ast.AST]] = []
+    #: ⛔ A BIND INSIDE A LOOP RUNS MANY TIMES, SO APPLYING IT ONCE UNDER-APPROXIMATES
+    #: (#14326 round 15, MEASURED as a FAIL-OPEN): `_S = "_tortoise"` then
+    #: `for _p in ("_fts", "_query"): _S = _S + _p` builds `_tortoise_fts_query` at runtime,
+    #: a one-application pass resolved to `{'_tortoise','_tortoise_fts','_tortoise_query'}`
+    #: — the built string ABSENT — and a third `kind="statement"` reach was `refuses=False`.
+    #: The iteration count of a LITERAL iterable is statically visible (this file's own
+    #: `for`-target arm says so), so the count multiplies the applications. A loop over a
+    #: NAME/attribute/call is NOT countable: that case applies once and stays the declared
+    #: residual pinned below, exactly like `_CFG["read"]` — declared, not silent.
+    accruals: list[tuple[int, int, str, ast.Name, ast.AST, int]] = []
+    _parents = _parents_of(tree)
+
+    def _literal_len(iterable: ast.AST) -> int:
+        """How many values a literal iterable hands its `for` target; 1 when unknowable."""
+        if isinstance(iterable, (ast.Tuple, ast.List, ast.Set)):
+            return max(len(iterable.elts), 1)
+        if isinstance(iterable, ast.Dict):
+            return max(len(iterable.keys), 1)
+        return 1
+
+    def _loop_reps(node: ast.AST) -> int:
+        """Applications the runtime may make to this bind, from its enclosing loops."""
+        reps = 1
+        current: ast.AST | None = node
+        while current is not None:
+            if isinstance(current, (ast.For, ast.AsyncFor, ast.comprehension)):
+                reps *= _literal_len(current.iter)
+            current = _parents.get(id(current))
+        return min(reps, _ACCRUAL_MAX_REPS)
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if _self_referential(target, node.value):
-                    accruals.append(
-                        (node.lineno, node.col_offset, "expr", target, node.value))
+                    accruals.append((node.lineno, node.col_offset, "expr",
+                                     target, node.value, _loop_reps(node)))
                 else:
                     binds.append((target, node.value))
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
             if _self_referential(node.target, node.value):
                 accruals.append((node.lineno, node.col_offset, "expr",
-                                 node.target, node.value))
+                                 node.target, node.value, _loop_reps(node)))
             else:
                 binds.append((node.target, node.value))
         # ⛔ AN AUGMENTED BIND IS A BIND (#14326 review at `a29f3cd8`, MEASURED GREEN at
@@ -442,7 +477,7 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
                 and isinstance(node.op, ast.Add)):
             accruals.append((node.lineno, node.col_offset, "aug",
-                             node.target, node.value))
+                             node.target, node.value, _loop_reps(node)))
         # ⛔ A `for`/COMPREHENSION TARGET IS A BIND TOO (#14279 review F1): the spelling
         # carries no `Assign` node at all, so no assignment arm above could ever see it.
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
@@ -745,17 +780,18 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     # computes the product against the map as it stands for BOTH spellings, so the only
     # difference between them here is that `+=` names only the RHS while `=` carries the
     # whole expression.
-    for _lineno, _col, kind, _target, _value in sorted(
+    for _lineno, _col, kind, _target, _value, _reps in sorted(
             accruals, key=lambda item: (item[0], item[1])):
-        _acc = out.get(_target.id)
-        if _acc is None:
-            _acc = out[_target.id] = set()
-        if kind == "aug":
-            _bases = set(_acc)
-            _acc |= {base + suffix for base in _bases for suffix in _values(_value)}
-        else:
-            _acc |= _values(_value)
-        _check_budget(_target.id, _acc)
+        for _ in range(_reps):
+            _acc = out.get(_target.id)
+            if _acc is None:
+                _acc = out[_target.id] = set()
+            if kind == "aug":
+                _bases = set(_acc)
+                _acc |= {base + suffix for base in _bases for suffix in _values(_value)}
+            else:
+                _acc |= _values(_value)
+            _check_budget(_target.id, _acc)
     _fixpoint()
     return {name: frozenset(values) for name, values in out.items() if values}
 
@@ -4905,6 +4941,49 @@ def test_a_MUTUAL_PRODUCT_REFUSES_before_it_allocates() -> None:
             'def run():\n    _a = "xx"\n    _b = _a * 2\n    _a = _b * 2\n'))
 
 
+@pytest.mark.timeout(20)
+def test_the_CONCAT_doubling_and_the_ONE_TOKEN_repetition_REFUSE() -> None:
+    """Each budget clause has a shape only IT stops — otherwise neither is a guard.
+
+    ⛔ MEASURED (#14326 round 15, review P2): deleting `_check_budget`'s raise left the whole
+    file **35 passed**, because `_repetitions`' own guard already refused the `* 2` doubling
+    the row above uses — so that row pinned `_repetitions`, not the clause it was added for.
+    The shape ONLY `_check_budget` stops is a CONCATENATION doubling (no `*` at all):
+
+        _a = "xx"; _b = _a + _a; _a = _b + _b
+
+    and the shape only `_repetitions` stops is one token that allocates the budget in a
+    single call (`_s * 100000000`). Both are pinned here, so deleting either guard reds.
+    """
+    with pytest.raises(_ResolutionDidNotConverge):
+        _str_constants(ast.parse(
+            'def run():\n    _a = "xx"\n    _b = _a + _a\n    _a = _b + _b\n'))
+    # The literal is 12 digits ON PURPOSE: `_s * 100000000` is only 800 MB, so a build that
+    # SKIPS the pre-allocation guard still ends in `_check_budget`'s refusal and this row
+    # would stay green (MEASURED — deleting that guard red nothing until the literal was
+    # raised). At 999999999999 the same build is a `MemoryError`, which is a kill, not a red.
+    with pytest.raises(_ResolutionDidNotConverge):
+        _str_constants(ast.parse(
+            'def run():\n    _s = "_tortoise"\n    _s = _s * 999999999999\n'))
+
+
+def test_a_loop_over_a_NAME_stays_the_DECLARED_residual() -> None:
+    """A loop whose iterable is not a literal applies ONCE — declared, and pinned GREEN.
+
+    ⛔ THIS IS A BOUNDARY, NOT A HOLE. The count of applications is statically visible only
+    for a literal iterable (`_literal_len`); for a NAME, an attribute or a call it is not,
+    and guessing high would over-accumulate every legitimate SQL-ish `while` loop in the file
+    into a refusal. The residual is named in `_str_constants`' docstring beside
+    `_CFG["read"]`, and this row keeps it VISIBLE: if a later change starts resolving it, the
+    assertion tells the author to delete the residual note instead of leaving a stale one.
+    """
+    body = ('    _SEQ = ("_fts", "_query")\n    _S = "_tortoise"\n'
+            '    for _p in _SEQ:\n        _S = _S + _p\n'
+            '    getattr(sdk, _S)(query=queries[0]["query"], limit=10, kind="statement")\n')
+    consts = _str_constants(ast.parse("def run():\n" + body.split("    getattr")[0]))
+    assert "_tortoise_fts_query" not in consts["_S"]
+
+
 def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     """Each way a name can hold the read's NAME must be a reach the pin refuses.
 
@@ -5043,6 +5122,21 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # the two-phase apply produced: with every `+=` staged BEFORE every `=`, the product
         # of `_S = _S + "_query"` never saw `_tortoise_fts`, so the name the code actually
         # builds was missing from the set and this reach was refused=False (measured).
+        # ⛔ A BIND INSIDE A LOOP RUNS MANY TIMES (#14326 round 15, MEASURED GREEN while a
+        # single application was assumed): `for _p in ("_fts", "_query"): _S = _S + _p`
+        # builds `_tortoise_fts_query`, and one application resolved only the FIRST step, so
+        # the name the code ends at was absent and this reach was refused=False. The count
+        # comes from the literal iterable — the same "iteration over a literal is statically
+        # visible" rule this file already applies to `for` TARGETS — and both spellings of
+        # the accumulation are here because each is a separate arm.
+        "loop body, `=` accumulation": (
+            '    _S = "_tortoise"\n    for _p in ("_fts", "_query"):\n'
+            '        _S = _S + _p\n'
+            f'    {reach.format(name="_S")}\n'),
+        "loop body, `+=` accumulation": (
+            '    _S = "_tortoise"\n    for _p in ("_fts", "_query"):\n'
+            '        _S += _p\n'
+            f'    {reach.format(name="_S")}\n'),
         "`+=` THEN a self-referential `=`": (
             '    _S = "_tortoise"\n    _S += "_fts"\n    _S = _S + "_query"\n'
             f'    {reach.format(name="_S")}\n'),
