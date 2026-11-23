@@ -3464,6 +3464,76 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "a Prepended_Concatenation_Mark is being stripped again — that is r19's over-block "
             f"returning: {[(hex(ord(c)), self.INVISIBLE_RE.fullmatch(c)) for c in pcm]}")
 
+    def test_the_invisible_class_holds_for_EVERY_member_of_its_properties(self):
+        """EXHAUSTIVE where the rows above are SAMPLED — because sampling is how this class
+        was declared closed three times while members of it were still open (#14237 r19, r21,
+        r22).
+
+        Every row above pins ONE member of each family it names, and each of those rows did its
+        job: it re-measured a family and found it open. What no row could do is answer the
+        question the class comment keeps asserting — *is the strip the DERIVED class, all of
+        it?* r18 enumerated six codepoints and said closed (164 of Cf's 170 were open); r19
+        asked `category` and said closed (a whole family OUTSIDE Cf was open); r21 asked
+        `Default_Ignorable_Code_Point` and said closed (the 19 layout-excluded Cf members and
+        the `Cc` family were open). A per-family sample cannot falsify "closed"; this does.
+
+        BOTH populations are DERIVED AT RUNTIME from the same property table the strip asks,
+        so the assertion is version-proof rather than pinned to this Unicode release: a
+        Unicode bump that adds a member moves both sides together, and a bump that changes a
+        character's category moves `INVISIBLE_PROPERTY`'s own meaning with it.
+
+        It is the union that is exhaustive, not one property: the class is
+        `Default_Ignorable_Code_Point ∪ Cf ∪ Cc` minus what a reader SEES. Asking only the
+        property would leave the layout-excluded Cf members and every control open; asking
+        only `Cf` would leave the variation selectors and Hangul fillers open. Both halves are
+        asserted, because the union can be narrowed or widened and each direction hides a
+        different way of letting a retired door be pasted back into a document.
+        """
+        properties = ("Default_Ignorable_Code_Point", "Cf", "Cc")
+        seen_as_nothing_but_excluded = ("Prepended_Concatenation_Mark", "White_Space")
+        union = regex.compile("|".join(rf"\p{{{p}}}" for p in properties))
+        excluded = regex.compile(
+            "|".join(rf"\p{{{p}}}" for p in seen_as_nothing_but_excluded))
+        population = [chr(cp) for cp in range(0x110000)
+                      if not 0xD800 <= cp <= 0xDFFF
+                      and union.fullmatch(chr(cp)) and not excluded.fullmatch(chr(cp))]
+        # ⛔ VACUITY GUARDS. A property regex that silently matched nothing would make every
+        # assertion below true over an EMPTY population — the "green measures nothing" failure
+        # mode, and the one a derived population is most exposed to.
+        categories = {unicodedata.category(ch) for ch in population}
+        assert len(population) > 1000 and {"Cf", "Cc"} <= categories, (
+            "the derived population collapsed — the properties no longer resolve as they did, "
+            f"so a green here would measure nothing: {len(population)} codepoints, "
+            f"categories {sorted(categories)}")
+        assert any(c[0] in "LM" for c in categories), (
+            "every derived member is Cf/Cc — the property half of the union (variation "
+            "selectors, Hangul fillers, Mongolian free variation selectors) stopped "
+            f"resolving, so the union is untested here: {sorted(categories)}")
+        survivors = [(hex(ord(ch)), unicodedata.category(ch)) for ch in population
+                     if self.INVISIBLE_RE.fullmatch(ch) is None]
+        assert not survivors, (
+            "a reader sees nothing where these codepoints sit, yet the strip left them in "
+            "place — so a retired name split by one of them is ACCEPTED by both rules, the "
+            "false PASS this class exists to remove. It is the whole derived class or it is a "
+            f"sample again: {survivors}")
+        assert self._strip_invisible("".join(population)) == "", (
+            "the strip is not the derived class as a whole: "
+            f"{self._strip_invisible(''.join(population))!r} survived the one pass")
+        # …and the bound in the OTHER direction, exhaustively too: what the class subtracts is
+        # exactly "visible enough that dropping it is an over-block" — the spaces a reader sees,
+        # and the Prepended_Concatenation_Marks Unicode keeps out of Default_Ignorable because
+        # they render a sign or mark.
+        visible = regex.compile(r"\p{White_Space}|\p{Prepended_Concatenation_Mark}")
+        must_survive = [chr(cp) for cp in range(0x110000)
+                        if not 0xD800 <= cp <= 0xDFFF and visible.fullmatch(chr(cp))]
+        assert must_survive, (
+            "the must-survive population collapsed, so the over-block half measures nothing")
+        wrongly_stripped = [(hex(ord(ch)), unicodedata.category(ch)) for ch in must_survive
+                            if self.INVISIBLE_RE.fullmatch(ch) is not None]
+        assert not wrongly_stripped, (
+            "the strip removed characters a reader SEES — a space, or a mark Unicode keeps "
+            f"visible on purpose — which is the r19 over-block returning: {wrongly_stripped}")
+
     @pytest.mark.parametrize("codepoint", (
         0x0600, 0x0601, 0x06DD, 0x070F, 0x0890, 0x08E2, 0x110BD, 0x110CD))
     def test_a_Cf_member_that_DESIGNS_a_visible_mark_is_NOT_stripped(self, codepoint):
