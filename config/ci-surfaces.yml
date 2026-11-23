@@ -63,7 +63,7 @@ version: 1
 # sentence is GRADED below instead of trusted. That map is the union of both parents'
 # registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
 # (`--emit-push-matrix` lists it in shard c), plus `tests/test_spool_drain_rehearsal.py`
-# (#14429, listed in shard g) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
+# (#14429, listed in shard d) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
 # matters only because it sits one main fold from rounding again. Re-run `--emit-push-matrix`;
 # never carry the last revision's minute.
 #

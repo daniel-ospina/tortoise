@@ -86,8 +86,17 @@ find "$SPOOL/entries" -type f | sort | xargs sha256sum > /tmp/spool-before.txt
 sha256sum "$SPOOL"/entries/*.turns.jsonl | sort | sha256sum   # THE transcript digest
 ```
 
-Record the file count (`wc -l < /tmp/spool-before.txt`) and the transcript
-digest.
+Record the file count (`wc -l < /tmp/spool-before.txt`), the transcript digest,
+**and the session count the API holds right now** — Stage 3's row 6 grades a
+*delta* against it, and a total read after the drain cannot be compared to
+`filed` at all (production holds every previously-filed session):
+
+```bash
+curl -sS -H "Authorization: Bearer $TORTOISE_API_KEY" \
+  "$TORTOISE_API_URL/v1/sessions" | python3 -c \
+  'import json,sys; d=json.load(sys.stdin); print(len(d["sessions"]))' \
+  | tee /tmp/sessions-before.txt
+```
 
 **Pass:** you have both numbers written down somewhere outside the box.
 
@@ -109,7 +118,11 @@ you point at, not by this runbook.
 
 ```bash
 # REHEARSAL ONLY — a throwaway FalkorDB owned by this worktree (#5084)
-eval "$(uv run python tools/test_lane.py uri)"
+# ⛔ TWO steps, deliberately: a FAILED start prints nothing on stdout and
+# `eval ""` returns 0, so the one-line form cannot abort — it silently leaves a
+# PREVIOUSLY exported TORTOISE_DB_URI in place (tools/test_lane.py USAGE).
+uri="$(uv run python tools/test_lane.py uri)" || { echo "lane start failed"; exit 1; }
+eval "$uri"
 echo "$TORTOISE_DB_URI"        # must be 127.0.0.1:<ephemeral port>
 ```
 
@@ -241,7 +254,10 @@ Run it in the foreground first (the SessionStart hook runs a silent, backgrounde
 drain; for the one-shot backlog you want to see the output):
 
 ```bash
-tortoise session drain --retry-terminal 2>&1 | tee /tmp/drain-$(date -u +%H%M).log
+# `uv run` because `uv sync` installs the console script into `.venv/bin`, which is
+# not on `PATH` on a fresh box. ⛔ And read the LINE, never `$?`: this verb wraps the
+# whole drain in one try and ALWAYS exits 0 (`tortoise/__main__.py:9474-9484`).
+uv run tortoise session drain --retry-terminal 2>&1 | tee /tmp/drain-$(date -u +%H%M).log
 ```
 
 ### The stages, their observable, and their pass/fail
@@ -249,12 +265,12 @@ tortoise session drain --retry-terminal 2>&1 | tee /tmp/drain-$(date -u +%H%M).l
 | # | Stage | Observable (where) | PASS | FAIL — and what it is |
 |---|---|---|---|---|
 | 1 | terminal re-arm | `spool drain: cleared terminal state on N entries` | N is any number (0 is normal) | — |
-| 2 | POST batch | server-side: `POST /v1/sessions` → `200` | all `200` | `504` → extraction outran the ack window; the entry is **deferred, kept**; re-run (idempotent) |
+| 2 | POST batch | server-side: `POST /v1/sessions` → `200` | all `200` | `504` → extraction outran the ack window; ⛔ the record may have LANDED anyway — measured `filed 3, deferred 0`, `filed_key 3/3` — the confirm path files it, so check `filed_key` before re-running. A `504` is a lost **response**, not a lost capture |
 | 3 | ACK honesty | `spool drain: outcome unrecorded N (…)` | N may equal the filed count — this is the ACK path saying extraction is behind the answer | ⛔ not a failure. It becomes one only if it is still `N` after Stage 5 |
-| 4 | drain summary | `spool drain: filed F, deferred D, skipped S …, terminal T, discarded X` | `X == 0`; `T == 0`; `S == entries − unfiled` | `discarded > 0` → READ the `spool discard (<reason>)` lines; `terminal > 0` → a PERMANENT 4xx, see below |
+| 4 | drain summary | `spool drain: filed F, deferred D, skipped S …, terminal T, discarded X` | **`F + D == unfiled` and `F > 0`**; `X == 0`; `T == 0`; `S == entries − unfiled` | `discarded > 0` → READ the `spool discard (<reason>)` lines; `terminal > 0` → a PERMANENT 4xx, see below; ⛔ **`F == 0` → FAIL, and this row alone cannot see it**: an unreachable API defers every entry (`classify_failure` returns `retry` for `status=None`, `tortoise/capture_spool.py:663-667`), so `F 0, D 264, T 0, X 0, S = 265 − 264` satisfies every other criterion here |
 | 5 | completion (no client action) | `GET /v1/sessions/{id}` → `extraction.outcome_known: true`, no `phase` | every session terminal | still `phase` after minutes → extraction worker stuck; the capture is still durable — do NOT re-drain blindly |
-| 6 | the record | graph: `Session` count, turn `Point`s, extracted points | sessions == POSTs; turn points ≈ turns | fewer sessions than POSTs → **read `#14342` D2 before re-running** |
-| 7 | idempotency | run the drain a second time | `filed 0`, `deferred 0`, seconds not minutes | a second drain that re-POSTs = the `capture_key` short-circuit is broken |
+| 6 | the record | graph: `Session` count, turn `Point`s, extracted points | **`sessions Δ` (vs the Stage 0 count) == `F`**; turn points ≈ turns | a `sessions Δ` SHORT of `F` → **read `#14342` D2 before re-running**. ⛔ Not `sessions == POSTs`: already-filed entries never POST (Stage −1), and a refused `429` creates no session, so a healthy rehearsal measured 264 POSTs against 214 sessions |
+| 7 | idempotency | run the drain a second time | **`sessions Δ 0`** across the second pass (seconds, not minutes) | a second drain that re-POSTs / raises the session count = the `capture_key` short-circuit is broken. ⛔ Not the drain's summary line: `tortoise/__main__.py:9849` prints `spool drain: filed …` only when something was attempted, held, discarded or terminal, so a CLEAN second pass prints only `cleared terminal state on 0 entries — retrying` — success is silence, not a `filed 0` line |
 
 ⛔ **Every failure above is recorded by the DRAIN, never by deleting anything.**
 The single most important property of this operation: a failed entry stays on the
