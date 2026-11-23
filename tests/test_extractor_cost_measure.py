@@ -675,25 +675,33 @@ def test_the_static_regions_of_a_prompt_are_its_own_bytes():
     The table's first section is only evidence if it is exhaustive: a region
     that the renderer splices but this helper does not count would show up as
     template prose and be attributed to the wrong party.
+
+    ⛔ `template_prose` is a RESIDUAL — `render minus the named slots`
+    (`tools/extractor_cost_measure.py:1802` for S1, `:1826-1827` for S2/S4) — so
+    `sum(statics[stage]) == tokens(render)` is an ARITHMETIC IDENTITY and cannot
+    fail. It proves determinism, never completeness. The falsifiable property is
+    the one pinned below: an unaccounted splice would be silently filed under
+    "stage instructions (template prose)" — the 6,430-token row §1/§4 rank the
+    levers by — so the accounted region NAMES are pinned exactly.
     """
     from tortoise import extractor_v2 as X
     statics = m._render_regions()
-    enc = m._encoding()
-    master = X.build_master_list()
-    date = "2026-11-21T00:00:00+00:00"
 
-    s1 = (X.S1_TMPL
-          .replace("{memory_granularity}", X._granularity_text(master))
-          .replace("{date_anchor}", X._date_anchor(date)))
-    assert sum(statics["s1"].values()) == len(enc.encode(s1))
-    # S2/S4: the region map is captured from the renderer's own fill map, so
-    # the equality is the property that the capture is complete.
-    for stage, rendered in (("s2", X.render_s2_prompt(master, session_date=date,
-                                                      story="", edus=None)),
-                            ("s4", X.render_s4_prompt("", {}, {}, master,
-                                                      session_date=date,
-                                                      edus=None))):
-        assert sum(statics[stage].values()) == len(enc.encode(rendered)), stage
+    # S1 is the stage whose slots are counted BY HAND (S2/S4 come from the
+    # renderer's own fill map), so a new `{slot}` there is the live risk.
+    assert set(re.findall(r"\{(\w+)\}", X.S1_TMPL)) == {
+        "memory_granularity", "date_anchor"}
+    assert set(statics["s1"]) == {
+        "memory_granularity", "date_anchor", "template_prose"}
+    # S2/S4: pin the full accounted set, so a slot the renderer grows without a
+    # matching region reds HERE instead of quietly inflating template_prose.
+    assert set(statics["s2"]) == {
+        "master_list", "anti_routine", "output_contract", "chains_text",
+        "pack_namespaces", "date_anchor", "template_prose"}
+    assert set(statics["s4"]) == {
+        "master_list", "anti_routine", "output_contract", "chains_text",
+        "search_results", "story", "embed_list_json", "date_anchor",
+        "template_prose"}
 
 
 def test_the_kind_vocabulary_is_a_measured_region_not_prose():
@@ -722,12 +730,28 @@ def test_every_document_region_is_charged_once_per_call():
 
 
 def test_the_composition_sums_and_states_its_unattributed_remainder():
-    """The table's parts must sum to what it claims, residual disclosed."""
+    """Every region in the published breakdown is accounted for, and the
+    remainder is disclosed rather than pro-rated.
+
+    ⛔ `composition_total` IS `sum(regions.values())` and `unattributed` IS
+    `fitted - total` (`tools/extractor_cost_measure.py:1940-1942`), so asserting
+    those two relationships is an identity and cannot fail. What CAN fail — and
+    is the property the table needs — is that no region silently goes MISSING
+    from the breakdown (a dropped `regions` entry leaves both identities intact
+    and only shrinks the total), so the labels are pinned exactly.
+    """
     dec = m.decompose(_evidence_rows())
-    assert sum(dec["regions"].values()) == pytest.approx(
-        dec["composition_total"], abs=1.0)
-    assert dec["unattributed"] == pytest.approx(
-        dec["fitted_constant"] - dec["composition_total"], abs=1.0)
+    assert set(dec["regions"]) == {
+        "**S2's embed list, re-sent to S4**",
+        "**S1's story, re-sent to S2 and S4**",
+        "kind vocabulary (`master_list`)",
+        "stage instructions (template prose)",
+        "mapping rules (`anti_routine`)",
+        "output schema (`output_contract`)",
+        "memory granularity (S1 only)",
+        "date anchor",
+        "chains",
+        "graph search results (S4)"}
     # The remainder is stated, not hidden: it is the OLS intercept's leverage,
     # and a table that closed the gap by construction would be a rounder lie.
     assert abs(dec["unattributed"]) < 0.25 * dec["fitted_constant"]

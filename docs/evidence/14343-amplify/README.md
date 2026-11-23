@@ -22,6 +22,9 @@ count already in `#14295`'s `measurements.jsonl`.
 **Reproduce (no provider call, no spend):**
 
 ```bash
+# Requires TORTOISE_S4_DELTA unset (the production default): the LEGACY arm
+# renders different S4 prose, so a revert-flagged shell regenerates different
+# §1/§2 numbers. `tests/test_extractor_cost_measure.py` pins the unset posture.
 uv run python tools/extractor_cost_measure.py decompose \
     --evidence docs/evidence/14277-extractor-cost/measurements.jsonl \
     --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
