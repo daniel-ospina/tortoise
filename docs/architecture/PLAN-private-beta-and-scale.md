@@ -115,6 +115,27 @@ acceptance bar).
 `#2952`'s declared-read rule (`declared_retrieval_kind`) instead of defaulting to unlabelled keyword-only results — `#2952` is
 **closed**, so this is inheriting a rule, not pending work. *Exit:* all four pair shapes resolve; **the demo runs**, numeric and noun-substitution variants.
 
+**F4 · Bulk ingest — the document BATCH surface (`#14219`).** F1/F2/F3 make bulk work *survivable*; they do not
+make it a *product*. A customer who hands us a folder of documents needs, in addition: a batch identity, per-item
+status, dedup by content hash, resumability, a declared concurrency ceiling and a progress surface. Every comparable
+has this shape (Hindsight publishes 500–2,000 ms per retain batch, Mem0 acknowledges an add in <50 ms and works on a
+queue, Supermemory runs a later "dreaming" phase) — all of them separate **acceptance** from **completion**.
+
+⛔ Named **batch**, never "pack": `/v1/packs` is the ONTOLOGY pack surface (#318/#9583, #1935/epic #1891) and stays
+untouched. *Exit:* `POST /v1/batches` accepts N items inside the existing wait budget (#3834 — a batch ACKs, it does
+not get a longer timeout), every item reaches a terminal state (`queued · extracting · embedded · indexed · failed ·
+skipped-duplicate · cancelled`, each non-success with a reason), a re-submitted file is a no-op that spends zero
+tokens, a restart resumes (and the batch says it is resuming), and a cancel stops future work while keeping what was
+done. Batch document processing is **off-peak only** (owner, 2026-11-23): the layer makes scheduling possible and
+publishes the estimate; the scheduler is F4's remaining half.
+
+**Landed:** the layer and the routes (`tortoise/batch_ingest.py`, PR #14415) with the per-item indexer door,
+content-hash dedup, resume, cancel and the proactive estimate against the ONE `capture_extraction` budget (#14275).
+**Not yet:** the LLM-extraction half of a batched item (the document is registered, embedded and searchable, and
+`needs_extraction` routes it through the existing pending-document sweep), the off-peak tick, and a 20/500-document
+scale measurement on the production shape.
+
+
 ### Track S — build the destination *(starts now; spend only when a gate says so; S = scale)*
 
 Track S is **not** blocked on Track F. Its first four items (S1–S4) are free and independent, and doing them now is exactly what
