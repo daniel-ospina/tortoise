@@ -8024,14 +8024,22 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # that head (`git show origin/main:tortoise/sdk.py | grep -nF '<needle>'`), never derived.
     _twin = (f"sits at `:{_rs_hits[0]}` at this head — ⛔ ONE head, ONE number: "
              "no `origin/main` value is typed beside it")
-    assert _d5.count(_twin) == 2, (
+    #: ⛔ ONE OCCURRENCE, NOT TWO (#14386 review round 9 — MEASURED). `count == 2` was the
+    #: DUPLICATED-CLAUSE RESIDUE of a patch collision, not a second fact: the same sentence,
+    #: with the same number, had been written twice on the row (the second copy nested inside
+    #: the first's parenthesis). De-duplicating the row dropped this to 1 and this arm's `== 2`
+    #: is what reddened — i.e. the arm was grading the collision as content. ONE is the true
+    #: count, and non-vacuity does not depend on a second copy: the NUMBER is derived from
+    #: `tortoise/sdk.py` above, so moving it reds the number, deleting the sentence reds the
+    #: count (0), and both were replayed against this head before the assertion was changed.
+    assert _d5.count(_twin) == 1, (
         f"05-verify.md states the `register_source(..., raw_state=...)` pair ({_rs_hits[0]} "
         f"measured in `tortoise/sdk.py`) in this phrasing {_d5.count(_twin)} time(s), and it "
-        "must be stated exactly twice. Re-derive BOTH occurrences from THIS tree "
-        "(`grep -nF 'register_source(..., raw_state=...)' tortoise/sdk.py`), and state the "
-        "number for ONE head — the row's own rule is that one present-tense fact carries "
-        "one number, and a number for another head is a reading of that head or it is not "
-        "stated at all")
+        "must be stated exactly ONCE — the row's own rule is that one present-tense fact "
+        "carries one number, so a second copy is not a fact but a duplicated clause. "
+        "Re-derive the sentence from THIS tree "
+        "(`grep -nF 'register_source(..., raw_state=...)' tortoise/sdk.py`) and state the "
+        "number for ONE head")
 
     # ⛔ THE OTHER THREE `_honours` CURRENCY CLAIMS ON D5, READ BY A DERIVED LITERAL (#13494
     # review cycles 4 and 5). The `_pin_row_failures` row added for this clause is scoped to the
@@ -8043,7 +8051,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 298 cite-shaped `:N` tokens (the `~50` these
+    # because D5 is one markdown LINE carrying 296 cite-shaped `:N` tokens (the `~50` these
     # comments used to say was about five times low, `265/50 ≈ 5.3`, not a tenfold one —
     # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
@@ -17786,10 +17794,10 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 298 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 296 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
-    any commit moving the line off `298` reds instead of leaving four comments behind (a
+    any commit moving the line off `296` reds instead of leaving four comments behind (a
     mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
     ⛔ The merge that brought `origin/main` in took THIS branch's row (its own 16 review rounds
     and the pins that read it live here), so the branch row's count is the one that holds; a
@@ -18000,7 +18008,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 298 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 296 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -18067,7 +18075,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 298 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 296 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
@@ -18907,7 +18915,7 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
     re-pointed the `_dedup_content_candidates` / `alreadyDecided` pair and the `_extract_session_llm`
     docstring / empty-gate return dict pair, and restoring EITHER number to its pre-fix
     value left this file's whole D5 selection GREEN — `_D5_CURRENT_CLAIMS` named neither,
-    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 298 of
+    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 296 of
     them. A row whose own thesis is that a typed line number rots cannot re-point a figure
     and leave it unread; that is the class #13879 review named when a reverted address
     "reddened no arm at all".
@@ -19605,11 +19613,12 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 
 #: ⛔ THE `sdk.py:147` FIGURES ARE GRADED BY A DECLARED CENSUS, not by one `re.search`
 #: (#14386 review round 6, P2 — MEASURED). Entry 10 of `_INDEX_ROW_ANCHORS` binds the spelling
-#: ``line at `sdk.py:N` is `main`'s own``, which occurs TWICE (both on line 102); the other FIVE
-#: occurrences — on lines 102, 108 and 114 — match that shape not at all. Mutating occurrence 2,
-#: 3 or 6 to `:148` (whose line is `from .live import direction_flows`, NOT the insert) left
-#: `485 passed`. The arm reads one match, so one occurrence was graded out of seven: the
-#: fail-open direction, on prose this PR itself adds.
+#: ``line at `sdk.py:N` is `main`'s own``, which occurs ONCE (on line 102); the other five
+#: occurrences — 1 on line 102, 3 on line 108 and 2 on line 114, SIX in all (#14386 review
+#: round 9: this said seven / TWICE, which was the pre-dedup reading) — match that shape not at
+#: all. Mutating occurrence 2, 3 or 6 to `:148` (whose line is `from .live import
+#: direction_flows`, NOT the insert) left `485 passed`. The arm reads one match, so one
+#: occurrence was graded out of six: the fail-open direction, on prose this PR itself adds.
 #:
 #: The fix is the shape the sibling tables already use — a DECLARED COUNT. Every occurrence of
 #: the token must still be there, so repointing ANY ONE of them drops the count and reds; the
@@ -19618,8 +19627,8 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
 #:
 #: ⛔ AND THE COUNT NEEDS A RIGHT BOUNDARY, or the sentence above is FALSE (#14386 review round 8,
 #: F2 — MEASURED). `doc.count("sdk.py:147")` counts a PREFIX, so `sdk.py:1475` counts as a hit:
-#: entry 10 grades TWO of the seven occurrences, and repointing the other FIVE to `:1475` left the
-#: count at 7 and this arm GREEN — the fail-open direction, on the very guarantee this comment
+#: entry 10 grades ONE of the six occurrences, and repointing the other five to `:1475` left the
+#: count at 6 and this arm GREEN — the fail-open direction, on the very guarantee this comment
 #: asserts. The census now matches `sdk\.py:147(?!\d)`, and that mutation is replayed as an
 #: assertion in `test_the_index_table_row_states_each_anchor_it_names_at_this_head`, so the
 #: boundary cannot be dropped again without a red.
