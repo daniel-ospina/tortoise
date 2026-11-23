@@ -1297,11 +1297,11 @@ The body carries
                            "batch_size":{"n": 0, "window": 0, "p50": null, "p95": null, "max": null}},
                "latency_stale": false,
                "backings": {"inprocess": {"max_wait_ms": 0.0,  "selected": true,
-                                       "latency": null, "latency_stale": false},
+                                          "latency": null, "latency_stale": false},
                             "worker":    {"max_wait_ms": 20.0, "selected": false,
-                                       "latency": null, "latency_stale": false},
+                                          "latency": null, "latency_stale": false},
                             "external":  {"max_wait_ms": 20.0, "selected": false,
-                                       "latency": null, "latency_stale": false}}}
+                                          "latency": null, "latency_stale": false}}}
 ```
 
 **Every `backings[*]` entry carries the SAME four keys** — `max_wait_ms`, `selected`, `latency`,

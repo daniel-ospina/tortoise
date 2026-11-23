@@ -2233,11 +2233,11 @@ def seam_status() -> dict:
             # ⛔ THE KEY SET IS THE SAME ON EVERY ENTRY (review P3).
             # `latency_stale` used to be written only on the entries that are
             # NOT the live-configured one, so the published shape depended on
-            # which backing was selected: `jq .embed_seam.backings.worker
-            # .latency_stale` answered `false` under `worker` and `true`/
-            # `false` under any other lever. A declared STABLE shape cannot
-            # have a key that appears conditionally, so both keys are seeded
-            # here and each branch only overwrites them.
+            # which backing was selected: `jq .embed_seam.backings.worker`
+            # answered without a `latency_stale` key under `worker`, and with one
+            # under any other lever. A declared STABLE shape cannot have a key
+            # that appears conditionally, so both keys are seeded here and each
+            # branch only overwrites them.
             entry: dict[str, Any] = {
                 "max_wait_ms": resolve_max_wait_ms(candidate),
                 "selected": candidate == name,
