@@ -251,9 +251,19 @@ def test_the_compact_layout_always_shrinks_and_the_share_is_a_property_of_the_la
 def test_both_layouts_round_trip_to_the_identical_object(emissions):
     """Parsing either render yields what S2 emitted — key order included.
 
-    This is the property that makes the lever information-neutral at the JSON level.
-    `json.loads` preserves insertion order, so a reordered render reds here even
-    though it is "the same dict" by equality-insensitive comparison.
+    What this establishes: the corpus is JSON-native, so both layouts round-trip to the
+    identical object with insertion order intact — `json.loads` preserves it, so a
+    reordered render reds here even though it is "the same dict" by
+    equality-insensitive comparison. That makes it a **fixture-integrity** check on the
+    payload §1 measured.
+
+    ⛔ What it does NOT establish, stated because the earlier wording claimed it did: this
+    reads its renders out of `json.dumps` itself and never calls `extractor_v2`'s embed
+    serializer, so it pins no production path and cannot by itself show the lever is
+    information-neutral at the JSON level.
+    `test_the_s4_prompt_carries_a_region_that_parses_back_to_the_same_list` is the only
+    assertion in this file that touches the product. The one way this test can fail is a
+    receipt carrying a value JSON cannot round-trip (`NaN`/`Infinity`).
     """
     for session, arm, embed in emissions:
         for label, render in (("indent", json.dumps(embed, indent=1)),
