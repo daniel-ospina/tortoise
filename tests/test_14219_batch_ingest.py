@@ -17,6 +17,7 @@ from tortoise.batch_ingest import (
     ACKNOWLEDGEMENT_TOKEN_THRESHOLD,
     BATCH_ITEMS_IN_FLIGHT,
     BATCH_LABEL,
+    BATCH_RECLAIM_AFTER_S,
     OVERAGE_USD_PER_MILLION_TOKENS,
     PROVIDER_MECHANICS_WORDS,
     SECONDS_PER_DOCUMENT,
@@ -42,6 +43,9 @@ from tortoise.batch_ingest import (
     normalise_text,
     runner_result_to_outcome,
     status_body,
+)
+from tortoise.batch_ingest import (
+    _age_seconds as bi_age,
 )
 
 ORG = "org_test"
@@ -1460,3 +1464,101 @@ def test_record_item_spend_returns_the_tokens_it_recorded(monkeypatch):
     # The zero case is still a no-op (no phantom capture row, #3359).
     assert record_item_spend(ORG, tokens_in=0, tokens_out=0) == 0
     assert len(calls) == 1
+# ── round 8: the order the rotation needs, the receipt/ledger equality ─────
+def test_pending_batches_is_ordered_by_the_caller_not_by_cypher():
+    """⛔ BLOCKING 1: a `UNION` followed by `ORDER BY` is IGNORED by FalkorDB.
+
+    Measured: the real query came back in insertion order, byte-identical to the
+    same query without the clause, three runs out of three (the single-arm control
+    sorted correctly). The rotating recovery window is only fair over a
+    DETERMINISTIC list, so the order is imposed in Python — an inert Cypher clause
+    is exactly the "assertion that cannot fail" class this branch keeps removing.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    ids = [coord.submit(ORG, [f"/d/{n}.md"])[0].batch_id for n in range(6)]
+    # The consumer sorts, so the window is deterministic whatever the store's
+    # natural order is (the in-memory store is insertion-ordered, the graph store
+    # sorts because FalkorDB ignores the clause).
+    assert sorted(coord._store.pending_batches(ORG)) == sorted(ids)
+    import random
+
+    shuffled = list(ids)
+    random.Random(7).shuffle(shuffled)
+    resumed = []
+    for offset in range(0, len(ids), 2):
+        resumed += coord.recover(ORG, offset=offset, limit=2)
+    assert set(ids) <= set(resumed), (
+        f"{sorted(set(ids) - set(resumed))} were never reached by the rotation")
+
+
+def test_a_future_stamp_is_fresh_within_one_window_and_ancient_beyond_it():
+    """NB1: both failure modes are real, and they point opposite ways.
+
+    `max(0.0, …)` read a stamp months ahead as age 0 → the item was never
+    re-claimed, the ceiling never incremented, the document non-terminal for ever.
+    A 60 s cliff then read ORDINARY two-box skew as ancient and re-ran the runner
+    on a claim seconds old. Inside one reclaim window it is skew (fresh); beyond
+    it, the stamp is not a clock and the item is treated as ancient.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    def stamp(offset_s: float) -> str:
+        return (datetime.now(UTC) + timedelta(seconds=offset_s)).isoformat()
+
+    assert bi_age(stamp(-5)) > 4, "a past stamp is an ordinary age"
+    assert bi_age(stamp(30)) == 0.0, "a minute of skew must read as FRESH"
+    assert bi_age(stamp(BATCH_RECLAIM_AFTER_S + 30)) == float("inf"), (
+        "beyond a window the stamp is not a clock: believing it strands the "
+        "document for ever")
+    assert bi_age("not-a-timestamp") == float("inf"), (
+        "an unreadable claim time is ancient, never permanently fresh")
+
+
+def test_a_receipt_and_the_meter_agree_when_the_row_moved_on():
+    """⛔ BLOCKING 2: the row must record what the meter bills.
+
+    Two arms have a runner call that really spent while the row could not take its
+    outcome: the row went terminal first, and the compare-and-set lost. Both used
+    to leave the spend off the row — the ledger billed 735 against a receipt that
+    said 5, and in the second arm 730 appeared on NEITHER surface.
+    """
+    for variant in ("terminal", "cas-lost"):
+        store = InMemoryBatchStore()
+        assert store is not None
+        coord = BatchCoordinator(store)
+        batch, items = coord.submit(ORG, ["/a.md"])
+
+        def runner(item, _v=variant, _store=store):
+            other = BatchCoordinator(_store)
+            peer = _store.get_item(ORG, item.batch_id, item.item_id)
+            if _v == "terminal":
+                other.advance(ORG, peer, BatchItemState.EXTRACTING, attempt=True)
+                other.advance(ORG, peer, BatchItemState.INDEXED, tokens_in=5)
+            return ItemOutcome(BatchItemState.INDEXED, tokens_in=700,
+                               tokens_out=30)
+
+        if variant == "cas-lost":
+            # The row moves BETWEEN the coordinator's `_fresh` and its write, so
+            # the compare-and-set loses and the outcome cannot be applied.
+            real = coord.advance
+
+            def _advance(org_id, item, new_state, _store=store, _real=real,
+                         **kw):
+                if new_state is BatchItemState.INDEXED:
+                    peer = _store.get_item(org_id, item.batch_id, item.item_id)
+                    BatchCoordinator(_store).advance(
+                        org_id, peer, BatchItemState.EXTRACTING, attempt=True)
+                return _real(org_id, item, new_state, **kw)
+
+            coord.advance = _advance  # type: ignore[method-assign]
+
+        out = coord.run_item(ORG, items[0], runner)
+        billed = out.charge_in + out.charge_out
+        row = store.get_item(ORG, batch.batch_id, items[0].item_id)
+        assert billed == 730, f"{variant}: our call spent 730, billed {billed}"
+        peer_spend = 5 if variant == "terminal" else 0
+        assert row.tokens_in + row.tokens_out == billed + peer_spend, (
+            f"{variant}: the meter bills {billed} (+{peer_spend} by the peer) but "
+            f"the row reports {row.tokens_in + row.tokens_out} — the receipt must "
+            "match the bill")

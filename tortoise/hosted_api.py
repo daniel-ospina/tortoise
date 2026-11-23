@@ -17019,8 +17019,22 @@ def _recover_org_batches(org: dict) -> list[str]:
             # failing scan — and, because the offset went with it, reset the
             # rotation to 0 so the tail was never reached while the fault
             # persisted.
-            _BATCH_SCAN[org_id] = (now - _BATCH_RESCAN_S + _BATCH_RETAIN_FAILURE_S,
-                                   offset)
+            # ⛔ ANCHOR THE THROTTLE AT THE FAILURE, NOT AT THE SCAN'S START
+            # (#14415 review round 8, NB2). With `now` from before the scan, a
+            # failure that takes longer than the retain interval (50 batches x 4
+            # round trips is this file's own measured cost, and a loaded graph is
+            # the reason the arm exists) had already expired its own throttle by
+            # the time it was written — so EVERY read paid a full failing scan,
+            # which is the opposite of what the arm is for. And ⛔ ADVANCE THE
+            # OFFSET WHILE FAILING (#14415 review round 8, NB3): retaining it
+            # pinned the window on a batch whose own read raises, so that batch
+            # was retried for ever and everything behind it was never inspected
+            # by any scan — non-terminal for ever, the stranding class the
+            # rotation exists to remove. A failed window is skipped, and the next
+            # scan starts after it.
+            _BATCH_SCAN[org_id] = (
+                time.monotonic() - _BATCH_RESCAN_S + _BATCH_RETAIN_FAILURE_S,
+                offset + _BATCH_RECOVER_LIMIT)
         return []
     # ⚠️ Every returned batch gets a drain, including one whose only non-terminal
     # item is a FRESH claim a peer may own — that is the round-5 decision (defer,

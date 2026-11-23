@@ -84,7 +84,8 @@ from tests.fake_control_plane import FakeControlPlane
 from tests.test_metering_period_window import _anchor, reg_org  # noqa: F401
 
 #: The nine swallow sites → the lane token each must report. The inventory is
-#: asserted against source in ``test_the_eight_swallow_sites_are_the_eight_lanes``.
+#: asserted against source in
+#: ``test_the_declared_swallow_sites_are_the_declared_lanes``.
 SITE_LANES: dict[str, str] = {
     "write_op": "tortoise/hosted_api.py",
     "capture_ledger": "tortoise/hosted_api.py",
