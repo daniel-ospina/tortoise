@@ -1,4 +1,4 @@
-// tortoise-hook-version: 26
+// tortoise-hook-version: 27
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -2414,6 +2414,53 @@ export function writeSpoolEntry(
     );
 
   let extendsLog = extendsStored;
+  // ⛔ THE LOG AXIS IS NOT NESTED INSIDE THE META AXIS (#14347 review, cycle 3,
+  // finding F1 — the Python twin is `capture_spool.write_spool_entry`).
+  // `storedRead.state` is resolved for EVERY on-disk entry, but its only reader
+  // used to sit inside `if (unusablePrior)` below — so a READABLE meta beside an
+  // UNREADABLE turn log skipped the guard entirely, `stored` was `[]` so
+  // `extendsStored` was false, and the write reached `atomicWrite(logPath,
+  // logText)`. A rename inside a writable directory needs no read permission on
+  // the target, so a mode-`000` log was REPLACED by the snapshot with
+  // `written: true` and NO record at all. That is #11802's rule — a read refusal
+  // is not a corruption, and NOTHING IS DESTROYED — applied one axis over, which
+  // is also the shape the external comparables take for an unreadable SOURCE
+  // (restic: an *incomplete* snapshot, exit 3, never a valid-empty replacement).
+  // So the refusal runs whenever the state is KNOWN, not only when the meta also
+  // failed: refuse, retain, leave the entry byte-identical.
+  if (entryOnDisk && storedRead.state === TURNS_UNREADABLE) {
+    // The record says which of the two files could NOT be read. Both arms share
+    // `DISCARD_META_UNREADABLE` ("the stored state could not be read", retained,
+    // reversible) because a new reason would have to be mirrored into the
+    // retention set and the Python leg for no behavioural gain; the `detail` is
+    // what a reader needs, and it is exact in both arms.
+    const what = unusablePrior
+      ? `neither the stored meta (${basename(metaPath)}) nor the turn log could be read`
+      : `the stored turn log could not be read (its meta ${basename(metaPath)} could)`;
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          session_id: snapshot.sessionId,
+          capture_key: captureKey(snapshot.sessionId, snapshot.turns),
+          reason: DISCARD_META_UNREADABLE,
+          retained: true,
+          detail:
+            `${what}, so this snapshot was REFUSED and the entry left` +
+            " byte-identical: nothing can be concluded about what is on disk," +
+            " and a resync would hide a conversation that some other uid may" +
+            " still be able to deliver",
+        },
+        {
+          stamp: unusablePrior
+            ? `unusable-meta:${snapshot.sessionId}`
+            : `unreadable-turns:${snapshot.sessionId}`,
+        },
+      ),
+    );
+    return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
+  }
+
   // The stored turn count this write would QUARANTINE if it is admitted —
   // resolved before the guards and APPLIED after them (#14347 review F3).
   let divergentTurns = 0;
@@ -2446,27 +2493,9 @@ export function writeSpoolEntry(
     // append rewrites the meta, which moves the directory mtime on every turn, so
     // a per-state stamp would re-record per turn forever (#4714's amplification
     // class).
-    if (storedRead.state === TURNS_UNREADABLE) {
-      discards.push(
-        recordRefusal(
-          dir,
-          {
-            session_id: snapshot.sessionId,
-            capture_key: captureKey(snapshot.sessionId, snapshot.turns),
-            reason: DISCARD_META_UNREADABLE,
-            retained: true,
-            detail:
-              `neither the stored meta (${basename(metaPath)}) nor the turn log` +
-              " could be read, so this snapshot was REFUSED and the entry left" +
-              " byte-identical: nothing can be concluded about what is on disk," +
-              " and a resync would hide a conversation that some other uid may" +
-              " still be able to deliver",
-          },
-          { stamp: `unusable-meta:${snapshot.sessionId}` },
-        ),
-      );
-      return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
-    }
+    // (disposition 1 — the log cannot be read either — is enforced ABOVE,
+    // outside this arm: the log axis is an axis, not a sub-case of the meta one.
+    // See `if (entryOnDisk && storedRead.state === TURNS_UNREADABLE)`.)
     if (extendsLog) {
       const note =
         `the write APPENDED ${snapshot.turns.length - stored.length} new turn(s)` +
@@ -4776,9 +4805,12 @@ function healthScan(
   // hole. A meta this leg cannot READ is retained and never evicted, so its
   // BYTES still count against the byte ceiling — returned here so the health line
   // reaches the same SATURATED verdict the write path reaches, without a second
-  // walk. A meta it can read but not USE (invalid JSON, no `session_id`) is not
-  // counted: the repairing scan quarantines it, and its log then counts as an
-  // orphan. Mirrors `capture_spool._health_scan`.
+  // walk. A meta it can read but not USE (invalid JSON, no `session_id`) is
+  // COUNTED too (#14347 review F3): `listSpoolEntries` collects those stems
+  // BEFORE its `repair` gate, so a read-only probe still sees the class it would
+  // otherwise drop — and this scan passes `repair: false`, so it quarantines
+  // nothing; the repairing scan (the drain) is what moves such an entry.
+  // Mirrors `capture_spool._health_scan`.
   //
   // ⛔ THE COUNT ELEMENT IS THE OTHER HALF (#12483's "both ceilings"):
   // `metas.length` cannot see either unreadable class, so a health line that

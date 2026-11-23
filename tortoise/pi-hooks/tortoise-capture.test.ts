@@ -6440,6 +6440,61 @@ test("the writer REFUSES when it cannot read the LOG either (#12487)", () => {
   assert.equal(readFileSync(logPath, "utf8").split("\n").filter(Boolean).length, 1);
 });
 
+test("the writer REFUSES when ONLY the LOG cannot be read (#14347 cycle-3 F1)", () => {
+  // The LOG axis is an axis, not a sub-case of the META one. A READABLE meta
+  // beside an UNREADABLE turn log used to skip the `TURNS_UNREADABLE` guard —
+  // its only reader sat inside `if (unusablePrior)` — so `stored` was `[]`,
+  // `extendsStored` was false, and the write reached `atomicWrite(logPath,
+  // logText)`: a rename inside a writable directory needs no read permission on
+  // the target, so the log was REPLACED by the snapshot with `written: true` and
+  // no record at all. Mirrors
+  // `test_the_writer_refuses_when_ONLY_the_LOG_cannot_be_read`.
+  //
+  // MUTATION THAT REDS THIS: re-nest the guard inside `if (unusablePrior)` (or
+  // drop it) -> `written` is true and the log falls from 2 lines to 1.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-log-only";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(
+    metaPath,
+    JSON.stringify({ version: 1, session_id: sid, content_digest: "stale-digest" }),
+  );
+  const stored = [
+    { role: "user" as const, content: "one" },
+    { role: "assistant" as const, content: "two" },
+  ];
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  const metaBefore = readFileSync(metaPath, "utf8");
+  chmodSync(logPath, 0o000);
+  try {
+    const res = writeSpoolEntry(
+      spool,
+      snapshot(sid, [{ role: "assistant" as const, content: "only this one" }]),
+    );
+    assert.equal(res.written, false, "a log it could not read is never overwritten");
+    assert.ok(res.discards.length > 0, "a refusal must be recorded, not silent");
+    assert.equal(res.discards.at(-1)?.reason, DISCARD_META_UNREADABLE);
+    assert.equal(res.discards.at(-1)?.retained, true);
+    assert.match(res.discards.at(-1)?.detail ?? "", /REFUSED/);
+    assert.match(res.discards.at(-1)?.detail ?? "", /turn log could not be read/);
+  } finally {
+    if (existsSync(logPath)) chmodSync(logPath, 0o600);
+  }
+  assert.equal(
+    readFileSync(logPath, "utf8").split("\n").filter(Boolean).length,
+    stored.length,
+    "the stored turns are byte-identical after the refusal",
+  );
+  assert.equal(readFileSync(metaPath, "utf8"), metaBefore, "the readable meta is not rewritten either");
+  assert.equal(
+    readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan")).length,
+    0,
+    "a log this process could not read must never be moved aside",
+  );
+});
+
 test("a growth of an unreadable entry is counted ONCE (#14347 F2)", () => {
   // `prior === undefined` is not "nothing is on disk": in the UNUSABLE arm the
   // entry occupies bytes while its meta cannot be read. Passing

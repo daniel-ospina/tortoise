@@ -2140,6 +2140,53 @@ def write_spool_entry(
     ):
         return {"written": False, "bytes": _entry_bytes(root, snapshot.session_id), "discards": discards}
 
+    # ⛔ THE LOG AXIS IS NOT NESTED INSIDE THE META AXIS (#14347 review, cycle 3,
+    # finding F1). `stored_state` is computed above for EVERY on-disk entry, but
+    # its only reader used to sit inside `if unusable:` below — so a READABLE
+    # meta beside an UNREADABLE turn log skipped the guard entirely, `stored ==
+    # []` made `extends` False, and the write reached
+    # `_atomic_write(log_path, log_text)`. `os.replace` needs only DIRECTORY
+    # write permission, so a mode-`000` log was REPLACED by the snapshot with
+    # `written: True` and NO record at all. Measured on the pre-fix head: log 6
+    # lines -> 1, `discards == []`, no `.orphan`.
+    #
+    # This is #11802's recorded rule — "a read refusal is not a corruption;
+    # nothing is concluded about the entry and NOTHING IS DESTROYED" — applied
+    # one axis over, and it is the same shape the external comparables take for
+    # an unreadable SOURCE (restic: an *incomplete* snapshot, exit 3, never a
+    # valid-empty replacement; Borg: never repair from an unverified source).
+    # So the refusal runs whenever the state is KNOWN, not only when the meta
+    # also failed: refuse, retain, leave the entry byte-identical.
+    if entry_on_disk and stored_state == TURNS_UNREADABLE:
+        # The record says which of the two files could NOT be read. Both arms
+        # share `DISCARD_META_UNREADABLE` ("the stored state could not be read",
+        # retained, reversible) because a new reason would have to be mirrored
+        # into the retention set and the Pi leg for no behavioural gain; the
+        # `detail` is what a reader needs, and it is exact in both arms.
+        what = (
+            f"neither the stored meta ({meta_path.name}) nor the turn log could"
+            " be read"
+            if unusable else
+            f"the stored turn log could not be read (its meta"
+            f" {meta_path.name} could)"
+        )
+        discards.append(_record_refusal(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": capture_key(snapshot.session_id, snapshot.turns),
+            "reason": DISCARD_META_UNREADABLE,
+            "retained": True,
+            "detail": (
+                f"{what}, so this snapshot was REFUSED and the entry left"
+                " byte-identical: nothing can be concluded about what is on"
+                " disk, and a resync would hide a conversation that some other"
+                " uid may still be able to deliver"
+            ),
+        }, stamp=(f"unusable-meta:{snapshot.session_id}" if unusable
+                 else f"unreadable-turns:{snapshot.session_id}")))
+        return {"written": False,
+                "bytes": _entry_bytes(root, snapshot.session_id),
+                "discards": discards}
+
     extends = (
         len(stored) > 0
         # The log must end at a record boundary, or a torn append would fuse the
@@ -2191,23 +2238,9 @@ def write_spool_entry(
         # append rewrites the meta, which moves the directory mtime on every
         # turn, so a per-state stamp would re-record per turn forever (#4714's
         # amplification class).
-        if stored_state == TURNS_UNREADABLE:
-            discards.append(_record_refusal(root, {
-                "session_id": snapshot.session_id,
-                "capture_key": capture_key(snapshot.session_id, snapshot.turns),
-                "reason": DISCARD_META_UNREADABLE,
-                "retained": True,
-                "detail": (
-                    f"neither the stored meta ({meta_path.name}) nor the turn"
-                    " log could be read, so this snapshot was REFUSED and the"
-                    " entry left byte-identical: nothing can be concluded about"
-                    " what is on disk, and a resync would hide a conversation"
-                    " that some other uid may still be able to deliver"
-                ),
-            }, stamp=f"unusable-meta:{snapshot.session_id}"))
-            return {"written": False,
-                    "bytes": _entry_bytes(root, snapshot.session_id),
-                    "discards": discards}
+        # (disposition 1 — the log cannot be read either — is enforced ABOVE,
+        # outside this arm: the log axis is an axis, not a sub-case of the meta
+        # one. See `if entry_on_disk and stored_state == TURNS_UNREADABLE`.)
         if extends:
             note = (f"the write APPENDED {len(snapshot.turns) - len(stored)} new"
                     " turn(s) and overwrote nothing; the entry's retry/filing"
@@ -3306,8 +3339,14 @@ def _health_scan(root: Path) -> tuple[int, list[dict], int, int] | None:
     meta this leg cannot READ is retained and never evicted, so its BYTES still
     count against the byte ceiling — returned here so the health line reaches the
     same SATURATED verdict the write path reaches, without a second walk. A meta
-    it can read but not USE (invalid JSON, no ``session_id``) is not counted:
-    the repairing scan quarantines it, and its log then counts as an orphan.
+    it can read but not USE (invalid JSON, no ``session_id``) is COUNTED as well
+    (#14347 review F3): :func:`_scan_spool` collects those stems BEFORE its
+    ``repair`` gate, so a read-only probe still sees the class it would otherwise
+    drop — and this scan passes ``repair=False``, so it quarantines nothing; the
+    repairing scan (the drain) is what moves such an entry, and its log then
+    counts as an orphan. The test that pins it is
+    ``test_the_ONE_health_scan_answers_both_questions_the_same_way``
+    (``unreadable_count == 3``: read-refused + corrupt + no-``session_id``).
 
     ⛔ THE FOURTH ELEMENT IS THE COUNT HALF OF THE SAME ARGUMENT (#12483 said
     "both ceilings"). `len(metas)` cannot see either unreadable class, so a health

@@ -304,6 +304,49 @@ def test_the_writer_refuses_when_it_cannot_read_the_LOG_either(tmp_path):
     assert len(log.read_text(encoding="utf-8").splitlines()) == len(TURNS)
 
 
+def test_the_writer_refuses_when_ONLY_the_LOG_cannot_be_read(tmp_path):
+    """(cycle-3 F1) The LOG axis is an axis, not a sub-case of the META one.
+
+    A READABLE meta beside an UNREADABLE turn log used to skip the
+    ``TURNS_UNREADABLE`` guard, because the only reader of ``stored_state`` sat
+    inside the ``if unusable:`` (meta) arm. ``stored == []`` then made
+    ``extends`` False and the write reached ``_atomic_write(log_path, ...)`` —
+    and ``os.replace`` needs only DIRECTORY write permission, so a mode-``000``
+    log was REPLACED by the snapshot with ``written: True`` and no record at
+    all. Measured on the pre-fix head: 3 lines -> 1, ``discards == []``, no
+    ``.orphan``. #11802 (recorded) rules that a read refusal must never
+    destroy, so the refusal is hoisted out of the meta arm and pinned here.
+
+    The sibling test above locks the meta AND the log, so it passes through the
+    ``unusable`` arm and never reaches this case — which is exactly why the
+    defect survived two cycles.
+
+    MUTATION THAT REDS THIS: re-nest the guard inside the ``unusable`` arm (or
+    drop it) -> ``written`` is True, the log falls from 3 lines to 1, and the
+    ledger is empty.
+    """
+    meta = _write_meta(tmp_path, "sess-w", content_digest="digest-of-six-turns")
+    log = _write_turns(tmp_path, "sess-w", TURNS)
+    meta_before = meta.read_bytes()
+    _lock(log)
+    try:
+        shorter = [{"role": "assistant", "content": "only this one"}]
+        res = write_spool_entry(tmp_path, _snapshot("sess-w", turns=shorter), ROOMY)
+        assert res["written"] is False, "a log it could not read is never overwritten"
+        assert res["discards"], "a refusal must be recorded, not silent"
+        assert res["discards"][-1]["reason"] == "meta_unreadable"
+        assert res["discards"][-1]["retained"] is True
+        assert "REFUSED" in res["discards"][-1]["detail"]
+        assert "turn log could not be read" in res["discards"][-1]["detail"]
+    finally:
+        _unlock(log)
+    assert len(log.read_text(encoding="utf-8").splitlines()) == len(TURNS), \
+        "the stored turns are byte-identical after the refusal"
+    assert meta.read_bytes() == meta_before, "the readable meta is not rewritten either"
+    assert not list(_entries(tmp_path).glob("*.orphan*")), \
+        "a log this process could not read must never be moved aside"
+
+
 def test_a_corrupt_json_meta_is_unusable_for_the_writer_but_still_repaired(tmp_path):
     """The symmetric arm: bytes that WERE read and are not a meta. The writer
     treats them as unusable (it cannot carry the filing state), but it does not
