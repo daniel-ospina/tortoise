@@ -150,8 +150,10 @@ WHAT THIS PINS
    builtin name; a repeated function-local VARIABLE target no longer resolves
    (`#9817` — the NAME of a nested `def`/`class` still does, and that residue is
    declared in the note at `_DOOR_REACH_HOPS`), the
-   budget is a BOUND (3, with two
-   measured exceptions), and its acceptance COUNT is pinned by (22) so it cannot
+   budget is a BOUND (3, plus every `_DISTANCE_EXCEPTIONS` entry — four at this
+   head, each equal to its reader's deepest measured door; a typed COUNT here is
+   exactly the rot this file spends its arms on, so the register is the authority),
+   and its acceptance COUNT is pinned by (22) so it cannot
    loosen again silently. **The REST door is keyed on `(verb, path)`, not path
    alone** — a cell naming the sibling `GET` of a `POST` route is a different
    door, and was green before the verb was checked.
@@ -3721,8 +3723,11 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # the budget's own claim. The budget's own text says
     # it is "the measured distance", so assert THAT: the deepest door of each exception
     # reader must need exactly its budget. (MAX over the reader's doors, not per door:
-    # `_preview_delete_edges` is a door at distance 2 for two live tools and 4 for the
-    # retired shim, and only the deepest one is what the budget was raised for.)
+    # `_preview_delete_edges`'s three doors are ALL retired #3883 spellings —
+    # `tortoise_delete_point` and `tortoise_delete_entity` at distance 2, and the
+    # `tortoise_delete` forwarding shim at 4 (the chain the register entry below
+    # describes); the LIVE door, `tortoise_delete_knowledge`, is not one of this row's
+    # doors at all. Only the deepest is what the budget was raised for.)
     for exception_reader, (exception_budget, _why) in _DISTANCE_EXCEPTIONS.items():
         exception_doors = [
             door
