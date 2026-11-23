@@ -4381,6 +4381,90 @@ def _unregistered_wall_clock_citations(
 #: below, so a number that keeps passing `1 <= n <= EOF` while landing elsewhere reds instead.
 _REFUSAL_ANCHOR = "Cost when GitHub-hosted is healthy"
 
+#: A DE-NUMBERED pointer: a `(file, marker, declaration)` triple for a `python-ci.yml` claim a graded
+#: file makes in PROSE, where the number it used to carry could not be expressed at all.
+#:
+#: `.github/workflows/ci.yml` cited the `#11057 review P2` note inside python-ci.yml's own
+#: `actions/checkout` step — the insertion that put that file's gate at `fetch-depth: 0` — as
+#: `python-ci.yml:4234-4244`. That number was WRONG WHEN IT WAS WRITTEN (it landed on
+#: `- uses: actions/checkout@v4`), and `_refusal_citation_problems` could not catch it as a second
+#: target: its single anchor is the `test-slow` refusal paragraph's OPENER, so EVERY
+#: `python-ci.yml:<n>` in these two files must be that line — a legitimate second citation target has
+#: no spelling that satisfies it. Deleting the number was therefore the only way to get the arm green,
+#: and it took the last GRADED pointer to that note with it (measured at `158ac4115e`: `ci.yml`'s
+#: graded `python-ci.yml` population went from two cites to one, and nothing else in the repo reads
+#: the note).
+#: ⛔ A prose pointer is only better than a stale number if it RESOLVES. This register is what makes
+#: it checkable: `_de_numbered_cite_problems` proves both halves of the sentence — the marker exists
+#: in python-ci.yml, and it sits inside an `actions/checkout` step whose block declares the
+#: `fetch-depth` the sentence claims. Rewording the note, deleting it, or changing that checkout back
+#: to a shallow one reds here, which is the unverified state a number alone cannot detect.
+#: ⚠ No line number is restated in this note on purpose — that is exactly the rot this register
+#: replaces (three attempts to keep a live number in `_REFUSAL_CITATION_SITES`' own note went stale on
+#: the next merge).
+_DE_NUMBERED_CITE_MARKERS: tuple[tuple[str, str, str], ...] = (
+    (".github/workflows/ci.yml", "#11057 review P2", "fetch-depth: 0"),
+)
+
+
+def _de_numbered_cite_problems(
+    text: str,
+    workflow: list[str],
+    markers: tuple[tuple[str, str, str], ...] = _DE_NUMBERED_CITE_MARKERS,
+) -> list[str]:
+    """Every de-numbered `python-ci.yml` pointer in `text` that does not resolve to what it names.
+
+    Two checks per entry, because a prose pointer carries two claims and either can rot silently:
+    the marker must still be NAMED by the citing file (else the sentence points at nothing), and it
+    must sit inside an `actions/checkout` step whose block declares the `fetch-depth` the sentence
+    attributes to it (else the citation resolves to a step that no longer does what it is cited for).
+    """
+    problems: list[str] = []
+    for _rel, marker, declaration in markers:
+        if marker not in text:
+            problems.append(
+                f"no longer names the {marker!r} marker in prose — the sentence it carries then "
+                "points at a note nothing resolves, which a line number at least made checkable"
+            )
+            continue
+        hits = [i for i, line in enumerate(workflow) if marker in line]
+        if not hits:
+            problems.append(
+                f"names the {marker!r} marker, and python-ci.yml no longer carries any line with it"
+            )
+            continue
+        for i in hits:
+            # Walk back to the enclosing `- uses: actions/checkout` step. A DIFFERENT step met first
+            # means the note is not inside one — the marker is cited for a checkout it does not sit in.
+            start: int | None = None
+            for j in range(i, -1, -1):
+                if re.match(r"\s*-\s+uses:\s*actions/checkout", workflow[j]):
+                    start = j
+                    break
+                if re.match(r"\s*-\s+(?:uses|name|run|with):", workflow[j]):
+                    break
+            if start is None:
+                problems.append(
+                    f"the {marker!r} note at python-ci.yml:{i + 1} is not inside an "
+                    "`actions/checkout` step, so the sentence cites it for a checkout it is not in"
+                )
+                continue
+            indent = len(workflow[start]) - len(workflow[start].lstrip())
+            end = len(workflow)
+            for j in range(start + 1, len(workflow)):
+                line = workflow[j]
+                if line.strip() and (len(line) - len(line.lstrip())) <= indent and re.match(
+                    r"\s*-\s", line
+                ):
+                    end = j
+                    break
+            if not any(declaration in line for line in workflow[start:end]):
+                problems.append(
+                    f"the {marker!r} note at python-ci.yml:{i + 1} sits in a checkout step that "
+                    f"declares no {declaration!r} — that is the claim the sentence makes"
+                )
+    return problems
+
 
 def _refusal_citation_problems(text: str, workflow: list[str]) -> list[str]:
     """Every `python-ci.yml:<n>` in `text` that misses the `test-slow` refusal-cost paragraph.
@@ -4592,6 +4676,43 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     assert _refusal_citation_problems(
         "The required legs CANNOT be routed here: `python-ci.yml:1891` — refused.", workflow_lines
     ), "the checker no longer sees the pre-#6744 citation it exists for — it would pass the drift"
+
+    # ── The DE-NUMBERED pointer: prose instead of a number, and it must still RESOLVE ─────────────
+    # `ci.yml` used to carry `python-ci.yml:4234-4244` for the `#11057 review P2` note — the head of
+    # the sentence above it. The number was wrong when written (it landed on
+    # `- uses: actions/checkout@v4`) and the arm above CANNOT express a second citation target: its
+    # only anchor is the refusal paragraph's opener, so every `python-ci.yml:<n>` in these files must
+    # be that line. Deleting the number was the only way to green the arm — and it deleted the last
+    # GRADED pointer to that note (measured at `158ac4115e`: two graded cites in `ci.yml` -> one).
+    # ⛔ The register below is what keeps a prose pointer from being the weaker option: it resolves
+    # the marker and the construct the sentence attributes to it, so the claim is CHECKED instead of
+    # merely reworded. Mutation: reword the note in python-ci.yml, or flip its checkout back to
+    # `fetch-depth: 1` -> RED naming the note's own line.
+    for rel, marker, declaration in _DE_NUMBERED_CITE_MARKERS:
+        text = (REPO_ROOT / rel).read_text()
+        problems = _de_numbered_cite_problems(text, workflow_lines, ((rel, marker, declaration),))
+        assert not problems, (
+            f"{rel}'s de-numbered pointer to `python-ci.yml` does not resolve: " + "; ".join(problems)
+        )
+
+    # Non-vacuity, executable, BOTH halves — a green on the real files must not be this checker
+    # matching nothing. (a) the citing file stops naming the marker; (b) python-ci.yml rewords it;
+    # (c) the checkout it is cited for is no longer the depth-0 one the sentence claims.
+    _rel, _marker, _declaration = _DE_NUMBERED_CITE_MARKERS[0]
+    _ci_text = (REPO_ROOT / _rel).read_text()
+    _entry = ((_rel, _marker, _declaration),)
+    assert _de_numbered_cite_problems(
+        _ci_text.replace(_marker, "_11057 review P2_"), workflow_lines, _entry
+    ), "the de-numbered pin no longer sees a citing file that stopped naming the marker"
+    assert _de_numbered_cite_problems(
+        _ci_text, [line.replace(_marker, "_11057 review P2_") for line in workflow_lines], _entry
+    ), "the de-numbered pin no longer sees a python-ci.yml that reworded the note"
+    assert _de_numbered_cite_problems(
+        _ci_text, [line.replace(_declaration, "fetch-depth: 1") for line in workflow_lines], _entry
+    ), (
+        "the de-numbered pin no longer sees the checkout step back on a shallow fetch — that is "
+        "the claim the sentence makes, and it would report green without measuring it"
+    )
 
     # ── `docs/ops/ci-wall-clock.md` — the SAME hole, in the file #6744 grew most ───────────────
     # This doc cites `python-ci.yml:<n>` for its cost arguments (the postgres-extra install row,

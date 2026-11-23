@@ -926,13 +926,11 @@ jobs:
           # (`tests/test_ci_check_repair.py`, surface `core`) checks out at the default
           # `fetch-depth: 1`. In a grafted graph an ABSENT ANCESTOR and a BOGUS SHA are
           # both simply missing objects, so there the pin can only SKIP — and a provenance
-          # gate that runs only where it cannot answer is a no-op gate (#11057 review P2,
-          # the `#11057 review P2` note inside `python-ci.yml`'s own checkout step — the
-          # one that put that file's gate at `fetch-depth: 0`; #9075 review r6 P1 made the
-          # same call at `:487-492`). This
-          # job checks out
-          # at `fetch-depth: 0`, so this is where the claim is actually proved. Stdlib
-          # only, one file, no network; exit 0 = verified, 1 = a defect in the document,
+          # gate that runs only where it cannot answer is a no-op gate (#11057 review P2 — the
+          # note inside `python-ci.yml`'s own checkout step, the one that put that file's gate at
+          # `fetch-depth: 0`; #9075 review r6 P1 made the same call at `:487-492`). This job
+          # checks out at `fetch-depth: 0`, so this is where the claim is actually proved.
+          # Stdlib only, one file, no network; exit 0 = verified, 1 = a defect in the document,
           # 2 = UNVERIFIED (never a pass).
           python3 tools/ci_check_repair.py --check-doc-citations
       - uses: actions/setup-node@v4

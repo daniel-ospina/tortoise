@@ -4436,8 +4436,8 @@ def test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit():
             # ⛔ AND THE SKIP IS NOT A COVERAGE LOSS — the same claim has a home that
             # CAN answer it: `tools/ci_check_repair.py --check-doc-citations`, run by
             # the depth-0 `docs` job (.github/workflows/ci.yml). A gate that runs only
-            # where it cannot answer is a no-op gate (#11057 review P2, the
-            # same-marker note in `python-ci.yml`'s checkout step), so the history half
+            # where it cannot answer is a no-op gate (#11057 review P2 — the marker names
+            # the note in `python-ci.yml`'s own checkout step), so the history half
             # lives there and this arm keeps the half that needs no history: the
             # hex-token arm above, which fires in EVERY clone.
             shallow = subprocess.run(

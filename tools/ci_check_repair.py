@@ -2940,8 +2940,9 @@ def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
             # branch holds is gone from a fresh clone the moment that branch lands.
             # Fail CLOSED when the base ref itself is unresolvable — an ancestry
             # question a checkout cannot answer is UNVERIFIED, never a pass (the same
-            # doctrine as `python-ci.yml:4236`, #11057 review P2, which is where the
-            # "a gate that runs only where it cannot answer is a NO-OP gate" rule lives)
+            # doctrine as the `#11057 review P2` note inside `python-ci.yml`'s own
+            # checkout step, which is where the "a gate that runs only where it cannot
+            # answer is a NO-OP gate" rule lives)
             # — the depth-0 `docs` job always has `origin/main`, so this cannot
             # false-block it, and anywhere it cannot be answered the claim is simply not
             # verified.

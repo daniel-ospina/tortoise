@@ -72,8 +72,8 @@ DOCS_DRIFT_STEP_COMMANDS = (
     # (`tests/test_ci_check_repair.py`, surface `core`) runs in the depth-1 `test`
     # job, where an absent ancestor and a bogus sha are both missing objects — so it
     # can only SKIP there, and a gate that runs only where it cannot answer is a
-    # no-op gate (#11057 review P2, the same-marker note in `python-ci.yml`'s own
-    # checkout step). It is pinned INSIDE
+    # no-op gate (#11057 review P2 — the marker names the note inside `python-ci.yml`'s
+    # own checkout step). It is pinned INSIDE
     # this exact list rather than exempted,
     # for the reason this module's docstring gives: the exactness is the point.
     "python3 tools/ci_check_repair.py --check-doc-citations",
