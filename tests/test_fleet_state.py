@@ -4301,9 +4301,15 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
         if census_kind == "alternating":
             return ([], err) if calls["n"] % 2 == 1 else ([], None)
         if census_kind == "late_burst":
-            # Healthy for > _CENSUS_ERROR_MIN_SPAN_S of simulated poll time, then exactly two
-            # errors 0.1 s apart: a 0.2 s burst, so it must NOT be the census.
-            return ([], err) if calls["n"] in (22, 23) else ([], None)
+            # Healthy past _CENSUS_ERROR_MIN_SPAN_S of simulated poll time, then exactly two
+            # errors one sample apart — a 0.1 s burst, so it must NOT be the census.
+            # ⛔ DERIVED FROM THE CONSTANTS, never a literal call number (#12039 review round 7):
+            # a literal is arithmetically hard-wired to today's span, so raising
+            # `_CENSUS_ERROR_MIN_SPAN_S` "to be safer" would silently retire this pin — it would
+            # then pass on the `poll_started` mutant it exists to catch, which is a false PASS in
+            # the instrument rather than in the code.
+            late = 2 + int(_CENSUS_ERROR_MIN_SPAN_S / clock.step_s)
+            return ([], err) if calls["n"] in (late, late + 1) else ([], None)
         if calls["n"] == 1:
             return [], err
         return [], None
