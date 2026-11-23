@@ -7996,12 +7996,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # ⛔ AND THE NUMBER IS DERIVED, NOT TYPED (the 2026-11-21 merge of `origin/main`): the
     # twin used to read "this head `:9753`, `origin/main` `:9722` — they no longer agree",
     # which was true on the branch `#13971` merged FROM and false the moment it landed —
-    # `main` moved `+31` in `tortoise/sdk.py` while this branch inserts nothing there
-    # (`git diff --numstat origin/main...HEAD -- tortoise/sdk.py` prints nothing), so the two
-    # heads carry ONE number and there is one present-tense fact to state. Typing it again
-    # would repeat the very defect D5 exists to catch, so this row reads the line out of the
-    # tree and asserts the twins against it: a half-move still reds (count 1), an all-move
-    # still reds (count 0), and a shift of `sdk.py` reds on the number.
+    # `main` moved `+31` in `tortoise/sdk.py` while this branch then inserted nothing there
+    # (`git diff --numstat origin/main...HEAD -- tortoise/sdk.py` printed nothing), so the
+    # two heads carried ONE number. ⛔ THAT PREMISE IS FALSE NOW: this branch's seam wiring
+    # DOES insert above this line, so the twin states THIS head's number only and claims no
+    # agreement — the row still reads the line out of the tree: half-move 1, all-move 0.
     _rs_hits = [
         _n for _n, _line in enumerate(
             _EPIC_CITE_SOURCES["sdk"].read_text(encoding="utf-8").splitlines(), start=1)
@@ -8010,7 +8009,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     assert _rs_hits, (
         "`tortoise/sdk.py` carries no `register_source(..., raw_state=...)` line any more "
         "— the D5 twin's anchor is gone, so re-derive the sentence AND this arm")
-    _twin = f"sits at `:{_rs_hits[0]}` at BOTH this head and `origin/main` — ⛔ they AGREE"
+    _twin = (f"sits at `:{_rs_hits[0]}` at this head — ⛔ NOT `origin/main`'s "
+             "numbering any more")
     assert _d5.count(_twin) == 2, (
         f"05-verify.md states the `register_source(..., raw_state=...)` pair ({_rs_hits[0]} "
         f"measured in `tortoise/sdk.py`) in this phrasing {_d5.count(_twin)} time(s), and it "
@@ -8113,10 +8113,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # and an end below `:15449` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
+    # ⛔ BOTH ENDPOINTS ARE DERIVED FROM THE SOURCE (#14220). The pair used to be TYPED here
+    # (`:15346-15423`), and by the head this lane read it was stale at its own start: the read
+    # had moved 240 lines down and the arm's only complaint was "the range has moved". A typed
+    # range is the same defect class the document's `file:line` cites have — it re-stales on the
+    # next insertion above the symbol — so the guard now reads the START (`nodes_used`) and the
+    # END (the blank line immediately before `return OrgInfoResponse(`) out of the tree and asks
+    # the DOCUMENT to carry exactly that pair. A document re-point the source did not make, and
+    # a source move the document did not follow, both red with the pair printed.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
-    assert _i7.count("`hosted_api.py:15346-15423`") == 1, (
-        "04-plan.md I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
-        "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
     _org_info = _EPIC_CITE_SOURCES["hosted_api"].read_text(encoding="utf-8").splitlines()
     _span = _org_info[15449 - 1:15526]
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
@@ -18452,7 +18457,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # the diff at this head (measured in the block below). An earlier
     # cut of this block stated the opposite in both halves (once "NOT in this diff at all", once
     # "IS in the diff, this branch's re-point"), which is the head-bound-membership class this
-    # arm has been wrong in both directions on.
+    # arm has been wrong in both directions on — so the membership sentence now says what the
+    # command prints at the head it was read at.
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
     # "CARRIES". Both ends are still pinned so the row cannot drift back to the base's value,
     # which is what a re-derivation-by-offset produces — and `sdk.py:28935` is NOT

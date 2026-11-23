@@ -430,6 +430,20 @@ surfaces:
   # FULL matrix and selects this file either way. DB-FREE: doubles and the gate's
   # own `meters=` seam.
   - test_13829_cache_cap_at_fold.py  # #13829: dual: core
+  # #14186: the `api` arm of the TRIPLE registration (core/api/eval). Each arm
+  # exists because a DIFFERENT surface owns a module this suite guards, and a
+  # named SOURCE_PATTERNS match REPLACES the `core` fallback in `select()` — so
+  # a `core`-only row would leave the suite unselected on the diffs it exists
+  # for. MEASURED with the shipped selector (`select([...], 'pull_request', m)`):
+  # `tortoise/hosted_api.py` -> `['api', 'onboarding']` (this row);
+  # `tortoise/embed_seam.py` / `tortoise/embed_worker.py` -> `['core']` (the
+  # `core` row); `tortoise/embeddings.py` -> `['eval']` (the `eval` row).
+  # `tortoise/sdk.py` is a SHARED_MODULES entry, so its own diff already forces
+  # the full matrix and needs no wing here. Before this registration the file was
+  # in NO surface (`--integrity` printed
+  # `manifest drift: ['test_14186_embedder_seam_batching.py']`), which is
+  # #13854's defect class: never SELECTED, so every row in it was dead weight.
+  - test_14186_embedder_seam_batching.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -2952,6 +2966,15 @@ surfaces:
   # (DUAL-registered: matrix + job). ONE row only: this file is `merge=union` in `.gitattributes`,
   # so a second `core` row on the merge result is a `duplicate_entries()` gate failure.
   - test_14002_record_only_journal.py
+  # #14186: the `core` arm of the TRIPLE registration (core/api/eval), and the
+  # one `--register` mints by default. It is LOAD-BEARING, not a rider on the
+  # other two: `tortoise/embed_seam.py` and `tortoise/embed_worker.py` are the
+  # suite's primary subjects and both resolve `['core']` (measured:
+  # `select(['tortoise/embed_seam.py'], 'pull_request', m)['surfaces']`), so a
+  # diff to either — the whole point of the suite — selects nothing without this
+  # row. The `api` arm (hosted_api.py) and the `eval` arm (embeddings.py) are
+  # stated at their own entries.
+  - test_14186_embedder_seam_batching.py
   - test_extractor_cost_measure.py
   # #13034's `test_13034_currency_rule_reads_position.py` is registered on `core`
   # FURTHER DOWN this file, in the block the main-red repair (#13139 / #13144)
@@ -11415,6 +11438,13 @@ surfaces:
   # load-bound derivation pin and the reclaim guard are only reached on an
   # `embeddings.py`-only diff through this row.
   - test_13674_embedder_load_bound_and_reclaim.py
+  # #14186: the `eval` arm of the TRIPLE registration (core/api/eval) — the same
+  # shape as the #13674 row directly above, and for the same reason: `eval` owns
+  # `tortoise/embeddings.py`, and that named match REPLACES the `core` fallback,
+  # so a `embeddings.py`-only diff (the `compute_embeddings` / read-embed wiring
+  # this suite pins) is reached through this row and nowhere else. Measured:
+  # `select(['tortoise/embeddings.py'], 'pull_request', m)` -> `['eval']`.
+  - test_14186_embedder_seam_batching.py
   # #2517 (C4): the source-session re-injection rules + E2E — dual-registered
   # because a change to tools/longmem_eval/ selects `eval`, and the arm is
   # wired there (the hermetic rules leg also passes in the eval lane).
@@ -15253,6 +15283,7 @@ durations:
   test_retype_8882.py: 0.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.1
   test_runner_tool_contract.py: 32.8  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 1.2
   test_sdk_retirement.py: 2.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 1.4
+  test_14186_embedder_seam_batching.py: 2.0  # new in #14186 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this row takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348 — `tests/test_ci_selection.py` pins exactly that). The row must EXIST, not merely default ('a default is not a reading'): the `core`/`api`/`eval` rows above put the file in `fast_pool()`, and `--integrity`'s coverage ratio stays green either way, so only this row records the weight; `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. The file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because the entry-rule pin iterates an EXPLICIT tuple and cannot see a file nobody listed. ⚠️ MEASURED LOCALLY as a SANITY BOUND, never as the weight: **117 passed in 39.05 s** on one contended box — the same suite read **161.6 s** until `test_an_unarmed_process_declares_the_degrade_with_the_existing_reason` stopped loading a real sentence-transformers model (129.6 s of that total, to prove nothing about the decline vocabulary it asserts); its ARMED neighbour keeps the real environment at 0.37 s, because THAT pin is about which branch refuses. What the weight covers: the seam's SCHEDULING contract (fake backings are injected through `install_backing`, so most rows make no model call, no network and no graph): the hard bound measured on `collect_ms` (the batch's open-window duration) with a tight allowance, a genuinely LATE arrival not extending the first arrival's window (the property a re-arm/"wait until quiet" design loses), SUSTAINED load still coalescing when the collector is already inside an encode (the state in which a submission-anchored deadline fires one-ticket batches — the defect review F1 caught), `max_batch` firing early, N concurrent queries coalescing into ONE encode with each ticket receiving ITS OWN row, the collector's own short-row-set refusal, a ticket whose batch never fires being DECLINED rather than parked, the unknown-backing and unusable-lever refusals with their warnings, the per-backing windows, nearest-rank percentiles and the reservoir rollover, `/health`'s declared key set and its never-raise arm, the worker's preloaded-encoder readiness (the socket's existence means READY, so the first request after boot does not pay the cold import), the worker's named decline when the encoder is absent, its death with its stdin, and the #5275 flag still refusing on a remote backing on BOTH the read path and the write path (with the unarmed control that keeps a blip from becoming a write failure). ⛔ NOT fully hermetic, and this comment claimed it was: the #5275 pair builds a real `TortoiseSDK(db_path=…)` (a real embedded graph), and the reserve/worker rows spawn real threads and a real `tortoise.embed_worker` subprocess with this interpreter. ⛔ The 117 above belongs to that SANITY READING, not to a pinned measurement: a case count moves whenever a review round adds a pin, so `tools/ci_selection.py --integrity` is the authority for coverage and the only graded number in this row is the weight.
   test_14125_retired_name_calls.py: 123.0  # new in #14125 — a file a PR ADDS can never carry a CI junit reading yet (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so the value is MEASURED LOCALLY here rather than left at the flat `DEFAULT_FAST_WEIGHT` (2.0), which this row would otherwise silently understate by ~60x on a SHARD-LAYOUT input (#2818/#3419/#4348 forbids a local reading as the WEIGHT, but a 2.0 row for a 123 s file is the worse error — it packs a two-minute file as if it were free). Measured on the tree as it now stands: **144.20 s total** (`pytest -q`, one contended box), its parent tree reading **118.19 s** and **140.83 s** in two runs, so the reading is bound to the TREE rather than to a sha. ⛔ THE `123.0` VALUE ABOVE IS THEREFORE KNOWINGLY LOW BY ~15% on the current tree: it is the reading from the tree that ADDED this row, and it is kept rather than re-measured because a locally-typed number is only a stopgap for `DEFAULT_FAST_WEIGHT` (2.0) until `tools/ci_timing.py --refresh-durations` samples a push-to-main sweep of this file — that tool is the authority and will overwrite both the value and this sentence: every edit to this row has been comment-only, and naming a commit here would claim a measurement not taken at it (review F4 - an earlier text named `ace960ac754`, where the file already carried 6 cases and the quoted split could not have been produced there). No case count is quoted (it moves whenever a review round adds a pin); `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_sdk_privatise_sweep.py: 28.0  # new in #13899; MEASURED LOCALLY, not from junit (the file did not exist at the 2026-11-16 capture): 6 passed in 28.01 s on a contended lane box, of which ~25 s is the session conftest every file in this pool pays. The weight covers the arms themselves: `rename_map(SWEEP_BASE)` runs one `git show` + parse of the 50k-line `tortoise/sdk.py`, and the two typing arms parse a synthetic 7-line module. Hermetic — no DB, no graph, no network, no model; the empty-map arm returns before the tree walk. ci_timing.py --refresh-durations replaces this from junit once a push-to-main sweep includes it.
   test_secret_not_printed_5109.py: 0.4  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.3s) is a LOWER bound; kept 0.4

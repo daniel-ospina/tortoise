@@ -10648,6 +10648,13 @@ ROWED_BY_THIS_FOLD = (
     # reading: the `durations` refresher samples push-to-main runs, so a file a PR ADDS
     # cannot have a junit figure yet (#3400/#4348).
     "test_14185_projection_worker.py",
+    # #14186 — a file this fold ADDED and registered on `core`/`api`/`eval`. It is
+    # listed here for the reason every row above states: the ENTRY-RULE pin
+    # iterates this EXPLICIT tuple, so a file nobody listed can ship rowless and
+    # nothing reds. Its `durations:` row exists (the PR's review F1 asked for it
+    # after `--integrity` stayed green over the missing REGISTRATION itself, the
+    # #13854 shape — a file in no surface is never selected at all).
+    "test_14186_embedder_seam_batching.py",
 )
 
 

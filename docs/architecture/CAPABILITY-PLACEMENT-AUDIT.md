@@ -186,7 +186,7 @@ enumeration is what has been RE-DERIVED, each entry carrying the head it was mea
 that nothing else is at `main`** — and a range entry spans every line it covers.
 ⚠️ **This revision adds its own entries to it**: `projection/__init__.py`'s fulltext declarations
 `:6974-6990` (the block), `:6984` (`Event`), `:6985` (`Subject`), `:6989` (`Object`), `:6990` (`Source`);
-`record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37883`/`:37906` (the whole-node pair, still 23 apart);
+`record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37957`/`:37980` (the whole-node pair, still 23 apart);
 `audit.py:817`; `mcp_server.py:5250`/`:8515`/`:11590`; `goal_judgement.py:1128`; and §2.1's own table, which carries
 two of this class as well — `sdk.py:24626` and `search_engine.py:7226`, both open at this revision and neither
 open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at **this head** (⚠️ NOT at
@@ -546,7 +546,7 @@ columns in a single `RETURN`. What separates them:
    identically off a record row. Adjacency sharing a statement is not adjacency the property needs.
 
 ⚠️ **A sibling column does NOT carry the verdict — and the code says so in its own words.** `session_schema.py:852-853`: *"`capture_ok` is reported beside it so a reader can see the class the epic named
-without a second query"* — *reported beside it* IS the definition. The decisive case is `sdk.py:58317-58339`, the
+without a second query"* — *reported beside it* IS the definition. The decisive case is `sdk.py:58455-58477`, the
 session-detail read, which is a **pure point lookup** (`MATCH (s:Session {id:$sid}) RETURN …`) with **no walk in
 the statement at all** and still returns `machine_id`, `model`, `capture_ok`, `capture_extractor`,
 `client_captured_at`, `client_captured_at_source`, `capture_lane` **and** `turn_max_index`: a property's
@@ -554,7 +554,7 @@ capability cannot turn on a walk that is not there, which is why `turn_max_index
 COMPOSED site (`hosted_api.py:45586-45611`) and not on this one. ⛔ Applied consistently below: the four sibling
 members of verdict row 7 move into row 7b, and **no label's verdict changes** — four *properties* change row,
 which is the whole point of a census that classifies properties rather than statements. ⚠️ The rule cuts inside a
-`graph` row too: `harness` is a sibling projection in BOTH session reads (`sdk.py:58317`, `hosted_api.py:24790`) and
+`graph` row too: `harness` is a sibling projection in BOTH session reads (`sdk.py:58455`, `hosted_api.py:24790`) and
 is `none`-capability — row 6 is `graph` for its `CONTAINS` structure and `turn_count`'s composition, never for
 `harness`.
 
@@ -605,8 +605,8 @@ MIXED set, and precision here is the point — it is not one claim:
   `client_captured_at` also read inside a `SET` (`sdk.py:4265-4268`); **`draft_count` and `commit_count`**
   are read inside the same commit-statement `SET` (`hosted_api.py:23437-23440`) — §2's reader rule, exactly
   as `provenance_spans` is counted in §2.2, and an earlier revision of this paragraph omitted them.
-- **No shipped query NAMES it — but it IS read back as a WHOLE NODE:** `capture_redactions`. `sdk.py:2898` and
-  `:2921` only WRITE it (`SET s.capture_redactions=$redactions`) and no product `RETURN`/`WHERE` names the
+- **No shipped query NAMES it — but it IS read back as a WHOLE NODE:** `capture_redactions`. `sdk.py:2927` and
+  `:2950` only WRITE it (`SET s.capture_redactions=$redactions`) and no product `RETURN`/`WHERE` names the
   property — the one Cypher read that does name it is a TEST assertion
   (`tests/test_capture_secret_redaction_4911.py:250-254`), which is not a PRODUCT read — but two
   whole-node reads carry it, and a whole-node read is a reader by this document's own vocabulary
@@ -1065,7 +1065,7 @@ No guessed verdicts. Each of these is a shape the census **cannot** settle from 
 | part | members | what decides it |
 |---|---|---|
 | **composed with a walk ⇒ `graph`** (verdict row 7) | `turn_max_index`, `entity_links_created` (and `turn_count`, row 6) | the returned figure is a function of the walk AND the property — `max(count(t), mark + 1)`, `live_edges > s.entity_links_created`, `stored_turns < s.turn_count` |
-| **sibling columns ⇒ `none`, property-level `record_only`** (row 7b) | `capture_ok`, `capture_extractor`, `capture_lane`, `entity_links_attempted` | *reported beside* a walk (`session_schema.py:852-853`), and returned by a point lookup with **no walk in the statement at all** (`sdk.py:58317-58339`) |
+| **sibling columns ⇒ `none`, property-level `record_only`** (row 7b) | `capture_ok`, `capture_extractor`, `capture_lane`, `entity_links_attempted` | *reported beside* a walk (`session_schema.py:852-853`), and returned by a point lookup with **no walk in the statement at all** (`sdk.py:58455-58477`) |
 | **the remainder ⇒ `none`, property-level `record_only`** (row 7b) | `capture_redactions`, `machine_id`, `model`, `client_captured_at*`, `value_nodes_created`, `value_nodes_held`, `draft_count`, `commit_count`, `harness`, `actor_user_id` | point lookups, `SET`-that-reads, whole-node dumps |
 
 ⚠️ **`capture_lane` was in NO row until `#13095`'s predecessor found it, and this revision moves it a second time —
@@ -1100,15 +1100,15 @@ What remains a placement question is the **remainder plus the four siblings** �
 `none` on the strength of the session-detail read (`sdk.py:52345`) alone, missing the reader whose ANSWER is
 the mark/count comparison over the `CONTAINS` walk (`hosted_api.py:45586-45611`) — row 7's rule applied to a
 property, the same sibling confusion `capture_lane` records above, one property later. (That justification is ONE
-site: `sdk.py:4399-4406` returns the mark but consumes it without the walk, and is cited in row 7 only for that
+site: `sdk.py:4428-4435` returns the mark but consumes it without the walk, and is cited in row 7 only for that
 contrast.)
 
 - **Why it is arguable:** they are **not unread** and must not be treated as such. `value_nodes_created` and
   `value_nodes_held` are both named by the commit-state load (`hosted_api.py:22307-22308`), but only
   `value_nodes_created` is incremented inside the commit atom (`hosted_api.py:22980-22981`) — `value_nodes_held` by
   its own `:Session` `MERGE`/`SET` at `hosted_api.py:24493-24497`; `machine_id`/`model`/`client_captured_at*` by the session-detail read
-  (`sdk.py:58317-58339`) and again by `list_sessions` (`hosted_api.py:24770-24802`), with `client_captured_at` also
-  read inside a `SET` (`sdk.py:4265-4268`); `capture_ok`/`capture_extractor`/`capture_lane` by both of those
+  (`sdk.py:58455-58477`) and again by `list_sessions` (`hosted_api.py:24770-24802`), with `client_captured_at` also
+  read inside a `SET` (`sdk.py:4294-4297`); `capture_ok`/`capture_extractor`/`capture_lane` by both of those
   reads and by the retrofit audit's `RETURN`; and
   `draft_count`/`commit_count` are read inside that same commit-statement `SET`
   (`hosted_api.py:23437-23440`). The four siblings are named across three reads — `entity_links_attempted` by the retrofit audit alone:
@@ -1161,7 +1161,7 @@ rules are arguable here.
      `id` or `turns` is provided — *"Events with NONE of the three are skipped (nothing meaningful to log)."*
   2. **`append_event`'s own contract** (`event_store.py:808`, and again in its module docstring at `:58`):
      *"a payload-only emit writes one with no JSONL record at all."*
-  3. **A shipped call site in exactly that class** — the turn hard delete (`sdk.py:3801`): it emits
+  3. **A shipped call site in exactly that class** — the turn hard delete (`sdk.py:3830`): it emits
      `PointRetracted` as an `:GraphEvent` subscriber row and *separately* calls
      `_journal_entity_mutation("Point", tid, "delete")` for the JSONL half, whose record is `EntityMutated`
      (folded by `_delete_entity_by_id`). The surrounding comment states the split as a contract — *"Two

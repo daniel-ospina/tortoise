@@ -875,10 +875,12 @@ CACHE_LEG_FAILURE_COUNT = Counter(
 #:   over this population).
 #:
 #: ``decline`` vocabulary — ``"<leg>:<cause>"``, where ``cause`` is the value
-#: ``EmbeddingModel.await_write_ready_reason`` returned. The four causes need
+#: ``EmbeddingModel.await_write_ready_reason`` returned. The FIVE causes need
 #: OPPOSITE operator responses (install the extra / repair a broken load / retry
-#: later / wait longer), and ``budget_expired`` is the only one where a wait
-#: actually happened — the genuine #13229 cost. Eight values, bounded, because
+#: later / wait longer / re-encode once the remote backing answers), and
+#: ``budget_expired`` is the only one where a LOCAL wait actually happened — the
+#: genuine #13229 cost (``backing_cold`` waits for nothing on purpose: a create
+#: must not pay the backing's boot). Ten values, bounded, because
 #: `_collect_by_label` assumes ONE sample per label value.
 #:
 #: ⛔ **Two same-class causes are deliberately NOT counted here**, and the
@@ -8874,8 +8876,9 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # load (p95 20,414 ms → 268 ms) — a trade that LEAVES ROWS the dense leg
         # cannot find. §17.2 requires that divergence be checkable, and #13156
         # rules out inferring it from the read side (a budget-cancelled leg reads
-        # like a slow store). Keyed by the decline's CAUSE, because the four
-        # causes need opposite responses. Like every key above: additive, never
+        # like a slow store). Keyed by the decline's CAUSE, because the FIVE
+        # causes (#14186 added `backing_cold`) need opposite responses. Like every
+        # key above: additive, never
         # a term in `status`.
         "derived_embed_declines": derived_embed_decline_counts(),
         # ...and WHERE the live writes actually landed (#12943 reopening). The

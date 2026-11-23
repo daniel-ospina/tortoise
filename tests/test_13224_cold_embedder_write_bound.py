@@ -788,10 +788,11 @@ def test_a_zero_wait_decline_never_claims_a_wait(cause, setup, cause_phrase,
     designed-absence line ALSO satisfies "no wait claim" + "names the backfill" +
     "INFO is not asserted" verbatim, so every zero-wait FAULT was free to borrow
     the absence's text and severity and stay green. The other half is the CAUSE:
-    each of the four `_WRITE_DECLINE_*` reasons needs an OPPOSITE operator
-    response (install the extra / repair the failed load / retry later / wait
-    longer), and the absence's repair — `uv sync --extra embeddings` — is a no-op
-    on the box that hits a FAULT. So each row also asserts its OWN level
+    each FAULT-shaped `_WRITE_DECLINE_*` cause needs an OPPOSITE operator
+    response (repair the failed load / retry later / wait longer), and the
+    absence's repair — `uv sync --extra embeddings` — is a no-op on the box that
+    hits a fault. (The fifth cause, `backing_cold`, is INFO by design and is
+    pinned in tests/test_14186_embedder_seam_batching.py.) So each row also asserts its OWN level
     (WARNING: a fault, unlike the designed absence's INFO) and its OWN
     cause-bearing phrase, and that the absence line is not the one emitted.
 
@@ -801,7 +802,7 @@ def test_a_zero_wait_decline_never_claims_a_wait(cause, setup, cause_phrase,
     `logger.info`; make the `attempt_spent` arm return
     `_WRITE_DECLINE_NOT_INSTALLED`. They also keep `_note_cold_write`'s
     fall-through default (the budget-expired text) unreachable, instead of it
-    silently labelling a future fifth cause.
+    silently labelling a cause that has no arm of its own.
     """
     monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
     EmbeddingModel._reset()
