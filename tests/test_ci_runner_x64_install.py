@@ -4492,6 +4492,30 @@ def _comment_prose(block: list[str]) -> str:
     return " ".join(line.strip().lstrip("#").strip() for line in block).strip()
 
 
+def _comment_runs(lines: list[str]) -> list[tuple[int, int]]:
+    """Every maximal run of `#`-comment lines, as `[lo, hi)` half-open spans.
+
+    ⛔ THE REGISTER'S CANDIDATE SET IS BUILT FROM THESE, not from line-wise regex hits. Building it
+    from hits made a WRAPPED pointer invisible as a candidate: the regex's ``\\s+`` spans a line break,
+    but a per-line scan cannot see that, so a second pointer wrapped across two `#` lines was never
+    enumerated — while the completeness arm excused its block (the prose names the covered marker).
+    Measured: the unwrapped second pointer reds the register, the wrapped one left BOTH arms green.
+    One definition of "a block that carries a pointer", shared by both arms.
+    """
+    runs: list[tuple[int, int]] = []
+    start = None
+    for i, line in enumerate(lines):
+        is_comment = line.lstrip().startswith("#")
+        if is_comment and start is None:
+            start = i
+        elif not is_comment and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, len(lines)))
+    return runs
+
+
 def _declaration_re(indent: int, declaration: str) -> re.Pattern[str]:
     """The regex for `declaration` as a key at the given indent, whose line may carry a comment.
 
@@ -4562,8 +4586,13 @@ def _de_numbered_cite_problems(
     problems: list[str] = []
     lines = text.splitlines()
     for rel, marker, declaration in markers:
-        pointers = [i for i, line in enumerate(lines) if re.search(_DE_NUMBERED_POINTER_RE, line)]
-        if not pointers:
+        candidates: list[tuple[int, int, str]] = []
+        for lo, hi in _comment_runs(lines):
+            prose = _comment_prose(lines[lo:hi])
+            if not re.search(_DE_NUMBERED_POINTER_RE, prose):
+                continue
+            candidates.append((lo, hi, prose))
+        if not candidates:
             problems.append(
                 "no longer carries the de-numbered `python-ci.yml` pointer this register covers — "
                 "the claim behind the sentence is then unverified, which is the state the deleted "
@@ -4590,12 +4619,8 @@ def _de_numbered_cite_problems(
         # for the UNWRAPPED case. ONE definition of "a pointer", shared by both arms.
         blocks: list[tuple[int, int, str]] = []
         multi = False
-        for i in pointers:
-            lo, hi = _comment_block(lines, i)
-            block = "\n".join(lines[lo:hi])
-            if any(b[0] == lo for b in blocks):
-                continue
-            if len(re.findall(_DE_NUMBERED_POINTER_RE, _comment_prose(lines[lo:hi]))) > 1:
+        for lo, hi, prose in candidates:
+            if len(re.findall(_DE_NUMBERED_POINTER_RE, prose)) > 1:
                 problems.append(
                     f"the pointer's own comment block at {rel}:{lo + 1}-{hi} carries more than one "
                     "de-numbered pointer — the register's marker cannot say which one this entry "
@@ -4603,14 +4628,14 @@ def _de_numbered_cite_problems(
                 )
                 multi = True
                 break
-            blocks.append((lo, hi, block))
+            blocks.append((lo, hi, prose))
         if multi:
             continue
         naming: list[tuple[int, int, str]] = []
-        for lo, hi, block in blocks:
+        for lo, hi, prose in blocks:
             sentences = [
                 piece
-                for piece in _SENTENCE_SPLIT_RE.split(block)
+                for piece in _SENTENCE_SPLIT_RE.split(prose)
                 if re.search(_DE_NUMBERED_POINTER_RE, piece)
             ]
             if any(marker in piece for piece in sentences):
@@ -4628,14 +4653,8 @@ def _de_numbered_cite_problems(
                 "the citation then resolves to no note at all"
             )
             continue
-        lo, hi, block = naming[0]
+        lo, hi, _prose = naming[0]
         sentence = naming[0][2]
-        if marker not in sentence:  # defensive: `naming` selected on this, so this cannot fire
-            problems.append(
-                f"the pointer at {rel}:{lo + 1} no longer names the {marker!r} marker in its own "
-                "sentence — the citation then resolves to no note at all"
-            )
-            continue
         # ⛔ PUNCTUATION-INDEPENDENT CONTRADICTION CHECK. The split is punctuation-based, so a rewrite
         # that swaps the terminal `;` for a comma MERGES the next sentence into this piece — and that
         # next sentence states the SAME key for a DIFFERENT subject ("… This job checks out at
@@ -5148,6 +5167,27 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
             "a SECOND de-numbered pointer naming the same marker in another comment block is "
             "accepted — the entry is then graded against whichever pointer the file lists first, and "
             "a rewrite of the other one's cited clause reads green"
+        )
+        # …and again with that second pointer WRAPPED across two `#` lines. Building the candidate
+        # set from line-wise regex hits made this shape invisible while the completeness arm excused
+        # the block (its prose names the covered marker) — MEASURED: the unwrapped second pointer
+        # reds, the wrapped one left BOTH arms green. Candidates come from `_comment_runs` +
+        # wrap-normalised prose, and the sentences are split from that prose, so both shapes red here.
+        _separate_wrapped = [
+            *_lines,
+            "",
+            "    # Another paragraph, added later, about the same note.",
+            "    # `python-ci.yml`'s own",
+            f"    # checkout step — the one the {_marker} note names, stating `{_declaration}`.",
+        ]
+        assert any(
+            "is named by 2 de-numbered pointers" in problem
+            for problem in _de_numbered_cite_problems(
+                "\n".join(_separate_wrapped), workflow_lines, _entry
+            )
+        ), (
+            "a WRAPPED second de-numbered pointer naming the same marker in another comment block "
+            "is accepted — the candidate set is built from line-wise hits, so a reflow hides it"
         )
         # (d) The completeness arm's coverage must be STRUCTURAL (the pointer's own comment block),
         # not a proximity window: `#`-only lines between the marker and the pointer are what a rewrap
