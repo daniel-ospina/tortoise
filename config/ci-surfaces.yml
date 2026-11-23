@@ -74,9 +74,24 @@ version: 1
 # tree above, which is why the shard NAMES (not only the seconds) are stated here and graded.
 # ⛔ The MINUTE has stood at 28 m across every reading of this pool from
 # 835.5 s to 836.8 s while the SECONDS moved under it, so NO arithmetic
+# MERGES INTO, never carried from the branch that first wrote it. Measured on THIS merged tree
+# (`origin/main` at `b2d1e9086a` plus #14220's `core` row for
+# `tests/test_14186_embedder_seam_batching.py`), the verb packs
+# two shards at 837.0 s (a, e) and nine at 836.9 s (b, c, d, f, g, h, i, j, k), so
+# `ceil(837.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
+# agree by construction rather than by a hand re-read. ⛔ A fast file being REGISTERED is what moves
+# the partition, and re-measured one row at a time on this pool the chain runs: with #14371's
+# `tests/test_14371_offline_embed_json.py` alone it packs six at 836.6 s then five at 836.5 s,
+# #14434's `tests/test_7879_record_chain.py` re-packs it to four at 836.8 s then seven at 836.7 s,
+# and #14220's `tests/test_14186_embedder_seam_batching.py` to the two/nine split above — all three
+# rows at the flat 2.0 s `DEFAULT_FAST_WEIGHT`. That is why the shard NAMES (not only the seconds)
+# are stated here and graded.
+# ⛔ The MINUTE has stood at 28 m across every reading of this pool from 835.5 s to 837.0 s while
+# the SECONDS moved under it, so NO arithmetic
 # on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
 # sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a
-# fast file is registered — the packer is greedy, so a seventh file re-packs every bin — which is
+# fast file is registered — the packer is greedy, so one more file re-packs every bin — which is
 # why the names are stated and graded, not only the seconds. Re-run `--emit-push-matrix` on the
 # merged tree; never carry the last revision's minute, seconds, or split.
 #
