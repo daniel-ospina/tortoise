@@ -224,6 +224,13 @@ class TestCreatePointRetrySafety:
         # first-run user straight into a refusal. Mutation: drop the header
         # clause and this REDs.
         assert "Authorization: Bearer" in out
+        # ⛔ AND IT MUST NAME WHERE THE KEY ACTUALLY IS. `signup` writes
+        # `~/.tortoise/credentials.json` and never sets `TORTOISE_API_KEY`
+        # (measured: no `environ[...]` in `_cmd_signup`), so a hint naming only
+        # the env var hands the documented first-run user an empty Bearer and a
+        # 401 — a fresh refusal inside the hint that exists to remove one.
+        # Mutation: narrow the hint back to the env var and this REDs.
+        assert "credentials.json" in out
         # ...and the printed URL must survive a paste. An unquoted `<` is a shell
         # REDIRECT, so a `<a word from it>` placeholder fails before any request
         # is made. Mutation: restore an angle-bracket placeholder and this REDs.

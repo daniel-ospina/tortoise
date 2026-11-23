@@ -6135,10 +6135,13 @@ def _cmd_create_point(args) -> int:
     # (declared in docs/evidence/14424-onboarding/README.md D5), so the next
     # action must name the doors that do — otherwise "Created point: <id>" is a
     # success with no next step, and the memory is never found again.
-    print(f"  Next: search for it — GET {api_url}/v1/search?q=WORD with an "
-          "`Authorization: Bearer $TORTOISE_API_KEY` header (hosted), or the "
-          "`tortoise_search` MCP tool / `TortoiseSDK.search_knowledge` — this "
-          "CLI has no search verb yet (#14424).")
+    print(f"  Next: search for it — GET "
+          f"{_printable(_mask_display_target(api_url or ''))}/v1/search?q=WORD "
+          "with an `Authorization: Bearer` header carrying your key "
+          "($TORTOISE_API_KEY if you exported it, else the `api_key` in "
+          "`~/.tortoise/credentials.json`) — or the `tortoise_search` MCP tool / "
+          "`TortoiseSDK.search_knowledge`. This CLI has no search verb yet "
+          "(#14424).")
     return 0
 
 
