@@ -3709,9 +3709,57 @@ def _css_all_rules(css: str) -> list[tuple[str, str, bool]]:
     return out
 
 
+def _media_blocks(css: str) -> list[tuple[int, int, str]]:
+    """Every `@media (…) { … }` block as `(start, end, condition)`.
+
+    `_media_block_spans` answers "is this rule inside a media block"; this also
+    returns the CONDITION, because the condition decides whether the block can
+    affect a desktop viewport at all — and that is the difference between a
+    legitimate narrow-viewport hatch and an override that ships (#14406 review
+    round 4, finding G3).
+    """
+    blanked = _css_blanked(css)
+    out: list[tuple[int, int, str]] = []
+    for m in re.finditer(r"@media([^{]*)\{", blanked):
+        inner = _brace_block(blanked, m.end() - 1)
+        out.append((m.start(), m.end() + len(inner) + 1, m.group(1).strip()))
+    return out
+
+
+def _css_desktop_rules(css: str) -> list[tuple[str, str, str | None]]:
+    """Every style rule that can apply at a DESKTOP viewport, `(prelude, body, media)`.
+
+    `media` is the `@media` condition the rule sits in, or `None` at top level.
+
+    A rule inside a `max-width`/`max-height` block is EXCLUDED — a viewport
+    hatch, and the pricing cards legitimately stack one per row below ~907px,
+    so a narrow override is the page working as designed. Every OTHER media
+    block is INCLUDED, because `min-width` / `min-height` / preference blocks
+    apply AT desktop size. Measured (#14406 review round 4, finding G3):
+    `@media (min-width: 1024px) { .pricing-card .btn { margin-top: 0 } }` left
+    the entire CTA class GREEN while the rendered buttons split to three
+    baselines, 70.2px apart — the defect signature of #13645 item 6. A reader
+    that skips every media rule cannot see an override hiding in a `min-width`
+    one, so `inside_media` is the wrong axis: the CONDITION is.
+    """
+    blanked = _css_blanked(css)
+    media = _media_blocks(css)
+    out: list[tuple[str, str, str | None]] = []
+    for m in re.finditer(r"([^{}]+)\{", blanked):
+        prelude = m.group(1).strip()
+        if not prelude or prelude.startswith("@"):
+            continue
+        condition = next((c for start, end, c in media
+                          if start <= m.start() < end), None)
+        if condition is not None and re.search(r"max-(?:width|height)", condition):
+            continue
+        out.append((prelude, _brace_block(blanked, m.end() - 1), condition))
+    return out
+
+
 def _css_reaching_decls(css: str, prop: str, compound: str,
                         tokens: tuple[str, ...] = ()) -> list[tuple[str, str]]:
-    """Every BASE rule that declares `prop` and can select `compound`.
+    """Every rule that declares `prop` and can select `compound` at desktop size.
 
     `_css_rules_with_scope` matches a prelude only when it NAMES the exact
     selector text and never consults specificity, so a HIGHER-SPECIFICITY rule
@@ -3722,33 +3770,35 @@ def _css_reaching_decls(css: str, prop: str, compound: str,
     left all three rows of `TestProductTeamsPricingCardCtaBaseline` GREEN while
     the rendered CTAs split again.
 
-    `test_no_other_rule_takes_the_ctas_slack` answers that for the CTA's
-    slack, as a NEGATIVE invariant (no other rule may set it at all). This
-    reader answers it for the declarations no such row covers — the card's
-    `display`/`flex-direction` and the popular card's `padding-bottom` — as an
-    AGREEMENT invariant: whatever reaches the subject must say the same thing.
-    Measured on the tree before it: `.pricing-grid .pricing-card { display:
-    block }` and `.pricing-grid .pricing-card.popular { padding-bottom:
-    1.75rem }` both left every row in the class GREEN.
+    This is the AGREEMENT half of that question (whatever reaches the subject
+    must say the same thing) and it is what the class's rows use for the
+    declarations no other row covers: the card's `display`/`flex-direction`,
+    the popular card's `padding-bottom`. Measured on the tree before it:
+    `.pricing-grid .pricing-card { display: block }` and
+    `.pricing-grid .pricing-card.popular { padding-bottom: 1.75rem }` both left
+    every row in the class GREEN while the rendered baselines split.
 
-    "Can select" is decided on the RIGHTMOST compound of each comma part: a
-    selector can only select an element the same KIND as its subject, so
-    `.pricing-card` -> `.pricing-card` (any ancestor chain in front of it) is a
-    candidate, while `.features` (a sibling subject) is not. `tokens` narrows
-    it further for a compound that must also carry them (`(".popular",)` for
-    `.pricing-card.popular`). `inside_media` is skipped: a narrow-viewport
-    override is a legitimate re-declaration, not an override of the desktop
-    pin.
+    Reach, and its LIMITS (stated, because a guard that overclaims its reach is
+    how the next lane trusts a shield that is not there — #14406 review round 4,
+    finding D):
 
-    This is a SUBJECT test, not a cascade resolver — it does not prove which
-    declaration wins, so callers assert that every candidate AGREES with the
-    pinned value (a disagreement is either a live override or dead weight the
-    next editor cannot tell apart).
+    * ANCESTOR selectors are reached — the test is on the RIGHTMOST compound of
+      each comma part, so `.pricing-grid .btn` and `.pricing-card > .btn` both
+      count as selecting a `.btn` (`compound` is a SUBSTRING of that compound,
+      so `.btn-secondary` counting too is deliberate fail-closed slack).
+    * `min-width` / `min-height` / preference media blocks are reached;
+      `max-width` / `max-height` ones are not (see `_css_desktop_rules`).
+    * It is NOT a cascade resolver: it does not prove which declaration wins.
+      Callers therefore assert that every candidate AGREES with the pinned
+      value — a disagreement is either a live override or dead weight the next
+      editor cannot tell apart.
+    * It reads NAMED properties only. A caller that pins `margin-top` must also
+      pin the logical alias it delegates to (`margin-block-start`) and any
+      shorthand that resets it (`margin`, `margin-block`) — see
+      `SLACK_PROPS` in `TestProductTeamsPricingCardCtaBaseline`.
     """
     out: list[tuple[str, str]] = []
-    for prelude, body, inside_media in _css_all_rules(css):
-        if inside_media:
-            continue
+    for prelude, body, _condition in _css_desktop_rules(css):
         value = _effective_decl(body, prop)
         if value is None:
             continue
@@ -11036,7 +11086,9 @@ class TestProductTeamsPricingCardCtaBaseline:
     rows of this class GREEN while the four CTAs split again. `[-1]` is still
     right for the rule that OWNS the declaration (an appended duplicate of the
     same selector must win); `test_no_other_rule_takes_the_ctas_slack` closes
-    the competing-selector half.
+    the competing-selector half — for ancestor selectors, the logical aliases
+    and `min-width` media blocks too, each of which was a measured false PASS
+    in that row's first draft (#14406 review round 4, G1-G3).
     """
 
     def test_each_card_is_a_flex_column_and_its_cta_takes_the_slack(self):
@@ -11088,46 +11140,71 @@ class TestProductTeamsPricingCardCtaBaseline:
                 "the winner (#14406 review round 3 P2, the same hole "
                 "`test_no_other_rule_takes_the_ctas_slack` closes for the slack)")
 
+    #: Every declaration that sets the CTA's VERTICAL slack. `margin-block-start`
+    #: is the LOGICAL alias `margin-top` delegates to, so pinning only the
+    #: physical property left `margin-block-start: 0` invisible (measured —
+    #: #14406 review round 4, finding G2). `margin` and `margin-block` are the
+    #: shorthands that RESET it, and in the CSS grammar the FIRST token is the
+    #: block-start side (one value = all sides; two = block, inline; three =
+    #: top, inline, bottom), so `margin: 0 auto` is a zero top margin and is
+    #: refused with `margin: 0` — which is correct, it splits the baselines.
+    SLACK_PROPS = ("margin-top", "margin-block-start", "margin", "margin-block")
+
     def test_no_other_rule_takes_the_ctas_slack(self):
-        """No OTHER rule may set the CTA's vertical slack, at ANY specificity.
+        """The card CTA's ONLY vertical slack is the pinned `margin-top: auto`.
 
         `_css_rules_with_scope` matches a prelude that NAMES the exact selector
         and returns them in source order, so `[-1]` cannot see a rule that
-        reaches the same element through a different, higher-specificity
-        selector. Measured (#14406 review round 3): appending
-        `.pricing-grid .pricing-card .btn { margin-top: 0 }` — (0,3,0) against
-        the pinned (0,2,0), so it wins at any source order — left all three
-        rows of this class GREEN while the rendered CTAs split again. That is a
-        false PASS in the guard whose docstring says the CTA takes the slack.
+        reaches the same element through a DIFFERENT selector. Measured
+        (#14406 review round 3): appending `.pricing-grid .pricing-card .btn
+        { margin-top: 0 }` — (0,3,0) against the pinned (0,2,0), so it wins at
+        any source order — left all three rows of this class GREEN while the
+        rendered CTAs split again.
 
-        So this row reads EVERY top-level rule that can reach a card's CTA and
-        refuses a competing `margin-top` / `margin` shorthand. It does not
-        re-implement the cascade: it states the invariant the page needs — the
-        only rule that may set that slack is the pinned one, and it sets `auto`.
+        The first version of THIS row only looked at a prelude containing both
+        `.pricing-card` and `.btn`, only at `margin-top`/`margin`, and only
+        outside `@media`. Three measured false PASSes followed (#14406 review
+        round 4) — the same 3-baseline / 70.2px signature with every row green:
+
+        * **G1 — ancestor selectors.** `.pricing-grid .btn { margin-top: 0 }`
+          (0,2,0) is tied with the pinned rule and later in source, so it wins;
+          the filter required `.pricing-card` in the same prelude and never read
+          it.
+        * **G2 — the logical property.** `margin-block-start: 0`, including
+          INSIDE the pinned rule's own body, where `_effective_decl(body,
+          "margin-top")` returns `None`.
+        * **G3 — `min-width` media.** `@media (min-width: 1024px) { … }` applies
+          at 1440x900; the `inside_media` skip threw it away. A `max-width`
+          hatch is the opposite case (the cards stack there by design) and is
+          still skipped.
+
+        So the reach here is `_css_reaching_decls`'s — rightmost-compound
+        matching (ancestors included), logical aliases and shorthands, and
+        `min-width` media — and the invariant is the one the page needs: every
+        rule that can select the CTA must either not touch the slack or say
+        `auto`. It does not re-implement the cascade; it fails closed on any
+        disagreement, because specificity — not source order — picks the winner
+        and a reader of source order cannot.
         """
         css = _product_teams_html()
         competing = []
-        for prelude, body, inside_media in _css_all_rules(css):
-            if inside_media:
-                continue
-            targets = [p.strip() for p in prelude.split(",")]
-            if not any(".pricing-card" in t and ".btn" in t for t in targets):
-                continue
-            if "".join(prelude.split()) == ".pricing-card.btn":
-                continue  # the pinned rule itself, asserted above
-            for prop in ("margin-top", "margin"):
-                value = _effective_decl(body, prop)
-                if value is None:
-                    continue
-                if prop == "margin-top" and value == "auto":
+        for prop in self.SLACK_PROPS:
+            for prelude, value in _css_reaching_decls(css, prop, ".btn"):
+                # The block-start side is the first token for the shorthands.
+                start_side = (value.split()[0] if prop in ("margin", "margin-block")
+                              else value)
+                if start_side == "auto":
                     continue
                 competing.append((prelude, prop, value))
-        assert not competing, (
+        assert competing == [], (
             "another rule sets the pricing CTA's vertical slack, and can starve "
             f"the pinned `margin-top: auto`: {competing!r}. Specificity, not "
-            "source order, decides which one a browser applies, so a rule like "
-            "`.pricing-grid .pricing-card .btn { margin-top: 0 }` (0,3,0) "
-            "out-ranks the pinned (0,2,0) rule and splits the four baselines "
+            "source order, decides which one a browser applies, so "
+            "`.pricing-grid .pricing-card .btn { margin-top: 0 }` (0,3,0), "
+            "`.pricing-grid .btn { margin-top: 0 }` (0,2,0, later in source), "
+            "`margin-block-start: 0` (the logical alias) and the same inside a "
+            "`@media (min-width: …)` block all out-rank or by-pass the pinned "
+            "rule and split the four baselines to three, 70.2px apart "
             "(#13645 item 6)")
 
     def test_the_popular_cards_thicker_border_does_not_move_its_cta(self):
@@ -11152,17 +11229,20 @@ class TestProductTeamsPricingCardCtaBaseline:
             "744.78 vs 745.78 at 1440x900 — #13645 item 6)")
         # Same cascade caveat as the flex row above: `.pricing-card`'s `padding`
         # shorthand and any `.pricing-card.popular` rule under another prelude
-        # reach this element without naming this selector text, so every base
-        # rule that can select it must agree with the compensating value.
-        disagreeing = [(p, v) for p, v in _css_reaching_decls(
-            css, "padding-bottom", ".pricing-card", (".popular",))
-            if v != "calc(1.75rem - 1px)"]
-        assert disagreeing == [], (
-            f"a rule that can select `.pricing-card.popular` declares "
-            f"`padding-bottom: {disagreeing[0][1]}` ({disagreeing[0][0]!r}), "
-            "overriding the 1px compensation — the popular card's CTA lands "
-            "1px off the other three (#14406 review round 3 P2, same "
-            "exact-selector limit as the flex row)")
+        # reach this element without naming this selector text, so every rule
+        # that can select it must agree with the compensating value — and
+        # `padding-block-end` is the LOGICAL alias `padding-bottom`
+        # delegates to (#14406 review round 4, finding G2's shape).
+        for prop in ("padding-bottom", "padding-block-end"):
+            disagreeing = [(p, v) for p, v in _css_reaching_decls(
+                css, prop, ".pricing-card", (".popular",))
+                if v != "calc(1.75rem - 1px)"]
+            assert disagreeing == [], (
+                f"a rule that can select `.pricing-card.popular` declares "
+                f"`{prop}: {disagreeing[0][1]}` ({disagreeing[0][0]!r}), "
+                "overriding the 1px compensation — the popular card's CTA "
+                "lands 1px off the other three (#14406 review round 3 P2, "
+                "same exact-selector limit as the flex row)")
 
     def test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render(self):
         """`margin-top: auto` aligns the LAST item — so nothing may follow the CTA.
