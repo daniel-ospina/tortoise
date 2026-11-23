@@ -1456,24 +1456,6 @@ class _RegistryCtx(NamedTuple):
     sys_dict_names: frozenset[str]
     consts: dict[str, frozenset[str]]
     builtin_aliases: frozenset[str]
-    #: Names bound to `dict.get` / `dict.__getitem__` (#14326 round 25 P1). A ctx field for the
-    #: same reason as every other: a call site cannot pass it "partly".
-    dict_readers: frozenset[str]
-
-
-def _is_dict_reader_ref(node: ast.AST) -> bool:
-    """`dict.get` / `dict.__getitem__` — the UNBOUND read of a mapping, carried as a VALUE.
-
-    ⛔ ONE HOP FURTHER THAN THE RECEIVER CLAUSE (#14326 round 25 P1, MEASURED GREEN at
-    `7508592c24`: `_dg = dict.get; _dg(sys.__dict__, "modules")[…] = …` inserted the entry
-    while the literal `dict.get(sys.__dict__, "modules")[…]` was RED). Here the callee is a
-    NAME, so the attribute-shaped arm never sees the call at all — the same hop
-    `_is_setattr_like`/`launderers` already resolve for `setattr`, applied to the registry
-    READ rather than the registry WRITE.
-    """
-    return bool(isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name) and node.value.id == "dict"
-                and node.attr in {"get", "__getitem__"})
 
 
 def _is_modules_key(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
@@ -1501,6 +1483,57 @@ def _registry_replacement(target: ast.AST, ctx: _RegistryCtx) -> ast.AST | None:
                 and _is_module_registry(element, ctx):
             return element
     return None
+
+
+def _is_registry_replacement_store(
+    func: ast.AST, node: ast.AST, ctx: _RegistryCtx,
+    launderers: frozenset[str], consts: dict[str, frozenset[str]],
+) -> bool:
+    """A CALL that stores the key `"modules"` on `sys` or on `sys`'s own `__dict__`.
+
+    ⛔ THE CALL SPELLING OF A REPLACEMENT (#14326 round 26, MEASURED GREEN at `e1cd3cad95`:
+    `setattr(sys, "modules", {…})` and `dict.__setitem__(sys.__dict__, "modules", {…})` each
+    replaced the import registry while every ASSIGNMENT spelling of the same replacement was
+    RED). `_registry_replacement` destructures an assignment TARGET; this destructures the
+    same store carried as a CALL, so a key position that differs per spelling is resolved
+    rather than indexed — the lesson `_setattr_key_operands` already carries.
+
+    Kept to `sys`/`sys.__dict__` deliberately: an ordinary object's `"modules"` attribute is
+    not the import registry and must stay GREEN.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    unbound_setitem = (
+        _callee_names_of(func) & {"__setitem__", "setdefault", "update", "setattr"}
+        and node.args
+    )
+    if not (_is_setattr_family(func, launderers) or unbound_setitem):
+        return False
+    keys: set[str] = set()
+    for arg in attr_key_candidates(func, node, launderers):
+        keys |= _string_keys_of(arg, consts)
+    if not (keys & {"modules"}):
+        return False
+    return _stores_on_sys_or_its_dict(node, ctx)
+
+
+def attr_key_candidates(func: ast.AST, node: ast.Call,
+                        launderers: frozenset[str]) -> list[ast.AST]:
+    """Every node that can carry the KEY of a store-shaped call — the `setattr` family's own
+    position logic, or `args[1]` for the unbound mapping mutators (`dict.__setitem__(m, k, v)`)."""
+    if _is_setattr_family(func, launderers):
+        return _setattr_key_operands(func, node, launderers)
+    return list(node.args[1:2])
+
+
+def _stores_on_sys_or_its_dict(node: ast.Call, ctx: _RegistryCtx) -> bool:
+    """The OBJECT side of the store resolves to `sys`, or to `sys`'s own `__dict__`."""
+    for obj in node.args[:1]:
+        if isinstance(obj, ast.Name) and obj.id in ctx.sys_names:
+            return True
+        if _is_sys_dict_mapping(obj, ctx):
+            return True
+    return False
 
 
 def _is_module_registry(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
@@ -1563,22 +1596,30 @@ def _is_module_registry(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
     # the entry while the bound spelling was RED). The store axis already resolves its own
     # unbound twins (`_REGISTRY_MUTATORS` with `offset=1`); the READ axis is the surviving
     # asymmetry, and both are `dict.get(sys.__dict__, "modules") is sys.modules` at runtime.
+    # ⛔ THE ARGUMENT SHAPE IS THE IDENTITY, AND THE CALLEE IS IRRELEVANT (#14326 round 26,
+    # MEASURED). Rounds 24-25 tried to decide WHICH CALLable this is — `dict` by name, then
+    # `builtin_aliases`, then a callee CARRIED in a name (`_dg = dict.get`) — and every round
+    # found the next spelling GREEN: `builtins.dict.get(sys.__dict__, "modules")`,
+    # `_bg = builtins.dict.get`, `_g = builtins.getattr`, `_v = builtins.vars`,
+    # `partial(dict.get)`, `_mget = getattr(dict, "get")`, `dict.__dict__["get"]`. That list
+    # is UNBOUNDED (a lambda, an `operator.getitem`, a class attribute, an alias of an alias),
+    # so enumerating it cannot converge — it is the same defect as matching a KEY by spelling
+    # instead of resolving it, one level up.
+    #
+    # The callee never needed identifying: `args[0]`/`args[1]` are what select the mapping, and
+    # `_is_sys_dict_mapping(node.args[0])` already restricts the READ to `sys`'s own mapping.
+    # So the arm matches the SHAPE — *any* call that reads `(<sys dict>, "modules")` — and the
+    # callee, its spelling, its aliases and its laundering are all out of scope by
+    # construction. This is strictly SIMPLER than the spelling match it replaces, which is the
+    # tell that it is the right predicate.
+    #
+    # ⛔ THE ACCEPTED COST, stated rather than implied: `f(sys.__dict__, "modules")` reds for
+    # ANY `f` that returns a mapping. That is a contrived shape (its arguments are literals
+    # naming `sys`'s own `__dict__` and the key `"modules"`) and the over-red is the SAFE
+    # direction against a store into the import registry — the same trade the `with`-target arm
+    # makes by binding the context expression. An unrelated MAPPING stays GREEN, which is the
+    # control that matters: `dict.get(_cfg, "modules")` and `_cfg.get("modules")` below.
     return bool(isinstance(node, ast.Call)
-                and (
-                    # The BOUND spelling, `X.get(<sys dict>, "modules")`. ⛔ THE RECEIVER IS
-                    # NOT WHAT IS READ (#14326 round 25 P1, MEASURED: round 24's
-                    # `node.func.value.id in ({"dict"} | ctx.builtin_aliases)` clause made a
-                    # store into the registry GREEN through `builtins.dict.get`, while
-                    # `X.get(sys.__dict__, "modules") is sys.modules` is `True` for EVERY
-                    # spelling of the receiver — `args[0]`/`args[1]` choose the mapping). The
-                    # clause is GONE; `_is_sys_dict_mapping(node.args[0])` already restricts
-                    # the read to sys's own mapping, which is what makes it the registry.
-                    (isinstance(node.func, ast.Attribute)
-                     and node.func.attr in {"get", "__getitem__"})
-                    # …and the UNBOUND spelling CARRIED IN A NAME (`_dg = dict.get`).
-                    or (isinstance(node.func, ast.Name)
-                        and node.func.id in ctx.dict_readers)
-                )
                 # The arity guard keeps `node.args[1]` from an IndexError on a 1-arg
                 # `dict.get(<mapping>)`; it is unreachable-by-mutant and SAID SO (#14326
                 # round 24, MEASURED: relaxing it also left `41 passed`).
@@ -7586,19 +7627,23 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     #: an alias of the CALLEE was never collected, so three arms downstream were blind to it).
     #: A ctx field passed empty at the one site that fills it is exactly the hazard
     #: `_RegistryCtx` exists to remove, one ordering hop out.
+    #: ⛔ THE MODULE-QUALIFIED VALUE IS THE BUILTIN (#14326 round 26, MEASURED GREEN:
+    #: `_g = builtins.getattr; _g(sys, "modules")[…] = …` and `_v = builtins.vars;
+    #: _v(sys)["modules"][…] = …` each replaced the registry while the INLINE
+    #: `builtins.getattr(...)`/`builtins.vars(...)` spellings were RED — the alias set
+    #: collected a bare `Name` only, so the module-qualified VALUE matched nothing).
     builtin_aliases = frozenset(_aliases_of(
-        tree, lambda _n: isinstance(_n, ast.Name) and _n.id in _REGISTRY_BUILTINS, loops=True))
-    #: The UNBOUND read carried in a name (#14326 round 25 P1). Built BEFORE `sys_dict_names`
-    #: for the same ordering reason `builtin_aliases` is — a ctx field passed empty at the one
-    #: site that fills it is the hazard `_RegistryCtx` exists to remove.
-    dict_readers = frozenset(_aliases_of(tree, _is_dict_reader_ref, loops=True))
+        tree,
+        lambda _n: (isinstance(_n, ast.Name) and _n.id in _REGISTRY_BUILTINS)
+        or (isinstance(_n, ast.Attribute) and _n.attr in _REGISTRY_BUILTINS
+            and isinstance(_n.value, ast.Name) and _n.value.id == "builtins"),
+        loops=True))
     sys_dict_names = frozenset(_aliases_of(
         tree, lambda _n: _is_sys_dict_mapping(
-            _n, _RegistryCtx(sys_names, frozenset(), consts, builtin_aliases,
-                             dict_readers)), loops=True))
+            _n, _RegistryCtx(sys_names, frozenset(), consts, builtin_aliases)), loops=True))
     #: ONE object for every resolved-registry question — see `_RegistryCtx` for why the
     #: positional form was a hazard (#14326 round 24).
-    ctx = _RegistryCtx(sys_names, sys_dict_names, consts, builtin_aliases, dict_readers)
+    ctx = _RegistryCtx(sys_names, sys_dict_names, consts, builtin_aliases)
     # The namespace MAPPINGS, plus the IMPORT REGISTRY `from tortoise.sdk import …`
     # resolves THROUGH (`sys.modules`), each with its one-bind aliases resolved.
     namespaces = frozenset(
@@ -7785,6 +7830,25 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
                 # binds no class. `__builtins__["TortoiseSDK"]` is not a lever either:
                 # `run()`'s own `from … import` binds a LOCAL that shadows a builtin).
                 keys |= _string_keys_of(node.slice, consts)
+            # ⛔ A STORE OF THE KEY `"modules"` ON `sys` (OR ON `sys`'s OWN NAMESPACE)
+            # REPLACES THE WHOLE REGISTRY (#14326 round 26, MEASURED GREEN:
+            # `setattr(sys, "modules", {…})` and
+            # `dict.__setitem__(sys.__dict__, "modules", {…})` each replaced the import
+            # registry while every ASSIGNMENT spelling of the same replacement
+            # (`sys.modules = {…}`, `sys.__dict__["modules"] = {…}`) was RED). The
+            # assignment spelling goes through `_registry_replacement`; the CALL spelling
+            # carries the same store, so it lands in the same red. The key is `"modules"`,
+            # which is not in `{_SDK_CONSTRUCTOR, _SHIPPED_MODULE}` — that is why the
+            # `setattr` arm above missed it.
+            if (isinstance(node, ast.Call)
+                    and _is_registry_replacement_store(node.func, node, ctx, launderers, consts)):
+                out.append(
+                    f"line {node.lineno} REPLACES `sys.modules` — `run()`'s deferred "
+                    "`from tortoise.sdk import …` resolves THROUGH this mapping at CALL "
+                    "time, so storing the key `modules` on `sys` (or on its `__dict__`) "
+                    "swaps the class just as assigning `sys.modules` outright does"
+                )
+                continue
             hits = keys & {_SDK_CONSTRUCTOR, _SHIPPED_MODULE}
             if not hits:
                 continue
@@ -8349,6 +8413,32 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         # the blessed-fail-open shape this predicate's own docstring names. These rows red if
         # the receiver clause ever comes back; the last two are the CALLEE carried in a name,
         # which the attribute-shaped arm cannot see at all.
+        # ⛔ THE CALLEE IS IRRELEVANT — THE ARGUMENT SHAPE IS THE IDENTITY (#14326 round 26).
+        # Each of these replaced the registry at `e1cd3cad95` while the INLINE spelling was
+        # RED. Enumerating callees cannot converge (a lambda, an `operator.getitem`, an alias
+        # of an alias), so the arm now matches `(<sys dict>, "modules")` by SHAPE and these
+        # rows are what red if a callee test is ever reintroduced.
+        "`builtins.dict.get` CARRIED in a name":
+            'import builtins\n_bg = builtins.dict.get\n'
+            '_bg(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`builtins.getattr` CARRIED in a name":
+            'import builtins\n_g = builtins.getattr\n'
+            '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`builtins.vars` CARRIED in a name":
+            'import builtins\n_v = builtins.vars\n'
+            '_v(sys)["modules"]["tortoise.sdk"] = _Mirror\n',
+        "`partial(dict.get)`":
+            'from functools import partial\n_p = partial(dict.get)\n'
+            '_p(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`getattr(dict, \"get\")` carried in a name":
+            '_mget = getattr(dict, "get")\n'
+            '_mget(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`dict.__dict__[\"get\"]` carried in a name":
+            '_mget = dict.__dict__["get"]\n'
+            '_mget(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`for _dg in (dict.get,)` TARGET":
+            'for _dg in (dict.get,):\n'
+            '    _dg(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
         "UNBOUND `.get` through `builtins.dict`":
             'builtins.dict.get(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
         "UNBOUND `dict.get` CARRIED in a name":
@@ -8453,6 +8543,15 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "`_g = getattr` then `__d = _g(sys, \"__dict__\")` REPLACES":
             '_g = getattr\n__d = _g(sys, "__dict__")\n'
             '__d["modules"] = {"tortoise.sdk": _Mirror}\n',
+        # ⛔ THE CALL SPELLING OF THE SAME REPLACEMENT (#14326 round 26, EACH MEASURED GREEN at
+        # `e1cd3cad95` while every ASSIGNMENT spelling above was RED). The key is `"modules"`,
+        # which is not in `{TortoiseSDK, tortoise.sdk}`, so the `setattr` arm — keyed on those
+        # — missed it entirely, and the unbound `__setitem__` arm's receiver test wants
+        # `sys.modules`, not `sys.__dict__`.
+        "`setattr(sys, \"modules\", {…})`":
+            'setattr(sys, "modules", {"tortoise.sdk": _Mirror})\n',
+        "`dict.__setitem__(sys.__dict__, \"modules\", {…})`":
+            'dict.__setitem__(sys.__dict__, "modules", {"tortoise.sdk": _Mirror})\n',
     }
     for name, lever in registry_replacements.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
