@@ -245,9 +245,15 @@ Measured:
 
 - `printenv DEEPSEEK_API_KEY` → **set**; `printenv TORTOISE_API_KEY` → **set**.
   `OPENROUTER_API_KEY`, `VENICE_API_KEY` and `OPENAI_API_KEY` → unset.
-- the fleet's credential file is **`~/keys.env`** (present, mode `600`), which
-  `orchestrator/lane-env.sh` sources for every lane. The name this section used to cite,
-  `~/pi-keys.env`, is not the file the fleet loads — and it does not exist.
+- the file a **lane** loads is `$HOME/keys.env` (present on this box, mode `600`):
+  agent-infra's `scripts/orchestrator-harness/lane-env.sh:61` defaults
+  `_lane_env_file="${ENV_FILE:-${HOME:-/nonexistent}/keys.env}"` and `:93` sources it.
+  ⚠️ `~/pi-keys.env` is a real credential location too, and the earlier wording here
+  (“not the file the fleet loads”) was wrong about that: the fleet's **worker** launch
+  line loads a PAIR — `worker-terminal.sh:686` iterates `"$home/keys.env"
+  "$home/pi-keys.env"`, last non-blank value winning, precisely because on a Mac
+  `pi-keys.env` is the only env file there is (`worker-terminal.sh:670-677`). It is simply
+  **absent on this box**, which is why a lane-only reading looked complete.
 - `build_extractor_model()` returns a `RoutingModel` whose primary is a
   `DeepSeekDirectModel` pointed at `https://api.deepseek.com/v1/chat/completions`. It does
   **not** fall back to the no-key default, so "every call returns `401`" was not a
