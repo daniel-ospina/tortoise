@@ -2353,7 +2353,8 @@ def _balance_cut_parens(text: str) -> str:
 # `_balance_cut_parens` — seeing an unclosed `(` and no `)` — deleted the OPENER,
 # leaving `never ran cannot appear in an artifact), so this is the LOCAL wall …`.
 # That reddened `test_no_durations_row_keeps_half_a_parenthesis` on the required
-# legs (run 41395489623), which is a P3 note-damage defect and not a wrong weight.
+# legs (run 41395489623) while that pin existed — it went with the durations-map
+# arithmetic cut — which is a P3 note-damage defect and not a wrong weight.
 #
 # So the renderer joins the span before it touches it (`_joined_note_tail`) and
 # re-emits it per the shape of the change (see `render_refreshed_manifest`):

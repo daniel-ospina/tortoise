@@ -12559,6 +12559,47 @@ _EMITTED_WATCHDOG_CLAIM_RE = re.compile(
     r"the emitted \*\*(\d+) m\*\* per-shard|the emitted (\d+) m per-shard")
 
 
+def _cache_refs_of(step: dict) -> str:
+    """EVERY cache key a step names: its primary `key:` AND its `restore-keys:`.
+
+    `actions/cache` reads both fields: on a primary-key miss it walks
+    `restore-keys` in order as PREFIX matches and restores the newest entry that
+    matches. So a guard that reads `with.key` alone cannot see a step that reads
+    a retired key through `restore-keys:`, and reports green while the step
+    restores the archive the guard exists to keep out (#11065 cycle 8).
+    """
+    with_ = step.get("with") or {}
+    return "\n".join(str(with_.get(k) or "") for k in ("key", "restore-keys"))
+
+
+def _steps_naming_key(jobs: dict, needle: str) -> list:
+    """`[(job id, step name)]` for every step whose cache FIELDS name `needle`.
+
+    Fields, plural (`_cache_refs_of`). Takes the JOBS mapping, not the workflow,
+    so the same call serves the whole-workflow scan — where "no reader, no
+    writer" is a claim about every job — and a synthetic single-job fixture.
+    """
+    return [(jid, s.get("name")) for jid, jd in jobs.items()
+            for s in (jd.get("steps") or [])
+            if needle in _cache_refs_of(s)]
+
+
+def _test_job_pre_phase_watchdog_minutes(steps: list) -> int:
+    """The last-failed pre-phase's OWN watchdog, parsed from the run step.
+
+    It is a `timeout -s INT -k 10 <N>m` inside the pytest step (#6142). Parsed
+    rather than restated: if it moves, the arm-2 SUM must move with it.
+    """
+    pattern = re.compile(r"timeout -s INT -k 10 (\d+)m ")
+    found = sorted({int(m) for s in steps
+                    for m in pattern.findall(str(s.get("run") or ""))})
+    assert len(found) == 1, (
+        f"the `test` job carries {len(found)} distinct `timeout -s INT -k 10 "
+        f"<N>m` watchdogs {found}m — the pre-phase term of the arm-2 SUM is "
+        "ambiguous; sum them here deliberately, or keep one")
+    return found[0]
+
+
 def test_the_test_job_carries_no_unbounded_cache_post_step():
     """#11063: the `test` job must carry NO unbounded cache post step, and its
     `~/.cache/uv` writer must be bounded twice — in SIZE and in TIME.
@@ -12643,6 +12684,17 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert isinstance(bound, int) and save.get("continue-on-error") is True, (
         "the uv save must be bounded in TIME and unable to red the leg: "
         f"timeout-minutes={bound!r}, continue-on-error={save.get('continue-on-error')!r}")
+    # ⛔ A POSITIVE INTEGER IS NOT A BOUND — it must also be SMALL. Arm 2 of
+    # §2 caps the `test` job's SUM (`x1.5 <= the 90 m cap`); the prune + save
+    # terms live inside whatever the rest of the SUM leaves, and a bound raised
+    # into that margin is a save killed AT THE CAP, i.e. `cancelled`, i.e. a
+    # required check withheld on a green shard (#5219/#11063). The margin itself
+    # is NOT restated here — re-derive it with `--emit-push-matrix` (#11290).
+    assert 0 < bound <= 8, (
+        f"the uv save's `timeout-minutes` is {bound!r}; it must be a positive "
+        "integer <= 8. A larger bound does not make the payload smaller, it only "
+        "spends the arm-2 margin a real regression needs, and a save killed at "
+        "the job's cap withholds a required check (#5219/#11063)")
     assert "cache-hit" in str(save.get("if") or ""), (
         "the uv save must be gated on `cache-hit != 'true'` — a `restore-keys` "
         "HIT leaves that output `'false'`, so an ungated save re-uploads a cache "
@@ -12657,11 +12709,43 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert prune_i < save_i, (
         "the uv prune must run BEFORE the save; saving first archives exactly the "
         "accumulated entries the prune exists to drop (#11063)")
-    assert isinstance(prune.get("timeout-minutes"), int) and prune.get("continue-on-error") is True, (
+    prune_bound = prune.get("timeout-minutes")
+    assert isinstance(prune_bound, int) and prune.get("continue-on-error") is True, (
         "the prune must be bounded in time and unable to red the leg — a leg that "
         "failed before `uv` was installed has nothing to prune: "
-        f"timeout-minutes={prune.get('timeout-minutes')!r}, "
+        f"timeout-minutes={prune_bound!r}, "
         f"continue-on-error={prune.get('continue-on-error')!r}")
+    assert 0 < prune_bound <= 4, (
+        f"the uv prune's `timeout-minutes` is {prune_bound!r}; it must be a "
+        "positive integer <= 4 — an unbounded prune is the same defect class as "
+        "the unbounded save, and both terms spend the arm-2 margin (#11063/#10182)")
+
+    # ⛔ A STEP BOUND ABOVE THE STEP'S OWN BLOCKING WAIT IS AN INERT ENFORCER.
+    # `uv` waits `UV_LOCK_TIMEOUT` (default 300 s) for the cache lock another uv
+    # process may hold; on a shared pool host several shards install
+    # concurrently, so a 1 m step bound with the 5 m default kills the prune
+    # having pruned NOTHING, every time — and the save then uploads exactly the
+    # accumulation the prune exists to drop.
+    prune_code = "\n".join(str(prune.get("run") or "").splitlines())
+    lock = re.search(r"UV_LOCK_TIMEOUT=(\d+)", prune_code)
+    assert lock, (
+        "the prune step does not bound `UV_LOCK_TIMEOUT`. `uv`'s default "
+        "cache-lock wait is 300 s — longer than this step's bound — so on any "
+        "host where another uv process holds the cache (the normal case on a "
+        "shared pool) the step is killed mid-wait, pruning nothing while the "
+        "bound reads as if it held")
+    assert int(lock.group(1)) < prune_bound * 60, (
+        f"the prune step's `UV_LOCK_TIMEOUT` is {lock.group(1)}s against a "
+        f"`timeout-minutes: {prune_bound}` ({prune_bound * 60}s) — the wait must "
+        "be decided INSIDE the step bound, or the bound cannot fire before the "
+        "wait does")
+    # ⛔ The `OVERRIDES:` departure is PLAIN `prune`: the vendor's `--ci` variant
+    # deletes the pre-built registry wheels `uv sync --frozen` re-resolves cold on
+    # every shard — the exact tidy-up the marker exists to prevent.
+    assert "--ci" not in prune_code, (
+        "the uv prune was switched to `uv cache prune --ci`, which removes the "
+        "dev-group registry wheels `uv sync --frozen` re-resolves cold on every "
+        "shard (the torch set is `pip`'s cache, restored read-only here)")
 
     # (d) the payload SPLIT: pip is restore-only HERE, because two other jobs
     # write its key and it is 93% of the payload that cancelled the shard.
@@ -12671,6 +12755,51 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "this job must READ the pip cache and write nothing — two other jobs own "
         "that key and it is 93% of the 3.8 GB payload that cancelled a green "
         f"shard (#7612/#11063): {pip_writers}")
+
+    # (d2) the RETIRED combined key is unreferenced ANYWHERE, on EITHER axis.
+    # `uv-pip-<os>-<hash>` restored both trees into one step (3.88 GB); the split
+    # above only keeps it out of THIS job, so the population is the whole
+    # workflow — the `pip-` writers live in sibling jobs.
+    legacy = _steps_naming_key(_load_python_ci().get("jobs") or {}, "uv-pip-")
+    assert legacy == [], (
+        "a step still references the retired `uv-pip-` combined key — `key:` and "
+        f"`restore-keys:` are both key axes, and either one restores the 3.88 GB "
+        f"payload this split exists to retire (#11063): {legacy}")
+
+    # (d3) Arm 2 of §2: the cap must clear SUM x 1.5. The terms the FILE can
+    # state are PARSED out of it; the rest are the MEASUREMENTS from the run
+    # that filed #11063 (run 42000057137, job `test (d)` 127165076497), named
+    # and sized as such — never dressed as file facts.
+    from tools.ci_selection import fast_matrix_include, push_legs
+    fast = fast_matrix_include(push_legs(load_manifest())["shards"])["include"]
+    worst_watchdog = max(int(e["watchdog_minutes"]) for e in fast)
+    pre_phase = _test_job_pre_phase_watchdog_minutes(steps)
+    embedders = [s for s in steps
+                 if str(s.get("name") or "").startswith("Embedding model REQUIRED")]
+    assert len(embedders) == 1, (
+        "expected one embedder-provision step in the `test` job, found "
+        f"{len(embedders)} — the SUM below would then be wrong")
+    embedder = embedders[0].get("timeout-minutes")
+    assert isinstance(embedder, int) and embedder > 0, (
+        "the embedder-provision step must keep its own `timeout-minutes` — it is "
+        "a term in the job's SUM")
+    setup = 3.03               # `Set up job`                            = 182 s
+    uncapped_pre_suite = 4.23  # other uncapped pre-suite steps, embedder EXCLUDED = 254 s
+    lastfailed = 0.38          # last-failed save                        =  23 s
+    cache_write = prune_bound + bound
+    total = (pre_phase + worst_watchdog + embedder + setup + uncapped_pre_suite
+             + lastfailed + cache_write)
+    cap = job["timeout-minutes"]
+    assert total * 3 / 2 <= cap, (
+        f"the `test` job's SUM ({pre_phase}m pre-phase + {worst_watchdog}m worst "
+        f"shard watchdog + {embedder}m embedder + {setup}m `Set up job` + "
+        f"{uncapped_pre_suite}m uncapped pre-suite + {lastfailed}m last-failed "
+        f"save + {cache_write:g}m prune+uv-cache-save = {total:g}m) x 1.5 = "
+        f"{(total * 3 / 2):g}m no longer clears its {cap}m cap. Arm 2 "
+        "(docs/ops/ci-wall-clock.md §2) requires the x1.5 margin on the SUM, not "
+        "the median, and a save killed at the cap withholds a REQUIRED check "
+        "(#5219). The pre-suite terms are the ones to shrink: raising the cap "
+        "instead re-opens #3239's stale-head exposure")
 
     # (e) §2's stated emitted watchdog must BE the emission (docstring, last ¶).
     wall = (Path(__file__).resolve().parents[1] / "docs" / "ops" / "ci-wall-clock.md").read_text()
@@ -13365,6 +13494,23 @@ def _save_arm_cap(in_step: int, setup: int = 1, cold_save: int = 9) -> int:
     # whose total is odd (#6744 review). Both shipped values are unaffected
     # (15 -> 30, 30 -> 50), so this is a latent bug fixed while it is cheap.
     return -(-(total * 3) // 20) * 10
+
+
+def test_the_save_arm_rounds_the_sum_up_before_it_divides():
+    """§2's save arm rounds UP: an ODD total must still clear 1.5 x SUM.
+
+    The helper once computed `-(total * 3 // 2)`, which drops the half-minute
+    BEFORE the ceiling, so 27 x 1.5 = 40.5 came back as 40 — a cap BELOW
+    1.5 x SUM, silently, on the first re-tune whose total is odd. The shipped
+    in-step values (15, 30) agree under both forms, which is why the odd total
+    is the case this pin exists for (#10182/#10212).
+    """
+    assert _save_arm_cap(in_step=5) == 30      # total 15 -> 22.5 -> 30
+    assert _save_arm_cap(in_step=20) == 50     # total 30 -> 45.0 -> 50
+    assert _save_arm_cap(in_step=17) == 50, (
+        "_save_arm_cap floors before it ceils: 27 x 1.5 = 40.5 rounded up is "
+        "50, and a cap BELOW 1.5 x SUM is the under-sizing that reddened two "
+        "required checks in the first place (#10182/#10212)")
 
 
 def test_the_save_arm_caps_clear_the_post_step_that_reddened_them():
@@ -19416,10 +19562,11 @@ def _workflow_jobs(workflow: str) -> dict:
 def _wall_clock_cap_rows(text: str | None = None) -> dict[str, int]:
     """`{job: published cap}` for every 6-column row that publishes one.
 
-    The CAP-only sibling of `_wall_clock_table_rows`. That reader also requires a measured
-    `max`, which drops `ci-introduced-failure` ("not yet measured") — and its cap is exactly
-    what this pin is about, since a cap can move without the max moving. The job-cell filter
-    is the same one, so the shard aggregate rows stay excluded by construction.
+    The CAP-only sibling of the `max`-carrying table reader (that wider reader went with
+    the durations-map arithmetic cut). A table reader that also requires a measured `max`
+    would drop `ci-introduced-failure` ("not yet measured") — and its cap is exactly what
+    this pin is about, since a cap can move without the max moving. The job-cell filter is
+    the same one, so the shard aggregate rows stay excluded by construction.
 
     `text` is accepted so a control can feed a MUTATED document; it defaults to the real one.
     """
@@ -19446,7 +19593,8 @@ def test_every_cap_the_record_publishes_is_the_cap_its_workflow_ships():
         | `test-record-postgres` | 23 | 1.62 | 14.61 | 15.43 | **50** |
 
     left `tests/test_ci_selection.py -k 'wall_clock or arm_1'` at **2 passed** — because
-    `_wall_clock_cap_claims` scans `X → Y` prose MOVES only, and the arm-1 pin reads a
+    the prose-MOVE scanner (also cut with the durations-map arithmetic) reads `X → Y`
+    claims only, and the arm-1 pin reads a
     published cap for the rows arm 1's bullet NAMES plus any row called "arm-1 shaped" (and
     no row is). The table's `cap` column therefore could re-assert the exact cap the code
     reversed while every wall-clock pin stayed green — the defect state this PR exists to fix.
