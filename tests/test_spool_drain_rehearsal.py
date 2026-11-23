@@ -602,6 +602,36 @@ def test_a_cost_describing_a_corpus_no_mode_drained_is_refused(
         "a cost that describes a corpus no mode drained was written anyway")
 
 
+def test_the_cost_fingerprint_is_taken_AFTER_the_measurement(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard is only as good as its ORDER: fingerprint, then measure, is a hole.
+
+    `_corpus_cost` tokenises the whole spool, so it is the long window. Reading the
+    digest BEFORE it and writing a cost measured after it attests a corpus the
+    measurement never saw — measured in that order: an entry appended inside
+    `_corpus_cost` exited 0 with `sessions: 4` while every mode had attested 3.
+    This pin appends an entry DURING the measurement, so it reds if the two
+    statements are ever swapped back.
+    """
+    out = tmp_path / "evidence"
+    out.mkdir()
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379/tortoise_test")
+    spool = _live_spool(tmp_path / "live-spool")               # 3 entries
+    _stub_one_mode(
+        monkeypatch, digest=rehearsal._source_fingerprint(spool)["aggregate_sha256"])
+    real_cost = rehearsal._corpus_cost
+
+    def cost_then_a_capture_lands(src: Path) -> dict:
+        cost = real_cost(src)                                  # measures 3
+        _spool(Path(src), "late")                              # ... and a 4th lands
+        return cost
+
+    monkeypatch.setattr(rehearsal, "_corpus_cost", cost_then_a_capture_lands)
+    with pytest.raises(SystemExit) as exc:
+        rehearsal._run(["all", "--out", str(out), "--spool-src", str(spool)])
+    assert "changed while the run was in flight" in str(exc.value), exc.value
+
+
 # ── every mode states its capture seams, so none inherits the operator's ────
 
 
