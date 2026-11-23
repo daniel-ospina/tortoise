@@ -1757,10 +1757,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # to reach — and each row is scoped to the LITERAL so a future, different URI in the
     # same file still reds (a shape-level `setenv` row would pre-authorize it).
     #
-    #   test_13094_graphevent_home.py — BOTH sites hand `main()` a deliberately
-    #     UNREACHABLE port (`:1`) and assert the produced refusal is exit 2 / "NO
-    #     VERDICT": the claim under test is that an unreadable graph yields NO VERDICT
-    #     rather than a wrong one, and no connection succeeds.
+    #   test_13094_graphevent_home.py — FIVE of its seven sites hand `main()` a
+    #     deliberately UNREACHABLE port (`:1`) and assert the exit-2 contract on the
+    #     produced refusal (each also asserts the message, several that it is "NO
+    #     VERDICT"): the claim under test is that an unreadable graph yields NO VERDICT
+    #     rather than a wrong one. The other TWO (`:1362`, `:1384`) name no port at all
+    #     and patch `module.measure` directly, so no connection is attempted.
+    #     ⚠️ THE LITERALS BELOW ARE TWO, NOT ONE: this row was written against
+    #     `docker://:@127.0.0.1:1/x` alone, and `main`'s #14183 (the walk that could not
+    #     prove it reached the end) re-pointed TWO of that file's sites to `docker://x`
+    #     while five kept the old literal. Declared as two literal rows rather than
+    #     widened to a shape-level pattern: the LITERAL scoping is this row's whole
+    #     point — a future, different URI in this file must still red.
     #   test_13337_cache_graph_declaration.py — the pair pins the record/cache
     #     disagreement: cache-without-record must SKIP (the `setenv`, whose value is
     #     the lane SIGNAL `_both_stores()` branches on) and record-without-cache must
@@ -1770,12 +1778,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #     refuse or refuse-to-claim: `db.example`/`hunter2` are the non-ephemeral and
     #     secret-bearing shapes N8 asserts are refused (and never echoed), and both
     #     arms here patch `tortoise.sdk.TortoiseSDK`, so no store is contacted.
-    #     ⚠️ THE LITERALS BELOW ARE TWO, NOT ONE: this row was written against
-    #     `docker://:@127.0.0.1:1/x` alone, and `main`'s #14183 (the walk that could not
-    #     prove it reached the end) re-pointed TWO of that file's sites to `docker://x`
-    #     while five kept the old literal. Declared as two literal rows rather than
-    #     widened to a shape-level pattern: the LITERAL scoping is this row's whole
-    #     point — a future, different URI in this file must still red.
     "test_13094_graphevent_home.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@127\.0\.0\.1:1/x"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://x"\)$'],

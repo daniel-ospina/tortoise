@@ -701,8 +701,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         # grades both DENOMINATORS — `215` against `_PIN_EOF_PAIRS`, the ratio's own
         # `of the 215` — and the `8`/`5` partition, but never the count of the 215 that
         # drift). ⛔ That result does NOT reproduce at this head and is not a claim about
-        # it: the literals below are asserted now, so the same mutation REDS this arm (34
-        # test functions, up from the 31 it had). It is a coverage gap, and the number is
+        # it: the literals below are asserted now, so the same mutation REDS this arm (the
+        # file's arms have grown from the 31 it then had; a typed COUNT here is the same
+        # rot, so the count itself is not repeated). It is a coverage gap, and the number is
         # whatever the header's own rule
         # measures at this head: `123` (it read `128` until `5171be0d53` re-pointed the
         # audit's sibling-file cites, and the population has moved twice since — the
