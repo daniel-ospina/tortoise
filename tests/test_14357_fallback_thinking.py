@@ -514,6 +514,37 @@ def test_empty_length_base_still_runs_the_escalation_rung():
     assert stats["recovery"]["escalated"] == 1, stats.get("recovery")
 
 
+def test_base_collapse_with_a_failed_escalation_stays_reasoning_collapse():
+    """#14357 review round 2 (P1) — a collapsed BASE is the collapse even when
+    the escalated call fails for an unrelated reason.
+
+    Restoring the rung made a new arm reachable: base collapses (empty, length)
+    -> escalation runs -> the ESCALATED call raises a transient (429/timeout/
+    503). The ladder's abort arm then re-parses the retained base response,
+    which is empty, gets ``None``, and used to wrap the TRANSIENT exception in
+    ``_ParseError(truncated=True)`` — filing a zero-content extraction as the
+    RECOVERABLE ``truncated_parse_error``, which is exactly the fail-open #14357
+    closes (the eval gate rate-limits that class instead of vetoing it). The
+    base's own collapse is what decides the class, so it must stay
+    ``reasoning_collapse``.
+    """
+    class _BaseCollapsesEscTransient:
+        last_finish_reason = "length"
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.last_finish_reason = "length"
+            if (max_tokens or 0) >= 32000:
+                raise RuntimeError("503 Service Unavailable")
+            return ""  # the collapse
+
+    m = _BaseCollapsesEscTransient()
+    with pytest.raises(v2._ReasoningCollapse) as ei:
+        v2._complete_parsed(m, "SYSTEM", "USER", max_tokens=16000, stats={})
+    assert v2._classify_error(ei.value) == "reasoning_collapse", ei.value
+
+
 def test_collapsed_extraction_yields_no_document_and_is_recorded(monkeypatch):
     """End to end: a collapsed S1 is a RECORDED failure that extracts nothing.
 

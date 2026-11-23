@@ -2441,8 +2441,8 @@ def _complete_parsed(model, system: str, user: str, *,
                         # file it as the RECOVERABLE ``truncated_parse_error`` and
                         # let the gate rate-limit a zero-content extraction —
                         # the fail-open #14357 exists to close.
-                        if isinstance(e, _ReasoningCollapse):
-                            raise
+                        if isinstance(e, _ReasoningCollapse) or _collapse:
+                            raise _ReasoningCollapse(str(e)) from e
                         raise _ParseError(
                             str(e), truncated=True, attempt=attempts,
                             excerpt=_error_excerpt(retained_response, None)
@@ -17164,9 +17164,9 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
             #
             # Only the collapse shape is caught. A NON-EMPTY length-truncated
             # response keeps the #2134 rung (a cut tail is recoverable); an
-            # EMPTY one is fatal at the BASE budget and deliberately pre-empts
-            # that rung: 2x on a reasoning burn buys no output. An empty
-            # ``finish_reason=stop`` reply is a legitimate empty answer.
+            # EMPTY one is HELD by _complete_parsed's base call and escalated
+            # ONCE, so this raise is what keeps the class reasoning_collapse
+            # when no rung remains. A stop reply is a legitimate empty answer.
             if truncated and not (resp or "").strip():
                 raise _ReasoningCollapse(
                     "empty content with finish_reason=length — the output "

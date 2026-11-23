@@ -1928,7 +1928,7 @@ def compose_report(artifacts: list[dict]) -> dict:
 #: ⛔ `"S4 failed"` IS DELIBERATELY ABSENT FROM THIS SET (review cycle 15, P3).
 #: `capture_session` appends it from ONE `except` that wraps `run_s4(...)`
 #: (`tortoise/extractor_v2.py:15293`) *and* the post-call merge/shape work that
-#: follows it (`:15292`–`:15333`), while `_Recording.complete` appends a call
+#: follows it (`:15292`–`:15340`), while `_Recording.complete` appends a call
 #: only after the adapter RETURNS — so the marker is the error TYPE of a
 #: failure, not the fact that no call happened. An S4 whose prompt was rendered,
 #: sent and measured but whose output then failed to parse or merge carries this
@@ -1990,8 +1990,8 @@ def _row_complete(row: dict) -> bool:
     P1 — two independent reviewers). `extractor_v2` records errors on calls that
     RETURNED and were fully measured: rung-4 partial accept appends
     `"S4 output partial — truncated tail dropped"` (`tortoise/extractor_v2.py:15347`),
-    `"S4 output malformed section … kept S2 output"` (`:15292`) and the S2 twin
-    (`:17929`) are the same, as are the post-extraction `S5 failed` / `chain …` /
+    `"S4 output malformed section … kept S2 output"` (`:15302`) and the S2 twin
+    (`:18014`) are the same, as are the post-extraction `S5 failed` / `chain …` /
     `entity resolution failed` / `classify(union) failed` entries. Treating ANY
     error as "did not measure" refused a complete composition and exited 1 — and
     it is not clearable by re-running, because README §2's 13 of 50 documents
