@@ -337,6 +337,147 @@ def test_a_failed_send_does_not_consume_the_digest_window(monkeypatch):
     notify.reset_abuse_delivery_for_tests()
 
 
+def test_a_retry_never_resolves_on_an_unreadable_window(monkeypatch):
+    """The retry finishes an episode KNOWN to have ended — it never decides one did.
+
+    When `latest_flag_at`/`flag_clear` RAISES the episode state is UNKNOWN, and
+    closing on that would push a `✅ DR resolved` for an org that may still be over
+    threshold (#5143 / ADR-011's false all-clear). The pending retry must be gated
+    on `ended` exactly like the confirmed episode-end arm.
+    """
+    import tortoise.notify as notify
+
+    resolved: list[tuple[str, str]] = []
+
+    class _Store:
+        def resolve_incident_state(self, kind, subject="", **kw):
+            resolved.append((kind, subject))
+            raise RuntimeError("close failed (#5143)")   # first attempt fails
+
+    class _FlakyStore:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.flagged = True
+
+        def window_sum(self, org_id, rule, window_s, now):
+            return 0
+
+        def latest_flag_at(self, org_id, rule):
+            self.calls += 1
+            if self.calls == 1:
+                return datetime.now(timezone.utc)   # noqa: UP017
+            raise RuntimeError("supabase read blip")  # episode state UNKNOWN
+
+        def flag_clear(self, org_id, rule, now=None):
+            self.flagged = False
+
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    engine = AbuseEngine(_FlakyStore())
+    now = datetime.now(timezone.utc)  # noqa: UP017
+
+    engine._evaluate("org-a", "point_create", 500, 3600, now)   # close raises → pending
+    first = len(resolved)
+    assert first == 2, resolved
+
+    engine._evaluate("org-a", "point_create", 500, 3600, now)   # read RAISES
+    assert len(resolved) == first, (
+        "an UNREADABLE window closed the incident — a false all-clear "
+        f"({resolved})")
+
+
+def test_a_resolution_window_stays_pending_until_it_completes(monkeypatch):
+    """`ALERT_RECOVERY_STREAK` applies to every kind; abuse must honour it.
+
+    `resolve_incident_state` returns SKIPPED_WINDOW until N consecutive healthy
+    observations are counted (#3146). The episode end fires ONCE, so treating that
+    outcome as success meant a deployment raising the fleet-wide recovery window
+    never resolved an abuse incident at all — defect 3 back through an env var.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import ResolveOutcome
+
+    calls: list[tuple[str, str]] = []
+    # 2 resolve calls per evaluation (one per incident kind)
+    outcomes = [ResolveOutcome.SKIPPED_WINDOW] * 4 + [ResolveOutcome.RESOLVED] * 8
+
+    class _Store:
+        def resolve_incident_state(self, kind, subject="", **kw):
+            calls.append((kind, subject))
+            return outcomes[min(len(calls) - 1, len(outcomes) - 1)]
+
+    class _FlagOnceStore:
+        def __init__(self) -> None:
+            self.flagged = True
+
+        def window_sum(self, org_id, rule, window_s, now):
+            return 0
+
+        def latest_flag_at(self, org_id, rule):
+            return (datetime.now(timezone.utc)  # noqa: UP017
+                    if self.flagged else None)
+
+        def flag_clear(self, org_id, rule, now=None):
+            self.flagged = False
+
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    engine = AbuseEngine(_FlagOnceStore())
+    now = datetime.now(timezone.utc)  # noqa: UP017
+
+    engine._evaluate("org-a", "point_create", 500, 3600, now)   # 2 SKIPPED_WINDOW
+    after_first = len(calls)
+    assert after_first == 2, calls
+
+    engine._evaluate("org-a", "point_create", 500, 3600, now)   # 2 more SKIPPED_WINDOW
+    assert len(calls) == 4, f"SKIPPED_WINDOW dropped the retry ({calls})"
+
+    engine._evaluate("org-a", "point_create", 500, 3600, now)   # RESOLVED now
+    assert len(calls) == 6, calls
+
+    engine._evaluate("org-a", "point_create", 500, 3600, now)   # completed → no more
+    assert len(calls) == 6, f"a completed resolution kept retrying ({calls})"
+
+
+def test_a_migration_that_cannot_release_the_legacy_object_is_rolled_back(
+        monkeypatch):
+    """One issue, ONE claimant — a partial migration must leave none behind.
+
+    The legacy object is the adoption SOURCE, so a scoped key created next to it
+    lets the NEXT rule migrate the same issue number again: two sentinels for one
+    issue, and then one rule's episode end closes the issue the other rule is
+    tracked by. The scoped key is therefore deleted when the legacy delete fails.
+    """
+    from tortoise.alert_store import AlertStore
+    from tortoise.hosted_backup import MemoryStorage
+
+    class _Stubborn(MemoryStorage):
+        def delete(self, key):
+            if key.endswith("/org-a.json"):
+                raise RuntimeError("R2 refused the delete")
+            return super().delete(key)
+
+    storage = _Stubborn()
+    store = AlertStore(
+        storage,
+        file_issue=lambda title, body: 7,
+        close_issue=lambda number, comment=None: None,
+        search_open=lambda kind, org: [],
+        push_telegram=lambda text: None,
+        issue_open=lambda number: True,
+        comment_issue=lambda number, body: None,
+        repo="daniel-ospina/tortoise",
+    )
+    store.open_incident_state("abuse_review_needed", "org-a", {"detail": "legacy"})
+
+    moved = store.migrate_incident_subject(
+        "abuse_review_needed", "org-a:point_create", "org-a")
+
+    assert moved is False
+    assert store.incident_record("abuse_review_needed", "org-a:point_create") == {}, \
+        "the rolled-back migration left a second claimant for one issue"
+    assert store.incident_record("abuse_review_needed", "org-a").get(
+        "issue_number") == 7, "the legacy claimant must survive the rollback"
+
+
 def test_an_anonymous_digest_does_not_claim_a_dashboard_row(
         delivered, monkeypatch):
     """The dashboard row is written only when the detection carried an org.
@@ -355,6 +496,21 @@ def test_an_anonymous_digest_does_not_claim_a_dashboard_row(
     assert "dashboard" in message
     assert "NO dashboard row was written" in message, message
     assert "the rows are on the dashboard" not in message, message
+
+
+def test_a_scoped_detection_digest_still_names_the_dashboard_row(delivered):
+    """The POSITIVE arm: a detection WITH an org does write a dashboard row.
+
+    Without this, a mutant that always emitted the anonymous sentence would stay
+    green — the conditional would be pinned on one side only.
+    """
+    import tortoise.notify as notify
+
+    notify.notify_abuse("abuse_new_ip", {"org_id": "org-a"}, {"country": "ES"})
+
+    assert len(delivered.pushes) == 1
+    assert "the rows are on the dashboard's activity register" in delivered.pushes[0], \
+        delivered.pushes[0]
 
 
 def test_activity_detections_collapse_into_one_message(delivered):

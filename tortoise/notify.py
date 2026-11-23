@@ -55,7 +55,7 @@ import time
 from datetime import datetime, timezone
 
 import httpx
-from tortoise.alert_store import OpenOutcome
+from tortoise.alert_store import OpenOutcome, ResolveOutcome
 from tortoise.incident_kinds import (
     KIND_ABUSE_FLAG_RAISED,
     KIND_ABUSE_REVIEW_NEEDED,
@@ -549,13 +549,31 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
     for kind in kinds:
         for subj in subjects:
             try:
-                store.resolve_incident_state(kind, subj)
+                outcome = store.resolve_incident_state(kind, subj)
             except Exception as e:  # noqa: BLE001, RUF100
                 ok = False
                 logger.warning("abuse episode end: %s (%s) did not resolve (%s) — "
                                "the incident stays OPEN and the engine retries it "
                                "on the next clean window", kind, subj,
                                redact_safe(e))
+                continue
+            # A close that did NOT happen is not a resolution (#5143/ADR-011).
+            # Two outcomes leave the incident ON RECORD and must keep the subject
+            # PENDING, or a fleet that raises the recovery window
+            # (`ALERT_RECOVERY_STREAK`, `docs/ops/registry-backup-dr.md`) silently
+            # never resolves an abuse incident at all — defect 3 coming back
+            # through an env var:
+            #   * SKIPPED_WINDOW — the healthy observation was counted, the
+            #     recovery window is not satisfied yet (`#3146`); this episode end
+            #     is observation 1 of N.
+            #   * SKIPPED_FRESH  — the incident is on record and this attempt may
+            #     not clear it (fresh, or owned by another writer, `#3127`).
+            if outcome in (ResolveOutcome.SKIPPED_WINDOW, ResolveOutcome.SKIPPED_FRESH):
+                ok = False
+                logger.info(
+                    "abuse episode end: %s (%s) not resolved yet (%s) — staying "
+                    "pending so a later clean window completes the recovery window",
+                    kind, subj, getattr(outcome, "name", outcome))
     return ok
 
 
@@ -714,11 +732,17 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
             # open incident has earned its next reminder.
             deliver, folded = _claim_delivery(
                 kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
+            # A read that RAISES is not "no issue number": the store may have
+            # pushed an attributed alert already, so treating unknown as absent
+            # would send a second, wrongly-unattributed message. `number_known`
+            # keeps the two facts apart.
+            number = None
+            number_known = True
             try:
                 number = store.incident_record(incident_kind, subject).get(
                     "issue_number")
-            except Exception:  # noqa: BLE001 — NEVER raise from the alert path
-                number = None
+            except Exception:  # noqa: BLE001, RUF100 — NEVER raise from the alert path
+                number_known = False
             if outcome is OpenOutcome.DEDUP and deliver:
                 # A persistent breach must not go silent: an episode that stays
                 # open re-alarms at most once per window, and the message NAMES
@@ -728,19 +752,21 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                        else "an open incident with no issue number on record")
                 bot_token = _env("TELEGRAM_BOT_TOKEN")
                 chat_id = _env("TELEGRAM_CHAT_ID")
-                if not (_skip_channel("telegram", bot_token)
-                        or _skip_channel("telegram-chat", chat_id)):
-                    if not _send_abuse(bot_token, chat_id, _abuse_message(
-                            kind, org_id, details,
-                            attribution=(f"Still open — {ref}. One reminder per "
-                                         f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
-                                         "while the episode stays open; repeats "
-                                         "inside that window are folded (the issue "
-                                         "comment trail is the recurrence record)."),
-                            folded=folded)):
-                        # A failed send must not consume the reminder window.
-                        release_abuse_delivery(kind, subject)
-            elif outcome is OpenOutcome.FILED and not number and deliver:
+                channel_ok = not (
+                    _skip_channel("telegram", bot_token)
+                    or _skip_channel("telegram-chat", chat_id))
+                if channel_ok and not _send_abuse(bot_token, chat_id, _abuse_message(
+                        kind, org_id, details,
+                        attribution=(f"Still open — {ref}. One reminder per "
+                                     f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
+                                     "while the episode stays open; repeats "
+                                     "inside that window are folded (the issue "
+                                     "comment trail is the recurrence record)."),
+                        folded=folded)):
+                    # A failed send must not consume the reminder window.
+                    release_abuse_delivery(kind, subject)
+            elif (outcome is OpenOutcome.FILED and number_known and not number
+                  and deliver):
                 # FILED with NO issue number is NOT a delivered alert. The store
                 # pushes only when it holds a number (`alert_store` guards its own
                 # push on it), and `_become_filer` returns exactly this way when

@@ -263,6 +263,11 @@ _WINDOW_WARN_LOCK = threading.Lock()
 #: authority: the store holds the incident, and the runbook's manual close remains
 #: the fallback for a close that cannot succeed.
 _MAX_PENDING_EPISODE_RESOLVES = 4096
+#: Attempts per subject before an episode-end close that keeps failing is dropped
+#: and the operator closes the incident by hand (#14407). Each retry costs the
+#: same incident reads as the first attempt, so an unbounded retry is a read tax
+#: on the request path, not a free set lookup.
+_MAX_EPISODE_RESOLVE_ATTEMPTS = 12
 
 
 def _negative_env(raw: str | None) -> bool:
@@ -1807,10 +1812,11 @@ class AbuseEngine:
         # store remains authoritative for staging and is the cross-replica gate.
         self._last_notified: dict[tuple[str, str, str], datetime] = {}
         self._notify_lock = threading.Lock()
-        # Episode ends whose incident resolution FAILED, awaiting a retry on a
-        # later clean window (#14407). In-process and bounded — a hint, never an
-        # authority (see `_remember_pending_resolve`).
-        self._pending_episode_resolves: set[tuple[str, str]] = set()
+        # Episode ends whose incident resolution did not COMPLETE, awaiting a
+        # retry on a later clean window (#14407): the value is the attempt count,
+        # so a close that can never succeed is dropped instead of retried for
+        # ever. In-process and bounded — a hint, never an authority.
+        self._pending_episode_resolves: dict[tuple[str, str], int] = {}
 
     def _claim_notify(self, org_id: str, rule: str, stage: str,
                       now: datetime, window_s: int) -> bool:
@@ -1875,22 +1881,36 @@ class AbuseEngine:
         # The retry is a set lookup on the clean-window path — no store read — so
         # it costs nothing on the hot path and cannot undo the R2-read reduction.
         if resolved:
-            self._pending_episode_resolves.discard((org_id, rule))
+            self._pending_episode_resolves.pop((org_id, rule), None)
         else:
             self._remember_pending_resolve(org_id, rule)
 
     def _remember_pending_resolve(self, org_id: str, rule: str) -> None:
-        """Queue an episode-end resolution that FAILED, for the next clean window.
+        """Queue an episode-end resolution that did not COMPLETE, for a retry.
 
-        Bounded: this is a retry HINT, never an authority — the store holds the
-        incident. The cap keeps a permanently broken close from growing the set
-        without limit; dropping the oldest entries only costs the retry, and the
-        runbook's manual close remains the fallback.
+        Bounded twice, because the retry is not free: it costs the same incident
+        reads as the first attempt (~2 R2 GETs per rule), on every clean window.
+          * per subject — `_MAX_EPISODE_RESOLVE_ATTEMPTS`, after which the entry is
+            DROPPED with a warning: a close that keeps failing is a durable fault,
+            and the runbook's manual close is the honest fallback rather than an
+            unbounded read tax on the request path;
+          * overall — `_MAX_PENDING_EPISODE_RESOLVES` entries, so a fleet-wide
+            outage cannot grow the map without limit.
+        This is a retry HINT, never an authority: the store holds the incident.
         """
-        self._pending_episode_resolves.add((org_id, rule))
+        key = (org_id, rule)
+        attempts = self._pending_episode_resolves.get(key, 0) + 1
+        if attempts > _MAX_EPISODE_RESOLVE_ATTEMPTS:
+            self._pending_episode_resolves.pop(key, None)
+            logger.warning(
+                "abuse episode end: %s/%s still not resolved after %d attempts — "
+                "giving up on the automatic close; close the incident by hand "
+                "(the runbook names the object)", org_id, rule, attempts - 1)
+            return
+        self._pending_episode_resolves[key] = attempts
         if len(self._pending_episode_resolves) > _MAX_PENDING_EPISODE_RESOLVES:
             self._pending_episode_resolves.clear()
-            self._pending_episode_resolves.add((org_id, rule))
+            self._pending_episode_resolves[key] = attempts
 
     def _release_notify(self, org_id: str, rule: str, stage: str) -> None:
         """Re-arm the alert budget for a stage when its episode ENDS, so a
@@ -1994,12 +2014,26 @@ class AbuseEngine:
                 self._release_notify(org_id, rule, EVENT_FLAG)
                 self._release_notify(org_id, rule, EVENT_REVIEW)
                 self._end_alert_episode(org_id, rule)
-            elif (org_id, rule) in self._pending_episode_resolves:
+            elif ended and (org_id, rule) in self._pending_episode_resolves:
                 # A previous episode end could not close its incidents (a failed
-                # close re-raises by design, #5143). Retry it here: for this org
-                # the flag is already gone, so no later window would ever see
-                # `flagged=True` again and the incident would stay OPEN forever.
-                # A set lookup, never a store read.
+                # close re-raises by design, #5143, or returned SKIPPED_WINDOW
+                # because the recovery window is not satisfied yet, #3146). Retry
+                # it here: for this org the flag is already gone, so no later
+                # window would ever see `flagged=True` again and the incident
+                # would stay OPEN forever.
+                #
+                # GATED ON `ended` like the confirmed arm above, and for the same
+                # reason: when the clean-window read RAISED the episode state is
+                # UNKNOWN, and "unknown" must never close an incident (#5143 /
+                # ADR-011's false all-clear). The retry finishes an episode already
+                # known to have ended; it never decides that one did.
+                #
+                # COST, stated honestly: a retry costs the same incident reads as
+                # the first attempt (~2 R2 GETs per rule), so a close that keeps
+                # failing costs those reads on each clean window until it succeeds
+                # or `_MAX_EPISODE_RESOLVE_ATTEMPTS` drops it. That is bounded and
+                # rare; it is NOT free, and it must not be described as a bare dict
+                # lookup.
                 self._end_alert_episode(org_id, rule)
             return None
         details = {"rule": rule, "count": total,
