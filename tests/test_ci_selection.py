@@ -13805,7 +13805,7 @@ def _live_fast_shard_emission() -> tuple[dict[float, set[str]], int]:
 def test_the_fast_shards_header_block_states_the_measured_emission():
     """#14296: the block restates the emission and must BE the emission.
 
-    Measured at the pre-fix head: the block stated nine shards at 721.8 s (`a`–`e`,
+    Measured at the pre-fix head `2d57abb3e98c`: the block stated nine shards at 721.8 s (`a`–`e`,
     `g`, `i`–`k`) and two at 721.7 s (`f`, `h`), while `push_legs` packed **seven** at
     **722.0** (`a`–`e`, `i`, `j`) and **four** at **721.9** (`f`, `g`, `h`, `k`) — the
     `origin/main` merge moved the pool and the sentence was carried instead of
@@ -13874,6 +13874,20 @@ def test_the_emission_block_guard_is_not_vacuous():
     with pytest.raises(AssertionError, match="carries no `fast_shards:` key"):
         _emission_block_claims(
             "fast_shards_x: 11\n# five shards at 835.7 s (a, c, d, e, k)\n")
+    # A COUNT that disagrees with the names beside it is graded as claiming a set it does not name
+    # (`<count says N>`), so the caller reds rather than believing one side of a sentence that
+    # disagrees with itself. Without this fixture the arm is live on the artifact but graded by
+    # nothing: measurably, with the arm disabled (`if False:`) BOTH rows above stay green and a
+    # count-word-only edit (`five` -> `four`, names intact) ships silently (agent-infra#3442 rule 3).
+    disagreed = _emission_block_claims(
+        "# four shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
+        "# `ceil(835.7/60 x 2)` = 28 m\n"
+        "\nfast_shards: 11\n")
+    assert disagreed is not None
+    assert disagreed[0][835.7] == {
+        "a", "c", "d", "e", "k", "<count says 4>"}, (
+        "a COUNT that disagrees with the names beside it was read as the names alone — the count arm "
+        f"is the only thing that reds a `five` -> `four` edit: {disagreed[0][835.7]}")
     # A SECOND clause at the same `est` is a repeat, not a second statement of one fact:
     # `|` would absorb a subset (`two at 835.7 s (a, k)` beside the clause naming five)
     # into a claim the block does not make, invisibly. The repeat is marked instead.
@@ -13913,6 +13927,7 @@ def test_the_emission_block_guard_is_not_vacuous():
         "that only reads explicit lists turns the map's other spelling into an unread claim: "
         f"{ranged}")
 
+#: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
 
 
