@@ -6222,6 +6222,31 @@ def test_a_value_READ_OUT_of_a_LITERAL_container_is_a_reach() -> None:
             f"[{label}] a method call other than `str.format`/`str.format_map` is a DECLARED "
             "residual — if this now resolves, update `_possible_strings`' residual note "
             "instead of leaving it contradicting the code")
+    # ⛔ AND THE OTHER DECLARED CARRIERS, NAMED BY SPELLING SO THE NOTE CANNOT GO STALE
+    # (#14326 round 16, each MEASURED GREEN at `203737ebf`): a value held in an ATTRIBUTE or
+    # produced by a CALL. `_str_constants` models NAME bindings, not attribute namespaces, so
+    # `_C.name` and `self.read` are out of its reach by construction — the same statement the
+    # docstring makes in prose. Rows rather than prose because the next lane's change is what
+    # un-stales them: if one of these starts resolving, the residual note is wrong and this
+    # reds instead of leaving a sentence that contradicts the code.
+    for label, body in (
+            ("class attribute",
+             '    class _C:\n        name = "_tortoise_fts_query"\n'
+             f'    {reach.format(name="_C.name")}\n'),
+            ("instance attribute",
+             '    self = type("S", (), {})()\n'
+             '    self.read = "_tortoise_fts_query"\n'
+             f'    {reach.format(name="self.read")}\n'),
+            ("call returning the literal",
+             '    def _mk():\n        return "_tortoise_fts_query"\n'
+             f'    {reach.format(name="_mk()")}\n'),
+            ("lambda default carrier",
+             '    _f = lambda _x="_tortoise_fts_query": _x\n'
+             f'    {reach.format(name="_f()")}\n')):
+        assert not _pin_refuses(_pin_source(body)), (
+            f"[{label}] a value held in an ATTRIBUTE or produced by a CALL is a DECLARED "
+            "residual — if this now resolves, update the residual note in "
+            "`_str_constants`/`_possible_strings` rather than leaving it stale")
 
 
 def test_a_PRODUCT_that_outgrows_its_budget_REFUSES_instead_of_spinning() -> None:
