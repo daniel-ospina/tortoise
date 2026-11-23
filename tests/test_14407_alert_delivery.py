@@ -337,6 +337,127 @@ def test_a_failed_send_does_not_consume_the_digest_window(monkeypatch):
     notify.reset_abuse_delivery_for_tests()
 
 
+def test_a_failed_unattributed_send_does_not_consume_the_window(monkeypatch):
+    """The no-incident-channel path releases its window too — pin it.
+
+    This is the shape this PR declares as prod's residual, and
+    ``_deliver_unattributed``'s own docstring says one Telegram blip must not cost
+    that subject the whole window. Removing ``release_abuse_delivery`` from it left
+    every test green: a guard whose removal no test detects is not a guard.
+    """
+    import tortoise.notify as notify
+
+    attempts: list[str] = []
+
+    def _boom(bot, chat, text, **k):
+        attempts.append(text)
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr(notify, "_abuse_alert_store",
+                        lambda: (None, "no alert channel configured"))
+    monkeypatch.setattr(notify, "telegram_send", _boom)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+    for _ in range(2):
+        _flag(notify)
+
+    assert len(attempts) == 2, (
+        "the failed unattributed send consumed the window — the class stays mute "
+        f"after the channel recovers ({len(attempts)} attempt(s))")
+    notify.reset_abuse_delivery_for_tests()
+
+
+def test_a_failed_re_alarm_does_not_consume_the_reminder_window(monkeypatch):
+    """The DEDUP re-alarm releases on a failed send — pin it.
+
+    A reminder whose send failed must not SPEND the 24h window: that turns a
+    channel blip into silence for a persistent breach (#4872). Removing the
+    release from the DEDUP arm left every test green.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    attempts: list[str] = []
+
+    class _DedupStore:
+        def open_incident_state(self, *a, **kw):
+            return OpenOutcome.DEDUP
+
+        def incident_record(self, *a, **kw):
+            return {"issue_number": 5}
+
+    def _boom(bot, chat, text, **k):
+        attempts.append(text)
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_DedupStore(), ""))
+    monkeypatch.setattr(notify, "telegram_send", _boom)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+    for _ in range(2):
+        _flag(notify)
+
+    assert len(attempts) == 2, (
+        "the failed reminder consumed the 24h window — a channel blip became "
+        f"silence for a persistent breach ({len(attempts)} attempt(s))")
+    notify.reset_abuse_delivery_for_tests()
+
+
+def test_an_unrecognised_outcome_releases_the_window_instead_of_spending_it(
+        monkeypatch):
+    """A FOURTH ``OpenOutcome`` fact must not spend the delivery window.
+
+    The decision chain names two facts by identity (``is DEDUP`` / ``is FILED``),
+    so a fact added to the enum later matches neither. The window is ALREADY ARMED
+    at that point: left that way, an outcome this path cannot interpret silently
+    consumes the whole window, and whatever produced it stays quiet for the rest of
+    it — the direction #4872 forbids. The window is released instead, so the next
+    recognised detection delivers.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    sent: list[str] = []
+
+    class _FourthFactStore:
+        fact: object = "a fourth fact"         # neither FILED, DEDUP nor SUPPRESSED
+
+        def open_incident_state(self, *a, **kw):
+            return self.fact
+
+        def incident_record(self, *a, **kw):
+            return {"issue_number": 5}
+
+    store = _FourthFactStore()
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (store, ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+    for _ in range(5):
+        _flag(notify)
+
+    assert sent == [], (
+        "an outcome this path cannot interpret was delivered as though it were "
+        f"known ({sent})")
+    assert ("abuse_flag", "org-a:point_create") not in notify._delivery, (
+        "the unrecognised outcome SPENT the window — whatever produced it stays "
+        "silent for the rest of the window (#4872)")
+
+    # …and the release is what makes recovery deliver: a recognised DEDUP
+    # detection is not swallowed by the unknown outcome's window.
+    store.fact = OpenOutcome.DEDUP
+    _flag(notify)
+    assert len(sent) == 1, sent
+    notify.reset_abuse_delivery_for_tests()
+
+
 def test_a_retry_never_resolves_on_an_unreadable_window(monkeypatch):
     """The retry finishes an episode KNOWN to have ended — it never decides one did.
 
