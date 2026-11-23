@@ -397,6 +397,13 @@ def test_a_restart_settles_what_a_cancelled_batch_left_in_flight():
     coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
     coord.cancel(ORG, batch.batch_id)
     # …the process dies here, leaving /a.md mid-flight inside a cancelled batch.
+    # ⛔ The claim is aged FIRST: the reclaim window applies to every caller
+    # (#14415 review round 10), so a 0 s claim is deliberately left alone and a
+    # later scan settles it. This test is about the row not stranding, which is
+    # what the stale claim proves.
+    stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    stale.updated_at = _ancient_stamp()
+    store.put_item(ORG, stale)
     assert BatchCoordinator(store).recover(ORG) == []
     after = {i.ref: i for i in coord.status(ORG, batch.batch_id)[1]}
     assert after["/a.md"].state is BatchItemState.CANCELLED
@@ -1665,33 +1672,48 @@ def test_a_rescan_never_settles_a_fresh_claim_of_a_cancelled_batch():
     """⛔ HIGH: `abandon_dead_claims` released a claim that was SECONDS old.
 
     `recover()` is not a boot-only hook — it is a throttled re-scan re-entered
-    from every batch read — so on a second replica it settled the FIRST
-    replica's live in-flight row `cancelled` (measured: claim age 0.0 s against a
-    900 s window). The live runner's outcome could then not be applied, so
-    `run_item`'s terminal arm billed the spend and dropped the document: the
-    customer charged for work the cancel copy promised to keep.
+    from every batch read, and on a ROLLING DEPLOY a new replica's first scan
+    runs while the old replica is still inside the runner. An earlier cut let a
+    "first scan in this process" settle fresh claims, on the theory that a first
+    scan means every claim belongs to a dead predecessor; measured false (claim
+    age 0.00 s), and the live runner's outcome then became unreachable so its 730
+    tokens were billed for a dropped document.
+
+    ⛔ SO THE WINDOW IS THE ONLY ARM: every caller leaves a FRESH claim alone, and
+    a LATER scan settles it once it is stale. Both halves are asserted below,
+    because an earlier version of this test called no windowed scan at all — it
+    passed with the age check deleted.
     """
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
     # TWO items: `cancel()` records the cancellation only when it can settle a
     # queued sibling (`/b.md`); with every item in flight it leaves the row
-    # `running` and the in-flight work alone, which is the documented behaviour
-    # for "their result is kept".
+    # `running` and the in-flight work alone ("their result is kept").
     batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
     coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
     coord.cancel(ORG, batch.batch_id)
     assert store.get_batch(ORG, batch.batch_id).state is BatchState.CANCELLED
+
+    # 1. A FRESH claim survives a full scan, however many times it runs.
+    for _ in range(3):
+        BatchCoordinator(store).recover(ORG)
     live = store.get_item(ORG, batch.batch_id, items[0].item_id)
     assert live.state is BatchItemState.EXTRACTING, (
-        "a re-scan settled a FRESH claim: the peer holding it loses its outcome "
-        "and the customer is billed for a dropped document")
+        "a scan settled a FRESH claim: the peer holding it loses its outcome and "
+        "the customer is billed for a dropped document")
 
-    # …and the boot pass (the default: nothing this process knows of is running)
-    # still settles it, so the row cannot strand non-terminal for ever.
+    # 2. The SAME claim, once stale, is settled by the same call — otherwise the
+    #    row would strand non-terminal for ever and "no settlement" would be a
+    #    different bug wearing this fix's clothes.
+    stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    stale.updated_at = _ancient_stamp()
+    store.put_item(ORG, stale)
     BatchCoordinator(store).recover(ORG)
     settled = store.get_item(ORG, batch.batch_id, items[0].item_id)
-    assert settled.state is BatchItemState.CANCELLED
+    assert settled.state is BatchItemState.CANCELLED, (
+        "a STALE claim was not settled — the cancelled batch strands its row")
     assert settled.tokens_in == 0 and settled.tokens_out == 0
+    assert store.pending_batches(ORG) == []
 
 
 def test_a_cancel_landing_during_the_resume_scan_is_not_erased():

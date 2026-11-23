@@ -1077,6 +1077,15 @@ def test_a_retry_pass_never_runs_work_on_a_cancelled_batch(store, monkeypatch):
     # customer, seeing a stuck batch, cancels.
     coord.advance(ORG_ID, items[1], bi.BatchItemState.EXTRACTING, attempt=True)
     coord.cancel(ORG_ID, batch.batch_id, reason="stuck, stop it")
+    # ⛔ THE CLAIM IS AGED, because the reclaim window now applies to EVERY caller
+    # (#14415 review round 10): a 0 s claim may belong to a live runner — on a
+    # rolling deploy the old replica's work is still in flight — so it is left
+    # alone and a later pass settles it once stale. This test is about the cancel
+    # STOPPING work and the row not stranding; the stale claim is what proves the
+    # second half.
+    dead = store.get_item(ORG_ID, batch.batch_id, items[1].item_id)
+    dead.updated_at = "2000-01-01T00:00:00+00:00"
+    store.put_item(ORG_ID, dead)
     before = list(calls)
 
     ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
@@ -1743,6 +1752,15 @@ def test_a_peer_settling_the_same_state_is_not_charged_by_this_pass(store,
     assert (out.charge_in, out.charge_out) == (700, 0), (
         "this pass lost the settle, so it must mark exactly its own spend for "
         f"the meter — got {(out.charge_in, out.charge_out)}")
+    # ⛔ AND THE ROW CARRIES IT TOO (#14415 review round 10, MEDIUM). Without this
+    # line the suite stays green when `if landed:` is replaced by the state
+    # inference the test's own docstring refutes: measured under that mutation the
+    # row reads 0/0 while the meter bills 700 — the round-8 bill/receipt
+    # disagreement, restored and unnoticed.
+    row = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
+    assert row.tokens_in + row.tokens_out == 700, (
+        f"the row reports {row.tokens_in + row.tokens_out} while the meter bills "
+        "700 — receipt and bill disagree")
     if out.charge_in or out.charge_out:
         bi.record_item_spend(ORG_ID, tokens_in=out.charge_in,
                             tokens_out=out.charge_out)

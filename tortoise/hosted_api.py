@@ -17008,17 +17008,19 @@ def _recover_org_batches(org: dict) -> list[str]:
             with _BATCH_DRAINING_LOCK:
                 return candidate in _BATCH_DRAINING
 
-        # ⛔ A FIRST SCAN IN THIS PROCESS MAY SETTLE FRESH CLAIMS; A RE-SCAN MAY
-        # NOT (#14415 review round 9, HIGH). `last == 0.0` is exactly "this
-        # process has never scanned this tenant", i.e. the boot case, where every
-        # existing claim belongs to a predecessor that is gone — that is what
-        # settles a cancelled batch's stranded rows. Every later scan is on a
-        # live deployment, where a claim younger than the reclaim window may be
-        # held by a PEER REPLICA: settling it drops that runner's outcome and
-        # bills the spend for a document the cancel copy promised to keep.
+        # ⛔ NO "FIRST SCAN" EXCEPTION (#14415 review round 10, HIGH). An earlier
+        # cut let a tenant's FIRST scan settle fresh claims, on the theory that a
+        # first scan means "boot, so every claim belongs to a dead predecessor".
+        # Measured false on the case that matters: on a ROLLING DEPLOY the new
+        # replica's first scan runs while the OLD replica is still inside the
+        # runner (claim age 0.00 s), so it settled that live claim, the peer's
+        # `indexed` became unreachable, and its 730 tokens were billed for a
+        # document the cancel copy promised to keep. `_BATCH_SCAN` evicts too, so
+        # "first scan" is not even "start of process". The claim window is applied
+        # on every arm; a stranded row is settled by a later scan once it is
+        # stale.
         resumed = coord.recover(org_id, live_batches=_is_live, offset=offset,
-                                limit=_BATCH_RECOVER_LIMIT,
-                                settle_fresh_claims=not last)
+                                limit=_BATCH_RECOVER_LIMIT)
     except Exception:
         _logger.exception("batch recovery failed for team %s", org_id)
         with _BATCH_RETRY_LOCK:
