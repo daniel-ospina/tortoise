@@ -4408,6 +4408,22 @@ def test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit():
             ["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
              f"{ref}^{{commit}}"],
             capture_output=True, text=True)
-        assert probe.returncode == 0, (
-            f"docs/ops/ci-wall-clock.md cites `git show --stat {ref}` but {ref} does not "
-            f"resolve in this checkout: {probe.stderr.strip()}")
+        if probe.returncode != 0:
+            # ⛔ A `fetch-depth: 1` checkout cannot contain an ANCESTOR, so an
+            # unresolvable cite there is UNCHECKED, not disproved — the same
+            # premise `tests/test_7949_capstone_measure.py` states for its own
+            # pre-flip head. Measured: CI's shallow clone reds this arm on a sha
+            # that IS an ancestor of the head (run 45081971415, shard `g`), which
+            # is a false block, not a defect in the document.
+            shallow = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+                capture_output=True, text=True).stdout.strip()
+            if shallow == "true":
+                pytest.skip(
+                    f"`git show --stat {ref}` cannot be checked in a shallow clone "
+                    f"(`fetch-depth: 1` has no ancestors, so {ref!r} is UNCHECKED "
+                    "here rather than disproved) — re-derive on a full clone: "
+                    "`git fetch --unshallow origin`.")
+            raise AssertionError(
+                f"docs/ops/ci-wall-clock.md cites `git show --stat {ref}` but {ref} "
+                f"does not resolve in this FULL checkout: {probe.stderr.strip()}")
