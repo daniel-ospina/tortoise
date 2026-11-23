@@ -53,7 +53,14 @@ version: 1
 # eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k), so
 # `ceil(837.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. ⛔ This branch's own `core` row is what moved
+# agree by construction rather than by a hand re-read. ⛔ **THIS SENTENCE IS A MERGE MAGNET, and that
+# is why it is stated ONCE, in ONE form.** Two lanes independently re-derived it on the same merged
+# tree and reached the SAME reading (eleven at 837.1 s); git spliced both spellings in, so the block
+# stated the same partition TWICE and the guard read it as `<est 837.1 stated twice>` — a red that
+# no reader of the prose could see. That is the shape both arms of
+# `tests/test_ci_selection.py` exist to catch (the repeat marker and the unread-sentence count), and
+# the repair is the one this block already states: re-derive at the merged tree, then keep ONE
+# sentence. ⛔ This branch's own `core` row is what moved
 # the partition, which is why the shard NAMES (not only the seconds) are stated here and graded.
 # ⛔ The MINUTE has stood at 28 m across every reading of this pool while the SECONDS moved under
 # it, so NO arithmetic on the minute can catch a carried figure — only the `est_seconds` partition

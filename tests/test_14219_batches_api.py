@@ -1077,6 +1077,15 @@ def test_a_retry_pass_never_runs_work_on_a_cancelled_batch(store, monkeypatch):
     # customer, seeing a stuck batch, cancels.
     coord.advance(ORG_ID, items[1], bi.BatchItemState.EXTRACTING, attempt=True)
     coord.cancel(ORG_ID, batch.batch_id, reason="stuck, stop it")
+    # ⛔ THE CLAIM IS AGED, because the reclaim window now applies to EVERY caller
+    # (#14415 review round 10): a 0 s claim may belong to a live runner — on a
+    # rolling deploy the old replica's work is still in flight — so it is left
+    # alone and a later pass settles it once stale. This test is about the cancel
+    # STOPPING work and the row not stranding; the stale claim is what proves the
+    # second half.
+    dead = store.get_item(ORG_ID, batch.batch_id, items[1].item_id)
+    dead.updated_at = "2000-01-01T00:00:00+00:00"
+    store.put_item(ORG_ID, dead)
     before = list(calls)
 
     ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
@@ -1688,66 +1697,75 @@ def test_recovery_reaches_batches_past_the_per_call_window(client, store,
 
 def test_a_peer_settling_the_same_state_is_not_charged_by_this_pass(store,
                                                                    monkeypatch):
-    """⛔ ROUND-5 REVIEW P2: "landed" cannot be inferred from the row.
+    """⛔ ROUND-5 REVIEW P2/HIGH: "landed" cannot be inferred from the row.
 
-    The earlier cut tested `landed.state is outcome.state`, which a PEER's write
-    to the SAME state also satisfies — so a settlement this process did not make
-    was still charged. The landing flag is explicit (`_advance_landed`).
+    The peer's first cut tested `landed.state is outcome.state` — a PEER's write
+    to the SAME state satisfies that too, so a settlement this process did not
+    make was still charged. The landing flag is explicit (`_advance_landed`).
 
-    ⛔ AND THE SEAM MUST BE REACHED (#14415 review round 5, P2): the previous
-    fixture left the row a FRESH `extracting` claim, so `run_item` returned at its
-    liveness guard before the claim, the runner or the settle write — every
-    assertion held for a reason unrelated to the code under test. The row starts
-    `queued` here, and both intermediates are asserted so that stays true.
+    ⛔ AND THE PEER MUST WIN THE *SETTLE*, NOT THE CLAIM (#14415 review round 9,
+    MEDIUM). The first version of this test wrote the peer row on EVERY advance,
+    so the CLAIM lost and `run_item` returned before the runner ever ran
+    (`runner calls: 0`) — the assertions then held because nothing was spent, and
+    the test stayed green with the `landed` flag and the `_bill` path deleted.
+    This version lets the claim succeed and only steals the settlement, which is
+    the interleaving the finding is about; it also asserts the set did not come
+    back empty, so the vacuous shape cannot return.
     """
     charged: list[int] = []
-    ran: list[str] = []
-    fired = {"settled": False}
     monkeypatch.setattr(bi, "record_item_spend",
                         lambda org_id, *, tokens_in=0, tokens_out=0:
                         charged.append(tokens_in + tokens_out) or 0)
     coord = bi.BatchCoordinator(store)
     batch, items = coord.submit(ORG_ID, ["/d/a.md"])
-
+    # ⛔ NOT pre-claimed: `run_item` leaves a FRESH claim alone (the one liveness
+    # rule), so pre-claiming here would make the runner never run and the test
+    # vacuous again. The claim is this call's to win; only the settle is stolen.
     real_advance = coord._advance_landed
+    calls: list[str] = []
 
-    def peer_lands_first(org_id, item, new_state, **kw):
-        if new_state is bi.BatchItemState.INDEXED:
-            fired["settled"] = True
-            # A PEER settles the row to the SAME state this pass is about to
-            # write, so the row looks exactly as intended and only the explicit
-            # `landed` flag can tell the difference.
-            store.put_item(org_id, bi.BatchItem(
-                batch_id=item.batch_id, item_id=item.item_id, ref=item.ref,
-                state=new_state, tokens_in=0, tokens_out=0,
-                attempts=item.attempts, updated_at=item.updated_at))
+    def losing_advance(org_id, item, new_state, **kw):
+        calls.append(str(new_state))
+        if new_state is bi.BatchItemState.EXTRACTING:
+            return real_advance(org_id, item, new_state, **kw)  # the claim wins
+        # A PEER settles it to the SAME state the runner is about to write…
+        store.put_item(org_id, bi.BatchItem(
+            batch_id=item.batch_id, item_id=item.item_id, ref=item.ref,
+            state=new_state, tokens_in=0, tokens_out=0,
+            attempts=item.attempts, updated_at=item.updated_at))
+        # …so this pass's compare loses while the row looks exactly as intended.
         return real_advance(org_id, item, new_state, **kw)
 
-    monkeypatch.setattr(coord, "_advance_landed", peer_lands_first)
+    monkeypatch.setattr(coord, "_advance_landed", losing_advance)
     out = coord.run_item(
         ORG_ID, store.get_item(ORG_ID, batch.batch_id, items[0].item_id),
-        lambda i: ran.append(i.item_id) or bi.ItemOutcome(
-            bi.BatchItemState.INDEXED, tokens_in=700))
-
-    assert ran == [items[0].item_id], (
-        "the runner must have run for this test to prove anything")
-    assert fired["settled"], "the settle seam was never reached"
-    # ⛔ WHAT "NOT CHARGED" MEANS HERE (#14415 review round 5, P2). A lost
-    # compare does NOT mean "charge nothing": this pass's runner RAN and spent its
-    # own 700, so the ledger gets exactly that — once (round 8's row/ledger
-    # equality). What must never happen is charging the ROW's totals, or charging
-    # our spend twice. The peer's write carried 0, so a 700 on the meter and a 700
-    # row total is the pass billing itself once; a 1400, or a row total of 0 with
-    # a 700 charge, is the defect.
+        lambda i: bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=700))
+    assert str(bi.BatchItemState.INDEXED) in calls, (
+        "the runner's settlement never reached the store — the peer stole the "
+        f"CLAIM instead of the settle ({calls}), so this test proves nothing")
+    # The row moved on, so the outcome could not be applied — but the tokens are
+    # a real spend of THIS call, so the row total and the charge mark both carry
+    # them (round 8's rule) and `_bill` is the arm that does it. The METER call is
+    # the drain's (it reads `charge_in/charge_out`), so assert the mark here and
+    # bill it the way `_drain_batch` does.
+    assert out.state is bi.BatchItemState.INDEXED
     assert (out.charge_in, out.charge_out) == (700, 0), (
-        "a lost compare must bill exactly THIS pass's own spend")
-    # `run_item` does not touch the ledger itself: it RECORDS the spend on the
-    # row and the drain meters that record, once.
-    assert charged == [], (
-        f"run_item must not meter directly — the drain does: {charged}")
+        "this pass lost the settle, so it must mark exactly its own spend for "
+        f"the meter — got {(out.charge_in, out.charge_out)}")
+    # ⛔ AND THE ROW CARRIES IT TOO (#14415 review round 10, MEDIUM). Without this
+    # line the suite stays green when `if landed:` is replaced by the state
+    # inference the test's own docstring refutes: measured under that mutation the
+    # row reads 0/0 while the meter bills 700 — the round-8 bill/receipt
+    # disagreement, restored and unnoticed.
     row = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
-    assert (row.tokens_in, row.tokens_out) == (700, 0), (
-        f"the row must hold the same number the ledger does: {row.tokens_in}")
+    assert row.tokens_in + row.tokens_out == 700, (
+        f"the row reports {row.tokens_in + row.tokens_out} while the meter bills "
+        "700 — receipt and bill disagree")
+    if out.charge_in or out.charge_out:
+        bi.record_item_spend(ORG_ID, tokens_in=out.charge_in,
+                            tokens_out=out.charge_out)
+    assert charged == [700], (
+        f"the spend was not billed exactly once: {charged}")
 
 
 def test_a_status_poll_cannot_erase_a_cancellation(store, monkeypatch):

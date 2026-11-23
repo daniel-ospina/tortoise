@@ -17019,6 +17019,17 @@ def _recover_org_batches(org: dict) -> list[str]:
             with _BATCH_DRAINING_LOCK:
                 return candidate in _BATCH_DRAINING
 
+        # ⛔ NO "FIRST SCAN" EXCEPTION (#14415 review round 10, HIGH). An earlier
+        # cut let a tenant's FIRST scan settle fresh claims, on the theory that a
+        # first scan means "boot, so every claim belongs to a dead predecessor".
+        # Measured false on the case that matters: on a ROLLING DEPLOY the new
+        # replica's first scan runs while the OLD replica is still inside the
+        # runner (claim age 0.00 s), so it settled that live claim, the peer's
+        # `indexed` became unreachable, and its 730 tokens were billed for a
+        # document the cancel copy promised to keep. `_BATCH_SCAN` evicts too, so
+        # "first scan" is not even "start of process". The claim window is applied
+        # on every arm; a stranded row is settled by a later scan once it is
+        # stale.
         resumed = coord.recover(org_id, live_batches=_is_live, offset=offset,
                                 limit=_BATCH_RECOVER_LIMIT)
     except Exception:
@@ -17113,13 +17124,7 @@ def _drain_batch(org: dict, batch_id: str) -> None:
             # charged. The dead claim is settled instead (the boot path's rule),
             # so the row does not strand non-terminal either.
             cancelled_batch = True
-            # `stale_after_s=0`: THIS process just established that it is not
-            # draining the batch (`_BATCH_DRAINING`), so no runner here holds a
-            # claim — the age window exists for a PEER replica's claim, which this
-            # path cannot see. Without the explicit 0 a claim whose owner's
-            # terminal write failed would sit non-terminal until the window
-            # elapsed, and the retry tick that found it would find it again.
-            coord.abandon_dead_claims(org["org_id"], batch_id, stale_after_s=0)
+            coord.abandon_dead_claims(org["org_id"], batch_id)
             coord.settle(org["org_id"], batch_id)
             return
         corpus_name = batch.corpus_name if batch else ""
@@ -53456,7 +53461,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 205 tracked files (753 distinct
+# ABSOLUTE line number from 205 tracked files (752 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

@@ -687,19 +687,6 @@ class BatchStore(Protocol):
 
     def put_item(self, org_id: str, item: BatchItem) -> None: ...
 
-    def add_item_tokens(self, org_id: str, batch_id: str, item_id: str, *,
-                        tokens_in: int = 0, tokens_out: int = 0,
-                        updated_at: str = "") -> BatchItem | None:
-        """ADD to a row's token totals WHERE THE ROW LIVES; returns the row.
-
-        ⛔ ADDITIVE, NOT READ-MODIFY-WRITE (#14415 review round 5, P3). A caller
-        that reads the total, adds, and writes it back loses one accumulation
-        whenever two callers read before either writes — and that is exactly the
-        shape of the settle path, where two replicas can both lose their state
-        compare. A RELATIVE `SET` cannot lose an increment, so no compare is
-        needed at all. ``None`` means the row is gone.
-        """
-        ...
     def put_item_if_state(self, org_id: str, item: BatchItem,
                           expected: BatchItemState,
                           expected_attempts: int | None = None) -> bool:
@@ -823,21 +810,6 @@ class InMemoryBatchStore:
         with self._lock:
             bucket = self._items.setdefault((org_id, item.batch_id), {})
             bucket[item.item_id] = _copy_item(item)
-
-    def add_item_tokens(self, org_id: str, batch_id: str, item_id: str, *,
-                        tokens_in: int = 0, tokens_out: int = 0,
-                        updated_at: str = "") -> BatchItem | None:
-        # Atomic under the same lock `put_item` uses: read and add in one hold.
-        with self._lock:
-            bucket = self._items.get((org_id, batch_id))
-            row = bucket.get(item_id) if bucket else None
-            if row is None:
-                return None
-            row.tokens_in = max(0, row.tokens_in) + max(0, int(tokens_in))
-            row.tokens_out = max(0, row.tokens_out) + max(0, int(tokens_out))
-            if updated_at:
-                row.updated_at = updated_at
-            return _copy_item(row)
 
     def put_item_if_state(self, org_id: str, item: BatchItem,
                           expected: BatchItemState,
@@ -1082,31 +1054,6 @@ class GraphBatchStore:
              "updated": item.updated_at},
         )
 
-    def add_item_tokens(self, org_id: str, batch_id: str, item_id: str, *,
-                        tokens_in: int = 0, tokens_out: int = 0,
-                        updated_at: str = "") -> BatchItem | None:
-        """A RELATIVE `SET` — the increment happens inside the database.
-
-        ⛔ No compare is needed when the write is additive (#14415 review round 5,
-        P3): two concurrent accumulations both apply, which is the property the
-        bill/receipt equality depends on. `coalesce` keeps a row whose columns
-        were never written from becoming null.
-        """
-        rows = self._q(
-            f"MATCH (i:{ITEM_LABEL} {{id:$iid, batch_id:$bid, org_id:$org}}) "
-            "SET i.tokens_in = coalesce(i.tokens_in, 0) + $tin, "
-            "    i.tokens_out = coalesce(i.tokens_out, 0) + $tout, "
-            "    i.updated_at = $updated "
-            "RETURN i.tokens_in, i.tokens_out",
-            {"iid": item_id, "bid": batch_id, "org": org_id,
-             "tin": max(0, int(tokens_in)), "tout": max(0, int(tokens_out)),
-             "updated": updated_at or ""},
-        )
-        if not rows:
-            return None
-        stored = self.get_item(org_id, batch_id, item_id)
-        return stored
-
     def put_item_if_state(self, org_id: str, item: BatchItem,
                           expected: BatchItemState,
                           expected_attempts: int | None = None) -> bool:
@@ -1125,7 +1072,19 @@ class GraphBatchStore:
                            if expected_attempts is not None else "")
         rows = self._q(
             f"MATCH (i:{ITEM_LABEL} {{id:$iid, batch_id:$bid, org_id:$org, "
-            "state:$expect}}) "
+            # ⛔ THIS LINE MUST BE AN f-STRING (#14415 review round 9, BLOCKING):
+            # the sentence above escapes its opening brace as `{{`, so the
+            # matching `}}` only closes correctly in an f-string. A plain literal
+            # emits a DOUBLE brace and FalkorDB refuses the statement —
+            # `Invalid input '}': expected ')'` — which made EVERY item-state
+            # write fail on the production store while 135 hermetic tests stayed
+            # green (a fake `query` accepts any string). Measured on the docker
+            # lane: without the prefix `run_item` and `cancel` both raise and the
+            # batch sits `resuming` for ever; with it the CAS behaves exactly as
+            # documented. `test_every_emitted_statement_is_brace_balanced` pins
+            # the shape so a string this module hands to FalkorDB cannot be
+            # malformed again.
+            f"state:$expect}}) "
             f"WHERE 1=1 {attempts_clause}"
             "SET i.ref=$ref, i.name=$name, i.staged_path=$staged, "
             "    i.state=$state, i.reason=$reason, "
@@ -1378,8 +1337,8 @@ def record_item_spend(org_id: str, *, tokens_in: int = 0,
     double-charges a retried item (measured: pass 1 `queued` with 100 tokens, pass
     2 `indexed` with 100 → 200 on the meter while the status surface said 100)
     and re-charges a row a peer settled. :meth:`BatchCoordinator.run_item` puts
-    exactly the landed call's figures on ``item.charge_tokens``, which is not
-    persisted, so the same spend cannot be charged twice.
+    exactly the landed call's figures on ``item.charge_in``/``charge_out``,
+    which are not persisted, so the same spend cannot be charged twice.
 
     ``calls=0``: a batch item is NOT a capture call, and this layer has no
     measured price for one. That keeps ``capture_calls`` (the denominator that
@@ -2055,15 +2014,13 @@ class BatchCoordinator:
         spend is real) and the row is left as it was, which is the visible form of
         the loss rather than a silent one.
 
-        ⛔ THE ACCUMULATION IS ADDITIVE IN THE STORE (#14415 review round 5, P3).
-        It used to be a read-modify-write (`item.tokens_in = row.tokens_in + d`
-        then an unconditional `put_item`), and the paragraph that stood here
-        claimed that could not happen "from today's call sites" — but THIS
-        function is a call site: it writes tokens with NO state change and never
-        goes through `advance`, so two replicas' lost-CAS settles could each read
-        the same total and one accumulation would vanish, leaving
-        `tokens_spent` below the ledger (the bill/receipt disagreement round 8
-        closed). `add_item_tokens` does the addition WHERE THE ROW LIVES.
+        ⚠️ DECLARED RESIDUAL: this is a read-modify-write against a state-based
+        compare-and-set, so two writers that both read before either writes could
+        lose one accumulation. It is not reachable from today's call sites (every
+        token-carrying write through `advance` changes state, and the state CAS
+        then serialises the pair), but a caller that passes tokens on a
+        state-preserving edge would make it reachable — a counter column, or a
+        second CAS on the token total, is the fix.
         """
         tokens_in = max(0, int(tokens_in or 0))
         tokens_out = max(0, int(tokens_out or 0))
@@ -2071,15 +2028,11 @@ class BatchCoordinator:
         item.charge_out = tokens_out
         if not (tokens_in or tokens_out):
             return item
+        item.tokens_in = max(0, item.tokens_in) + tokens_in
+        item.tokens_out = max(0, item.tokens_out) + tokens_out
         item.updated_at = self._now()
         try:
-            settled = self._store.add_item_tokens(
-                org_id, item.batch_id, item.item_id,
-                tokens_in=tokens_in, tokens_out=tokens_out,
-                updated_at=item.updated_at)
-            if settled is not None:
-                item.tokens_in = max(0, settled.tokens_in)
-                item.tokens_out = max(0, settled.tokens_out)
+            self._store.put_item(org_id, item)
         except Exception:
             _logger.warning("batch spend not recorded on item %s (team %s): the "
                             "ledger is charged, the row's total is short",
@@ -2217,8 +2170,9 @@ class BatchCoordinator:
         return batch, self._store.items(org_id, batch_id)
 
     # -- resume (brief item 4) -------------------------------------------
-    def abandon_dead_claims(self, org_id: str, batch_id: str, *,
-                            stale_after_s: float | None = None) -> None:
+    def abandon_dead_claims(
+            self, org_id: str, batch_id: str, *,
+            reclaim_after: float = BATCH_RECLAIM_AFTER_S) -> None:
         """Settle a CANCELLED batch's claims that NO runner is holding.
 
         ⛔ NOTHING MAY RUN AFTER A CANCEL (#14415 review round 3, BLOCKING 2).
@@ -2235,34 +2189,37 @@ class BatchCoordinator:
         invented for a run nothing can observe — the same rule the boot path has
         always applied, now in ONE place both callers use.
 
-        ⛔ "NO runner is holding" IS DECIDED BY THE RECLAIM WINDOW (#14415 review
-        round 5, P1). `_BATCH_DRAINING` answers it for THIS process; a second
-        replica's status poll cannot ask that question, and with no age test this
-        arm settled ANY claim it found — measured: a live claim seconds old was
-        turned `cancelled`, its runner then returned a real result, the document
-        was indexed, 60 000 tokens were billed, and the customer's surface said
-        the item "was cancelled before this item completed". A claim younger than
-        the window is left for its holder; a stale one is settled here, and the
-        poll rotation revisits the batch, so nothing is stranded — the cost is
-        latency, and the alternative was losing a paid extraction.
+        ⛔ BUT "VOID" IS THE CLAIM'S AGE, NOT OUR HOPE (#14415 review round 9,
+        HIGH). This method had NO age check, so it released a claim that was
+        SECONDS old: `_resume_batch` is not a boot-only hook — `recover()` is a
+        throttled re-scan re-entered from every batch read — so on multi-replica
+        deployment replica B settled replica A's LIVE in-flight row `cancelled`
+        (measured: claim age 0.0 s against a 900 s window, released and settled).
+        The runner's outcome then could not be applied (`queued`/`indexed` is not
+        reachable from `cancelled`), so `run_item`'s terminal arm BILLED the
+        spend and dropped the document — the customer charged for work the cancel
+        copy promised to keep. A fresh claim is left alone, exactly as `run_item`
+        and `_resume_batch` do; the re-scan returns and settles it once it is
+        stale, which is the ONE rule this file states.
+
+        ⛔ THE WINDOW APPLIES ON **EVERY** ARM, INCLUDING "BOOT" (#14415 review
+        round 9, HIGH, then round 10 HIGH). The first cut of this fix let a
+        caller pass ``None`` for "nothing I know of is running" — and the caller
+        used it on a tenant's FIRST scan in the process. That premise is false on
+        a rolling deploy: the first scan of the NEW replica runs while the OLD
+        replica is still inside the runner (measured: claim age 0.00 s, settled,
+        the peer's `indexed` became unreachable, its 730 tokens billed and the
+        document dropped — the exact defect the arm was added to close). "First
+        scan" is not "boot" either: `_BATCH_SCAN` evicts, and an evicted tenant
+        re-enters that arm mid-life. So the window is not optional here: a FRESH
+        claim is never touched by ANY caller, and it is settled by a later scan
+        once it is stale — which is the ONE rule this file states, with no
+        exception left to get wrong.
         """
-        window = (float(BATCH_RECLAIM_AFTER_S) if stale_after_s is None
-                  else float(stale_after_s))
         for item in self._store.items(org_id, batch_id):
             if item.state in (BatchItemState.EXTRACTING,
                               BatchItemState.EMBEDDED):
-                # ⛔ A CLAIM IS ONLY VOID WHEN IT IS STALE (#14415 review round 5,
-                # P1). Every sibling claim path bounds this by the reclaim window
-                # (`run_item`, `cancel`, `_resume_batch`); this arm settled ANY
-                # claim it found. One process is shielded by `_BATCH_DRAINING`,
-                # but a SECOND REPLICA's status poll reaches here — which is the
-                # deployment shape the window exists for. Measured: a live claim
-                # seconds old was voided to `cancelled`, its runner then returned
-                # a real result, the document was indexed, 60 000 tokens were
-                # billed, and the customer's surface said the item "was cancelled
-                # before this item completed". The docstring already says "claims
-                # that NO runner is holding"; this is what makes it true.
-                if _age_seconds(item.updated_at) < window:
+                if _age_seconds(item.updated_at) < reclaim_after:
                     continue
                 released = self.advance(org_id, item, BatchItemState.QUEUED,
                                         reason="cancelled batch, claim released",
@@ -2420,8 +2377,12 @@ class BatchCoordinator:
             # is void: settle it ``cancelled``, without inventing token counts for
             # a run we cannot observe.
             self.abandon_dead_claims(org_id, batch_id,
-                                     stale_after_s=reclaim_after)
+                                     reclaim_after=reclaim_after)
             return None
+        # ⛔ The `resuming` write below is a compare-and-set against the states a
+        # resume may legally start from (review round 5, P1 — the third
+        # unconditional writer of the batch row, and the one a status poll
+        # reaches), so a cancel landing in this loop is never erased.
         items = self._store.items(org_id, batch_id)
         moved = False
         for item in items:
