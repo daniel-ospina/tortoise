@@ -5025,6 +5025,47 @@ def test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool():
         r["surfaces"])
 
 
+def test_the_doc_reader_guard_runs_on_the_doc_it_reads():
+    # #14237 review (P1, the #6138 class — a doc that GAINED a reader).
+    # `tests/test_11609_door_retirement.py::TestEveryReaderNamesTheLiveListingDoor`
+    # READS `docs/how-to/provision-a-graph-per-end-user.md` and asserts every
+    # `tortoise_*` mention in it is a labelled migration note rather than an
+    # instruction — but the doc was in no `SOURCE_PATTERNS` row, and `docs/` is a
+    # `NON_PYTHON_PREFIX`, so `_keep_changed` dropped it, `changed == []`, and
+    # `select()` took the docs-only early return. Measured on the pre-fix tree:
+    #   select(["docs/how-to/provision-a-graph-per-end-user.md"])
+    #     -> surfaces=[] , full=False , 106 files, guard ABSENT
+    # while a `mcp_server.py` diff (SHARED_MODULES -> FULL matrix) ran it. So the
+    # guard was awake on code diffs and asleep on the ONE edit class it exists
+    # for: a how-to that re-points a step at a name `tools/list` does not
+    # advertise would merge green — the reader it protects is the reader who ACTS
+    # on the doc. This pin is the registration's own guard, so deleting the
+    # `SOURCE_PATTERNS["sdk"]` entry reds here instead of silently sleeping.
+    doc = "docs/how-to/provision-a-graph-per-end-user.md"
+    r = _sel([doc])
+
+    def runs(name: str) -> bool:
+        return r["full"] is True or name in r["test_files"]
+
+    assert "sdk" in r["surfaces"], (
+        "a diff to the how-to the retired-name guard READS selects no surface "
+        "(SOURCE_PATTERNS['sdk'] entry removed?) — the guard then never runs on "
+        "the doc edit it exists to catch", r["surfaces"])
+    assert runs("test_11609_door_retirement.py"), (
+        "the how-to-reader guard is not in the selection for a diff to the doc it "
+        "reads (SOURCE_PATTERNS['sdk'] entry removed?)", r["test_files"])
+    # …and the entry must stay CONCRETE: an unrelated prose doc is still not a
+    # python-relevant change, so it keeps taking the docs-only early return
+    # (tier-1 smoke). A `docs/how-to/` prefix here would drag this suite into
+    # every documentation PR.
+    other = _sel(["docs/how-to/some-unrelated-page.md"])
+    assert other["surfaces"] == [], (
+        "an unrelated how-to now selects a surface — the entry for the reader doc "
+        "was widened to a prefix; keep it one concrete path", other["surfaces"])
+    assert "test_11609_door_retirement.py" not in other["test_files"], (
+        "the retired-name guard runs on docs it does not read", other["test_files"])
+
+
 def test_mcp_client_change_keeps_the_core_pool_that_guards_its_words():
     # #10605 / PR #10727 review (P2). `tortoise/mcp_client.py` was registered as
     # an exact SOURCE_PATTERNS["api"] entry so that `tests/test_mcp_client.py`
@@ -7364,6 +7405,41 @@ def test_docs_only_skips_slow_and_carve_out():
         assert r["slow_run"] is False
         assert r["carve_out_run"] is False
         assert r["slow_selected"] == []
+
+
+def test_the_p7_how_to_selects_its_reader_and_declares_the_cost():
+    """#14237 round-2 review (P2), corrected by round 3: the ONE declared exception to
+    `test_docs_only_skips_slow_and_carve_out`'s property.
+
+    Registering the P7 how-to against `sdk` is what makes the guard that READS it run on
+    the doc-only diff it exists for — and `sdk` carries the slow leg and the carve-out
+    pool. ⛔ The two legs cost DIFFERENT things and the comment in `tools/ci_selection.py`
+    must not merge them: the slow leg is diff-SCOPED by `slow_selected` (three files,
+    which is what this pin asserts), while the carve-out leg is diff-GATED but never
+    diff-SIZED, so it runs its whole pool in 3 shard jobs. Pinned here so the cost is
+    declared rather than discovered; every OTHER docs-only path still skips both legs,
+    which is what the pin above says.
+    """
+    doc = "docs/how-to/provision-a-graph-per-end-user.md"
+    r = _sel([doc])
+    assert r["surfaces"] == ["sdk"], (
+        f"{doc} no longer selects the surface its reader guard lives in: "
+        f"{r['surfaces']}")
+    assert "test_11609_door_retirement.py" in r["test_files"], (
+        "the doc no longer selects tests/test_11609_door_retirement.py — the guard "
+        "that asserts every retired name in it is labelled, i.e. the whole point of "
+        "the registration")
+    assert r["full"] is False, (
+        "a docs-only diff must not fall through to the whole matrix")
+    assert r["slow_run"] is True and r["carve_out_run"] is True, (
+        "the declared cost of this registration moved — re-measure it and say so in "
+        "the comment in tools/ci_selection.py, or move the registration")
+    # The THREE-file slow leg is the diff-SCOPED half (`slow_files` is the declared pool
+    # every path emits and sizes nothing here). Pinned by count, not by membership, so a
+    # surface gaining a leg reds here instead of silently widening a docs-only PR.
+    assert len(r["slow_selected"]) == 3, (
+        f"the slow leg this registration wakes changed size: {r['slow_selected']} — "
+        "re-measure the cost in tools/ci_selection.py's comment")
 
 
 def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
