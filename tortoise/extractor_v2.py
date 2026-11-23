@@ -1163,9 +1163,9 @@ def _s4_delta_enabled() -> bool:
     GARBAGE → the default (True), NEVER coerced — the same allowlist
     semantics ``_classify_later_enabled`` has, with the INVERTED default.
     The fail-open asymmetry is deliberate and documented in ``.env.example``
-    + the #1789 rollout note: a typo'd or inline-commented value
-    (``"0  # comment"`` — inline comments are NOT stripped) SILENTLY selects
-    delta. Comments belong on their own line.
+    + the #1789 rollout note: any value that is not an allowlist spelling
+    SILENTLY selects delta. An unquoted ``.env`` value loses its inline
+    comment (``dotenv_file.parse_dotenv``); an exported value arrives whole.
 
     Read at CALL time (matching ``_classify_later_enabled``), so the
     production choke point in ``extract_session_v2`` captures ONE value per

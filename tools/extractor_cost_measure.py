@@ -2292,16 +2292,158 @@ def _source_transcript_tokens(doc_id: str | None) -> int:
     return len(_encoding().encode(block)) if block else 0
 
 
+#: ⛔ THE STAGES THIS ARITHMETIC IS WRITTEN FOR, and a REFUSAL if the corpus
+#: gate grows past them. `_REQUIRED_STAGES` is the corpus gate's list; the
+#: arithmetic below names its three stages (`c1`/`c2`/`c4`, the region table,
+#: the `calls_per_doc` / `per_call` maps). Two literals that agree by
+#: coincidence is exactly the subset-median failure this file keeps removing: a
+#: fourth stage added to the GATE alone would decompose three of four and
+#: publish a total that silently omits it. `decompose` compares the two and
+#: refuses, so the omission can never be published.
+_DECOMPOSED_STAGES: tuple[str, ...] = ("s1", "s2", "s4")
+
+#: The static render slots each `regions` row charges, as (stage, slot) pairs.
+#: The row's value is ``Σ calls[stage] × statics[stage][slot]``, so the table IS
+#: the row — one declaration, and `_static_slot_problems` below derives the
+#: coverage invariant from it instead of trusting a second hand-written list.
+#: Row order is the bundle's own (§4) and is kept: `regions` is published sorted
+#: by magnitude, and a stable sort ties on insertion order.
+_STATIC_ROW_SLOTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "kind vocabulary (`master_list`)": (
+        ("s2", "master_list"), ("s4", "master_list")),
+    # ⛔ `pack_namespaces` is S2-only and renders EMPTY under the production
+    # default (`core_only` off), so this row is 0 today and non-zero in a
+    # `TORTOISE_CLASSIFY_LATER=1` shell — exactly the posture nobody was
+    # charging (review notes at `371fd0a22e96`, P3).
+    "pack namespace list (`pack_namespaces`, S2 only)": (
+        ("s2", "pack_namespaces"),),
+    "mapping rules (`anti_routine`)": (
+        ("s2", "anti_routine"), ("s4", "anti_routine")),
+    "output schema (`output_contract`)": (
+        ("s2", "output_contract"), ("s4", "output_contract")),
+    "stage instructions (template prose)": (
+        ("s1", "template_prose"), ("s2", "template_prose"),
+        ("s4", "template_prose")),
+    "memory granularity (S1 only)": (("s1", "memory_granularity"),),
+    "chains": (("s2", "chains_text"), ("s4", "chains_text")),
+    "date anchor": (("s1", "date_anchor"), ("s2", "date_anchor"),
+                    ("s4", "date_anchor")),
+    "graph search results (S4)": (("s4", "search_results"),),
+}
+
+#: The render slots NO `regions` row charges, each with what it is and why it is
+#: not chargeable. These are NOT a silent residual — they are a DECLARED one, and
+#: `decompose` refuses a render slot that is in neither this map nor
+#: `_STATIC_ROW_SLOTS`, and refuses an entry here whose slot the render no longer
+#: fills — so the exemptions cannot rot silently either (review notes at
+#: `0c06906012f6`, B).
+_UNCHARGED_STATIC_SLOTS: dict[str, dict[str, str]] = {
+    "s4": {
+        #: 1 token/call in the committed posture. The row that would charge the
+        #: REAL list is `**S2's embed list**`, solved as
+        #: `pc4 − s4_sys − story − clause` — i.e. NET of this empty `{}`
+        #: render, so charging this token here as well would need the solve
+        #: changed in lockstep. Left in `unattributed` (≈4 tokens/doc, 0.009 %)
+        #: rather than perturbing a published bundle for 0.009 %.
+        "embed_list_json": (
+            "the EMPTY list render (`{}`, 1 token/call); the real list is the "
+            "solved embed row, which subtracts this render"),
+        #: 0 tokens/call: a blank body renders as the EMPTY STRING (#10311
+        #: envelope measured separately), so the static render carries no story.
+        "story": (
+            "blank in the static render (0 tokens/call); the real story body "
+            "is solved and charged on the S1-story row"),
+    },
+}
+
+
+def _static_slot_problems(statics: dict[str, dict[str, int]]) -> list[str]:
+    """Every fill slot is charged by EXACTLY ONE row, or declared exempt.
+
+    DERIVED from ``statics`` — the real render — never from a second
+    hand-written list of names. One defect per line, empty when the table covers
+    the render. Five ways this can go wrong, all of them silent before this
+    check existed (`0c06906012f6` review note B):
+
+    * a slot the render fills that NO row charges — its tokens leave the
+      composition and land in `unattributed` while the table still sums
+      (the `pack_namespaces` shape, `371fd0a22e96` P3);
+    * a slot charged by TWO rows — double counted, the opposite error;
+    * a slot a row charges that the render does not fill — a typo, which
+      `.get(slot, 0)` would otherwise charge as a silent zero;
+    * a slot both charged and declared exempt — the two lists disagree;
+    * an exemption the render no longer fills — a stale exemption, which would
+      re-open the first hole for whatever takes its name.
+    """
+    charged: dict[tuple[str, str], list[str]] = {}
+    for label, slots in _STATIC_ROW_SLOTS.items():
+        for pair in slots:
+            charged.setdefault(pair, []).append(label)
+    exempt = {(stage, slot) for stage, slots in _UNCHARGED_STATIC_SLOTS.items()
+              for slot in slots}
+    problems: list[str] = []
+    for pair in sorted(charged):
+        stage, slot = pair
+        labels = charged[pair]
+        if slot not in statics.get(stage, {}):
+            problems.append(
+                f"`{stage}.{slot}` is charged by {labels} but the render fills "
+                f"no such slot — a typo would have charged 0 silently")
+        if len(labels) > 1:
+            problems.append(
+                f"`{stage}.{slot}` is charged by more than one row {labels} — "
+                f"double counted")
+        if pair in exempt:
+            problems.append(
+                f"`{stage}.{slot}` is BOTH charged and declared exempt")
+    for stage, slot in sorted(exempt):
+        if slot not in statics.get(stage, {}):
+            problems.append(
+                f"`{stage}.{slot}` is declared exempt but the render fills no "
+                f"such slot — stale exemption")
+    for stage in _DECOMPOSED_STAGES:
+        for slot, tokens in sorted(statics.get(stage, {}).items()):
+            if (stage, slot) not in charged and (stage, slot) not in exempt:
+                problems.append(
+                    f"`{stage}.{slot}` ({tokens} tokens/call) is filled by the "
+                    f"render but charged by NO row — its tokens would leave "
+                    f"the composition into `unattributed`")
+    return problems
+
+
+def _assert_static_slots_are_covered(
+        statics: dict[str, dict[str, int]]) -> None:
+    """Fail closed, naming every uncovered slot — before any `--out` write."""
+    problems = _static_slot_problems(statics)
+    if problems:
+        raise SystemExit(
+            "refusing to decompose: the stage prompts' static regions do not "
+            "reconcile with `regions`.\n  " + "\n  ".join(problems) +
+            "\nAdd the slot to `_STATIC_ROW_SLOTS` (a row that charges it), or "
+            "declare it in `_UNCHARGED_STATIC_SLOTS` with what it is and why "
+            "it is not chargeable.")
+
+
 def decompose(rows: list[dict], *, arm: str = "cold",
               receipts: Path | None = None) -> dict:
     """Attribute the two fitted constants of #14295 to the regions that make
     them (#14343).
+
 
     Every number here is either (a) tiktoken on a real render of the stage
     prompts (the statics), or (b) a measured token count from the evidence
     rows (the per-call inputs, the emissions, the call counts). Nothing is
     assumed; the residual rows are what keeps the table honest.
     """
+    #: ⛔ ONE STAGE LIST, or a refusal. A stage added to the corpus gate alone
+    #: would be gated but never decomposed (see `_DECOMPOSED_STAGES`).
+    if tuple(_REQUIRED_STAGES) != _DECOMPOSED_STAGES:
+        raise SystemExit(
+            f"refusing to decompose: the corpus gate requires "
+            f"{list(_REQUIRED_STAGES)} but this arithmetic is written for "
+            f"{list(_DECOMPOSED_STAGES)} — extend the per-stage terms (and "
+            f"`_STATIC_ROW_SLOTS`) before adding a stage to the gate, or the "
+            f"total would silently omit it.")
     docs = [r for r in rows
             if r.get("arm") == arm and r.get("kind") == "doc"
             and not r.get("failed") and r.get("stages")]
@@ -2334,6 +2476,10 @@ def decompose(rows: list[dict], *, arm: str = "cold",
             f"residual would collapse toward zero. Per-stage document counts: "
             f"{per_stage}.")
     statics = _render_regions()
+    #: ⛔ COVERAGE IS DERIVED, NOT ASSERTED IN PROSE. Before the rows are built:
+    #: every slot the REAL render fills must be charged by exactly one row, or be
+    #: a declared exemption. Refuses here, before `--out` is ever opened.
+    _assert_static_slots_are_covered(statics)
     #: ⛔ THE SOURCE-TRANSCRIPT TAIL IS SUBTRACTED, NOT IGNORED. `render_s2_prompt`
     #: / `render_s4_prompt` append `_render_source_transcript(edus)` OUTSIDE
     #: `_fill_template` whenever the document's EDU text fits
@@ -2409,39 +2555,21 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     #: affected documents above are not; see `source_transcript` in the result).
     tail_med = statistics.median(list(tails.values())) if tails else 0
 
+    #: ⛔ THE ROWS ARE THE TABLE. `_STATIC_ROW_SLOTS` declares which (stage, slot)
+    #: pairs each row charges and this comprehension is the only place the value
+    #: is computed, so a row cannot silently stop charging a slot it names — or
+    #: charge one the render does not fill (`_assert_static_slots_are_covered`
+    #: has already refused both). The two solved rows below are the ones that are
+    #: NOT a sum of static slots; they stay explicit because the provenance of
+    #: their number is a solve, not a render.
+    calls_by_stage = {"s1": c1, "s2": c2, "s4": c4}
     regions = {
-        # (label, tokens/doc, what it is, provenance)
-        "kind vocabulary (`master_list`)": c2 * statics["s2"]["master_list"]
-        + c4 * statics["s4"]["master_list"],
-        # ⛔ EVERY static region that `s2_sys`/`s4_sys` charge must own a row
-        # here, or its tokens leave the composition and land in `unattributed`
-        # while the table still sums — the silent-absorption shape this bundle
-        # spends its review cycles removing (agent-infra#3442; the exclusive,
-        # non-overlapping usage-bucket invariant OpenTelemetry GenAI / Langfuse
-        # both mandate). `pack_namespaces` is S2-only and renders EMPTY under
-        # the production default (`core_only` off), so this row is 0 today and
-        # non-zero in a `TORTOISE_CLASSIFY_LATER=1` shell — which is exactly
-        # the posture nobody was charging (review notes at `371fd0a22e96`, P3).
-        "pack namespace list (`pack_namespaces`, S2 only)":
-        c2 * statics["s2"].get("pack_namespaces", 0),
-        "mapping rules (`anti_routine`)": c2 * statics["s2"]["anti_routine"]
-        + c4 * statics["s4"]["anti_routine"],
-        "output schema (`output_contract`)":
-        c2 * statics["s2"]["output_contract"]
-        + c4 * statics["s4"]["output_contract"],
-        "stage instructions (template prose)":
-        c1 * statics["s1"]["template_prose"]
-        + c2 * statics["s2"]["template_prose"]
-        + c4 * statics["s4"]["template_prose"],
-        "memory granularity (S1 only)": c1 * statics["s1"]["memory_granularity"],
-        "chains": c2 * statics["s2"].get("chains_text", 0)
-        + c4 * statics["s4"].get("chains_text", 0),
-        "date anchor": c1 * statics["s1"]["date_anchor"]
-        + c2 * statics["s2"]["date_anchor"] + c4 * statics["s4"]["date_anchor"],
-        "graph search results (S4)": c4 * statics["s4"].get("search_results", 0),
-        "**S1's story, re-sent to S2 and S4**": (c2 + c4) * (story + clause),
-        "**S2's embed list, re-sent to S4**": (c4 * embed),
+        label: sum(calls_by_stage[stage] * statics[stage].get(slot, 0)
+                   for stage, slot in slots)
+        for label, slots in _STATIC_ROW_SLOTS.items()
     }
+    regions["**S1's story, re-sent to S2 and S4**"] = (c2 + c4) * (story + clause)
+    regions["**S2's embed list, re-sent to S4**"] = c4 * embed
     total = sum(regions.values())
     # ⛔ DERIVED, not hardcoded: the constant is the intercept of THIS arm's
     # per-document fit. A literal 45_503 is right for `cold` and wrong for any

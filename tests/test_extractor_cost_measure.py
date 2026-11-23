@@ -911,6 +911,109 @@ def test_the_composition_sums_and_states_its_unattributed_remainder():
     assert abs(dec["unattributed"]) < 0.25 * dec["fitted_constant"]
 
 
+def test_a_static_slot_no_row_charges_is_REFUSED_not_absorbed(monkeypatch):
+    """⛔ THE COVERAGE IS DERIVED FROM THE RENDER, so a NEW fill slot cannot be
+    absorbed silently (`0c06906012f6` review note B).
+
+    The pre-fix state is the one this test replaces: coverage was a per-region
+    hand list, so adding a slot to `render_s2_prompt`/`render_s4_prompt` left the
+    table summing while its tokens became `unattributed` — the `pack_namespaces`
+    shape (`371fd0a22e96`, P3) with no row to miss it.
+
+    ⛔ NON-VACUITY: pre-fix (no `_assert_static_slots_are_covered`) `decompose`
+    RETURNS a decomposition for this mutated render — measured: the assertion
+    below reds on the missing SystemExit, not on a message difference.
+    """
+    real = m._render_regions()
+
+    def _with_a_new_slot():
+        out = {stage: dict(slots) for stage, slots in real.items()}
+        out["s2"]["a_fill_slot_added_tomorrow"] = 41
+        return out
+
+    monkeypatch.setattr(m, "_render_regions", _with_a_new_slot)
+    with pytest.raises(SystemExit) as refused:
+        m.decompose(_evidence_rows())
+    message = str(refused.value)
+    assert "a_fill_slot_added_tomorrow" in message, message
+    assert "41 tokens/call" in message, message
+    assert "_STATIC_ROW_SLOTS" in message, message
+
+
+def test_the_static_slot_table_covers_the_real_render_exactly_once():
+    """Every slot the real render fills is charged by ONE row or declared exempt.
+
+    The five defect classes `_static_slot_problems` names are all reachable and
+    all silent without it: an uncharged slot (`pack_namespaces`), a slot charged
+    twice (double counted), a charged name the render never fills (a typo that
+    `.get(slot, 0)` charges as zero), a slot both charged and exempt, and a
+    STALE exemption left behind by a rename.
+    """
+    statics = m._render_regions()
+    assert m._static_slot_problems(statics) == []
+    # The exemptions are the two documented ones — not a growing list of
+    # convenient holes: `embed_list_json` (the empty `{}` render, 1 token) and
+    # `story` (a blank body renders as the empty string, 0 tokens).
+    assert {stage: sorted(slots) for stage, slots in
+            m._UNCHARGED_STATIC_SLOTS.items()} == {
+        "s4": ["embed_list_json", "story"]}, m._UNCHARGED_STATIC_SLOTS
+    # …and each is still a slot the render really fills, so an exemption cannot
+    # outlive the region it was written for.
+    for stage, slots in m._UNCHARGED_STATIC_SLOTS.items():
+        for slot in slots:
+            assert slot in statics[stage], (stage, slot, statics[stage])
+
+
+def test_a_declared_exemption_for_a_slot_the_render_dropped_is_REFUSED(
+        monkeypatch):
+    """A STALE exemption is a hole with a signature on it: if the render renames
+    `embed_list_json`, the exemption must stop being accepted and the new name
+    must be caught, not inherited."""
+    real = m._render_regions()
+
+    def _renamed():
+        out = {stage: dict(slots) for stage, slots in real.items()}
+        out["s4"]["embed_list_json_v2"] = out["s4"].pop("embed_list_json")
+        return out
+
+    monkeypatch.setattr(m, "_render_regions", _renamed)
+    with pytest.raises(SystemExit) as refused:
+        m.decompose(_evidence_rows())
+    message = str(refused.value)
+    assert "stale exemption" in message, message
+    assert "embed_list_json" in message, message
+    # The renamed slot is caught in its own right, not just as the stale half.
+    assert "embed_list_json_v2" in message, message
+
+
+def test_a_stage_the_corpus_MEASURED_is_REFUSED_when_the_gate_grows(monkeypatch):
+    """⛔ ONE list, or a refusal (`0c06906012f6` review note C).
+
+    `_REQUIRED_STAGES` gates the corpus and the arithmetic names s1/s2/s4 on its
+    own. Two literals that agree by coincidence is the subset-median failure this
+    file keeps removing — but the reachable state is only the one where the new
+    stage IS measured, so this injects real `s5` measurements into every document
+    as well as the member into the gate. A stage the corpus does NOT carry needs
+    no guard: the partial-corpus gate refuses it first.
+
+    ⛔ NON-VACUITY, MEASURED against the pre-fix tool: with `s5` measured on all
+    50 documents and added to `_REQUIRED_STAGES`, `decompose` RETURNS a
+    decomposition in which every number is s1/s2/s4 — the measured stage owns no
+    term at all — while the corpus gate it was added to is satisfied.
+    """
+    rows = json.loads(json.dumps(_evidence_rows()))
+    for row in rows:
+        if row.get("stages"):
+            row["stages"]["s5"] = {"calls": 1, "prompt_tokens": 999,
+                                   "completion_tokens": 99}
+    monkeypatch.setattr(m, "_REQUIRED_STAGES", ("s1", "s2", "s4", "s5"))
+    with pytest.raises(SystemExit) as refused:
+        m.decompose(rows)
+    message = str(refused.value)
+    assert "arithmetic" in message, message
+    assert "s5" in message, message
+
+
 def test_the_pack_namespace_list_is_charged_to_its_own_row(monkeypatch):
     """`pack_namespaces` is a static region with a row, not absorbed residual.
 
