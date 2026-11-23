@@ -3966,6 +3966,7 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
             deadline = time.time() + 10.0
             poll_started = time.time()
             err_streak = 0
+            streak_started: float | None = None
             pids: list[int] = []
             while True:
                 procs, err = fs.pi_processes()
@@ -3994,10 +3995,23 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     # below classify it.
                     if _child_exited(proc):
                         break
+                    # ⛔ THE SPAN IS MEASURED FROM THE STREAK, NOT FROM THE POLL (#12039 review
+                    # cycle 6, P1). `poll_started` was set ONCE before the loop, so two
+                    # consecutive errors arriving AFTER 2 s of HEALTHY polling satisfied
+                    # `_CENSUS_ERROR_MIN_SPAN_S` — a 0.2 s `ps` blip, the load class rule 1
+                    # protects, redded a REQUIRED shard, and the message below asserted a span
+                    # the streak never had. MEASURED on the shipped form (hermetic probe, fake
+                    # clock, ALIVE fixture): 50 healthy samples (~5 s), then exactly TWO
+                    # consecutive errors, then healthy -> `HarnessDefect … spanning at least 2s`.
+                    # The documented invariant is CONTINUOUS failure, so the clock starts at the
+                    # streak's own first error and any successful sample resets it.
+                    if err_streak == 0:
+                        streak_started = time.time()
                     err_streak += 1
+                    streak_span_s = time.time() - streak_started
                     if (
                         err_streak >= _CENSUS_ERROR_STREAK
-                        and (time.time() - poll_started) >= _CENSUS_ERROR_MIN_SPAN_S
+                        and streak_span_s >= _CENSUS_ERROR_MIN_SPAN_S
                     ):
                         # The verdict is due NOW, so the `ps` control runs at most once per
                         # poll instead of once per erroring sample (review round 5, P2: the
@@ -4006,14 +4020,16 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                             pytest.skip(f"the process table is unreadable here: {err}")
                         raise HarnessDefect(
                             f"{_HARNESS_PREFIX}: the census reported an error on "
-                            f"{err_streak} consecutive samples spanning at least "
-                            f"{_CENSUS_ERROR_MIN_SPAN_S:g}s on a box whose `ps` answers: "
+                            f"{err_streak} consecutive samples over {streak_span_s:.2f}s "
+                            f"(the continuous-failure bound is {_CENSUS_ERROR_MIN_SPAN_S:g}s) "
+                            f"on a box whose `ps` answers: "
                             f"{err!r} — `ps -p {os.getpid()} -o command=` answered, so the "
                             f"census's own invocation is what failed, which is this test's "
                             f"subject")
                     time.sleep(0.1)
                     continue
                 err_streak = 0
+                streak_started = None
                 pids = [p["pid"] for p in procs]
                 # ⛔ A DEAD CHILD ENDS THE POLL (#12039 review finding 4a). Liveness was
                 # consulted only AFTER the 10 s deadline burned, so on a box where the child
@@ -4167,6 +4183,36 @@ class _FakeChild:
         return 0 if self._rc is None else self._rc
 
 
+def _verdict_or_fail(expect, why: str, call):
+    """Call the fixture and RETURN the exception it raised, requiring the EXPECTED kind.
+
+    ⛔ A SKIP IS NOT A VERDICT, AND `pytest.raises` CANNOT SEE ONE. `pytest.skip.Exception`
+    derives from `OutcomeException`/`BaseException`, not from `AssertionError` — measured:
+    `issubclass(pytest.skip.Exception, AssertionError) is False`
+    (`Skipped.__mro__` -> `Skipped, OutcomeException, BaseException, object`). So an arm that
+    expects `AssertionError` or `HarnessDefect` and instead gets a skip does NOT fail: the
+    `Skipped` escapes `pytest.raises(expect)` and THIS guard test is reported as **SKIPPED**,
+    i.e. green. That is precisely the false PASS these arms exist to pin — the file's own
+    comments note that neither static nodeid manifest carries it and the INCONCLUSIVE family
+    trips no skip-guard — and it was MEASURED on the shipped form of this test: mutating the
+    ALIVE arm back to `pytest.skip(...)` gave `3 passed, 1 skipped` with the pin-green, and
+    the pre-fix census skip left the `persistent/ps-answers` and `once` params skipped.
+
+    So in every verdict-bearing arm an escaping skip is converted into a FAILURE. The
+    skip-expecting arm is unchanged (that is its verdict, and `why` still discriminates it).
+    """
+    if expect == "skip":
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            call()
+        return excinfo.value
+    try:
+        with pytest.raises(expect) as excinfo:
+            call()
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"the code SKIPPED where {expect.__name__} is required ({why}): {exc}")
+    return excinfo.value
+
+
 @pytest.mark.parametrize(
     ("rc", "expect", "marker", "why"),
     [
@@ -4208,14 +4254,9 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
     # `_row_for_pid` shells out to `ps` for a DIAGNOSTIC only; stub it so the arm stays hermetic.
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _Completed())
 
-    if expect == "skip":
-        with pytest.raises(pytest.skip.Exception) as excinfo:
-            test_pi_processes_sees_a_real_long_path_lane(monkeypatch)
-    else:
-        with pytest.raises(expect) as excinfo:
-            test_pi_processes_sees_a_real_long_path_lane(monkeypatch)
-
-    assert marker in str(excinfo.value), why
+    raised = _verdict_or_fail(
+        expect, why, lambda: test_pi_processes_sees_a_real_long_path_lane(monkeypatch))
+    assert marker in str(raised), why
     elapsed = clock.now - _FakeClock.START
     if rc is None:
         assert elapsed >= 10.0, "the ALIVE arm must still burn the full deadline and still fail"
@@ -4237,6 +4278,11 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
         (
             "once", True, None, AssertionError, "was ALIVE and invisible to the census",
             "ONE isolated `ps` death is the load class (#5049 rule 1) and must not red the shard",
+        ),
+        (
+            "late_pair", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "TWO consecutive errors arriving AFTER 2 s of healthy polling are still a 0.2 s blip "
+            "— the span belongs to the STREAK, not to the poll (cycle-6 P1)",
         ),
         (
             "persistent", True, -9, "skip", "INCONCLUSIVE [#5049]",
@@ -4276,9 +4322,16 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
 
     def _census():
         calls["n"] += 1
-        if census_kind == "persistent" or calls["n"] == 1:
+        if census_kind == "persistent":
             return [], err
-        return [], None
+        if census_kind == "late_pair":
+            # ~40 healthy samples first (the fake clock advances 0.1 s per `time()` call, so
+            # that is ≈4 s of well-past-the-bound polling), then EXACTLY TWO consecutive
+            # errors, then healthy again. The old gate measured the span from `poll_started`,
+            # so this pair — 0.2 s of real failure — raised `HarnessDefect` on a required
+            # shard; the fixed gate measures it from the streak and keeps polling.
+            return ([], err) if 40 <= calls["n"] < 42 else ([], None)
+        return ([], err) if calls["n"] == 1 else ([], None)
 
     class _Completed:
         stdout = ""
@@ -4290,14 +4343,9 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     # `_row_for_pid` shells out to `ps` for a DIAGNOSTIC only; stub it so the arm stays hermetic.
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _Completed())
 
-    if expect == "skip":
-        with pytest.raises(pytest.skip.Exception) as excinfo:
-            test_pi_processes_sees_a_real_long_path_lane(monkeypatch)
-    else:
-        with pytest.raises(expect) as excinfo:
-            test_pi_processes_sees_a_real_long_path_lane(monkeypatch)
-
-    assert marker in str(excinfo.value), why
+    raised = _verdict_or_fail(
+        expect, why, lambda: test_pi_processes_sees_a_real_long_path_lane(monkeypatch))
+    assert marker in str(raised), why
     if expect is HarnessDefect:
         assert clock.now - _FakeClock.START >= _CENSUS_ERROR_MIN_SPAN_S, (
             "the census verdict must wait for the streak to SPAN a real interval — two 0.1 s "
@@ -4305,6 +4353,10 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
         )
     if census_kind == "once":
         assert calls["n"] > _CENSUS_ERROR_STREAK, "a single error must not decide the verdict"
+    if census_kind == "late_pair":
+        assert calls["n"] > 42, (
+            "the poll must keep running after a two-sample blip that arrives late — a census "
+            "verdict here is the #5049 rule-1 false red this arm pins against")
 
 
 def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
@@ -4337,3 +4389,43 @@ def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
     assert "_ps_answers" in doc, (
         "the header's census-error skip must also require `_ps_answers()` to come back empty; "
         "`where the process table cannot be read at all` alone is the permanent-green drift")
+
+
+def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
+    """`_child_exited` must NOT collect the status: the `ps` row is the diagnosis's evidence.
+
+    `waitid(WNOWAIT)` over `Popen.poll()` is the whole reason the helper exists — `poll()` calls
+    `waitpid()`, and a COLLECTED child leaves no row for the `HarnessDefect` message to quote
+    (the 2026-11-23 incident's evidence is exactly that row: `'[python] <defunct>'`).
+
+    ⛔ NOTHING ELSE IN THIS FILE EXERCISES THE REAL BRANCH (review cycle 6, P2). Every hermetic arm
+    drives `_FakeChild`, whose pid `4_000_001` makes `os.waitid` raise `ChildProcessError`, so all
+    of them take the documented `poll()` fallback — measured: mutating this helper to
+    `return proc.poll() is not None` (i.e. reaping the evidence away) left the suite fully GREEN,
+    `10 passed, 163 deselected`. So the property is pinned here with a REAL, short-lived child:
+    exited, row still readable, and only THEN `poll()` returns the code.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("ps") is None:  # pragma: no cover — no `ps` to read a row with
+        pytest.skip("no `ps` on this box: the row this test grades cannot be read")
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.time() + 10.0
+        while not _child_exited(proc) and time.time() < deadline:
+            time.sleep(0.05)
+        assert _child_exited(proc), "the child exited but `_child_exited` never reported it"
+        row = _row_for_pid(proc.pid)
+        assert row, (
+            "the exited child has no `ps` row, so its status was COLLECTED rather than "
+            "observed — the `HarnessDefect` message would lose the evidence it quotes "
+            "(`_child_exited` must keep `WNOWAIT`)")
+        assert proc.poll() is not None, (
+            "the status was not collectable after `_child_exited` read it, so the returncode "
+            "the exit arms classify would be lost")
+    finally:
+        if proc.poll() is None:  # pragma: no cover — child still alive on a slow box
+            proc.kill()
+        proc.wait(timeout=10)
