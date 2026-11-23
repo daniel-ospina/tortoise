@@ -1707,9 +1707,12 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
     fixpoint either: that function takes its alias sets as PARAMETERS and never calls back into
     this one, so these pass the LITERAL empty registry sets on purpose — they ask only
     "is this expression a member fetched out of a mapping / a `getattr` fetch", which needs
-    no aliases. What they cannot resolve is a mapping reached through `__builtins__` (its name
-    set is being built by our caller), and that residual is closed at the inline call site
-    instead.
+    no aliases. ⛔ CORRECTED (#14326 review cycle 10): this note used to say the mapping
+    reached through `__builtins__` "is being built by our caller", which is FALSE —
+    `__builtins__` is a hard-coded literal root, not something derived from
+    `_builtin_name_aliases`, so passing it is not a fixpoint. It IS passed now, because
+    without it the BOUND spelling `_dd = __builtins__["dict"]; _dd(mapping)` was GREEN while
+    the INLINE spelling is a pinned RED row.
 
     ⛔ OVER-MATCHING ACROSS THE MEMBERS IS HARMLESS, as `_REGISTRY_BUILTINS`' own note argues,
     BUT THE BOUND IS WIDER THAN THE REGISTRY ARMS' ONE (#14326 review cycle 7, CORRECTED: this
@@ -1745,7 +1748,15 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
         # executed the read while the INLINE `vars(builtins)["dict"](…)` was REFUSED). The
         # mapping-key spelling is the sibling half of the module-attribute one above and
         # `_builtin_lookup_name` resolves it — so the bind, not only the inline call, resolves.
-        or _builtin_lookup_name(n, _module_names, _bu_consts_, frozenset(),
+        # ⛔ THE ROOT IS PASSED AS `dict_names`, NOT `frozenset()` (#14326 review cycle 10,
+        # MEASURED GREEN: `_dd = __builtins__["dict"]; _d = _dd(builtins.__dict__)` was not
+        # refused while its INLINE twin `__builtins__["dict"](__builtins__)` is a pinned RED
+        # row). `__builtins__` is a HARD-CODED literal root — injected by CPython, never
+        # bound — so handing it over is NOT a fixpoint, and leaving it out blinded the one
+        # root that needs no import. `launderers` stays empty: the no-fixpoint argument above
+        # still holds for the ALIAS sets.
+        or _builtin_lookup_name(n, _module_names, _bu_consts_,
+                                frozenset({"__builtins__"}),
                                 frozenset(), members=_REGISTRY_BUILTINS,
                                 getattr_fetchers=frozenset({"getattr"})) is not None
         # ⛔ AND AN ALIAS OF A COPY CALLEE (#14326 review cycles 6-7, MEASURED GREEN:
