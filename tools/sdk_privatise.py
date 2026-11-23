@@ -1717,7 +1717,15 @@ SWEEP_NAMES = 66
 #: trees, never as arithmetic across the parents. A later merge re-measures this pin rather than
 #: deleting a previous reading; if a block above contradicts the live pin, that block is HISTORY and
 #: the last one is the PIN.
-SWEEP_RESIDUE = (11873, "b617f45a195476a6")
+#: ⛔ MERGED `origin/main` `7244b4d1a9` INTO THIS BRANCH (the PR was `CONFLICTING`: seven files) — the
+#: pair is RE-MEASURED ON THE RESOLVED TREE, never inherited from either parent: a merge tree is a THIRD
+#: tree, and each parent's numeral is a true reading of the tree it NAMES only. `--repin` here prints
+#: **(11881, '090b6d0e3ad7d520')** and `--check` exits 0 on it with `typed references still pointing at a
+#: public name: 0`. The 8-row rise over this branch's pre-merge `11873` is `main`'s own work
+#: (`#14263`'s relation-pair readers in `tortoise/sdk.py`, `#14347`'s spool, `#14372`'s census); it is
+#: RECORDED rather than attributed by arithmetic — `--report --base <sha> --top 5000` on each tree is
+#: what attributes it, and this block does not claim it.
+SWEEP_RESIDUE = (11881, "090b6d0e3ad7d520")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
