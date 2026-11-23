@@ -1751,6 +1751,44 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # the probe is what decides `@_docker_only`.
     "test_13557_13558_reachable_reads.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", _uri\(\)\)$'],
+    # #14286 family (#14164 fallout): three modules mutated TORTOISE_DB_URI without a
+    # row, so the declaration guard redded `main`. Triage for all three is
+    # DELIBERATE_URI — the URI VALUE is the test's own input, not a lane the test needs
+    # to reach — and each row is scoped to the LITERAL so a future, different URI in the
+    # same file still reds (a shape-level `setenv` row would pre-authorize it).
+    #
+    #   test_13094_graphevent_home.py — FIVE of its seven sites hand `main()` a
+    #     deliberately UNREACHABLE port (`:1`) and assert the exit-2 contract on the
+    #     produced refusal (each also asserts the message, several that it is "NO
+    #     VERDICT"): the claim under test is that an unreadable graph yields NO VERDICT
+    #     rather than a wrong one. The other TWO (`:1362`, `:1384`) name no port at all
+    #     and patch `module.measure` directly, so no connection is attempted.
+    #     ⚠️ THE LITERALS BELOW ARE TWO, NOT ONE: this row was written against
+    #     `docker://:@127.0.0.1:1/x` alone, and `main`'s #14183 (the walk that could not
+    #     prove it reached the end) re-pointed TWO of that file's sites to `docker://x`
+    #     while five kept the old literal. Declared as two literal rows rather than
+    #     widened to a shape-level pattern: the LITERAL scoping is this row's whole
+    #     point — a future, different URI in this file must still red.
+    #   test_13337_cache_graph_declaration.py — the pair pins the record/cache
+    #     disagreement: cache-without-record must SKIP (the `setenv`, whose value is
+    #     the lane SIGNAL `_both_stores()` branches on) and record-without-cache must
+    #     FAIL (the `delenv`). Both assertions are raised by `_both_stores()` itself,
+    #     before any client is constructed.
+    #   test_measure_4211_session_hierarchy.py — the URI names the TARGET the arm must
+    #     refuse or refuse-to-claim: `db.example`/`hunter2` are the non-ephemeral and
+    #     secret-bearing shapes N8 asserts are refused (and never echoed), and both
+    #     arms here patch `tortoise.sdk.TortoiseSDK`, so no store is contacted.
+    "test_13094_graphevent_home.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@127\.0\.0\.1:1/x"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://x"\)$'],
+    "test_13337_cache_graph_declaration.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://localhost:6379"\)$',
+        r'^monkeypatch\.delenv\("TORTOISE_DB_URI", raising=False\)$'],
+    "test_measure_4211_session_hierarchy.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:hunter2@db\.example:6379/tortoise"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@db\.example:6379/tortoise"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@127\.0\.0\.1:16379/m4211_hierarchy"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@localhost:1/m4211_r10_fake"\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
