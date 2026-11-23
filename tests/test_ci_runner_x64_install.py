@@ -4401,9 +4401,10 @@ _REFUSAL_ANCHOR = "Cost when GitHub-hosted is healthy"
 #: declares the depth the sentence claims. Rewording the note, deleting it, repeating it, or changing
 #: that checkout back to a shallow one reds here, which is the unverified state a number alone cannot
 #: detect.
-#: ⚠ No line number is restated in this note on purpose — that is exactly the rot this register
+#: ⚠ No LIVE line number is restated in this note on purpose — that is exactly the rot this register
 #: replaces (three attempts to keep a live number in `_REFUSAL_CITATION_SITES`' own note went stale on
-#: the next merge).
+#: the next merge). The `4234-4244` above is quoted as HISTORY, not as a claim: it is there to explain
+#: why the number could not stay, and it is graded by nothing. What is graded is the pointer below.
 _DE_NUMBERED_CITE_MARKERS: tuple[tuple[str, str, str], ...] = (
     (".github/workflows/ci.yml", "#11057 review P2", "fetch-depth: 0"),
 )
@@ -4893,19 +4894,22 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     )
 
     # ── The TWO CITING FILES this pin never read (#11032 review) ───────────────────────────────
-    # `.github/workflows/ci.yml:1506` and `.github/actionlint.yaml:32` both cite the same refusal
+    # `.github/workflows/ci.yml` and `.github/actionlint.yaml` both cite the same refusal
     # paragraph, and neither file is read by any gate — the identical "no gate reads it, so it drifts
     # green" hole that put `batch-integration.md` in this pin one round earlier. When that citation
     # was written the number landed on the `Do NOT change it back` prohibition, ~30 lines past the
     # paragraph's OPENER that the checker requires — written from a remembered offset, not derived —
     # and every insert above it since has moved it further. Both sentences are load-bearing:
-    # `ci.yml:1506` is why the #10237 canary exists at all (the required legs CANNOT be routed to
-    # the pool), and `actionlint.yaml:32` is the only record of why declaring a label is not a way
+    # the `ci.yml` one is why the #10237 canary exists at all (the required legs CANNOT be routed to
+    # the pool), and the `actionlint.yaml` one is the only record of why declaring a label is not a way
     # to make a required leg schedulable.
     #
     # Mutation: revert either number to its pre-#6744 value -> RED naming the line it actually hit.
-    # No line number is restated in this note on purpose: the checker below resolves the citation
-    # from the FILE and compares it to the sentence, so trust the red rather than this prose.
+    # No line number is restated in this note on purpose: the two it used to carry had ALREADY moved
+    # when this revision was written (the earlier `ci.yml` spelling now lands on a DIFFERENT step's
+    # definition, not on the #10237 canary comment that carries the cite), so a restated address here
+    # would be the same drift one level up. The checker below resolves the citation from the FILE and
+    # compares it to the sentence — trust the red, not this prose.
     workflow_lines = (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
     for rel in _REFUSAL_CITATION_SITES:
         text = (REPO_ROOT / rel).read_text()
