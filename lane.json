@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-14429-1795473108-p135004-7029b0e2",
+  "_sha": "58e2d23b5e4e8b14272508c17cb79868bd5ea29c",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-14429.log"
+    },
+    {
+      "kind": "branch",
+      "value": "chore/spool-drain-rehearsal"
+    },
+    {
+      "kind": "sha",
+      "value": "a51d0213915a7769778aa657d063e9cc0c82bd5b"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/prd-14429"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 2957,
+  "ended_at": 1795476065,
+  "exit_code": 0,
+  "heartbeat_at": 1795476065,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-14429-1795473108-p135004-7029b0e2",
+  "lease_until": 1795512665,
+  "pid": 135004,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795473108,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-14429",
+  "worktree": "/home/cmux/tortoise/.worktrees/prd-14429"
+}
