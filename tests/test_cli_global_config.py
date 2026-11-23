@@ -299,6 +299,35 @@ class TestCreatePointRetrySafety:
         assert "does NOT mean nothing was written" not in err, (
             "the 504 completion claim must not leak onto the 503 arm")
 
+    def test_a_refusal_without_retry_after_names_a_concrete_wait(
+            self, tmp_path, capsys):
+        """#14424 review P2-3: naming the missing header is not enough.
+
+        The measured 504 body (docs/evidence/14424-onboarding/README.md §1.1)
+        says only *"wait for the advertised delay before retrying"* — and "the
+        advertised delay" IS the header. So with the header absent, the pre-fix
+        fallback ("wait the delay its body names") sent the reader to the body
+        for a number the body does not contain: the same dead-end this hint
+        exists to close (AX rule #10183 — a surface must not refuse where the
+        next action is knowable). The fallback must name a concrete wait; 10 s
+        is what the deployed server advertises when it does send the header.
+
+        Mutation that reds it: restore the pre-fix fallback text.
+        """
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(504)):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "no Retry-After" in err
+        # actionable: a stated wait the user can act on
+        assert "10 s" in err, "the fallback must name a concrete delay"
+        assert "its body names" not in err, (
+            "the body names no number — pointing at it yields no wait")
+        # and the 504 arm still says what changed about the write
+        assert "may have" in err and "completed on the server" in err
+
     def test_an_unreachable_api_does_not_claim_nothing_was_written(
             self, tmp_path, capsys):
         """#14424 review: the `URLError` arm asserted "Nothing was sent, so

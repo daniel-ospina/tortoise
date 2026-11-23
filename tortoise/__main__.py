@@ -6179,8 +6179,8 @@ def _create_point_retry_hint(exc, *, dedup_used: bool) -> str:
             f"re-sending.")
     else:
         lines.append(
-            "The server advertised no Retry-After; wait the delay its body "
-            "names before re-sending.")
+            "The server advertised no Retry-After; wait 10 s — the delay the "
+            "deployed server sends when it advertises one — before re-sending.")
     if code == 429:
         # Refused at admission: the write never ran, so a re-send after the
         # delay cannot duplicate anything.
