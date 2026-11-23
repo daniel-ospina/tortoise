@@ -1891,7 +1891,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
     this floor defers to is `tools/ci_queue_health.py:395`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 lines 531-533 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 534-536 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
     population rather than on it"). This docstring carries the SECOND citation of that same
     span, and the mechanical pin below holds it EQUAL to the one in
@@ -4597,7 +4597,7 @@ def test_a_mistyped_sha_in_a_full_clone_is_a_DEFECT(tmp_path):
     root = _citation_tree(tmp_path, "8abf4845")
     rc, findings = doc_citation_defects(root)
     assert rc == 1, f"a bogus sha must be a DEFECT (exit 1), got rc={rc}: {findings}"
-    assert "does not resolve in this FULL checkout" in findings[0]
+    assert "does not resolve to a single commit" in findings[0]
 
 
 def test_a_placeholder_is_a_DEFECT(tmp_path):
@@ -4671,23 +4671,76 @@ def test_the_citation_arm_reaches_no_command_but_git():
     tree = ast.parse(Path(R.__file__).read_text(encoding="utf-8"))
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "doc_citation_defects")
+    # FAIL CLOSED on anything this reader cannot PROVE is `git`: a call whose argv is a
+    # variable, or a different spawn verb (`check_output`, `Popen`), is recorded as None
+    # and reds. A literal-argv-only reader stays green while the arm reaches `gh`
+    # through a variable — measured by a reviewer on an earlier cut of this arm
+    # (`_probe_argv = ["gh", …]; subprocess.run(_probe_argv)` passed it).
+    SPAWN = {"run", "call", "check_call", "check_output", "Popen"}
     progs = []
     for node in ast.walk(fn):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if not (isinstance(func, ast.Attribute) and func.attr == "run") or not node.args:
+        if getattr(func, "attr", getattr(func, "id", "")) not in SPAWN:
             continue
-        first = node.args[0]
+        first = node.args[0] if node.args else None
         if (isinstance(first, ast.List) and first.elts
-                and isinstance(first.elts[0], ast.Constant)):
+                and isinstance(first.elts[0], ast.Constant)
+                and isinstance(first.elts[0].value, str)):
             progs.append(first.elts[0].value)
+        else:
+            progs.append(None)   # not provably `git` — fail closed, never assume
     assert progs, (
-        "no `subprocess.run([...])` call with a literal argv was found in "
-        "doc_citation_defects — the READER broke, so this arm proves nothing")
+        "no spawn call with a literal argv was found in doc_citation_defects — the "
+        "READER broke (or every call became dynamic), so this arm proves nothing")
     assert set(progs) == {"git"}, (
         "the citation arm must reach `git` and nothing else (the `docs` job provisions "
-        f"no `gh`), got {sorted(set(progs))}")
+        f"no `gh`, and no argv here may be dynamic); got {sorted(map(str, set(progs)))}")
+
+
+def test_a_missing_base_ref_is_UNVERIFIED_not_a_defect(tmp_path):
+    """No `origin/main` at all means the DURABILITY question cannot be answered.
+
+    It must be exit 2 — UNVERIFIED, never a pass and never blamed on the document. The
+    `docs` job cannot hit it: both its checkouts are `fetch-depth: 0`
+    (`ci.yml:757-764`), so `refs/remotes/origin/main` is always present there.
+    """
+    from tools import ci_check_repair as R
+
+    root = _citation_tree(tmp_path, "placeholder")
+    subprocess.run(["git", "-C", str(root), "update-ref", "-d",
+                    "refs/remotes/origin/main"], check=True)
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        f"… `git show --stat {sha} -- docs/ops/ci-wall-clock.md` is empty …\n")
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 2, (
+        f"an unresolvable base ref is a missing ANSWER, not a defect: rc={rc} {findings}")
+    assert "does not resolve" in findings[0] and "UNVERIFIED" in findings[0]
+
+
+def test_an_ambiguous_prefix_is_a_DEFECT_not_UNVERIFIED(tmp_path):
+    """An ambiguous prefix is UNRUNNABLE — a DEFECT, and the message must name ambiguity.
+
+    `rev-parse --verify <ambiguous>^{commit}` exits 128, so the cite's own command cannot
+    run. This also pins the resolved-sha handoff to `merge-base`: passing the raw token
+    there exits 128 and used to turn this into rc 2 (UNVERIFIED), pointing the reader at
+    the checkout instead of the document.
+    """
+    from tools import ci_check_repair as R
+
+    root = _citation_tree(tmp_path, "placeholder")
+    probe = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify",
+                            "6960^{commit}"], capture_output=True, text=True)
+    if probe.returncode == 0:
+        pytest.skip("this fixture's object ids do not make `6960` ambiguous")
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        "… `git show --stat 6960 -- docs/ops/ci-wall-clock.md` is empty …\n")
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 1, f"an unrunnable (ambiguous) cite is a DEFECT, got rc={rc}: {findings}"
+    assert "does not resolve to a single" in findings[0]
 
 
 def test_a_short_hex_abbreviation_is_not_a_defect(tmp_path):
