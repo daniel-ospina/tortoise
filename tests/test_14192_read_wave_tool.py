@@ -7587,6 +7587,58 @@ def _generator_filter_findings(key: str, gen: ast.comprehension) -> list[str]:
     return []
 
 
+def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx) -> bool:
+    """A write to the IMPORT SEARCH PATH — `sys.path` / `sys.meta_path` / `sys.path_hooks`.
+
+    ⛔ THE AXIS THE PIN HAD NO VIEW OF (#14326 round 29 P2, MEASURED GREEN). Every other arm
+    pins what is written INTO `sys.modules`; none pins WHERE a re-created entry is read FROM.
+    With the search path poisoned, `del sys.modules["tortoise.sdk"]` stops being the inert no-op
+    this file used to assert it was: the deferred `from tortoise.sdk import …` re-imports, and a
+    planted `tortoise/sdk.py` earlier on the path becomes the constructor (measured end-to-end:
+    the fake class resolved, the pin GREEN). Deliberately coarse — the fine-grained alternative
+    is to enumerate finders and path shapes, i.e. the unbounded class this file already declares
+    as residual — and coarse here can only over-RED code that simultaneously rewrites the
+    import path and empties the registry while the pin is watching, which is the premise.
+    """
+    _PATH_ATTRS = {"path", "meta_path", "path_hooks"}
+    if isinstance(node, ast.Call):
+        func = node.func
+        if (isinstance(func, ast.Attribute) and func.attr in
+                {"insert", "append", "extend", "remove", "clear"}
+                and isinstance(func.value, ast.Attribute)
+                and func.value.attr in _PATH_ATTRS
+                and _is_sys_ref(func.value.value, ctx.sys_names)):
+            return True
+        # `sys.path.__setitem__(…)` / `sys.path[0:0] = […]` are the same write
+        if (isinstance(func, ast.Attribute) and func.attr in {"__setitem__", "__iadd__"}
+                and isinstance(func.value, (ast.Attribute, ast.Subscript))):
+            base = func.value.value if isinstance(func.value, ast.Subscript) else func.value
+            if (isinstance(base, ast.Attribute) and base.attr in _PATH_ATTRS
+                    and _is_sys_ref(base.value, ctx.sys_names)):
+                return True
+        return False
+    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            element = target.value if isinstance(
+                target, ast.Subscript) else getattr(target, "value", None)
+            if (isinstance(element, ast.Attribute) and element.attr in _PATH_ATTRS
+                    and _is_sys_ref(element.value, ctx.sys_names)):
+                return True
+    return False
+
+
+def _is_registry_delete(target: ast.AST, ctx: _RegistryCtx) -> bool:
+    """A `del` of a registry ENTRY — or of the registry itself.
+
+    ⛔ NOT AN ARM ON ITS OWN, AND THAT IS THE POINT (#14326 round 29 P2). `del` alone really is
+    inert: the deferred import re-creates the entry from the shipped class, or fails. It is only
+    an arm TOGETHER with an import-path mutation, which is why the caller requires both.
+    """
+    return _is_module_registry(target, ctx) or (
+        isinstance(target, ast.Subscript) and _is_module_registry(target.value, ctx))
+
+
 def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     """Every reason the name `TortoiseSDK` is not provably the class the product ships.
 
@@ -7805,8 +7857,21 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
                 # GREEN). ELEMENTS ONLY, never `ast.walk(target)`: a deep walk would also visit
                 # the INNER `sys.modules` attribute of the shipped tool's own legitimate
                 # `sys.modules[_AB_MODULE] = module`, which is measured GREEN and must stay so.
-                # (`del` is deliberately not an arm: deleting an entry makes the deferred
-                # import resolve the genuine class, or fail — it cannot install a mirror.)
+                # ⛔ `del` IS INERT **ONLY WHILE THE IMPORT PATH IS UNMODIFIED** (#14326 round
+                # 29, MEASURED). Round 28 wrote here that deleting an entry "makes the
+                # deferred import resolve the genuine class, or fail — it cannot install a
+                # mirror", and pinned `del sys.modules[...]` GREEN on that sentence. The
+                # sentence is FALSE as written and was never measured: with the search path
+                # poisoned, the re-import resolves an ATTACKER's class —
+                #
+                #     sys.path.insert(0, "/tmp/evil")                    # or meta_path.insert
+                #     del sys.modules["tortoise"], sys.modules["tortoise.sdk"]
+                #
+                # resolved `<class 'tortoise.sdk.TortoiseSDK'>` from `/tmp/evil/tortoise/sdk.py`
+                # with the pin GREEN. So `del` STAYS inert (it is, on its own), and the ARM goes
+                # on the path axis that makes it live — see `_swaps_the_import_path` below.
+                # ⛔ This is the SAME defect round 28 P1 corrected one axis over: a mechanism
+                # argued from theory and then pinned as a control instead of measured.
                 replaced = _registry_replacement(target, ctx)
                 if replaced is not None:
                     out.append(
@@ -7930,6 +7995,33 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
                     f"line {node.lineno} stores "
                     f"`{'` / `'.join(sorted(hits))}` under a string key on "
                     f"`{ast.unparse(receiver)}` — the same rebind as an attribute store")
+    # ⛔ THE IMPORT-PATH AXIS (#14326 round 29 P2, MEASURED GREEN). Every other arm pins what
+    # is written INTO `sys.modules`; this one pins WHERE the deferred import would read a
+    # re-created entry from. `del` alone is inert, and `sys.path` alone is inert, but together
+    # they install a mirror — and the axis is not hypothetical, the artifact's own
+    # `tools/read_wave_latency.py` already does `sys.path.insert(0, _REPO_ROOT)`.
+    #
+    # The clause is deliberately coarse — "the search path is mutated AND the registry is
+    # emptied of a `tortoise*` key" — because the fine-grained alternative is to enumerate
+    # finders and path shapes, which is the unbounded class this file already declares as
+    # residual. Coarse here can only over-RED code that simultaneously rewrites the import
+    # path and drops the package from the cache while the pin is watching, which is the
+    # premise itself.
+    _path_mutations = [
+        node for node in ast.walk(tree)
+        if _is_import_path_mutation(node, ctx)]
+    _dels = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Delete) and any(
+            _is_registry_delete(t, ctx) for t in node.targets)]
+    if _path_mutations and _dels:
+        out.append(
+            f"line {min(n.lineno for n in _path_mutations)} mutates the import search path "
+            f"(`{ast.unparse(_path_mutations[0])[:80]}`) AND line "
+            f"{min(n.lineno for n in _dels)} drops a registry entry — the deferred "
+            "`from tortoise.sdk import …` then RE-IMPORTS from wherever the mutated path "
+            "points, so a planted module becomes the constructor with the pin GREEN "
+            "(measured: a fake `tortoise/sdk.py` resolved instead of the shipped class)")
     if not bound_from_shipped:
         out.append(
             f"no `from tortoise.sdk import {_SDK_CONSTRUCTOR}` binding exists in this file — "
@@ -8737,6 +8829,28 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     for name, lever in registry_replacements.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
         assert got and any("REPLACES" in g for g in got), (name, lever, got)
+    # ⛔ THE IMPORT-PATH AXIS, WHICH HAS ITS OWN MESSAGE (#14326 round 29 P2). `del` alone is
+    # inert (its words are in the controls below); `sys.path` alone is inert; together they
+    # re-import a planted class. Measured end-to-end: a fake `tortoise/sdk.py` resolved as the
+    # constructor with the pin GREEN, and the artifact's own `tools/read_wave_latency.py`
+    # already calls `sys.path.insert(0, _REPO_ROOT)`, so the axis is live rather than academic.
+    path_levers = {
+        "`sys.path.insert` + `del sys.modules[...]` re-imports a planted class":
+            'sys.path.insert(0, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`sys.meta_path.insert` + `del` (a finder, not a path)":
+            'sys.meta_path.insert(0, _Evil())\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`sys.path.__setitem__` slice + `del`":
+            'sys.path.__setitem__(slice(0, 0), ["/tmp/evil"])\n'
+            'del sys.modules["tortoise"], sys.modules["tortoise.sdk"]\n',
+        "`sys.path[0:0] = [...]` slice assign + `del`":
+            'sys.path[0:0] = ["/tmp/evil"]\n'
+            'del sys.modules["tortoise.sdk"]\n',
+    }
+    for name, lever in path_levers.items():
+        got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
+        assert got and any("import search path" in g for g in got), (name, lever, got)
     # ⛔ THE CALL SITES THE `sys_dict_names` THREADING ACTUALLY FEEDS (#14326 round 24, each
     # RED at `bce008ce`): the review emptied three of the five sites and the file stayed at
     # `41 passed`, so the threading was load-bearing and unpinned. `_RegistryCtx` removes the
@@ -8832,6 +8946,15 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   'del sys.modules["tortoise.sdk"]\n',
                   'del sys.modules\n',
                   'sys.modules.clear()\n',
+                  # ⛔ AND THE TWO HALVES OF THE IMPORT-PATH AXIS ARE EACH INERT ALONE (#14326
+                  # round 29): a poisoned search path with nothing removed from the registry
+                  # resolves the CACHED shipped class, and a `del` with an untouched path
+                  # re-imports the genuine module. Only the COMBINATION is a lever, and the
+                  # arm above requires both — so these two must stay GREEN or the clause has
+                  # over-redded ordinary code.
+                  'sys.path.insert(0, "/tmp/evil")\n',
+                  'sys.meta_path.insert(0, _Evil())\n',
+                  'sys.path[0:0] = ["/tmp/evil"]\n',
                   'sys.modules[_AB_MODULE] = module\n',
                   '_x["modules"] = {"tortoise.sdk": _Mirror}\n',
                   'a, b = 1, 2\nprint(a, b)\n',
