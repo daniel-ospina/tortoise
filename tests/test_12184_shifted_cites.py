@@ -2377,7 +2377,7 @@ def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
     shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37547, "``:Document`` node).")
     assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37547 must red"
     # A range token is accepted on any line INSIDE the range it names (the anchor convention).
-    inside = (_AUDIT, "`:7576-7579`", _SE, 7579, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
+    inside = (_AUDIT, "`:7576-7579`", _SE, 7579, "(m:Event)-[r2:aboutSubject]->(:Subject)")
     assert not _rows_outside_their_token((inside,)), "a line inside the named range must pass"
 
 
