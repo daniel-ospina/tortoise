@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-hygiene-sweep-1795465299-p3993446-05639399",
+  "_sha": "f33893388b735493f3917b3b24da1a4650f87984",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/hygiene-sweep.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/11081-beta-set-hygiene"
+    },
+    {
+      "kind": "sha",
+      "value": "0fbfbb5b210c5dc32fd9e05634f095cece5e8e76"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/hygiene-sweep"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 5105,
+  "ended_at": 1795470404,
+  "exit_code": 0,
+  "heartbeat_at": 1795470404,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-hygiene-sweep-1795465299-p3993446-05639399",
+  "lease_until": 1795507004,
+  "pid": 3993446,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795465299,
+  "state": "DONE",
+  "tag": "hygiene-sweep",
+  "worktree": "/home/cmux/tortoise/.worktrees/hygiene-sweep"
+}
