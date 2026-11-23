@@ -1637,7 +1637,16 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
     if isinstance(node, ast.Attribute):
         return node.attr == "__dict__"
     if isinstance(node, ast.Name):
-        return node.id in namespaces
+        # ⛔ AND `__builtins__`, THE ONE ROOT THAT NEEDS NO IMPORT (#14326 review cycle 19,
+        # EACH MEASURED GREEN **and LIVE**): `__builtins__["print"] = getattr` then a
+        # `print(sdk, "_tortoise_fts_query")(ģ)` call executed the read, while the SAME store on
+        # `builtins.__dict__` is REFUSED and `setattr(__builtins__, …)` is REFUSED. In an
+        # imported module `__builtins__` IS that `__dict__` (measured: `type` is `dict`), so the
+        # store is the identical lever — and the file already hard-codes this root in
+        # `_bu_dict_roots` and in two `_builtin_lookup_name` calls for exactly this reason. It is
+        # a ROOT, never a bind, so seeding it is not the alias-fixpoint hazard the `namespaces`
+        # parameter exists to keep out.
+        return node.id in namespaces or node.id == "__builtins__"
     if not isinstance(node, ast.Call):
         return False
     _fn = getattr(node.func, "id", None)
@@ -8005,6 +8014,19 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    vars(builtins.dict)["copy"](builtins.__dict__)'
             '["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ AND THE STORE INTO `__builtins__` ITSELF (#14326 review cycle 19, EACH MEASURED
+        # GREEN **and LIVE**): in an imported module that name IS the builtins `__dict__`
+        # (measured: `type` is `dict`), so the store is the same lever as the REFUSED
+        # `builtins.__dict__["print"] = getattr` — one root over, not a new mechanism.
+        "a STORE into `__builtins__`": (
+            '    __builtins__["print"] = getattr\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
+        "a STORE into an ALIAS of `__builtins__`": (
+            '    _b = __builtins__\n'
+            '    _b["print"] = getattr\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
         # ⛔ THE OTHER TWO FILL SPELLINGS, AND THE EMPTY-SPLICE GUARD (#14326 review cycle 18,
         # EACH MEASURED GREEN **and LIVE**): the `**` slot delivers the operand exactly as a
         # positional does, and the UNBOUND spelling carries the TARGET in `args[0]`.
