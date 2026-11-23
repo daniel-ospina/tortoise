@@ -4378,23 +4378,28 @@ def test_R16_an_all_never_dispatched_queue_still_lets_the_zero_job_repair_fire(
 def test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit():
     """P3 (fix lane): a citation nobody can RUN is not evidence.
 
-    `docs/ops/ci-wall-clock.md` §2 rests its restored shard split on one command — the
+`docs/ops/ci-wall-clock.md` §2 rests its restored shard split on one command — the
     `git show --stat <sha>` that is supposed to prove the follow-up commit carried no
     edit to that file. At the head this pin was written its argument was a literal
     placeholder (`<that commit>`): the paragraph named NO commit, so the command it
     invites cannot be run and the "carried no edit" claim stays unverifiable while
     reading as verified — the exact false-PASS shape this section exists to record.
-    The commit is `8abf4844` (the split itself was restored in `600257c3a2`), the
-    placeholder is replaced by that sha, and this pin keeps a future re-cut from
-    re-introducing one.
+    The document now cites `10e51693f1` — a commit that is an ancestor of `main`, so the
+    citation SURVIVES the squash-merge (an earlier cut cited `8abf4844`, a commit on the
+    PR's own branch, which stops resolving once the branch is deleted).
 
-    Discriminating on the pre-fix document, on BOTH arms: the placeholder is not a
-    7-40 hex token, and it does not resolve in this checkout.
+    Discriminating on the pre-fix document, on BOTH arms: the placeholder is neither a
+    commit token (`_HEX`) nor resolvable in this checkout.
     """
     root = Path(__file__).resolve().parents[1]
     doc = (root / "docs" / "ops" / "ci-wall-clock.md").read_text()
-    refs = re.findall(
-        r"git show\s+--stat\s+([^\s`]+)[^`]*?--\s+docs/ops/ci-wall-clock\.md", doc)
+    # EXTRACTION is the tool's too, for the same reason the token rule is: a hand-copy of
+    # the pattern stopped at the narrow shape, so a placeholder written as
+    # `git -C . show --stat <that` was a DEFECT for `doc_citation_defects` and INVISIBLE
+    # here (measured) — two arms of one guard disagreeing again.
+    from tools import ci_check_repair as _R
+
+    refs = _R._CITE.findall(doc)
     assert refs, (
         "the document no longer runs `git show --stat <sha> -- docs/ops/ci-wall-clock.md`; "
         "if the command was reworded, re-aim this pin at the new shape rather than "
@@ -4403,10 +4408,8 @@ def test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit():
     # `{7,40}` literal while `doc_citation_defects` widened to git's `{4,40}`, so a
     # legitimate 6-char cite was `rc == 0` in the depth-0 `docs` job and a FALSE BLOCK
     # here — two arms of the same guard disagreeing is the defect class above.
-    from tools.ci_check_repair import _HEX
-
     for ref in refs:
-        assert _HEX.fullmatch(ref), (
+        assert _R._HEX.fullmatch(ref), (
             f"`git show --stat {ref}` is cited in docs/ops/ci-wall-clock.md but {ref!r} is "
             "not a commit — a placeholder here reads as evidence while being unrunnable, "
             "so name the sha the claim was measured at")
