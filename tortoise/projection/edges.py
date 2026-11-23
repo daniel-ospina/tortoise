@@ -3136,7 +3136,31 @@ class _EdgeHandlers:
         """
         valid_predicates = _VALID_EDGE_PREDICATES
         if predicate not in valid_predicates:
-            raise ValueError(f"Unknown predicate: {predicate}")
+            # ── AX Rule 2 (#14263): a refusal carries its CORRECTIVE THIRD PART ─
+            # `docs/ax/ax-principles.md` §1 Rule 2: a refusal states (1) that it
+            # refused, (2) exactly what failed, (3) exactly what to do. This one
+            # said the bare sentence `Unknown predicate: blocks` — the caller
+            # learned the word was not accepted and got nothing else: not which
+            # words ARE, and not the door that would take its verb. The third
+            # part is writable here, so the refusal stays (Rule 2 permits it) and
+            # says both.
+            #
+            # ⛔ The route must be one that can actually record the verb. Sending
+            # a caller back to `link_entities` is CIRCULAR for a domain verb: this
+            # method is the arm `link_entities` dispatches to for anything that is
+            # not an epistemic meaning, so the caller would land here again. The
+            # two doors that record an arbitrary Layer-3 label are named instead.
+            raise ValueError(
+                f"Unknown predicate: {predicate}"
+                f". This writer mints the STRUCTURAL edges ONTOLOGY §3.2/§3.3 "
+                f"declare and nothing else: {', '.join(sorted(valid_predicates))}"
+                f". For a DOMAIN verb the packs declare (blocks, "
+                f"contains, fixes, addresses …) use "
+                f"create_operator(op_type=..., label=<verb>) or "
+                f"create_direct_edge(op_type, from_id, to_id, label=<verb>) "
+                f"— those record the verb as the Layer-3 label, which is where a "
+                f"pack's ontology.relations[].predicate lives (#7852)."
+            )
         # Resolve endpoints via index-backed labeled lookups (issue #327).
         # Source OR-set: id | eventId | url ; target OR-set: id | eventId —
         # matching the legacy predicates exactly (a url-only stub Source is

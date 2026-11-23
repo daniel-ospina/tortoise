@@ -1085,6 +1085,23 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     `/proc/<pid>/cmdline` holds a string that does not end in it. The pre-fix
     filter drops this process; the inventory must list it.
     """
+    # ⛔ THE BINARY MUST SURVIVE AN ARBITRARY `argv[0]`, and `cat` does not.
+    # GNU coreutils' *multi-call* build dispatches on `basename(argv[0])`, so a
+    # copy of it renamed `redis-server` REFUSES and exits: the failing run's own
+    # output carries the child's message, `coreutils: unknown program
+    # 'redis-server'` ("Captured stderr call"), and a SIGTERM never prints
+    # anything. The child is then a ZOMBIE — `comm` still reads `redis-server`
+    # (the kernel sets `comm` from the EXEC'D FILENAME), `/proc/<pid>/cmdline` is
+    # EMPTY — so `_iter_proc_inventory` returns its documented KEEP row with
+    # `socket_dir: None` and the assertion below fails as `None == …`, i.e. on a
+    # fixture that never ran. Reproduced locally by copying `/bin/true` as
+    # `redis-server`: same row (`socket_dir: None`), same ASSERTION text — though
+    # `/bin/true` prints nothing, so the child's message is a property of the
+    # multi-call binary and not of every exiting one. ⛔ #14335 REPLACED the
+    # `sh`/`dash`/`bash` stand-in this comment used to justify with the RUNNING
+    # INTERPRETER (see the block below): a real ELF survives `argv[0]`, but a
+    # RELOCATABLE CPython needs `PYTHONHOME` for its stdlib once copied. Both
+    # fixes below are load-bearing and neither subsumes the other.
     binary = tmp_path / "redis-server"
     # ⛔ NOT a renamed copy of `cat` (#14335). On a runner whose coreutils is the
     # uutils MULTICALL binary (`ubuntu-26.04`: `/usr/bin/cat` is a hardlink into
@@ -1111,8 +1128,24 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     # derived from the interpreter we are already running under, so it names the prefix the
     # copied bytes would have used in place.
     child_env = {**os.environ, "PYTHONHOME": sys.base_prefix}
-    gone = tmp_path / "gone-socket-dir"
-    line = f"{binary} unixsocket:{gone}/redis.socket"
+    # ⛔ AND THE SOCKET DIR MUST EXIST, or the fixture is a legitimately REAPABLE
+    # process and this repo's own cleanup kills it (#14347 CI red, measured).
+    # `reap-redislite-orphans.py --apply` runs in the setup of EVERY leg
+    # (`python-ci.yml` ×4, `ci.yml`, `post-merge-validation.yml`) on shared
+    # self-hosted runners whose own orphan gate measures `other_suites=10`. A
+    # process named `redis-server` whose socket dir is ABSENT is classified
+    # `REAP — socket dir … is gone`, so a leg booting while this test runs
+    # SIGTERMs it; the dead child's `/proc/<pid>/cmdline` is then EMPTY, the
+    # inventory returns its row with `socket_dir: None` (the documented KEEP
+    # arm), and the assertion below fails as `None == …` — the same end state
+    # the coreutils arm above produces, from the opposite direction. With
+    # the dir present the same row classifies `KEEP — could be a concurrent
+    # leg's live instance` (age ~0s), so no reaper can take it. Nothing this
+    # test asserts changes: identity is still `comm`, and the socket dir is
+    # still read out of the one-element `argv[0]` line.
+    sockdir = tmp_path / "socket-dir"
+    sockdir.mkdir()
+    line = f"{binary} unixsocket:{sockdir}/redis.socket"
     child = subprocess.Popen(
         [line],
         executable=str(binary),
@@ -1157,7 +1190,16 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
             "a live wrapper-exec'd server must be enumerated from the kernel's "
             f"name, not from argv[0] — inventory held {sorted(rows)}"
         )
-        assert rows[child.pid]["socket_dir"] == str(gone)
+        assert rows[child.pid]["socket_dir"] == str(sockdir)
+        # …and the fixture is not itself reapable litter. This is the half that
+        # makes the fix above non-vacuous: drop the `sockdir.mkdir()` and this
+        # row REDs with `REAP — socket dir … is gone`, i.e. it names the state
+        # in which the repo's own cleanup is entitled to kill the fixture
+        # mid-assertion — the shape that flaked this test on CI.
+        assert reaper.classify(rows[child.pid], reaper.DEFAULT_MAX_AGE_MINUTES * 60.0)[0] is False, (
+            "the fixture must never be a reap candidate, or a concurrent leg's "
+            "cleanup can SIGTERM it mid-assertion (#14347)"
+        )
     finally:
         child.kill()
         child.wait(timeout=30)
