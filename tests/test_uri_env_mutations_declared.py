@@ -1757,12 +1757,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # to reach — and each row is scoped to the LITERAL so a future, different URI in the
     # same file still reds (a shape-level `setenv` row would pre-authorize it).
     #
-    #   test_13094_graphevent_home.py — FIVE of its seven sites hand `main()` a
+    #   test_13094_graphevent_home.py — the MAJORITY of its sites hand `main()` a
     #     deliberately UNREACHABLE port (`:1`) and assert the exit-2 contract on the
     #     produced refusal (each also asserts the message, several that it is "NO
     #     VERDICT"): the claim under test is that an unreadable graph yields NO VERDICT
-    #     rather than a wrong one. The other TWO (`:1362`, `:1384`) name no port at all
-    #     and patch `module.measure` directly, so no connection is attempted.
+    #     rather than a wrong one. The rest carry the bare `docker://x` literal, name no
+    #     port at all and patch `module.measure` directly, so no connection is
+    #     attempted. ⛔ No count is typed for either group: a numeric split here is a
+    #     current-head figure with no arm behind it (an eighth site on an
+    #     already-declared literal stays green), which is the rot this file's own table
+    #     calls "a regression, not a record". The declaration below is what is graded —
+    #     a THIRD literal reds.
     #     ⚠️ THE LITERALS BELOW ARE TWO, NOT ONE: this row was written against
     #     `docker://:@127.0.0.1:1/x` alone, and `main`'s #14183 (the walk that could not
     #     prove it reached the end) re-pointed TWO of that file's sites to `docker://x`
