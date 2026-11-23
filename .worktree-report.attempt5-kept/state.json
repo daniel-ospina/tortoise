@@ -1,0 +1,115 @@
+{
+  "base_sha": "47e28b549e764049123aa8c9793e8d9e5521ac66",
+  "branch": "fix/main-14224-repair",
+  "head_at_write": "86ba8306e7d991303b0ddaa90906e541c5230a3d",
+  "issue": "14269",
+  "not_done": [
+    "the wider review-named set (test_7949_capstone_verdict_check, test_13098_cypher_inventory, test_docs_citation_refs, test_substrate_map, test_sdk_privatise_sweep, test_commit_endpoint, test_14012_resident_pin, test_capstone_preregistration_9075) was run outside this tool before it was initialised for this attempt: 972 passed, 8 skipped, 474.94s"
+  ],
+  "started_at": "2026-11-22T19:17:14Z",
+  "suites": [
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_7949_capstone_measure.py -q -p no:cacheprovider",
+      "counts": {
+        "passed": 444
+      },
+      "duration_s": 46.4,
+      "exit": 0,
+      "finished_at": "2026-11-22T19:18:01Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/01-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "7657c183048f258030dfec7683e5f8795245ef195866e90e814cce24fe5c4b1e",
+      "n": 1,
+      "started_at": "2026-11-22T19:17:15Z"
+    },
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_12184_shifted_cites.py -q -p no:cacheprovider",
+      "counts": {
+        "passed": 31
+      },
+      "duration_s": 6.7,
+      "exit": 0,
+      "finished_at": "2026-11-22T19:18:10Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/02-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "51b675381461f7c54d0d80b7e040a84a98fecbd3d20cbbb3b8b3badd9b7b96ab",
+      "n": 2,
+      "started_at": "2026-11-22T19:18:03Z"
+    },
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_12184_shifted_cites.py tests/test_7949_capstone_measure.py -q -p no:cacheprovider",
+      "counts": {
+        "passed": 477
+      },
+      "duration_s": 49.3,
+      "exit": 0,
+      "finished_at": "2026-11-22T20:13:11Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/03-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "6e5018e96afe7b748808a5d75e2e97ef69865c125aba32ab03f9a34b9c95e3e8",
+      "n": 3,
+      "started_at": "2026-11-22T20:12:21Z"
+    },
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_12184_shifted_cites.py tests/test_7949_capstone_measure.py -q -p no:cacheprovider",
+      "counts": {
+        "passed": 477
+      },
+      "duration_s": 52.8,
+      "exit": 0,
+      "finished_at": "2026-11-22T20:14:54Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/04-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "ad1919ef835abebd72fc564cbc4c49324cb5e229a59183e446e7b008bd9f0194",
+      "n": 4,
+      "started_at": "2026-11-22T20:14:01Z"
+    },
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_12184_shifted_cites.py tests/test_7949_capstone_measure.py tests/test_7949_capstone_verdict_check.py tests/test_13098_cypher_inventory.py tests/test_docs_citation_refs.py tests/test_substrate_map.py tests/test_sdk_privatise_sweep.py tests/test_commit_endpoint.py tests/test_14012_resident_pin.py tests/test_capstone_preregistration_9075.py -q -p no:cacheprovider",
+      "counts": {
+        "errors": 87,
+        "passed": 1362,
+        "skipped": 8
+      },
+      "duration_s": 470.1,
+      "exit": 1,
+      "finished_at": "2026-11-22T22:14:55Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/05-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "cab36203b41f8da372398e544b041e268a6bf2a0c6e891eb86bdfec8e10f0f19",
+      "n": 5,
+      "started_at": "2026-11-22T22:07:05Z"
+    },
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_7949_capstone_measure.py tests/test_12184_shifted_cites.py -q -p no:cacheprovider",
+      "counts": {
+        "passed": 477
+      },
+      "duration_s": 49.3,
+      "exit": 0,
+      "finished_at": "2026-11-22T22:15:53Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/06-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "53f2d3d54cc80b67373491c8abe342eb0cfb1d9d715c1c35f583aab5206f0c82",
+      "n": 6,
+      "started_at": "2026-11-22T22:15:04Z"
+    },
+    {
+      "command": "TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_7949_capstone_verdict_check.py tests/test_13098_cypher_inventory.py tests/test_docs_citation_refs.py tests/test_substrate_map.py tests/test_sdk_privatise_sweep.py tests/test_commit_endpoint.py tests/test_14012_resident_pin.py tests/test_capstone_preregistration_9075.py -q -p no:cacheprovider",
+      "counts": {
+        "passed": 972,
+        "skipped": 8
+      },
+      "duration_s": 459.3,
+      "exit": 0,
+      "finished_at": "2026-11-22T22:23:37Z",
+      "label": "tortoise-test-carve-out-1-venv-bin-pytho",
+      "log": ".worktree-report/logs/07-tortoise-test-carve-out-1-venv-bin-pytho.log",
+      "log_sha256": "0ed0f717be27cda5fc416b942330f02675d20c52de3fcf620519dc350c0440d1",
+      "n": 7,
+      "started_at": "2026-11-22T22:15:58Z"
+    }
+  ],
+  "version": 1,
+  "worktree": "/home/cmux/tortoise/.worktrees/fix-14269"
+}
