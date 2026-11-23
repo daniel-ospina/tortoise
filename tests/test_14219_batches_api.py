@@ -1880,3 +1880,28 @@ def test_the_retry_tick_cannot_drop_a_handoff_that_re_enqueued(monkeypatch):
     assert [bid for _org, bid in ha._BATCH_RETRY] == ["batch_x"], (
         "the tick dropped the re-enqueue its own hand-off caused — the batch "
         f"waits out the re-scan: {ha._BATCH_RETRY}")
+
+
+def test_two_stale_passes_both_accumulate_their_spend(store):
+    """⛔ ROUND-5 REVIEW P3: `_bill`'s accumulation must be additive in the STORE.
+
+    `_bill` writes tokens with NO state change, so the state compare that
+    serialises `advance` does not serialise it: two replicas whose settles both
+    lost their compare each hold a STALE copy of the row. A read-modify-write —
+    `item.tokens_in = row.tokens_in + d`, then `put_item` — makes each compute
+    `0 + 700` and write 700, so 1 400 spent is recorded as 700 and `tokens_spent`
+    sits below the ledger (the bill/receipt disagreement round 8 closed). The
+    addition happens where the row lives, so both increments apply.
+    """
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    stale_a = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
+    stale_b = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
+
+    coord._bill(ORG_ID, stale_a, 700, 0)
+    coord._bill(ORG_ID, stale_b, 700, 0)
+
+    row = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
+    assert row.tokens_in == 1400, (
+        "a lost accumulation: 1 400 tokens were spent and the row records "
+        f"{row.tokens_in} — the receipt under-reports the bill")

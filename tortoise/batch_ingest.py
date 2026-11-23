@@ -687,6 +687,22 @@ class BatchStore(Protocol):
 
     def put_item(self, org_id: str, item: BatchItem) -> None: ...
 
+    def add_item_tokens(self, org_id: str, batch_id: str, item_id: str, *,
+                        tokens_in: int = 0, tokens_out: int = 0,
+                        updated_at: str = "") -> BatchItem | None:
+        """ADD to a row's token totals WHERE THE ROW LIVES; returns the row.
+
+        ⛔ ADDITIVE, NOT READ-MODIFY-WRITE (#14415 review round 5, P3). A caller
+        that reads the total, adds, and writes it back loses one accumulation
+        whenever two callers read before either writes — and that is exactly the
+        shape of `_bill`, the settle path's own recorder: it writes tokens with
+        NO state change, so the state compare that serialises `advance` does not
+        serialise it, and two replicas can both lose their compare and then both
+        read the same total. A RELATIVE `SET` cannot lose an increment, so no
+        compare is needed at all. ``None`` means the row is gone.
+        """
+        ...
+
     def put_item_if_state(self, org_id: str, item: BatchItem,
                           expected: BatchItemState,
                           expected_attempts: int | None = None) -> bool:
@@ -805,6 +821,22 @@ class InMemoryBatchStore:
             rows = [b for (o, _), b in self._batches.items() if o == org_id]
         rows.sort(key=lambda b: b.created_at, reverse=True)
         return [_copy_batch(b) for b in rows[:limit]]
+
+    def add_item_tokens(self, org_id: str, batch_id: str, item_id: str, *,
+                        tokens_in: int = 0, tokens_out: int = 0,
+                        updated_at: str = "") -> BatchItem | None:
+        # Atomic under the same lock `put_item` uses: read and add in ONE hold,
+        # so no other writer can interleave a read between them.
+        with self._lock:
+            bucket = self._items.get((org_id, batch_id))
+            row = bucket.get(item_id) if bucket else None
+            if row is None:
+                return None
+            row.tokens_in = max(0, row.tokens_in) + max(0, int(tokens_in))
+            row.tokens_out = max(0, row.tokens_out) + max(0, int(tokens_out))
+            if updated_at:
+                row.updated_at = updated_at
+            return _copy_item(row)
 
     def put_item(self, org_id: str, item: BatchItem) -> None:
         with self._lock:
@@ -1035,6 +1067,35 @@ class GraphBatchStore:
                 cancel_reason=r[6] or "",
                 corpus_name=(r[7] or "") if len(r) > 7 else ""))
         return out
+
+    def add_item_tokens(self, org_id: str, batch_id: str, item_id: str, *,
+                        tokens_in: int = 0, tokens_out: int = 0,
+                        updated_at: str = "") -> BatchItem | None:
+        """⛔ A RELATIVE `SET`, never a read-then-write (#14415 review round 5, P3).
+
+        `MATCH ... SET i.tokens_in = coalesce(i.tokens_in, 0) + $tin` does the
+        addition in the database, so two concurrent accumulations BOTH apply.
+        A read-modify-write would let them read the same total and lose one — the
+        row then disagrees with the ledger, which is a receipt that under-reports
+        the bill.
+
+        `MATCH`, deliberately NOT `MERGE`: a MERGE here would CREATE the row it
+        failed to match, resurrecting a row that was deleted or never existed.
+        """
+        rows = self._q(
+            f"MATCH (i:{ITEM_LABEL} {{id:$iid, batch_id:$bid, org_id:$org}}) "
+            "SET i.tokens_in = coalesce(i.tokens_in, 0) + $tin, "
+            "    i.tokens_out = coalesce(i.tokens_out, 0) + $tout, "
+            "    i.updated_at = $updated "
+            "RETURN i.id",
+            {"iid": item_id, "bid": batch_id, "org": org_id,
+             "tin": max(0, int(tokens_in)), "tout": max(0, int(tokens_out)),
+             "updated": updated_at or self._now()})
+        if not rows:
+            return None
+        # Read back through the ONE row projection, so this cannot drift from
+        # `get_item`'s field list.
+        return self.get_item(org_id, batch_id, item_id)
 
     def put_item(self, org_id: str, item: BatchItem) -> None:
         self._q(
@@ -2014,13 +2075,16 @@ class BatchCoordinator:
         spend is real) and the row is left as it was, which is the visible form of
         the loss rather than a silent one.
 
-        ⚠️ DECLARED RESIDUAL: this is a read-modify-write against a state-based
-        compare-and-set, so two writers that both read before either writes could
-        lose one accumulation. It is not reachable from today's call sites (every
-        token-carrying write through `advance` changes state, and the state CAS
-        then serialises the pair), but a caller that passes tokens on a
-        state-preserving edge would make it reachable — a counter column, or a
-        second CAS on the token total, is the fix.
+        ⛔ THE ACCUMULATION IS ADDITIVE IN THE STORE (#14415 review round 5, P3).
+        It used to be a read-modify-write — `item.tokens_in = row.tokens_in + d`
+        then an unconditional `put_item` — and the paragraph that stood here
+        called that unreachable "from today's call sites". THIS function is a call
+        site: it writes tokens with NO state change and never goes through
+        `advance`, so the state compare that serialises the settle path does not
+        serialise it, and two replicas that both lost their compare could each
+        read the same total and write it back, losing one accumulation and
+        leaving `tokens_spent` below the ledger — the bill/receipt disagreement
+        round 8 closed. `add_item_tokens` does the addition WHERE THE ROW LIVES.
         """
         tokens_in = max(0, int(tokens_in or 0))
         tokens_out = max(0, int(tokens_out or 0))
@@ -2028,11 +2092,15 @@ class BatchCoordinator:
         item.charge_out = tokens_out
         if not (tokens_in or tokens_out):
             return item
-        item.tokens_in = max(0, item.tokens_in) + tokens_in
-        item.tokens_out = max(0, item.tokens_out) + tokens_out
         item.updated_at = self._now()
         try:
-            self._store.put_item(org_id, item)
+            settled = self._store.add_item_tokens(
+                org_id, item.batch_id, item.item_id,
+                tokens_in=tokens_in, tokens_out=tokens_out,
+                updated_at=item.updated_at)
+            if settled is not None:
+                item.tokens_in = max(0, settled.tokens_in)
+                item.tokens_out = max(0, settled.tokens_out)
         except Exception:
             _logger.warning("batch spend not recorded on item %s (team %s): the "
                             "ledger is charged, the row's total is short",
