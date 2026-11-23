@@ -1086,10 +1086,25 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     `/proc/<pid>/cmdline` holds a string that does not end in it. The pre-fix
     filter drops this process; the inventory must list it.
     """
+    # ⛔ THE BINARY MUST SURVIVE AN ARBITRARY `argv[0]`, and `cat` does not.
+    # GNU coreutils' *multi-call* build dispatches on `basename(argv[0])`, so a
+    # copy of it renamed `redis-server` REFUSES and exits: the failing run's own
+    # output carries the child's message, `coreutils: unknown program
+    # 'redis-server'` ("Captured stderr call"), and a SIGTERM never prints
+    # anything. The child is then a ZOMBIE — `comm` still reads `redis-server`
+    # (the kernel sets `comm` from the EXEC'D FILENAME), `/proc/<pid>/cmdline` is
+    # EMPTY — so `_iter_proc_inventory` returns its documented KEEP row with
+    # `socket_dir: None` and the assertion below fails as `None == …`, i.e. on a
+    # fixture that never ran. Reproduced locally by copying `/bin/true` as
+    # `redis-server`: row `socket_dir: None`, identical message. `sh`/`dash`/
+    # `bash` are real ELFs that read stdin with `argc == 1` and do not dispatch
+    # on their own name, so they carry the shape this test needs on any host.
+    source = next((p for n in ("sh", "dash", "bash") if (p := shutil.which(n))), None)
+    assert source, "no argv[0]-agnostic, stdin-reading binary to stand in for redis-server"
     binary = tmp_path / "redis-server"
-    binary.write_bytes(Path(shutil.which("cat") or "/bin/cat").read_bytes())
+    binary.write_bytes(Path(source).read_bytes())
     binary.chmod(0o755)
-    # ⛔ THE SOCKET DIR MUST EXIST, or the fixture is a legitimately REAPABLE
+    # ⛔ AND THE SOCKET DIR MUST EXIST, or the fixture is a legitimately REAPABLE
     # process and this repo's own cleanup kills it (#14347 CI red, measured).
     # `reap-redislite-orphans.py --apply` runs in the setup of EVERY leg
     # (`python-ci.yml` ×4, `ci.yml`, `post-merge-validation.yml`) on shared
@@ -1098,8 +1113,8 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     # `REAP — socket dir … is gone`, so a leg booting while this test runs
     # SIGTERMs it; the dead child's `/proc/<pid>/cmdline` is then EMPTY, the
     # inventory returns its row with `socket_dir: None` (the documented KEEP
-    # arm), and the assertion below fails as `None == …/gone-socket-dir` —
-    # measured: SIGTERM, `child.poll() == -15`, row `socket_dir: None`. With
+    # arm), and the assertion below fails as `None == …` — the same end state
+    # the coreutils arm above produces, from the opposite direction. With
     # the dir present the same row classifies `KEEP — could be a concurrent
     # leg's live instance` (age ~0s), so no reaper can take it. Nothing this
     # test asserts changes: identity is still `comm`, and the socket dir is
@@ -1122,6 +1137,24 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
                 break
             time.sleep(0.02)
         assert seen, "the fixture process never came up with comm == redis-server"
+        # `comm` identifies a ZOMBIE too, so liveness is a separate fact: a
+        # fixture binary that exited on its own leaves a child whose empty
+        # `cmdline` makes `socket_dir` None and reds the assertion below with a
+        # message that blames the reaper. Fail here, where the cause is the
+        # fixture, and reap the corpse so it cannot confuse a later sweep.
+        # A STABILITY WINDOW, not a single poll: the exit can land just after the
+        # spawn (`/bin/true` copied as `redis-server` exits in ~2 ms), so one
+        # `poll()` reads "alive" and the inventory then sees the zombie. Measured:
+        # with a bare poll a fast-exiting fixture still reds the SOCKET_DIR
+        # assertion instead of this one.
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and child.poll() is None:
+            time.sleep(0.02)
+        assert child.poll() is None, (
+            f"the fixture binary ({source}) exited (rc={child.returncode}) instead of "
+            "staying alive — a dead child is still `comm == redis-server` with an "
+            "EMPTY cmdline, which the inventory reports as `socket_dir: None`"
+        )
         inventory = reaper._iter_proc_inventory()
         assert inventory is not None
         # Written against the rows ALONE, so the pre-fix tree fails on the FACT
