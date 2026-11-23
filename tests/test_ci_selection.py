@@ -14152,8 +14152,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # prose restating a computed constant is exactly how a constant goes stale.
     wall = (Path(__file__).resolve().parents[1]
             / "docs" / "ops" / "ci-wall-clock.md").read_text()
-    stated = re.search(r"the emitted \*\*(\d+) m\*\* per-shard|the emitted (\d+) m per-shard",
-                       wall)
+    stated = _EMITTED_WATCHDOG_CLAIM_RE.search(wall)
     assert stated, (
         "docs/ops/ci-wall-clock.md §2 no longer states the emitted per-shard "
         "watchdog in a form this pin can read (`the emitted <N> m per-shard`), so "

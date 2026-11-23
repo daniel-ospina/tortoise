@@ -12212,8 +12212,8 @@ tier1:
 # is right. Matching that arithmetic is also why #9539's lever is the LEG COUNT
 # rather than a better cut of two: `slow_shards: 5` takes the critical leg from
 # 18.95m to 7.58m.
-# The 40m watchdog's headroom is the DERIVED legs against the 2.0x
-# `WATCHDOG_HEADROOM` floor (5.3x
+# `test_slow_leg_bounds_clear_the_committed_work` re-derives the 40m watchdog's
+# headroom from the DERIVED legs against the 2.0x `WATCHDOG_HEADROOM` floor (5.3x
 # at the 7.58m heavier leg of the pre-#10194 pool, and higher today on a lighter
 # leg — the ratio is DERIVED, so it moves with the pool and is not restated as a
 # fixed number here), and the workflow's drift guard pins the union of the EXPANDED legs to
@@ -12471,8 +12471,8 @@ slow_files:
 # map's slow-pool rows are themselves only as fresh as the last sweep
 # (`tools/ci_timing.py --refresh-durations`, run by `ci-timing.yml`), so a stale
 # row mis-ranks the pack. The watchdog's headroom (recomputed from the
-# committed leg weights) is what absorbs a ranking error; the durable fix is the
-# scheduled refresh
+# committed leg weights by `test_slow_leg_bounds_clear_the_committed_work`) is
+# what absorbs a ranking error; the durable fix is the scheduled refresh
 # (`.github/workflows/ci-timing.yml` → `tools/ci_timing.py --refresh-durations`),
 # which ships on its own and is NOT half-fixed here.
 #
@@ -12486,8 +12486,8 @@ slow_files:
 # 10.5x at today's 5.72m leg — the multipliers are DERIVED, so re-derive them
 # rather than quoting these); deriving them from the leg
 # weight is the per-leg `matrix.watchdog_minutes` follow-up. The floor that
-# keeps the literals honest is the 2.0x `WATCHDOG_HEADROOM` multiplier, applied
-# to the heavier derived leg.
+# keeps the literals honest is
+# tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
 - eval/retrieval/test_run.py
