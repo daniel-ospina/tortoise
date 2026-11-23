@@ -4238,12 +4238,27 @@ def test_the_report_quotes_the_physical_line_bash_READS():
     """
     cr_line = "echo ok\recho $(printf CRLINE) here\n"
 
-    # PREMISE, executed: the substitution really runs (its OUTPUT cannot come from the source),
-    # so the only question left is WHICH line the report names for it.
+    # PREMISE, executed: the substitution really runs, so the only question left is WHICH line
+    # the report names for it.
+    # ⛔ AND THE MARKER'S SOURCE *DOES* CONTAIN THE TOKEN, so `"CRLINE" in stdout` alone is
+    # satisfiable without anything running (review of #14314 at `2dd184661c9`, P3, MEASURED).
+    # This comment used to claim the output "cannot come from the source"; it can, because
+    # `printf CRLINE` is the command's own argument. Quote the substitution and bash echoes it
+    # verbatim (bash manual §3.5.4: the substitution is replaced by its OUTPUT; inside `'…'`
+    # nothing is special, and `bash -e -` measures `echo ok\recho '$(printf CRLINE)' here` →
+    # `ok\recho $(printf CRLINE) here`, stdout/rc 0), so the premise passed with the
+    # substitution INERT — a vacuous premise of exactly the class this file exists to refuse.
+    # The second assertion is the discriminator: a live substitution prints `CRLINE`, never
+    # `$(printf`. Same `""`-split idea as the splice test below, applied to the other side.
     ran = subprocess.run([*_RUNNER_SHELL, cr_line], capture_output=True, text=True)
     assert ran.returncode == 0 and "CRLINE" in ran.stdout, (
         f"the substitution did not run, so this pin's premise is gone: {ran.stdout!r} "
         f"{ran.stderr!r}"
+    )
+    assert "$(printf" not in ran.stdout, (
+        "the substitution was INERT — its own SOURCE reached stdout, so `'CRLINE' in stdout` "
+        "is satisfied by the fixture's text rather than by an executed command, and the pin's "
+        f"premise proves nothing: {ran.stdout!r}"
     )
 
     assert _executable_prose_lines(cr_line) == ["echo ok\recho $(printf CRLINE) here"], (
