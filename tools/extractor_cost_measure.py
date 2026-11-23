@@ -187,6 +187,13 @@ def pick_corpus(limit: int = 50, seed: int = 7) -> list[dict]:
         nearest = min(inv, key=lambda r: abs(r["tokens"] - landmark))
         picked[nearest["path"]] = nearest
     rows = sorted(picked.values(), key=lambda r: r["tokens"])[:limit]
+    # ⛔ A LIMIT OF 0 IS A LEGAL REQUEST ("measure no documents"), not a crash.
+    # `rows[-1] = inv[-1]` below used to raise `IndexError: list assignment
+    # index out of range` on an empty slice — a traceback instead of a result,
+    # reached by `run --docs 0` (review cycle 13, P3). The landmark loop above
+    # always fills `picked`, so the empty case is only ever this slice.
+    if limit <= 0 or not rows:
+        return []
     if inv[-1]["path"] not in {r["path"] for r in rows}:
         rows[-1] = inv[-1]
     return rows
@@ -314,6 +321,79 @@ def _existing_rows(path: Path) -> set[tuple[str, str, str]]:
     return done
 
 
+_TOGGLE = "TORTOISE_S4_EMBED_JSON"
+
+#: What each measurement ARM asks that lever to be. An arm absent from this map
+#: is not a lever arm (``cold``/``warm`` size the cache ladder), so it inherits
+#: the ambient value.
+_ARM_LAYOUT = {"after": "compact", "before": "indent"}
+
+#: The CLOSED set of arm names the tool understands: the two that move the lever
+#: plus the two cache-ladder arms that deliberately inherit the ambient value.
+#: `--arms` refuses anything else — see the refusal in `main()`.
+_ARMS = frozenset(_ARM_LAYOUT) | {"cold", "warm"}
+
+
+def _embed_mode() -> str:
+    """The serialization `render_s4_prompt` will really use — production's own
+    resolution, not a copy of its rule.
+
+    ⛔ RECORDED PER ROW, AND RECORDED BY READING THE ENVIRONMENT — never by
+    re-deriving it from the arm label. A value computed as
+    ``"compact" if arm == "after" else "indent"`` is a function of the label, so
+    it can never disagree with it and can never catch a mislabelled run — which
+    is the one thing the field exists to make visible (review cycle 10, P2).
+
+    The resolution itself is delegated to ``extractor_v2._embed_json_mode``,
+    which derives it from the kwargs the render passes to ``json.dumps``. A
+    hand-written copy of that rule here (``.strip().lower() == "compact"``) is a
+    SECOND parser of the same predicate: it agrees today and is free to drift
+    the first time the toggle grows a spelling, and the drift would show up as a
+    row that records a layout the render did not take.
+    """
+    from tortoise.extractor_v2 import _embed_json_mode
+    return _embed_json_mode()
+
+
+def _install_arm(arm: str) -> None:
+    """Arm the lever for a whole BATCH.
+
+    ``after`` arms compact; ``before`` pins it off; any other arm name (the
+    ``cold``/``warm`` cache arms) leaves the ambient value alone, because those
+    arms size the cache ladder rather than this lever.
+    """
+    if arm == "after":
+        os.environ[_TOGGLE] = "compact"
+    elif arm == "before":
+        os.environ.pop(_TOGGLE, None)
+
+
+def _assert_the_arm_is_what_rendered(arm: str, observed: str, *,
+                                     at_exit: str | None = None) -> None:
+    """Refuse a row whose render did not carry its arm's setting.
+
+    ⛔ Review cycle 10 called the corrupted row "indistinguishable from a good
+    one": recording the OBSERVED layout makes it visible in the artifact, but a
+    row that was still written as a good measurement of that arm is evidence a
+    reader has to distrust rather than evidence the harness refused. So the two
+    ways an observation can disagree — a lever that moved under the measurement,
+    or a batch that did not install what its arm asked for — RAISE, and the
+    caller's own failure path records the row as FAILED.
+    """
+    if at_exit is not None and at_exit != observed:
+        raise RuntimeError(
+            f"{_TOGGLE} resolved to {observed!r} at entry and {at_exit!r} at "
+            f"exit — the lever moved mid-measurement, so neither layout "
+            f"describes this item's whole pipeline run and the row cannot be "
+            f"labelled")
+    expected = _ARM_LAYOUT.get(arm)
+    if expected is not None and observed != expected:
+        raise RuntimeError(
+            f"the {arm!r} arm requests {expected!r} but the render resolved "
+            f"{observed!r} — the lever moved under the measurement, so this "
+            f"row cannot be attributed to an arm")
+
+
 def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
                     workers: int, seed: int, arms: tuple[str, ...],
                     arm_gap_s: float, long_split: bool,
@@ -339,6 +419,14 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
             os.fsync(fh.fileno())
 
     def _job(item: dict, kind: str, arm: str) -> dict:
+        # ⛔ THE ARM IS A SETTING, NOT A LABEL — but the setting is installed by
+        # the BATCH, not by this function (see the `by_arm` loop below). It was
+        # a label only: nothing on the measurement path wrote `os.environ`, so
+        # `--arms before,after` measured the SAME render twice in one process and
+        # the before→after delta came back 0 — a false pass with no banner, in
+        # the one command the bundle documents as finishing the job (review
+        # cycle 9, P2). `TORTOISE_S4_EMBED_JSON` is the lever this harness exists
+        # to size, so `after` ARMS it and `before` pins it off.
         model = _build_model()   # one per call: the adapter carries per-call
                                  # state (last_*), which races under workers>1
         if kind == "doc":
@@ -346,9 +434,18 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
                              "content": item["text"]}]
         else:
             conversation = item["turns"]
+        mode_before = _embed_mode()      # sampled BEFORE the pipeline: S4 renders
+                                        # late, so the label must bracket the run
         rec = measure_one(model, conversation,
                           session_date="2026-11-21T00:00:00+00:00")
         rec["arm"] = arm
+        #: the serialization the render ACTUALLY used — sampled at entry and at
+        #: exit, so a mislabelled row is VISIBLE instead of self-consistent and a
+        #: lever that moved under the measurement is REFUSED instead of written
+        #: as a good row.
+        rec["s4_embed_json"] = mode_before
+        _assert_the_arm_is_what_rendered(arm, mode_before,
+                                         at_exit=_embed_mode())
         rec["kind"] = kind
         rec["id"] = item["path"]
         rec["item_tokens"] = item["tokens"]
@@ -376,27 +473,65 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
     print(f"running {total} measurements at {workers} workers "
           f"(arms: {', '.join(arms)})", flush=True)
     finished = 0
-    with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_job, item, kind, arm): (item, kind, arm)
-                   for item, kind, arm in jobs}
-        for fut in cf.as_completed(futures):
-            item, kind, arm = futures[fut]
-            finished += 1
-            try:
-                rec = fut.result()
-            except Exception as exc:
-                # a 360-call measurement; the failure is recorded as a row so
-                # the report can state how many items did not measure.
-                rec = {"arm": arm, "kind": kind, "id": item["path"],
-                       "item_tokens": item["tokens"], "failed": True,
-                       "error": f"{type(exc).__name__}: {exc}"}
-                _emit(rec)
-            print(f"  [{finished}/{total}] {arm:4} {kind:7} "
-                  f"{rec['id'][-58:]:58} "
-                  f"in={rec.get('prompt_tokens', 0):>7} "
-                  f"out={rec.get('completion_tokens', 0):>5} "
-                  f"hit={rec.get('cache_hit_tokens', 0):>7} "
-                  f"{'FAILED' if rec.get('failed') else ''}", flush=True)
+    first_batch = True
+    # ⛔ ARMS RUN AS SEQUENTIAL BATCHES — NEVER INTERLEAVED (review cycle 10, P2).
+    # `os.environ` is PROCESS-GLOBAL and every worker thread shares it, so the
+    # first cut of this fix — installing the flag per JOB, around the single
+    # `measure_one` call — let an `after` row and a `before` row overwrite each
+    # other between a thread's install and its measure. At the documented
+    # `--arms before,after` and the DEFAULT `--workers 6`, that is a race rather
+    # than an arm, and it reproduces the very false pass the fix was meant to
+    # remove (a before→after delta that is an artefact of thread scheduling).
+    # Installing the value ONCE per batch, before any thread starts, and
+    # restoring it only after the batch has joined, makes it constant for every
+    # call in that batch.
+    by_arm: dict[str, list[tuple[dict, str]]] = {}
+    for item, kind, arm in jobs:
+        by_arm.setdefault(arm, []).append((item, kind))
+    for batch_arm, batch_jobs in by_arm.items():
+        #: ⛔ `--arm-gap-s` IS HONOURED HERE (review cycle 11, P3). It was
+        #: documented as "a pause between arms (a provider's prefix cache is
+        #: time-bounded)" but was bound to a parameter nothing ever read — an
+        #: option that promised a pause it never took, so a caller asking for
+        #: 300 s to defeat prefix-cache carry-over silently got a back-to-back
+        #: replay and a delta that included the cache warm-up. The pause belongs
+        #: between BATCHES, which is exactly where the arms now meet.
+        if not first_batch and arm_gap_s > 0:
+            print(f"arm gap: pausing {arm_gap_s:g}s before {batch_arm!r}",
+                  flush=True)
+            time.sleep(arm_gap_s)
+        first_batch = False
+        saved_embed = os.environ.get(_TOGGLE)
+        try:
+            _install_arm(batch_arm)
+            with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_job, item, kind, batch_arm):
+                           (item, kind, batch_arm)
+                           for item, kind in batch_jobs}
+                for fut in cf.as_completed(futures):
+                    item, kind, arm = futures[fut]
+                    finished += 1
+                    try:
+                        rec = fut.result()
+                    except Exception as exc:
+                        # a 360-call measurement; the failure is recorded as a
+                        # row so the report can state how many items did not
+                        # measure.
+                        rec = {"arm": arm, "kind": kind, "id": item["path"],
+                               "item_tokens": item["tokens"], "failed": True,
+                               "error": f"{type(exc).__name__}: {exc}"}
+                        _emit(rec)
+                    print(f"  [{finished}/{total}] {arm:4} {kind:7} "
+                          f"{rec['id'][-58:]:58} "
+                          f"in={rec.get('prompt_tokens', 0):>7} "
+                          f"out={rec.get('completion_tokens', 0):>5} "
+                          f"hit={rec.get('cache_hit_tokens', 0):>7} "
+                          f"{'FAILED' if rec.get('failed') else ''}", flush=True)
+        finally:
+            if saved_embed is None:
+                os.environ.pop(_TOGGLE, None)
+            else:
+                os.environ[_TOGGLE] = saved_embed
 
     if long_split:
         _measure_long_split(out, docs, arms, _emit, split_max_turns
@@ -435,10 +570,29 @@ def _measure_long_split(out: Path, docs: list[dict], arms: tuple[str, ...],
         turns.append("\n\n".join(paras[lo:hi]))
     for arm in arms:
         model = _build_model()
-        rec = measure_one(model,
-                          [{"role": "user", "content": t} for t in turns],
-                          session_date="2026-11-21T00:00:00+00:00")
+        # Same lever, same contract as the batch loop in `run_measurement`: the
+        # arm is a SETTING. This block is serial, so install/restore around the
+        # single call is race-free — it is written this way so the two paths
+        # cannot disagree about what an arm means.
+        saved_embed = os.environ.get(_TOGGLE)
+        try:
+            _install_arm(arm)
+            mode_before = _embed_mode()
+            rec = measure_one(model,
+                              [{"role": "user", "content": t} for t in turns],
+                              session_date="2026-11-21T00:00:00+00:00")
+            mode_at_exit = _embed_mode()
+        finally:
+            if saved_embed is None:
+                os.environ.pop(_TOGGLE, None)
+            else:
+                os.environ[_TOGGLE] = saved_embed
         rec["arm"] = arm
+        rec["s4_embed_json"] = mode_before
+        #: the same refusal the batch loop makes — the two paths must not
+        #: disagree about what an arm MEANS, only about how they install it.
+        _assert_the_arm_is_what_rendered(arm, mode_before,
+                                         at_exit=mode_at_exit)
         rec["kind"] = "doc_split"
         rec["id"] = f"{longest['path']}#{len(turns)}turns"
         rec["item_tokens"] = longest["tokens"]
@@ -820,6 +974,32 @@ def measurement_cost(rows: list[dict], rates_peak: dict, rates_off: dict) -> dic
     }
 
 
+def affordable_count(allowance: int, unit_cost: float) -> int:
+    """How many ``unit_cost``-priced items a token ``allowance`` can BUY.
+
+    ⛔ FLOOR, never ``round()`` — this is a capacity claim, not a ratio.
+    `round()` overstated three of the six printed cells: solo-after
+    ``3,000,000/60,201 = 49.83`` printed **50**, and ``50 × 60,201 =
+    3,010,050`` is 10,050 tokens PAST the allowance; team-after printed 399
+    for ``24,020,199 > 24,000,000``; pro-before printed 62 for
+    ``4,017,538 > 4,000,000``; pro's session count printed 110 for
+    ``4,005,650 > 4,000,000``. A table whose "what you get for your tier"
+    column cannot be bought at that tier is wrong in the direction that
+    flatters us, so the count is what FITS, not the nearest integer.
+
+    The bundle was already inconsistent about its own convention — §5's
+    ``45,000``/``32,000`` columns and the ``+43 %`` derived from them are
+    floors, while the ``64,799`` column was ``round()`` — which is why the
+    three overstating cells survived four review rounds (review round 4,
+    P2: ``docs/evidence/14343-amplify/README.md:320-322`` and
+    ``.env.example:1767``). One convention, and it is the one that cannot
+    overpromise.
+    """
+    if not unit_cost or unit_cost <= 0:
+        return 0
+    return int(allowance // unit_cost)
+
+
 def allowance_table(cost: dict, tokens_per_doc: int) -> list[dict]:
     """`#14275`'s four allowances, re-stated in the MEASURED unit.
 
@@ -828,6 +1008,9 @@ def allowance_table(cost: dict, tokens_per_doc: int) -> list[dict]:
     what that allowance costs us. Both are derived here rather than asserted:
     the in:out mix comes from the measured median document, and the cost per
     token from the measured cache behaviour at peak rates.
+
+    The document/session counts are FLOORS (`affordable_count`) — round()
+    printed counts the allowance cannot afford.
     """
     rows = cost.get("rows") or []
     if not rows:
@@ -858,12 +1041,11 @@ def allowance_table(cost: dict, tokens_per_doc: int) -> list[dict]:
             "usd_peak": usd_peak, "usd_off_peak": usd_off,
             "pct_peak": round(100 * usd_peak / price, 1) if price else 0.0,
             "pct_off_peak": round(100 * usd_off / price, 1) if price else 0.0,
-            "documents": round(allowance / tokens_per_doc) if tokens_per_doc else 0,
+            "documents": affordable_count(allowance, tokens_per_doc),
             "sessions": (
-                round(allowance / (session_row["measured_in"]
-                                   + session_row["measured_out"]))
-                if session_row and (session_row["measured_in"]
-                                    + session_row["measured_out"]) else 0),
+                affordable_count(allowance, session_row["measured_in"]
+                                 + session_row["measured_out"])
+                if session_row else 0),
         })
     return out
 
@@ -1394,6 +1576,1431 @@ def report_json(report: dict) -> str:
                       indent=1, sort_keys=True)
 
 
+# ── #14343: WHERE the two constants come from ────────────────────────────
+#
+# `run` answers *how much*. It cannot answer *of what*: the fitted 45,503 /
+# 22,802 are summed over stages, calls and regions, and a constant nobody can
+# decompose cannot be shrunk without guessing. `compose` runs the SAME
+# pipeline over ONE document and attributes every prompt token to the region
+# that produced it, plus every output token to the records the model emitted.
+#
+# It is additive by construction: the region counts are computed on the exact
+# strings `_fill_template` was handed (captured by wrapping it, so the table
+# can never describe a prompt other than the one sent), and the difference
+# between their sum and the prompt's own token count is reported as its own
+# row. A table that does not sum is not evidence.
+
+#: The stage → (system-prompt prefix, template constants) map. The prefix is
+#: how a captured call is identified as a stage: the pipeline renders three
+#: distinct system prompts and the first line of each is a fixed signature.
+_COMPOSE_STAGE_SIGNATURES = (
+    ("s1", "You are the STORY SUMMARIZER"),
+    ("s2", "You are the GRAPH MAPPER"),
+    ("s4", "You are the GAP REVIEWER"),
+)
+
+
+def _compose_stage(system: str) -> str | None:
+    for stage, sig in _COMPOSE_STAGE_SIGNATURES:
+        if (system or "").startswith(sig):
+            return stage
+    return None
+
+
+def _output_structure(text: str) -> dict:
+    """What a stage's OUTPUT is made of (#14343 step 2).
+
+    The question the constant asks is not "how many tokens" but "tokens of
+    WHAT, derived from WHAT". So a JSON emission is counted structurally:
+    section → item count, item chars, and the kinds those items carry. A stage
+    whose item COUNT does not move with the document is emitting something the
+    document did not authorise, and the counts are what make that visible.
+    """
+    from tortoise.extractor_v2 import _parse_json_robust
+    enc = _encoding()
+    out: dict = {"chars": len(text or ""),
+                 "tokens": len(enc.encode(text or "")),
+                 "json": False, "sections": {}}
+    if not text:
+        return out
+    try:
+        parsed = _parse_json_robust(text)
+    except Exception:
+        # a narrative emission is not a defect — S1 emits prose, not JSON
+        parsed = None
+    if not isinstance(parsed, dict):
+        # S1's narrative: report its shape rather than pretending it is JSON.
+        out["paragraphs"] = len([p for p in (text or "").split("\n\n")
+                                 if p.strip()])
+        return out
+    out["json"] = True
+    for section, value in parsed.items():
+        if isinstance(value, list):
+            items = [v for v in value if isinstance(v, dict)]
+            kinds: dict[str, int] = {}
+            for item in items:
+                kind = str(item.get("kind") or item.get("type") or "-")
+                kinds[kind] = kinds.get(kind, 0) + 1
+            payload_tokens = len(enc.encode(json.dumps(value, indent=1)))
+            out["sections"][section] = {
+                "items": len(value),
+                # ⛔ ADDITIVE, not a mean. `item_chars` was a per-call mean, and
+                # `_merge_sections` added it across a stage's calls — so the
+                # published JSON carried the SUM OF TWO MEANS as if it were a
+                # mean. `chars_sum` and `items` are the two additive halves and
+                # both are published, so the mean is `chars_sum / items` at any
+                # moment without storing a derived third key that could drift
+                # from them (review cycle 6, P2: the previous wording promised
+                # a mean "derived at publish time" that nothing derived).
+                "chars_sum": sum(len(json.dumps(i)) for i in items),
+                "tokens": payload_tokens,
+                # ⛔ NOT truncated here. A per-call `[:12]` cap is invisible on
+                # one call and LOSSY on two: 13 kinds in one call plus 5 more in
+                # another published `distinct_kinds = 12` for a true union of
+                # 18 — fewer kinds than either call knew (measured, review
+                # cycle 6). Truncation belongs where a human reads the map, and
+                # nothing renders `kinds`, so the full histogram is kept and a
+                # merge is exact.
+                "kinds": dict(sorted(kinds.items(), key=lambda kv: -kv[1])),
+                "distinct_kinds": len(kinds),
+            }
+        elif isinstance(value, dict):
+            out["sections"][section] = {
+                "keys": len(value),
+                "tokens": len(enc.encode(json.dumps(value, indent=1))),
+            }
+        else:
+            out["sections"][section] = {
+                "value_tokens": len(enc.encode(json.dumps(value))),
+            }
+    return out
+
+
+def compose_one(*, doc: dict, master: dict | None = None,
+                session_date: str = "2026-11-21T00:00:00+00:00",
+                live: bool = True) -> dict:
+    """Run the real pipeline over ONE document and decompose each prompt.
+
+    ``live=False`` swaps the provider for a canned emission (the prompts are
+    still the REAL rendered ones for S1/S2; S4's ``embed_list_json`` region is
+    then a stub, which is why the offline arm is a shape check and the live
+    arm is the measurement).
+    """
+    from tortoise import extractor_v2 as X
+
+    calls: list[dict] = []
+    renders: list[dict] = []
+    slots: list[dict] = []
+
+    orig_fill = X._fill_template
+    orig_granularity = X._granularity_text
+    orig_anchor = X._date_anchor
+
+    def _fill(tmpl, values):
+        rendered = orig_fill(tmpl, values)
+        stage = ("s2" if tmpl in (X.S2_TMPL, X.S2_TMPL_CORE_ONLY)
+                 else "s4" if tmpl in (X.S4_TMPL, X.S4_TMPL_CORE_ONLY,
+                                       X.S4_TMPL_DELTA,
+                                       X.S4_TMPL_CORE_ONLY_DELTA)
+                 else None)
+        renders.append({"stage": stage, "values": dict(values),
+                        "prompt": rendered})
+        return rendered
+
+    def _granularity(master=None):
+        text = orig_granularity(master)
+        slots.append({"slot": "memory_granularity", "text": text})
+        return text
+
+    def _anchor(session_date, *, include_emission_rules=False):
+        text = orig_anchor(session_date,
+                           include_emission_rules=include_emission_rules)
+        slots.append({"slot": "date_anchor", "text": text,
+                      "emission": include_emission_rules})
+        return text
+
+    X._fill_template = _fill
+    X._granularity_text = _granularity
+    X._date_anchor = _anchor
+    try:
+        model = _compose_model(live=live, calls=calls)
+        out = X.extract_session_v2(model, [{"role": "user",
+                                            "content": doc["text"]}],
+                                   sdk=None, session_date=session_date,
+                                   master=master)
+    finally:
+        X._fill_template = orig_fill
+        X._granularity_text = orig_granularity
+        X._date_anchor = orig_anchor
+
+    enc = _encoding()
+    # Pair each provider call with the render that produced its system
+    # prompt, by PREFIX and WITHOUT consuming it.
+    #
+    # ⛔ PREFIX, not equality: `render_s2_prompt` / `render_s4_prompt` append
+    # the SOURCE TRANSCRIPT **outside** `_fill_template`
+    # (`return rendered + "\n\n" + transcript`), and that tail is non-empty
+    # whenever the EDUs fit `_SOURCE_TRANSCRIPT_CAP` (8,000 chars). An equality
+    # test therefore fails for every SMALL document — and fails silently: the
+    # region map comes back empty, the whole prompt is printed as one
+    # `*template prose*` row, and the table still sums.
+    #
+    # ⛔ NOT consumed: a stage RENDERS ONCE and may CALL TWICE — the #1746 parse
+    # re-prompt and the #2134 truncation escalation both re-send the IDENTICAL
+    # system prompt. A one-shot consumption therefore leaves every retry
+    # unmatched (`regions == {}`), which is the same silent misattribution in a
+    # rarer disguise. The last render for the stage is the one, for all calls.
+    for call in calls:
+        stage = _compose_stage(call["system"])
+        call["stage"] = stage
+        match = None
+        for render in reversed(renders):
+            if render["stage"] != stage:
+                continue
+            if call["system"].startswith(render["prompt"]):
+                match = render
+                break
+        call["regions"] = ({k: len(enc.encode(v or ""))
+                            for k, v in (match["values"].items()
+                                         if match else {})})
+        tail = (call["system"][len(match["prompt"]):]
+                if match and len(call["system"]) > len(match["prompt"]) else "")
+        if tail:
+            call["regions"]["source_transcript"] = len(enc.encode(tail))
+        if match is None and stage == "s1":
+            # S1 substitutes with .replace, not the fill map — its slots are
+            # the granularity block and the date anchor, captured above.
+            for slot in slots:
+                if slot["slot"] == "memory_granularity" and "emission" not in slot:
+                    call["regions"]["memory_granularity"] = len(
+                        enc.encode(slot["text"] or ""))
+                elif slot["slot"] == "date_anchor" and not slot["emission"]:
+                    call["regions"]["date_anchor"] = len(
+                        enc.encode(slot["text"] or ""))
+        call["user_tokens"] = len(enc.encode(call["user"] or ""))
+        call["system_tokens"] = len(enc.encode(call["system"] or ""))
+        # ⛔ The USER message is a prompt region like any other, and it is the
+        # BIGGEST one for S1 (the whole document) and a real one for S2 (the
+        # framed story). Leaving it out of the region map did not lose it from
+        # the total — it landed in the `*template prose*` residual, so `compose`
+        # and `decompose` attributed the same tokens to different parties.
+        call["regions"]["user_message"] = call["user_tokens"]
+        call["output"] = _output_structure(call.get("response") or "")
+        call.pop("response", None)
+        call.pop("system", None)
+        call.pop("user", None)
+
+    return {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "live": live,
+        "doc": {"path": doc["path"], "item_tokens": doc["tokens"]},
+        "session_date": session_date,
+        "calls": calls,
+        "pipeline": {"calls": out.get("stats", {}).get("llm", {}).get("calls"),
+                     "retries": out.get("stats", {}).get("llm", {}).get(
+                         "retries"),
+                     "story_chars": len(out.get("story_arc") or ""),
+                     "errors": list(out.get("errors") or [])[:5]},
+    }
+
+
+def _compose_model(*, live: bool, calls: list[dict]):
+    """The measuring model: the production adapter, wrapped.
+
+    The wrapper is the instrument, not a change to the pipeline — it records
+    what was actually sent and returned, then delegates. ``live=False`` swaps
+    only the transport for a canned emission, which is what makes the shape
+    of the decomposition testable offline.
+    """
+    inner = _build_model() if live else _StubModel()
+
+    class _Recording:
+        """Delegating wrapper with a ``max_tokens`` KWARG in its signature.
+
+        The kwarg is not decoration: ``extractor_v2._cap_kind`` picks the
+        race-free per-call path only when the signature accepts it, and its
+        fallback MUTATES ``model.max_tokens`` (an attribute this wrapper does
+        not own). A ``**kwargs``-only signature therefore defers to a
+        read-only property and every stage raises
+        ``property 'max_tokens' has no setter`` before its first call.
+        """
+
+        def __init__(self, model):
+            self._m = model
+
+        def complete(self, *, system, user, max_tokens=None, **kwargs):
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            resp = self._m.complete(system=system, user=user, **kwargs)
+            calls.append({"system": system, "user": user, "response": resp,
+                          "prompt_tokens": int(
+                              getattr(self._m, "last_prompt_tokens", 0) or 0),
+                          "completion_tokens": int(
+                              getattr(self._m, "last_completion_tokens", 0) or 0),
+                          "finish_reason": getattr(
+                              self._m, "last_finish_reason", None)})
+            return resp
+
+        def __getattr__(self, name):
+            return getattr(self._m, name)
+
+    return _Recording(inner)
+
+
+class _StubModel:
+    """A canned emission for the offline arm — never a measured result.
+
+    Its only job is to let the pipeline reach S4 so the render path is
+    exercised without a provider call. The S4 prompt's ``embed_list_json``
+    region is therefore a STUB in this arm and the offline composition is a
+    shape check: a table built from it describes the instructions, not the
+    pipeline.
+    """
+
+    last_finish_reason = "stop"
+    last_prompt_tokens = 0
+    last_completion_tokens = 0
+    last_cache_hit_tokens = 0
+    last_cost_usd = 0.0
+    last_route = "stub/stub"
+    max_tokens = None
+
+    _S2 = json.dumps({
+        "entities": [{"name": "stub entity", "kind": "core:Project",
+                      "lifecycle": "created"}],
+        "events": [], "points": [], "operators": [],
+        "link_before_create": [], "chain_notes": []})
+
+    def complete(self, *, system, user, max_tokens=None, **kwargs):
+        if (system or "").startswith("You are the STORY SUMMARIZER"):
+            return "The session changed the state of the project."
+        if (system or "").startswith("You are the GRAPH MAPPER"):
+            return self._S2
+        return json.dumps({"gaps": [], "corrections": [],
+                           "link_before_create": [], "chain_notes": []})
+
+
+def compose_report(artifacts: list[dict]) -> dict:
+    """Fold one or more ``compose`` artifacts into the #14343 table.
+
+    Two tables, because the constants have two audiences: the INPUT table
+    attributes every prompt token to the region that produced it, and the
+    OUTPUT table says what the model emitted and what it derived it from.
+    """
+    rows: list[dict] = []
+    for art in artifacts:
+        per_stage: dict[str, dict] = {}
+        for call in art["calls"]:
+            stage = call.get("stage") or "?"
+            acc = per_stage.setdefault(stage, {
+                "calls": 0, "system_tokens": 0, "user_tokens": 0,
+                "completion_tokens": 0, "regions": {}, "output": {}})
+            acc["calls"] += 1
+            acc["system_tokens"] += call["system_tokens"]
+            acc["user_tokens"] += call["user_tokens"]
+            acc["completion_tokens"] += call["completion_tokens"]
+            for name, tokens in (call.get("regions") or {}).items():
+                acc["regions"][name] = acc["regions"].get(name, 0) + tokens
+            out = call.get("output") or {}
+            acc["output"]["tokens"] = (acc["output"].get("tokens", 0)
+                                       + out.get("tokens", 0))
+            acc["output"]["sections"] = _merge_sections(
+                acc["output"].get("sections") or {}, out.get("sections") or {})
+        rows.append({"doc": art["doc"], "stages": per_stage,
+                     "pipeline": art.get("pipeline") or {}})
+    # ⛔ `live` is propagated or the renderer cannot tell a stub run from a
+    # measured one, and the report is the artifact a reader quotes.
+    live = all(a.get("live", False) for a in artifacts)
+    return {"rows": rows, "live": live,
+            "complete": all(_row_complete(r) for r in rows) if rows else False}
+
+
+#: The stages a complete measurement must have observed. A stage that RAISED is
+#: not a stage that measured: `_Recording.complete` appends to `calls` only
+#: after the adapter RETURNS, so a failing stage contributes no call at all and
+#: the table would show the surviving stages as if they were the whole run.
+#: Error signatures that mean a stage produced NO call — a lost call, and the
+#: only pipeline errors that make a `compose` row incomplete. Everything else
+#: `extractor_v2` records (a truncated tail it dropped, a malformed section it
+#: kept past, a failed S5/chain/entity-resolution/classify step) is recorded on a
+#: call that RETURNED and was measured, so it is a note and not a verdict.
+#:
+#: ⛔ `"S4 failed"` IS DELIBERATELY ABSENT FROM THIS SET (review cycle 15, P3).
+#: `capture_session` appends it from ONE `except` that wraps `run_s4(...)`
+#: (`tortoise/extractor_v2.py:15286`) *and* the post-call merge/shape work that
+#: follows it (`:15292`–`:15333`), while `_Recording.complete` appends a call
+#: only after the adapter RETURNS — so the marker is the error TYPE of a
+#: failure, not the fact that no call happened. An S4 whose prompt was rendered,
+#: sent and measured but whose output then failed to parse or merge carries this
+#: marker on a call that WAS measured, and reading it as a lost call refused an
+#: intact composition and exited 1: the same over-block class cycle 9 fixed for
+#: `"S4 output partial"`, one marker over. The fail-open it used to close stays
+#: closed STRUCTURALLY — `compose_report` builds `stages` only from recorded
+#: calls, so an S4 that really produced no call leaves `"s4"` out of `stages`
+#: and `_REQUIRED_STAGES` below already refuses the row. That split is also the
+#: one OpenTelemetry's GenAI conventions draw: a failure AFTER a response was
+#: received (schema validation, parsing) keeps the response content and its
+#: token usage and records an `error.type`, while only a request failure means
+#: nothing was measured.
+#: ⛔ EVERY MEMBER MUST NAME A CALL THAT WAS NEVER RECORDED. `_Recording.complete`
+#: appends a call only AFTER the adapter returns, so a marker appended by code
+#: that runs *after* a stage returned describes a post-processing failure on a
+#: call that WAS measured — a note, not a lost call. Review cycle 13 measured two
+#: members that are exactly that, and refused a complete run for them:
+#:   * `"no embed list produced (S2/S4 empty)"` is appended in the **S5** branch
+#:     (`tortoise/extractor_v2.py:15615`), i.e. only after `run_s2` AND `run_s4`
+#:     returned and merged. It cannot indicate a lost call by construction.
+#:   * `"S2 failed"` is the SAME shape as the `"S4 failed"` this list already
+#:     dropped in cycle 12 — one broad `except` around `run_s2(...)`, whose
+#:     `_complete_parsed` raises `_ParseError` after the adapter already returned.
+#: A genuinely call-less stage is refused structurally by `_REQUIRED_STAGES`.
+_LOST_CALL_MARKERS = ("chunk failed",)
+
+_REQUIRED_STAGES = ("s1", "s2", "s4")
+
+
+def _stages_without_a_measured_call(row: dict) -> list[str]:
+    """Which `_REQUIRED_STAGES` a MEASURED row has no recorded call for.
+
+    The measurement-row half of `_row_complete`'s missing-stage test. The two
+    row shapes are not the same: a `compose` row also carries `pipeline`
+    (`errors`, attempt counts), while a row that has been through
+    `measurements.jsonl` carries only `stages` — so the PRESENCE test is shared
+    here and the error/attempt reads stay in `_row_complete`.
+    """
+    stages = row.get("stages") or {}
+    return [s for s in _REQUIRED_STAGES
+            if not (stages.get(s) or {}).get("calls")]
+
+
+def _row_complete(row: dict) -> bool:
+    """Whether a `compose` row is a measurement rather than a partial run.
+
+    ⛔ THE FAIL-OPEN THIS CLOSES (review cycle 7, P1). The provenance gate above
+    distinguishes a stub transport from a live one, and says nothing about a
+    live run whose stages FAILED. Measured on a box with no provider key — the
+    exact state the evidence README documents — every call raised
+    `401 Unauthorized`, so `calls` was empty, `pipeline.errors` held three
+    entries, and the rendered output was a header plus three empty tables with
+    **no marker at all** and exit 0. A partial run is worse: S1+S2 rendering
+    with S4 (the stage whose embed-list region is this bundle's subject) simply
+    absent reads as a smaller, complete measurement.
+
+    ⛔ AND THE GUARD IS SCOPED TO ERRORS THAT EXPLAIN A LOST CALL (review cycle 9,
+    P1 — two independent reviewers). `extractor_v2` records errors on calls that
+    RETURNED and were fully measured: rung-4 partial accept appends
+    `"S4 output partial — truncated tail dropped"` (`tortoise/extractor_v2.py:15337`),
+    `"S4 output malformed section … kept S2 output"` (`:15292`) and the S2 twin
+    (`:17929`) are the same, as are the post-extraction `S5 failed` / `chain …` /
+    `entity resolution failed` / `classify(union) failed` entries. Treating ANY
+    error as "did not measure" refused a complete composition and exited 1 — and
+    it is not clearable by re-running, because README §2's 13 of 50 documents
+    averaging >6,000 S4 completion tokens (max 24,000) is exactly what rung 4
+    exists for, so the documented `compose --out …` exits 1 DETERMINISTICALLY on
+    such a `--doc`. The fail-open this block exists for is still closed by the
+    missing-stage test and the retry-aware call count below; a content-level
+    error is a NOTE, not an incompleteness.
+
+    ⛔ AND THE LOST-CALL SET IS A NAMED SET, NOT "ANY ERROR" (review cycle 15,
+    P3 — see `_LOST_CALL_MARKERS`'s `"S4 failed"` note). A marker that the
+    pipeline can append AFTER the call RETURNED describes a failure of
+    post-processing, so it is a note; the incompleteness of a genuinely
+    call-less stage is decided by the recorded CALLS themselves, through
+    `_REQUIRED_STAGES` below.
+    """
+    pipe = row.get("pipeline") or {}
+    if any(marker in err for err in (pipe.get("errors") or [])
+           for marker in _LOST_CALL_MARKERS):
+        return False
+    stages = row.get("stages") or {}
+    if not all(stages.get(s) for s in _REQUIRED_STAGES):
+        return False
+    emitted = sum(int(v.get("calls") or 0) for v in stages.values())
+    made = pipe.get("calls")
+    # ⛔ `pipeline.calls` is the sum of ATTEMPTS, not of successful calls:
+    # `_rollup_llm` does `llm_stats["calls"] += stage_stats.get("attempts", 0)`
+    # (`tortoise/extractor_v2.py:16719`) and `_complete` sets `attempts=attempt`
+    # only on the SUCCESSFUL attempt. So a transient 429/5xx that succeeds on
+    # retry adds +1 here with no call recorded by `_Recording` — and comparing
+    # the two WITHOUT the retry count flagged a fully-measured run as INCOMPLETE
+    # and made `main` exit 1, refusing a valid artifact and sending the next
+    # lane to re-spend until it got a retry-free run (review cycle 7, P2).
+    return made is None or int(made) <= emitted + int(pipe.get("retries") or 0)
+
+
+def _merge_sections(a: dict, b: dict) -> dict:
+    """Fold two per-call section maps.
+
+    Two keys are not sums and must not be added blindly, which is what the
+    previous revision did (review cycle 5, P3): `distinct_kinds` is a per-CALL
+    count of a call-local histogram, so it is read off the UNION of the kind
+    maps, and the per-item character figure is accumulated as `chars_sum`
+    (additive) with its denominator `items` alongside — `chars_sum / items` is
+    the mean, and no derived mean is stored to disagree with them.
+
+    The union is taken over the FULL histograms: truncating the merged map here
+    would make `distinct_kinds` report the display cap, not the count (measured:
+    13 kinds + 5 more published 12 for a union of 18 — FEWER than either call
+    knew). `_output_structure` therefore publishes the untruncated histogram
+    too, and nothing renders `kinds`.
+    """
+    merged = {k: dict(v) for k, v in a.items()}
+    for section, val in b.items():
+        cur = merged.setdefault(section, {})
+        for key, value in val.items():
+            if key == "kinds" and isinstance(value, dict):
+                kinds = dict(cur.get("kinds") or {})
+                for kind, count in value.items():
+                    kinds[kind] = kinds.get(kind, 0) + count
+                cur["kinds"] = dict(sorted(
+                    kinds.items(), key=lambda kv: -kv[1]))
+            elif isinstance(value, (int, float)) and isinstance(
+                    cur.get(key), (int, float)):
+                cur[key] = cur[key] + value
+            else:
+                cur.setdefault(key, value)
+        if cur.get("kinds"):
+            cur["distinct_kinds"] = len(cur["kinds"])
+        # (no `item_chars` here: nothing renders it, and a derived key with no
+        # reader is the dead field review cycle 5 caught as `contract_tokens`.
+        # `chars_sum` and `items` are both published, so the mean is theirs to
+        # divide — it is not stored, and cannot drift from them.)
+    return merged
+
+
+def render_compose(report: dict) -> str:
+    """The #14343 deliverable: a table whose parts SUM to the prompt."""
+    lines: list[str] = ["## Prompt composition (#14343)", ""]
+    # ⛔ THE MARKER IS THE POINT. An `--offline` run swaps only the TRANSPORT for
+    # a stub, so its region map and its emission shapes are real while its
+    # per-stage token counts are the stub's. Without this line the rendered
+    # table is structurally identical to a measured one, and a bundle whose
+    # whole purpose is that a stub must never read as a measurement would print
+    # exactly that (review cycle 5, P3).
+    # ⛔ FAIL-CLOSED: `report.get("live") is not True` — NOT `.get("live", True)`.
+    # A report that does not carry the key is a report whose provenance is
+    # unknown, and unknown must render as a stub, never as a measurement: the
+    # fail-open direction prints no marker and is byte-shape identical to a
+    # measured run, which is the false pass this whole block exists to prevent
+    # (review cycle 6, P2). `compose_report` already takes the fail-closed view
+    # (`all(a.get("live", False))`), so the two halves agree.
+    if report.get("live") is not True:
+        lines.append(
+            "⚠️ **OFFLINE / STUB TRANSPORT — NOT A MEASUREMENT.** The region map "
+            "and the emission shapes below are real render output, but every "
+            "`completion` figure is the stub's, not a model's. Re-run without "
+            "`--offline` on a box with a provider key before quoting any of it.")
+        lines.append("")
+    elif report.get("complete") is not True:
+        # ⛔ A LIVE run is not automatically a MEASUREMENT (review cycle 7, P1).
+        # A stage that raised appends no call, keeps the surviving stages
+        # looking measured, and — before this branch — printed no marker and
+        # exited 0. Name the stages that are missing and the errors the
+        # pipeline itself recorded, so the table cannot be quoted as partial.
+        missing = sorted({s for row in report.get("rows") or []
+                          for s in _REQUIRED_STAGES
+                          if not (row.get("stages") or {}).get(s)})
+        errs = [e for row in report.get("rows") or []
+                for e in ((row.get("pipeline") or {}).get("errors") or [])]
+        lines.append(
+            "⚠️ **INCOMPLETE LIVE RUN — NOT A MEASUREMENT.** The table below is "
+            "missing stage(s) or recorded pipeline errors, so it is a partial "
+            "run, not a decomposition: "
+            + (", ".join(f"`{s}`" for s in missing) if missing
+               else "every stage reported, but the pipeline counted calls the "
+                    "instrument never saw complete")
+            + ".")
+        for err in errs[:5]:
+            lines.append(f"* pipeline error: `{err}`")
+        lines.append("")
+        lines.append("A stage that RAISES emits no call, so the surviving rows "
+                     "read as if they were the whole run. Re-run to a "
+                     "complete artifact before quoting any figure here.")
+        lines.append("")
+    else:
+        # ⛔ A CONTENT-LEVEL note, not a verdict (review cycle 9, P1). These are
+        # recorded on calls that RETURNED and were measured — a truncated tail
+        # the rung-4 partial accept dropped, a malformed section the pipeline
+        # kept past, a failed S5/chain/entity-resolution/classify step. They do
+        # not cost a call and must not flip `complete`, but a reader still
+        # deserves to know the emission was not clean.
+        notes = [e for row in report.get("rows") or []
+                 for e in ((row.get("pipeline") or {}).get("errors") or [])]
+        if notes:
+            lines.append("ℹ️ **Measured, with content-level notes.** Every stage "
+                         "reported and every prompt was measured; the pipeline "
+                         "recorded the following on calls that RETURNED, so they "
+                         "do not affect the composition:")
+            for note in notes[:5]:
+                lines.append(f"* {note}")
+            lines.append("")
+    for row in report["rows"]:
+        lines.append(f"### `{row['doc']['path']}` — "
+                     f"{row['doc']['item_tokens']} tokens")
+        lines.append("")
+        lines.append("| stage | calls | system | user | **total prompt** "
+                     "| completion |")
+        lines.append("|---|---|---|---|---|---|")
+        for stage, acc in sorted(row["stages"].items()):
+            lines.append(
+                f"| {stage} | {acc['calls']} | {acc['system_tokens']:,} | "
+                f"{acc['user_tokens']:,} | "
+                f"**{acc['system_tokens'] + acc['user_tokens']:,}** | "
+                f"{acc['completion_tokens']:,} |")
+        lines.append("")
+        lines.append("| stage | region | tokens | share of that stage's "
+                     "prompt |")
+        lines.append("|---|---|---|---|")
+        for stage, acc in sorted(row["stages"].items()):
+            total = acc["system_tokens"] + acc["user_tokens"]
+            # zero-token regions are omitted from the RENDER (a spliced empty
+            # value spends nothing, so printing it at 0.0% would pad a table
+            # that is trying to be an account); they stay in the JSON so a
+            # consumer can tell "empty this run" from "never a slot".
+            regions = {k: v for k, v in
+                       sorted(acc["regions"].items(), key=lambda kv: -kv[1])
+                       if v}
+            named = sum(regions.values())
+            for name, tokens in regions.items():
+                share = (100.0 * tokens / total) if total else 0.0
+                lines.append(f"| {stage} | `{name}` | {tokens:,} | {share:.1f}% |")
+            # the unattributed remainder is a ROW, never a rounding note: it
+            # is the template prose the slots sit in plus every tokenizer
+            # boundary, and hiding it would make the table sum by assertion.
+            rest = total - named
+            share = (100.0 * rest / total) if total else 0.0
+            lines.append(f"| {stage} | *template prose + boundaries* | "
+                         f"{rest:,} | {share:.1f}% |")
+        lines.append("")
+        lines.append("| stage | output tokens | sections |")
+        lines.append("|---|---|---|")
+        for stage, acc in sorted(row["stages"].items()):
+            out = acc.get("output") or {}
+            # ⛔ RENDER THE PUBLISHED KEYS — do not leave a derived key readerless.
+            # `chars_sum` and `distinct_kinds` were both published in `_output_
+            # structure` and neither was printed by ANYTHING, which is the same
+            # "derived key with no reader" this module's own comment criticises
+            # (measured, review cycle 7 P3 — the reviewer had to open the JSON to
+            # see them). Printing the two stored halves is the reader: no third
+            # derived number is created here (a `chars_sum / items` mean is the
+            # consumer's to compute, and the render does not). `distinct_kinds`
+            # is the UNION across a stage's calls, kept whole in `_merge_sections`
+            # so it can never report the display cap instead of the count.
+            parts = []
+            for name, val in sorted((out.get("sections") or {}).items()):
+                n = val.get("items", val.get("keys", 0))
+                label = "items" if "items" in val else "keys"
+                bits = [f"{n} {label}", f"{val.get('tokens', 0):,} tok"]
+                if "chars_sum" in val:
+                    bits.append(f"{val['chars_sum']:,} chars")
+                if "distinct_kinds" in val:
+                    bits.append(f"{val['distinct_kinds']} kinds")
+                parts.append(f"{name}: " + ", ".join(bits))
+            secs = "; ".join(parts)
+            lines.append(f"| {stage} | {out.get('tokens', 0):,} | {secs or '—'} |")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_regions() -> dict[str, dict[str, int]]:
+    """The STATIC region sizes of each stage prompt, offline and exact.
+
+    A region is a value the renderer SPLICES into the template; everything
+    else in the prompt is the template's own prose (the instructions the
+    stage is written in). Both are computed from the real render — the fill
+    map is captured by wrapping ``_fill_template`` — so the numbers describe
+    the prompt the pipeline sends, not a reconstruction of it.
+
+    ⛔ No provider call is made: this is the render path only. It is the one
+    part of the decomposition that is exact — the dynamic regions (the story
+    and the re-serialized embed list) are solved from the measured evidence
+    in ``decompose``.
+    """
+    from tortoise import extractor_v2 as X
+    enc = _encoding()
+    n = lambda s: len(enc.encode(s or ""))  # noqa: E731
+    master = X.build_master_list()
+    session_date = "2026-11-21T00:00:00+00:00"
+
+    out: dict[str, dict[str, int]] = {}
+
+    # S1 substitutes with .replace, so its two slots are counted directly.
+    granularity = X._granularity_text(master)
+    anchor_s1 = X._date_anchor(session_date)
+    system_s1 = (X.S1_TMPL
+                 .replace("{memory_granularity}", granularity)
+                 .replace("{date_anchor}", anchor_s1))
+    out["s1"] = {"memory_granularity": n(granularity),
+                 "date_anchor": n(anchor_s1),
+                 "template_prose": n(system_s1) - n(granularity) - n(anchor_s1)}
+
+    captured: list[dict] = []
+    orig_fill = X._fill_template
+
+    def _fill(tmpl, values):
+        rendered = orig_fill(tmpl, values)
+        captured.append({"values": dict(values), "prompt": rendered})
+        return rendered
+
+    X._fill_template = _fill
+    try:
+        # Blank dynamic slots: this is what isolates the static part. The
+        # story is a LABEL-ORDER SEED in the verbose render, so the static
+        # vocabulary is the same with it empty (compact mode differs — that
+        # is the lever `decompose` reports the size of, not a static here).
+        X.render_s2_prompt(master, session_date=session_date, story="",
+                           edus=None)
+        X.render_s4_prompt("", {}, {}, master, session_date=session_date,
+                           edus=None)
+    finally:
+        X._fill_template = orig_fill
+    for stage, rec in zip(("s2", "s4"), captured, strict=False):
+        regions = {name: n(text) for name, text in rec["values"].items()}
+        regions["template_prose"] = (n(rec["prompt"])
+                                     - sum(regions.values()))
+        out[stage] = regions
+    # The envelope a stage pays to frame the untrusted region, measured on a
+    # one-character body so the body itself is not counted.
+    out["envelope"] = {"clause": n(X._render_untrusted_block("S1 STORY", "x")) - 1}
+    return out
+
+
+def _source_transcript_tokens(doc_id: str | None) -> int:
+    """Tokens of the SOURCE TRANSCRIPT block S2/S4 append for this document.
+
+    ⛔ MEASURED, NOT ASSUMED. The block is rendered from the conversation's
+    EDUs and omitted when they exceed `_SOURCE_TRANSCRIPT_CAP`, so whether a
+    document carries one — and how big it is — is a property of THAT document,
+    not of the corpus. `decompose` subtracts it per document before taking the
+    medians, and publishes the count separately, because a residual solve that
+    ignores it books verbatim source text into "S1's story".
+
+    Returns 0 when the document cannot be read (a row whose `id` no longer
+    resolves — the artefact still reproduces, and the row is then a documented
+    floor rather than a silent subtraction of nothing).
+    """
+    if not doc_id:
+        return 0
+    path = _REPO_ROOT / doc_id
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    from tortoise import extractor_v2 as X
+    edus = X._edus_from_conversation([{"role": "user", "content": text}])
+    block = X._render_source_transcript(edus)
+    return len(_encoding().encode(block)) if block else 0
+
+
+#: ⛔ THE STAGES THIS ARITHMETIC IS WRITTEN FOR, and a REFUSAL if the corpus
+#: gate grows past them. `_REQUIRED_STAGES` is the corpus gate's list; the
+#: arithmetic below names its three stages (`c1`/`c2`/`c4`, the region table,
+#: the `calls_per_doc` / `per_call` maps). Two literals that agree by
+#: coincidence is exactly the subset-median failure this file keeps removing: a
+#: fourth stage added to the GATE alone would decompose three of four and
+#: publish a total that silently omits it. `decompose` compares the two and
+#: refuses, so the omission can never be published.
+_DECOMPOSED_STAGES: tuple[str, ...] = ("s1", "s2", "s4")
+
+#: The static render slots each `regions` row charges, as (stage, slot) pairs.
+#: The row's value is ``Σ calls[stage] × statics[stage][slot]``, so the table IS
+#: the row — one declaration, and `_static_slot_problems` below derives the
+#: coverage invariant from it instead of trusting a second hand-written list.
+#: Row order is the bundle's own (§4) and is kept: `regions` is published sorted
+#: by magnitude, and a stable sort ties on insertion order.
+_STATIC_ROW_SLOTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "kind vocabulary (`master_list`)": (
+        ("s2", "master_list"), ("s4", "master_list")),
+    # ⛔ `pack_namespaces` is S2-only and renders EMPTY under the production
+    # default (`core_only` off), so this row is 0 today and non-zero in a
+    # `TORTOISE_CLASSIFY_LATER=1` shell — exactly the posture nobody was
+    # charging (review notes at `371fd0a22e96`, P3).
+    "pack namespace list (`pack_namespaces`, S2 only)": (
+        ("s2", "pack_namespaces"),),
+    "mapping rules (`anti_routine`)": (
+        ("s2", "anti_routine"), ("s4", "anti_routine")),
+    "output schema (`output_contract`)": (
+        ("s2", "output_contract"), ("s4", "output_contract")),
+    "stage instructions (template prose)": (
+        ("s1", "template_prose"), ("s2", "template_prose"),
+        ("s4", "template_prose")),
+    "memory granularity (S1 only)": (("s1", "memory_granularity"),),
+    "chains": (("s2", "chains_text"), ("s4", "chains_text")),
+    "date anchor": (("s1", "date_anchor"), ("s2", "date_anchor"),
+                    ("s4", "date_anchor")),
+    "graph search results (S4)": (("s4", "search_results"),),
+}
+
+#: The render slots NO `regions` row charges, each with what it is and why it is
+#: not chargeable. These are NOT a silent residual — they are a DECLARED one, and
+#: `decompose` refuses a render slot that is in neither this map nor
+#: `_STATIC_ROW_SLOTS`, and refuses an entry here whose slot the render no longer
+#: fills — so the exemptions cannot rot silently either (review notes at
+#: `0c06906012f6`, B).
+_UNCHARGED_STATIC_SLOTS: dict[str, dict[str, str]] = {
+    "s4": {
+        #: 1 token/call in the committed posture. The row that would charge the
+        #: REAL list is `**S2's embed list**`, solved as
+        #: `pc4 − s4_sys − story − clause` — i.e. NET of this empty `{}`
+        #: render, so charging this token here as well would need the solve
+        #: changed in lockstep. Left in `unattributed` (≈4 tokens/doc, 0.009 %)
+        #: rather than perturbing a published bundle for 0.009 %.
+        "embed_list_json": (
+            "the EMPTY list render (`{}`, 1 token/call); the real list is the "
+            "solved embed row, which subtracts this render"),
+        #: 0 tokens/call: a blank body renders as the EMPTY STRING (#10311
+        #: envelope measured separately), so the static render carries no story.
+        "story": (
+            "blank in the static render (0 tokens/call); the real story body "
+            "is solved and charged on the S1-story row"),
+    },
+}
+
+
+def _static_slot_problems(statics: dict[str, dict[str, int]]) -> list[str]:
+    """Every fill slot is charged by EXACTLY ONE row, or declared exempt.
+
+    DERIVED from ``statics`` — the real render — never from a second
+    hand-written list of names. One defect per line, empty when the table covers
+    the render. Five ways this can go wrong, all of them silent before this
+    check existed (`0c06906012f6` review note B):
+
+    * a slot the render fills that NO row charges — its tokens leave the
+      composition and land in `unattributed` while the table still sums
+      (the `pack_namespaces` shape, `371fd0a22e96` P3);
+    * a slot charged by TWO rows — double counted, the opposite error;
+    * a slot a row charges that the render does not fill — a typo, which
+      `.get(slot, 0)` would otherwise charge as a silent zero;
+    * a slot both charged and declared exempt — the two lists disagree;
+    * an exemption the render no longer fills — a stale exemption, which would
+      re-open the first hole for whatever takes its name.
+    """
+    charged: dict[tuple[str, str], list[str]] = {}
+    for label, slots in _STATIC_ROW_SLOTS.items():
+        for pair in slots:
+            charged.setdefault(pair, []).append(label)
+    exempt = {(stage, slot) for stage, slots in _UNCHARGED_STATIC_SLOTS.items()
+              for slot in slots}
+    problems: list[str] = []
+    for pair in sorted(charged):
+        stage, slot = pair
+        labels = charged[pair]
+        if slot not in statics.get(stage, {}):
+            problems.append(
+                f"`{stage}.{slot}` is charged by {labels} but the render fills "
+                f"no such slot — a typo would have charged 0 silently")
+        if len(labels) > 1:
+            problems.append(
+                f"`{stage}.{slot}` is charged by more than one row {labels} — "
+                f"double counted")
+        if pair in exempt:
+            problems.append(
+                f"`{stage}.{slot}` is BOTH charged and declared exempt")
+    for stage, slot in sorted(exempt):
+        if slot not in statics.get(stage, {}):
+            problems.append(
+                f"`{stage}.{slot}` is declared exempt but the render fills no "
+                f"such slot — stale exemption")
+    for stage in _DECOMPOSED_STAGES:
+        for slot, tokens in sorted(statics.get(stage, {}).items()):
+            if (stage, slot) not in charged and (stage, slot) not in exempt:
+                problems.append(
+                    f"`{stage}.{slot}` ({tokens} tokens/call) is filled by the "
+                    f"render but charged by NO row — its tokens would leave "
+                    f"the composition into `unattributed`")
+    return problems
+
+
+def _assert_static_slots_are_covered(
+        statics: dict[str, dict[str, int]]) -> None:
+    """Fail closed, naming every uncovered slot — before any `--out` write."""
+    problems = _static_slot_problems(statics)
+    if problems:
+        raise SystemExit(
+            "refusing to decompose: the stage prompts' static regions do not "
+            "reconcile with `regions`.\n  " + "\n  ".join(problems) +
+            "\nAdd the slot to `_STATIC_ROW_SLOTS` (a row that charges it), or "
+            "declare it in `_UNCHARGED_STATIC_SLOTS` with what it is and why "
+            "it is not chargeable.")
+
+
+def decompose(rows: list[dict], *, arm: str = "cold",
+              receipts: Path | None = None) -> dict:
+    """Attribute the two fitted constants of #14295 to the regions that make
+    them (#14343).
+
+
+    Every number here is either (a) tiktoken on a real render of the stage
+    prompts (the statics), or (b) a measured token count from the evidence
+    rows (the per-call inputs, the emissions, the call counts). Nothing is
+    assumed; the residual rows are what keeps the table honest.
+    """
+    #: ⛔ ONE STAGE LIST, or a refusal. A stage added to the corpus gate alone
+    #: would be gated but never decomposed (see `_DECOMPOSED_STAGES`).
+    if tuple(_REQUIRED_STAGES) != _DECOMPOSED_STAGES:
+        raise SystemExit(
+            f"refusing to decompose: the corpus gate requires "
+            f"{list(_REQUIRED_STAGES)} but this arithmetic is written for "
+            f"{list(_DECOMPOSED_STAGES)} — extend the per-stage terms (and "
+            f"`_STATIC_ROW_SLOTS`) before adding a stage to the gate, or the "
+            f"total would silently omit it.")
+    docs = [r for r in rows
+            if r.get("arm") == arm and r.get("kind") == "doc"
+            and not r.get("failed") and r.get("stages")]
+    if not docs:
+        raise SystemExit(f"no usable `{arm}` document rows in the evidence")
+    #: ⛔ A PARTIAL CORPUS IS NOT A DECOMPOSITION (review, P1). `compose` refuses
+    #: an incomplete RUN through `_row_complete` + `_REQUIRED_STAGES`; this half
+    #: had no such gate, and a corpus where only SOME documents measured a stage
+    #: still published `documents: len(docs)` while every median for that stage
+    #: was taken over the subset that carried it. The residual then COLLAPSED
+    #: toward zero and the bundle's headline ("fit and composition agree to
+    #: 6.6%") flattered itself — no marker, exit 0, both files written. Measured
+    #: by dropping S4 from 10 of the 50 committed rows: the embed region moved
+    #: 14,149 → 16,695 and the residual 2,994 → 71.5. The committed corpus is
+    #: complete (all 50 rows carry s1/s2/s4 with calls), so this refuses a state
+    #: the tool can be handed, not the one it is handed today — the shape a
+    #: per-document `S4 failed` on a call that never recorded leaves behind.
+    partial = {str(r.get("id") or f"row{i}"): missing
+               for i, r in enumerate(docs)
+               if (missing := _stages_without_a_measured_call(r))}
+    if partial:
+        per_stage = {s: sum(1 for r in docs
+                            if (r["stages"].get(s) or {}).get("calls"))
+                     for s in _REQUIRED_STAGES}
+        raise SystemExit(
+            f"refusing to decompose a PARTIAL corpus: {len(partial)} of "
+            f"{len(docs)} `{arm}` document row(s) have no measured call for a "
+            f"required stage ({partial}) — the medians would be taken over a "
+            f"subset while `documents` counted the whole corpus, and the "
+            f"residual would collapse toward zero. Per-stage document counts: "
+            f"{per_stage}.")
+    statics = _render_regions()
+    #: ⛔ COVERAGE IS DERIVED, NOT ASSERTED IN PROSE. Before the rows are built:
+    #: every slot the REAL render fills must be charged by exactly one row, or be
+    #: a declared exemption. Refuses here, before `--out` is ever opened.
+    _assert_static_slots_are_covered(statics)
+    #: ⛔ THE SOURCE-TRANSCRIPT TAIL IS SUBTRACTED, NOT IGNORED. `render_s2_prompt`
+    #: / `render_s4_prompt` append `_render_source_transcript(edus)` OUTSIDE
+    #: `_fill_template` whenever the document's EDU text fits
+    #: `_SOURCE_TRANSCRIPT_CAP` (8,000 chars), and `_render_regions` renders with
+    #: `edus=None` — so the residual solve `story = pc2 − s2_sys − clause` booked
+    #: that block into "S1's story, re-sent to S2 and S4". Same class as the
+    #: `compose_one` misattribution (review cycle 8, P2), and it is measured per
+    #: document here: 9 of the 50 corpus documents carry a tail.
+    tails: dict[str, int] = {r.get("id") or "": _source_transcript_tokens(
+        r.get("id")) for r in docs}
+
+    def _per_call(stage: str) -> tuple[float, float, float]:
+        """(calls/doc, prompt tokens per call, completion tokens per call).
+
+        MEDIANS, not means: the longest document (127,914 tokens, 9.3% of the
+        corpus's prompt tokens but 29.7% of its DOCUMENT tokens) is sent twice
+        and carries more prompt tokens than 90 documents its size, so it drags
+        every mean per-call figure upward — the mean S1 call is 11,673 tokens
+        against a median of 7,138. A mean would describe that document's
+        leverage; the issue is about the median document.
+        """
+        calls, pc, oc = [], [], []
+        for r in docs:
+            s = r["stages"].get(stage)
+            if not s or not s.get("calls"):
+                continue
+            calls.append(s["calls"])
+            # the tail rides on EVERY S2/S4 call for a document that carries one
+            tail = tails.get(r.get("id") or "", 0) if stage in ("s2", "s4") else 0
+            pc.append((s["prompt_tokens"] / s["calls"]) - tail)
+            oc.append(s["completion_tokens"] / s["calls"])
+        return (sum(calls) / len(calls), statistics.median(pc),
+                statistics.median(oc))
+
+    c1, pc1, oc1 = _per_call("s1")
+    c2, pc2, oc2 = _per_call("s2")
+    c4, pc4, oc4 = _per_call("s4")
+    t_med = statistics.median([r["item_tokens"] for r in docs])
+
+    s2_sys = sum(statics["s2"].values())
+    s4_sys = sum(statics["s4"].values())
+    clause = statics["envelope"]["clause"]
+    #: how often S1 makes a SECOND call for the same document (the narrative
+    #: cap is hit, so the escalation re-sends the identical prompt). ONE
+    #: predicate, counted once: `document_term` publishes the COUNT and
+    #: `levers_offline` the SHARE, and a second `sum(...)` could drift from it.
+    n_two_call = sum(1 for r in docs
+                     if (r["stages"].get("s1") or {}).get("calls", 0) > 1)
+    two_call_share = n_two_call / len(docs)
+
+    # The two dynamic regions, solved from the measured per-call prompts. The
+    # story is S1's own emission seen by the next stage; the embed list is
+    # S2's emission re-serialized into S4's prompt.
+    # ⛔ BOTH STAGES PAY THE #10311 ENVELOPE, and it is charged to the STORY
+    # row, not left inside `embed` (review cycle 7, P2). S2's story is a USER
+    # message (`_render_untrusted_block("S1 STORY", story)`), and S4's story
+    # slot is wrapped by the same call inside its template. The statics above
+    # render with `story=""`, and an empty body renders as the EMPTY STRING
+    # (`_render_untrusted_block("S1 STORY", "")` is 0 tokens, measured), so
+    # `s4_sys` contains NO story envelope — while a real S4 prompt carries
+    # envelope+body. Subtracting only the body therefore dumped each S4 call's
+    # 93-token envelope into `**S2's embed list**`, ~106 tokens/doc on the
+    # bundle's headline row.
+    #
+    # The two rows therefore get: the body from both stages, and the envelope
+    # from both stages. S2's own envelope was previously in the UNATTRIBUTED
+    # residual (it is known, so it does not belong there) — hence the
+    # composition total rises by (c2 + c4) x clause and the residual falls by
+    # the same, which is what makes §1's fit-vs-composition agreement tighter.
+    story = max(0.0, pc2 - s2_sys - clause)
+    embed = max(0.0, pc4 - s4_sys - story - clause)
+    #: the median per-call tail (0 for a transcript-free corpus — which the nine
+    #: affected documents above are not; see `source_transcript` in the result).
+    tail_med = statistics.median(list(tails.values())) if tails else 0
+
+    #: ⛔ THE ROWS ARE THE TABLE. `_STATIC_ROW_SLOTS` declares which (stage, slot)
+    #: pairs each row charges and this comprehension is the only place the value
+    #: is computed, so a row cannot silently stop charging a slot it names — or
+    #: charge one the render does not fill (`_assert_static_slots_are_covered`
+    #: has already refused both). The two solved rows below are the ones that are
+    #: NOT a sum of static slots; they stay explicit because the provenance of
+    #: their number is a solve, not a render.
+    calls_by_stage = {"s1": c1, "s2": c2, "s4": c4}
+    regions = {
+        label: sum(calls_by_stage[stage] * statics[stage].get(slot, 0)
+                   for stage, slot in slots)
+        for label, slots in _STATIC_ROW_SLOTS.items()
+    }
+    regions["**S1's story, re-sent to S2 and S4**"] = (c2 + c4) * (story + clause)
+    regions["**S2's embed list, re-sent to S4**"] = c4 * embed
+    total = sum(regions.values())
+    # ⛔ DERIVED, not hardcoded: the constant is the intercept of THIS arm's
+    # per-document fit. A literal 45_503 is right for `cold` and wrong for any
+    # other arm — the bundle's own completion recipe runs `--arm after`, where a
+    # literal would report the BEFORE intercept as the AFTER one and absorb the
+    # lever's whole saving into "unattributed".
+    in_fit = _fit([(r["item_tokens"], r["prompt_tokens"]) for r in docs])
+    fitted = round(in_fit["intercept"])
+    out_fit = _fit([(r["item_tokens"], r["completion_tokens"]) for r in docs])
+    composition_out = c1 * oc1 + c2 * oc2 + c4 * oc4
+    return {
+        "arm": arm,
+        "documents": len(docs),
+        "median_doc_tokens": t_med,
+        "calls_per_doc": {"s1": round(c1, 3), "s2": round(c2, 3),
+                          "s4": round(c4, 3),
+                          "total": round(c1 + c2 + c4, 3)},
+        "per_call": {"s1": {"prompt": pc1, "completion": oc1},
+                     "s2": {"prompt": pc2, "completion": oc2},
+                     "s4": {"prompt": pc4, "completion": oc4}},
+        #: ⛔ TWO estimators, both reported, because they answer different
+        #: questions and differ by 22% here. The COMPOSITION is per-call MEDIANS
+        #: times the measured call counts (the median document's shape); the
+        #: FITTED constant is the intercept of the arm's own per-document fit,
+        #: and output's fit is nearly flat (R²≈0.02) so its intercept sits near
+        #: the MEAN output per document. The mean is above the median because
+        #: S4's output is bimodal (see `output.reemission_tail`), which is a
+        #: finding, not a discrepancy to smooth away.
+        "output": {
+            "s1_tokens_per_doc": round(c1 * oc1, 1),
+            "s2_tokens_per_doc": round(c2 * oc2, 1),
+            "s4_tokens_per_doc": round(c4 * oc4, 1),
+            "total_per_doc": round(composition_out, 1),
+            "s2_share": round(100.0 * c2 * oc2 / max(1e-9, composition_out), 1),
+            "fitted_constant": round(out_fit["intercept"]),
+            "fitted_slope": round(out_fit["slope"], 3),
+            "fitted_r2": round(out_fit["r2"], 3),
+            "unattributed": round(out_fit["intercept"] - composition_out, 1),
+            "mean_per_doc": round(sum(r["completion_tokens"] for r in docs)
+                                  / len(docs), 1),
+            "s2_share_of_fitted": round(100.0 * c2 * oc2
+                                        / max(1e-9, out_fit["intercept"]), 1),
+            "reemission_tail": _output_tail(docs),
+        },
+        "statics": statics,
+        "source_transcript": {
+            "documents": len(tails),
+            "documents_with_a_tail": sum(1 for v in tails.values() if v),
+            "tokens_per_call_median": tail_med,
+            "tokens_per_call_max": max(tails.values()) if tails else 0,
+        },
+        "solved": {"story_tokens": round(story, 1),
+                   "embed_list_tokens": round(embed, 1),
+                   "embed_over_emission": round(embed / oc2, 2) if oc2 else None},
+        "regions": {k: round(v, 1) for k, v in
+                    sorted(regions.items(), key=lambda kv: -kv[1])},
+        "composition_total": round(total, 1),
+        "fitted_constant": fitted,
+        "unattributed": round(fitted - total, 1),
+        #: ⛔ BOTH terms are DERIVED from this arm's own fit. The intercept fix
+        #: was half-applied in the first revision: `fitted` came from `_fit()`
+        #: while the slope was a literal `2.159` — so the bundle's own
+        #: completion recipe (`--arm after`) printed the BEFORE slope as the
+        #: AFTER arm's, which is the same mislabel the intercept fix removed.
+        "input_fit": {"slope": round(in_fit["slope"], 3),
+                      "intercept": fitted,
+                      "r2": round(in_fit["r2"], 3)},
+        "document_term": {
+            "s1_calls_x_median_doc": round(c1 * t_med, 1),
+            "fitted_slope_x_median_doc": round(in_fit["slope"] * t_med, 1),
+            "documents": len(docs),
+            "documents_taking_two_s1_calls": n_two_call,
+            "note": ("S1 sends the WHOLE document once per call, and a "
+                     "majority of documents take a second S1 call, so the "
+                     "document is paid for ~2x"),
+        },
+        "levers_offline": _offline_levers(statics, c1, c2, c4, t_med,
+                                          two_call_share, oc2,
+                                          n_two_call=n_two_call),
+        "serialization": serialization_lever(receipts) if receipts else {},
+    }
+
+
+def _output_tail(docs: list[dict]) -> dict:
+    """S4's output distribution: the delta contract's compliance tail.
+
+    A median/mean gap in S4's completion tokens is not noise — `#1789` measured
+    the delta contract at −93.8 % on 26-turn sessions, and on a DOCUMENT corpus
+    a quarter of documents still emit a full list. Reported as a distribution
+    because a mean alone would hide it and a median alone would deny it.
+    """
+    per_call = sorted(
+        (r["stages"]["s4"]["completion_tokens"] / r["stages"]["s4"]["calls"])
+        for r in docs
+        if (r["stages"].get("s4") or {}).get("calls"))
+    if not per_call:
+        return {}
+    #: ⛔ These are DOCUMENTS, not calls: each value is that document's
+    #: `completion_tokens / calls`, so one entry per document. The first
+    #: revision called them "S4 calls", which overstated the denominator by the
+    #: call ratio (≈1.14 here) in the JSON, the rendered markdown and the README.
+    return {"s4_docs_over_6000": sum(1 for v in per_call if v > 6000),
+            "s4_docs": len(per_call),
+            "share_docs_over_6000_pct": round(
+                100.0 * sum(1 for v in per_call if v > 6000) / len(per_call), 1),
+            "s4_max_per_doc_per_call": round(max(per_call)),
+            "s4_median_per_doc_per_call": round(statistics.median(per_call))}
+
+
+def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
+                    t_med: float, two_call_share: float, oc2: float,
+                    *, n_two_call: int) -> dict:
+    """The size of each candidate lever, measured WITHOUT a provider call.
+
+    A lever that cannot be sized cannot be chosen between, and a lever's size
+    is a property of the prompt — not of the model's answer. What this cannot
+    do is establish a lever's EFFECT ON QUALITY, which only a run of the
+    capstone corpus can; every entry below therefore carries that limit.
+    """
+    from tortoise import extractor_v2 as X
+    enc = _encoding()
+    n = lambda s: len(enc.encode(s or ""))  # noqa: E731
+    master = X.build_master_list()
+    out: dict = {}
+    try:
+        compact = X._render_master_compact(master, "")
+        verbose = X._render_master(master, "")
+        out["compact_master_render"] = {
+            "verbose_tokens": n(verbose),
+            "compact_tokens": n(compact),
+            "saved_per_doc": round((c2 + c4) * (n(verbose) - n(compact)), 1),
+            "quality_risk": ("compact mode story-filters the pack kinds, so "
+                             "a document that misses every trigger word drops "
+                             "to the all-packs fallback and a document that "
+                             "hits one drops the others — not "
+                             "quality-neutral"),
+        }
+    except Exception as exc:
+        # the lever's absence is a RESULT, not a crash: report it as one
+        out["compact_master_render"] = {"error": f"{type(exc).__name__}: {exc}"}
+    out["s1_second_send"] = {
+        "cause": (f"S1's narrative cap is {X._S1_MAX_TOKENS} tokens; a story "
+                  "that hits it escalates and re-sends the SAME prompt, so "
+                  "the document is paid for twice"),
+        # ⛔ COUNT AND SHARE ARE SEPARATE, CORRECTLY-NAMED KEYS (review cycle
+        # 11, P3). This was `documents_with_two_s1_calls: round(100.0 * share,
+        # 1)` — a PERCENTAGE under a COUNT-shaped name, published in the same
+        # artifact as `document_term.documents_taking_two_s1_calls`, which is
+        # the count of the same quantity. So the bundle asserted that 68 of a
+        # 50-document corpus took two S1 calls.
+        "documents_taking_two_s1_calls": n_two_call,
+        "share_pct": round(100.0 * two_call_share, 1),
+        "saved_per_doc_if_one_call": round(
+            two_call_share * (t_med + sum(statics["s1"].values())), 1),
+        "quality_risk": ("a longer narrative is more content, not less — but "
+                         "it also enlarges the story both later stages "
+                         "re-read, so the net is a measurement, not "
+                         "arithmetic; the story's own growth is NOT "
+                         "sizeable offline"),
+    }
+    return out
+
+
+def serialization_lever(receipts: Path) -> dict:
+    """#14343: the `indent=1` tax on S4's embed-list region, measured on REAL
+    emissions.
+
+    The one place in the pipeline where a token count can be cut with the
+    JSON's CONTENT unchanged: S4's prompt re-serializes S2's list, and
+    ``indent=1`` writes a newline + a space per key/line. The write-path
+    receipts (`tests/eval/write_path/receipts/*/*.arms.json`) carry the real
+    S2 emissions, so both serializations are computed on the same data — this
+    is a measurement, not an estimate from a synthetic list.
+    """
+    enc = _encoding()
+    rows = []
+    for path in sorted(receipts.glob("*.arms.json")):
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for arm, embed in (rec.get("embed_list") or {}).items():
+            if not isinstance(embed, dict):
+                continue
+            items = sum(len(v) for v in embed.values() if isinstance(v, list))
+            if not items:
+                continue
+            indented = len(enc.encode(json.dumps(embed, indent=1)))
+            compact = len(enc.encode(json.dumps(embed, separators=(",", ":"))))
+            stats = (rec.get("s2_stats") or {}).get(arm) or {}
+            rows.append({"session": path.name.split(".")[0], "arm": arm,
+                         "items": items,
+                         "indented_tokens": indented,
+                         "compact_tokens": compact,
+                         "emission_tokens": stats.get("completion_tokens"),
+                         "story_tokens": len(enc.encode(
+                             (rec.get("stories") or {}).get(arm) or ""))})
+    if not rows:
+        return {}
+    ti = sum(r["indented_tokens"] for r in rows)
+    tc = sum(r["compact_tokens"] for r in rows)
+    emissions = [r["emission_tokens"] for r in rows if r["emission_tokens"]]
+    return {
+        "receipts": len({r["session"] for r in rows}),
+        "emissions": len(rows),
+        "items": sum(r["items"] for r in rows),
+        "indented_tokens": ti,
+        "compact_tokens": tc,
+        "saved_tokens": ti - tc,
+        "saved_pct": round(100.0 * (ti - tc) / ti, 1) if ti else None,
+        "saved_per_emission": round((ti - tc) / len(rows)),
+        "tokens_per_item": (round(sum(emissions) / sum(r["items"] for r in rows), 1)
+                            if emissions else None),
+        "rows": rows,
+    }
+
+
+def render_serialization_lever(lev: dict) -> str:
+    if not lev:
+        return ""
+    lines = ["### The one information-neutral lever: `indent=1` on S4's "
+             "embed-list region", ""]
+    lines.append(
+        f"Measured on **{lev['receipts']} real sessions / {lev['emissions']} "
+        f"emissions / {lev['items']} items** from "
+        f"`tests/eval/write_path/receipts/`: the list S4 re-reads costs "
+        f"**{lev['indented_tokens']:,}** tokens as today's `indent=1` dump and "
+        f"**{lev['compact_tokens']:,}** with compact separators — "
+        f"**{lev['saved_tokens']:,} tokens ({lev['saved_pct']}%) that are pure "
+        f"whitespace**, {lev['saved_per_emission']:,} per emission. "
+        f"S2's own emission is {lev['tokens_per_item']} completion tokens per "
+        f"item, so the re-serialized copy is ~1.3x the emission it copies.")
+    lines.append("")
+    lines.append("| session | arm | items | emission | `indent=1` | compact | "
+                 "saved |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for r in lev["rows"]:
+        lines.append(f"| {r['session']} | {r['arm']} | {r['items']} | "
+                     f"{r['emission_tokens'] or '—'} | {r['indented_tokens']:,} | "
+                     f"{r['compact_tokens']:,} | "
+                     f"{r['indented_tokens'] - r['compact_tokens']:,} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_decompose(dec: dict) -> str:
+    lines = ["## The input constant, decomposed (#14343)", ""]
+    lines.append(f"arm `{dec['arm']}` · {dec['documents']} documents · median "
+                 f"document {dec['median_doc_tokens']:,} tokens · calls/doc "
+                 f"{dec['calls_per_doc']['total']}"
+                 f" (s1 {dec['calls_per_doc']['s1']}, "
+                 f"s2 {dec['calls_per_doc']['s2']}, "
+                 f"s4 {dec['calls_per_doc']['s4']})")
+    lines.append("")
+    lines.append("### Static part of each prompt (offline render, exact)")
+    lines.append("")
+    stages = sorted(dec["statics"])
+    names = sorted({k for st in stages for k in dec["statics"][st]})
+    lines.append("| region | " + " | ".join(stages) + " |")
+    lines.append("|---" * (len(stages) + 1) + "|")
+    for name in names:
+        cells = [f"{dec['statics'][st].get(name, 0):,}" for st in stages]
+        lines.append(f"| `{name}` | " + " | ".join(cells) + " |")
+    lines.append("")
+    lines.append("### Per document — what the constant is made of")
+    lines.append("")
+    lines.append("| region | tokens/doc | share |")
+    lines.append("|---|---|---|")
+    total = dec["composition_total"] or 1
+    for name, tokens in dec["regions"].items():
+        lines.append(f"| {name} | {tokens:,.0f} | {100.0 * tokens / total:.1f}% |")
+    lines.append(f"| **composition total** | **{total:,.0f}** | 100.0% |")
+    lines.append(f"| *fitted constant (this arm's own intercept)* | "
+                 f"{dec['fitted_constant']:,} | — |")
+    lines.append(f"| *unattributed (fit intercept − composition)* | "
+                 f"{dec['unattributed']:,.0f} | — |")
+    lines.append("")
+    doc_term = dec["document_term"]
+    lines.append(f"The document itself is NOT in that table: it is the fit's "
+                 f"slope, {doc_term['s1_calls_x_median_doc']:,.0f} tokens/doc "
+                 f"({dec['calls_per_doc']['s1']} × "
+                 f"{dec['median_doc_tokens']:,}) against the fitted "
+                 f"{doc_term['fitted_slope_x_median_doc']:,.0f}. "
+                 f"{doc_term['note']} — "
+                 f"{doc_term['documents_taking_two_s1_calls']} of "
+                 f"{doc_term['documents']} documents here.")
+    lines.append("")
+    st = dec.get("source_transcript") or {}
+    if st.get("documents_with_a_tail"):
+        lines.append(
+            f"⚠️ **{st['documents_with_a_tail']} of {st['documents']} documents "
+            "carry a SOURCE TRANSCRIPT block** (S2 and S4 append it outside the "
+            "template whenever the EDU text fits the 8,000-char cap; up to "
+            f"{st['tokens_per_call_max']:,} tokens per call). Those tails are "
+            "**subtracted per document before the medians**, so the *S1's story* "
+            "row is the narrative alone — without the subtraction it books "
+            "verbatim source text as narrative (measured: 2,656 → 2,110 tokens "
+            "per S2 call). The median document carries none, which is why the "
+            "correction moves the row and adds no row of its own.")
+        lines.append("")
+    solved = dec["solved"]
+    lines.append(f"Solved dynamic regions: the S1 story is **{solved['story_tokens']:,.0f}** "
+                 f"tokens as the later stages see it, and S2's embed list is "
+                 f"re-serialized into S4's prompt at "
+                 f"**{solved['embed_list_tokens']:,.0f}** tokens — "
+                 f"{solved['embed_over_emission']}× S2's own emission.")
+    lines.append("")
+    # ⛔ THE TWO SOLVED ROWS ARE A UNIT DIFFERENCE, and leaving it unnamed is
+    # what lets a reader take them for a single tokenizer's numbers. `_per_call`
+    # returns the PROVIDER's own reported `prompt_tokens` (per call, minus the
+    # SOURCE-TRANSCRIPT tail), while `s2_sys`/`s4_sys`/`clause` are
+    # `tiktoken cl100k_base` on a local render — so `story` and `embed` mix two
+    # tokenizers, and the residual they feed (`unattributed`) absorbs the
+    # complement. The bundle measures that gap itself in §3
+    # (provider / offline render = 1.063, 1.035, 1.017 on three S1 prompts), so
+    # the disclosure names the rows that carry it rather than presenting the
+    # fit-vs-composition agreement as tokenizer-free.
+    lines.append(
+        "⚠️ **The two solved rows span TWO tokenizers.** `story` and `embed` "
+        "are `provider prompt_tokens − cl100k static render`: the per-call "
+        "prompt count is the provider's own reported usage "
+        "(`last_prompt_tokens`), while the static being removed is "
+        "`tiktoken cl100k_base` on a local render. The bundle measures that "
+        "gap directly in §3 (measured / offline render = 1.063, 1.035, 1.017 "
+        "on three S1 prompts), so these two rows carry it and `unattributed` "
+        "absorbs its complement — the fit-vs-composition agreement reported "
+        "below is therefore not a tokenizer-free comparison.")
+    lines.append("")
+    out = dec.get("output") or {}
+    if out:
+        lines.append("### The output constant, decomposed")
+        lines.append("")
+        lines.append("| stage | completion tokens/doc | share of output |")
+        lines.append("|---|---|---|")
+        # ⛔ THE PRINTED ROWS AND THE PRINTED TOTAL MUST SUM. The total used to
+        # be formatted from the UNROUNDED sum while each row was formatted from
+        # its own unrounded value, so banker's rounding made the column read
+        # 2,798 + 11,677 + 3,354 = 17,830 — an off-by-one in the one table whose
+        # stated rule is "a table that does not sum is not evidence" (review
+        # cycle 9, P3). The total is now the SUM OF THE PRINTED ROWS, so the
+        # column reconciles by construction rather than by luck. The shares keep
+        # the unrounded total as their denominator, which is why they still sum
+        # to 100.0%.
+        stage_rows = [(stage, out.get(f"{stage}_tokens_per_doc", 0))
+                      for stage in ("s1", "s2", "s4")]
+        printed_total = sum(round(tokens) for _, tokens in stage_rows)
+        for stage, tokens in stage_rows:
+            share = (100.0 * tokens / out["total_per_doc"]) \
+                if out.get("total_per_doc") else 0.0
+            lines.append(f"| {stage} | {round(tokens):,} | {share:.1f}% |")
+        lines.append(f"| **composition total** | **{printed_total:,}** "
+                     f"| 100.0% |")
+        lines.append(f"| *fitted constant (this arm's own intercept)* | "
+                     f"{out['fitted_constant']:,} | — |")
+        # ⛔ THE RESIDUAL IS DERIVED FROM THE PRINTED TOTAL, so the column
+        # RECONCILES when a reader adds it up (review cycle 13, P2). It used to
+        # be formatted from the UNROUNDED `out['unattributed']`, so the printed
+        # rows summed to 17,829 while the residual printed 4,972 and the fitted
+        # row said 22,802 — 17,829 + 4,972 = 22,801, one short, in the table whose
+        # stated rule is that a column which does not sum is not evidence. The
+        # measured value stays in the JSON (`output.unattributed`); only the
+        # printed residual is re-based so the DISPLAY sums.
+        printed_unattributed = out["fitted_constant"] - printed_total
+        lines.append(f"| **unattributed** | {printed_unattributed:,.0f} | — |")
+        lines.append("")
+        tail = out.get("reemission_tail") or {}
+        lines.append(
+            "⚠️ **Two estimators, both reported.** The rows are per-call "
+            "MEDIANS × measured call counts (the median document's shape); the "
+            "fitted row is the intercept of this arm's own per-document fit, and "
+            "output's fit is nearly flat "
+            f"(slope {out['fitted_slope']}, R²={out['fitted_r2']}) so its "
+            "intercept sits near the MEAN output per document "
+            f"({out['mean_per_doc']:,.0f}), not the median. The mean is above the "
+            "median because **S4's output is bimodal**: "
+            f"{tail.get('s4_docs_over_6000', 0)} of {tail.get('s4_docs', 0)} "
+            "documents "
+            f"({tail.get('share_docs_over_6000_pct', 0)}%) average more than "
+            f"6,000 completion tokens per S4 call (max "
+            f"{tail.get('s4_max_per_doc_per_call', 0):,} against a median of "
+            f"{tail.get('s4_median_per_doc_per_call', 0):,}) — the "
+            "delta contract complying on most documents and not on the tail. "
+            "That tail is where the gap between the two estimators lives, so it "
+            "is stated rather than smoothed.")
+        lines.append("")
+        lines.append(
+            f"Against the fitted constant, S2 carries "
+            f"**{out.get('s2_share_of_fitted')}%** of output (the composition "
+            f"gives {out.get('s2_share')}% of the attributed part). Both are "
+            "printed because the remainder is not attributable by construction.")
+        lines.append("")
+        lines.append(
+            "⚠️ The per-SECTION token counts printed by `compose` are "
+            "re-serializations of each section on their own, so they do not sum "
+            "to the emission and carry no residual row. Stage totals are the "
+            "measured `completion_tokens`; section sizes are shape, not an "
+            "account.")
+        lines.append("")
+        lines.append(
+            "Two objects are each paid more than once, and they are NOT the "
+            "same object. **S2's embed list** is paid twice: once as S2's "
+            "output and once as S4's largest input region. **S1's story** is "
+            "paid three times: as S1's output, as S2's user message and as S4's "
+            "`{story}` slot. Nothing in this table scales with the document: "
+            "the item COUNT is what moves, and a document's length barely "
+            "moves it (R²=0.000 on S2's input fit).")
+        lines.append("")
+    if dec.get("serialization"):
+        lines.append(render_serialization_lever(dec["serialization"]))
+    if dec.get("levers_offline"):
+        lines.append("### Candidate levers, sized offline")
+        lines.append("")
+        lines.append("| lever | size (tokens/doc) | quality-neutral? |")
+        lines.append("|---|---|---|")
+        cm = dec["levers_offline"].get("compact_master_render") or {}
+        if "saved_per_doc" in cm:
+            lines.append(f"| compact master render ({cm['compact_tokens']:,} vs "
+                         f"{cm['verbose_tokens']:,} tokens/call) | "
+                         f"−{cm['saved_per_doc']:,.0f} | NO — {cm['quality_risk']} |")
+        s1l = dec["levers_offline"].get("s1_second_send") or {}
+        if "saved_per_doc_if_one_call" in s1l:
+            lines.append(
+                f"| S1 truncation double-send "
+                f"({s1l['documents_taking_two_s1_calls']} documents, "
+                f"{s1l['share_pct']}% of the corpus take 2 "
+                f"S1 calls) | −{s1l['saved_per_doc_if_one_call']:,.0f} | NO — "
+                f"{s1l['quality_risk']} |")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1428,6 +3035,33 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--json-out", type=Path)
     rep.add_argument("--markdown-out", type=Path)
 
+    comp = sub.add_parser(
+        "compose", help="#14343 — decompose ONE document's prompts by region")
+    comp.add_argument("--out", required=True, type=Path)
+    comp.add_argument("--docs", type=int, default=50,
+                      help="corpus size to select the median FROM")
+    comp.add_argument("--seed", type=int, default=7)
+    comp.add_argument("--doc", default="median",
+                      help="'median' | 'p75' | 'max' | a repo path")
+    comp.add_argument("--offline", action="store_true",
+                      help="canned emission: a shape check, NOT a "
+                           "measurement (S4's embed-list region is a stub)")
+
+    dec = sub.add_parser(
+        "decompose", help="#14343 — attribute the fitted constants to regions")
+    dec.add_argument("--evidence", required=True, type=Path,
+                     help="the measurements.jsonl a `run` produced")
+    dec.add_argument("--out", required=True, type=Path)
+    dec.add_argument("--json-out", type=Path)
+    dec.add_argument("--arm", default="cold")
+    dec.add_argument("--receipts", required=True, type=Path,
+                     help="dir of write-path `*.arms.json` receipts carrying "
+                          "real S2 emissions (sizes the serialization lever). "
+                          "REQUIRED: it is the only source of the artifact's "
+                          "serialization section (the 32.5%% finding), so a "
+                          "decomposition without it is a false pass, not a "
+                          "shorter report")
+
     args = ap.parse_args(argv)
     if args.cmd == "run":
         if args.corpus_only:
@@ -1437,6 +3071,38 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{row['tokens']:>7}  session {row['path']}")
             return 0
         arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
+        # ⛔ REFUSE AN ARM THE TOOL DOES NOT UNDERSTAND. `_install_arm` acts only
+        # on `after`/`before`; `cold`/`warm` deliberately inherit the ambient
+        # value. ANY other token used to fall through with no arm installed and
+        # no diagnostic — so `--arms before,After` (a capital) or
+        # `--arms before,compact` reproduced exactly the failure `_install_arm`
+        # exists to prevent: both batches render `indent`, the delta is 0, `run`
+        # exits 0, and a full provider run (~360 calls) measures nothing. The
+        # only trace was the per-row `s4_embed_json` inside measurements.jsonl
+        # (review cycle 11, P3). A typo must cost an EXIT CODE, not a run.
+        #
+        # ⛔ THE EXIT CODE IS 2, AND THAT HAS TO BE SAID OUT LOUD.
+        # `raise SystemExit("message")` exits **1** and prints the message to
+        # stderr — the same code this tool uses for a real run failure, so a
+        # wrapper or CI step could not tell "you typed the arm wrong" from
+        # "the measurement failed". `SystemExit(int)` makes it argparse's own
+        # usage code, which is what a caller already distinguishes (review
+        # cycle 12, P2 — the comment used to CLAIM exit 2 while the code
+        # produced 1, and the pin never read `exc.value.code`).
+        if not arms:
+            print("--arms named no arm (got an empty selection)",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        unknown = sorted(set(arms) - _ARMS)
+        if unknown:
+            print(
+                f"unknown arm(s) {', '.join(repr(a) for a in unknown)}; the "
+                f"closed set is {', '.join(sorted(_ARMS))} — `after`/`before` "
+                f"set the S4 embed-list layout, `cold`/`warm` inherit the "
+                f"ambient value, and anything else would silently measure the "
+                f"same render twice",
+                file=sys.stderr)
+            raise SystemExit(2)
         return run_measurement(out=args.out, docs_limit=args.docs,
                                sessions_limit=args.sessions,
                                workers=args.workers, seed=args.seed, arms=arms,
@@ -1444,6 +3110,64 @@ def main(argv: list[str] | None = None) -> int:
                                long_split=args.long_split,
                                split_max_turns=args.split_max_turns,
                                split_only=args.split_only)
+    if args.cmd == "decompose":
+        decomposition = decompose(load_rows(args.evidence), arm=args.arm,
+                                  receipts=args.receipts)
+        # A `--receipts` path that yielded NOTHING is a user error, and the
+        # artifact it would produce is one whose serialization section (the
+        # headline 32.5% finding) is silently absent — the exact false pass
+        # this bundle exists to carry. Refuse instead of writing it. The flag
+        # itself is `required=True` for the same reason: an OMITTED one used to
+        # emit that same artifact at exit 0, and this bundle's two documented
+        # commands disagreed about it (one passed it, one did not).
+        if not decomposition.get("serialization"):
+            raise SystemExit(
+                f"no usable write-path receipts in {args.receipts} — refusing "
+                "to emit an artifact whose serialization section is missing")
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(finalize_markdown(render_decompose(decomposition)),
+                            encoding="utf-8")
+        if args.json_out:
+            args.json_out.write_text(json.dumps(decomposition, indent=1,
+                                               sort_keys=True),
+                                     encoding="utf-8")
+        sys.stdout.write(render_decompose(decomposition))
+        return 0
+    if args.cmd == "compose":
+        corpus = pick_corpus(limit=args.docs, seed=args.seed)
+        if args.doc in ("median", "p75", "max"):
+            sizes = [r["tokens"] for r in corpus]
+            target = {"median": _quantile(sizes, 0.5),
+                      "p75": _quantile(sizes, 0.75),
+                      "max": max(sizes)}[args.doc]
+            pick = min(corpus, key=lambda r: abs(r["tokens"] - target))
+        else:
+            pick = next((r for r in corpus if r["path"] == args.doc), None)
+            if pick is None:
+                raise SystemExit(f"{args.doc!r} is not in the selected corpus")
+        doc = {"path": pick["path"], "tokens": pick["tokens"],
+               "text": (_REPO_ROOT / pick["path"]).read_text(
+                   encoding="utf-8", errors="replace")}
+        art = compose_one(doc=doc, live=not args.offline)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(art, indent=1, sort_keys=True),
+                            encoding="utf-8")
+        report = compose_report([art])
+        table = render_compose(report)
+        sys.stdout.write(table)
+        sys.stderr.write(f"\ncompose artifact: {args.out}\n")
+        # ⛔ A LIVE run that did not measure every stage must not exit 0: the
+        # exit code is the only machine-readable signal a scripted re-runner
+        # has, and returning 0 here is how a 401-only run wrote an artifact that
+        # read as a measurement (review cycle 7, P1). `--offline` is exempt —
+        # a stub is a documented SHAPE check and its banner says so.
+        if not args.offline and report.get("complete") is not True:
+            sys.stderr.write(
+                "compose: INCOMPLETE — not every stage measured (see the "
+                "INCOMPLETE banner above). The artifact is written for "
+                "diagnosis, but it is NOT a measurement.\n")
+            return 1
+        return 0
     rows = load_rows(args.out)
     report = report_from_rows(rows)
     text = report_markdown(report)
