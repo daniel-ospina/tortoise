@@ -27,8 +27,10 @@ different decisions and had drifted apart:
 
 * :data:`ABUSE_INCIDENT_KINDS` — a STATE CHANGE. The message belongs to the
   incident lifecycle, so the store's create-once path files the issue AND emits
-  the single push, and the message names the issue. ONE message per episode; the
-  engine re-arms it at episode end and closes the incident then.
+  the episode's first push, and the message names the issue. While the episode
+  stays OPEN it re-alarms at most once per
+  :data:`_INCIDENT_DELIVERY_WINDOW_S`, naming the same issue; the engine closes
+  the incident and re-arms delivery at episode end.
 * :data:`ABUSE_ACTIVITY_KINDS` — a MEASUREMENT (#10156's ACTIVITY register). It
   files nothing **by design**, and every message says so; delivery is a bounded
   digest rather than one message per detector window.
@@ -53,6 +55,7 @@ import time
 from datetime import datetime, timezone
 
 import httpx
+from tortoise.alert_store import OpenOutcome
 from tortoise.incident_kinds import (
     KIND_ABUSE_FLAG_RAISED,
     KIND_ABUSE_REVIEW_NEEDED,
@@ -142,11 +145,16 @@ _EPISODE_INCIDENT_KINDS: tuple[str, ...] = (
 
 #: Delivery windows (#14407). One message per ``(kind, subject)`` per window.
 #:
-#: INCIDENT kinds: the normal path is gated by the store's create-once lifecycle
-#: and never reaches this bound — it applies only to the fallback below (no
-#: incident channel can be built), where 24h keeps a security class delivered
-#: while bounding an unattributable message to one a day, and the engine's
-#: episode-end release re-arms it for a genuinely new episode.
+#: INCIDENT kinds: the normal path is the store's create-once lifecycle — the
+#: episode's first message is the store's own push, and this window is the
+#: RE-ALARM bound while the episode stays open (the `DEDUP` outcome). 24h keeps a
+#: persistent breach from going silent without paging a human every window: the
+#: pre-fix code re-paged hourly (``_claim_notify``'s window expiry) for a breach
+#: that was already tracked by ONE issue, so a single org over its R1 threshold
+#: cost ~24 messages/day. The engine releases the window at episode end, so a
+#: genuinely new episode pages at once — the bound is the episode, never a mute.
+#: The same window bounds the no-incident-channel fallback, where it is the only
+#: bound there is.
 #:
 #: ACTIVITY kinds: the collapse window for the digest. 6h is chosen against the
 #: detector cadence — R3 re-arms every 5 minutes (288 messages/day/scope at
@@ -534,10 +542,11 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
     classes filed nothing at all.
 
     ``DEDUP`` means the human was already told for this incident and the issue is
-    live; the store records the recurrence on the ISSUE (agent-visible, bounded
-    to one a day by #12243) rather than re-paging a human. ``SUPPRESSED`` means an
-    operator paused the kind in ``ops/suppression.json`` — an explicit decision,
-    which is honoured.
+    live: repeats inside the delivery window are folded (the store records them
+    on the ISSUE, agent-visible, bounded to one a day by #12243), and at most one
+    RE-ALARM per window is sent while the episode stays open so a persistent
+    breach cannot go silent. ``SUPPRESSED`` means an operator paused the kind in
+    ``ops/suppression.json`` — an explicit decision, which is honoured.
 
     When no incident can be established at all the message is delivered ANYWAY,
     bounded, and labelled with the reason: a missing tracker must never mute a
@@ -562,10 +571,39 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
             "context": _abuse_context(details),
         }
         try:
-            store.open_incident_state(incident_kind, subject, detail)
+            outcome = store.open_incident_state(incident_kind, subject, detail)
         except Exception as e:  # noqa: BLE001, RUF100
             reason = f"incident filing failed ({redact_safe(e)})"
         else:
+            # The bound is the EPISODE, with a bounded RE-ALARM, and both are the
+            # delivery ledger's (`_claim_delivery`). Arm the window here on EVERY
+            # outcome so the first repeat cannot page again in the same minute:
+            # the create-once path has already pushed the episode's first message
+            # when it FILED, and on DEDUP the ledger alone decides whether the
+            # open incident has earned its next reminder.
+            deliver, folded = _claim_delivery(
+                kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
+            if outcome is OpenOutcome.DEDUP and deliver:
+                # A persistent breach must not go silent: an episode that stays
+                # open re-alarms at most once per window, and the message NAMES
+                # the incident so the human can see it is the same one — the
+                # pre-fix code pushed every window with no reference at all.
+                number = store.incident_record(incident_kind, subject).get(
+                    "issue_number")
+                ref = (f"issue #{number}" if number
+                       else "an open incident with no issue number on record")
+                bot_token = _env("TELEGRAM_BOT_TOKEN")
+                chat_id = _env("TELEGRAM_CHAT_ID")
+                if not (_skip_channel("telegram", bot_token)
+                        or _skip_channel("telegram-chat", chat_id)):
+                    _send_abuse(bot_token, chat_id, _abuse_message(
+                        kind, org_id, details,
+                        attribution=(f"Still open — {ref}. One reminder per "
+                                     f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
+                                     "while the episode stays open; repeats "
+                                     "inside that window are folded (the issue "
+                                     "comment trail is the recurrence record)."),
+                        folded=folded))
             return
 
     deliver, folded = _claim_delivery(kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
