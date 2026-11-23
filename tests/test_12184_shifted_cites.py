@@ -3173,11 +3173,10 @@ def test_a_def_range_pin_ends_on_the_docstring_its_prose_names() -> None:
     """A `def …` span pins BOTH ends, not only its start.
 
     ⛔ WHY. `_PINS` grades the fragment at a range token's START line, and the sibling range arm above
-    only asks that an anchor sit INSIDE the span — so `:7605-7619` could be re-pointed to `:7605-7618`
-    with the whole file green (MEASURED on `#14269`: that mutation, applied consistently to the document
-    and both pin tables, left the file green). The END is therefore DERIVED from the source, so an insert
-    that moves the docstring's closing quote reds this arm instead of leaving the published `:N` stating
-    a line nothing reads.
+    only asks that an anchor sit INSIDE the span — so the PUBLISHED END of a `def` span is read by no
+    row in `_PINS` at all. The END is therefore DERIVED from the source, so an insert that moves the
+    docstring's closing quote reds this arm instead of leaving the published `:N` stating a line nothing
+    reads.
 
     ⛔ THE END IS THE DOCSTRING'S LAST LINE, because that is the span the document publishes. The row
     reads "consumed only by `subject_binding_available()` at `:7605-7619`", and measured on this tree
@@ -3189,9 +3188,19 @@ def test_a_def_range_pin_ends_on_the_docstring_its_prose_names() -> None:
     The START is graded against the same AST rather than against the pin's own claim, so a row that
     names the wrong definition reds here instead of resolving some other `def`'s fragment.
 
-    ⛔ RE-ADDED AFTER TWO BASE MERGES. `main` carries NO `def`-anchored END arm (it pins `:7605-7619` in
-    `_PINS` and grades only that range's START), so this is the file's only reader of a `def` range's
-    second end — which is exactly why dropping it during a resolution would be silent.
+    ⛔ THIS ARM IS *NOT* THE FILE'S ONLY END READER — that claim was FALSE and is corrected here
+    (measured at review of `#14269`). `main` DOES carry a `def`-span END arm,
+    `test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter` (line 2230, landed by
+    `ff2218b6` / `#14249`), which grades the DOCUMENT's cited end against the source. The two arms
+    cover DIFFERENT mutations, and which one sees which is MEASURED rather than assumed — mutate only
+    the `_PINS` row (`:7605-7619` -> `:7605-7618`) and leave the document alone:
+
+        test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter  PASSED
+        test_a_def_range_pin_ends_on_the_docstring_its_prose_names              FAILED
+
+    So `main`'s arm reads the document and this one reads the PIN TABLE; a doc-side re-point is caught
+    there, and a pin-table-only re-point is caught ONLY here. Neither is redundant and neither may be
+    dropped during a resolution on the strength of the other existing.
     """
     checked = 0
     for _doc, token, src_path, _line, fragment in _PINS:
