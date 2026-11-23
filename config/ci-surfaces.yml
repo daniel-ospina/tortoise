@@ -70,6 +70,12 @@ version: 1
 # agree by construction rather than by a hand re-read. ⛔ Every one of those rows is what moved
 # the partition: strip a `2.0` row and the same verb packs a different split at nearly the same
 # seconds, which is why the shard NAMES (not only the seconds) are stated here and graded. ⛔ The
+# agree by construction rather than by a hand re-read. ⛔ What moves the partition is the
+# REGISTRATION, not the `durations:` row: both files' rows carry the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`, so DELETING a row leaves the packing identical (measured — the file stays
+# in `fast_pool()` and falls back to the same 2.0 s), while unregistering either file from its
+# surface re-packs the bins to a different split, at 836.6/836.5 s, six-and-five names. That is
+# why the shard NAMES (not only the seconds) are stated here and graded. ⛔ The
 # MINUTE has stood at 28 m across every reading of this pool from 835.5 s to 836.8 s while the
 # SECONDS moved under it, so NO arithmetic
 # on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
