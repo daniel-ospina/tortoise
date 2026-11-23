@@ -495,7 +495,7 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
                    # i.e. it moves the population this run measures under a header
                    # that would still claim the door held. Default-OFF, so pinning
                    # it OFF matches today's behaviour and needs no value.
-                   "TORTOISE_PARTIAL_GAP_FILL")
+                   "TORTOISE_PARTIAL_GAP_FILL", "TORTOISE_S4_EMBED_JSON")  # #14343 S4 embed JSON
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient

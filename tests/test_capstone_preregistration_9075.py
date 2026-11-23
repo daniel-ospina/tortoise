@@ -2118,7 +2118,16 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # requirement is that no binding of it points anywhere but its own line.
     for symbol, expected_line, entry in (
         ("TORTOISE_STATE_VALUE_VERBATIM", 527, '("TORTOISE_STATE_VALUE_VERBATIM", "1"))'),
-        ("TORTOISE_PARTIAL_GAP_FILL", 498, '"TORTOISE_PARTIAL_GAP_FILL")'),
+        # ⛔ `#14343` put its pin on the SAME source line as the `#11534` entry —
+        # deliberately, because a line inserted inside that tuple moves every
+        # `probes/capstone_measure.py` cite below it — so BOTH symbols bind to
+        # `:498` and share ONE line literal. The binding is what keeps that
+        # deliberate choice from decaying into a bare number nobody re-checks:
+        # splitting the line later reds here until the cite moves with it.
+        ("TORTOISE_PARTIAL_GAP_FILL", 498,
+         '"TORTOISE_PARTIAL_GAP_FILL", "TORTOISE_S4_EMBED_JSON")  # #14343 S4 embed JSON'),
+        ("TORTOISE_S4_EMBED_JSON", 498,
+         '"TORTOISE_PARTIAL_GAP_FILL", "TORTOISE_S4_EMBED_JSON")  # #14343 S4 embed JSON'),
     ):
         bound = {
             int(n) for n in re.findall(

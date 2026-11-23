@@ -1127,6 +1127,20 @@ def test_the_probe_pins_the_lane_and_reads_it_back():
         "`acknowledged_not_a_measurement_seam` — an unclassified read is how an "
         "inherited shell changes the measured population under a door the log "
         "says is pinned (#10983 reviews)")
+    # `#14343`: the SAME classification argument as the cycle-11 entry above, so
+    # it is asserted rather than left to the census. `TORTOISE_S4_EMBED_JSON` is
+    # a RENDER toggle (unset = `{"indent": 1}` = today's bytes; `compact`
+    # re-serialises S4's embed list with `(",", ":")` separators), so it moves
+    # bytes the door's captures are scored over — a PIN is right and
+    # `acknowledged_not_a_measurement_seam` would be the wrong call.
+    assert "TORTOISE_S4_EMBED_JSON" in probe.DOOR_PINNED_OFF, (
+        "TORTOISE_S4_EMBED_JSON is #14343's S4 embed-list layout toggle "
+        "(`extractor_v2._embed_json_kwargs`, read PER CALL). UNSET is the "
+        "shipped default and the only layout the registered corpus was scored "
+        "under; an ambient `=compact` re-serialises that list, changing the "
+        "prompt this door renders and therefore the population it measures, "
+        "under a header that would still claim the pin held (#14343 CI: this "
+        "read was unaccounted and redded the census)")
 
 
 class _Unpoppable(dict):
