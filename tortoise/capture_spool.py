@@ -188,6 +188,20 @@ DRAIN_CAPACITY_YIELDS = 3
 #: measured refusal this issue starts from. One POST at a time is also what makes
 #: the ceiling OBSERVABLE: the value is a property of the loop below, not of a
 #: pool, so no configuration can raise it without editing this file.
+#:
+#: ⛔ WHAT IT ACTUALLY BOUNDS, stated because the first version of this comment
+#: overstated it (#14423 review, P2). It is **1 POST per PASS**, and the claim is
+#: what makes that "per box": every UNTARGETED pass takes the spool claim first, so
+#: concurrent untargeted passes cannot overlap at all. A TARGETED pass
+#: (``only_session_id`` — the live session's own shutdown filing) takes no claim on
+#: purpose, so it can POST while the claim holder is awaiting one; the box's real
+#: worst case is therefore **2** in flight, not 1, and it is 2 only in that
+#: overlap. That is the number this constant should be read as: it is a per-pass
+#: ceiling, and the claim — not this constant — is what serialises the passes.
+#: ⚠️ No test asserts the per-pass property itself: the constant is read by no code
+#: (it is a stated ceiling), and the loop below issues one POST at a time by
+#: construction. The test pins the value and the claim serialisation, and this
+#: note is where the difference is written down rather than implied away.
 DRAIN_MAX_IN_FLIGHT = 1
 # `attempts` is clamped to this before `backoff_delay` computes 2**(n-1): the
 # backoff saturates (30 * 2**10 > 6 h) long before, and a corrupt stored value
