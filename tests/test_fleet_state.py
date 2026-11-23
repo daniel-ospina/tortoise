@@ -3839,9 +3839,18 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     box without a usable `ps` does not red a census that is fine — **or** where an
     OUTSIDE signal killed the fixture's child while the poll ran (`_OUTSIDE_SIGNALS` — the OOM
     killer, an orphan sweep, the shard's own timeout; a killed child has no `argv[0]` for any
-    census to match). Everything else stays a FAIL: a clean exit means the fixture never ran its
-    command, and a CRASH signal (SIGSEGV/SIGABRT/…) means the interpreter under it died — both
-    are the test substrate's fault, not the box's. See the exits far below.
+    census to match). Everything else stays a FAIL, and there are THREE of them — the taxonomy is
+    enumerated here so a reader re-deriving from this header cannot reinstate a skip that the
+    arms below deliberately removed (#12039, review cycle 4):
+
+      * the census **keeps** reporting an error while ``ps`` itself answers — `_CENSUS_ERROR_STREAK`
+        CONSECUTIVE samples, so ONE lost ``ps`` under load is not the census (that is the box,
+        #5049 rule 1, and it does not red a required shard);
+      * a clean exit means the fixture never ran its command (``rc >= 0``);
+      * a CRASH signal (SIGSEGV/SIGABRT/…) means the interpreter under it died.
+
+    The last two are the test substrate's fault, not the box's, and the first is this test's own
+    subject. See the exits far below.
 
     ⛔ IT IS NOT A COPY OF `sleep` ANY MORE (measured on the `ubuntu-26.04` hosted
     runner `GitHub Actions 1000848497`, `test (c)`, head `70116a870dbb`). On that image
@@ -4257,3 +4266,35 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
         assert calls["n"] >= _CENSUS_ERROR_STREAK, "the FAIL must wait for the streak, not one sample"
     if census_kind == "once":
         assert calls["n"] > _CENSUS_ERROR_STREAK, "a single error must not decide the verdict"
+
+
+def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
+    """The docstring's skip/FAIL taxonomy must name the arm the code actually has (#12039 cycle 4).
+
+    Review cycle 4 at `70caad8392` measured this drift in the VERY block the previous commit
+    repaired: the header said the test skips where the process table cannot be read at all and
+    listed only two FAIL arms, while the code FAILs the census error on a box whose ``ps``
+    answers — a third arm. A reader who re-derives the skip rule from that header writes
+    ``pytest.skip(...)`` on any census error and re-creates the permanent green the fix removes:
+    a false PASS that no instrument reds, since neither static nodeid manifest carries this file
+    and the INCONCLUSIVE family trips no skip-guard.
+
+    Text, not behaviour, on purpose. The ARMS' behaviour is pinned at their own raise sites by
+    `test_long_path_census_expiry_splits_on_the_fixture_exit_kind` and
+    `test_long_path_census_error_is_the_census_only_when_it_persists`; what nothing else pins is
+    the prose a reader derives from. Both tokens are absent from the header this finding was
+    raised against — measured at `70caad8392`: `'_CENSUS_ERROR_STREAK' not in doc` and
+    `'_ps_answers' not in doc` — and the streak token is still absent at `16b24c83e9`, which
+    narrowed the skip but never named the arm. So each guard reds on the version of the drift it
+    exists for rather than passing vacuously.
+    """
+    doc = test_pi_processes_sees_a_real_long_path_lane.__doc__ or ""
+    # The third FAIL arm, named by the constant that decides it — and the STREAK is the point:
+    # one lost `ps` under load is the box (#5049 rule 1), not the census.
+    assert "_CENSUS_ERROR_STREAK" in doc, (
+        "the header stopped naming the census-error FAIL arm, so a reader re-deriving the skip "
+        "rule from it can reinstate `pytest.skip(...)` on any census error (#12039)")
+    # And the census-error SKIP is narrowed, never "the table cannot be read" on its own.
+    assert "_ps_answers" in doc, (
+        "the header's census-error skip must also require `_ps_answers()` to come back empty; "
+        "`where the process table cannot be read at all` alone is the permanent-green drift")
