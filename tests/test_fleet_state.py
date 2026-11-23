@@ -3879,7 +3879,7 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     census cannot see a live lane. Verified red with the flag removed.
 
     A real process carrying an arbitrary argv[0] (never a `#!` script — the kernel
-    rewrites argv[0] to the interpreter, which `_pi_pids_from_ps` documents). SKIPS on THREE
+    rewrites argv[0] to the interpreter, which `_pi_pids_from_ps` documents). SKIPS on FOUR
     paths and no more: where the process table cannot be read at all, which means the reader
     reports an error AND ``ps`` itself cannot answer (`_ps_answers()` asks about our own pid, so a
     box without a usable `ps` does not red a census that is fine); where an
@@ -4073,7 +4073,7 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     # (SIGKILL from an OOM sweep) plus a simultaneous `ps` failure reported
                     # `HarnessDefect … the census's own invocation is what failed` — the exact
                     # inversion this PR exists to stop, and the header promises that kill as
-                    # one of the three skip paths. A dead child ends the poll; the four arms
+                    # one of the FOUR skip paths. A dead child ends the poll; the four arms
                     # below classify it.
                     if _child_exited(proc):
                         break
@@ -4787,6 +4787,32 @@ def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
         "the header stopped declaring that the ALIVE arm OVERRIDES #5049 rule 1, so a reader "
         "holding `tests/_verdict.py` reads a FAILING wall-clock expiry as an oversight and "
         "turns it into a skip — the permanent green this file's arms exist to prevent (#12039)")
+    # ⛔ AND THE COUNT ITSELF, NOT ONLY THE NAMES (#12039 cycle 10, P2). The paragraph below declares
+    # the count "part of the contract" and NOTHING compared it to the code: the header said "SKIPS
+    # on THREE paths" while enumerating four, twice, one sentence after the declaration. Names
+    # cannot catch that — so the declared number is parsed out of the header and checked against the
+    # skip exits actually present in the function, by AST.
+    words = {"ZERO": 0, "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5}
+    tail = taxonomy.split("SKIPS on ", 1)
+    assert len(tail) == 2, "the header stopped declaring how many skip paths the test has"
+    word = tail[1].split()[0].strip("*_ `")
+    assert word in words, f"unreadable skip-path count {word!r} in the header"
+    fn = next(
+        n for n in ast.walk(ast.parse(Path(__file__).read_text()))
+        if isinstance(n, ast.FunctionDef)
+        and n.name == "test_pi_processes_sees_a_real_long_path_lane")
+    exits = 0
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name in ("skip", "inconclusive"):
+            exits += 1
+    assert words[word] == exits, (
+        f"the header declares {words[word]} skip paths but the test body has {exits} skip exits "
+        f"(pytest.skip + inconclusive) — the count is contractual and this is the drift the "
+        f"paragraph above it forbids (#12039)")
 
 
 def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
