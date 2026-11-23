@@ -1935,16 +1935,27 @@ def _is_builtins_dict_of(node: ast.AST, names: frozenset[str],
     # are REFUSED). This predicate was the one composition arm the cycle-14 splice fix missed:
     # it read `node.args`, where a two-element splice is ONE argument, so the module name in
     # position ZERO was invisible.
+    # ⛔ AND THE DOTTED RECEIVER IN THE ARGUMENT POSITION TOO (#14326 review cycle 16, EACH
+    # MEASURED GREEN **and LIVE**: `vars(builtins.dict)["copy"](builtins.__dict__)`,
+    # `_f = vars(builtins.dict)["get"]` and `getattr(builtins.dict, "__dict__")["get"](m, "exec")`
+    # all executed the read, while `vars(dict)` / `dict.__dict__` / `getattr(dict, "__dict__")`
+    # are REFUSED). `builtins.dict` IS `dict` — the Attribute arm twenty lines above already
+    # accepts it, and the module `builtins` is already in `names`, so the receiver rule is the
+    # SAME one and is applied here rather than re-spelled.
+    def _module_or_dict_name(expr: ast.AST) -> bool:
+        if isinstance(expr, ast.Name):
+            return expr.id in names
+        return (isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name)
+                and expr.value.id in names and expr.attr in names)
+
     _positions = _spliced_positions(node.args)
     if (isinstance(node.func, ast.Name)
             and (node.func.id == "vars" or node.func.id in launderers)
-            and len(_positions) == 1 and isinstance(_positions[0], ast.Name)
-            and _positions[0].id in names):
+            and len(_positions) == 1 and _module_or_dict_name(_positions[0])):
         return True
     return bool(isinstance(node.func, ast.Name)
                 and (node.func.id == "getattr" or node.func.id in launderers)
-                and len(_positions) >= 2 and isinstance(_positions[0], ast.Name)
-                and _positions[0].id in names
+                and len(_positions) >= 2 and _module_or_dict_name(_positions[0])
                 and "__dict__" in _string_keys_of(_positions[1], consts))
 
 
@@ -2065,13 +2076,14 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                   # MEASURED GREEN with `copy.deepcopy(builtins.__dict__, {})` — the positional
                   # `memo` — while the bare one-argument form was REFUSED).
                   # ⛔ THE ARITY IS READ ON THE RAW NODE, AND THAT IS MEASURED (#14326 review
-                  # cycle 15): `len(_positions)` and `len(node.args)` differ only for a
-                  # multi-element splice, and `copy.copy(*(m, {}))` / `copy.deepcopy(*(m, {}))`
-                  # — the only inputs where they disagree — are a TypeError and a REAL CALL
-                  # respectively. Cycle 14 changed both tokens; the `deepcopy` half is
-                  # unpinnable no-op and was REVERTED, because no row can distinguish it and
-                  # this file deletes what no mutant can red. What actually closed the shape is
-                  # the POSITION read below (`_positions[0]`), which its own row reds.
+                  # cycles 15-16): `len(_positions)` and `len(node.args)` disagree for an
+                  # EMPTY literal splice (`_f(*())`: raw 1, spliced 0) and for a multi-element
+                  # one (`copy.deepcopy(*(m, {}))`, a real call; `copy.copy(*(m, {}))`, a
+                  # TypeError). ⛔ Cycle 15 wrote "for every input", which cycle 16 falsified.
+                  # No row can move on either token — every consumer that needs the spliced
+                  # count also guards with `and _positions` — so both are REVERTED and the
+                  # comment says so. What actually closed the shape is the POSITION read below
+                  # (`_positions[0]`), which its own row reds.
                   and ((node.func.attr == "copy" and len(node.args) == 1)
                        or (node.func.attr == "deepcopy" and len(node.args) >= 1)))
                  # ⛔ AND THE ALIASED CALLEE (#14326 review cycle 6, MEASURED GREEN:
@@ -4123,6 +4135,19 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
         elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) \
                 and node.value is not None:
             targets, value = [node.target], node.value
+        # ⛔ AND AN IN-PLACE FILL, WHICH IS THE SAME BIND (#14326 review cycle 16, EACH MEASURED
+        # GREEN **and LIVE**: `_d = {}` then `_d.update(builtins.__dict__)`,
+        # `_d.__init__(m)`, `_d.__ior__(m)` and `_u = _d.update; _u(m)` — the last through the
+        # alias — while `_d |= m` is RED and `{}.__ior__(m)` is a REFUSED row). After the call
+        # `_d` holds exactly what `_d |= m` puts there, so the TARGET is bound to the ARGUMENT.
+        # Restricted to the fill spellings this file already enumerates as mutators; a
+        # `setdefault(k, v)` inserts a VALUE rather than the mapping and is unaffected.
+        elif (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+              and isinstance(node.value.func, ast.Attribute)
+              and node.value.func.attr in {"update", "__init__", "__ior__"}
+              and node.value.args):
+            binds.append((node.value.func.value, node.value.args[0]))
+            continue
         elif loops and isinstance(node, (ast.For, ast.AsyncFor)):
             for source in _loop_target_sources(node.iter):
                 binds.append((node.target, source))
@@ -7925,6 +7950,18 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # GREEN **and LIVE**): `_is_builtins_dict_of` read the raw `args`, so a two-element
         # literal splice hid the module name in position zero and `vars(*(builtins,))` composed
         # the mapping anyway.
+        # ⛔ THE DOTTED RECEIVER AND THE IN-PLACE FILL (#14326 review cycle 16, EACH MEASURED
+        # GREEN **and LIVE**): `builtins.dict` IS `dict`, and `_d.update(m)` puts in `_d` exactly
+        # what the RED `_d |= m` does.
+        "a MAPPING composed of `vars(builtins.dict)`": (
+            '    import builtins\n'
+            '    vars(builtins.dict)["copy"](builtins.__dict__)'
+            '["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY filled in place by `update`": (
+            '    import builtins\n'
+            '    _d = {}\n'
+            '    _d.update(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a MAPPING composed by `vars` behind a literal splice": (
             '    import builtins\n'
             '    _d = vars(*(builtins,))\n'
@@ -12032,6 +12069,19 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`_c = builtins.__dict__.copy; _c()`": (
             'import builtins', '_c = builtins.__dict__.copy', '_d = _c()',
             f'_d["exec"]("results = {read}")'),
+        # ⛔ AND A FILL METHOD BOUND TO A NAME BEFORE THE CALL (#14326 review cycle 16,
+        # MEASURED GREEN **and LIVE**: `_u = _d.update; _u(builtins.__dict__)`; the INLINE
+        # `_d.update(builtins.__dict__)` is RED). This is the SAME class the two rows above
+        # declare — a method VALUE extracted from an object produces the object's contents
+        # without the file ever naming the object again, and `_con = dict(builtins.__dict__)`
+        # shows the bound-VALUE route terminates no more than the callee one. It is declared,
+        # not closed: the fixpoint binds `_u` to the Attribute `_d.update`, whose receiver is a
+        # NAME that is not itself the mapping — so closing it means teaching the predicate to
+        # follow a bound method back to `__self__`, i.e. a different question, not another
+        # spelling.
+        "`_u = _d.update; _u(builtins.__dict__)`": (
+            'import builtins', '_d = {}', '_u = _d.update',
+            '_u(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
         # ⛔ AND A SELECTION OUT OF A LITERAL CONTAINER (#14326 round 35 review cycle 5,
         # MEASURED GREEN: `[builtins.__dict__][0]["exec"](<read>)`). Not the callee-composition
         # class and not an arbitrary constructor — it is a mapping reached by indexing a
