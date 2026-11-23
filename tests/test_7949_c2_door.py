@@ -1127,6 +1127,20 @@ def test_the_probe_pins_the_lane_and_reads_it_back():
         "`acknowledged_not_a_measurement_seam` — an unclassified read is how an "
         "inherited shell changes the measured population under a door the log "
         "says is pinned (#10983 reviews)")
+    # `#14343`: the SAME classification argument as the cycle-11 entry above, so
+    # it is asserted rather than left to the census. `TORTOISE_S4_EMBED_JSON` is
+    # a RENDER toggle (unset = `{"indent": 1}` = today's bytes; `compact`
+    # re-serialises S4's embed list with `(",", ":")` separators), so it moves
+    # bytes the door's captures are scored over — a PIN is right and
+    # `acknowledged_not_a_measurement_seam` would be the wrong call.
+    assert "TORTOISE_S4_EMBED_JSON" in probe.DOOR_PINNED_OFF, (
+        "TORTOISE_S4_EMBED_JSON is #14343's S4 embed-list layout toggle "
+        "(`extractor_v2._embed_json_kwargs`, read PER CALL). UNSET is the "
+        "shipped default and the only layout the registered corpus was scored "
+        "under; an ambient `=compact` re-serialises that list, changing the "
+        "prompt this door renders and therefore the population it measures, "
+        "under a header that would still claim the pin held (#14343 CI: this "
+        "read was unaccounted and redded the census)")
 
 
 class _Unpoppable(dict):
@@ -1194,6 +1208,54 @@ def test_the_probe_refuses_a_LEAKED_PINNED_OFF_switch(monkeypatch):
         assert "REFUSED" in str(exc.value) and key in str(exc.value), (
             f"a leaked {key} was accepted: the run would declare a pinned-off "
             f"seam it did not actually run (got {exc.value})")
+
+
+def test_the_door_SAYS_SO_when_it_discards_an_armed_pinned_off_switch(capsys,
+                                                                     monkeypatch):
+    """⛔ The DISCLOSURE, asserted — the whole point of the change it shipped with.
+
+    #14343 put `TORTOISE_S4_EMBED_JSON` on `DOOR_PINNED_OFF`, and four documents
+    told an operator to arm it and "re-run the capstone in the same session" to
+    prove the bars hold. `measured_arm()` pops it, so that run scored the DEFAULT
+    render while the log's `pinned_off` read-back simply said `None` and nothing
+    said the exported flag had been discarded — a fabricated green for anyone who
+    believed the armed layout had been validated (review cycle 10, P1).
+
+    `_pin_off_the_door` announces the discard on stderr. Without this test the
+    announcement is unpinned: reverting the call site to a bare
+    `os.environ.pop(key, None)` (and deleting the function) left the suite green,
+    because the leak tests only assert the POP semantics, which are identical
+    either way (review cycle 15, P3).
+    """
+    probe = _load_probe()
+    key = "TORTOISE_S4_EMBED_JSON"
+    assert key in probe.DOOR_PINNED_OFF, (
+        "this test pins the disclosure for the #14343 render toggle; if it left "
+        "DOOR_PINNED_OFF the announcement below is moot")
+
+    # NEGATIVE CONTROL FIRST: an unset switch must be SILENT, or the positive
+    # assertion below would pass for an implementation that always prints.
+    monkeypatch.delenv(key, raising=False)
+    with probe.measured_arm():
+        pass
+    assert "PINNED-OFF OVERRIDE" not in capsys.readouterr().err, (
+        "the door announced a discard for a switch that was never armed")
+
+    # THE POSITIVE: armed in the shell, pinned OFF by the door, and SAID SO.
+    monkeypatch.setenv(key, "compact")
+    with probe.measured_arm() as observed:
+        assert observed.get(key) in (None, ""), (
+            f"the door did not pin {key} OFF for the run (read back "
+            f"{observed.get(key)!r})")
+    err = capsys.readouterr().err
+    assert "PINNED-OFF OVERRIDE" in err, (
+        f"an armed {key} was discarded IN SILENCE: a run that exported it would "
+        f"score the default render while its log read back `None`, and nothing "
+        f"would tell the operator the flag they armed never applied "
+        f"(stderr was {err!r})")
+    assert key in err and "compact" in err, (
+        f"the notice must name the switch and the value it DISCARDED, so the "
+        f"operator can see which arm they did not measure (stderr was {err!r})")
 
 
 def test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run():
@@ -2290,3 +2352,42 @@ def test_the_run_REFUSES_a_bypassed_capture_at_the_CALL_SITE_that_arms_the_witne
         f"arm never runs it and a `try/except SystemExit` arm swallows the very "
         f"refusal it exists to make, while the run still writes a table saying "
         f"`measured: true` and exits 0 (#10983 review P2 at 7eb4a042)")
+
+
+def test_an_armed_pinned_off_switch_is_ANNOUNCED_before_it_is_discarded(monkeypatch):
+    """Pinning `TORTOISE_S4_EMBED_JSON` OFF must SAY so, not discard it silently.
+
+    ⛔ Review cycle 11 (P3): the notice is the ENTIRE point of `#14343`'s
+    `_pin_off_the_door` change — four documents told an operator to arm the lever
+    and "re-run the capstone to prove the bars hold", while the door popped it
+    for the whole run. Without this case, reverting the call site to a bare
+    `os.environ.pop(key, None)` and deleting the function left every test in this
+    file green: the pop semantics are identical either way, so only the NOTICE
+    distinguishes a discarded arm from a silent one.
+
+    The pin itself is a registered decision (`preregistration.json`: UNSET is the
+    only state the corpus was scored under) and this case does not weaken it —
+    it asserts that an operator who armed the switch is TOLD the run measured the
+    pinned value instead.
+    """
+    probe = _load_probe()
+    assert "TORTOISE_S4_EMBED_JSON" in probe.DOOR_PINNED_OFF, (
+        "the lever is no longer a pinned-off switch — if that is deliberate, the "
+        "documents that promise `arm it and re-run` are finally true and this "
+        "case must be replaced, not deleted")
+    monkeypatch.setenv("TORTOISE_S4_EMBED_JSON", "compact")
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        probe._pin_off_the_door("TORTOISE_S4_EMBED_JSON")
+    said = buf.getvalue()
+    assert "PINNED-OFF OVERRIDE" in said, (
+        "an armed pinned-off switch was discarded SILENTLY — the run then scores "
+        "the pinned value while the operator believes the armed one was measured")
+    assert "TORTOISE_S4_EMBED_JSON" in said and "compact" in said, (
+        "the notice must name the switch AND the value it discarded")
+    assert "os.environ" not in said  # a message, not a repr dump
+    import os as _os
+    assert _os.environ.get("TORTOISE_S4_EMBED_JSON") is None, (
+        "the notice must not replace the pop — the pin still has to HOLD")

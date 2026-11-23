@@ -3800,32 +3800,49 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: `poll_started`) plus FIVE inside the sample (`sample_started`, the duration read,
 #: `streak_started`, the span read, the error branch's deadline check) is SEVEN; this is
 #: deliberately BELOW the true count, so a step derived from it still carries the clock with one
-#: read of slack. ⛔ NOT A GUESS, BUT NOT A STATIC PIN EITHER (#12039 cycle 13, F1): "typoing it
-#: must red the premise" is true in only ONE direction, and this file measures the other. RAISING
-#: it 6 -> 7 leaves all 184 green — as a DIVISOR of `once_slow`'s second term it LOWERS that term,
-#: so the `max()` absorbs the typo (premise (a)'s term dominating; measured at `:4659`), and in
-#: `death_after_streak`'s premise (b) it is a MULTIPLIER, where `7 * 0.5 = 3.5 < 10` passes exactly
-#: as `6 * 0.5 = 3.0` does. Only a raise to `>= 20` (`20 * 0.5 = 10.0` is no longer `< 10`) or a
-#: lowering large enough to move the `max()` reds. The behavioural pins are the `once_slow` and
-#: `death_after_streak` ROWS, not a bare assertion on this constant.
+#: read of slack. ⛔ NOT A GUESS, BUT NOT A STATIC PIN EITHER (#12039 cycle 13, F1) — for a TYPO
+#: in either direction. MEASURED on copies at this head, implementation unmutated, only this
+#: constant moved:
+#: `6 -> 7` leaves `184 passed`, `19` leaves `184 passed`, and `1` and `2` also leave `184 passed`
+#: (they DO move the `max()` below — `10/1 + 0.1 = 10.1` — and still red nothing, because the step
+#: has to pass `_CENSUS_SAMPLE_TIMEOUT_S = 30.0` to change a verdict, which this integer domain
+#: cannot reach). Only a raise to `>= 20` reds (`20 * 0.5 = 10.0` is no longer `< 10`) — MEASURED,
+#: `11 failed`, the premise-(b) assertion firing across all 11 params. The behavioural pins are the
+#: `once_slow` and `death_after_streak` ROWS, not a bare assertion on this constant.
 _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 
 #: How many `time()` reads span the STREAK at the sample where the count+span conjunction fires
 #: (`death_after_streak`'s premise (a)): `sample_started` -> the span read is FIVE reads, which
 #: is what `_CENSUS_ERROR_MIN_SPAN_S / 5 + 0.1` is derived from.
-#: ⛔ AND IT HAS NO STATIC PIN (#12039 cycle 13, F1): the guard that looks like one —
+#: ⛔ AND IT HAS NO STATIC PIN, SO A TYPO HERE RETIRES THE ORDERING GUARD SILENTLY (#12039 cycle
+#: 13, F1). The guard that looks like a pin —
 #: `_LONG_PATH_STREAK_TIME_CALLS * death_step_s >= _CENSUS_ERROR_MIN_SPAN_S` — expands to
-#: `0.1 * K >= 0` and is true for every K, because the divisor cancels against its own product.
-#: A typo here is therefore INVISIBLE TO THE PREMISES: 5 -> 8 makes `death_step_s` 0.35 s, the
-#: streak spans `5 * 0.35 = 1.75 s < 2.0` at the death sample, and both premises stay green
-#: (MEASURED: 184 passed, implementation unmutated).
-#: ⛔ BUT THE ARM DOES **NOT** GO VACUOUS, which is the part worth knowing before "fixing" this
-#: by assuming it does. This arm's census errors on EVERY sample and the fixture dies from sample
-#: 2 on, so a span the typo cannot clear at the death sample is cleared one sample later and the
-#: conjunction fires anyway — the ordering stays observable, one sample further out. MEASURED at
-#: `K = 8`: the ordering mutant (`_child_exited` moved below the conjunction) still REDS the row
-#: (`2 failed`), exactly as it does at `K = 5`. The typo moves WHEN the row discriminates, not
-#: WHETHER it does. So the behaviour is the pin here — the assertion was only ever dead weight.
+#: `0.1 * K >= 0` and is true for every positive K, because the divisor cancels against its own
+#: product. MEASURED at this head, on copies, restored after each run:
+#:   K = 8, implementation unmutated      -> `184 passed`  (the deleted assertion saw nothing)
+#:   K = 8, `_child_exited` moved BELOW the conjunction -> `184 passed`  (the row goes VACUOUS)
+#:   K = 5, same mutant                    -> `1 failed`   (the row reds — it IS the real pin)
+#: ⛔ MEASURE THE MUTANT YOU NAME (#12039 cycle 13). An earlier version of this paragraph reported
+#: "still `2 failed` at `K = 8`" from a mutant that made the check UNREACHABLE rather than moving it
+#: below the gate — that is DELETE-entirely, not a reordering. It reds at every K at which the file
+#: is green unmutated, for a different reason (nothing observes the death), and the two are NOT
+#: interchangeable: the difference is the finding.
+#: WHY the typo is NOT survivable: with the gate not yet qualified at the death sample the poll
+#: keeps going; a moved-below check then meets the already-dead child on that same sample and
+#: breaks to the same outside-signal SKIP the shipped order produces — both orderings agree, and
+#: the arm can no longer distinguish them. (Deleting the check instead reds the row on every K at
+#: which the file is green unmutated — for a DIFFERENT reason, since nothing observes the death at
+#: all — which is exactly why the wrong mutant looked reassuring. ⛔ SCOPE A CLAIM TO THE K IT WAS
+#: MEASURED AT: the deletion raises on the death sample itself at the shipped `K = 5`
+#: (`on 2 consecutive samples over 2.50s`) and only one sample later from `K = 7` (`K = 8`: count 3,
+#: span 3.15 s), and at `K = 1` nothing at all is attributable — premise (b) below reds the FILE
+#: with no mutant applied, the same `11 failed, 173 passed` either way.)
+#: SO: no static assertion can pin this constant. The `death_after_streak` ROW pins the ORDERING
+#: wherever the gate is satisfied at the death sample — `5 * (2/K + 0.1) >= 2.0`, i.e. `K <= 6` —
+#: MEASURED: `1 failed` at `K` = 2, 3, 4, 5, 6, and `184 passed` (vacuous) at `K` = 7 and 8. A typo
+#: past that boundary therefore retires the guard silently, with nothing static to red. ⛔ SCOPE IT
+#: THAT WAY rather than to "the shipped value": the row covers a RANGE of K, and writing the range
+#: as one point is the same over-claim in the safe direction.
 _LONG_PATH_STREAK_TIME_CALLS = 5
 
 
@@ -4694,20 +4711,25 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     # the constant is what makes the assertion unfalsifiable on that axis (agent-infra#3442 rule 3
     # — an assertion that cannot vary under ANY mutation of the diff is dead weight that actively
     # misleads the next reader into thinking the guard is covered).
-    # ⛔ SO `_LONG_PATH_STREAK_TIME_CALLS` (:3823) HAS NO STATIC PIN — and that is a NON-FINDING for
-    # the guard, which is why this premise is stated rather than "fixed" with a cleverer assertion.
-    # MEASURED on copies at this head: typo it 5 -> 8 and the file stays at `184 passed` (the
-    # assertion is blind to it, exactly as the algebra above says), BUT the ordering mutant still
-    # REDS the `death_after_streak` row (`2 failed`, the same count as at `K = 5`). This arm's census
-    # errors on EVERY sample and the fixture dies from sample 2 on, so a span that one sample cannot
-    # clear is cleared on the next and the conjunction fires anyway: the typo moves WHEN the row
-    # discriminates, never WHETHER. The ROW is therefore a real pin and it survives the typo; the
-    # removed assertion pinned nothing and only told the next reader otherwise.
-    # WHAT IS FALSIFIABLE IS THE BEHAVIOUR: move `_child_exited` below the conjunction and the
-    # `death_after_streak` row REDS (the PR body records `1 failed`). That is this premise's pin —
-    # stated here instead of shadowed by a tautology, exactly as `once_slow`'s premise (b) was
-    # corrected one cycle ago (block above). Premise (b) below DOES stay an assertion: there both
-    # sides are independent constants, so it can fail.
+    # ⛔ SO `_LONG_PATH_STREAK_TIME_CALLS` HAS NO STATIC PIN — and, unlike the `once_slow` premise
+    # (b) above, its typo is NOT survivable. This premise is therefore STATED, not asserted, and
+    # the absence of a pin is named rather than papered over with a cleverer assertion that also
+    # cannot fail. MEASURED on copies at this head, restored after each run:
+    #   K = 8, implementation unmutated                     -> `184 passed` (the assertion: blind)
+    #   K = 8, `_child_exited` moved BELOW the conjunction   -> `184 passed`
+    #        ^ the row goes VACUOUS: `death_step_s` is 0.35 s, the streak spans `5 * 0.35 = 1.75 s
+    #          < 2.0` at the death sample, the gate is not satisfied, and the moved-below check then
+    #          meets the already-dead child ON THAT SAME SAMPLE and breaks to the same outside-signal
+    #          SKIP the shipped order produces — so both orderings agree and nothing discriminates.
+    #   K = 5, same mutant                                   -> `1 failed`  (the row IS the pin)
+    # ⛔ MEASURE THE MUTANT YOU NAME (#12039 cycle 13): a "reorder" mutant that DELETES the check
+    # instead reports `2 failed` at BOTH values, because nothing observes the death at all — and that
+    # is what made an earlier version of this comment claim the typo was survivable. It is not.
+    # WHAT IS FALSIFIABLE IS THE BEHAVIOUR, at the shipped value: move `_child_exited` below the
+    # conjunction and the `death_after_streak` row REDS (`1 failed` — the PR body's own number).
+    # That is this premise's pin — stated here instead of shadowed by a tautology, exactly as
+    # `once_slow`'s premise (b) was corrected one cycle ago (block above). Premise (b) below DOES
+    # stay an assertion: there both sides are independent constants, so it can fail.
     # (#12039 cycle 11, F2, still honoured for (b): at `_CENSUS_ERROR_MIN_SPAN_S >= 7.84` the poll
     # broke on the FIRST sample (clock 11.68 vs deadline 11.67), `child.die_with()` never ran,
     # `healthy_samples == 0` and the NEVER-ANSWERED skip satisfied the row's family-only marker —
