@@ -1851,7 +1851,18 @@ SWEEP_NAMES = 66
 #: ABOVE ARE KEPT, this file's standing ground rule. The pair below is `--repin`'s own output on
 #: the RESOLVED merge tree, never inherited from either parent (they disagree: this branch's
 #: provisional `11881` against `main`'s `11886`) and never arithmetic across them.
-SWEEP_RESIDUE = (11896, "ea44c5f732d2a97d")
+#: ⛔ RE-PINNED FOR `main`'s OWN DRIFT ON THE REBASED TREE (#14395). Rebased onto `origin/main`
+#: `0fbfbb5b210`, `--repin` reads **11898** (`8cf59d52af09e536`) over this pin's `11896` — and
+#: **`origin/main`'s OWN tree reads that same `(11898, '8cf59d52af09e536')`**, measured by running
+#: `--repin` in a detached worktree at `0fbfbb5b210` with no branch content in it, where `--check`
+#: exits **1** naming the identical observed/pinned pair. `python-ci.yml`'s "The privatisation
+#: sweep's check reports no typed reference left" step runs exactly that command, so `main` is RED
+#: on that step and this PR inherits the red. Both rows are therefore `main`'s, NOT this lane's:
+#: this lane's only tracked change is `tests/test_14192_read_wave_tool.py`, and `--repin` prints
+#: the same pair with and without it. The pair below is that re-derivation on the rebased tree, and
+#: the extent figure in `tests/test_sdk_privatise_sweep.py` was re-walked in the same pass because
+#: those arms grade it in BOTH directions.
+SWEEP_RESIDUE = (11898, "8cf59d52af09e536")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1741 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1752 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -278,7 +278,10 @@ def _residue_block() -> str:
     — and this fold of `origin/main` `9aaaff10acd` kept BOTH sides again: `main`'s own blob read 1400
     there (its `#14283` zero-net re-pin rewrites measured 1328, and `#14284`'s merge of `main`
     `38f2ab7fc594` re-read 1363 on ITS tree), while the RESOLVED run here reads 1741, re-measured by
-    this walk rather than inherited from either side,
+    this walk rather than inherited from either side, and the `#14395` re-pin paragraph recording
+    `main`'s OWN two-row drift — measured 11898 against a pin of 11896 by running `--repin` in a
+    detached worktree at `origin/main` `0fbfbb5b210` — took the run to 1752, which is the figure
+    above,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
