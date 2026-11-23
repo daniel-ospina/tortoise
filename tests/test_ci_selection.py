@@ -19612,3 +19612,194 @@ def test_a_sentry_only_diff_runs_the_startup_init_guard():
         "what covers the `_lifespan` call site"
     )
 
+
+#: Which workflow each row that is NOT a `python-ci.yml` job comes from. Every other row in
+#: the record's tables resolves against `python-ci.yml`. ⛔ The mapping is asserted EXACT below:
+#: a row in neither is a hard failure, never a skip — a skipped row is precisely how the `cap`
+#: column drifted with every sibling pin green (#11195 review, P1).
+_WALL_CLOCK_ROW_WORKFLOWS = {
+    "legal-e2e": "ci.yml",
+    "docs": "ci.yml",
+    "pricing-artifact": "ci.yml",
+    "test-isolation": "ci.yml",
+    "license-surface": "ci.yml",
+    "ai-review-gate": "ai-review-gate.yml",
+    "drift-guard": "drift-guard.yml",
+}
+
+#: `python-ci.yml` jobs the record's table deliberately publishes no single `cap` for.
+_WALL_CLOCK_TABLE_EXEMPT_JOBS = {
+    # Shard AGGREGATES: the table publishes `test (a…i)` / `test-slow (a…e)` as ONE row for 9
+    # and 5 jobs that each carry their own `timeout-minutes`, so there is no single shipped
+    # cap for a published cell to be compared against (their bounds are pinned instead by
+    # `test_every_bounded_pytest_job_caps_above_its_watchdog` and the shard-budget pin).
+    "test",
+    "test-slow",
+    # `push`-only and `needs: test`, so it never runs on a PR and is outside the merge gate's
+    # `pull_request`-dominated measurement set that §1 is derived from.
+    "canary-streak",
+}
+
+def _workflow_jobs(workflow: str) -> dict:
+    """`{job: job-doc}` for one file under `.github/workflows/`."""
+    return yaml.safe_load(
+        (REPO / ".github" / "workflows" / workflow).read_text())["jobs"]
+
+def _wall_clock_cap_rows(text: str | None = None) -> dict[str, int]:
+    """`{job: published cap}` for every 6-column row that publishes one.
+
+    The CAP-only sibling of `_wall_clock_table_rows`. That reader also requires a measured
+    `max`, which drops `ci-introduced-failure` ("not yet measured") — and its cap is exactly
+    what this pin is about, since a cap can move without the max moving. The job-cell filter
+    is the same one, so the shard aggregate rows stay excluded by construction.
+
+    `text` is accepted so a control can feed a MUTATED document; it defaults to the real one.
+    """
+    text = ((REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+            if text is None else text)
+    rows: dict[str, int] = {}
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in line.split("|")[1:-1]]
+        if len(cells) != 6:
+            continue
+        named = re.fullmatch(r"`([a-z0-9][a-z0-9-]+)`(?: \(.*\))?",
+                             cells[0].replace("**", ""))
+        cap_digits = re.findall(r"\d+", cells[5].replace("**", ""))
+        if named and cap_digits:
+            rows[named.group(1)] = int(cap_digits[0])
+    return rows
+
+def test_every_cap_the_record_publishes_is_the_cap_its_workflow_ships():
+    """P1 (#11195 review): §1's `cap` column was pinned by NOTHING.
+
+    Reproduced by the reviewer, not taken on trust: patching the `test-record-postgres` row's
+    cap cell back to the PRE-#11063 value the sibling pins exist to forbid
+
+        | `test-record-postgres` | 23 | 1.62 | 14.61 | 15.43 | **50** |
+
+    left `tests/test_ci_selection.py -k 'wall_clock or arm_1'` at **2 passed** — because
+    `_wall_clock_cap_claims` scans `X → Y` prose MOVES only, and the arm-1 pin reads a
+    published cap for the rows arm 1's bullet NAMES plus any row called "arm-1 shaped" (and
+    no row is). The table's `cap` column therefore could re-assert the exact cap the code
+    reversed while every wall-clock pin stayed green — the defect state this PR exists to fix.
+
+    So the column is compared to the workflow, for EVERY row, mechanically: a row resolves to
+    its own workflow (`_WALL_CLOCK_ROW_WORKFLOWS` for the non-`python-ci.yml` tables), and the
+    published number must equal that job's literal `timeout-minutes`. Coverage is asserted in
+    both directions — a row that resolves to no capped job reds, and a `python-ci.yml` job the
+    table silently STOPS publishing a row for reds too — so neither a wrong number nor a
+    deleted row can shrink this pin into passing.
+    """
+    python_ci = _load_python_ci()["jobs"]
+    doc_rows = _wall_clock_cap_rows()
+    assert doc_rows, (
+        "ci-wall-clock.md publishes no comparable `cap` cell at all — this pin would assert "
+        "nothing, so re-anchor it rather than letting it pass on an empty table")
+
+    unresolved: list[str] = []
+    mismatched: list[str] = []
+    for job, published in sorted(doc_rows.items()):
+        workflow = _WALL_CLOCK_ROW_WORKFLOWS.get(job, "python-ci.yml")
+        jobs = python_ci if workflow == "python-ci.yml" else _workflow_jobs(workflow)
+        job_doc = jobs.get(job)
+        shipped = job_doc.get("timeout-minutes") if isinstance(job_doc, dict) else None
+        if not isinstance(shipped, int) or shipped <= 0:
+            unresolved.append(
+                f"`{job}` — the table publishes {published} m, but {workflow} has no job "
+                f"`{job}` with a literal `timeout-minutes`")
+            continue
+        if shipped != published:
+            mismatched.append(
+                f"`{job}` — the table publishes {published} m, {workflow} ships {shipped} m")
+
+    assert not unresolved, (
+        "docs/ops/ci-wall-clock.md publishes a cap for a job that does not exist (or carries no "
+        "literal bound) in the workflow it is attributed to. Add the row to "
+        "`_WALL_CLOCK_ROW_WORKFLOWS` if it lives in another workflow, or delete the row:\n  "
+        + "\n  ".join(unresolved))
+
+    assert not mismatched, (
+        "docs/ops/ci-wall-clock.md's `cap` column disagrees with the workflow it describes — the "
+        "record then states a bound the tree does not ship, and the next cap lane re-derives (or "
+        "re-litigates) the wrong number. Change the cell, or change the workflow:\n  "
+        + "\n  ".join(mismatched))
+
+    unlisted = sorted(set(python_ci) - set(doc_rows) - _WALL_CLOCK_TABLE_EXEMPT_JOBS)
+    assert not unlisted, (
+        f"python-ci.yml job(s) {unlisted} no longer publish a `cap` row in "
+        "docs/ops/ci-wall-clock.md, so this pin stops covering them the moment anyone deletes "
+        "a row. Publish the row, or add the job to `_WALL_CLOCK_TABLE_EXEMPT_JOBS` with the "
+        "reason its cap cannot be stated as one number.")
+
+    stale_mapping = sorted(set(_WALL_CLOCK_ROW_WORKFLOWS) - set(doc_rows))
+    assert not stale_mapping, (
+        f"`_WALL_CLOCK_ROW_WORKFLOWS` maps {stale_mapping}, which no longer publish a cap row — "
+        "a mapping for a row that is gone is dead weight that hides the row's deletion. "
+        "Remove the mapping.")
+
+    # Non-vacuity, executable: the reader must SEE the cell the finding patched, and the value
+    # it reads must DISCRIMINATE against the workflow — so a green here cannot be a reader that
+    # matched nothing. `50` is the pre-#11063 value, i.e. the exact defect state.
+    doc_text = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    mutated = doc_text.replace("| 15.43 | 20 |", "| 15.43 | **50** |", 1)
+    assert mutated != doc_text, (
+        "the `test-record-postgres` row this control mutates is no longer in the shape it "
+        "mutates — re-anchor the control so it still proves the reader reads the cell")
+    assert _wall_clock_cap_rows(mutated)["test-record-postgres"] == 50, (
+        "the cap reader did not see the mutated cell, so a green run of this pin cannot be it "
+        "reading the table")
+    assert python_ci["test-record-postgres"]["timeout-minutes"] != 50, (
+        "the workflow now ships 50 for `test-record-postgres`, so the mutation above no longer "
+        "discriminates — pick a value the workflow does not ship")
+
+def test_the_committed_map_still_declares_its_three_caps():
+    """DELETING the `durations_floors` block must red — and this is where that runs.
+
+    `_declared_floors` treats an ABSENT `durations_floors` key as legal, and it has
+    to: every fixture manifest that carries no caps must keep its output. The cost
+    of that leniency is that the third defeat direction of the #10575 P1 — removing
+    the block outright — is invisible to every reader and every gate. All three
+    then see `{}`, no cap binds, and the next `--refresh-durations` (the scheduled
+    sweep, unreviewed) adopts the discounted reading this mechanism exists to stop:
+    `test_lane_stash.py` 355.0 -> 25.4.
+
+    WHY THIS PIN LIVES HERE, and not beside the mechanism in `test_ci_timing.py`.
+    `tests/test_ci_timing.py` already asserts `floors` is non-empty — but a PR that
+    edits ONLY `config/ci-surfaces.yml` does not select it. Measured with the map's
+    own selector (`ci_selection.py --changed-files config/ci-surfaces.yml`):
+    `full=False`, `surfaces=['core']`, and `test_ci_timing.py` is in NEITHER
+    `test_files` NOR `slow_selected` — while `test_ci_selection.py` IS in
+    `slow_selected`, in every diff shape that touches the map (map alone, map+code,
+    map+docs, map+`.gitattributes`). So the map's only pin on its own caps is this
+    file's, and a gate whose pin cannot be selected is not a gate (#10704 review).
+
+    DELETING the block was measured, not assumed: with it removed, `ci_manifest.py`,
+    `registry_integrity.py`, `ci_selection.py --integrity` and
+    `_manifest_contract_issues()` all stay green and `_declared_floors()` returns
+    `{}`. Lowering a cap IS caught (`ci_manifest` reds rc 1 with the CAP
+    diagnostic), so only the deletion face was open.
+
+    Scoped to the three KNOWN caps as a SUBSET: adding a fourth cap must not red
+    this, because deciding a cap is a #9172 CI-budget decision and an ordinary PR
+    may legitimately make one. Dropping one, or dropping them all, must.
+    """
+    from tools.ci_timing import _declared_floors
+
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    floors = _declared_floors(text)
+    required = {
+        "test_lane_stash.py": 355.0,
+        "test_calibration.py": 355.0,
+        "eval/write_path/test_write_path_operator_lane.py": 355.0,
+    }
+    missing = sorted(set(required) - set(floors))
+    assert not missing, (
+        f"the committed map no longer declares {missing} in `durations_floors` "
+        f"(it declares {sorted(floors) or 'NOTHING'}) — an absent block is legal to "
+        "`_declared_floors` by design, so every gate stays green while no cap binds "
+        "and the next sweep discounts the row (#10575 P1). Restore the declaration.")
+    for name, value in required.items():
+        assert floors[name].value == value, (name, floors[name])
+        # A CAP, not a FLOOR: the declared value is the weight in BOTH directions.
+        assert floors[name].pinned is True, name
+
