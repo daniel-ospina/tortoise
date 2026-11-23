@@ -48,12 +48,14 @@ tests/test_fork_safety_3845.py::test_without_the_fix_the_same_race_hangs_a_child
 # pytest.param(id=...))".
 #
 # #10502: the reaper's decision-table pins. The file is registered in
-# tests/test_markers.py::PLATFORM_GATED_TESTS (two of its tests carry a
-# `sys.platform` skipif — they read `/proc/<pid>/comm` from a REAL child), so
-# the registry's runtime half must observe it (#4215): the file is routed to
+# tests/test_markers.py::PLATFORM_GATED_TESTS (THREE of its tests carry a
+# `sys.platform` skipif — two read `/proc/<pid>/comm` from a REAL child, and the
+# third needs a plain-ELF shell because `_argv0_stand_in_source()` accepts only
+# `b"\x7fELF"` candidates and macOS ships Mach-O), so the registry's runtime half
+# must observe it (#4215): the file is routed to
 # the URI-unset carve-out lane (`config/ci-surfaces.yml:carve_out:`) and the
 # nodeids below are that lane's `--collect-only` for THIS file.
-# No `allow-skipped` budget: on the ubuntu runners both `/proc` tests RUN, so a
+# No `allow-skipped` budget: on the ubuntu runners all three gated tests RUN, so a
 # skip here is a gate evasion and must red rather than be absorbed.
 # PROVENANCE: `pytest tests/test_reap_redislite_orphans.py --collect-only -q
 #   -m 'not track_b and not live and not integration'` (the carve-out job's own
