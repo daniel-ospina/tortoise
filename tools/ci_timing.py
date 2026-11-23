@@ -3827,6 +3827,31 @@ def _dedupe_history(rows: list[dict]) -> list[dict]:
     return out
 
 
+_PYTEST_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})")
+
+
+def _unescape_nodeid(nodeid: str) -> str:
+    """Decode the ASCII escapes pytest writes into a parametrize id.
+
+    pytest escapes a non-ASCII parametrize value as `\\uXXXX` in the ids it
+    prints and stores, so a REAL id whose parameter contains an em dash arrived
+    in the published flake table as the six literal characters `\\u2014` — not a
+    test id, and one nothing can look up. Measured on the 2026-11-23 render:
+    `docs/ci-timing.md:825` carried `\\u2014` where
+    `tests/test_7949_capstone_measure.py`'s parametrize id has an em dash (that
+    file's own `--collect-only -q` prints the decoded text, and 25 of its ids
+    carry the escape).
+
+    Applied ONLY where a value is PUBLISHED (`candidate_flakes`' emit). The
+    claim logic keeps comparing the RAW strings from `failed_tests`, so the
+    emitted table and the JSON cannot disagree with the lists that produced
+    them, and a history row written before this fix still matches.
+    """
+    def _decode(m: re.Match) -> str:
+        return chr(int(m.group(1) or m.group(2), 16))
+    return _PYTEST_ESCAPE_RE.sub(_decode, nodeid)
+
+
 def candidate_flakes(history: list[dict]) -> list[dict]:
     """Nodeid failed in an earlier sample, absent from the failed list of the
     next sample (i.e. it passed next time) → flake candidate. Checks up to the
@@ -3890,7 +3915,10 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
             if listed_failed_at_or_after(nodeid, newer.get("sample_time"), newer):
                 continue
             out.append({
-                "test": nodeid,
+                # ⛔ Published value, so it is DECODED (`_unescape_nodeid`): pytest
+                # escapes a non-ASCII parametrize value, and a Test column holding
+                # the literal `\u2014` is not a test id.
+                "test": _unescape_nodeid(nodeid),
                 "failed_at": older.get("sample_time"),
                 "passed_at": newer.get("sample_time"),
                 "run_id": older.get("run_id"),

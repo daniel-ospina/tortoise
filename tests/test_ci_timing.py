@@ -283,6 +283,47 @@ def test_candidate_flakes_across_samples() -> None:
     assert ci_timing.candidate_flakes([history[0]]) == []
 
 
+def test_a_published_flake_id_is_decoded_to_the_id_pytest_printed() -> None:
+    """pytest ESCAPES a non-ASCII parametrize value as `\\uXXXX` in the ids it prints
+    and stores, so the published Test column carried the six literal characters
+    `\\u2014` where the id has an em dash — not a test id, and one nothing can look up
+    (measured on the 2026-11-23 render: the flake table listed
+    `test_7949_capstone_measure.py::test_each_block_arm_reds_on_the_mutation_it_guards`
+    with `\\u2014` in several of its parametrize ids, and that row's own
+    `--collect-only -q` prints the decoded text).
+
+    Two arms, because the fix must decode the PUBLISHED value without changing what the
+    CLAIM compares:
+
+    1. the emitted `test` is the DECODED id (pre-fix: the literal `\\u2014`, so this arm
+       reds on the old emit);
+    2. a later sample that still lists the RAW escaped id refutes the claim — which is
+       only possible while the identity test stays on the raw strings the history rows
+       are keyed on, so the decode cannot have silently doubled a row.
+    """
+    escaped = ("tests/test_beta.py::test_gamma[<lambda>-`_ONE_ENTRY` "
+               "(`re.escape` \\u2014 the filename's `.` is a wildcard unescaped)]")
+    decoded = escaped.replace("\\u2014", "\u2014")
+    assert escaped != decoded, (
+        "the fixture must carry the pytest-ESCAPED id, or both arms are vacuous")
+    newer = {"sample_time": "2026-11-23T04:38:02Z", "run_id": "45071394329",
+             "created_at": "2026-11-23T04:38:02Z", "failed_tests": []}
+    older = {"sample_time": "2026-11-16T04:44:19Z", "run_id": "43792641690",
+             "created_at": "2026-11-16T04:44:19Z", "failed_tests": [escaped]}
+    flakes = ci_timing.candidate_flakes([newer, older])
+    assert [f["test"] for f in flakes] == [decoded], (
+        "the published flake id is the RAW pytest-escaped id — `\\u2014` is not a test "
+        "id, so the reader cannot look the row up")
+
+    later = dict(newer, sample_time="2026-11-24T00:00:00Z",
+                 created_at="2026-11-24T00:00:00Z", failed_tests=[escaped])
+    assert ci_timing.candidate_flakes([later, newer, older]) == [], (
+        "a sample stamped at/after the `passed_at` instant still lists the RAW escaped "
+        "id as failing, so the claim must be dropped — if the decode also moved the "
+        "COMPARISON, that refutation is invisible and the table announces a recovery "
+        "the artifact itself contradicts (#9134 review, P1)")
+
+
 # --- eligible-run selection (ci-timing.yml `find` step) ---------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
