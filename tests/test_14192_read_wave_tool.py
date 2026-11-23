@@ -1202,6 +1202,30 @@ def _spread_elements(elements: list[ast.AST]) -> list[ast.AST]:
     return out
 
 
+def _single_star_argument(node: ast.AST | None) -> ast.AST | None:
+    """A call argument with a ONE-ELEMENT `*` spread over a LITERAL sequence unwrapped.
+
+    ⛔ THE SAME COUNTING RULE `_spread_elements` CARRIES, ONE POSITION OVER (#14326 review
+    round 9, EACH MEASURED GREEN with a third reach executing the read, at `cb87c7c8cb`):
+    `_f = dict; _d = _f(*(builtins.__dict__,))` IS `_f(builtins.__dict__)` — the shallow copy
+    of the builtins mapping whose `exec` is the real one — and the arm that REFUSES the
+    un-starred call read `node.args[0]`, saw a `Starred`, and answered False. Every spelling
+    of the star (`*(m,)`, `*[m]`, `*((m,))`, the same through an aliased/`:name`-fetched
+    `dict`) was GREEN on BOTH axes: the copy family (`dict`/`copy.copy`/`copy.deepcopy`/
+    `dict.copy`/`{}.__or__`) and the fetch family (`_g = dict.get; _g(*(m,), "exec")`).
+
+    Only a LITERAL operand can be spliced (`_f(*(_rest))` is the declared residual, and it
+    comes back unchanged), and only a spread of EXACTLY ONE element is the same call:
+    `_f(*(m, {}))` is `_f(m, {})` — two arguments, a TypeError for every callee in this
+    family — so it must stay GREEN rather than be red-ed by over-application.
+    """
+    if isinstance(node, ast.Starred):
+        spliced = _spread_elements([node])
+        if len(spliced) == 1:
+            return spliced[0]
+    return node
+
+
 def _indexed_values(values: list, index: ast.AST) -> list:
     """Apply ONE index step to every statically possible value of the container.
 
@@ -1822,7 +1846,8 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                  or _builtin_lookup_name(node.func, names, consts, dict_names, launderers,
                                          members=frozenset({"dict"})) == "dict")
             and ((len(node.args) == 1
-                  and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts))
+                  and _is_builtins_mapping(_single_star_argument(node.args[0]),
+                                           names, dict_names, launderers, consts))
                  or any(kw.arg is None
                         and _is_builtins_mapping(kw.value, names, dict_names, launderers, consts)
                         for kw in node.keywords))):
@@ -1836,8 +1861,13 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
             (node.func.attr == "copy"
              and _is_builtins_mapping(node.func.value, names, dict_names, launderers, consts))
             or (node.func.attr == "__or__" and any(
-                _is_builtins_mapping(part, names, dict_names, launderers, consts)
+                _is_builtins_mapping(_single_star_argument(part), names, dict_names,
+                                     launderers, consts)
                 for part in (node.func.value, *node.args)))):
+        # ⛔ AND THE ONE-ELEMENT `*` SPREAD HERE TOO (#14326 review round 9, MEASURED GREEN
+        # and LIVE at `cb87c7c8cb`: `_d = {}.__or__(*(builtins.__dict__,))` executed the read
+        # while `{}.__or__(builtins.__dict__)` was REFUSED). The `__or__` dunder reads its
+        # operands from `node.args`, so it needs the same unwrap the constructor arms got.
         return True
     if (isinstance(node, ast.Call)
             and ((isinstance(node.func, ast.Attribute)
@@ -1858,7 +1888,14 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                  # two-positional-argument forms are TypeErrors.
                  or (isinstance(node.func, ast.Name) and node.func.id in launderers
                      and len(node.args) >= 1))
-            and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
+            # ⛔ AND THE ONE-ELEMENT `*` SPREAD OF THE SAME ARGUMENT (#14326 review round 9,
+            # EACH MEASURED GREEN and LIVE at `cb87c7c8cb`: `_f = dict; _d =
+            # _f(*(builtins.__dict__,))` / `copy.copy(*[m])` / `dict.copy(*((m,)))` /
+            # `{}.__or__(*(m,))` all yielded the mapping, `_d["exec"]` the real `exec`, and
+            # the read executed — while the un-starred twin was REFUSED). One owner for the
+            # unwrap, so the arity and the argument are read the same way.
+            and _is_builtins_mapping(_single_star_argument(node.args[0]),
+                                     names, dict_names, launderers, consts)):
         # the UNBOUND `dict.copy(m)` / `copy.deepcopy(m)` — the callee is a constructor here,
         # so `node.func.value` is that constructor and the mapping is argument ONE.
         # ⛔ `deepcopy` IS THE SAME LEVER (#14326 review cycle 5, MEASURED GREEN: `_x =
@@ -2043,7 +2080,8 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     if (isinstance(node.func, ast.Attribute)
             and node.func.attr in _BUILTINS_MAPPING_READS
             and len(node.args) >= 2
-            and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
+            and _is_builtins_mapping(_single_star_argument(node.args[0]),
+                                     names, dict_names, launderers, consts)):
         keys = _string_keys_of(node.args[1], consts) & _members
         return sorted(keys)[0] if keys else None
     # ⛔ AND THE MAPPING'S OWN METHODS, WHICH ARE THE SUBSCRIPT ONE SPELLING OVER (#14326
@@ -2092,7 +2130,8 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
         return sorted(keys)[0] if keys else None
     if isinstance(node.func, ast.Name) and node.func.id in copies and node.args:
         _key_at = 1 if (len(node.args) >= 2
-                        and _is_builtins_mapping(node.args[0], names, dict_names,
+                        and _is_builtins_mapping(_single_star_argument(node.args[0]),
+                                                 names, dict_names,
                                                  launderers, consts)) else 0
         keys = _string_keys_of(node.args[_key_at], consts) & _members
         return sorted(keys)[0] if keys else None
@@ -7433,6 +7472,38 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    dict.__getitem__(builtins.__dict__, "exec")('
             "'results = sdk._tortoise_fts_query(query=q, limit=10)')\n"),
+        # ⛔ THE ONE-ELEMENT `*` SPREAD, WHICH IS THE SAME CALL (#14326 review round 9, EACH
+        # MEASURED GREEN and LIVE at `cb87c7c8cb` with a third reach executing the read —
+        # every one the STAR twin of a shape an arm already REFUSED, on BOTH axes):
+        #
+        #   _f = dict; _f(*(m,))             the ALIAS arm read `node.args[0]`, saw a
+        #                                    `Starred`, and answered False
+        #   copy.copy(*[m])                  the INLINE copy arm, list operand
+        #   dict.copy(*((m,)))               the UNBOUND arm, nested tuple operand
+        #   {}.__or__(*(m,))                 the `__or__` arm reads its operands from `args`
+        #   _g = dict.get; _g(*(m,), "exec")   the FETCH arm's `_key_at` decided 0, not 1
+        "an ALIASED `dict` callee with a STARRED mapping argument": (
+            '    import builtins\n'
+            '    _f = dict\n'
+            '    _d = _f(*(builtins.__dict__,))\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`copy.copy(*[builtins.__dict__])` — the STARRED list operand": (
+            '    import builtins, copy\n'
+            '    _d = copy.copy(*[builtins.__dict__])\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`dict.copy(*((builtins.__dict__,)))` — the STARRED nested tuple": (
+            '    import builtins\n'
+            '    _d = dict.copy(*((builtins.__dict__,)))\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`{}.__or__(*…)` — the STARRED dunder operand": (
+            '    import builtins\n'
+            '    _d = {}.__or__(*(builtins.__dict__,))\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "a STARRED mapping argument to an ALIASED READ METHOD": (
+            '    import builtins\n'
+            '    _g = dict.get\n'
+            '    _g(*(builtins.__dict__,), "exec")(\n'
+            '        "results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         # ⛔ THE INTRA-PREDICATE TWINS OF THE CONSTRUCTORS ALREADY CLOSED (#14326 round 35
         # review cycle 5, EACH MEASURED GREEN: `dict(**m)["exec"] is exec` at RUNTIME, and the
         # pin saw `m=2 c=2 i=0`). A `**` spread lives in `node.keywords` with `arg is None`, an
@@ -8096,6 +8167,24 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     assert not _pin_refuses(_pin_source(name_carried_store)), (
         "a subscript STORE whose key is a NAME bound to the read literal is the same false "
         "RED as the literal spelling — the Name arm's Load guard is its twin")
+    # ⛔ THE STAR-SPREAD UNWRAP IS A COUNT, NOT A BAN (#14326 review round 9). It must not
+    # red a spread that is NOT the same call: `_f(*(cfg,))` copies an ordinary config, and
+    # `_f(*(m, {}))` is `_f(m, {})` — TWO arguments, a TypeError for every callee in the
+    # family — so both stay GREEN. Without these, the only way a later lane learns the
+    # unwrap's bound is by breaking it.
+    assert not _pin_refuses(_pin_source(
+        '    import copy\n'
+        '    _cfg = {"a": 1}\n'
+        '    _d = copy.copy(*(_cfg,))\n')), (
+        "a one-element star over a NON-mapping operand must stay GREEN — the unwrap asks "
+        "whether the spread element is the builtins mapping, not whether a star exists")
+    assert not _pin_refuses(_pin_source(
+        '    import builtins\n'
+        '    _f = dict\n'
+        '    _d = _f(*(builtins.__dict__, {}))\n')), (
+        "a TWO-element star is `_f(mapping, {})` — two arguments, not the one-argument copy "
+        "the arm refuses; the unwrap must return the spread unchanged rather than pick an "
+        "element out of it")
 
     # ⛔ THE RECORDING DIRECTION, IN THE CALL SPELLINGS (#14326 round 6, all four MEASURED
     # REFUSED at `81973329`): the Constant arm treated every callee outside `_PURE_READS` as
