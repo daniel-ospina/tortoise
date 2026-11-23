@@ -1869,9 +1869,17 @@ SWEEP_NAMES = 66
 #: ⛔ A THIRD FOLD (`main` `0fbfbb5b21`, the `fix/14344-expansion` × `origin/main` merge) KEEPS BOTH
 #: blocks again, exactly as the two above argue, and re-derives the pair with `--repin` on THIS
 #: resolved tree: neither parent's line is inherited (`663eb19` read 11887, the `9aaaff10acd` fold
-#: read 11896) and no arithmetic crosses them. The mover is `main`'s own advance — `#14416`,
-#: `#14413`, `#13998` and `#14418` landed between those folds and this one — so the pair below is a
-#: measurement of the tree that SHIPS, and `--check` exits 0 on it.
+#: read 11896) and no arithmetic crosses them.
+#: The mover is `main`'S OWN STALE PIN, not this branch — MEASURED, not inferred from commit
+#: titles: `main`'s own tree at `0fbfbb5b21` derives **(11898, "8cf59d52af09e536")** against its
+#: own pin of `(11896, "ea44c5f732d2a97d")` — `--repin` and `--check` in a detached worktree at that
+#: sha, where `--check` exits **1** printing `observed: (11898, '8cf59d52af09e536')` /
+#: `pinned: (11896, 'ea44c5f732d2a97d')` — so `surface-guard` was RED on `main` BEFORE this branch
+#: merged it. The merged tree reproduces `main`'s set bit-for-bit (same count AND the same digest),
+#: which is the cross-check that nobody here moved it; this branch's product, test and tool files
+#: carry **0** residue rows (`edits_for` returns an empty Counter for each), so the `+2` against
+#: `main`'s pin is not this branch's. The pair below is `--repin`'s own output on the tree that
+#: SHIPS, and `--check` exits 0 on it — which repairs `main`'s red as well.
 SWEEP_RESIDUE = (11898, "8cf59d52af09e536")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
