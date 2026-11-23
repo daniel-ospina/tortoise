@@ -3589,9 +3589,27 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # review P2): this is the census' callee resolution, and the copy-callee arm it
         # reaches takes `names | {"dict", "copy"}` — so the alias spelling of the receiver
         # has to arrive here in `names`.
+        # ⛔ AND THE LAUNDERERS, THE SAME ONE-HOP ALIAS ONE RECEIVER OVER (#14395 review P1,
+        # EACH MEASURED GREEN **and LIVE** at `ac53237158d` while the literal twin was
+        # REFUSED — the copy-callee half of the class this PR closes for the read method):
+        #
+        #     _dc = dict; _dc.__dict__["copy"](builtins.__dict__)["exec"](<read>)        GREEN
+        #     _dc = dict; vars(_dc)["copy"](builtins.__dict__)["exec"](<read>)             GREEN
+        #     _dc = dict; getattr(_dc, "__dict__")["copy"](builtins.__dict__)["exec"](…)    GREEN
+        #
+        # `_is_builtins_dict_of`'s three composition arms answer on `names` (the
+        # `.__dict__` attribute arm reads `node.value.id in names`; the `vars`/`getattr`
+        # arms read `_positions[0].id in names`), so the module alias reaches the copy-callee
+        # resolution only if it ARRIVES here — and `_builtin_name_aliases` already threads the
+        # very same union for the read method (`_BUILTINS_MAPPING_READS`) and for the mapping
+        # closure, which is why this was an in-file asymmetry ("SPELLING IS NOT IDENTITY").
+        # Widening can only ADD reds; the only false-red surface is code that cannot run
+        # (`_v.__dict__` for `_v = vars` is an AttributeError), the same residual the alias
+        # closure above already accepts and states.
         if (_callee in _code_executing_names
                 or _builtin_lookup_name(
-                    n.func, _builtins_names | {"dict"} | _copy_names,
+                    n.func, _builtins_names | {"dict"} | _copy_names
+                    | _builtins_launderers,
                     consts, _builtins_dict_names, _builtins_launderers,
                     members=_CODE_EXECUTING_CALLEES,
                     getattr_fetchers=_getattr_fetchers,
@@ -8263,6 +8281,47 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a COPY CALLEE fetched out of `vars(<copy module alias>).get`": (
             '    import builtins, copy as _z\n'
             '    _d = vars(_z).get("copy")(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ AND THE SAME COPY CALLEE OUT OF A NAMESPACE ALIAS'S OWN NAMESPACE (#14395 review
+        # P1, EACH MEASURED GREEN **and LIVE** at `ac53237158d` while the literal `dict.…`
+        # twin one row above was RED — `_is_builtins_dict_of`'s three composition arms answer
+        # on `names`, so the module one BIND away reached the copy-callee arm only if it
+        # arrived there in `names`, and the census' callee ask did not carry it):
+        #
+        #     _dc = dict; _dc.__dict__["copy"](m)["exec"](<read>)             GREEN
+        #     _dc = dict; vars(_dc)["copy"](m)["exec"](<read>)                  GREEN
+        #     _dc = dict; getattr(_dc, "__dict__")["copy"](m)["exec"](…_)     GREEN
+        #
+        # The read-method half of the identical class was already closed by the union this
+        # one was missing, which is the in-file asymmetry the whole #14395 lane exists for.
+        # One row per composition, because each is a different arm of `_is_builtins_dict_of`.
+        "a COPY CALLEE out of a NAMESPACE ALIAS's `__dict__`, INLINE": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    _dc.__dict__["copy"](builtins.__dict__)["exec"]'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY CALLEE out of `vars(<namespace alias>)` (`_dc = dict`), INLINE": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    vars(_dc)["copy"](builtins.__dict__)["exec"]'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY CALLEE out of `getattr(<namespace alias>, \"__dict__\")`, INLINE": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    getattr(_dc, "__dict__")["copy"](builtins.__dict__)["exec"]'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ THE BOUND SPELLING OF THE SAME FETCH IS REFUSED ALREADY, and this row exists to
+        # keep that true. The #14395 review P1 listed it as GREEN at `ac53237158d`; it is NOT
+        # (MEASURED through the pin's own `_read_reach`: `m=2 c=2 i=1`, the indirect arm firing
+        # on the `_d["exec"](…)` call) — `_f` enters the launderer set by `_aliases_of`'s
+        # operand closure on `_dc`, so `_f(builtins.__dict__)` resolves as a copy application
+        # one bind over. Recorded as a row rather than left as prose: a live `exec` lever must
+        # stay REFUSED by the pin's own census even if the mechanism that closes it moves.
+        "a COPY CALLEE out of a NAMESPACE ALIAS's `__dict__`, BOUND first": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    _f = _dc.__dict__["copy"]\n'
+            '    _d = _f(builtins.__dict__)\n'
             '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a COPY CALLEE fetched with `getattr` off a MAPPING fetch": (
             '    import builtins\n'
