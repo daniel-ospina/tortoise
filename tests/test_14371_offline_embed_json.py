@@ -36,11 +36,11 @@ What is pinned here, in the order the risks run:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
 
-import hashlib
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -86,7 +86,9 @@ def _emissions() -> list[tuple[str, str, dict]]:
 #: egress from a deterministic test, which is exactly what the gate exists to
 #: prevent.
 _BPE_BLOB = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
-_BPE_CACHE_KEY = hashlib.sha1(_BPE_BLOB.encode()).hexdigest()  # noqa: S324 - tiktoken's own key
+#: tiktoken derives this key from the blob URL itself, so sha1 is the protocol
+#: here rather than a digest choice (the key is what the cache file is named).
+_BPE_CACHE_KEY = hashlib.sha1(_BPE_BLOB.encode()).hexdigest()
 
 
 def _host_bpe_cache_dir() -> Path | None:
@@ -503,8 +505,11 @@ def test_the_offline_measurement_reproduces_the_recorded_cells(clean_posture):
     assert cells["solo"] == (3_000_000, 46, 49)
     assert cells["pro"] == (4_000_000, 61, 66)
     assert cells["team"] == (24_000_000, 370, 398)
-    for _, allowance, after in cells.values():
+    for allowance, _, after in cells.values():
         n = int(allowance // doc["after_total"])
+        assert n == after, (
+            f"the published floor {after} is not the recomputed floor {n} for "
+            f"{allowance:,} — the cell and its own arithmetic disagree")
         assert n * doc["after_total"] <= allowance
         assert (n + 1) * doc["after_total"] > allowance, (
             f"{n} is not the FLOOR for {allowance:,} — one more document would "

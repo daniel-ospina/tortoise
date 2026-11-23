@@ -414,7 +414,7 @@ the multiplication lines differ in the last few tokens because §4a rounds the u
 
 ### 7d. The guards that make this quotable
 
-* **Posture, graded by RESOLUTION through the pipeline's own predicates.** The solved region
+- **Posture, graded by RESOLUTION through the pipeline's own predicates.** The solved region
   is only comparable to 12,411.5 under the posture the corpus was scored in, so the verb
   **refuses** a value that MOVES the render (`TORTOISE_S4_DELTA=0/off`,
   `TORTOISE_EXTRACTOR_PROMPT=compact`, `TORTOISE_CLASSIFY_LATER`, `TORTOISE_REFERENTIALITY`)
@@ -426,11 +426,11 @@ the multiplication lines differ in the last few tokens because §4a rounds the u
   value is **accepted** (refusing it was a measured false block — the fleet's normal case is a
   reaped worktree under an exported variable), while a DIFFERENT loadable catalog is refused
   because its vocabulary cannot be proved identical.
-* **One arm or no artifact.** `cost_table` prices the COLD arm whenever the corpus carries one,
+- **One arm or no artifact.** `cost_table` prices the COLD arm whenever the corpus carries one,
   so `--arm warm` would have published warm's call structure and solved region beside cold's
   medians under a single label (measured: the team cell moved 398 → 397 on a quantity belonging
   to neither arm). A mismatch is now refused (exit 2) instead of mixed.
-* **Offline, as POSITIVE evidence.** The verb wraps `tiktoken.load.read_file` — the function
+- **Offline, as POSITIVE evidence.** The verb wraps `tiktoken.load.read_file` — the function
   `read_file_cached` reaches ONLY on a cache miss — and reports the blob URLs it was called for.
   The recorded run called it **zero times** (`network_used: false`, `fetched: []`), so
   "reproducible with no network" is an observation rather than a claim. A directory snapshot

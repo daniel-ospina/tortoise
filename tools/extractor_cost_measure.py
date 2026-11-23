@@ -3020,7 +3020,6 @@ def embed_json_measurement(receipts: Path, evidence: Path, *,
             file=sys.stderr)
         raise SystemExit(2)
 
-    fetched: list[str] = []
     with _observe_encoder_fetches() as fetched:
         lev = serialization_lever(receipts)
         if not lev:
