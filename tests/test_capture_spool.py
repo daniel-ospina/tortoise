@@ -5331,3 +5331,48 @@ def test_the_spool_ceilings_are_finite_and_identical_on_both_legs(tmp_path):
     assert json.loads(proc.stdout.strip().splitlines()[-1]) == [
         capture_spool.SPOOL_MAX_ENTRIES, capture_spool.SPOOL_MAX_TOTAL_BYTES,
     ]
+
+
+def test_a_readable_meta_over_a_zero_turn_log_is_orphaned_and_a_duplicate_meta_never_undercounts(tmp_path):
+    """#14359, two shapes where the spool lied about the bytes it stores.
+
+    (1) A READABLE meta whose turn log holds bytes but parses to zero turns must
+        not have those bytes overwritten: they are moved aside as an
+        ``.orphan`` (kept for forensics), exactly as a corrupt meta's log is.
+
+    (2) A hand-placed second meta naming the same session_id must not make the
+        real byte total exceed what is actually on disk. Otherwise the
+        predicate can refuse a write that the cheap scan (which sums each file
+        once) would admit, and the two answers diverge.
+
+    MUTATION THAT REDS (1): drop the ``_quarantine_log`` before the rewrite and
+    the garbage bytes vanish with no ``.orphan``.
+    MUTATION THAT REDS (2): sum ``_entry_bytes`` once per meta instead of once
+    per distinct session_id and the saturation answer flips.
+    """
+    from tortoise.capture_spool import _entries_dir, _log_path, _meta_path, spool_saturated
+
+    root = tmp_path / "shape-one"
+    sid = "14359-half-written"
+    write_spool_entry(root, _snapshot(sid))
+    garbage = b'{"note": "half-written"}\n[1, 2, 3]\n'
+    _log_path(root, sid).write_bytes(garbage)
+    write_spool_entry(root, _snapshot(sid, turns=[
+        {"role": "user", "content": "a fresh turn"},
+        {"role": "assistant", "content": "a fresh reply"},
+    ]))
+    orphans = sorted(p for p in _entries_dir(root).iterdir()
+                     if ".turns.jsonl.orphan" in p.name)
+    assert [p.read_bytes() for p in orphans] == [garbage], (
+        f"the unusable bytes must be kept as an orphan, found {orphans}")
+
+    dup_root = tmp_path / "shape-two"
+    dup_sid = "14359-dup"
+    write_spool_entry(dup_root, _snapshot(dup_sid, turns=[
+        {"role": "user", "content": "x" * 1000}]))
+    (_entries_dir(dup_root) / "dup.meta.json").write_text(
+        _meta_path(dup_root, dup_sid).read_text(encoding="utf-8"), encoding="utf-8")
+    on_disk = sum(p.stat().st_size for p in _entries_dir(dup_root).iterdir())
+    assert spool_saturated(dup_root, Bounds(max_total_bytes=on_disk + 1)) is False, (
+        f"the spool holds {on_disk} bytes under a {on_disk + 1}-byte ceiling; "
+        "a duplicate meta must not make it read as saturated")

@@ -2204,6 +2204,13 @@ def write_spool_entry(
                 "bytes": (_entry_bytes(root, snapshot.session_id) if prior else 0),
                 "discards": discards}
 
+    # #14359: a log that holds bytes but parses to ZERO turns is unusable, yet
+    # the rewrite below would replace it silently. Keep those bytes as an
+    # `.orphan` first (the same forensic move a corrupt meta's log gets), so
+    # the stored content is never destroyed without a trace. Gated on the
+    # BYTES, not on the parse, and on a non-extending rewrite only.
+    if not extends and _turn_log_has_content(root, snapshot.session_id):
+        _quarantine_log(log_path)
     try:
         if extends:
             fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -2425,7 +2432,12 @@ def _saturated_for_metas(
     # Bytes prune may reclaim WITHOUT spending an undelivered entry: the orphan
     # class is byte-evictable only (see the docstring above).
     reclaimable_orphan_bytes = sum(_file_size(p) for p in orphans)
-    total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
+    # #14359: one count per DISTINCT session_id. Two metas naming the same
+    # session address the same files, so a per-meta sum counted them twice and
+    # could exceed the cheap scan, which sums each file once and is the upper
+    # bound the admission fast path relies on.
+    total = sum(_entry_bytes(root, sid)
+                for sid in {m["session_id"] for m in metas})
     total += reclaimable_orphan_bytes
     if projected_bytes is None and replaces_session_id is None:
         # STRICT: the question is whether ADDING an entry would cross the ceiling,
