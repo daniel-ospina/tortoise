@@ -3075,6 +3075,22 @@ def _namespace_rebind_names(node: ast.AST, consts: dict[str, frozenset[str]],
                 out |= _string_keys_of(arg, consts)
         # `<ns>.update({"<name>": …})`, `<ns>.update(<name>=…)`, `<ns>.update(**{…})`,
         # `<ns>.setdefault("<name>", …)` — and the UNBOUND spelling of each.
+        # ⛔ AND THE MUTATOR FETCHED WITH `getattr` (#14326 review cycle 26, EACH MEASURED GREEN
+        # **and LIVE**: `getattr(builtins.__dict__, "update")({"print": getattr})` and its
+        # `__setitem__` / `setdefault` / `__ior__` / `__init__` / `getattr(__builtins__, …)` /
+        # aliased-receiver twins reinstated the callee while the DIRECT spelling of each is a
+        # REFUSED row — and the READ-side twin `getattr(builtins.__dict__, "get")("exec")(<read>)`
+        # is refused too). The callee is a CALL here, so `_callee_names_of` is empty and the
+        # NAME-keyed arm above never sees it; the member is a resolvable literal out of
+        # `_MAPPING_MUTATORS` and the receiver is a namespace expression, so both halves are
+        # already owned — the fetch spelling is the only thing that was not.
+        elif (isinstance(node.func, ast.Call) and node.func.args
+                and _callee_names_of(node.func.func) & {"getattr"}
+                and _string_keys_of(node.func.args[-1], consts) & _MAPPING_MUTATORS
+                and (_is_namespace_expr(node.func.args[0], namespaces)
+                     or _is_builtins_mapping(node.func.args[0], frozenset(), frozenset(),
+                                             frozenset(), consts))):
+            out |= _mapping_mutation_keys(node, consts, offset=0)
         elif (callee & _MAPPING_MUTATORS
                 and _is_namespace_expr(getattr(node.func, "value", None), namespaces)):
             # ⛔ `setdefault` SETS WHEN THE KEY IS ABSENT (#14326 review F1c, MEASURED GREEN):
@@ -8149,6 +8165,16 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # MEASURED GREEN **and LIVE**): in an imported module — how this pin loads the tool —
         # `__builtins__` in the globals IS the builtins `__dict__`, so `globals()["__builtins__"]`
         # is the SAME mapping `__builtins__` names.
+        "a KEYED STORE through an ALIAS, `.get` spelling": (
+            '    _n = globals()\n'
+            '    _n.get("__builtins__").update({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
+        "a MUTATOR fetched with `getattr`": (
+            '    import builtins\n'
+            '    getattr(builtins.__dict__, "update")({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
         "a KEYED STORE through an ALIAS of the namespace": (
             '    _n = globals()\n'
             '    _n["__builtins__"].update({"print": getattr})\n'
