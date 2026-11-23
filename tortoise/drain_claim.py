@@ -243,14 +243,23 @@ def claim_is_stale(
 
 
 def read_claim(root: Path) -> dict | None:
-    """The parsed claim, or ``None``. The SURFACE (`session drain`, health, tests)."""
-    try:
-        text = claim_path(root).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    """The parsed claim, or ``None``. The SURFACE (`session drain`, health, tests).
+
+    ⛔ READS GO THROUGH :func:`_read_raw`, which is ``lstat``-gated, and that is the
+    same gate the Pi leg's ``readDrainClaim`` carries. This function used to call
+    ``Path.read_text()`` directly — so it BLOCKED FOREVER on a FIFO or a socket at
+    the claim path (measured: killed at 8 s, no return) while the TypeScript twin
+    answered in ~0 s, and it is what ``renew``, :func:`_claim_still_ours` and
+    :func:`holder` actually call, i.e. the drain, the health line and every
+    ``session drain`` on the box (#14423 review, P1: the earlier FIFO fix landed
+    only on `acquire`'s path).
+    """
+    raw = _read_raw(claim_path(root))
+    if raw is None:
         return None
     try:
-        record = json.loads(text)
-    except ValueError:
+        record = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
         return None
     return record if isinstance(record, dict) else None
 
@@ -428,16 +437,25 @@ class DrainClaim:
             _write_claim_atomic(self.path, self.record(now))
         except OSError:
             return _claim_still_ours(self.path, self.token)
-        # ⛔ VERIFY AFTER WRITING. `_write_claim_atomic` REPLACES the inode, and the
-        # read above is not a compare: a peer whose takeover landed between that
-        # read and this replace had its fresh claim overwritten — `renew` would
-        # return True while two drainers exist (found in review). The realistic
+        # ⚠️ WHAT THE READ-BACK DOES AND DOES NOT COVER (corrected in review, #14423
+        # P2 — the earlier version of this comment overclaimed). `_write_claim_atomic`
+        # REPLACES the inode and the read above is not a compare, so a peer whose
+        # takeover lands between that read and this replace has its fresh claim
+        # overwritten and `renew` returns True. The read-back therefore does NOT
+        # convert that race; it covers the OTHER direction only — a peer that took
+        # over after our replace, which it sees as "not ours" and returns False for.
+        #
+        # RESIDUAL, stated rather than implied away: a takeover that lands inside
+        # the read → replace window is lost, and two drainers can coexist until the
+        # loser's next `renew_if_due` (≤ TTL/3 ≈ 40 s) — or until the winner's next
+        # pass, whichever is sooner. Closing it needs a compare-and-swap on the
+        # inode, which POSIX does not offer directly; the takedown's move-aside
+        # compare IS such a swap, and making the refresh path use it would add a
+        # rename + read to the per-entry hot path. It is not done here, and the
+        # window is bounded by the lease rather than unbounded. The realistic
         # trigger is a run of failed renewals (`_claim_still_ours` keeps the pass
         # going on the un-refreshed lease), after which the first write that
-        # succeeds is the clobbering one. Reading back converts that race into
-        # "we are no longer the holder", which the caller already handles by
-        # stopping — and it also covers a peer that took over between the replace
-        # and now.
+        # succeeds is the clobbering one.
         written = read_claim(self.path.parent)
         if written is None or written.get("token") != self.token:
             return False
@@ -461,22 +479,36 @@ class DrainClaim:
         The takedown is atomic (see :func:`_takedown`): this used to read the
         record, compare and then `unlink` — a sequence in which a successor
         installed between the compare and the unlink was deleted by the previous
-        holder. Now the file is MOVED aside first and the bytes are compared in
-        quarantine, so a release can only ever dispose of a claim it actually
-        owned.
+        holder.
+
+        ⛔ AND A RELEASE FIRST CHECKS THAT THE CLAIM IS OURS, WITHOUT MOVING IT.
+        The takedown-then-compare version made the docstring's promise ("a release
+        can only ever dispose of a claim it actually owned") false in a THREE-process
+        interleaving: the not-ours release still `rename`d the successor's claim
+        aside, and if a third process installed into the now-empty path the restore
+        `link` failed `EEXIST` and the successor's bytes were unlinked — reproduced,
+        `release()` returned ``False`` and the successor's claim was GONE
+        (#14423 review, P2). Reading our token first has no window at all in the
+        not-ours direction, which is the direction that destroyed a live claim; the
+        ours direction keeps the takedown, whose quarantine compare is what makes
+        the disposal safe against a peer that replaces it mid-release.
         """
+        current = _read_raw(self.path)
+        if current is None:
+            return False
+        try:
+            held = json.loads(current.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(held, dict) or held.get("token") != self.token:
+            return False  # not ours: leave it exactly where it is
         moved = _takedown(self.path, self.token)
         if moved is None:
             return False
         quarantine, data = moved
-        try:
-            record = json.loads(data.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            record = None
-        if not isinstance(record, dict) or record.get("token") != self.token:
-            # Not ours any more (a successor holds it): put its bytes back exactly
-            # as we took them. The sentinel can never equal `data`, so this always
-            # takes the restore branch of `_dispose_quarantine`.
+        if data != current:
+            # A peer replaced the record between our read and our rename. Its bytes
+            # are restored by the sentinel arm and our release declines.
             _dispose_quarantine(quarantine, data, self.path, b"<not-ours>")
             return False
         with contextlib.suppress(OSError):
@@ -669,8 +701,19 @@ class DrainClaimHeld:
         who = f"pid {self.pid}" if self.pid is not None else "an unnamed process"
         leg = f" ({self.leg} leg)" if self.leg else ""
         expires = self.expires_at
-        until = (f", lease to {time.strftime('%H:%M:%SZ', time.gmtime(expires))}"
-                 if expires is not None else "")
+        until = ""
+        if expires is not None:
+            # ⛔ GUARDED: `time.gmtime` raises on an out-of-range instant, and this
+            # line is the OPERATOR surface for a face we could not judge. A record
+            # with a finite but absurd `expires_at` (1e30) is honoured by rule 2
+            # (it is never expired), so `flush_spool` called this on EVERY pass and
+            # `OverflowError` escaped OUTSIDE its try/finally — one corrupt claim
+            # file blocked the spool permanently, the outcome #14350 forbids
+            # (#14423 review, P2, reproduced end-to-end).
+            try:
+                until = f", lease to {time.strftime('%H:%M:%SZ', time.gmtime(expires))}"
+            except (OverflowError, OSError, ValueError):
+                until = ""
         return (f"another drainer holds this spool{leg}: {who}{until} — "
                 f"nothing attempted ({claim_path(root)})")
 

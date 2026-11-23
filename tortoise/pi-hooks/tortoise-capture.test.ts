@@ -7806,6 +7806,23 @@ test("#14350: a displaced claim is RESTORED, never disposed of", async () => {
   assert.equal(existsSync(ours.quarantine), false);
 });
 
+test("#14350: an unmakeable root is UNAVAILABLE, not a lost RACE", async () => {
+  // `undefined` from `acquireDrainClaim` means two different things, and the
+  // difference decides whether `flushSpool` may run the pass UNCLAIMED
+  // (#14423 review, P2). An environment that cannot hold a claim at all is the
+  // documented "run unclaimed and say so" arm; a lost takeover race with an EMPTY
+  // path is NOT — the winner is installing, so the pass must fail CLOSED like the
+  // Python leg, where any `undefined`-equivalent becomes `held_by_claim`.
+  // MUTATION THAT REDS THIS: mark every `undefined` with `state.raced = true`
+  // (the unclaimed arm then never runs on a broken spool, hiding its report).
+  const parent = mkdtempSync(join(tmpdir(), `tortoise-capture-race-${process.pid}-`));
+  const dir = join(parent, "not-a-directory");
+  writeFileSync(dir, "a regular file where the spool root should be");
+  const state = { raced: false };
+  assert.equal(acquireDrainClaim(dir, { leg: "pi", state }), undefined);
+  assert.equal(state.raced, false, "a root that cannot hold a claim is not a lost race");
+});
+
 test("#14350: a FUTURE-version claim is unattributable, not reinterpreted", async () => {
   // The version field is load-bearing: a format this build does not know must be
   // staled out (then re-verifiable by its lease), never read with today's rules.

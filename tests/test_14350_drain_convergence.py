@@ -270,6 +270,58 @@ def test_a_SUCCESSORS_claim_survives_a_slow_holders_release(tmp_path):
     successor.release()
 
 
+def test_a_release_does_not_MOVE_a_claim_that_is_not_ours(tmp_path):
+    """A not-ours release must touch nothing at all.
+
+    The takedown-then-compare version `rename`d the successor's claim aside before
+    discovering it was not ours; if a THIRD process installed into the now-empty
+    path, the restore `link` failed `EEXIST` and the successor's bytes were
+    unlinked — a live claim destroyed by a release that was trying to be polite
+    (#14423 review, P2; reproduced: `release()` returned False and the successor's
+    claim was GONE).
+
+    MUTATION THAT REDS THIS: take the claim aside before reading its token (the
+    file's inode then changes, and a third party's install lands in the gap).
+    """
+    root = tmp_path / "spool"
+    slow = drain_claim.acquire(root, leg="python", now=1000.0, ttl_s=60.0)
+    assert slow is not None
+    successor = drain_claim.acquire(root, leg="pi", now=1100.0, ttl_s=60.0)
+    assert successor is not None
+    before = os.stat(drain_claim.claim_path(root))
+    assert slow.release() is False, "the token is no longer ours"
+    after = os.stat(drain_claim.claim_path(root))
+    assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns), (
+        "a release that does not own the claim must not move, replace or touch it")
+    assert drain_claim.read_claim(root)["token"] == successor.token
+    successor.release()
+
+
+def test_an_ABSURD_but_finite_lease_cannot_block_the_spool(tmp_path):
+    """A claim we can read but whose lease is out of range must be REPORTED, not
+    raised out of the drain.
+
+    `time.gmtime` raises on an out-of-range instant, and the operator line is built
+    OUTSIDE `flush_spool`'s try/finally — so one corrupt-but-parseable claim file
+    (a huge `expires_at`, honoured by rule 2 because it never expires) aborted
+    every later `session drain` with `OverflowError` and blocked the spool forever
+    (#14423 review, P2; reproduced end-to-end).
+
+    MUTATION THAT REDS THIS: format the instant unguarded.
+    """
+    root = tmp_path / "spool"
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None
+    record = drain_claim.read_claim(root)
+    record["expires_at"] = 1e30  # seconds, finite, out of range for BOTH clocks
+    record["host"] = "another-box"  # so only rule 2 may decide — it never expires
+    drain_claim.claim_path(root).write_text(json.dumps(record), encoding="utf-8")
+    held = drain_claim.holder(root)
+    assert held is not None
+    assert drain_claim.claim_is_stale(
+        held.record, now_s=time.time(), host="box-a", boot_id="boot-1") is False
+    line = held.line(root)   # must not raise
+    assert "another drainer" in line and "lease to" not in line, line
 def test_the_claim_lives_in_the_spool_ROOT_so_it_is_never_COUNTED(tmp_path):
     """A bookkeeping file inside `entries/` would be spool occupancy forever —
     counted by `_entry_bytes`, ranked by `prune_spool`, and able to push a box
@@ -1072,8 +1124,26 @@ def test_a_FIFO_at_the_claim_path_does_not_HANG_the_drain(tmp_path):
         "a FIFO is not a holder and must not block the drain (if this test hung, "
         "the FIFO was READ)")
     claim.release()
-    # And the reader is safe on its own, which is what renew/holder/health use.
-    assert drain_claim.read_claim(root) is None
+    # ⛔ AND THE READER IS TESTED WHILE THE FIFO IS STILL THERE. The first version of
+    # this arm read the path AFTER `acquire` had already unlinked the FIFO and after
+    # `release` had removed its own claim, so it asserted on an ABSENT path (a
+    # tautology: `read_claim` maps FileNotFoundError to None) while the shipped
+    # `read_claim` still blocked forever on a FIFO (#14423 review, P2). The read runs
+    # under a watchdog so a regression REDS instead of hanging the suite.
+    os.unlink(claim_path) if (claim_path := root / "drain.claim").exists() else None
+    os.mkfifo(claim_path)
+    outcome: list[object] = []
+
+    def _read() -> None:
+        outcome.append(drain_claim.read_claim(root))
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+    reader.join(5.0)
+    assert not reader.is_alive(), (
+        "read_claim BLOCKED on a FIFO — the permanent block #14350 forbids, and it is "
+        "what renew/holder/health call")
+    assert outcome == [None], f"a FIFO has no claim in it, got {outcome!r}"
 
 
 # ── The refusal's NAME must be the server's, in BOTH legs ──────────────────
