@@ -177,6 +177,25 @@ def test_an_open_episode_re_alarms_at_most_once_per_window(delivered, monkeypatc
 
 
 # ── 2. the bound is the EPISODE, never a mute ────────────────────────────────
+def test_a_pre_14407_rule_less_incident_is_adopted_not_duplicated(delivered):
+    """Subjects became rule-scoped here, so an existing ``{org}`` incident must
+    be ADOPTED — otherwise the first recurrence files a second issue for one
+    condition (the #2844 alias class). Measured on record: #10576."""
+    import tortoise.notify as notify
+
+    # The pre-#14407 sentinel, exactly as the old code wrote it (subject = org).
+    delivered.store.open_incident_state(
+        "abuse_review_needed", "org-a", {"detail": "legacy rule-less incident"})
+    assert len(delivered.filed) == 1
+    notify.reset_abuse_delivery_for_tests()
+
+    notify.notify_abuse("abuse_review_needed", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 1338})
+
+    assert len(delivered.filed) == 1, "a live legacy incident must be adopted"
+    assert len(delivered.pushes) == 2, delivered.pushes  # legacy alert + reminder
+    assert "issue #1" in delivered.pushes[-1]
+
 
 def test_a_new_episode_re_fires_exactly_once(delivered):
     """Pre-fix: 3 + 4 = 7 messages. A fix that muted would send 3."""

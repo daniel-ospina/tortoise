@@ -483,20 +483,26 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> None:
     """
     subject = _abuse_subject(org_id, rule)
     kinds = _EPISODE_INCIDENT_KINDS
+    # BOTH spellings: a rule-less subject is what pre-#14407 code wrote (and
+    # #10576 still carries), so a clean window must clear it too or the old
+    # incident outlives the condition it records (the #2844 stale-sentinel class).
+    subjects = (subject,) if subject == org_id else (subject, org_id)
     for kind in kinds:
-        release_abuse_delivery(kind, subject)
+        for subj in subjects:
+            release_abuse_delivery(kind, subj)
     store, reason = _abuse_alert_store()
     if store is None:
         logger.debug("abuse episode end: no incident channel (%s) — delivery "
                      "re-armed only (%s/%s)", reason, org_id, rule)
         return
     for kind in kinds:
-        try:
-            store.resolve_incident_state(kind, subject)
-        except Exception as e:  # noqa: BLE001, RUF100
-            logger.warning("abuse episode end: %s (%s) did not resolve (%s) — "
-                           "the incident stays OPEN", kind, subject,
-                           redact_safe(e))
+        for subj in subjects:
+            try:
+                store.resolve_incident_state(kind, subj)
+            except Exception as e:  # noqa: BLE001, RUF100
+                logger.warning("abuse episode end: %s (%s) did not resolve (%s) — "
+                               "the incident stays OPEN", kind, subj,
+                               redact_safe(e))
 
 
 def _abuse_message(kind: str, org_id: str, details: dict, *,
@@ -532,6 +538,38 @@ def _send_abuse(bot_token: str, chat_id: str, text: str) -> None:
         logger.warning("abuse notify: telegram failed (%s)", redact_safe(e))
 
 
+def _adopt_legacy_subject(store, incident_kind: str, subject: str,
+                          org_id: str) -> str:
+    """Adopt a pre-#14407 RULE-LESS incident instead of filing a sibling.
+
+    Subjects became rule-scoped in #14407, and the R2 object IS the dedup
+    linearisation point — so without this a live incident filed under the old
+    ``{org}`` spelling would be invisible to the new ``{org}:{rule}`` key and the
+    first recurrence would file a SECOND issue for one condition: exactly the
+    #2844 alias defect (two spellings, two create-once points, a resolve that
+    strands one). One such incident is MEASURED on record (#10576), so this is a
+    migration step, not a hypothetical.
+
+    Cost is one R2 GET, on the notification path the engine already throttles to
+    one attempt per (org, rule, window). A store read that fails returns the
+    scoped subject: filing under the new key is the pre-#14407-compatible
+    fallback, and a duplicate issue is cheaper than a swallowed recurrence.
+    """
+    if subject == org_id:
+        return subject
+    try:
+        legacy = store.incident_record(incident_kind, org_id)
+    except Exception:  # noqa: BLE001, RUF100
+        return subject
+    if legacy.get("issue_number"):
+        logger.info(
+            "abuse notify: adopting the pre-#14407 rule-less incident for %s "
+            "(issue #%s) instead of filing a second one under %s",
+            org_id, legacy.get("issue_number"), subject)
+        return org_id
+    return subject
+
+
 def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
     """A state-change class: the INCIDENT owns the message (#14407).
 
@@ -557,6 +595,7 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
     incident_kind = _INCIDENT_KIND_OF_EVENT[kind]
     store, reason = _abuse_alert_store()
     if store is not None:
+        subject = _adopt_legacy_subject(store, incident_kind, subject, org_id)
         what = ("Suspended by an operator"
                 if kind == KIND_ABUSE_SUSPENDED
                 else "Human review needed — rate-limit, do not suspend"
