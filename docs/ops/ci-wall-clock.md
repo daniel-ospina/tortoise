@@ -847,7 +847,8 @@ shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `4 
 (`ceil(11/3)` = 4 waves at `fast_shards: 11` — read it off the band pin below, not the 3-wave
 reading `ceil(9/3)` an earlier 9-shard shape gave), slow `2 × 8.5933 m ≈ 17.19 m` (the `8.59`
 above is that per-leg figure — `6.5933 m` plus the `2.0 m` setup allowance, printed as `8.59`,
-so take the product on the 2-dp leg: `2 × 8.59` reads 17.18 and is the same ROUNDED-SUM trap the
+so take the product on the HIGHER-PRECISION leg, not the 2-dp one: `2 × 8.59` reads 17.18 and is
+the same ROUNDED-SUM trap the
 `59.64 m` trio clause above forbids; the pin
 recomputes both halves from the map, and both moved on
 the 2026-11-23 sweep, which re-packed the slow pool — they read `8.18 m`/`16.36 m` at the
