@@ -6813,6 +6813,55 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("probes/capstone_measure.py", "with the flag ON", (
             ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
+        # ⛔ THE GATES `_IDLE_CITES["vet"]` NAMES, in the rule's own docstring — the second
+        # surface of one claim (#14269 review). ⛔ THE CAUSAL STORY HERE WAS WRONG TWICE and is
+        # corrected to the measurement: this is NOT a stale number. `main`'s `588cf7aeb6`
+        # re-pointed BOTH copies of this claim in ONE commit — `git show 588cf7aeb6 --
+        # docs/evidence/7949-capstone/probes/capstone_measure.py` moves the docstring line AND
+        # the `_IDLE_CITES`-style line `:17967` -> `:17970` together — and `git grep -n -F 17967`
+        # over that file exits 1 at this head. So no head of `main` or of this branch ever carried
+        # a split state, and nothing here is a figure to re-offset (this file's own header says
+        # the failure it was written for was not a stale number but a FALSE CORRECTION — which is
+        # what re-telling it as "the docstring kept `:17967`" invites). What the merge resolution
+        # with `588cf7aeb6` DROPPED is this ROW, and what makes the row necessary is main's WRAP:
+        # main puts `:15372` on its own line, where no row can scope it.
+        # ⛔ AND IT IS NOT "THE ONLY OTHER ROW": FIVE other rows reach this docstring (AST span
+        # 1871-1918) — those scoping on `with the flag ON` (1886), `follows at` (1884), `emits
+        # literally` (1885), `so an acceptance test of` (1877) and `is different code` (1896).
+        # They pin `:14791`/`:14792`, `:14823`, `:14819-14822`, `:15706-15720` and `:14757` — NOT
+        # the gate pair `:17970`/`:15372`, which no other row reads. That, not uniqueness of the
+        # docstring, is why this row is needed and not a duplicate.
+        # ⛔ RE-ADDED after the merge resolution with `origin/main` `588cf7aeb6` dropped it: the
+        # resolution took `main`'s whole copy of this file, which was right for the D5 block
+        # (unreachable) but ALSO discarded THIS row, ~900 lines away and not D5 machinery. The
+        # claim it guards is live and is in this PR's own net diff —
+        # `probes/capstone_measure.py`'s `` ``embed_list:`` (``:17970``) and ``if vet_enabled
+        # and complete_list:`` (``:15372``) `` sentence. Measured: WITHOUT this row, mutating
+        # `:17970` -> `:17967` in that probe leaves `444 passed` (green); WITH it, the same
+        # mutation reds `test_the_bare_continuation_cites_name_what_they_say`.
+        # Non-vacuity, MEASURED at this head: mutating `:17970` -> `:17967` in that probe reds
+        # `test_the_bare_continuation_cites_name_what_they_say`; the row's scope is what makes
+        # that number observable at all, since no other row reads the pair. The `_locate_hint`
+        # leg names the live line (`if vet_enabled and embed_list:` at `:17970`).
+        ("probes/capstone_measure.py", "and ``if vet_enabled and complete_list:``", (
+            ("17970", "if vet_enabled and embed_list:"),
+            ("15372", "if vet_enabled and complete_list:"),
+        )),
+        # ⛔ THE THIRD COPY OF THE SAME CLAIM (`#14269` review at `e587f2c8100d`, P2). The row
+        # above guards the `_pass_ran` docstring's copy of the gate pair; `_IDLE_CITES["vet"]`
+        # carries the same `(:17970)` in a sentence a future run PRINTS to a reader, and nothing
+        # read it: MEASURED on this head, mutating that `:17970` -> `:17967` in the probe leaves
+        # `2 passed, 442 deselected` (`-k 'bare_continuation or epic_bundle'`) — green.
+        # ⛔ The phrase carries the cite's own `(:17970)` token because the sentence around it does
+        # NOT scope: `"pass is gated on the LIST"` occurs on TWO lines of the probe (the
+        # `classify_later` value's `classify pass is gated on the LIST` is the other), and an
+        # ambiguous phrase is a FAILURE in this table, not a silent bind to the easier match.
+        # Only `:17970` is pinned here — `:15372` sits on the NEXT line of that same string, and a
+        # row scopes to exactly one.
+        ("probes/capstone_measure.py",
+         "pass is gated on the LIST — `if vet_enabled and embed_list:` (:17970)", (
+             ("17970", "if vet_enabled and embed_list:"),
+         )),
         ("probes/capstone_measure.py", "follows at", (
             ("14791", "edus = _edus_from_conversation(conversation)"),
         )),
@@ -18298,13 +18347,28 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         _numstat = None
     if _numstat is not None and _numstat.returncode == 0:
         _in_diff = bool(_numstat.stdout.strip())
-        _expected = _stated[0] if _in_diff else _stated[1]
-        assert _expected in text, (
-            f"D5 states the WRONG membership for `04-plan.md`: at this head "
-            f"`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints "
-            f"{_numstat.stdout.strip() or 'nothing'!r}, so the row must say {_expected!r}. "
-            "Re-derive the clause from that command — a membership typed into prose is the "
-            "figure this row exists to stop (it has been wrong in both directions)")
+        # ⛔ THE MERGED STATE IS A MEASUREMENT, NOT A DEMAND (#14260 fix lane, finding 3 —
+        # MEASURED). Once `HEAD` is an ancestor of `origin/main` the three-dot diff is EMPTY by
+        # construction, so the row's ``IS in this diff`` becomes HISTORY rather than a falsehood
+        # — and an arm that demanded the ``NOT`` spelling there would red on `main` the moment
+        # this branch merges, i.e. a gate that punishes its own landing. That is exactly what
+        # happened to the arm this one replaces, which is why the merged reading is taken from
+        # `git merge-base --is-ancestor` rather than inferred from an empty stdout: an EMPTY
+        # numstat means "HEAD already carries it" ONLY when HEAD is on the base, and means "the
+        # re-point was dropped" when it is not (#14269 review, P0 is the other half of that pair).
+        _ancestor = (
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", "HEAD", "origin/main"],
+                cwd=_REPO, capture_output=True, text=True).returncode == 0)
+        _merged_state = _ancestor and not _in_diff
+        if not _merged_state:
+            _expected = _stated[0] if _in_diff else _stated[1]
+            assert _expected in text, (
+                f"D5 states the WRONG membership for `04-plan.md`: at this head "
+                f"`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints "
+                f"{_numstat.stdout.strip() or 'nothing'!r}, so the row must say {_expected!r}. "
+                "Re-derive the clause from that command — a membership typed into prose is the "
+                "figure this row exists to stop (it has been wrong in both directions)")
     # and the chimera is refused, not merely absent from the message above
     # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
     # pair-lists in BOTH arrow conventions (ASCII `->` and unicode `→`) and does not always
@@ -18619,3 +18683,93 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     assert not failures, (
         "the pair this row names does not open on the symbol the row is about:\n  - "
         + "\n  - ".join(failures))
+
+    # ⛔ ONE CITATION, TWO VALUES, ONE HEAD — the same shape one document over, and it had
+    # NO reader at all (14183 pre-merge review, P2 — MEASURED). `05-verify.md` D5 states
+    # `sdk.py:10326` is `_registry_cache = PackRegistry(packs_dir)` "at the MERGE head"
+    # AND `:10326` "at the branch head `2584a86ec1` too, so this re-cut did NOT move it":
+    # the SAME head named twice, so the two sides must agree — a self-agreement claim that
+    # needs no git to grade. A re-cut changed the FIRST side to `:10347` and left the second
+    # alone, and `:10347` is `if not results:` at that head, so the sentence asserted two
+    # values for one head and neither was read. Both arms run on purpose: the agreement arm
+    # reds on ANY edit that moves one side only (no object, no network); the head arm is the
+    # measurement that the agreement arm cannot make, because both sides could be edited
+    # together to a number that names nothing.
+    #
+    # ⛔ AND WHY THIS ARM LIVES **HERE**, at the end of the file, rather than beside the other
+    # D5 arms: `RECONCILE-A1-A2-A5.md` cites THIS file's own derivation line twice as
+    # `(`:N`)`, and `test_the_reconcile_cites_resolve_where_the_record_says_they_do` DERIVES
+    # `N` from this file's text — so any insertion ABOVE that line re-stales the record and
+    # reds an unrelated pin (MEASURED: a 57-line block placed above it moved the value and
+    # the record's two cites stopped matching). An arm about rot must not itself rot a
+    # citation, so it appends below the number it must not move.
+    #
+    # ⛔ AND FOLDING THIS INTO THE HONOURS CASE ABOVE — the tidier shape, and the one that
+    # file's own convention prefers (`test_the_merge_head_honours_line_is_what_that_head_
+    # carries` already reads this same blob and already skips with the measured remedy) — is
+    # NOT available: that case sits above the derivation line, so moving this arm into it would insert
+    # lines above the derivation line and re-stale the record's two cites. Named here rather
+    # than left for the next lane to rediscover (14183 delta review, P3).
+    # ⛔ NO LINE NUMBER IS TYPED FOR IT (#14269 review, P3 — MEASURED). This comment used to say
+    # `:16615`, which was the derivation line's number on `origin/main`; this branch's own 49-line
+    # insertion above it moved the derivation to `:16664`, so the pointer named an unrelated comment
+    # and a reader following it landed on the wrong line — the file's own "re-derive, never type"
+    # class. The claim is positional ("above"), so it needs no figure; the derivation line is found
+    # by `grep -n 'n for n, line in enumerate(ext, 1) if'` rather than by a number that moves.
+    _d5 = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
+    _registry = re.search(
+        r"`sdk\.py:(?P<merge>\d+)` is `_registry_cache = PackRegistry\(packs_dir\)` "
+        r"at the MERGE head \(and `:(?P<branch>\d+)` at the branch head "
+        r"`(?P<head>[0-9a-f]{7,40})`", _d5)
+    assert _registry, (
+        "05-verify.md's `_registry_cache` clause no longer matches the form this arm "
+        "reads: `` `sdk.py:N` is `_registry_cache = PackRegistry(packs_dir)` at the "
+        "MERGE head (and `:N` at the branch head `<sha>` `` — if the wording moved, "
+        "re-derive the figure rather than dropping the arm, which is the only reader "
+        "this number has")
+    assert _registry.group("merge") == _registry.group("branch"), (
+        "05-verify.md names `:" + _registry.group("merge") + "` at the MERGE head and "
+        "`:" + _registry.group("branch") + "` at the branch head `"
+        + _registry.group("head") + "` — ONE head, stated twice, so the two sides must "
+        "agree. They do not: an edit moved one side only, the shape that let this pair "
+        "assert two values for one head (14183 review). Re-derive BOTH with `git show "
+        + _registry.group("head") + ":tortoise/sdk.py | grep -n "
+        "'_registry_cache = PackRegistry'` and correct the side that disagrees with the "
+        "head, never by copying the other side forward")
+    _r_head = _registry.group("head")
+    # ⛔ THE HEAD IS PINNED, and this is the one typed constant this arm carries — because an
+    # unpinned one FAILS OPEN (14183 delta review, P2 — MEASURED: move the sha in the
+    # document to an absent value with both numbers untouched, and this arm reported
+    # `1 skipped`, not a failure — the only reader of `_registry_cache`, disarmed by the very
+    # text it grades). A COMMIT SHA is immutable, so typing it does not rot the way a LINE
+    # NUMBER does: this file's derive-never-type rule is about values an insertion moves under
+    # the reader, and `2584a86ec1` cannot move. If the document is ever re-pointed to a
+    # different merge head this REDS and the arm is re-derived with that head — which is the
+    # behaviour an arm exists to have, and the opposite of a silent skip.
+    assert _r_head == "2584a86ec1", (
+        f"05-verify.md now quotes `{_r_head}` as the head its `_registry_cache` figure is "
+        "stated at, while this arm is armed on `2584a86ec1`. Re-arm it on the new head "
+        "(`git show <that-sha>:tortoise/sdk.py | grep -n '_registry_cache = "
+        "PackRegistry'`) — and do not let that turn into a skip: an absent sha here was "
+        "MEASURED reading as `1 skipped` with both numbers untouched, which is a fail-OPEN "
+        "arm (14183 review, P2)")
+    _r_show = subprocess.run(
+        ["git", "show", f"{_r_head}:tortoise/sdk.py"],
+        cwd=_REPO, capture_output=True, text=True)
+    if _r_show.returncode != 0:
+        pytest.skip(
+            f"{_r_head} (the branch head D5 quotes its `_registry_cache` figure for) is "
+            "not carried by this clone, so the figure is UNCHECKED here, not disproved — "
+            "CI's `fetch-depth: 1` checkout lacks it by construction, and it is a rebase "
+            "orphan a default refspec does not fetch (`git fetch origin "
+            "refs/pull/12950/head` re-arms it, as the honours case above records). git: "
+            f"{_r_show.stderr.strip()}")
+    _r_hits = [
+        _n for _n, _line in enumerate(_r_show.stdout.splitlines(), 1)
+        if "_registry_cache = PackRegistry(packs_dir)" in _line]
+    assert _r_hits == [int(_registry.group("merge"))], (
+        f"`_registry_cache = PackRegistry(packs_dir)` sits at {_r_hits} in "
+        f"`{_r_head}:tortoise/sdk.py`, while 05-verify.md D5 names "
+        f"`:{_registry.group('merge')}` for that head — re-derive the figure with "
+        f"`git show {_r_head}:tortoise/sdk.py | grep -n "
+        "'_registry_cache = PackRegistry'`, never carry it forward")
