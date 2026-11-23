@@ -133,6 +133,7 @@ from collections import Counter
 from typing import ClassVar
 
 import pytest
+import regex
 from markdown_it import MarkdownIt
 
 from tortoise import mcp_server as ms
@@ -1266,29 +1267,35 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         which closes both placements by leaving the ordinary `name(` behind — the
     #:         separator class is deliberately NOT widened (see `CALL_FORM`'s note, which
     #:         measured that widening as dead weight).
-    #:         ⛔ AND THE CLASS WAS DECLARED CLOSED WHILE 164 OF ITS MEMBERS WERE OPEN (#14237
-    #:         r19, measured fail-open — the same "stated bound wider than the behaviour" the
-    #:         bullet above is about). The r18 repair gave `_strip_invisible` a hand list of
-    #:         SIX codepoints, and `_strip_invisible` is the only thing that decides what the
-    #:         reader reads. ⚠️ THE COUNT IS THE FACT A COUNT CLAIM KEEPS GETTING WRONG, so it is
-    #:         read from primary source, not estimated: Unicode's Cf (format) category is **170
-    #:         codepoints in 21 ranges** (`unicode.org/Public/UCD/latest/ucd/extracted/
-    #:         DerivedGeneralCategory.txt`, v18.0.0; this interpreter's `unicodedata` — Unicode
-    #:         15.0.0 — agrees, also 170). An earlier wording of this bullet said "26 members;
-    #:         the other 20", and r19's commit message said "of Unicode's 23 Cf" — both are the
-    #:         count of the PROBE those rounds happened to use, and both understated the open
-    #:         surface by two orders of magnitude. Measured at the r18 head `c75dc3603e66`
-    #:         against the category itself: **164 of the 170 were ACCEPTED** between the name and
-    #:         its bracket (the six stripped being the hand list's own). So
-    #:         `Call tortoise_list_graphs&#8206;(x=1) …` and `Call tortoise&#8206;_list_graphs(x=1)
-    #:         …` returned `R1 [] R2 []` while the ZWSP spelling of each is RED — and so did 162
-    #:         more the probe never named. The class is now the Unicode CATEGORY, asked of
-    #:         `unicodedata`, not a second list that disagrees with Unicode the day a format
-    #:         character is minted (#4170);
-    #:         `test_the_invisible_class_is_the_UNICODE_CATEGORY_not_a_hand_list` pins the
-    #:         mechanism, the placement rows below pin it per Cf family, and
-    #:         `test_a_Cf_member_that_DESIGNS_a_visible_mark_is_stripped_anyway` pins the
-    #:         over-block the category buys (see `INVISIBLE_CATEGORY`).
+    #:         ⛔ AND THE CLASS WAS DECLARED CLOSED TWICE WHILE ITS MEMBERS WERE OPEN (#14237
+    #:         r19 and r21, both measured fail-open — the same "stated bound wider than the
+    #:         behaviour" the bullet above is about). The r18 repair gave `_strip_invisible` a
+    #:         hand list of SIX codepoints. Measured at the r18 head `c75dc3603e66` against
+    #:         Unicode's Cf category: **164 of its 170 members were ACCEPTED** between the name
+    #:         and its bracket. That count is read from primary source
+    #:         (`DerivedGeneralCategory.txt`; this interpreter's `unicodedata` — Unicode 15.0.0 —
+    #:         agrees, 170), because BOTH earlier wordings were the size of the round's own
+    #:         PROBE ("26 members; the other 20" in r20's comment, "of Unicode's 23 Cf" in r19's
+    #:         commit message). r19 then asked `unicodedata.category` and the prose said the class
+    #:         was closed a second time — and it was not, because **Cf is not the property that
+    #:         means "a reader sees nothing"**: measured at the r20 head, variation selectors
+    #:         (U+FE0F), the combining grapheme joiner (U+034F), the Hangul fillers (U+115F,
+    #:         U+1160, U+3164) and the Mongolian free variation selectors (U+180B..180D) all
+    #:         render as NOTHING and were ACCEPTED in BOTH placements, because their category is
+    #:         Mn/Lo and the strip removed only Cf. The class is now Unicode's
+    #:         **Default_Ignorable_Code_Point** PROPERTY, asked of `regex`'s own Unicode table
+    #:         (`unicodedata` exposes `category` only, never the property) — the one property
+    #:         DEFINED as "this character is invisible", 4174 codepoints under this table, and
+    #:         never a second list that disagrees with Unicode the day a character is minted
+    #:         (#4170). It also DELETES the over-block the category bought: the Cf codepoints that
+    #:         are NOT Default_Ignorable (32 here — U+0600..0605, U+06DD, U+070F, U+0890..0891,
+    #:         U+08E2, U+110BD, U+110CD, U+FFF9..FFFB, U+13430..1343F) are exactly the ones
+    #:         Unicode excludes BECAUSE they render a sign or mark, so they now survive the strip
+    #:         and a NOTE written beside one keeps its replacement credit.
+    #:         `test_the_invisible_class_is_the_UNICODE_PROPERTY_not_a_hand_list` pins the
+    #:         mechanism, the placement rows below pin it per family (Cf AND the non-Cf families
+    #:         r19 left open), and `test_a_Cf_member_that_DESIGNS_a_visible_mark_is_NOT_stripped`
+    #:         pins the over-block's removal (see `INVISIBLE_PROPERTY`).
     #:       * the judged UNITS are every leaf block **and the source between them**, so a
     #:         retired name in a link-reference DEFINITION is reached in EVERY spelling. That
     #:         text is in NO block (the parser consumes the definition), which is why R2 already
@@ -1348,35 +1355,45 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 lead = len(token) - len(token.lstrip("_"))
                 yield core, match.start() + lead, match.start() + lead + len(core)
 
-    #: Unicode's **Cf** (format) category, read from `unicodedata` — the FORMAT property, which
-    #: is what admits a character a reader does not see. Placed inside a retired name or
-    #: between the name and its bracket, each one leaves the reader looking at the door (or at
-    #: the call) while the SOURCE no longer tokenizes as either (#14237 r18, both shapes
-    #: measured ACCEPTED at `63ef683d18`). Declared ONCE and applied in ONE place —
-    #: `_strip_invisible`, over the JUDGED texts and before tokenizing — which closes BOTH
-    #: placements: inside the name the token splits without it, and between the name and its
-    #: bracket removing it leaves the ordinary `name(` that `CALL_FORM` already matches.
-    #: ⛔ IT IS A CATEGORY, NOT A LIST, AND THAT TOO IS MEASURED (#14237 r19). r18 shipped six
-    #: codepoints and the class comment called the class closed; 164 of the category's 170
-    #: members were ACCEPTED in both placements at the r18 head (measured against the category,
-    #: not against a probe — see the class comment's bullet). A hand list is a second list that
-    #: disagrees with Unicode the day a format character is minted, which is the #4170 failure
-    #: this file's prose keeps naming, so the question is asked of `unicodedata` and never of a
-    #: string of escapes.
-    #: ⚠️ THE DECLARED OVER-BLOCK, measured rather than glossed: "the format property" is NOT
-    #: the same question as "renders as nothing". SIXTEEN of the 170 members — U+0600..0605
-    #: (ARABIC NUMBER SIGN..NUMBER MARK ABOVE), U+06DD, U+070F, U+0890..0891, U+08E2, U+110BD,
-    #: U+110CD and U+FFF9..FFFB — designate a sign or mark that renders IN COMBINATION with the
-    #: adjacent text (`DerivedGeneralCategory.txt` names each of them). They are stripped anyway,
-    #: so a NOTE written beside one of them loses its replacement credit: the fail-closed
-    #: direction this guard has taken since round 1, and a price no ordinary English sentence
-    #: pays. It is stated here because an earlier wording of this very comment said "each
-    #: renders as NOTHING … the PROPERTY 'carries no glyph'", which is FALSE for those sixteen
-    #: and would license narrowing the class back to the glyphless subset — the direction that
-    #: reopens r18. `test_a_Cf_member_that_DESIGNS_a_visible_mark_is_stripped_anyway` pins it.
+    #: Unicode's **Default_Ignorable_Code_Point** property, asked of `regex` — the ONE property
+    #: that means "a reader sees NOTHING here", which is the question this class actually asks.
+    #: Placed inside a retired name or between the name and its bracket, each such character
+    #: leaves the reader looking at the door (or at the call) while the SOURCE no longer
+    #: tokenizes as either (#14237 r18, both shapes measured ACCEPTED at `63ef683d18`). Declared
+    #: ONCE and applied in ONE place — `_strip_invisible`, over the JUDGED texts and before
+    #: tokenizing — which closes BOTH placements: inside the name the token splits without it,
+    #: and between the name and its bracket removing it leaves the ordinary `name(` that
+    #: `CALL_FORM` already matches.
+    #: ⛔ IT IS A PROPERTY, NOT A LIST AND NOT A CATEGORY, AND ALL THREE WERE MEASURED (#14237
+    #: r19/r21). r18 shipped six codepoints and called the class closed. r19 replaced them with
+    #: `unicodedata.category == "Cf"` and the class comment called it closed AGAIN — 164 of Cf's
+    #: 170 members were open at r18, and then a WHOLE INVISIBLE FAMILY OUTSIDE Cf was open: Mn
+    #: variation selectors and the combining grapheme joiner, Lo Hangul fillers, Mn Mongolian
+    #: free variation selectors. "Cf" is the FORMAT category, not the "invisible" property, and
+    #: a hand list is a second list that disagrees with Unicode the day a character is minted
+    #: (#4170). So the question is asked of the PROPERTY, through `regex`'s Unicode table, and
+    #: never of a string of escapes.
+    #: ⚠️ WHAT THE PROPERTY BUYS AND WHAT IT COSTS, both measured rather than glossed. It DELETES
+    #: r19's declared over-block: the Cf codepoints that are not Default_Ignorable (32 under this
+    #: table) are exactly the ones Unicode excludes because they render a sign or mark — the
+    #: ARABIC NUMBER SIGN..NUMBER MARK ABOVE, U+06DD, U+070F, U+0890..0891, U+08E2, U+110BD,
+    #: U+110CD, the interlinear annotation anchors U+FFF9..FFFB and the Egyptian hieroglyph
+    #: format controls U+13430..1343F — so a NOTE written beside one of them keeps its
+    #: replacement credit instead of being stripped as if the character were invisible.
+    #: `test_a_Cf_member_that_DESIGNS_a_visible_mark_is_NOT_stripped` pins both halves.
     #: ⛔ NOT a general "strip all Unicode" rule: NBSP and the other spaces a reader SEES are
     #: horizontal whitespace, already covered, and are deliberately left visible here.
-    INVISIBLE_CATEGORY = "Cf"
+    INVISIBLE_PROPERTY = "Default_Ignorable_Code_Point"
+
+    #: ⚠️ THE DECLARED RESIDUAL, stated so it cannot be rediscovered as a finding: the property
+    #: is "invisible", NOT "renders as a blank". A codepoint whose glyph is an empty cell —
+    #: U+2800 BRAILLE PATTERN BLANK is the one that matters — is NOT Default_Ignorable, because
+    #: it does render its cell; a reader sees something between the name and the bracket, so the
+    #: line is not a cleanly copyable `name(`. Treating every blank-RENDERING glyph as invisible
+    #: would be an unbounded class (any one-cell space-like glyph), which is the enumeration
+    #: failure this class keeps repairing. Pinned by
+    #: `test_declared_residual_a_BLANK_GLYPH_that_is_NOT_the_property_is_accepted`.
+    INVISIBLE_RE = regex.compile(r"\p{Default_Ignorable_Code_Point}+")
 
     #: The CommonMark parser IS the block model. A hand-written punctuation/construct table
     #: was tried for four review rounds and every round found another construct it did not
@@ -1416,7 +1433,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
 
     @classmethod
     def _strip_invisible(cls, text: str) -> str:
-        """The text with every `INVISIBLE_CATEGORY` (Cf) character REMOVED — what a reader reads.
+        """The text with every `INVISIBLE_PROPERTY` character REMOVED — what a reader reads.
 
         Applied to the JUDGED texts only (`shown` and `rendered`), never to `body`: `body`
         decides R2's replacement credit and widening it would credit a replacement that
@@ -1426,16 +1443,19 @@ class TestEveryReaderNamesTheLiveListingDoor:
         caller uses the return value's own coordinates only for the SIGN of `call_end`, and
         reports the block's START line, which comes from the original text.
 
-        ⛔ THE CLASS COMES FROM `unicodedata.category`, NOT FROM AN ENUMERATION (#14237 r19,
-        measured fail-open): r18's hand list held 6 of the category's 170 Cf codepoints
-        (`DerivedGeneralCategory.txt` v18.0.0 = 21 ranges / 170; `unicodedata` 15.0.0 here
-        agrees) and the class comment then said the class was closed, so the other 164 — a
-        bidi mark or an invisible math operator between the name and its bracket, or inside
-        the name — still returned `R1 [] R2 []` on text a reader reads as
-        `tortoise_list_graphs(x=1)`.
+        ⛔ THE CLASS COMES FROM UNICODE'S PROPERTY, NOT FROM A LIST AND NOT FROM A CATEGORY
+        (#14237 r19/r21, both measured fail-open). r18's hand list held 6 of Cf's 170
+        (`DerivedGeneralCategory.txt`; `unicodedata` 15.0.0 agrees) and the class comment said
+        the class was closed, so the other 164 — a bidi mark or an invisible math operator
+        between the name and its bracket, or inside the name — still returned `R1 [] R2 []` on
+        text a reader reads as `tortoise_list_graphs(x=1)`. r19 asked `unicodedata.category`,
+        which fixed those and still MISSED every invisible character outside Cf: a variation
+        selector, the combining grapheme joiner, a Hangul filler, a Mongolian free variation
+        selector — measured ACCEPTED at the r20 head in both placements. `Default_Ignorable_Code_Point`
+        is the property that means "invisible", so it is the only correct answer to this
+        question, and it is asked of `regex` because `unicodedata` does not expose it.
         """
-        return "".join(
-            ch for ch in text if unicodedata.category(ch) != cls.INVISIBLE_CATEGORY)
+        return cls.INVISIBLE_RE.sub("", text)
 
     @staticmethod
     def _inline_text(token, *, breaks: str = " ") -> str:
@@ -3203,8 +3223,13 @@ class TestEveryReaderNamesTheLiveListingDoor:
         # …and one member of EVERY Cf family the hand list left ACCEPTED (#14237 r19,
         # measured): a bidi MARK, a bidi EMBEDDING, a bidi ISOLATE, the Arabic letter MARK,
         # an invisible MATH operator, and the Mongolian vowel separator. One per family, so
-        # a future narrowing of the category reds a NAME here rather than only a count.
+        # a future narrowing of the property reds a NAME here rather than only a count.
         0x200E, 0x202A, 0x2066, 0x061C, 0x2062, 0x180E,
+        # …and one member of EVERY family OUTSIDE Cf that r19 left ACCEPTED (#14237 r21,
+        # measured at the r20 head): variation selector-16 (Mn), the combining grapheme
+        # joiner (Mn), the Hangul fillers (Lo, both the choseong and the compatibility one),
+        # a Mongolian free variation selector (Mn), and U+17B4 (Mn, a Khmer inherent vowel).
+        0xFE0F, 0x034F, 0x115F, 0x3164, 0x180B, 0x17B4,
     ))
     def test_an_INVISIBLE_character_hides_neither_the_name_nor_its_bracket(
             self, codepoint, placement):
@@ -3253,47 +3278,51 @@ class TestEveryReaderNamesTheLiveListingDoor:
             f"reader sees `tortoise_list_graphs(x=1)` in {hidden!r}, so this is a false PASS "
             f"of R1: {self.retired_call_forms(hidden)}")
 
-    def test_the_invisible_class_is_the_UNICODE_CATEGORY_not_a_hand_list(self):
-        """The strip asks `unicodedata` for the class, and the class is the FORMAT property.
+    def test_the_invisible_class_is_the_UNICODE_PROPERTY_not_a_hand_list(self):
+        """The strip asks Unicode's `Default_Ignorable_Code_Point`, never a list and never `Cf`.
 
-        ⚠️ Not "carries no glyph", which an earlier wording of this docstring claimed: 16 of
-        the 170 members designate a visible sign or mark and are stripped anyway (the declared
-        over-block, pinned by `test_a_Cf_member_that_DESIGNS_a_visible_mark_is_stripped_anyway`).
+        ⛔ TWO ROUNDS IN A ROW DECLARED THIS CLASS CLOSED WHILE MEMBERS OF IT WERE OPEN
+        (#14237 r19, and then r21 — the same shape as the r13/r16 findings: a stated blast
+        radius wider than the behaviour). r18 repaired the class with SIX enumerated
+        codepoints. r19 showed 164 of Cf's 170 members were ACCEPTED in both placements and
+        asked `unicodedata.category` instead — and the prose said "closed" again, while a
+        WHOLE FAMILY OUTSIDE Cf was still open: a variation selector, the combining grapheme
+        joiner, a Hangul filler and a Mongolian free variation selector all render as NOTHING
+        and were ACCEPTED in both placements (measured at the r20 head), because their category
+        is Mn/Lo. "Cf" is the FORMAT category; the question this class asks is "does the reader
+        see nothing", and Unicode answers it with `Default_Ignorable_Code_Point`.
 
-        ⛔ THIS ROW EXISTS BECAUSE THE CLASS WAS DECLARED CLOSED WHILE 164 OF ITS MEMBERS WERE
-        OPEN (#14237 r19, measured fail-open, and the same shape as the r13/r16 findings: a
-        stated blast radius wider than the behaviour). r18 repaired the invisible-character
-        class with SIX enumerated codepoints, and the class comment then said the class was
-        closed. The category is 170 codepoints, not the 23/26 an earlier wording of this
-        round's probe and comments said; a bidi mark, a bidi isolate, an invisible math
-        operator and the Arabic letter mark were ACCEPTED in BOTH placements —
-        `Call tortoise_list_graphs\u200e(x=1) …` and `Call tortoise\u200e_list_graphs(x=1) …`
-        both returned `R1 [] R2 []` while the ZWSP spelling of each is RED.
-
-        So the assertion is about the MECHANISM, not about a longer list: the strip must
-        remove exactly the codepoints whose `unicodedata.category` is `Cf`, over a probe that
-        spans the families. A future narrowing back to an enumeration reds HERE (the probe's
-        non-r18 members survive the strip) as well as in the placement rows above, and a
-        widening that starts eating code points a reader SEES reds here too (the visible
-        control below) — which is the direction the placement rows alone could not catch.
+        So the assertion is about the MECHANISM, not about a longer list: every codepoint in the
+        probe must satisfy the property the strip asks, and the strip must remove ALL of them —
+        Cf families and the non-Cf families together. A future narrowing back to an enumeration
+        or to the Cf category reds HERE (the probe's non-Cf members survive the strip) as well
+        as in the placement rows above, and a widening that starts eating code points a reader
+        SEES reds here too (the visible control below) — the direction the placement rows alone
+        could not catch.
         """
-        probe = ("tortoise_list_graphs"
+        invisibles = (
                  # one member of every Cf family: soft hyphen, ZWSP/ZWNJ/ZWJ, LRM, RLM,
                  # Arabic letter mark, Mongolian vowel separator, bidi embeddings and
                  # isolates, invisible math operators, word joiner, BOM.
                  "\u00ad\u200b\u200c\u200d\u200e\u200f\u061c\u180e"
                  "\u202a\u202b\u202c\u202d\u202e\u2060\u2061\u2062\u2063\u2064"
-                 "\u2066\u2067\u2068\u2069\ufeff")
-        cf = [ch for ch in probe if unicodedata.category(ch) == "Cf"]
-        assert len(cf) == 23, (
-            "the probe no longer spans the Cf families — a green here would measure nothing: "
-            f"{[(hex(ord(c)), unicodedata.category(c)) for c in probe]}")
+                 "\u2066\u2067\u2068\u2069\ufeff"
+                 # …and one member of every family OUTSIDE Cf that renders as nothing:
+                 # variation selectors (Mn), the combining grapheme joiner (Mn), the Hangul
+                 # fillers (Lo), and Mongolian free variation selectors (Mn).
+                 "\ufe0f\ufe0e\U000e0100\u034f\u115f\u1160\u3164\u180b\u180d\u17b4")
+        probe = "tortoise_list_graphs" + invisibles
+        outside_the_property = [ch for ch in invisibles
+                                if not self.INVISIBLE_RE.fullmatch(ch)]
+        assert not outside_the_property, (
+            "the probe no longer spans the property's families — a green here would measure "
+            f"nothing: {[(hex(ord(c)), unicodedata.category(c)) for c in outside_the_property]}")
         assert self._strip_invisible(probe) == "tortoise_list_graphs", (
-            "the strip is not Unicode's Cf category: every character in the probe renders as "
-            "nothing, so a reader reads only the name, while the strip left "
-            f"{self._strip_invisible(probe)!r}")
+            "the strip is not Unicode's Default_Ignorable_Code_Point property: every character "
+            "in the probe renders as nothing, so a reader reads only the name, while the strip "
+            f"left {self._strip_invisible(probe)!r}")
         # The bound in the other direction: characters a reader SEES must survive, or the
-        # category has been widened into "strip all Unicode" (an over-block that would red
+        # property has been widened into "strip all Unicode" (an over-block that would red
         # correct prose and, worse, could shorten a token into a name).
         visible = " tortoise\u00a0list\u2003graphs\u2014x"
         assert self._strip_invisible(visible) == visible, (
@@ -3302,29 +3331,39 @@ class TestEveryReaderNamesTheLiveListingDoor:
 
     @pytest.mark.parametrize("codepoint", (
         0x0600, 0x0601, 0x06DD, 0x070F, 0x0890, 0x08E2, 0x110BD, 0x110CD, 0xFFF9, 0xFFFB))
-    def test_a_Cf_member_that_DESIGNS_a_visible_mark_is_stripped_anyway(self, codepoint):
-        """The DECLARED OVER-BLOCK: the class is Unicode's format property, not "no glyph".
+    def test_a_Cf_member_that_DESIGNS_a_visible_mark_is_NOT_stripped(self, codepoint):
+        """THE OVER-BLOCK IS GONE: asking the property instead of the category deletes it.
 
-        Sixteen of the category's 170 members designate a sign or mark that renders in
-        combination with adjacent text — U+0600..0605 (ARABIC NUMBER SIGN..NUMBER MARK ABOVE),
-        U+06DD, U+070F, U+0890..0891, U+08E2, U+110BD, U+110CD, U+FFF9..FFFB — so a reader of
-        `tortoise_list_graphs\u0600(x=1)` does see something, and stripping it anyway means a
-        NOTE carrying one loses its replacement credit. That is the fail-closed direction, and
-        it is pinned rather than left implicit for the reason this PR's §2 exists: the round-19
-        comment said the class was "carries no glyph", which is false for these and would
-        license narrowing the class back to the glyphless subset — reopening r18.
+        r19's class comment declared sixteen Cf members as a deliberate over-block — U+0600..0605,
+        U+06DD, U+070F, U+0890..0891, U+08E2, U+110BD, U+110CD, U+FFF9..FFFB — because they
+        render a sign or mark in combination with adjacent text, so stripping them made a NOTE
+        written beside one lose its replacement credit.
+
+        ⛔ The over-block was a symptom of asking the wrong question. Unicode excludes EXACTLY
+        those codepoints from `Default_Ignorable_Code_Point` because they render, so asking the
+        property removes the price instead of declaring it (#14237 r21). Both halves are pinned:
+        the character SURVIVES the strip, and the mention is still REPORTED as a dead end —
+        keeping it visible is only correct while R2 still catches the note, otherwise this row
+        would be trading an over-block for a fail-open.
         """
         ch = chr(codepoint)
         assert unicodedata.category(ch) == "Cf", (
-            f"U+{codepoint:04X} is no longer Cf, so this row no longer measures the over-block")
+            f"U+{codepoint:04X} is no longer Cf, so this row no longer measures what it names")
+        assert not self.INVISIBLE_RE.fullmatch(ch), (
+            f"U+{codepoint:04X} ({unicodedata.name(ch, '?')}) is Default_Ignorable in this "
+            "regex table — the row's premise is gone, so it now measures nothing")
         hidden = f"Call tortoise_list_graphs{ch}(x=1) for names."
-        assert self._strip_invisible(hidden) == "Call tortoise_list_graphs(x=1) for names.", (
-            f"U+{codepoint:04X} ({unicodedata.name(ch, '?')}) survived the strip — the class is "
-            "no longer the Cf category, so the sixteen marks it deliberately over-blocks would "
-            f"be read as visible text: {self._strip_invisible(hidden)!r}")
-        assert self.retired_call_forms(hidden) == ["tortoise_list_graphs:1"], (
-            f"a copyable call hidden by U+{codepoint:04X} was ACCEPTED — the over-block above "
-            "must come with the fail-closed verdict it is the price of")
+        assert self._strip_invisible(hidden) == hidden, (
+            f"U+{codepoint:04X} ({unicodedata.name(ch, '?')}) was stripped: it renders a sign "
+            "or mark, so the strip is no longer the Default_Ignorable property and the sixteen "
+            f"over-blocked marks are back: {self._strip_invisible(hidden)!r}")
+        assert self.retired_call_forms(hidden) == [], (
+            f"U+{codepoint:04X} was read as a plain call, but a reader SEES the mark between "
+            f"the name and its bracket: {self.retired_call_forms(hidden)}")
+        assert self.notes_missing_replacement(hidden), (
+            "a mention carrying a visible mark was graded CLEAN — keeping the character is only "
+            "correct while R2 still reports the dead end: "
+            f"{self.notes_missing_replacement(hidden)}")
 
     def test_a_VISIBLE_space_inside_the_name_is_still_a_plain_mention(self):
         """The bound beside the row above, stated so the codepoint class cannot widen silently.
@@ -3332,15 +3371,40 @@ class TestEveryReaderNamesTheLiveListingDoor:
         `tortoise&#160;_list_graphs` is NOT the retired name to a reader — an NBSP renders as
         a space, so the sentence shows `tortoise _list_graphs`, which nobody copies as a call
         to this door. It stays a NON-call mention (R2's question), which is why the strip holds
-        Unicode's Cf (render-as-nothing) category and not NBSP or the other visible spaces:
-        widening it to "all Unicode spaces" would red correct prose for a shape that is not
-        the door.
+        Unicode's `Default_Ignorable_Code_Point` property (render-as-nothing) and not NBSP or
+        the other visible spaces: widening it to "all Unicode spaces" would red correct prose
+        for a shape that is not the door.
         """
         replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
         text = f"Call tortoise&#160;_list_graphs(x=1) for names. {replacement}\n"
         assert self.retired_call_forms(text) == [], (
             "a VISIBLE space inside the name was read as the door, which is the over-block "
             f"direction: {self.retired_call_forms(text)}")
+
+    def test_declared_residual_a_BLANK_GLYPH_that_is_NOT_the_property_is_accepted(self):
+        """⚠️ DECLARED RESIDUAL — `tortoise_list_graphs\u2800(x=1)` is ACCEPTED (#14237 r21).
+
+        U+2800 BRAILLE PATTERN BLANK renders as an EMPTY CELL, not as nothing, so Unicode does
+        not list it as Default_Ignorable (measured: the property is false for it, and for the
+        other blank-RENDERING glyphs, while it is true for all 4174 members the tests above
+        span). A reader sees a blank between the name and its bracket and a line copied out of
+        the doc carries the cell, so this is not the cleanly copyable `name(` the R1 rule
+        forbids — which is why it is declared rather than chased.
+
+        ⛔ The bound is stated here so it cannot be rediscovered as a finding, and so the next
+        reader can tell it apart from a stale claim: "blank glyph" is an UNBOUNDED class (any
+        one-cell space-like glyph), and enumerating it is exactly the failure this class has
+        repaired twice. Pinned with the row style the line-break residual below uses.
+        """
+        ch = chr(0x2800)
+        assert not self.INVISIBLE_RE.fullmatch(ch), (
+            "U+2800 became Default_Ignorable — this residual is CLOSED: delete this row and say "
+            "so in `INVISIBLE_RE`'s comment instead of leaving a stale bound")
+        replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
+        text = f"Call tortoise_list_graphs{ch}(x=1) for names. {replacement}\n"
+        assert self.retired_call_forms(text) == [], (
+            "the blank-glyph residual is CLOSED — delete this row and say so in "
+            f"`INVISIBLE_RE`'s comment: {self.retired_call_forms(text)}")
 
     def test_declared_residual_a_LINE_BREAK_inside_the_name_is_accepted(self):
         """⚠️ DECLARED RESIDUAL — `tortoise_list_\ngraphs(x=1)` is ACCEPTED, and it should be.
