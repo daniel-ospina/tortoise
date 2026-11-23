@@ -1201,6 +1201,15 @@ jobs:
           # and its source are in the script's header; the first revision of this
           # change had the polarity inverted ({0, 1}), which would have redded this
           # required check on all 46 inherited findings in the snapshot.
+          #
+          # ⛔ #2148/B5: this producer now runs lychee with `--exclude '^https?://'`,
+          # so the REQUIRED check grades LOCAL (relative/fragment) targets only. A
+          # remote host's answer is a property of the run, not of the diff — #14230
+          # reddened main's own merged tree because a citation's host 403'd CI's
+          # bot user agent. `tools/docs_lint_baseline.py sweep` covers the whole-tree
+          # local class network-free; remote liveness is an on-demand run, not a
+          # merge gate. The flag lives in the script (and in the snapshot
+          # generator), NOT here — the two argv lists are pinned equal.
           bash .github/scripts/docs-link-check.sh \
             --label "Link check (changed files)" \
             --files-from "$RUNNER_TEMP/pr-md.txt" \

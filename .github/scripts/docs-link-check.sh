@@ -217,6 +217,22 @@ fi
 STDERR_LOG="${OUTPUT}.stderr"
 TMP_REPORT="${OUTPUT}.tmp"
 
+# ⛔ LOCAL LINKS ONLY (#2148/B5). `--exclude '^https?://'` drops every REMOTE
+# http(s) target from the population. The gate that runs here is REQUIRED, and a
+# remote host's answer is not a property of the diff: #14230 reddened main's own
+# merged tree because a citation's host 403'd CI's bot user agent, and the class
+# also covers rate limits, TLS and DNS — the run-property variance the snapshot's
+# own `variance` note records. A RELATIVE target IS a property of the tree, so it
+# stays checked here: its PATH half is graded (the target file must exist), and
+# `docs_lint_baseline.py sweep` covers the whole-tree form network-free.
+# ⚠️ THE FRAGMENT HALF IS NOT GRADED — do not read the sentence above as claiming
+# it is. lychee verifies `docs/x.md#section` anchors only when it runs with
+# `--include-fragments`, and NEITHER this producer nor
+# `tools/docs_lint_baseline.py::_run_lychee` passes that flag (pre-existing, and
+# deliberately not changed here: this PR's cut is the remote population, not the
+# anchor class). To sweep remote liveness on demand, run lychee WITHOUT the
+# exclude flag — never add it back to this producer.
+#
 # `--mode task` / `--format json` / `--files-from`: the same invocation
 # `tools/docs_lint_baseline.py::_run_lychee` uses to GENERATE the snapshot, so the
 # producer and the generator cannot drift apart in what they ASK for. They do
@@ -225,6 +241,7 @@ TMP_REPORT="${OUTPUT}.tmp"
 # here without any test noticing — it is pinned in this script (see the exit-code
 # table in the header), not in the generator.
 "$LYCHEE_BIN" --mode task --no-progress --format json \
+  --exclude '^https?://' \
   --files-from "$FILES_FROM" >"$TMP_REPORT" 2>"$STDERR_LOG"
 rc=$?
 
