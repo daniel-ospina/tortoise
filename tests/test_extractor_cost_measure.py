@@ -1514,6 +1514,7 @@ def test_the_output_table_rows_sum_to_its_printed_total():
     block = _committed_markdown().split(
         "### The output constant, decomposed", 1)[1]
     rows, total = [], None
+    fitted, residual = None, None
     for line in block.splitlines():
         if not line.startswith("|"):
             if total is not None:
@@ -1524,7 +1525,18 @@ def test_the_output_table_rows_sum_to_its_printed_total():
             continue
         if "composition total" in cells[0]:
             total = int(cells[1].replace(",", "").replace("*", ""))
-            break
+            # ⛔ KEEP PARSING — DO NOT `break` HERE. The two rows that make the
+            # column reconcile are BELOW this one, so breaking here left them
+            # unread and the residual defect (the residual formatted from the
+            # unrounded float, giving 17,829 + 4,972 = 22,801 against a fitted
+            # 22,802) passed this test for a whole cycle (review cycle 14, P3).
+            continue
+        if "fitted constant" in cells[0]:
+            fitted = int(cells[1].replace(",", "").replace("*", ""))
+            continue
+        if "unattributed" in cells[0]:
+            residual = int(cells[1].replace(",", "").replace("*", ""))
+            continue
         if cells[0] in ("s1", "s2", "s4"):
             rows.append(int(cells[1].replace(",", "")))
     assert len(rows) == 3, f"the three stage rows must be present, got {rows}"
@@ -1533,6 +1545,28 @@ def test_the_output_table_rows_sum_to_its_printed_total():
         f"the printed stage rows sum to {sum(rows):,} but the printed total is "
         f"{total:,} — a column that does not add up is the exact defect this "
         f"bundle's own rule forbids")
+    # …and a reader who ADDS THE WHOLE COLUMN must land on the fitted constant.
+    assert fitted is not None and residual is not None, (
+        f"the printed fitted-constant ({fitted}) and unattributed ({residual}) "
+        f"rows must both be present — they are what the column reconciles to")
+    assert fitted - total == residual, (
+        f"the printed column does not reconcile: {total:,} rows + {residual:,} "
+        f"residual = {total + residual:,}, but the printed fitted constant is "
+        f"{fitted:,} (off by {fitted - total - residual:,}). The residual must be "
+        f"derived from the PRINTED total, not formatted from the unrounded float")
+    # …and the hand-written README copy of this table must carry the same two
+    # numbers. It drifted twice (17,830 / 4,972 while the generated file said
+    # 17,829 / 4,973), because nothing pinned it.
+    readme = (_REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+              / "README.md").read_text(encoding="utf-8")
+    s2 = readme.split("## 2. The output constant, decomposed", 1)[1]
+    assert f"**{total:,}**" in s2, (
+        f"the README's §2 table must print the generated composition total "
+        f"({total:,}) — two different totals for one column is what this pins "
+        f"out")
+    assert f"**{residual:,}**" in s2, (
+        f"the README's §2 table must print the generated residual "
+        f"({residual:,}), not the pre-fix one")
     # …and the total is the sum of the ROUNDED rows. Formatting the UNROUNDED
     # sum is precisely how 17,829 became 17,830, so pin the derivation and not
     # just today's arithmetic.
