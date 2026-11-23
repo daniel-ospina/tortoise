@@ -69,7 +69,7 @@ _SAVING_SHARE_BAND = (29.0, 36.0)
 
 
 #: Padding for an ABSENT key. `None` cannot be used: it is a legitimate value in this
-#: schema (measured: 210 explicitly-`null` cells vs 55 absent ones), so `dict.get(k)` would
+#: schema (measured: 210 explicitly-`null` cells vs 54 absent ones), so `dict.get(k)` would
 #: conflate "field not present" with "field present and null". `~` cannot either — it occurs
 #: inside real content. This sentinel is verified absent from the corpus below, which is the
 #: property a real renderer must check at render time rather than assume.

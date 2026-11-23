@@ -166,7 +166,7 @@ it survives review; the corpus aggregate is where it is wrong.) Any such render 
 **union** of keys and pad absent ones.
 2. **`null` is a legitimate value in this schema, so it cannot be the padding.** The corpus
 carries **210 cells that are explicitly `null`** (`entities.supersedes` 150, `points.when`
-53, `events.startedAt` 4, `points.source_turn_id` 3) against **55 cells that are an absent
+53, `events.startedAt` 4, `points.source_turn_id` 3) against **54 cells that are an absent
 key** — so `dict.get(k)` conflates "field not present" with "field present and null", which
 are different statements about a record.
 3. **`null` is not the only unusable sentinel — `~`, the first one tried here, is already
