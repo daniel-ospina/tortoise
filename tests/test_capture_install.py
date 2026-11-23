@@ -4711,7 +4711,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 27}
+                             "pi": 28}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4824,7 +4824,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     artifact, move the generation, update this pair — all three in one commit").
     What is never rewritten is a SHIPPED entry in ``_GENERATION_DIGESTS``.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 27
+    assert hook_install.read_hook_version(_PI_SRC) == 28
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4917,7 +4917,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: rename and the replacement lost the same way. A gen-25 copy therefore DELETES
 #: captures that gen-24 merely overwrote, and must read STALE.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    27, "09e4ff18b21f04f4723d8602f015819a6b33e085e13674c37e64271bd5c08e03")
+    28, "1b4be368725292b60cc3e283f912107c3ab68a54a8caa861db12519040625d0a")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4966,6 +4966,12 @@ _GENERATION_DIGESTS = {
     # claims "turn log has bytes" when none exists. Gen 26 kept a husk and could
     # clobber live bytes, so it must read STALE.
     27: "09e4ff18b21f04f4723d8602f015819a6b33e085e13674c37e64271bd5c08e03",
+    # Generation 28 (#14359 review cycle 5): the orphan pass now SKIPS an orphan
+    # that is the only copy of a capture (its key has a readable meta and no log, or
+    # it is the session being written), so a write can no longer move bytes aside
+    # and spend them in the same call. Gen 27 promised to keep those bytes and then
+    # deleted them — it must read STALE.
+    28: "1b4be368725292b60cc3e283f912107c3ab68a54a8caa861db12519040625d0a",
     # Generation 23 (#12603): the PI leg can STAMP the marker it could only ever
     # CLEAR. The confirm-on-refusal read (`GET /v1/sessions/<id>` + a turn match
     # + an explicit `extraction.outcome_known: false`) is the stamp's first live
@@ -5148,6 +5154,9 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # behaviour is untouched, but the pair is ONE contract and
     # `contract_version_for("pi")` answers None when the markers disagree.
     27: "177e63412de8aa70cc78a5d88b4ad2b849a2d05b10fd46b006041a9c7a78c412",
+    # Generation 28 (#14359 review cycle 5): marker-only — the read half's behaviour
+    # is untouched, but the pair is ONE contract.
+    28: "a74b5f43f7878aa3604d96407f94331767a5b741d1381dc11ec125c74b68a45d",
     # Generation 23 (#12603): only the header line moves — the read half's
     # behaviour is untouched, but `contract_version_for('pi')` grades the PAIR as
     # one contract and answers None when the two markers disagree, so the read
@@ -5192,7 +5201,7 @@ _READ_SEAM_GENERATION_DIGESTS = {
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    27, "177e63412de8aa70cc78a5d88b4ad2b849a2d05b10fd46b006041a9c7a78c412")
+    28, "a74b5f43f7878aa3604d96407f94331767a5b741d1381dc11ec125c74b68a45d")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

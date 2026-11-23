@@ -1,4 +1,4 @@
-// tortoise-hook-version: 27
+// tortoise-hook-version: 28
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -2762,6 +2762,29 @@ function compareAge(a: SpoolMeta, b: SpoolMeta): number {
  * eviction is still a real loss, and its record names that class in the same
  * `loss` vocabulary the live entries use (#6388).
  */
+/** Is this orphan's capture the ONLY copy left? (#14359 review cycle 5)
+ *
+ *  The prune must not spend it: it runs at the end of the very write that created
+ *  it. Two witnesses, both keyed off the orphan's own name
+ *  (`<entryKey>.turns.jsonl.orphan[N]`):
+ *
+ *  * the key is the session being written in this call — its own fresh orphan is
+ *    never the prune's to spend; and
+ *  * the key still has a readable `.meta.json` and NO `.turns.jsonl`: the writer
+ *    moved the log aside and has not replaced it (yet, or ever — a kill leaves it
+ *    so), and nothing but a drain adopting it back can deliver those bytes.
+ *
+ *  Everything else is #8531's cheap reclaim: a key whose log still exists is
+ *  SUPERSEDED, and a key with no meta is undeliverable. Twin of
+ *  `capture_spool._orphan_is_only_copy`. */
+function orphanIsOnlyCopy(dir: string, orphan: string, keepSessionId: string | null): boolean {
+  const name = basename(orphan);
+  const key = name.split(".turns.jsonl.orphan")[0];
+  if (keepSessionId !== null && key === entryKey(keepSessionId)) return true;
+  if (!existsSync(join(entriesDir(dir), `${key}.meta.json`))) return false;
+  return !existsSync(join(entriesDir(dir), `${key}.turns.jsonl`));
+}
+
 export function pruneSpool(
   dir: string,
   keepSessionId: string | undefined,
@@ -2821,6 +2844,17 @@ export function pruneSpool(
   }
   for (const orphan of orphans) {
     if (total <= bounds.maxTotalBytes) break;
+    // ⛔ AN ORPHAN CAN BE THE ONLY COPY, and the quarantine that creates one is
+    // followed IMMEDIATELY by this prune (`writeSpoolEntry` ends in it). A write
+    // that moves unusable bytes aside and then EVICTS them in the same call
+    // destroys what it just promised to keep, returns `written: true`, and logs
+    // `UNREACHABLE` about bytes it can name. Mirrors
+    // `capture_spool._orphan_is_only_copy`: skip the key being written now, and
+    // any key that still has a readable meta and NO turn log (the kill-window
+    // state, where only a drain adopting it back can deliver those bytes). What
+    // stays spendable is #8531's class: an entry that still has a log, or no meta
+    // naming it at all.
+    if (orphanIsOnlyCopy(dir, orphan, keepSessionId)) continue;
     const size = fileSize(orphan);
     discards.push(
       recordDiscard(dir, {
@@ -2828,8 +2862,9 @@ export function pruneSpool(
         reason: DISCARD_BYTES_EXCEEDED,
         detail:
           `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}` +
-          "; evicted a quarantined log (UNREACHABLE: no drain can file one" +
-          " back and no reader consumes one as a capture — whether it was ever" +
+          "; evicted a quarantined log (UNREACHABLE: its entry still holds a" +
+          " turn log, so this copy is SUPERSEDED by it — or no meta names it at" +
+          " all. Either way no drain can file it back; whether it was ever" +
           " delivered is unknown)",
       }),
     );

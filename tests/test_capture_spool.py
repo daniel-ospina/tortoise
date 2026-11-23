@@ -5427,10 +5427,10 @@ def test_a_FAILED_rewrite_puts_the_quarantined_bytes_BACK(tmp_path, monkeypatch)
     a restore our own failed write deletes a capture and reports "there was
     nothing to keep" — while the bytes sit in an orphan nothing can file.
 
-    MUTATION THAT REDS THIS: drop the ``os.replace(quarantined, log_path)``
-    restore in the ``except OSError`` arm — the log is then absent and the drain
-    discards the entry with ``transcript_empty`` instead of keeping it as
-    ``transcript_torn``.
+    MUTATION THAT REDS THIS: drop the restore in the ``except OSError`` arm
+    (`os.link(quarantined, log_path)` + `os.unlink(quarantined)`) — the log is then
+    absent and the drain discards the entry with ``transcript_empty`` instead of
+    keeping it as ``transcript_torn``.
     """
     import tortoise.capture_spool as capture_spool
     from tortoise.capture_spool import (
@@ -5565,6 +5565,51 @@ def test_a_quarantine_that_cannot_complete_REFUSES_the_write(tmp_path, monkeypat
     assert read_spool_meta(root, sid).get("filed_key") is None
 
 
+def test_the_adoption_takes_the_NEWEST_orphan_not_the_first_by_name(tmp_path):
+    """#14359 review cycle 5 — lexicographic order adopted the OLDEST bytes.
+
+    A key can hold several orphans (`.orphan`, `.orphan2`, …) because the rename
+    never clobbers. `sorted()` picks `.orphan` — the OLDEST — so the drain kept the
+    stale bytes, the prune then spent the newer ones, and the ledger said the bytes
+    were "put back … and kept". mtime is the transcript's own age (a rename
+    preserves it), so newest-first is the most recent capture.
+
+    MUTATION THAT REDS THIS: sort by name (`key=lambda p: (p.name,)`) — the older
+    bytes are adopted and the newer ones stay in the evictable class.
+    """
+    import os as _os
+
+    from tortoise.capture_spool import (
+        DISCARD_TRANSCRIPT_TORN,
+        _entries_dir,
+        _log_path,
+        _orphan_paths,
+        read_discards,
+    )
+
+    root = tmp_path / "multi-orphan"
+    sid = "14359-two-orphans"
+    write_spool_entry(root, _snapshot(sid))
+    log = _log_path(root, sid)
+    old_bytes, new_bytes = b"older capture\n", b"newer capture\n"
+    older = _entries_dir(root) / f"{log.name}.orphan"
+    newer = _entries_dir(root) / f"{log.name}.orphan2"
+    older.write_bytes(old_bytes)
+    newer.write_bytes(new_bytes)
+    base = 1_700_000_000
+    _os.utime(older, (base, base))
+    _os.utime(newer, (base + 60, base + 60))
+    log.unlink()   # the kill: the log is gone, only the orphans hold bytes
+
+    flush_spool(root, _Server().post, now=1000.0)
+
+    assert [d["reason"] for d in read_discards(root)] == [DISCARD_TRANSCRIPT_TORN]
+    assert _log_path(root, sid).read_bytes() == new_bytes, (
+        "the drain adopted the OLDEST orphan — the newest capture is still in the"
+        " evictable class and the ledger claims the bytes were kept")
+    assert [p.read_bytes() for p in _orphan_paths(root)] == [old_bytes]
+
+
 def test_a_kill_between_the_quarantine_and_the_write_keeps_the_entry(tmp_path):
     """#14359 review P2 — the residual kill window, closed rather than documented.
 
@@ -5610,6 +5655,11 @@ def test_a_kill_between_the_quarantine_and_the_write_keeps_the_entry(tmp_path):
     assert [p.name for p in _orphan_paths(root)] == [f"{_log_path(root, sid).name}.orphan"]
     orphan_bytes = _orphan_paths(root)[0].read_bytes()
     assert orphan_bytes, "fixture must carry the mover's bytes"
+    # The adoption LINKS the orphan's inode instead of copying its bytes, so the
+    # bytes can never be half-written (a copy would be byte-identical here, which
+    # is why the inode is the assertion). Same reason the failed-write restore uses
+    # `os.link`; a future "simplification" to write_bytes() reds this line.
+    orphan_ino = _orphan_paths(root)[0].stat().st_ino
 
     flush_spool(root, _Server().post, now=1000.0)
 
@@ -5630,6 +5680,9 @@ def test_a_kill_between_the_quarantine_and_the_write_keeps_the_entry(tmp_path):
     # then counts it, so the bytes are protected AND visible.
     assert _log_path(root, sid).read_bytes() == orphan_bytes, (
         "the drain recorded 'kept' but left the bytes in the evictable orphan class")
+    assert _log_path(root, sid).stat().st_ino == orphan_ino, (
+        "the adoption copied the bytes instead of linking them — a copy can be"
+        " half-written and doubles the disk cost")
     assert _orphan_paths(root) == [], "an adopted orphan must not leave a second name behind"
 
     # The consequence, measured: a prune at a ceiling tight enough to bind reaps
@@ -5703,3 +5756,86 @@ def test_the_restore_cannot_clobber_a_log_that_landed_IN_BETWEEN(tmp_path, monke
     assert [p.name for p in _entries_dir(root).iterdir()
             if ".turns.jsonl.orphan" in p.name] == [f"{_log_path(root, sid).name}.orphan"]
 
+
+
+def test_a_write_under_byte_pressure_cannot_evict_ITS_OWN_orphan(tmp_path):
+    """#14359 review cycle 5 — P1: the write path could spend the bytes it kept.
+
+    `write_spool_entry` ends in `prune_spool(root, snapshot.session_id, bounds)`,
+    and the prune's orphan pass reaps orphans while the spool is over the byte
+    ceiling. `keep_session_id` protected live ENTRIES only, so a write that
+    quarantined an unusable log and then crossed the ceiling reaped its OWN
+    orphan — returning `written: True` and logging `UNREACHABLE` about the only
+    copy it had just moved aside (measured by review: `orphans: []`, "THE ONLY
+    COPY still anywhere on disk: False").
+
+    Driven through `prune_spool` with the same `keep_session_id` the write path
+    passes, because that is the mechanism: going through `write_spool_entry` would
+    need a ceiling that admits one write and refuses the next, which is a brittle
+    three-way inequality rather than a property.
+
+    MUTATION THAT REDS THIS: drop the `_orphan_is_only_copy` guard, or the
+    `keep_session_id` witness inside it — the orphan is reaped.
+    """
+    from tortoise.capture_spool import (
+        _entries_dir,
+        _entry_bytes,
+        _log_path,
+        _orphan_paths,
+        prune_spool,
+    )
+
+    root = tmp_path / "pressure"
+    sid = "14359-own-orphan"
+    other = "14359-pressure-other"
+    write_spool_entry(root, _snapshot(other, turns=[{"role": "user", "content": "o" * 900}]))
+    write_spool_entry(root, _snapshot(sid, turns=[{"role": "user", "content": "s" * 900}]))
+    # The state the write leaves when it replaces an unusable log: the new bytes
+    # are the LOG, the unusable ones are an ORPHAN of the same key.
+    unusable = b'{"note": "unparseable"}\n[1, 2, 3]\n'
+    _log_path(root, sid).write_bytes(unusable)
+    _log_path(root, sid).rename(
+        _entries_dir(root) / f"{_log_path(root, sid).name}.orphan")
+    _log_path(root, sid).write_bytes(b'{"role":"user","content":"a fresh turn"}\n')
+
+    live = _entry_bytes(root, other) + _entry_bytes(root, sid)
+    bounds = Bounds(max_total_bytes=live + 8)   # the orphan alone pushes it over
+    discards = prune_spool(root, sid, bounds)
+
+    assert [d for d in discards if d["session_id"].startswith("orphan:")] == [], (
+        f"the prune spent the bytes this write had just moved aside: {discards}")
+    assert [p.read_bytes() for p in _orphan_paths(root)] == [unusable]
+
+
+def test_a_kill_window_orphan_is_not_evicted_by_a_later_prune(tmp_path):
+    """#14359 review cycle 5 — the same guard, reached WITHOUT a writer.
+
+    Meta + no turn log + orphan is the kill-window state. A later prune at the
+    ceiling used to evict the orphan and then the drain reported `transcript_empty`
+    for the entry — the exact lie the drain arm was added to remove.
+
+    MUTATION THAT REDS THIS: drop the `_orphan_is_only_copy` guard.
+    """
+    from tortoise.capture_spool import (
+        _entry_bytes,
+        _log_path,
+        _orphan_paths,
+        prune_spool,
+    )
+
+    root = tmp_path / "kill-then-prune"
+    sid = "14359-kill-then-prune"
+    other = "14359-kill-then-prune-other"
+    write_spool_entry(root, _snapshot(sid, turns=[{"role": "user", "content": "s" * 800}]))
+    write_spool_entry(root, _snapshot(other, turns=[{"role": "user", "content": "o" * 800}]))
+    # The kill: the rename landed, the replacement never did.
+    log = _log_path(root, sid)
+    log.rename(log.with_name(log.name + ".orphan"))
+    kept = _orphan_paths(root)[0].read_bytes()
+    assert kept
+
+    ceiling = _entry_bytes(root, other) + 64   # the orphan is what pushes it over
+    discards = prune_spool(root, None, Bounds(max_total_bytes=ceiling))
+    assert [d for d in discards if d["session_id"].startswith("orphan:")] == [], (
+        f"the prune spent the only copy of a capture: {discards}")
+    assert [p.read_bytes() for p in _orphan_paths(root)] == [kept]

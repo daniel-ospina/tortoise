@@ -6393,8 +6393,8 @@ test("#14359: a kill between the quarantine and the write keeps the entry (orpha
   // `capture_spool._sibling_orphan_exists`; the asymmetry is the point — a stale
   // orphan can only make an entry retained, never destroyed.
   //
-  // MUTATION THAT REDS THIS: drop `|| siblingOrphanExists(...)` from the drain's
-  // empty arm → the entry is unlinked and the ledger says `transcript_empty`.
+  // MUTATION THAT REDS THIS: drop the `else if (siblingOrphanExists(...))` arm
+  // from the drain → the entry is unlinked and the ledger says `transcript_empty`.
   const spool = tmpSpool();
   const sid = "killed-mid-rewrite";
   writeSpoolEntry(spool, snapshot(sid));
@@ -6478,4 +6478,36 @@ test("#14359: the restore cannot clobber a log that landed IN BETWEEN", () => {
   const orphans = readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan"));
   assert.equal(orphans.length, 1, "the stale bytes stay in the orphan, not in the live log");
   assert.equal(readFileSync(join(spool, "entries", orphans[0]), "utf8"), stale);
+});
+
+test("#14359: a prune under byte pressure cannot spend the ONLY COPY of a capture", () => {
+  // ⛔ The write path ends in `pruneSpool`, and the orphan pass reaps orphans while
+  // the spool is over the ceiling. `keepSessionId` protects live ENTRIES only, so a
+  // write that quarantined an unusable log and then crossed the ceiling in the SAME
+  // call deleted its own orphan — returning `written: true` and logging
+  // `UNREACHABLE` about the only copy it had just moved aside (measured: review
+  // cycle 5, `orphans: []`, "THE ONLY COPY still anywhere on disk: False").
+  //
+  // MUTATION THAT REDS THIS: drop the `orphanIsOnlyCopy` guard from the orphan pass.
+  const spool = tmpSpool();
+  const sid = "only-copy";
+  const other = "pressure-other";
+  writeSpoolEntry(spool, { ...snapshot(sid), turns: [{ role: "user", content: "s".repeat(800) }] });
+  writeSpoolEntry(spool, { ...snapshot(other), turns: [{ role: "user", content: "o".repeat(800) }] });
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const unusable = '{"note":"unparseable"}\n[1,2,3]\n';
+  writeFileSync(log, unusable);
+  const orphan = `${log}.orphan`;
+  renameSync(log, orphan);   // the kill-window state: meta, no log, bytes in an orphan
+
+  // A ceiling the live entries alone fit under, but which the orphan pushes past.
+  const ceiling = spoolEntryBytes(spool, other) + spoolEntryBytes(spool, sid) + 16;
+  const discards = pruneSpool(spool, null, { maxEntries: 20_000, maxTotalBytes: ceiling, maxEntryBytes: 1 << 20 });
+
+  assert.deepEqual(
+    discards.filter((d) => d.session_id.startsWith("orphan:")),
+    [],
+    "the prune spent the only copy of a capture",
+  );
+  assert.equal(readFileSync(orphan, "utf8"), unusable, "the bytes are still on disk");
 });

@@ -26,8 +26,10 @@ capture spool is type-2 user data kept "until the user deletes it", and that a
 TTL / max-age / "prune after N days" CONTRADICTS that ruling. A count or byte
 bound is a size bound, not a clock — and **it is an ADMISSION bound, not an
 eviction trigger**: only a FILED entry (whose content is already on the wire) or
-a quarantined `.orphan` (undeliverable — `_orphan_paths` enumerates it for
-accounting only, and no drain can file one back) may ever be reclaimed. A
+a quarantined `.orphan` that is NOT the only copy (an `.orphan` whose entry still
+holds a turn log is superseded by it, and one with no meta names nothing that can
+be filed; the drain DOES adopt a same-key orphan back when the entry has no log,
+so that class is never spent) may ever be reclaimed. A
 spool at a ceiling with nothing reclaimable is SATURATED: it REFUSES the write,
 records the refusal, keeps the backlog, and reports `capture: SATURATED`. The
 oldest undelivered entry is never reaped to make room (capture-loss, 2026-11-01;
@@ -954,6 +956,19 @@ def _orphan_paths(root: Path) -> list[Path]:
     return [path for _mtime, _name, path in sorted(found)]
 
 
+def _file_mtime(path: Path) -> float:
+    """mtime, or 0.0 when it cannot be read (the orphan is the OLDEST then).
+
+    0.0 is the conservative direction for the only caller (newest-first adoption):
+    an unreadable candidate loses to a readable one, and if ALL are unreadable the
+    name tiebreak still makes the choice deterministic.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _file_size(path: Path) -> int:
     try:
         return path.stat().st_size
@@ -971,7 +986,7 @@ def _turn_log_has_content(root: Path, session_id: str) -> bool:
     not need read permission, so a present-but-unreadable log still counts as
     content and is never deleted.
 
-    ⚠️ Pair it with :func:`_sibling_orphan_exists` before treating "absent" as
+    ⚠️ Pair it with :func:`_adopt_sibling_orphan` before treating "absent" as
     "provably empty": the writer renames an unusable log aside BEFORE writing its
     replacement, so "no log" can mean "a writer moved those bytes to an
     `.orphan`" (#14359).
@@ -979,76 +994,62 @@ def _turn_log_has_content(root: Path, session_id: str) -> bool:
     return _file_size(_log_path(root, session_id)) > 0
 
 
-def _sibling_orphan_exists(root: Path, session_id: str) -> bool:
-    """Whether THIS entry key already has a quarantined log beside its meta.
+def _adopt_sibling_orphan(root: Path, session_id: str) -> tuple[str, Path | None]:
+    """Put a same-key orphan's bytes BACK as the turn log. Returns (outcome, log).
 
-    The ordering witness for the drain's empty-transcript arm (#14359): the bytes
-    of a log are never destroyed, they are moved to
-    ``<key>.turns.jsonl.orphan[N]``. So an entry whose log is ABSENT while an
-    orphan for its own key exists is not provably empty — it is the state a
-    process killed between the quarantine and the replacement write leaves behind,
-    and the only copy of that conversation is the orphan.
+    The outcome is a THREE-VALUE answer on purpose, so a ledger line can describe
+    the arm that actually ran instead of guessing (#14359 review cycle 5). One
+    ``None`` used to cover three unrelated states, and all three were reported as
+    "an `.orphan` for this key exists — a writer moved the bytes aside":
 
-    Unlike :func:`_orphan_paths` (which sorts the WHOLE spool by mtime), this
-    filters to one key, so a spool full of unrelated orphans costs one directory
-    read. That matters: it is called from the drain's per-entry path.
+    * ``"adopted"`` — the bytes are the turn log again (second value is the log);
+    * ``"absent"`` — there is no orphan for this key (it may have been pruned, or a
+      drain already took it). The caller's empty arm is now PROVABLY empty;
+    * ``"unlistable"`` — the entries dir could not be read, so nothing is proven: an
+      unlistable directory is not an absent orphan. The caller keeps the entry;
+    * ``"unrestorable"`` — an orphan is there and the link failed (no hard links on
+      this filesystem, ENOSPC for the directory entry). The bytes stay in the orphan
+      class, which the caller must say out loud, because that class is evictable.
+
+    NEWEST FIRST. `_orphan_paths` renames never clobber, so a key can hold several
+    (`.orphan`, `.orphan1`, …) and lexicographic order would adopt the OLDEST while
+    the prune then spent the NEWEST — the drain would keep the stale bytes and lose
+    the fresh ones, under a ledger line saying "put back … and kept" (measured by
+    review). mtime is the transcript's own age (a rename preserves it), so the
+    newest is the most recent capture, which is the one the meta's session names.
+
+    ``os.link`` for the same reason the failed-write restore uses it: the log slot is
+    absent, but the other leg shares this directory, and only an atomic create-or-fail
+    can tell "still absent" from "someone just wrote it". A hard link shares the
+    orphan's inode, so the bytes are never copied and cannot be half-written; the
+    orphan name is then dropped. Any failure leaves the orphan exactly as it was.
     """
-    prefix = f"{entry_key(session_id)}.turns.jsonl.orphan"
-    d = _entries_dir(root)
+    import contextlib as _ctx
+    key = entry_key(session_id)
+    prefix = f"{key}.turns.jsonl.orphan"
+    entries_dir = _entries_dir(root)
     try:
-        with os.scandir(d) as entries:
-            return any(e.name.startswith(prefix) for e in entries)
+        with os.scandir(entries_dir) as it:
+            candidates = [Path(e.path) for e in it if e.name.startswith(prefix)]
     except OSError:
-        # An unlistable directory is not proof of absence, and this predicate
-        # only ever WIDENS the safe reading (keep, do not unlink).
-        return True
-
-
-def _adopt_sibling_orphan(root: Path, session_id: str) -> Path | None:
-    """Put a same-key orphan's bytes BACK as the turn log, and return the log.
-
-    The second half of the #14359 kill-window fix. Recording `transcript_torn` and
-    keeping the ENTRY is not enough: the bytes would stay in the orphan class, and
-    the orphan class is exactly what `prune_spool` BYTE-evicts once `max_total_bytes`
-    binds (the filed-entry pass runs first, the orphan pass second). So the entry
-    would survive as a husk whose log was deleted — the loss deferred by one write
-    instead of prevented (measured by review: the retained entry's orphan was gone
-    after the next prune at the ceiling).
-
-    Adopting makes the bytes a LOG, which an UNFILED entry's log never loses to the
-    prune (capture-loss: only a filed entry is evictable), and which `_entry_bytes`
-    counts toward the ceiling so it is visible rather than invisible.
-
-    ``os.link`` for the same reason the failed-write restore uses it: the log slot
-    is absent, but the other leg shares this directory, and only an atomic
-    create-or-fail can tell "still absent" from "someone just wrote it". A hard
-    link is created under the orphan's own inode, so the bytes are never copied and
-    cannot be half-written; the orphan name is then dropped. Any failure leaves the
-    orphan exactly as it was — nothing is lost by trying.
-    """
+        return "unlistable", None
+    if not candidates:
+        return "absent", None
     log = _log_path(root, session_id)
-    prefix = f"{entry_key(session_id)}.turns.jsonl.orphan"
-    try:
-        with os.scandir(_entries_dir(root)) as entries:
-            names = sorted(e.name for e in entries if e.name.startswith(prefix))
-    except OSError:
-        return None
-    for name in names:
-        orphan = _entries_dir(root) / name
+    # Newest first; ties broken by name so the choice is deterministic.
+    for orphan in sorted(candidates,
+                         key=lambda p: (-_file_mtime(p), p.name)):
         try:
             os.link(orphan, log)
         except FileExistsError:
-            # A log exists after all — `_turn_log_has_content` would have been
-            # true and this arm unreachable. Nothing to do, nothing lost.
-            return None
+            # A log exists after all — the caller's "has content" arm owns it.
+            return "absent", None
         except OSError:
-            # Hard links unsupported / no space for the directory entry: leave
-            # the bytes in the orphan rather than risk a copy.
-            continue
-        with contextlib.suppress(OSError):
+            return "unrestorable", None
+        with _ctx.suppress(OSError):
             os.unlink(orphan)
-        return log
-    return None
+        return "adopted", log
+    return "absent", None
 
 
 def _quarantine_log(log: Path) -> Path | None:
@@ -2606,8 +2607,16 @@ def _saturated_for_metas(
     """
     orphans = _orphan_paths(root)
     # Bytes prune may reclaim WITHOUT spending an undelivered entry: the orphan
-    # class is byte-evictable only (see the docstring above).
-    reclaimable_orphan_bytes = sum(_file_size(p) for p in orphans)
+    # class is byte-evictable — EXCEPT the only-copy orphans, which the prune now
+    # refuses to spend (#14359 cycle 5, `_orphan_is_only_copy`). Counting those as
+    # reclaimable would ADMIT a write on bytes nothing may reclaim: the write would
+    # land, the prune would skip the orphan, the spool would sit over the ceiling
+    # with no record, and the same admit would repeat until the only-copy class
+    # filled the disk. The predicate and the prune must agree on what is spendable
+    # — that is the same rule as `_saturated_for_metas` vs `prune_spool` on the
+    # entry side.
+    reclaimable_orphan_bytes = sum(
+        _file_size(p) for p in orphans if not _orphan_is_only_copy(root, p, None))
     # #14359: one count per DISTINCT session_id. Two metas naming the same
     # session address the same files, so a per-meta sum counted them twice and
     # could exceed the cheap scan, which sums each file once and is the upper
@@ -2696,6 +2705,32 @@ def _admission_saturated(
         replaces_session_id=replaces_session_id)
 
 
+def _orphan_is_only_copy(root: Path, orphan: Path, keep_session_id: str | None) -> bool:
+    """Whether this orphan's bytes are the ONLY copy of a capture (#14359 c5).
+
+    The prune must not spend them: it is called at the end of the very write that
+    created them. Two witnesses, both keyed off the orphan's own name —
+    ``<entry_key>.turns.jsonl.orphan[N]``, where the entry key is
+    ``sha256(session_id)[:32]``:
+
+    * the key still has a readable ``.meta.json`` and NO ``.turns.jsonl``: the
+      writer moved the log aside and has not replaced it (yet, or ever — a kill
+      leaves it that way). Nothing but a drain adopting the orphan back can deliver
+      those bytes; and
+    * the key is the session being written in this call — its own fresh orphan is
+      never the prune's to spend.
+
+    Everything else is the cheap reclaim #8531 added the pass for: a key whose log
+    still exists is SUPERSEDED by it, and a key with no meta is undeliverable.
+    """
+    key = orphan.name.split(".turns.jsonl.orphan", 1)[0]
+    if keep_session_id is not None and key == entry_key(keep_session_id):
+        return True
+    if not (_entries_dir(root) / f"{key}.meta.json").exists():
+        return False
+    return not (_entries_dir(root) / f"{key}.turns.jsonl").exists()
+
+
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:
     """Enforce COUNT and BYTE ceilings, evicting the SAFEST loss first.
 
@@ -2759,11 +2794,12 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     # before it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on
     # the wire), while an orphan's delivered-ness is unknowable — so the certain
     # option is spent FIRST. An orphan is, however, still preferable to an
-    # UNFILED live entry: nothing can DELIVER it (no drain files one back and no
-    # reader consumes one as a capture; `_orphan_paths` lists them for accounting
-    # and this eviction pass only), while an unfiled entry still has a surface
-    # that can deliver it — and an unfiled entry is never evicted at all
-    # (capture-loss). The record names the class in
+    # UNFILED live entry: an orphan whose entry still has a log is SUPERSEDED by
+    # that log (and one with no meta names nothing that can be filed), while an
+    # unfiled entry still has a surface that can deliver it — and an unfiled entry
+    # is never evicted at all (capture-loss). ⚠️ An orphan that IS the only copy
+    # (its key has a readable meta and NO log) is skipped entirely by this pass,
+    # see `_orphan_is_only_copy`: the drain can adopt it back, so it is not spent. The record names the class in
     # the same `loss` vocabulary the live entries use (#6388).
     for meta in ranked:
         if count <= bounds.max_entries and total <= bounds.max_total_bytes:
@@ -2806,15 +2842,38 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     for orphan in orphans:
         if total <= bounds.max_total_bytes:
             break
+        # ⛔ AN ORPHAN CAN BE THE ONLY COPY, and the quarantine that creates one is
+        # followed IMMEDIATELY by this prune (`write_spool_entry` ends in it). So a
+        # write that moves unusable bytes aside and then evicts them in the same
+        # call destroys exactly what it just promised to keep, reports
+        # `written: True`, and logs `UNREACHABLE` about bytes it can name
+        # (#14359 review cycle 5, measured: fresh spool, one unusable rewrite at
+        # the ceiling → `orphans: []`, only copy gone).
+        #
+        # The test is the ONLY-COPY witness, not "is it an orphan":
+        #   * its key still has a readable meta AND no turn log — the state a
+        #     writer leaves when it moved the bytes aside (or was killed between
+        #     the move and the replacement). Nothing can deliver those bytes but a
+        #     drain adopting them back (`_flush_one`), so they are the only copy;
+        #   * this is the session being WRITTEN right now (`keep_session_id`): its
+        #     own fresh orphan is never the prune's to spend.
+        # Everything else keeps #8531's meaning: an orphan whose entry still has a
+        # log is superseded by that log, and an orphan with no meta at all is
+        # undeliverable — both are the cheap reclaim the byte bound exists for. The
+        # spool is then SATURATED (refuse, do not destroy), which is what
+        # `spool_saturated` already reports for this state.
+        if _orphan_is_only_copy(root, orphan, keep_session_id):
+            continue
         size = _file_size(orphan)
         discards.append(record_discard(root, {
             "session_id": f"orphan:{orphan.name}",
             "reason": DISCARD_BYTES_EXCEEDED,
             "detail": (
                 f"spool is {total} bytes > max_total_bytes={bounds.max_total_bytes}"
-                "; evicted a quarantined log (UNREACHABLE: no drain can file"
-                " one back and no reader consumes one as a capture — whether it"
-                " was ever delivered is unknown)"
+                "; evicted a quarantined log (UNREACHABLE: its entry still holds a"
+                " turn log, so this copy is SUPERSEDED by it — or no meta names it"
+                " at all. Either way no drain can file it back; whether it was ever"
+                " delivered is unknown)"
             ),
         }))
         with contextlib.suppress(OSError):
@@ -3528,19 +3587,28 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
                 root, meta, DISCARD_TRANSCRIPT_TORN,
                 "turn log has bytes but no parseable turn — kept", now_ms,
             ))
-        elif _sibling_orphan_exists(root, sid):
-            restored = _adopt_sibling_orphan(root, sid)
-            summary.discarded.append(_quarantine_entry(
-                root, meta, DISCARD_TRANSCRIPT_TORN,
-                ("no turn log, but an `.orphan` for this key held its bytes —"
-                 " put back as the log and kept" if restored is not None else
-                 "no turn log, but an `.orphan` for this key exists — a writer"
-                 " moved the bytes aside before its replacement landed; kept"),
-                now_ms,
-            ))
         else:
-            summary.discarded.append(_discard_entry(
-                root, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty"))
+            outcome, _restored = _adopt_sibling_orphan(root, sid)
+            if outcome == "absent":
+                # Nothing on disk and nothing moved aside: provably empty.
+                summary.discarded.append(_discard_entry(
+                    root, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty"))
+            else:
+                summary.discarded.append(_quarantine_entry(
+                    root, meta, DISCARD_TRANSCRIPT_TORN,
+                    {
+                        "adopted": "no turn log, but an `.orphan` for this key held"
+                                   " its bytes — put back as the log and kept",
+                        "unlistable": "no turn log, and the entries directory could"
+                                      " not be read — cannot prove the log is empty;"
+                                      " kept",
+                        "unrestorable": "no turn log, and an `.orphan` for this key"
+                                        " could not be linked back (no hard links,"
+                                        " or ENOSPC) — its bytes stay in the EVICTABLE"
+                                        " orphan class; kept",
+                    }[outcome],
+                    now_ms,
+                ))
         return
     # The digest of what will actually be POSTed. The CAS below compares the
     # disk against THIS, never against the stale pre-POST meta: a writer that
