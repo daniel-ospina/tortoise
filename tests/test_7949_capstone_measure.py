@@ -18414,7 +18414,9 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "head, while its row reads ONE address (`sdk.py:29121`) and the one re-point it "
         "carries is the I7 RANGE, not a `sdk.py` pair. ⛔ Do not restore the old reason "
         "beside this refusal: the file IS in this diff at this head — `git diff --numstat "
-        "origin/main...HEAD -- …/04-plan.md` prints `1 1` — so 'the file is not in this "
+        "origin/main...HEAD -- …/04-plan.md` prints a NON-EMPTY pair (its size is head-bound "
+        "and deliberately NOT typed here: it read `1 1` at `926b41d6` and moves with every "
+        "commit that touches the file) — so 'the file is not in this "
         "diff at all' is false here. The sentence is refused because its row reads ONE "
         "address, not because the file is absent (#13879 review, cycle 3; reason re-derived "
         "at the #14260 fix lane, finding 1)")
@@ -18447,8 +18449,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     #       by construction, and the sentence is history — that is a MEASUREMENT of the state,
     #       not a skip (this is what keeps the arm honest on `main` instead of inert).
     # ⛔ AND THE NAMED HEAD IS PROVENANCE, NEVER THE DECIDER (#14260 fix lane, finding 3). It
-    # is graded where its object is present (a wrong head still reds), but it cannot make the
-    # arm green on its own: satisfying that half no longer proves anything the readings below do
+    # is graded where its object is present — a head whose copy does NOT carry the target still
+    # reds — but it cannot make the arm green on its own, and it cannot tell the named head from
+    # a LATER head that also carries the target (the target reached `origin/main` with the
+    # document): that is exactly why the named head is provenance and not the decider.
+    # Satisfying that half no longer proves anything the readings below do
     # not, and the arm no longer carries its claim THROUGH a sha that a squash merge discards.
     # The residual is stated rather than implied — a sha naming no object is indistinguishable
     # from one this clone cannot reach, so its existence is ungraded wherever the object is
