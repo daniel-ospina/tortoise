@@ -7823,7 +7823,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15449`, measured at THAT head), and
         # the END was the blank line before `return OrgInfoResponse(` (`:15526`, call at `:15527`).
         # ⛔ THAT IS HISTORY, NOT THIS HEAD'S: this branch inserts 114 lines into `hosted_api.py`
-        # above `point_count`, so the span at THIS head is `:15563-15640` — START `:15563`, END
+        # above `point_count`, so the span is `:15563-15640` at this head — START `:15563`, END
         # the blank line before `return OrgInfoResponse(` at `:15641` — measured by the same two
         # `grep -n` commands against this working tree, never by adding `+114` to the pair above.
         # The three offsets (+29 `nodes_used` -> `:15592`, +39 `max_nodes` -> `:15602`, +77 END)
