@@ -589,7 +589,8 @@ def test_the_arm_refusal_costs_no_tokenizer_work(clean_posture, monkeypatch):
     assert exc.value.code == 2
 
 
-def test_the_verb_writes_only_when_told_to(clean_posture, monkeypatch, tmp_path):
+def test_the_verb_writes_only_when_told_to(clean_posture, monkeypatch, tmp_path,
+                                           capsys):
     """The published invariant: a bare run PRINTS, a flagged run WRITES.
 
     Three artifacts publish it (the generated doc says so in its own text, §7
@@ -615,10 +616,18 @@ def test_the_verb_writes_only_when_told_to(clean_posture, monkeypatch, tmp_path)
     args = ["embed-json", "--receipts", str(_RECEIPTS),
             "--evidence", str(_EVIDENCE)]
     assert m.main(args) == 0
+    # BOTH halves: it PRINTS (the claim three artifacts publish) ...
+    assert capsys.readouterr().out == "STUB\n", (
+        "a bare run printed nothing — the artifacts publish that it prints the "
+        "document and writes no file")
+    # ... and it writes nothing.
     assert list(tmp_path.iterdir()) == [], (
         "a bare run wrote a file — the artifacts publish that it only prints")
 
     out, js = tmp_path / "m.md", tmp_path / "m.json"
     assert m.main([*args, "--out", str(out), "--json-out", str(js)]) == 0
     assert out.read_text(encoding="utf-8") == "STUB\n"
-    assert js.exists()
+    # the JSON half is a PAYLOAD check, not an existence check: a writer that
+    # emitted an empty or non-JSON file must red here, not only after someone
+    # regenerates and commits the artifact.
+    assert json.loads(js.read_text(encoding="utf-8")) == stub
