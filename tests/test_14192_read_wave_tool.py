@@ -1488,7 +1488,15 @@ def _is_module_registry(node: ast.AST | None, sys_names: frozenset[str],
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr in {"get", "__getitem__"}
                 and isinstance(node.func.value, ast.Name)
+                # ⛔ `dict` BY NAME IS A CLAUSE, NOT DECORATION (#14326 round 24, MEASURED:
+                # deleting it left `1 passed`, because no INERT row named an ordinary
+                # receiver — `_dm.get(sys.__dict__, "modules")[…]` would then red innocent
+                # code). The row that reds this is in the narrowing controls.
                 and node.func.value.id == "dict"
+                # ⛔ THE ARITY GUARD IS UNREACHABLE-BY-MUTANT AND SAID SO: only a 1-arg
+                # `dict.get` reaches it, and no row writes one, so relaxing it to `>= 1` also
+                # left `1 passed` (round 24). It stays for `node.args[1]` safety below — a
+                # 1-arg `dict.get(<mapping>)` must not `IndexError` the pin.
                 and len(node.args) >= 2
                 and isinstance(node.args[1], ast.Constant)
                 and node.args[1].value == "modules"
@@ -8234,6 +8242,11 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   # unrelated module's own `modules` attribute reddened a pin that exists to
                   # protect a different object, which is the expensive direction here).
                   'other.modules["tortoise.sdk"] = _Mirror\n',
+                  # ⛔ AND THE `dict`-BY-NAME CONTROL (#14326 round 24, MEASURED: without it,
+                  # deleting `node.func.value.id == "dict"` from the unbound-read arm left
+                  # `1 passed` — the clause was unpinned, so a later "simplification" could
+                  # red this innocent receiver with the suite still green).
+                  '_dm.get(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
                   # ⛔ AND THE ALIAS/COMPOSITION CONTROLS FOR ROUND 22, for the same reason: an
                   # assignment alias of ANOTHER module, and the `__dict__` compositions on
                   # one, must all stay GREEN or the narrowing has been lost.
