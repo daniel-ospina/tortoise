@@ -26,12 +26,12 @@ taken from, and it pins the two things a *future* lever (keys-declared-once, see
    but reads differently": the saving is only information-neutral if the rendered
    region round-trips to what S2 emitted — key order included.
 
-3. **Records are heterogeneous, and `null` is a legitimate value.** 10 of the 79 lists in
+3. **Records are heterogeneous, and `null` is a legitimate value.** 10 of the 80 lists in
    this corpus carry records whose key sets differ (`operators` in 9 of its 12 lists,
    `points` in 1 of 14). The naive `items[0].keys()` implementation drops every field a
    later record adds — and the render gets SMALLER, so the data loss reads as a bigger
    saving. Padding the survivors with `dict.get(k)` is no better: the corpus carries 210
-   cells that are explicitly `null` against 55 that are an absent key, so `null` cannot be
+   cells that are explicitly `null` against 54 that are an absent key, so `null` cannot be
    the sentinel either. Measured: naive 44,993 · `null`-padded 45,905 · correct
    (`␀`-padded, verified absent) 46,028.
 """
@@ -53,6 +53,13 @@ _RECEIPTS = _REPO_ROOT / "tests/eval/write_path/receipts/7947-arms-2026-10-18"
 #: The measured `cl100k_base` cells for this corpus (#14343 increment 2, §1 and §3b of
 #: `docs/evidence/14343-amplify/reduction-measured.md`). Re-measure with the recipe in
 #: that file's §6 — do NOT derive them here (see the module docstring on the BPE fetch).
+#:
+#: ⛔ These CANNOT be re-derived in this test (no tokenizer, deliberately), so they are made
+#: REACHABLE by `test_the_recorded_token_cells_encode_the_doc_s_own_deltas` below: the
+#: ordering the three traps encode, and every delta the evidence doc publishes, is asserted
+#: against these cells. A typo here reds that test instead of shipping silently — which is
+#: the exact defect class `test_s2_decision_record_5087.py`'s `durations:` row records
+#: ("the table's token column was pinned by nothing — a token-only edit … shipped green").
 _MEASURED_TOKENS = {
     "indent": 77_561,          # json.dumps(embed, indent=1)              — today's bytes
     "compact": 52_346,         # json.dumps(embed, separators=(",",":")) — the shipped lever
@@ -62,9 +69,13 @@ _MEASURED_TOKENS = {
 }
 #: The LIVE tripwire: characters, not tokens. A receipts change moves these first.
 _MEASURED_CHARS = {"indent": 278_874, "compact": 224_109}
-#: The per-emission saving share, measured. A band, not a point: it is a property of the
-#: serialization (14 emissions span 29.6 %–35.0 %), so drifting outside it means the
-#: receipts changed shape, not that the tokenizer moved.
+#: The per-emission saving share, measured in TOKENS (14 emissions span 29.6 %–35.0 %);
+#: the aggregate cell §1 publishes (32.51 %) sits inside it. Read by
+#: `test_the_recorded_token_cells_encode_the_doc_s_own_deltas` — a band, not a point,
+#: because it is a property of the serialization, so drifting outside it means the
+#: receipts changed shape, not that the tokenizer moved. Enforcing a band rather than a
+#: point is deliberate: a token cell cannot be re-measured without a tokenizer, and §1
+#: correctly refuses to fetch one at test time.
 _SAVING_SHARE_BAND = (29.0, 36.0)
 
 
@@ -148,26 +159,74 @@ def test_the_pinned_cells_are_the_measured_corpus(emissions):
     assert len({s for s, _, _ in emissions}) == 7, "the frozen corpus is 7 sessions"
 
 
-def test_the_compact_layout_always_shrinks_and_the_share_is_a_property_of_the_layout(emissions):
-    """Compact is strictly smaller on EVERY emission, and the share is in its band.
+def test_the_recorded_token_cells_encode_the_doc_s_own_deltas():
+    """The recorded `cl100k_base` cells are a PIN, not decoration — each one is read here.
 
-    Measured per emission (tokens): 29.6 %–35.0 %. Asserted on characters here because
-    a tokenizer is unavailable to a deterministic test — and the band is deliberately
-    wide enough that the token share is a stable property while a per-emission
-    regression (one list rendered compact, another not) still reds.
+    A tokenizer is unavailable to a deterministic test (§1: fetching one is real egress),
+    so the cells themselves cannot be recomputed. They can still be made FALSIFIABLE: every
+    ordering the three §3b traps encode, and every delta the evidence doc publishes FROM
+    these cells, is asserted below. Editing any single cell moves an asserted delta or
+    breaks an ordering, so a token-only edit reds instead of shipping green.
+
+    What is still NOT enforced: the absolute values. Nothing here can tell 46,028 from a
+    different corpus's 46,028 — a receipts change is caught by the character tripwire in
+    `test_the_pinned_cells_are_the_measured_corpus` above, which is the live half.
+    """
+    t = _MEASURED_TOKENS
+    # The trap ordering, which is the whole argument of §3b: declaring keys once with the
+    # naive `items[0].keys()` renders SMALLER than the correct union-of-keys render, which
+    # is what makes data loss read as a bigger saving. `null`-padding cannot use `null` as
+    # the sentinel either, so it too must land above the naive render and below the correct
+    # one. Compact must beat today's indent render, and the correct keys-once render must
+    # beat compact — otherwise §3b has no headroom and the lever is pointless.
+    assert (t["keys_once_naive"] < t["keys_once_null_padded"] < t["keys_once"]
+            < t["compact"] < t["indent"]), (
+        "the recorded cells no longer encode the §3b traps' ordering "
+        "(naive < null-padded < keys-once < compact < indent) — re-measure §1/§3b before "
+        f"trusting any delta computed from them: {t}")
+    # Every delta the evidence doc publishes, recomputed from the cells.
+    assert t["indent"] - t["compact"] == 25_215, "§1's saving cell (−25,215 tokens)"
+    assert round(100.0 * (t["indent"] - t["compact"]) / t["indent"], 2) == 32.51, (
+        "§1's `25,215 / 77,561 = 32.5099 %` (printed 32.51 at two decimals)")
+    assert t["indent"] - t["keys_once"] == 31_533, "§3b's −31,533 (−40.66 %) cell"
+    assert t["compact"] - t["keys_once"] == 6_318, "§3b's −6,318 (−12.07 %) off compact"
+    assert t["keys_once"] - t["keys_once_naive"] == 1_035, (
+        "§3b's 'understates the render by 1,035 tokens while losing data' cell")
+    # The band the failure message below quotes: measured in TOKENS per emission
+    # (29.6 %–35.0 %), and the aggregate cell must sit inside it.
+    token_share = 100.0 * (t["indent"] - t["compact"]) / t["indent"]
+    assert _SAVING_SHARE_BAND[0] < token_share < _SAVING_SHARE_BAND[1], (
+        f"the recorded token share {token_share:.2f}% left the band this file pins, "
+        f"{_SAVING_SHARE_BAND[0]}–{_SAVING_SHARE_BAND[1]}% — re-measure §1")
+
+
+def test_the_compact_layout_always_shrinks_and_the_share_is_a_property_of_the_layout(emissions):
+    """The compact render is in its measured character band on EVERY emission.
+
+    Measured per emission (tokens): 29.6 %–35.0 %, and 17.11 %–21.68 % on characters — the
+    two differ because `indent=1` spends characters on whitespace the tokenizer folds into
+    single tokens. Asserted on characters here because a tokenizer is unavailable to a
+    deterministic test; the token band is pinned separately, against the recorded cells, in
+    `test_the_recorded_token_cells_encode_the_doc_s_own_deltas`.
+
+    ⛔ What this test does NOT catch, stated because the earlier wording claimed it did:
+    a per-emission regression in PRODUCTION (one list rendered compact, another not). It
+    re-serializes the corpus itself and never calls `extractor_v2`'s embed render; the only
+    production-touching assertion in this file is the S4 prompt test below, which is
+    layout-agnostic by design. What the band does catch is the mutant that renders the
+    second layout with DEFAULT separators: the share then falls to 13.41 %–17.39 %, outside
+    the band.
     """
     shares = []
-    for session, arm, embed in emissions:
+    for _, _, embed in emissions:
         ind = json.dumps(embed, indent=1)
         comp = json.dumps(embed, separators=(",", ":"))
-        assert len(comp) < len(ind), (
-            f"{session}/{arm}: compact separators must never be larger — the whole "
-            f"point is the whitespace `indent=1` writes")
         shares.append(100.0 * (len(ind) - len(comp)) / len(ind))
     assert min(shares) > 15.0 and max(shares) < 25.0, (
         f"character-level share drifted outside its measured band: {min(shares):.1f}–"
         f"{max(shares):.1f}% (measured 17.11–21.68%); the TOKEN band this file pins is "
-        f"{_SAVING_SHARE_BAND[0]}–{_SAVING_SHARE_BAND[1]}%")
+        f"{_SAVING_SHARE_BAND[0]}–{_SAVING_SHARE_BAND[1]}% and is asserted against the "
+        f"recorded cells, not against these characters")
 
 
 # ── the round-trip: same object, key order included ───────────────────────────

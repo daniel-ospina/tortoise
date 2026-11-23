@@ -154,24 +154,40 @@ own quality evidence, per this issue's rule. Per document it would be **5,752** 
 (`48,461 − 5,752 + 16,338 = 59,047` tokens/doc → 50 / 67 / 406 documents a month) against
 the shipped lever's 4,600.
 
-⚠️ **And it is not lossless by default — this is the trap, measured.** Records are **not
-homogeneous**: **10 of the 79 lists** in the corpus carry records with *differing key sets*
-(`operators` in 9 of its 12 lists, `points` in 1 of 14). A keys-declared-once render built
-from `items[0].keys()` — the obvious implementation — **silently drops every field that a
-later record carries and the first one does not**, and the render gets *smaller*, so the
-error reads as a **bigger saving**: measured, the naive version reports **44,993** instead of
-the correct 46,028 — it understates the render by **1,035 tokens while losing data**. (Per
-emission it is lossless whenever `items[0]` happens to carry the union of keys, which is why
-it survives review; the corpus aggregate is where it is wrong.) Any such render must use the
-**union** of keys and pad absent ones.
+⚠️ **And it is not lossless by default — these are the traps, measured.**
+
+**The measure, stated so it can be re-run.** The three cells above are three renders of the
+same 14 emissions, dumped with
+`json.dumps(render, ensure_ascii=False, separators=(",", ":"))` and counted with
+`tiktoken.get_encoding("cl100k_base")`. ⛔ `ensure_ascii=False` is load-bearing, and it is
+**not** the call §1 measures with (§1 keeps the default `ensure_ascii=True`): the flag is
+worth **375 characters** on the keys-once render — **192,559** with it, **192,934** without —
+so re-measured in §1's style the three cells read **46,086 · 45,050 · 45,962** instead. Both
+readings are recorded so that a reader who re-measures in §1's default style does not read
+the 58-token difference as rot. The render itself is `_keys_once()` in
+`tests/test_14343_embed_list_serialization.py`; the naive arm is the same shape with
+`cols = list(items[0].keys())` and the `null`-padded arm the same shape with `it.get(k)` and
+no sentinel.
+
+1. **Records are heterogeneous, so `items[0].keys()` loses fields — and the render gets
+   SMALLER, which is what makes it read as a win.** **10 of the 80 lists** in the corpus
+   carry records with *differing key sets* (`operators` in 9 of its 12 lists, `points` in 1
+   of 14). A keys-declared-once render built from `items[0].keys()` — the obvious
+   implementation — **silently drops every field that a later record carries and the first
+   one does not**: measured, the naive version reports **44,993** instead of the correct
+   46,028 — it understates the render by **1,035 tokens while losing data**. (Per emission it
+   is lossless whenever `items[0]` happens to carry the union of keys, which is why it
+   survives review; the corpus aggregate is where it is wrong.) Any such render must use the
+   **union** of keys and pad absent ones.
 2. **`null` is a legitimate value in this schema, so it cannot be the padding.** The corpus
-carries **210 cells that are explicitly `null`** (`entities.supersedes` 150, `points.when`
-53, `events.startedAt` 4, `points.source_turn_id` 3) against **54 cells that are an absent
-key** — so `dict.get(k)` conflates "field not present" with "field present and null", which
-are different statements about a record.
+   carries **210 cells that are explicitly `null`** (`entities.supersedes` 150, `points.when`
+   53, `events.startedAt` 4, `points.source_turn_id` 3) against **54 cells that are an absent
+   key** — so `dict.get(k)` conflates "field not present" with "field present and null", which
+   are different statements about a record.
 3. **`null` is not the only unusable sentinel — `~`, the first one tried here, is already
-inside real values.** A keys-declared-once render therefore needs a sentinel **checked for
-absence in the data at render time** (the table above uses `␀`, U+2400, verified absent).
+   inside real values.** A keys-declared-once render therefore needs a sentinel **checked for
+   absence in the data at render time** (the table above uses `␀`, U+2400, verified absent).
+
 `tests/test_14343_embed_list_serialization.py` pins both halves: that the real corpus *is*
 heterogeneous, and that the union-of-keys round-trip is exact on all 14 emissions.
 
@@ -261,15 +277,24 @@ bundle's §4 recipe), and every row records `s4_embed_json` — the layout its r
 uv run python tools/extractor_cost_measure.py decompose \
     --evidence docs/evidence/14277-extractor-cost/measurements.jsonl \
     --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
+    --out /tmp/decomposition.md \
     --json-out /tmp/decomposition.json          # §"the one information-neutral lever"
 
 # §3 — the two measurements this file adds (offline; same receipts)
-uv run pytest tests/test_14343_embed_list_serialization.py -v
+# The repo route is `tools/test_lane.py run`, not a bare `pytest`: a bare run is refused on a
+# URI-less box (epic #1647 P4, `tests/_embedded.py`), and `run` starts the lane's own
+# container and exports the four seam variables.
+uv run python tools/test_lane.py run -- tests/test_14343_embed_list_serialization.py -v
 ```
 
 The pinned token cells in that test are a **recorded** `cl100k_base` measurement, deliberately
 not re-derived at test time: `tiktoken.get_encoding("cl100k_base")` downloads its BPE ranks
 from `openaipublic.blob.core.windows.net` on a cold cache, which is real egress from a
 deterministic test — the same reason `tests/test_s2_decision_record_5087.py` pins its cells
-and makes the payload **bytes** the live tripwire. Re-measuring them needs only the recipe
-above.
+and makes the payload **bytes** the live tripwire.
+
+⚠️ **Re-measuring the cells is a manual step, not a rerun of the two commands above.** The
+test never tokenizes (§1 refuses to fetch an encoder) and `tools/` ships no keys-once
+renderer, so the §3b cells are reproduced by tokenizing `_keys_once()`'s own output with the
+dump named in §3b — that recipe is the producer, and the cells are recorded here because
+their re-derivation is not available to a deterministic leg.
