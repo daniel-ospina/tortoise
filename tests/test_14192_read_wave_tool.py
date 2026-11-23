@@ -4164,7 +4164,12 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
               and isinstance(node.value.func, ast.Attribute)
               and node.value.func.attr in {"update", "__init__", "__ior__"}
               and node.value.args):
-            binds.append((node.value.func.value, node.value.args[0]))
+            # ⛔ ON THE SPLICED POSITIONS (#14326 review cycle 17, EACH MEASURED GREEN **and
+            # LIVE**: `_d.update(*(builtins.__dict__,))`, its `*[m]` form and the `__init__` /
+            # `__ior__` twins, while the un-starred fill is a REFUSED row). Cycle 16 applied the
+            # splice rule to three predicates and left THIS arm reading the raw first argument.
+            binds.append((node.value.func.value,
+                          _spliced_positions(node.value.args)[0]))
             continue
         elif loops and isinstance(node, (ast.For, ast.AsyncFor)):
             for source in _loop_target_sources(node.iter):
@@ -7975,6 +7980,21 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    vars(builtins.dict)["copy"](builtins.__dict__)'
             '["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY filled in place by `__init__`": (
+            '    import builtins\n'
+            '    _d = {}\n'
+            '    _d.__init__(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY filled in place by the `__ior__` METHOD": (
+            '    import builtins\n'
+            '    _d = {}\n'
+            '    _d.__ior__(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY filled in place behind a literal splice": (
+            '    import builtins\n'
+            '    _d = {}\n'
+            '    _d.update(*(builtins.__dict__,))\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a COPY filled in place by `update`": (
             '    import builtins\n'
             '    _d = {}\n'
