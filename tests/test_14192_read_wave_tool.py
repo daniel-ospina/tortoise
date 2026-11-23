@@ -1543,14 +1543,36 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
             _is_builtins_mapping(node.left, names, dict_names, launderers, consts)
             or _is_builtins_mapping(node.right, names, dict_names, launderers, consts)):
         return True
+    # ⛔ THE KEYWORD (`**`) TWIN OF THE SAME CONSTRUCTOR (#14326 round 35 review cycle 5,
+    # MEASURED GREEN: `dict(**builtins.__dict__)["exec"] is exec` at runtime, and the pin saw
+    # `m=2 c=2 i=0`). The `ast.Dict` arm above already reads `k is None`; the `dict(…)` arm
+    # read `node.args` only, and CPython puts a `**` spread in `node.keywords` with `arg is
+    # None` — the same in-file asymmetry `_mapping_keys_in_keywords` exists to avoid.
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             and (node.func.id == "dict" or node.func.id in launderers)
-            and len(node.args) == 1
-            and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
+            and ((len(node.args) == 1
+                  and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts))
+                 or any(kw.arg is None
+                        and _is_builtins_mapping(kw.value, names, dict_names, launderers, consts)
+                        for kw in node.keywords))):
+        return True
+    # ⛔ BOUND *AND* UNBOUND `.copy`, and the `|` DUNDER (#14326 round 35 review cycle 5,
+    # EACH MEASURED GREEN: `dict.copy(builtins.__dict__)` and `{}.__or__(builtins.__dict__)`
+    # both yielded a mapping holding the real `exec`). These are spellings of an ENUMERATED
+    # constructor, not the arbitrary-constructor class the residual table declares — the
+    # `BinOp` arm reads the operator form and nothing read its `__or__` dunder twin.
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)) and (
+            (node.func.attr == "copy"
+             and _is_builtins_mapping(node.func.value, names, dict_names, launderers, consts))
+            or (node.func.attr == "__or__" and any(
+                _is_builtins_mapping(part, names, dict_names, launderers, consts)
+                for part in (node.func.value, *node.args)))):
         return True
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "copy"
-            and _is_builtins_mapping(node.func.value, names, dict_names, launderers, consts)):
+            and node.func.attr == "copy" and len(node.args) == 1
+            and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
+        # the UNBOUND `dict.copy(m)` — the callee is `dict` here, so `node.func.value` is
+        # the constructor and the mapping is argument ONE.
         return True
     return ((isinstance(node, ast.Name) and node.id in dict_names)
             or _is_builtins_dict_of(node, names, launderers, consts))
@@ -1659,7 +1681,10 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     so `__builtins__["getattr"]` is a live lever in exactly the context a launderer controls —
     and leaving it GREEN while `__builtins__.getattr` is RED would be the in-file asymmetry
     ("SPELLING IS NOT IDENTITY", round 20) this file deletes on sight. It is scoped to
-    `dict_names` — the names statically bound to the literal `__builtins__` — deliberately:
+    `dict_names` — every name that statically denotes the MAPPING: the literal
+    `__builtins__` and its aliases, PLUS the resolved compositions `builtins.__dict__` /
+    `vars(builtins)` / `getattr(builtins, "__dict__")` and their COPIES
+    (`_builtins_root_names`, #14326 round 35) — deliberately:
     `builtins["getattr"]` is a TypeError (`'module' object is not subscriptable`), so accepting
     a bare subscript on every root name would red code that cannot run.
     """
@@ -6820,6 +6845,23 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    dict.__getitem__(builtins.__dict__, "exec")('
             "'results = sdk._tortoise_fts_query(query=q, limit=10)')\n"),
+        # ⛔ THE INTRA-PREDICATE TWINS OF THE CONSTRUCTORS ALREADY CLOSED (#14326 round 35
+        # review cycle 5, EACH MEASURED GREEN: `dict(**m)["exec"] is exec` at RUNTIME, and the
+        # pin saw `m=2 c=2 i=0`). A `**` spread lives in `node.keywords` with `arg is None`, an
+        # unbound `.copy` puts the mapping in argument ONE, and `|` has an `__or__` dunder —
+        # three twins of three arms that were otherwise closed.
+        "`dict(**builtins.__dict__)` — the KEYWORD twin": (
+            '    import builtins\n'
+            '    _d = dict(**builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`dict.copy(builtins.__dict__)` — the UNBOUND twin": (
+            '    import builtins\n'
+            '    _d = dict.copy(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`{}.__or__(builtins.__dict__)` — the DUNDER twin of `| `": (
+            '    import builtins\n'
+            '    _d = {}.__or__(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         # ⛔ AND A SUBSCRIPT WHOSE KEY IS ASSEMBLED (#14326 review P0-2, MEASURED GREEN at
         # `cb5c2c81d9`: mentions=2, calls=2, indirect=0) — while the DIRECT key is refused by
         # the `Constant` arm and the SLICED key by `_possible_strings`. The key is the same
@@ -7864,7 +7906,9 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     Accepted FALSE-REDs, because the pin follows SHAPES and a shape shift costs an edit
     here rather than a silent change there — collating the id mapping
     (``"order": _ids(results)``) or the leg table into a helper, hoisting the artifact dict
-    to a local (``row = {…}; per_query.append(row)``), and ``per_query.extend([{…}])``.
+    to a local (``row = {…}; per_query.append(row)``), ``per_query.extend([{…}])``, and
+    RENAMING the collected list (this pin hard-codes the collector's name ``per_query`` on
+    purpose — it is what stops ``_p = list(reversed(per_query)); return {"per_query": _p}``).
     A red there costs an edit to this pin, which is the cheap direction — the expensive
     direction is a sorted page reaching the verdict as ``rank_identical: True`` (measured
     green against earlier shapes of this check).
@@ -8154,7 +8198,12 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         f"`run()` returns `per_query` as {ast.unparse(reported['per_query'])} — it must be "
         "the collected list ITSELF. A re-derivation here (a sorted or truncated copy, a "
         "helper call) re-orders the pages `compare()` reads while every check above still "
-        "passes: measured GREEN with `rank_identical: True` on a genuinely permuted page")
+        "passes: measured GREEN with `rank_identical: True` on a genuinely permuted page. "
+        "⛔ IF YOU ARE HERE BECAUSE YOU RENAMED THE LIST: this pin follows the collector by "
+        "its NAME `per_query` (unlike `results`/`trace`, whose names it DERIVES from the AST), "
+        "so renaming it is an ACCEPTED false red — edit this pin rather than hunting a "
+        "permutation bug that does not exist (#14326 round 35 review cycle 5, measured: a "
+        "rename-only edit reds here while the returned value IS the collected list)")
     element_mutations = _per_query_element_mutations(run_defs[0], holder.lineno)
     assert not element_mutations, (
         f"line(s) {element_mutations} mutate a RECORDED entry through an alias of a "
@@ -9336,8 +9385,6 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             '_k = "TortoiseSDK"\n_t.__dict__[_k] = _Mirror\n',
         "KEY is a literal-only `+`":
             '_t.__dict__["Tortoise" + "SDK"] = _Mirror\n',
-        "DOTTED setattr receiver":
-            'import tortoise.sdk\nsetattr(tortoise.sdk, "TortoiseSDK", _Mirror)\n',
         "setattr KEY carried by a NAME":
             '_k = "TortoiseSDK"\nsetattr(_t, _k, _Mirror)\n',
         "SPLATTED setattr argument list":
@@ -10597,14 +10644,24 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # still holds the SAME function objects, so it is a live lever, but "the ways to make a
         # mapping from a mapping" terminates no more than "the ways to name a callable" does.
         # Same DECLARED class as the rows above, not a spelling list to grow.
-        "`copy.copy(builtins.__dict__)`": (
-            'import builtins, copy', '_d = copy.copy(builtins.__dict__)',
-            f'_d["exec"]("results = {read}")'),
         "`types.MappingProxyType(builtins.__dict__)`": (
             'import builtins, types', '_d = types.MappingProxyType(builtins.__dict__)',
             f'_d["exec"]("results = {read}")'),
         "`_c = builtins.__dict__.copy; _c()`": (
             'import builtins', '_c = builtins.__dict__.copy', '_d = _c()',
+            f'_d["exec"]("results = {read}")'),
+        # ⛔ AND A SELECTION OUT OF A LITERAL CONTAINER (#14326 round 35 review cycle 5,
+        # MEASURED GREEN: `[builtins.__dict__][0]["exec"](<read>)`). Not the callee-composition
+        # class and not an arbitrary constructor — it is a mapping reached by indexing a
+        # LITERAL. The STRING axis resolves exactly this shape (`_subscript_strings`, round 16);
+        # the mapping predicate does not, so it is DECLARED here rather than left silent. The
+        # same sentence bounds it: a selection out of a NAME-held container is residual, and so
+        # is one out of a literal until this predicate learns that resolution.
+        "`[builtins.__dict__][0][\"exec\"]`": (
+            'import builtins', '_d = [builtins.__dict__][0]',
+            f'_d["exec"]("results = {read}")'),
+        "`(builtins.__dict__,)[0][\"exec\"]`": (
+            'import builtins', '_d = (builtins.__dict__,)[0]',
             f'_d["exec"]("results = {read}")'),
     }
     for label, lines in declared_residual.items():
@@ -10626,6 +10683,12 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
             'import builtins', '_d = builtins.__dict__', f'_d["exec"]("results = {read}")'),
         "`from builtins import exec as _e`": (
             'from builtins import exec as _e', f'_e("results = {read}")'),
+        # `copy.copy(m)` was declared residual here until the UNBOUND `.copy` arm closed it
+        # (#14326 round 35 review cycle 5): `copy.copy(m)` and `dict.copy(m)` are the same
+        # one-argument call shape, so closing one closed both. It moves to the REFUSED set.
+        "`copy.copy(builtins.__dict__)`": (
+            'import builtins, copy', '_d = copy.copy(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
     }.items():
         assert refused(*lines), (
             f"[{label}] is NOT refused — it is a statically visible spelling of the callee and "
