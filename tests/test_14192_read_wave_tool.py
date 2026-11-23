@@ -8234,6 +8234,18 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    _dc = dict\n'
             '    _f = vars(_dc).get("get")\n'
             '    _f(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ AND THE PLAIN BARE-NAME ARM, WHICH HAD NO ROW (#14395 review, P2, MEASURED). The
+        # `{"dict"} | _builtins_launderers` Name arm is what refuses `_g = _dc.get` when the
+        # callee is BOUND and then CALLED directly; reverting that one arm to `{"dict"}` left
+        # the suite at 44 passed while this spelling went GREEN (m=2 c=2 i=0). The
+        # `_d["exec"](…)` spelling of the same shape stays REFUSED under that mutant because the
+        # resolver clause answers it, which is why the row that surfaced the gap is THIS one.
+        "a READ METHOD out of a NAMESPACE ALIAS, the plain `get` BOUND then CALLED (`_dc = dict`)": (
+            '    import builtins\n'
+            '    _dc = dict\n'
+            '    _g = _dc.get\n'
+            '    _f = _g(builtins.__dict__, "exec")\n'
+            '    _f("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a READ METHOD fetched out of `getattr(<namespace alias>, \"__dict__\").get`": (
             '    import builtins\n'
             '    _dc = dict\n'
