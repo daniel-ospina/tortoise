@@ -54,9 +54,22 @@ version: 1
 # and `tests/test_14186_embedder_seam_batching.py` — both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
 # the verb packs two shards at 837.0 s (a, e) and nine at 836.9 s (b, c, d, f, g, h, i, j, k), so
 # `ceil(837.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# MERGES INTO, never carried from the branch that first wrote it. Re-derived on `main` at
+# `b2d1e9086a92` — #14409's landing (which brought #14371's own
+# `tests/test_14371_offline_embed_json.py`) PLUS #14434's `tests/test_7879_record_chain.py`, whose
+# registration is what re-packed it — the same verb packs four shards at 836.8 s (a, d, e, k) and
+# seven at 836.7 s (b, c, f, g, h, i, j), so
+# `ceil(836.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
 # reading of this pool from 835.5 s to 837.0 s while the SECONDS moved under it, so NO arithmetic
+# agree by construction rather than by a hand re-read. ⛔ The partition moves on EVERY landed
+# registration, and #14409's own landing shows how fast: it was re-emitted for the #14371 row at a
+# six/five split, and #14434's next file moved it to this four/seven one within the hour, reddening
+# `main` in between. That is why the shard NAMES (not only the seconds) are stated and graded: a
+# carried split reds a tree it does not describe while the minute is unchanged. ⛔ The MINUTE has
+# stood at 28 m across every
+# reading of this pool from 835.5 s to 836.8 s while the SECONDS moved under it, so NO arithmetic
 # on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
 # sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a
 # fast file is registered — the packer is greedy, so a seventh file re-packs every bin — which is
