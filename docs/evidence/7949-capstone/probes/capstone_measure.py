@@ -1885,8 +1885,8 @@ def _pass_ran(block: dict) -> bool | None:
     ``if not edus:`` early return (``:14792``) emits literally ``"vet": {"enabled":
     vet_enabled, "s2": {}, "union": {}}`` (``:14823``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:17970``) and ``if vet_enabled and complete_list:``
-    (``:15372``). So a session whose conversation produced no list emits
+    embed_list:`` (``:17970``) and ``if vet_enabled and complete_list:`` (``:15372``).
+    So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
     exception path (``extractor_v2.py:14512-14515``). ``enabled: true`` therefore

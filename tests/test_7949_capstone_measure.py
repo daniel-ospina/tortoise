@@ -6813,6 +6813,55 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("probes/capstone_measure.py", "with the flag ON", (
             ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
+        # ⛔ THE GATES `_IDLE_CITES["vet"]` NAMES, in the rule's own docstring — the second
+        # surface of one claim (#14269 review). ⛔ THE CAUSAL STORY HERE WAS WRONG TWICE and is
+        # corrected to the measurement: this is NOT a stale number. `main`'s `588cf7aeb6`
+        # re-pointed BOTH copies of this claim in ONE commit — `git show 588cf7aeb6 --
+        # docs/evidence/7949-capstone/probes/capstone_measure.py` moves the docstring line AND
+        # the `_IDLE_CITES`-style line `:17967` -> `:17970` together — and `git grep -n -F 17967`
+        # over that file exits 1 at this head. So no head of `main` or of this branch ever carried
+        # a split state, and nothing here is a figure to re-offset (this file's own header says
+        # the failure it was written for was not a stale number but a FALSE CORRECTION — which is
+        # what re-telling it as "the docstring kept `:17967`" invites). What the merge resolution
+        # with `588cf7aeb6` DROPPED is this ROW, and what makes the row necessary is main's WRAP:
+        # main puts `:15372` on its own line, where no row can scope it.
+        # ⛔ AND IT IS NOT "THE ONLY OTHER ROW": FIVE other rows reach this docstring (AST span
+        # 1871-1918) — those scoping on `with the flag ON` (1886), `follows at` (1884), `emits
+        # literally` (1885), `so an acceptance test of` (1877) and `is different code` (1896).
+        # They pin `:14791`/`:14792`, `:14823`, `:14819-14822`, `:15706-15720` and `:14757` — NOT
+        # the gate pair `:17970`/`:15372`, which no other row reads. That, not uniqueness of the
+        # docstring, is why this row is needed and not a duplicate.
+        # ⛔ RE-ADDED after the merge resolution with `origin/main` `588cf7aeb6` dropped it: the
+        # resolution took `main`'s whole copy of this file, which was right for the D5 block
+        # (unreachable) but ALSO discarded THIS row, ~900 lines away and not D5 machinery. The
+        # claim it guards is live and is in this PR's own net diff —
+        # `probes/capstone_measure.py`'s `` ``embed_list:`` (``:17970``) and ``if vet_enabled
+        # and complete_list:`` (``:15372``) `` sentence. Measured: WITHOUT this row, mutating
+        # `:17970` -> `:17967` in that probe leaves `444 passed` (green); WITH it, the same
+        # mutation reds `test_the_bare_continuation_cites_name_what_they_say`.
+        # Non-vacuity, MEASURED at this head: mutating `:17970` -> `:17967` in that probe reds
+        # `test_the_bare_continuation_cites_name_what_they_say`; the row's scope is what makes
+        # that number observable at all, since no other row reads the pair. The `_locate_hint`
+        # leg names the live line (`if vet_enabled and embed_list:` at `:17970`).
+        ("probes/capstone_measure.py", "and ``if vet_enabled and complete_list:``", (
+            ("17970", "if vet_enabled and embed_list:"),
+            ("15372", "if vet_enabled and complete_list:"),
+        )),
+        # ⛔ THE THIRD COPY OF THE SAME CLAIM (`#14269` review at `e587f2c8100d`, P2). The row
+        # above guards the `_pass_ran` docstring's copy of the gate pair; `_IDLE_CITES["vet"]`
+        # carries the same `(:17970)` in a sentence a future run PRINTS to a reader, and nothing
+        # read it: MEASURED on this head, mutating that `:17970` -> `:17967` in the probe leaves
+        # `2 passed, 442 deselected` (`-k 'bare_continuation or epic_bundle'`) — green.
+        # ⛔ The phrase carries the cite's own `(:17970)` token because the sentence around it does
+        # NOT scope: `"pass is gated on the LIST"` occurs on TWO lines of the probe (the
+        # `classify_later` value's `classify pass is gated on the LIST` is the other), and an
+        # ambiguous phrase is a FAILURE in this table, not a silent bind to the easier match.
+        # Only `:17970` is pinned here — `:15372` sits on the NEXT line of that same string, and a
+        # row scopes to exactly one.
+        ("probes/capstone_measure.py",
+         "pass is gated on the LIST — `if vet_enabled and embed_list:` (:17970)", (
+             ("17970", "if vet_enabled and embed_list:"),
+         )),
         ("probes/capstone_measure.py", "follows at", (
             ("14791", "edus = _edus_from_conversation(conversation)"),
         )),
@@ -18526,13 +18575,66 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         else:
             _measured.append(f"the live `{_base}...HEAD` numstat")
             if not _numstat.stdout.strip():
-                failures.append(
-                    f"D5 says `04-plan.md` IS in this diff by its PAIR, but "
-                    f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` is EMPTY — so at "
-                    f"the head you are running, that file carries no re-point of this "
-                    f"diff. Either the re-point was dropped, or the sentence no longer "
-                    f"describes this head. Re-derive the membership (#14260 fix lane, "
-                    f"finding 3)")
+                # ⛔ THE SAME MERGED READING, REACHED FROM THE OTHER SIDE (#14269, MEASURED). Case
+                # (3) above covers a HEAD already ON the base; this is the OPEN branch whose base
+                # ABSORBED the re-point while the branch is still in flight — the state `main` put
+                # `#14269` in when it landed the same re-cut. There the membership is history for
+                # exactly the reason (3) gives (the range reached the base WITH the document), so
+                # an EMPTY numstat is the same MEASUREMENT and not "the re-point was dropped".
+                # The two are told apart by the base's own copy: if the base does NOT carry the
+                # target, an EMPTY diff really did drop it and the failure below still fires — so
+                # this branch narrows what counts as history and does not excuse an absence.
+                _absorbed_copy = _git("show", f"{_base}:{_MEMBER_DOC}")
+                _base_absorbed = (
+                    _absorbed_copy.returncode == 0 and _I7_TARGET in _absorbed_copy.stdout
+                )
+                # ⛔ THE HATCH IS CONDITIONAL ON THE PROSE IT PROTECTS (#14269 review, P0 —
+                # MEASURED, and this is the false-PASS class the whole PR line exists to
+                # remove). The base-absorbed reading alone grades the BASE's blob and never
+                # looks at the sentence this arm exists to protect: MEASURED at the head before
+                # this fix, `git diff --numstat origin/main...HEAD -- …/04-plan.md` was EMPTY
+                # and `05-verify.md` still said "What THIS diff's `04-plan.md` DOES carry is the
+                # `capstone_verdict_check.py` pair" — a PRESENT-TENSE membership this head does
+                # not have. The hatch passed it, so the arm was green over the exact falsehood
+                # it exists to catch. An acceptance that does not read the claim is a false
+                # PASS, so the history reading is granted ONLY when the row also states, in the
+                # present tense, that the file is NOT in this diff.
+                _present_tense_membership = (
+                    "What THIS diff's `04-plan.md` DOES carry is the" in text)
+                _states_absent_here = (
+                    "AND AT THIS HEAD `04-plan.md` IS NOT IN THIS DIFF" in text)
+                if _base_absorbed and _present_tense_membership:
+                    failures.append(
+                        f"`{_base}` already carries {_I7_TARGET} in `{_MEMBER_DOC}`, so the "
+                        f"`{_base}...HEAD` numstat is EMPTY and the re-point is the base's — "
+                        f"but D5 still claims in the PRESENT TENSE that THIS diff's "
+                        f"`04-plan.md` carries the `capstone_verdict_check.py` pair. That is "
+                        f"FALSE at the head it ships on, and accepting it is the false PASS "
+                        f"this arm exists to catch. State that `04-plan.md` is NOT in this "
+                        f"diff at this head (and why), or drop the present-tense claim "
+                        f"(#14269 review, P0)")
+                elif _base_absorbed and not _states_absent_here:
+                    failures.append(
+                        f"`{_base}` absorbed the re-point, so the `{_base}...HEAD` numstat "
+                        f"for `{_MEMBER_DOC}` is EMPTY — but D5 never SAYS so: the "
+                        f"base-absorbed acceptance requires the row to state "
+                        f"'AND AT THIS HEAD `04-plan.md` IS NOT IN THIS DIFF'. Without that "
+                        f"sentence the history reading is indistinguishable to a reader from "
+                        f"a live membership claim, which is what made this hatch a false PASS "
+                        f"(#14269 review, P0)")
+                elif _base_absorbed:
+                    _measured.append(
+                        f"the merged state from the branch side (`{_base}` already carries "
+                        f"{_I7_TARGET} in `{_MEMBER_DOC}`, so the re-point is the base's)"
+                    )
+                else:
+                    failures.append(
+                        f"D5 says `04-plan.md` IS in this diff by its PAIR, but "
+                        f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` is EMPTY and "
+                        f"`{_base}`'s own copy does not carry {_I7_TARGET} either — so at "
+                        f"the head you are running, that file carries no re-point of this "
+                        f"diff, and no base carries it either. The re-point was dropped. "
+                        f"Re-derive the membership (#14260 fix lane, finding 3)")
             else:
                 _base_copy = _git("show", f"{_base}:{_MEMBER_DOC}")
                 if _base_copy.returncode == 0:
@@ -18929,9 +19031,15 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     # ⛔ AND FOLDING THIS INTO THE HONOURS CASE ABOVE — the tidier shape, and the one that
     # file's own convention prefers (`test_the_merge_head_honours_line_is_what_that_head_
     # carries` already reads this same blob and already skips with the measured remedy) — is
-    # NOT available: that case sits above `:16615`, so moving this arm into it would insert
+    # NOT available: that case sits above the derivation line, so moving this arm into it would insert
     # lines above the derivation line and re-stale the record's two cites. Named here rather
     # than left for the next lane to rediscover (14183 delta review, P3).
+    # ⛔ NO LINE NUMBER IS TYPED FOR IT (#14269 review, P3 — MEASURED). This comment used to say
+    # `:16615`, which was the derivation line's number on `origin/main`; this branch's own 49-line
+    # insertion above it moved the derivation to `:16664`, so the pointer named an unrelated comment
+    # and a reader following it landed on the wrong line — the file's own "re-derive, never type"
+    # class. The claim is positional ("above"), so it needs no figure; the derivation line is found
+    # by `grep -n 'n for n, line in enumerate(ext, 1) if'` rather than by a number that moves.
     _d5 = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
     _registry = re.search(
         r"`sdk\.py:(?P<merge>\d+)` is `_registry_cache = PackRegistry\(packs_dir\)` "
