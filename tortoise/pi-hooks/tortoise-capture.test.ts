@@ -84,6 +84,7 @@ import {
   pruneSpool,
   quarantineEntry,
   readCaptureStatus,
+  readDrainClaim,
   readDiscards,
   readSpoolEntry,
   readSpoolTurns,
@@ -1582,10 +1583,18 @@ test("a filing that lands DURING the confirm read is not clobbered (#12603)", as
       err.name = "AbortError";
       throw err;
     }
-    // A peer process files the SAME entry while our read is in flight.
+    // A peer files the SAME entry while our read is in flight.
+    //
+    // #14350: the peer is a TARGETED filing (`onlySessionId`), not a second
+    // whole-spool pass — a whole-spool peer is now excluded by the drain claim
+    // (one drainer per box), so a targeted filing is the only racer this CAS can
+    // still see, and it is a real one: `session capture` and the shutdown flush
+    // both take that path. The race this test performs is identical.
     if (!filedDuringRead) {
       filedDuringRead = true;
-      await flushSpool(TEST_CFG, { dir: spool, fetchImpl: healthy as never, now: 5 });
+      await flushSpool(TEST_CFG, {
+        dir: spool, fetchImpl: healthy as never, now: 5, onlySessionId: sid,
+      });
     }
     return { ok: true, status: 200, json: async () => servedDetail(sid, turns) };
   };
@@ -5559,12 +5568,36 @@ test("#2100: a 402 quota refusal is NAMED — BLOCKED, one attempt per pass, dur
   assert.equal(recorded?.state, "blocked", "the block is durable, not just one line in a log");
   assert.equal(recorded?.status, 402);
 
-  // (2) SECOND process, with a healthy endpoint that never answers in time: the
+  // (2) SECOND process, with a healthy endpoint that never answers: the
   // state is reported WITHOUT re-POSTing to discover it.
-  const second = await sessionStartLines(spool, () => new Promise(() => {}));
+  //
+  // #14350: the hanging POST is held open deliberately for this assertion, and
+  // then REJECTED, because a pass in flight HOLDS THE DRAIN CLAIM (one drainer
+  // per box) — part (3) is a later process, so this one has to finish first or
+  // it would correctly be skipped as `heldByClaim`. A real fetch is bounded by
+  // `REQUEST_TIMEOUT_MS`, so "never answers" always ends in production too; the
+  // reject is that same ending, made deterministic.
+  let endHung: ((err: Error) => void) | undefined;
+  let wedged = true;
+  const hanging = () => {
+    if (!wedged) return Promise.reject(new Error("test: endpoint already ended"));
+    return new Promise((_resolve, reject) => {
+      endHung = reject as (err: Error) => void;
+    });
+  };
+  const second = await sessionStartLines(spool, hanging);
   assert.ok(
     second.lines.some((l) => l.includes("capture: BLOCKED (3 queued, 402 quota)")),
     `a fresh process must report the recorded block: ${JSON.stringify(second.lines)}`,
+  );
+  // Every later entry in that abandoned pass must end too, or the claim stays
+  // held: the endpoint stops hanging the moment the first POST is released.
+  wedged = false;
+  endHung?.(new Error("test: end the wedged pass so its drain claim is released"));
+  await settle();
+  assert.equal(
+    readDrainClaim(spool), undefined,
+    "the claim must be RELEASED when the pass ends — else the next drainer is skipped",
   );
 
   // (3) THIRD process: the quota is back (a 2xx), which must CLEAR the marker —

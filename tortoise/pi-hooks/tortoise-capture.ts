@@ -1,4 +1,4 @@
-// tortoise-hook-version: 32
+// tortoise-hook-version: 33
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -287,6 +287,7 @@ import {
   existsSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -464,6 +465,57 @@ export const QUOTA_EXCEEDED_CODE = "quota_exceeded";
 export const COHORT_COST_CAP_CODE = "cohort_cost_cap";
 /** Every 402 category this client can name. */
 const REFUSAL_CODES = [QUOTA_EXCEEDED_CODE, COHORT_COST_CAP_CODE] as const;
+
+/**
+ * #14350 (D1): the server's machine-readable CAPACITY category
+ * (`hosted_api._CAPTURE_CAPACITY_CODE`).
+ *
+ * ⛔ Why this category is special. Every other refusal here is a verdict about
+ * the ENTRY — its harness is malformed, its org is out of quota, the network
+ * failed — and so it is charged to the entry's `attempts`. A capacity refusal is
+ * a verdict about the BOX, in the same instant, for every entry: the server is
+ * running `_CAPTURE_MAX_IN_FLIGHT` captures right now. Charging it to the entry
+ * is what turned a 908-entry backlog into `attempts` 10–17 — one saturated pass
+ * charged EVERY pending entry, and exponential backoff then pushed most of them
+ * hours out, so the head stopped falling while every surface reported a drain in
+ * progress (#14342 §7.3).
+ */
+export const CAPTURE_CAPACITY_CODE = "capture_capacity_saturated";
+
+/**
+ * #14350: the drain claim — ONE drainer per spool, across BOTH legs.
+ *
+ * The spool directory is shared by this leg and the Python CLI, and both drain
+ * it: every `session_start` fires one, `agent_end` another, shutdown a final
+ * flush, and `tortoise session drain` can be run by hand. N concurrent drains
+ * POST into ONE server ceiling of 8 captures, which is the self-feeding shape
+ * #14342 starts from. The claim is the exclusion; `tortoise/drain_claim.py`
+ * states the protocol (atomic create via `link`, a lease, three staleness rules)
+ * and the Python leg implements the same file. **Anything that changes here must
+ * change there**: a divergence is invisible — each leg would take its own claim
+ * — and it would restore the defect silently.
+ */
+export const DRAIN_CLAIM_FILE = "drain.claim";
+
+/**
+ * #14350: how long a claim stays valid without a refresh — from the transport,
+ * not from comfort. The longest step between refreshes is ONE POST, bounded by
+ * `REQUEST_TIMEOUT_MS` (10 s) plus `CONFIRM_READ_TIMEOUT_MS` on the refusal path
+ * plus local work; the Python drain uses 120 s for the same bound and the two
+ * legs must agree or one would steal the other's live claim.
+ */
+export const DRAIN_CLAIM_TTL_MS = 120_000;
+
+export interface DrainClaimRecord {
+  version: number;
+  token: string;
+  leg: string;
+  pid: number;
+  host: string;
+  boot_id?: string;
+  started_at: number;
+  expires_at: number;
+}
 
 export interface CaptureConfig {
   apiUrl: string;
@@ -1352,12 +1404,41 @@ export interface FlushSummary {
    *  bounded pass lost nothing, and what tells the caller to continue. */
   remaining: number;
   /** #2100: why the pass stopped early. Absent on a pass that reached the end. */
-  stopped?: "attempts" | "budget" | "quota";
+  stopped?: "attempts" | "budget" | "quota" | "capacity" | "claim";
   /** #2100: the quota refusal this pass hit, if any (402 / `quota_exceeded`).
    *  A quota-blocked box is a NAMED state (`capture: BLOCKED`), not a growing
    *  silent backlog of per-item deferrals. */
   quota?: QuotaRefusal;
+  /** #14350 (D1): this pass did NOT run because another drainer holds the
+   *  spool's claim (`tortoise.drain_claim` / `drain.claim`). The correct answer
+   *  for the second of two concurrent drains: every entry it would have
+   *  attempted is still on the spool and the HOLDER is working the same list. */
+  heldByClaim?: boolean;
+  /** #14350: the operator line naming who holds the claim (leg + pid). */
+  claimHolder?: string;
+  /** #14350: the pass STOPPED because it no longer held the claim (a peer took
+   *  it over after our refresh was missed). Recorded rather than thrown: the
+   *  correct response — stop being the second drainer — has already happened. */
+  lostClaim?: boolean;
+  /** #14350: the claim could not be CREATED (an unwritable spool root), so this
+   *  pass ran WITHOUT the cross-process exclusion. Never a silent state. */
+  claimUnavailable?: boolean;
+  /** #14350: the CAPACITY refusal that ended this pass, if any. Nothing was
+   *  charged to the entry's `attempts` and no backoff was armed — that is the
+   *  difference between this and a per-entry deferral, and it is what keeps the
+   *  head monotone. */
+  capacity?: CapacityRefusal;
   discarded: DiscardRecord[];
+}
+
+/** The server's CAPACITY refusal, as the client can name it (#14350). */
+export interface CapacityRefusal {
+  status: number;
+  /** The server's machine-readable category, when its body carries one. */
+  code?: string;
+  /** The server's own `Retry-After` seconds, when its body carries one. */
+  retry_after?: number;
+  detail?: string;
 }
 
 /** The server's quota refusal, as the client can name it (#2100). */
@@ -4342,7 +4423,93 @@ async function refusalOutcomeVerdict(
  * while the current one is still live (so a live session is never filed
  * mid-conversation and then silently frozen by the server's session_id replay).
  */
+/**
+ * #14350 (D1): ONE drainer per spool — the wrapper that enforces it.
+ *
+ * An UNTARGETED pass (`onlySessionId` absent) takes the spool's claim and does
+ * NOTHING (`heldByClaim`) when another process holds it. Every `session_start`
+ * fires a drain, `agent_end` another, shutdown a final flush, and the Python CLI
+ * drains the same directory — so N passes used to POST into ONE server ceiling of
+ * 8 captures. That is the self-feeding shape #14342 §7.3 measured (908 entries,
+ * `attempts` 10–17).
+ *
+ * ⛔ A TARGETED pass (`onlySessionId`) does NOT take the claim, deliberately:
+ * it files ONE named session (the shutdown flush of the LIVE conversation), one
+ * POST is the most it can hold, and delaying a session's own filing behind a
+ * whole-spool drain is a product regression, not contention control.
+ *
+ * The claim is released in a `finally` — a pass that throws must not leave the
+ * spool locked until the lease expires — and it is refreshed between entries
+ * (`renewIfDue`); a `false` from the refresh means a peer took it over, and the
+ * pass then STOPS rather than becoming the second drainer it exists to prevent.
+ */
 export async function flushSpool(
+  cfg: CaptureConfig,
+  opts: {
+    dir?: string;
+    fetchImpl?: FetchLike;
+    now?: number;
+    excludeSessionId?: string;
+    onlySessionId?: string;
+    timeoutMs?: number;
+    bounds?: SpoolBounds;
+    inFlight?: Set<string>;
+    maxAttempts?: number;
+    budgetMs?: number;
+    budgetClock?: () => number;
+  } = {},
+): Promise<FlushSummary> {
+  if (opts.onlySessionId !== undefined) {
+    return flushSpoolPass(cfg, opts, undefined);
+  }
+  const dir = opts.dir ?? SPOOL_DIR;
+  const claim = acquireDrainClaim(dir, { leg: "pi" });
+  if (!claim) {
+    const record = readDrainClaim(dir);
+    if (record) {
+      const summary = emptyFlushSummary();
+      summary.heldByClaim = true;
+      const who = typeof record.pid === "number" ? `pid ${record.pid}` : "an unnamed process";
+      const leg = typeof record.leg === "string" ? ` (${record.leg} leg)` : "";
+      summary.claimHolder =
+        `another drainer holds this spool${leg}: ${who} — nothing attempted`;
+      return summary;
+    }
+    // No claim AND no holder: the claim file could not be created (an unwritable
+    // or unlistable spool root). Run the pass UNCLAIMED and say so — a root that
+    // cannot hold a 60-byte claim file cannot hold a spool entry either, so the
+    // pass can only report the broken spool, and refusing to run would hide that
+    // report (the false-PASS direction is the worse error).
+    const summary = await flushSpoolPass(cfg, opts, undefined);
+    summary.claimUnavailable = true;
+    return summary;
+  }
+  try {
+    return await flushSpoolPass(cfg, opts, claim);
+  } finally {
+    try {
+      claim.release();
+    } catch {
+      /* the lease expires on its own */
+    }
+  }
+}
+
+function emptyFlushSummary(): FlushSummary {
+  return {
+    attempted: 0,
+    filed: 0,
+    deferred: 0,
+    skipped: 0,
+    heldByBackoff: 0,
+    heldBack: 0,
+    terminal: 0,
+    remaining: 0,
+    discarded: [],
+  };
+}
+
+async function flushSpoolPass(
   cfg: CaptureConfig,
   opts: {
     dir?: string;
@@ -4365,22 +4532,15 @@ export async function flushSpool(
      *  look instantaneous or infinitely long). */
     budgetClock?: () => number;
   } = {},
+  /** #14350: the claim this pass holds, when it holds one (`flushSpool` owns
+   *  acquire/release; `undefined` is a TARGETED pass, which takes none). */
+  claim?: DrainClaim,
 ): Promise<FlushSummary> {
   const dir = opts.dir ?? SPOOL_DIR;
   const doFetch = opts.fetchImpl ?? (fetch as unknown as FetchLike);
   const nowMs = opts.now ?? Date.now();
   const busy = opts.inFlight;
-  const summary: FlushSummary = {
-    attempted: 0,
-    filed: 0,
-    deferred: 0,
-    skipped: 0,
-    heldByBackoff: 0,
-    heldBack: 0,
-    terminal: 0,
-    remaining: 0,
-    discarded: [],
-  };
+  const summary: FlushSummary = emptyFlushSummary();
 
   const maxAttempts =
     typeof opts.maxAttempts === "number" && Number.isFinite(opts.maxAttempts)
@@ -4454,6 +4614,24 @@ export async function flushSpool(
     // attempting them only deepens each entry's backoff.
     if (summary.quota) {
       summary.stopped ??= "quota";
+      summary.remaining += 1;
+      continue;
+    }
+    // #14350 (D1): a CAPACITY refusal is the box's, not this entry's, so the
+    // rest of the pass is guaranteed to meet the same condition — stop before
+    // attempting (and refusing) the remaining entries one by one. Like the quota
+    // arm: `remaining`, never `skipped`, and nothing armed on the entries.
+    if (summary.capacity) {
+      summary.stopped ??= "capacity";
+      summary.remaining += 1;
+      continue;
+    }
+    // #14350: refresh the lease between entries. `false` means a peer took the
+    // claim over after a refresh was missed — stop, rather than become the
+    // second drainer this mechanism exists to prevent.
+    if (claim && !claim.renewIfDue()) {
+      summary.lostClaim = true;
+      summary.stopped ??= "claim";
       summary.remaining += 1;
       continue;
     }
@@ -4620,6 +4798,25 @@ export async function flushSpool(
         );
         continue;
       }
+      // #14350 (D1): THE BOX, NOT THE ENTRY. Checked BEFORE the marker read and
+      // before any write, and it does all three things the Python leg does in the
+      // same place: name the cause, charge nothing (`attempts` / `next_attempt_at_ms`
+      // untouched), and end the pass (the `summary.capacity` guard at the top of
+      // the loop stops every later entry). No confirm read either: this entry was
+      // not processed at all, so there is no marker direction to decide.
+      //
+      // ⚠️ Stated asymmetry with the Python drain: that leg may YIELD (honouring
+      // `retry_after`) before giving up, because it runs detached. This leg's pass
+      // is AWAITED on `session_shutdown`, so it must not sleep — it ends, and the
+      // next opportunity continues. Both charge nothing, which is the property
+      // that matters.
+      const capacity = capacityRefusal(res);
+      if (capacity) {
+        summary.capacity = capacity;
+        summary.stopped ??= "capacity";
+        summary.deferred += 1;
+        continue;
+      }
       // #12603: THE MARKER DIRECTION, on the refusal path. A retryable refusal is
       // not proof that nothing committed (#4675) — the transport bound ABANDONS
       // its handler rather than cancelling it — so this asks the ONE question the
@@ -4770,6 +4967,357 @@ export function quotaRefusal(res: {
 
 function statusPathFor(dir: string): string {
   return join(dir, SPOOL_STATUS_FILE);
+}
+
+/**
+ * #14350 (D1): the CAPACITY refusal this failed POST represents, if any.
+ *
+ * The sibling of `quotaRefusal`, and typed for the same reason: the server
+ * publishes `detail.code = "capture_capacity_saturated"` precisely so a capture
+ * client — which ships independently of the server's prose — can name the
+ * condition without matching a message.
+ *
+ * ⛔ What `flushSpool` does with this is the whole point of D1, and it is NOT
+ * what it does with a quota refusal: a quota refusal is REPORTED and the entry
+ * deferred on its backoff clock (unchanged); a CAPACITY refusal is evidence
+ * about nothing on the spool, so the entry is not charged, and the pass stops.
+ * `attempts` then measures what it is for — the entry's own refusals — which is
+ * what makes the epic's `attempts <= 3` falsifiable at all.
+ */
+export function capacityRefusal(res: {
+  status?: number | null;
+  detail?: string;
+}): CapacityRefusal | undefined {
+  const detail = typeof res.detail === "string" ? res.detail : "";
+  const status =
+    typeof res.status === "number" && Number.isFinite(res.status) ? res.status : undefined;
+  const typed = detail.includes(CAPTURE_CAPACITY_CODE);
+  if (status !== 429 && !typed) return undefined;
+  const retryAfter = retryAfterSeconds(detail);
+  return {
+    status: status ?? 429,
+    ...(typed ? { code: CAPTURE_CAPACITY_CODE } : {}),
+    ...(retryAfter !== undefined ? { retry_after: retryAfter } : {}),
+    ...(detail ? { detail } : {}),
+  };
+}
+
+/**
+ * The server's `retry_after` out of a refusal body, or `undefined`.
+ *
+ * TOTAL over every shape — an unparseable body, a scalar, a nested `detail`
+ * object, a string, a negative or non-finite number each answer `undefined` — so
+ * a corrupt body can never throw inside the per-entry loop.
+ */
+function retryAfterSeconds(detail: string): number | undefined {
+  if (!detail) return undefined;
+  let body: unknown;
+  try {
+    body = JSON.parse(detail);
+  } catch {
+    return undefined;
+  }
+  const candidates: unknown[] = [body];
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const nested = (body as Record<string, unknown>).detail;
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) candidates.push(nested);
+  }
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const raw = (candidate as Record<string, unknown>).retry_after;
+    let value: number | undefined;
+    if (typeof raw === "number" && Number.isFinite(raw)) value = raw;
+    else if (typeof raw === "string" && raw.trim() !== "") {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) value = parsed;
+    }
+    if (value !== undefined && value >= 0) return value;
+  }
+  return undefined;
+}
+
+// ── #14350 (D1): the cross-process drain claim ────────────────────────
+
+export function drainClaimPathFor(dir: string): string {
+  return join(dir, DRAIN_CLAIM_FILE);
+}
+
+/** Read the parsed claim, or `undefined`. The SURFACE (drain line, tests). */
+export function readDrainClaim(dir: string): DrainClaimRecord | undefined {
+  let text: string;
+  try {
+    text = readFileSync(drainClaimPathFor(dir), "utf8");
+  } catch {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  return typeof record.expires_at === "number" && typeof record.token === "string"
+    ? (record as unknown as DrainClaimRecord)
+    : undefined;
+}
+
+/**
+ * Is this process alive on THIS box? Unprovable reads as ALIVE (#14350).
+ *
+ * ERROR is "exists, not ours". Every other failure leaves the question
+ * unanswered, and the answer that cannot create a SECOND drainer is "alive":
+ * honouring a dead claim costs one skipped pass (the next one takes it), while
+ * stealing a live one is the defect the claim exists to remove.
+ */
+export function pidAlive(pid: unknown): boolean {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "ESRCH") return false;
+    return true;
+  }
+  return true;
+}
+
+function readBootId(): string | undefined {
+  // Linux only. Absent (macOS, a container without /proc), the pid rule is
+  // skipped and only the lease governs — the safe degradation: the lease still
+  // bounds a dead holder's claim, and the pid rule can never fire on a pid it
+  // cannot disambiguate across reboots.
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function thisHost(): string {
+  try {
+    return hostname() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * The three staleness rules, as one TOTAL predicate (#14350).
+ *
+ * 1. UNATTRIBUTABLE — unreadable, not an object, no usable `expires_at`.
+ * 2. EXPIRED — `now >= expires_at`. The only rule that applies to a claim from
+ *    another host (a copied spool): this box cannot check that host's pids.
+ * 3. DEAD HOLDER — same `host` AND same `boot_id` (a rebooted box can reuse a
+ *    pid) and `process.kill(pid, 0)` says it is gone.
+ *
+ * Pure, so every staleness test pins it directly.
+ */
+export function claimIsStale(
+  record: unknown,
+  opts: {
+    nowMs: number;
+    host?: string;
+    bootId?: string;
+    alive?: (pid: unknown) => boolean;
+  },
+): boolean {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return true;
+  const rec = record as Record<string, unknown>;
+  const expires = rec.expires_at;
+  if (typeof expires !== "number" || !Number.isFinite(expires)) return true;
+  if (opts.nowMs >= expires) return true;
+  if (opts.host === undefined) return false;
+  if (rec.host !== opts.host) return false;
+  if (
+    typeof rec.boot_id === "string" && rec.boot_id !== "" &&
+    typeof opts.bootId === "string" && opts.bootId !== "" &&
+    rec.boot_id !== opts.bootId
+  ) {
+    return true;
+  }
+  const pid = rec.pid;
+  if (typeof pid === "number" && Number.isInteger(pid) && pid > 0) {
+    const alive = opts.alive ?? pidAlive;
+    if (!alive(pid)) return true;
+  }
+  return false;
+}
+
+export interface DrainClaim {
+  token: string;
+  /** Refresh the lease. `false` means the claim is no longer ours. */
+  renew(nowMs?: number): boolean;
+  /** Refresh only when a third of the TTL has gone (the per-entry call). */
+  renewIfDue(nowMs?: number): boolean;
+  /** Give the claim up. `false` means we no longer held it. */
+  release(): boolean;
+}
+
+/**
+ * Take the spool's drain claim, or `undefined` when another holder has it.
+ *
+ * `undefined` is NOT an error: it is the correct answer for the second of two
+ * concurrent drains, and the caller must treat it as "do nothing this pass".
+ *
+ * The create is `linkSync` — atomic create-if-absent, and the target becomes
+ * visible WITH ITS FULL CONTENT because the content is written to a temp file
+ * first. `rename` would REPLACE an existing target (both processes "win"), and
+ * plain `wx` gives a window where a reader sees a zero-length claim and reads it
+ * as corrupt while the holder is mid-write. Renewal uses `rename` (atomic
+ * replace) for the mirror-image reason: a reader must never see a torn record.
+ */
+export function acquireDrainClaim(
+  dir: string,
+  opts: {
+    leg: string;
+    ttlMs?: number;
+    nowMs?: number;
+    host?: string;
+    bootId?: string;
+    alive?: (pid: unknown) => boolean;
+  },
+): DrainClaim | undefined {
+  const ttlMs = opts.ttlMs ?? DRAIN_CLAIM_TTL_MS;
+  const host = opts.host ?? thisHost();
+  const bootId = opts.bootId ?? readBootId();
+  const alive = opts.alive ?? pidAlive;
+  const path = drainClaimPathFor(dir);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch {
+    // An unmakeable spool root cannot hold a spool entry either, so the pass
+    // about to run can only report the broken spool. Run UNCLAIMED rather than
+    // hide that report (the false-PASS direction is the worse error) — and say
+    // so on the summary.
+    return undefined;
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const nowMs = opts.nowMs ?? Date.now();
+    const token = randomToken();
+    const record: DrainClaimRecord = {
+      version: 1,
+      token,
+      leg: opts.leg,
+      pid: process.pid,
+      host,
+      ...(bootId ? { boot_id: bootId } : {}),
+      started_at: nowMs,
+      expires_at: nowMs + ttlMs,
+    };
+    const tmp = join(dir, `${DRAIN_CLAIM_FILE}.tmp-${process.pid}-${token}`);
+    try {
+      writeFileSync(tmp, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+      linkSync(tmp, path);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "EEXIST") {
+        try { unlinkSync(tmp); } catch { /* best effort */ }
+        return undefined;
+      }
+      try { unlinkSync(tmp); } catch { /* best effort */ }
+      let raw: string | undefined;
+      try {
+        raw = readFileSync(path, "utf8");
+      } catch {
+        raw = undefined;
+      }
+      let parsed: unknown;
+      try {
+        parsed = raw === undefined ? undefined : JSON.parse(raw);
+      } catch {
+        parsed = undefined;
+      }
+      if (!claimIsStale(parsed, { nowMs, host, bootId, alive })) return undefined;
+      // Compare-and-delete: unlink ONLY if the file still holds what we judged
+      // stale. A claim that changed between the read and the unlink belongs to a
+      // NEW holder, who must keep it.
+      if (raw !== undefined) {
+        let current: string | undefined;
+        try {
+          current = readFileSync(path, "utf8");
+        } catch {
+          current = undefined;
+        }
+        if (current === raw) {
+          try { unlinkSync(path); } catch { /* a peer got there first */ }
+        }
+      }
+      continue;
+    }
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+    let renewedAt = nowMs;
+    return {
+      token,
+      renew(nowMsArg?: number): boolean {
+        const at = nowMsArg ?? Date.now();
+        const current = readDrainClaim(dir);
+        if (!current || current.token !== token) return false;
+        const next: DrainClaimRecord = {
+          ...record,
+          started_at: record.started_at,
+          expires_at: at + ttlMs,
+        };
+        const tmpPath = join(dir, `${DRAIN_CLAIM_FILE}.tmp-${process.pid}-${token}`);
+        try {
+          writeFileSync(tmpPath, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+          renameSync(tmpPath, path);
+        } catch {
+          try { unlinkSync(tmpPath); } catch { /* best effort */ }
+          return false;
+        }
+        renewedAt = at;
+        return true;
+      },
+      renewIfDue(nowMsArg?: number): boolean {
+        const at = nowMsArg ?? Date.now();
+        if (at - renewedAt < ttlMs / 3) return true;
+        return this.renew(at);
+      },
+      release(): boolean {
+        let raw: string | undefined;
+        try {
+          raw = readFileSync(path, "utf8");
+        } catch {
+          return false;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          return false;
+        }
+        if (!parsed || typeof parsed !== "object") return false;
+        if ((parsed as Record<string, unknown>).token !== token) return false;
+        let current: string | undefined;
+        try {
+          current = readFileSync(path, "utf8");
+        } catch {
+          return false;
+        }
+        if (current !== raw) return false;
+        try {
+          unlinkSync(path);
+        } catch {
+          return false;
+        }
+        return true;
+      },
+    };
+  }
+  return undefined;
+}
+
+function randomToken(): string {
+  // 16 hex chars, the same width the Python leg mints — an OWNERSHIP value, not
+  // a secret, so `Math.random` would do, but a per-leg-predictable token makes a
+  // confused-deputy delete conceivable for no gain.
+  let out = "";
+  for (let i = 0; i < 16; i += 1) {
+    out += Math.floor(Math.random() * 16).toString(16);
+  }
+  return out;
 }
 
 /**
@@ -5274,10 +5822,38 @@ function reportFlush(
         (summary.remaining > 0
           ? summary.stopped === "quota"
             ? `, paused ${summary.remaining} (quota refused; not retried in this pass)`
-            : opts.continuing
-              ? `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; continues in the background)`
-              : `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; left for the next opportunity)`
+            // #14350: a CAPACITY stop is the box's, so a follow-up pass would
+            // meet the same ceiling. Named as its own state — and never
+            // described as "continues in the background" — for the same reason
+            // as the quota arm.
+            : summary.stopped === "capacity"
+              ? `, paused ${summary.remaining} (server at capture capacity; nothing charged to any entry)`
+              : opts.continuing
+                ? `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; continues in the background)`
+                : `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; left for the next opportunity)`
           : ""),
+    );
+  }
+  // #14350: the two states that are NOT a failure of any entry, reported even
+  // when nothing else happened — a pass that refused to run, and a pass that
+  // could not take the exclusion, are exactly the cases where a silent drain
+  // reads as "nothing to do".
+  if (summary.heldByClaim) {
+    log(
+      `${summary.claimHolder ?? "another drainer holds this spool"} ` +
+        `— serialized drain: one drainer per box (#14350)`,
+    );
+  }
+  if (summary.claimUnavailable) {
+    warn(
+      "spool flush: the drain claim could not be created (unwritable spool root) " +
+        "— this pass ran WITHOUT the one-drainer exclusion",
+    );
+  }
+  if (summary.lostClaim) {
+    warn(
+      "spool flush: this pass no longer held the drain claim (a peer took it over) " +
+        "— stopped rather than drain twice",
     );
   }
   for (const d of summary.discarded) {
@@ -5394,7 +5970,7 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
           ...(summary.quota.detail ? { detail: summary.quota.detail.slice(0, 500) } : {}),
           updated_at: new Date().toISOString(),
         });
-      } else if (summary.attempted > 0) {
+      } else if (summary.attempted > 0 && !summary.capacity) {
         // Some POST was ATTEMPTED and none of them was refused for quota, so the
         // recorded cause is superseded: the marker is the LAST OBSERVED
         // 402, not a permanent verdict. Without this, a box that was
@@ -5415,11 +5991,33 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
           updated_at: new Date().toISOString(),
         });
       }
+      if (summary.capacity) {
+        // #14350: the box is at its capture ceiling. Recorded as BLOCKED with the
+        // server's own 429 so `capture: BLOCKED (n queued, 429 capture capacity)`
+        // names the cause — the same durable half the quota arm gets, for the same
+        // reason: the hook that fired this drain threw its stderr away, so a
+        // console line alone leaves the next process to re-POST to find out why
+        // nothing moved. Self-healing: a later pass with a free slot writes `ok`,
+        // and the health line clears it when the queue empties.
+        writeCaptureStatus(spoolDir, {
+          version: 1,
+          state: "blocked",
+          reason: summary.capacity.code ?? `${summary.capacity.status}`,
+          status: summary.capacity.status,
+          ...(summary.capacity.detail
+            ? { detail: summary.capacity.detail.slice(0, 500) }
+            : {}),
+          updated_at: new Date().toISOString(),
+        });
+      }
       // Say the state out loud whenever it MOVED: the start-of-session line was
       // printed from the marker this pass has just superseded, and leaving that
       // as the last thing the lane logged is the misdiagnosis the supersede
       // exists to prevent.
-      if (summary.quota || (previous?.state === "blocked" && summary.attempted > 0)) {
+      if (
+        summary.quota || summary.capacity ||
+        (previous?.state === "blocked" && summary.attempted > 0)
+      ) {
         log(captureHealthLine(spoolDir, { apiKey: cfg.apiKey }).line);
       }
     } catch (err) {
@@ -5453,8 +6051,12 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
         // The report is told whether a continuation is ACTUALLY scheduled — it
         // runs before the decision, so asking it to guess produced "continues in
         // the background" on the last pass of a spent chain (#2100 review 2).
+        // #14350: a CAPACITY stop is the box's, like a quota stop — chaining
+        // would spend the following passes meeting the same ceiling, so neither
+        // continues in the background.
         const willChain =
-          summary.remaining > 0 && !summary.quota && chain + 1 < FLUSH_MAX_CHAIN;
+          summary.remaining > 0 && !summary.quota && !summary.capacity &&
+          chain + 1 < FLUSH_MAX_CHAIN;
         reportFlush(summary, where, { continuing: willChain });
         recordOutcome(summary);
         if (willChain) {

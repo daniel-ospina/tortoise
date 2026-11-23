@@ -4711,7 +4711,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 32}
+                             "pi": 33}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4777,6 +4777,15 @@ def test_shipped_install_contract_generations(harness):
     quota)`) instead of a silent per-item backoff, and the extension prints a
     per-box health line.  A generation-4 install still carries the unbounded
     drain that filled the spool on agent-infra#2100, so it must read as STALE.
+    #14350 (D1 of #14342) then moved `pi` 32→33: the seam takes the spool's
+    drain CLAIM (one drainer per box, across both legs) and a
+    `capture_capacity_saturated` refusal no longer charges the entry — it ends
+    the pass and records `blocked`. A pre-#14350 install keeps draining
+    concurrently with the Python leg and keeps charging the box's refusals to
+    per-entry backoff, which is the 908-entry / attempts-10-17 shape the epic
+    starts from, so it must read as STALE. The `tortoise-volunteer.ts` marker
+    moves with it because `contract_version_for("pi")` grades the PAIR as one
+    contract.
     Those
     numbers are a reviewed decision, not a detail, so they are pinned once and
     explicitly.
@@ -4824,7 +4833,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     artifact, move the generation, update this pair — all three in one commit").
     What is never rewritten is a SHIPPED entry in ``_GENERATION_DIGESTS``.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 32
+    assert hook_install.read_hook_version(_PI_SRC) == 33
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4915,7 +4924,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: behaviour is untouched) because `contract_version_for('pi')` grades the pair
 #: as ONE contract.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    32, "3660e09dd73a13251c9cb87587ba7e4d00c52503a50aa6e22c1424154009779c")
+    33, "2416b186c069c0b103eb303eb88b9a538d449c5ff4542447471ebd10b44e87d4")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5079,6 +5088,15 @@ _GENERATION_DIGESTS = {
     # generation-31 copy must read STALE ("reinstall"), never
     # `modified-artifact` ("local edit").
     32: "3660e09dd73a13251c9cb87587ba7e4d00c52503a50aa6e22c1424154009779c",
+    # Generation 33 (#14350, D1 of #14342): BEHAVIOUR MOVED on shipped bytes —
+    # the drain takes the spool's cross-process CLAIM (one drainer per box,
+    # across both legs), a `capture_capacity_saturated` refusal no longer charges
+    # the entry's `attempts` but ends the pass and records `blocked`, and a
+    # capacity refusal is now named on the health line. A generation-32 install
+    # keeps draining concurrently with the Python leg and keeps charging the
+    # box's refusals to per-entry exponential backoff — the 908-entry /
+    # attempts-10-17 shape #14342 starts from — so it must read STALE.
+    33: "2416b186c069c0b103eb303eb88b9a538d449c5ff4542447471ebd10b44e87d4",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -5308,13 +5326,17 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # population and its fourth writer disposition moved; the read half's
     # behaviour is untouched.
     32: "708b6a21854982d607610e15da4e7de2c3ff6071102ba0c05726817c8d2493b5",
+    # Generation 33 (#14350): header only, same reason — one seam, one contract
+    # number. The capture half takes the drain claim and stops charging capacity
+    # refusals to entries; the read half's behaviour is untouched.
+    33: "904d2742abf6a167ac8f5f437ae9c23c5d129b269ddd03fcc8dbe150aa195200",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    32, "708b6a21854982d607610e15da4e7de2c3ff6071102ba0c05726817c8d2493b5")
+    33, "904d2742abf6a167ac8f5f437ae9c23c5d129b269ddd03fcc8dbe150aa195200")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():
