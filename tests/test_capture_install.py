@@ -4711,7 +4711,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 24}
+                             "pi": 32}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4824,7 +4824,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     artifact, move the generation, update this pair — all three in one commit").
     What is never rewritten is a SHIPPED entry in ``_GENERATION_DIGESTS``.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 24
+    assert hook_install.read_hook_version(_PI_SRC) == 32
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4904,8 +4904,18 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: before. BEHAVIOUR moved on shipped bytes: a generation-22 copy still cannot
 #: stamp, so it must read as STALE ("reinstall"), never as the user's
 #: `modified-artifact` ("local edit").
+#: Generation 27 (#14347 review, cycle 3, finding F1): the writer refuses a
+#: snapshot when the stored TURN LOG cannot be read, on the same rule the META
+#: axis already had — the log axis was only consulted inside the unreadable-meta
+#: arm, so a readable meta beside a mode-`000` log reached the atomic write and
+#: REPLACED it (`written: true`, no record, no `.orphan`). BEHAVIOUR moved on
+#: shipped bytes: a generation-26 copy still silently overwrites a turn log it
+#: could not read, so it must read STALE ("reinstall"), never
+#: `modified-artifact` ("local edit"). The READ half moves its header only (its
+#: behaviour is untouched) because `contract_version_for('pi')` grades the pair
+#: as ONE contract.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    24, "8e736a10aec5fea9665138de9b17313efaea0d32aea28c7445d97a85b6cc241e")
+    32, "3660e09dd73a13251c9cb87587ba7e4d00c52503a50aa6e22c1424154009779c")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4944,6 +4954,131 @@ _GENERATION_DIGESTS = {
     # halves move together (one contract), so the READ seam gains its own 21
     # entry below.
     21: "bec220fc1acac6d886c7e13d221130c1fc5918750b171bb59e3369ff1f31b1d5",
+    # #14342 D2 (#12483/#12484/#12487): the spool cannot lie — a
+    # retained-unreadable entry is COUNTED by both ceilings, undecodable meta
+    # bytes are a read-class refusal instead of a destroy, and the writer never
+    # overwrites bytes it could not use as a prior. Behavioural, so the
+    # generation moves. The READ half moves its header only (its behaviour is
+    # untouched) because `contract_version_for('pi')` grades the pair as ONE
+    # contract and answers None when the two markers disagree.
+    25: "5e6821d800ff8b5a5e7079bb1ec21fc0be9ce60029f6d965ac536f86b26c6f9d",
+    # Generation 26 (#14347 review, cycle 2): five defects at the seams the
+    # THREE-STATE prior read opens — the quarantine gate follows BYTES on disk
+    # instead of the parsed-turn COUNT (a byte-bearing log that parses to zero
+    # turns was overwritten, #12487's own signature); the admission probe scans
+    # with `repair: false` so a REFUSED write still mutates nothing; the bytes a
+    # resync is about to quarantine enter the projection (`pendingOrphanBytes`)
+    # so an admitted resync cannot then evict the orphan it just preserved; the
+    # COUNT ceiling counts the unreadable and corrupt classes (`unreadableCount`)
+    # so writer and health line stop disagreeing about one directory; and
+    # `quarantineLog` returns its target on SUCCESS, so an admitted resync no
+    # longer records "QUARANTINED to (none)". BEHAVIOUR moved on shipped bytes,
+    # so the generation moves with it — a generation-25 copy still overwrites a
+    # zero-turn log and still repairs inside a refusal, and must read STALE
+    # ("reinstall"), never `modified-artifact` ("local edit"). The READ half moves
+    # its header only (its behaviour is untouched) because
+    # `contract_version_for('pi')` grades the pair as ONE contract.
+    26: "1f00f887bf6357fad31f0673e45e59339810e52d859dfcf24934a1a6451e012b",
+    # Generation 27 (#14347 review, cycle 3, finding F1): the LOG axis of the
+    # three-state prior read is enforced on its own, not only inside the
+    # unreadable-META arm. A readable meta beside an unreadable turn log used to
+    # reach the atomic write (a rename needs no READ permission on the target),
+    # so the stored turns were replaced with `written: true` and no record. The
+    # 26 entry stays exactly as it shipped.
+    27: "bbf96453ebca3d1ef0fc0ea49df301938f5ac47a0bf9ce5641c00ad6aa28313a",
+    # Generation 28 (#14347 review, cycle 3, the other three findings, on top of
+    # gen 27): `prune_spool`'s eviction loop ignored the byte floor its own guard
+    # computes, so a spool over BOTH ceilings spent every filed entry to relieve
+    # ONE count slot (measured: 5 filed 100-byte entries + one 2,000-byte
+    # undelivered entry at maxEntries=3 lost all 5 and stayed over the byte
+    # ceiling); the unusable-prior record was emitted BEFORE the admission
+    # decision and shared one stamp across two dispositions, so a refused write's
+    # ledger claimed an append it never made and a later diverge had its
+    # QUARANTINE record suppressed; and `entryOnDisk` asked whether the META was
+    # present, so a byte-bearing `.turns.jsonl` with no meta (this writer stores
+    # the log FIRST, so an ENOSPC leaves exactly that) was overwritten with no
+    # record, no `.orphan` and no accounting on either ceiling. BEHAVIOUR moved
+    # on shipped bytes, so the generation moves with it — a generation-27 copy
+    # still spends the filed class and still overwrites a meta-less log, and must
+    # read STALE ("reinstall"), never `modified-artifact` ("local edit"). The 27
+    # entry above records the byte set gen 27 was cut from; neither 27 nor 28 has
+    # SHIPPED, and a new byte set always gets a NEW entry rather than a rewrite.
+    28: "75854cc98cdaa865d66be81ba241c77009b40044c38f44d2d49e389a6bc10022",
+    # Generation 29 (#14347 review, cycle 4, P1): the admission fast path's COUNT
+    # term could not see the class cycle 3 introduced. `_scan_spool` counts a
+    # byte-bearing `.turns.jsonl` with no meta (`scanSpool`'s third element), so
+    # a lone log IS in `parsedCount` — but `cheapSpoolScan` read the count from
+    # `*.meta.json` NAMES only, so its own docstring's guarantee ("both numbers
+    # here are UPPER bounds … 'under both ceilings here' is a proof of 'not
+    # saturated there'") was false for the count term. Measured: one meta-less
+    # log with `maxEntries: 1` gave `spoolSaturated === true` and health
+    # `saturated`, while `writeSpoolEntry` returned `written: true` with
+    # `discards: []`. That is the ENOSPC shape this PR is about (the writer
+    # stores the log BEFORE the meta). The fast path now returns `undefined` for
+    # such a directory, falling through to the full scan. BEHAVIOUR moved on
+    # shipped bytes, so a generation-28 copy — which still admits that write —
+    # must read STALE ("reinstall"), never `modified-artifact` ("local edit").
+    # Neither 28 nor 29 has SHIPPED, and a new byte set always gets a NEW entry
+    # rather than a rewrite.
+    29: "669165f0d337c419174a35db24b4a2ba984a31965a4694057eeef7de54860b4d",
+    # Generation 30 (#14347 review, cycle 5 — two independent lanes, merged).
+    # (a) Cycle 4 made the fast exit DECLINE the whole directory as soon as one
+    # meta-less turn log existed. That closed the under-count, but nothing reaps
+    # a meta-less log — `prune_spool` reaps metas and `.orphan` only — so one
+    # abandoned session left every later turn paying the full parse: measured
+    # 137.7 ms -> 690.5 ms per `_admission_saturated` on a 5 000-entry spool. The
+    # count is now EXACT instead: `names` (meta names, which covers
+    # parsed+unreadable+corrupt exactly) plus the BYTE-BEARING meta-less logs,
+    # minus the zero-byte ones the real count also skips — so the fast path stays
+    # ON and cannot under-count.
+    # (b) The COUNT term named two different populations in two places. The
+    # writer's `addsEntry` operand was `prior === undefined`, written when
+    # `parsedCount` was `metas.length` alone; `parsedCount` later became
+    # `metas.length + unreadableCount`, so an unreadable entry was counted twice
+    # and its own growth was refused PERMANENTLY (the refusal stamp replays and
+    # the projection only grows) on a spool the health line called relievable.
+    # `pruneSpool`'s `count` was still `metas.length` while the ceiling was set
+    # from `parsedCount`, so with K retained-unreadable entries the spool settled
+    # at `maxEntries + K`. All three are behaviour changes on shipped bytes, so a
+    # generation-29 copy must read STALE ("reinstall"), never `modified-artifact`
+    # ("local edit"). Neither 29 nor 30 has SHIPPED, and a new byte set always
+    # gets a NEW entry rather than a rewrite.
+    30: "06afdd39f5f1e13c45799bc4d9ba4a22607cf001f1b6aa8aa6a8be2b5637cddf",
+    # Generation 31 (#14347 review, cycle 6, findings 1+2+3). (1) The STRICT
+    # arm's floor carried no `+1`, so `capture_health_line` — the primary caller
+    # of that arm — answered "would a NEW capture be refused?" as if the capture
+    # added nothing: three readable undelivered + one FILED at `max_entries=3`
+    # reported `DRAINING (3 queued)` while the writer refused every new capture.
+    # That is a false PASS, the #2100 class the predicate exists to prevent.
+    # (2) `prune_spool` counted stems its own repairing scan had just unlinked
+    # (corrupt metas), so it evicted one filed entry per corrupt meta for a
+    # count overage that had ceased to exist inside the same call. (3) The
+    # over-bound refusal described an ABSENT meta as one that "cannot be read",
+    # which `prior_desc` exists to prevent. BEHAVIOUR moved on shipped bytes for
+    # (1) and (2), so a generation-30 copy must read STALE ("reinstall"), never
+    # `modified-artifact` ("local edit"). ⚠️ This file's never-rewrite rule
+    # protects a SHIPPED digest and this file records the exception (generation
+    # 6): a NEVER-SHIPPED generation may be re-cut. Neither 29, 30 nor 31 has
+    # shipped, and each entry below records the byte set its own commit carried.
+    # ⚠️ 31 was re-cut once (#14347 review, cycle 7, finding 1): the Pi leg's
+    # `addsEntry` COMMENT still stated the operand cycle 5 removed ("an unreadable
+    # meta … still ADDS one to the count") twelve lines above the block that says
+    # the opposite, so the Python twin's wording was copied across. Comment-only,
+    # no behaviour change — but a comment IS bytes here, so the generation-31
+    # digest moved with it (the same never-shipped re-cut that 29 and 30 carry).
+    31: "461c210f8daf22f170dabe3989985d41d594f8908eb398e7c143d8720dcc79db",
+    # Generation 32 (#14347 review, cycle 11, findings 1+2). (1) `spoolSaturated`
+    # counted the corrupt stems its own repairing scan had just unlinked, so the
+    # predicate answered SATURATED for a spool its repair left able to admit a
+    # capture — and answered the opposite one call later; `pruneSpool` excluded
+    # those stems since cycle 6, so both readers of the third element now share
+    # ONE definition (`liveUnreadableStems`). (2) An unusable meta with NO stored
+    # turn log fell through both record arms, so the write dropped the entry's
+    # filing state with no ledger line; it now carries its own
+    # `unusable-meta-fresh:` stamp. BEHAVIOUR moved on shipped bytes, so a
+    # generation-31 copy must read STALE ("reinstall"), never
+    # `modified-artifact` ("local edit").
+    32: "3660e09dd73a13251c9cb87587ba7e4d00c52503a50aa6e22c1424154009779c",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -5106,6 +5241,10 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # seam carries the capture half's number. A new byte set gets a NEW entry;
     # the 22 entry stays exactly as it shipped.
     23: "910614227d3c56e21afd22dee1ea6f386934a5aff1483da0b6d925aed2cad771",
+    # Generation 25 (#14342 D2): only the header line moves — the read half's
+    # behaviour is untouched, but the pair is ONE contract, so the read seam
+    # carries the capture half's number.
+    25: "6755920e63660716dbe538b2734291c417f89330363afc4a7dd729bbdb6b6a6e",
     # Generation 18: the read seam ships in the wheel at the generation that
     # grades the pair as one seam.  Nothing has shipped, so this entry is CREATED
     # here rather than rewritten.
@@ -5138,13 +5277,44 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # seam has to carry the capture half's number. A new byte set needs a new
     # entry; the 19 entry above stays exactly as it shipped.
     20: "5737edf7c3e0beaf444f260225897ac508f6dd1424089db16db8ec2af9894190",
+    # Generation 26 (#14347 review, cycle 2): header only — the READ half's
+    # behaviour is untouched, but `contract_version_for("pi")` grades the PAIR as
+    # one contract and answers None when the two markers disagree, so the read
+    # seam has to carry the capture half's number. A new byte set needs a new
+    # entry; every entry above stays exactly as it shipped.
+    26: "67768e816492f6549ab4d9e993a488e624776c08b01bf7b4a97397cfecd3f6cb",
+    # Generation 27 (#14347 review, cycle 3, finding F1): header only — the READ
+    # half's behaviour is untouched, but `contract_version_for("pi")` grades the
+    # PAIR as one contract and answers None when the two markers disagree, so the
+    # read seam carries the capture half's number.
+    27: "177e63412de8aa70cc78a5d88b4ad2b849a2d05b10fd46b006041a9c7a78c412",
+    # Generation 28 (#14347 review, cycle 3, the other three findings): header
+    # only, same reason — one seam, one contract number.
+    28: "a74b5f43f7878aa3604d96407f94331767a5b741d1381dc11ec125c74b68a45d",
+    # Generation 29 (#14347 review, cycle 4, P1): header only, same reason — one
+    # seam, one contract number.
+    29: "09d28db7e084f4f90cb245d434fa94842071759f826cbd747b0b8eca06212975",
+    # Generation 30 (#14347 review, cycle 5): header only, same reason — one
+    # seam, one contract number. The capture half now COUNTS a byte-bearing
+    # meta-less turn log instead of declining the directory, and its two count
+    # operands now name one population; the read half's behaviour is untouched.
+    30: "ada4cece48443ed9a47aab3cf77b7739ff1e1b4fc7a305eeba4fbc84871fc477",
+    # Generation 31 (#14347 review, cycle 6): header only, same reason — one
+    # seam, one contract number. The capture half's strict-arm floor and its
+    # prune count moved; the read half's behaviour is untouched.
+    31: "700ea54f4e4a67977d59ea883efe0187241602ebb6113e1a24b52c3efc24c042",
+    # Generation 32 (#14347 review, cycle 11): header only, same reason — one
+    # seam, one contract number. The capture half's `spoolSaturated` count
+    # population and its fourth writer disposition moved; the read half's
+    # behaviour is untouched.
+    32: "708b6a21854982d607610e15da4e7de2c3ff6071102ba0c05726817c8d2493b5",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    24, "c2ca381fb7032049a67a1063d23eaa4979621983f1591e64973c57d2b683503d")
+    32, "708b6a21854982d607610e15da4e7de2c3ff6071102ba0c05726817c8d2493b5")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():
@@ -5191,6 +5361,88 @@ def test_a_shipped_pi_seam_byte_change_moves_the_generation():
         "read as `modified-artifact` (\"local edit\") by every install made "
         "from the previous bytes, so move the generation (tortoise-hook-version) "
         "and update _EXPECTED_INSTALL_CONTRACT + this pair in the same commit.")
+
+
+def test_the_two_legs_state_the_SAME_addsEntry_operand_rule():
+    """#14347 review, cycle 7, finding 1: one seam, one wording.
+
+    ``adds_entry`` / ``addsEntry`` is the POST-WRITE entry count — the write path
+    passes ``not entry_on_disk`` / ``!entryOnDisk`` — so an unreadable, corrupt or
+    meta-less-log REPLACEMENT adds nothing.  Cycle 5 removed the older operand
+    (``prior is None``) from BOTH legs' code, but only the Python leg's
+    explanatory comment was rewritten: the Pi leg went on claiming an unreadable
+    meta does still add one to the count, twelve lines above a block stating the
+    opposite.  A reviewer read that as an open finding in two consecutive cycles,
+    which is exactly what a reader does — two legs, two rules, believe whichever
+    you open first.
+
+    A comment cannot be graded by behaviour, so it is graded as text: the
+    retracted sentence must be ABSENT from both legs and the post-write rule
+    PRESENT in both.  Mutation (the shape a careless revert of cycle 5
+    produces): restore the retracted sentence on either leg — this REDs while
+    every behavioural row in the repo stays green.
+
+    ⛔ THE POSITIVE HALF IS ANCHORED TO THE OPERAND SENTENCE, NOT TO A PHRASE
+    THAT ALSO LIVES ELSEWHERE (#14347 review, cycle 10, finding 1).  This row
+    used to assert the unbounded phrase ``POST-WRITE entry count``, which each
+    leg ALSO writes in its unrelated write-path comment
+    (``capture_spool.py:2622``, ``tortoise-capture.ts:2807``) — measured:
+    deleting the whole operand sentence from either leg left the row GREEN, so
+    the pin reliably stopped the retracted wording (the harm that actually hit)
+    and said nothing about its precondition.  Each leg is now keyed on its own
+    operand sentence — ``adds_entry=True`` / ``addsEntry is `true` only when the
+    session is not on disk at all`` — which states the operand, names the
+    question the operand answers, and occurs exactly ONCE per file.  The
+    ``count(anchor) == 1`` half is what keeps it unique: a second, unrelated
+    copy of the sentence would silently re-create the vacuity.
+
+    Mutation (measured on this head, mutant then reverted byte-identically):
+
+    * re-insert ``still ADDS one to the count`` on either leg → RED;
+    * delete/rewrite the operand sentence on either leg, leaving the write-path
+      ``POST-WRITE entry count`` comment intact → RED (it was GREEN before this
+      fix — that is the finding);
+    * duplicate the operand sentence elsewhere in a leg → RED on the
+      ``count(anchor) == 1`` half.
+    """
+    retracted = "still ADDS one to the count"
+    # (leg, path, the leg's OWN operand sentence — unique, and deleted by the
+    # exact mutation the retracted sentence is the precondition of).
+    legs = (
+        (
+            "Pi capture seam",
+            _PI_SRC,
+            "`addsEntry` is `true` only when the session is not on disk at all",
+        ),
+        (
+            "Python spool writer",
+            _REPO_ROOT / "tortoise" / "capture_spool.py",
+            "`adds_entry=True` only when the session is not on disk at all",
+        ),
+    )
+    for leg, path, operand_rule in legs:
+        assert path.is_file(), f"{leg}: {path} is missing"
+        # Collapse the comment wrapping: the two legs' lines are not identical.
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        assert retracted not in text, (
+            f"{leg} ({path}) restates the retracted `adds_entry` operand: "
+            f"{retracted!r}.  It is the POST-WRITE entry count (`not "
+            "entry_on_disk`), so an unreadable/corrupt/meta-less-log "
+            "REPLACEMENT adds NOTHING — cycle 5 removed that operand from both "
+            "legs' code, and both legs' comments must say so.")
+        found = text.count(operand_rule)
+        assert found == 1, (
+            f"{leg} ({path}) must state the `adds_entry` operand rule exactly "
+            f"ONCE, in the operand's own sentence: {operand_rule!r} — found "
+            f"{found} occurrence(s).  Zero means the operand sentence was "
+            "deleted or reworded (a deleted sentence is how the contradictory "
+            "one got back in: the two legs are ONE contract, so a reader of "
+            "either must get the same operand).  More than one means an "
+            "unrelated copy now satisfies this pin — which is exactly how the "
+            "previous form of this row went vacuous (#14347 review, cycle 10, "
+            "finding 1): `POST-WRITE entry count` also appears in each leg's "
+            "write-path comment, so the operand sentence could be deleted "
+            "while the row stayed green.")
 
 
 def test_a_shipped_pi_read_seam_byte_change_moves_the_generation():
