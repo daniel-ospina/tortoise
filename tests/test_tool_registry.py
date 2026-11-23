@@ -379,6 +379,59 @@ class TestRegistryEquivalence:
                     f"{method!r} but is HTTP-exposed")
 
 
+class TestCapabilityMapLiteralIntegrity:
+    """A duplicate LITERAL key in a capability map is SILENT to Python — the last one wins.
+
+    #14038's fold of `origin/main` (`ff2218b6a7`) produced exactly that: both sides had added
+    `"link_entities": "tortoise_link_entities"` to `DECLARED_WRITE_SURFACE_MAP`, the merge kept
+    both pairs, and EVERY arm that reads the map stayed green — the binding still resolved, so
+    `test_tool_registry.py`, `test_consumed_sdk_binding_3904.py`, `test_11609_read_containers.py`
+    and `test_tool_risk_tiers.py` all passed. The only instrument that saw it was `ruff`'s `F601`
+    (`agent-infra-ci / lint`), and `lint` is NOT one of `main`'s required contexts (required:
+    `pricing-artifact`, `docs`, `test-isolation`, `license-surface`, `legal-e2e`,
+    `python-ci-gate`, `ai-review-gate`). So a duplicate that carried a WRONG value would win
+    silently at merge time and no REQUIRED job would red: the guard would still report on the
+    name the last pair happened to hold. This pins the class in the required `python-ci-gate`.
+    """
+
+    def test_no_capability_map_declares_a_duplicate_literal_key(self):
+        import ast
+        from pathlib import Path
+
+        import tool_surface_capabilities as caps
+
+        source_path = Path(caps.__file__)
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        duplicates: list[str] = []
+        keys: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            # Per-DICT: the same string key in two DIFFERENT maps is legal and intended.
+            first_line: dict[str, int] = {}
+            for key in node.keys:
+                if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                    continue
+                keys.add(key.value)
+                if key.value in first_line:
+                    duplicates.append(
+                        f"{source_path.name}:{key.lineno}: {key.value!r} repeats "
+                        f"the key declared at line {first_line[key.value]}"
+                    )
+                else:
+                    first_line[key.value] = key.lineno
+        # Non-vacuity sentinel: the walk really reached `DECLARED_WRITE_SURFACE_MAP`, the map
+        # the #14038 fold broke. A walk that found no dict literals would otherwise "pass"
+        # this pin while checking nothing at all.
+        assert "link_entities" in keys, (
+            "the AST walk did not reach DECLARED_WRITE_SURFACE_MAP — the pin checked nothing"
+        )
+        assert not duplicates, (
+            "duplicate literal key(s) in a capability map — Python keeps the LAST and the "
+            "reader's guard then grades a name nobody declared:\n" + "\n".join(duplicates)
+        )
+
+
 class TestCurationGroups:
     """Epic #888 no-regret: GROUP_BY_NAME coherence fixes (#888 item 3).
 

@@ -196,7 +196,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0` (grep the symbol if the line has moved —
 #: it is the identifier that is load-bearing, the number is only a shortcut); and
 #: `docs/ops/ci-wall-clock.md` §6
-#: (lines 564-566) records that derivation in its own words — *"The budget's default is
+#: (lines 581-583) records that derivation in its own words — *"The budget's default is
 #: derived from this document's own §1 measurement (max first-job wait 81.9 min →
 #: 90 min), so it fires past the measured-normal population rather than on it."* 5400 s
 #: sits on the same side of the same measurement: past the measured maximum, so a run
@@ -2369,7 +2369,31 @@ def main(argv: list[str] | None = None) -> int:
                          "for the pass — a cancel may not be authorised by a queue "
                          "nobody read. The report says so (queue_congestion_measured)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--check-doc-citations", action="store_true",
+                    help="verify every `git show --stat <sha> -- docs/ops/ci-wall-clock.md` "
+                         "cited in that document resolves; 0 = verified, 1 = a defect in "
+                         "the document, 2 = UNVERIFIED in this checkout (a shallow graph "
+                         "cannot tell an absent ancestor from a bogus sha). Needs "
+                         "HISTORY, so it is run by the depth-0 `docs` job, not the "
+                         "depth-1 `test` job")
     args = ap.parse_args(argv)
+
+    if args.check_doc_citations:
+        # History-dependent, so its home is the depth-0 job (see the section comment
+        # above `doc_citation_defects`). Exit 2 is UNVERIFIED — never a pass, never a
+        # finding against the document.
+        rc, findings = doc_citation_defects(Path(__file__).resolve().parent.parent)
+        if args.json:
+            print(json.dumps({"rc": rc, "findings": findings}, indent=2))
+        elif rc == 0:
+            print("doc-citations: every `git show --stat <sha>` cite in "
+                  "docs/ops/ci-wall-clock.md both RESOLVES and prints NOTHING, so "
+                  "each claim of 'carried no edit to this file' holds at this head")
+        else:
+            label = "UNVERIFIED" if rc == 2 else "DEFECT"
+            for f in findings:
+                print(f"{label}: {f}", file=sys.stderr)
+        return rc
 
     if args.workflow_state:
         # The coverage question lives here rather than in the launcher's shell: it
@@ -2780,6 +2804,202 @@ def main(argv: list[str] | None = None) -> int:
               "(the local fallback covers this) — the per-PR detail is in the report",
               file=sys.stderr)
     return code
+
+
+# ── the wall-clock document's own citations (#13998 review P2) ────────────────
+#
+# `docs/ops/ci-wall-clock.md` §2 rests its restored shard split on one runnable
+# command — the `git show --stat <sha> -- docs/ops/ci-wall-clock.md` that proves the
+# follow-up commit carried no edit to that file. The pytest pin
+# (`tests/test_ci_check_repair.py::test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit`)
+# checks the same thing, but that file is registered on the `core` surface and so runs
+# in the `test` job, which checks out at the DEFAULT `fetch-depth: 1` — a grafted
+# graph in which a REAL ancestor and a BOGUS sha are both simply absent. There the pin
+# can only SKIP, and "a provenance gate that runs only where it cannot answer is a
+# no-op gate" (the `#11057 review P2` note inside `python-ci.yml`'s own checkout step —
+# the one that put that job at `fetch-depth: 0`; #9075 review r6 P1 made the same call
+# at `:487-492`).
+#
+# So the history half lives HERE too, and runs in the `docs` job — the depth-0 job
+# this repo already keeps for exactly this: `substrate_map_check.py`,
+# `problem_map_check.py` and `findings_ledger_check.py` all prove an
+# `measured_at_commit`-style ancestry claim there for the same reason. Stdlib only,
+# one file, no network. verify-only: it never edits the document.
+
+DOC_CITATION_PATHS = ("docs/ops/ci-wall-clock.md",)
+
+# The branch a cited commit must SURVIVE in. This repo squash-merges and has
+# `delete_branch_on_merge` on, so a sha that only a PR branch holds stops resolving
+# the moment that branch lands and is deleted — and because this arm runs in the
+# REQUIRED, path-filter-free `docs` job, one document's evidence then reds EVERY PR.
+# Measured on #14038: its §2 cite named a PR-branch commit
+# (`git rev-list origin/main | grep -c ^8abf4844` -> 0, `git branch -a --contains` ->
+# the PR branch only), so it was a defect AT PR TIME, not only after the merge.
+DOC_CITATION_BASE = "origin/main"
+
+# The command shape the document rests its claims on. WIDENED past the exact spelling:
+# the first version matched only `git show --stat <ref>`, so a cite written as
+# `git -C . show --stat <ref> -- <doc>` was invisible while the pass stayed green
+# (#13998 review P3-1) — a citation the regex cannot see is a citation nothing checks.
+_CITE = re.compile(
+    r"git\b[^`]*?\bshow\s+--stat\s+([^\s`]+)[^`]*?--\s+docs/ops/ci-wall-clock\.md")
+# git's own floor is 4 hex, so a {7,n} ceiling reported a legitimate 6-char abbreviation as
+# "is not a commit" and redded the required job — the same false-block family as the
+# upper-case-hex P2 (P2-1). The floor is git's, NOT a size guess: in THIS repo a 4-char
+# token is usually AMBIGUOUS (`6960` → "short object ID 6960 is ambiguous") while a
+# 6-char one resolves (`696038` → rc 0), so the arm must accept what git can resolve and
+# let the resolve probe report ambiguity as ambiguity rather than as absence.
+_HEX = re.compile(r"[0-9a-fA-F]{4,40}")
+
+
+def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
+    """Verify what `docs/ops/ci-wall-clock.md` CLAIMS with its own `git show` commands.
+
+    Every cite in that document asserts the SAME thing — that the named commit carried
+    **no edit to this file**, i.e. the command it invites prints nothing. So the gate
+    asserts both halves, because a cite that RESOLVES while contradicting its own
+    sentence is the fail-open the first version shipped (#13998 review P2-2: citing a
+    commit that really did edit the file still read as verified):
+
+    1. **runnable** — the ref is a commit token git can resolve;
+    2. **durable** — it is an ancestor of `DOC_CITATION_BASE`, because a sha only a PR
+       branch holds stops resolving once that branch is squash-merged and deleted; and
+    3. **empty** — `git show --stat <ref> -- docs/ops/ci-wall-clock.md` prints nothing.
+
+    Returns `(rc, findings)`; rc is 0 = every claim verified, 1 = a DEFECT in the
+    document, 2 = UNVERIFIED — the question cannot be answered in THIS checkout (no
+    `git`, not a work tree, an unreadable document, or a grafted/shallow graph where an
+    absent ancestor and a bogus sha are both simply missing objects), which is reported
+    rather than blamed on the document. Exit 2 is never a pass.
+    """
+    findings: list[str] = []
+    cites = 0
+    try:
+        inside = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True)
+    except (FileNotFoundError, OSError):
+        # No `git` on this host: the claims are UNVERIFIED, not wrong (P3-2 — the
+        # pytest arm was fixed for this and the tool was not, so it crashed with a
+        # traceback and exit 1, i.e. "a DEFECT in the document" about a document
+        # nobody read).
+        return 2, ["`git` is not installed here, so no cited sha can be resolved — "
+                   "the citations are UNVERIFIED, not disproved"]
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return 2, [f"{root} is not inside a git work tree, so no cited sha can be "
+                   "resolved — the citations are UNVERIFIED, not disproved"]
+    # ⛔ THE GRAFT LICENCE GATES EVERY HISTORY ARM, NOT ONLY THE RESOLVE PROBE (#13998
+    # review: answering a document defect from a grafted graph). `--is-shallow-repository`
+    # reads a GRAFT, and a grafted graph lies in BOTH directions: an ancestor can be
+    # simply absent (a bogus sha then looks like a real one) AND a commit that IS present
+    # can sit on the graft boundary, where `git show` has no parent and reports the
+    # commit as a ROOT — a full stat for a commit that changed nothing in the file. So a
+    # shallow clone is asked ONE question (the pure-text hex arm, which is clone-
+    # independent and is what caught the real defect) and then abstains: exit 2, never a
+    # finding against the document.
+    shallow = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+        capture_output=True, text=True).stdout.strip()
+    for rel in DOC_CITATION_PATHS:
+        path = root / rel
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, PermissionError, UnicodeDecodeError) as exc:
+            return 2, [f"{rel}: cannot be read ({exc.__class__.__name__}), so its "
+                       "citations are UNVERIFIED"]
+        for ref in _CITE.findall(text):
+            cites += 1
+            if not _HEX.fullmatch(ref):
+                findings.append(
+                    f"{rel}: `git show --stat {ref}` — {ref!r} is not a commit. A "
+                    "placeholder here reads as evidence while being unrunnable: name "
+                    "the sha the claim was measured at.")
+                continue
+            if shallow == "true":
+                return 2, [
+                    f"{rel}: `git show --stat {ref}` cannot be checked in this clone "
+                    "— it reports a grafted (shallow) history, in which an absent "
+                    "ancestor and a bogus sha are indistinguishable AND a commit on "
+                    f"the graft boundary reports a root's full stat. {ref} and its "
+                    "stat are UNVERIFIED, not disproved. Re-derive on a full clone: "
+                    "`git fetch --unshallow origin`."]
+            probe = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--verify",
+                 f"{ref}^{{commit}}"],
+                capture_output=True, text=True)
+            if probe.returncode != 0:
+                findings.append(
+                    f"{rel}: `git show --stat {ref}` — {ref} does not resolve to a single "
+                    "commit in this FULL checkout (absent, or an ambiguous prefix), so "
+                    "the command the paragraph invites cannot be run."
+                    + (" git reports it as AMBIGUOUS — write more of the sha."
+                       if "ambiguous" in (probe.stderr or "").lower() else ""))
+                continue
+            # DURABILITY. A cite that resolves TODAY can still expire: this repo
+            # squash-merges with `delete_branch_on_merge`, so a sha that only a PR
+            # branch holds is gone from a fresh clone the moment that branch lands.
+            # Fail CLOSED when the base ref itself is unresolvable — an ancestry
+            # question a checkout cannot answer is UNVERIFIED, never a pass (the same
+            # doctrine as the `#11057 review P2` note inside `python-ci.yml`'s own
+            # checkout step, which is where the "a gate that runs only where it cannot
+            # answer is a NO-OP gate" rule lives)
+            # — the depth-0 `docs` job always has `origin/main`, so this cannot
+            # false-block it, and anywhere it cannot be answered the claim is simply not
+            # verified.
+            base = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--verify",
+                 DOC_CITATION_BASE],
+                capture_output=True, text=True)
+            if base.returncode != 0:
+                return 2, [
+                    f"{rel}: `{DOC_CITATION_BASE}` does not resolve in this checkout, "
+                    f"so whether `{ref}` SURVIVES a squash-merge cannot be answered "
+                    "— the citation is UNVERIFIED, not disproved"]
+            # The RESOLVED sha, not the raw token. This is a defensive tidy, NOT a fix
+            # for an observed failure: an ambiguous token never reaches here (the
+            # `rev-parse --verify` probe above fails first and returns the DEFECT), and
+            # a mutant that passes the raw token returns the same verdict — measured.
+            # It is kept so the two probes cannot disagree about which object they mean
+            # if the resolve arm ever starts accepting a bare prefix.
+            resolved = probe.stdout.strip()
+            anc = subprocess.run(
+                ["git", "-C", str(root), "merge-base", "--is-ancestor", resolved,
+                 DOC_CITATION_BASE],
+                capture_output=True, text=True)
+            if anc.returncode == 1:
+                findings.append(
+                    f"{rel}: cites `git show --stat {ref}` as evidence, but {ref} "
+                    f"is NOT an ancestor of {DOC_CITATION_BASE}. This repo "
+                    "squash-merges with `delete_branch_on_merge`, so a sha only a "
+                    "PR branch holds stops resolving the moment that branch "
+                    "lands — the cite would red this required job on every PR "
+                    f"afterwards. Cite a commit {DOC_CITATION_BASE} reaches, or "
+                    "drop the command and keep the prose.")
+                continue
+            if anc.returncode != 0:
+                return 2, [
+                    f"{rel}: `git merge-base --is-ancestor {ref} "
+                    f"{DOC_CITATION_BASE}` failed ({anc.returncode}): "
+                    f"{(anc.stderr or anc.stdout).strip()} — UNVERIFIED"]
+            shown = subprocess.run(
+                ["git", "-C", str(root), "show", "--stat", ref, "--", rel],
+                capture_output=True, text=True)
+            if shown.returncode != 0:
+                findings.append(
+                    f"{rel}: `git show --stat {ref} -- {rel}` exits "
+                    f"{shown.returncode}: {shown.stderr.strip()}")
+            elif shown.stdout.strip():
+                findings.append(
+                    f"{rel}: cites `git show --stat {ref}` as its evidence that the "
+                    "commit carried NO edit to this file, but the command prints "
+                    f"{len(shown.stdout.splitlines())} line(s) of stat — the citation "
+                    "resolves and contradicts its own sentence.")
+    if cites == 0:
+        return 2, ["docs/ops/ci-wall-clock.md runs no `git show --stat <sha> -- "
+                   "docs/ops/ci-wall-clock.md`; if the command was reworded, re-aim "
+                   "THIS check at the new shape rather than deleting it — an "
+                   "unrunnable citation is what it exists to catch."]
+    return (1 if findings else 0), findings
 
 
 if __name__ == "__main__":

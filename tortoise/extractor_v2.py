@@ -1542,13 +1542,13 @@ def run_s1(model, transcript: str, *,
     three buckets (S1 has no parse ladder → no ``partial`` bucket):
     ``escalated == recovered + residual + abort``. Escalation is narrative
     (not list-bearing): a residual returns the ESCALATED response when one
-    exists; an abort keeps attempt-1's retained truncated summary — UNLESS
-    attempt-1 was the collapse itself, whose retained summary is empty, so
-    the chunk is deliberately dropped as ``reasoning_collapse``, never shipped
-    as an empty narrative (#14357's fail-open). A non-collapsed base is never
-    dropped by a raise (a benign tail-drop must not become a chunk failure
-    — P2-14a/P1-21). An un-escalatable truncation (esc <= base, P2-15)
-    records per-seam keys only, NO episode; a COLLAPSED base raised above."""
+    exists (the longer emission — fewer facts dropped); an abort (the
+    escalated call itself raised) keeps attempt-1's retained truncated
+    summary. A transient abort never drops the chunk (P2-14a/P1-21); an
+    EMPTY base is HELD so this ladder runs, and re-raised as the collapse only if nothing survives it (#14412). An
+    un-escalatable truncation (esc <= base, P2-15) records the per-seam
+    truncation keys only — NO escalation episode (the S2/S4 seam's
+    ordering; ``escalated`` counts calls that actually fired)."""
     granularity = _granularity_text(master)
     if emphasis:
         # The emphasis rides the SAME slot as the granularity declaration it
@@ -1608,10 +1608,10 @@ def run_s1(model, transcript: str, *,
     except BaseException as e:
         if not isinstance(e, Exception):
             raise
-        # P1-21 abort: a NON-collapsed base keeps its retained truncated summary
-        # (the chunk is not dropped: a transient raise on the one-attempt
-        # escalated call must not be MORE fragile than the base call's
-        # _COMPLETE_RETRIES=2 budget); a COLLAPSED base re-raises below.
+        # P1-21 abort: a TRANSIENT keeps attempt-1's retained summary (the
+        # one-attempt escalated call must not be MORE fragile than the base
+        # call's _COMPLETE_RETRIES=2 budget); a COLLAPSED base retains nothing
+        # and re-raises the class via _s1_abort_return (#14412).
         if _rec is not None:
             _rec["escalated_abort"] = _rec.get("escalated_abort", 0) + 1
         # R3-3/P1-39: the escalated call's except-update wrote
@@ -1623,9 +1623,7 @@ def run_s1(model, transcript: str, *,
             stats["retries"] = int(base_retries or 0) \
                 + int(stats.get("retries") or 0)
             stats["truncated"] = True
-        if _collapse:
-            raise _ReasoningCollapse(f"base collapsed; esc aborted: {e}") from e
-        return retained
+        return _s1_abort_return(retained, _collapse, e, base)
     if stats is not None:
         _rec = stats.setdefault("recovery", {})
         # R3-3 mirror: running-total attempts/retries (the escalated call
@@ -1673,9 +1671,9 @@ def run_s1(model, transcript: str, *,
                 _rec.get("truncation_completion_tokens_s1", 0),
                 int(stats.get("completion_tokens") or 0))
         return response
-    if _rec is not None:
-        _rec["escalated_recovered"] = _rec.get("escalated_recovered", 0) + 1
-    return response
+    # ⛔ CONTENT, not just ``finish``: an empty escalated reply is no recovery
+    return _s1_recovered_or_abort(
+        response, retained, _collapse, base, _rec)
 
 
 # ── The chunker + compiler (design doc §2) ─────────────────────────────────
@@ -19593,3 +19591,83 @@ def _base_complete_holding_collapse(model, system, user, max_tokens, stats,
         if _extractor_escalation_tokens(max_tokens) <= (max_tokens or 0):
             raise
         return "", True
+
+
+def _s1_abort_return(retained, collapse, exc, base):
+    """``run_s1``'s abort arm: what to return when the ESCALATED call raised.
+
+    A transient on the one-attempt escalated call must not be MORE fragile
+    than the base call's ``_COMPLETE_RETRIES`` budget, so attempt-1's retained
+    truncated summary is returned (P2-14a/P1-21) — that is the pre-#14357
+    behaviour and it stays.
+
+    ⛔ UNLESS the base call itself COLLAPSED. ``_complete``'s #14357 yield
+    guard raises ``_ReasoningCollapse`` on empty content at
+    ``finish_reason="length"``, and ``run_s1``'s base call holds that raise
+    (``_base_complete_holding_collapse``) so its #2134 rung can run — the S1
+    cap is 1500 tokens, the exact budget of the pilot #1549 collapse, so this
+    is the seam the escalation exists for. When the escalated call ALSO fails
+    there is nothing retained to keep: returning the held ``""`` would make a
+    chunk that produced no content a SILENT empty contribution to the compiled
+    story, which is the fail-open #14357 closes — the same rule
+    ``_complete_parsed``'s abort arm applies, that a collapsed base stays
+    ``reasoning_collapse`` whatever killed the escalation.
+
+    The accounting (``escalated_abort``, the two-call attempts/retries
+    roll-up) is done by the caller BEFORE this returns or raises, so a
+    collapsed chunk is still counted as two calls.
+
+    ⛔ Defined at the END of this module on purpose, like
+    ``_base_complete_holding_collapse``: every cite in the #7949 evidence
+    bundle is a LINE NUMBER into this file, and a helper placed beside
+    ``run_s1`` would move every one of them below it. Appending moves none.
+    """
+    if collapse:
+        raise _ReasoningCollapse(
+            "S1 base collapsed (empty content at finish_reason=length, "
+            f"max_tokens={base!r}) and the escalated call failed: "
+            f"{type(exc).__name__}: {exc}") from exc
+    return retained
+
+
+def _s1_recovered_or_abort(response, retained, collapse, base, rec):
+    """``run_s1``'s post-escalation arm: was this actually a RECOVERY?
+
+    ``_complete``'s #14357 yield guard raises only on ``length`` + EMPTY, so an
+    escalated call that returns empty content at ``finish_reason="stop"`` (or
+    on an adapter that reports no finish reason at all) arrives here as an
+    ordinary return. Pre-#14357 that arm was unreachable from a COLLAPSED base
+    — the base raise fired first — so holding the collapse made it reachable,
+    and left unfixed it is a fail-open: ``""`` counts as ``escalated_recovered``,
+    the chunk joins ``chunk_stories`` with ``failed_chunks == 0``, no ``errors``
+    entry and no ``error_census`` class is written, and ``compile_stories``
+    splits ``""`` into zero sentences. The run is then CERTIFIED by the eval
+    gate — the outcome #14357 exists to prevent.
+
+    So the arm is decided on CONTENT, matching ``_complete``'s own rule:
+
+    * non-empty ⇒ a recovery: bump ``escalated_recovered`` and return it;
+    * empty with a COLLAPSED base ⇒ nothing was retained either, so the
+      collapse is re-raised and the chunk becomes a recorded failure;
+    * empty over a usable truncated base ⇒ keep attempt-1's summary, and count
+      it in the abort bucket (the escalated call produced no recovery). Exactly
+      one bucket still fires per escalated call, so the arms' documented
+      ``escalated == recovered + residual + abort`` invariant holds.
+
+    ⛔ Defined at the END of this module for the same reason as
+    ``_base_complete_holding_collapse`` and ``_s1_abort_return``: every cite in
+    the #7949 evidence bundle is a LINE NUMBER into this file, and a helper
+    placed beside ``run_s1`` would move every one of them below it.
+    """
+    if (response or "").strip():
+        if rec is not None:
+            rec["escalated_recovered"] = rec.get("escalated_recovered", 0) + 1
+        return response
+    if rec is not None:
+        rec["escalated_abort"] = rec.get("escalated_abort", 0) + 1
+    if collapse:
+        raise _ReasoningCollapse(
+            "S1 base collapsed (empty content at finish_reason=length, "
+            f"max_tokens={base!r}) and the escalated call returned empty "
+            "content — nothing was retained to keep (#14412)")
+    return retained

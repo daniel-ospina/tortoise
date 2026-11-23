@@ -2647,7 +2647,7 @@ class TestCommitPointsGate:
         assert self._chain_counts("sGateAt") == (0, 0, 0), (
             "a refused commit must mint no Session/Event/Source — NOT 'nothing': "
             "a :CommitRecord with status='partial' IS merged before the gate "
-            "(`store.acquire(..., status='partial')`, hosted_api.py:24744, which "
+            "(`store.acquire(..., status='partial')`, hosted_api.py:24858, which "
             "runs ahead of `_check_org_limit`'s 402 for the `points` resource); "
             "replay-safe, and invisible to "
             "_chain_counts by design")

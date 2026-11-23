@@ -451,10 +451,31 @@ class RecordUnavailable(RuntimeError):
 # ── the graph side ─────────────────────────────────────────────────────────
 
 def _graph_connection(uri: str):
+    """The graph-side handle, with the product's BOUNDED read policy (#3065/#8118).
+
+    ``falkordb.FalkorDB`` defaults ``socket_timeout=None`` and hands that to
+    redis-py explicitly, which OVERRIDES redis-py's own default — so a raw
+    client built without the kwarg is not "5s by default", it is UNBOUNDED.
+    Against a stalled engine (the #2969 defrag loop, #2838's MERGE lock) the
+    read parks in ``recv()`` forever: alive, 0% CPU, no error, no exit — on a
+    verb whose whole contract is "read the feed and produce a verdict".
+
+    ⛔ This site landed without the bound (#14164) and reddened
+    ``tests/test_bounded_raw_clients_3065.py``'s tool-surface guard, which is
+    the systemic half of #8118: the bound is not a product-package privilege,
+    and a new raw client in ``tools/`` must carry it BEFORE it ships. The
+    resolver, not a literal, so the package's knobs
+    (``TORTOISE_DB_SOCKET_TIMEOUT`` / ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT``)
+    reach this client too.
+    """
     from falkordb import FalkorDB
 
-    from tortoise.projection import _bounded_server_socket_kwargs as socket_kwargs
-    return FalkorDB.from_url(uri.replace("docker://", "redis://"), **socket_kwargs())
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    return FalkorDB.from_url(
+        uri.replace("docker://", "redis://"),
+        **_bounded_server_socket_kwargs(),
+    )
 
 
 def _known_graphs(db) -> list[str]:
