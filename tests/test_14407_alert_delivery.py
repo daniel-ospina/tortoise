@@ -478,6 +478,184 @@ def test_a_migration_that_cannot_release_the_legacy_object_is_rolled_back(
         "issue_number") == 7, "the legacy claimant must survive the rollback"
 
 
+def test_a_cooldown_refusal_does_not_consume_the_retry_budget(monkeypatch):
+    """The store refuses retries inside its own cooldown; that is not an attempt.
+
+    `resolve_incident_state` raises `CloseCooldown` for `close_cooldown_min` after
+    a failed close (#5143), while the retry branch fires on EVERY clean-window
+    evaluation of the rule (every point create for an org under threshold). A
+    call-count cap is therefore spent inside one cooldown, and the entry is
+    dropped exactly when the cooldown expires and the retry could have worked.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import CloseCooldown
+
+    calls: list[tuple[str, str]] = []
+
+    class _Store:
+        def resolve_incident_state(self, kind, subject="", **kw):
+            calls.append((kind, subject))
+            if len(calls) == 1:
+                raise RuntimeError("close failed (#5143)")
+            raise CloseCooldown("backing off for 60 min")
+
+    class _FlagOnceStore:
+        def __init__(self) -> None:
+            self.flagged = True
+
+        def window_sum(self, org_id, rule, window_s, now):
+            return 0
+
+        def latest_flag_at(self, org_id, rule):
+            return (datetime.now(timezone.utc)  # noqa: UP017
+                    if self.flagged else None)
+
+        def flag_clear(self, org_id, rule, now=None):
+            self.flagged = False
+
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    engine = AbuseEngine(_FlagOnceStore())
+    now = datetime.now(timezone.utc)  # noqa: UP017
+
+    engine._evaluate("org-a", "point_create", 500, 3600, now)      # real failure
+    for _ in range(30):                                            # cooldown refusals
+        engine._evaluate("org-a", "point_create", 500, 3600, now)
+
+    assert ("org-a", "point_create") in engine._pending_episode_resolves, (
+        "the retry entry was dropped during the store's own cooldown — the "
+        "incident is stranded OPEN once the cooldown expires")
+
+
+def test_two_rules_cannot_both_claim_one_migrated_issue():
+    """ONE issue, ONE scoped claimant — across two store instances (two processes).
+
+    Two rules of one org can migrate from the same legacy object concurrently, and
+    `delete` is idempotent on both substrates, so a read-then-delete "claim check"
+    lets both claim: one rule's episode end then closes the issue the other rule is
+    tracked by (false `✅`), and the other re-files (#3029/#3031).
+    """
+    from tortoise.alert_store import AlertStore
+    from tortoise.hosted_backup import MemoryStorage
+
+    storage = MemoryStorage()
+
+    def _store():
+        return AlertStore(
+            storage,
+            file_issue=lambda title, body: 7,
+            close_issue=lambda number, comment=None: None,
+            search_open=lambda kind, org: [],
+            push_telegram=lambda text: None,
+            issue_open=lambda number: True,
+            comment_issue=lambda number, body: None,
+            repo="daniel-ospina/tortoise",
+        )
+
+    first, second = _store(), _store()
+    first.open_incident_state("abuse_review_needed", "org-a", {"detail": "legacy"})
+
+    moved_a = first.migrate_incident_subject(
+        "abuse_review_needed", "org-a:point_create", "org-a")
+    moved_b = second.migrate_incident_subject(
+        "abuse_review_needed", "org-a:key_create", "org-a")
+
+    claims = [subj for subj in ("org-a:point_create", "org-a:key_create")
+              if first.incident_record("abuse_review_needed", subj)]
+    assert moved_a is True and moved_b is False, (moved_a, moved_b)
+    assert claims == ["org-a:point_create"], (
+        f"two scoped sentinels claim one issue: {claims}")
+
+
+def test_a_migration_that_fails_mid_flight_leaves_one_claimant():
+    """An exception between the create and the release must ROLL BACK.
+
+    `_read_json`/`delete` can raise on a transport error; a bare `create` followed
+    by an unguarded read leaves the scoped sentinel AND the legacy object behind —
+    two claimants for one issue.
+    """
+    from tortoise.alert_store import AlertStore
+    from tortoise.hosted_backup import MemoryStorage
+
+    class _FlakyRead(MemoryStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_next_read = False
+
+        def download(self, key):
+            if self.fail_next_read and key.endswith("/org-a.json"):
+                self.fail_next_read = False
+                raise RuntimeError("R2 transport error")
+            return super().download(key)
+
+    storage = _FlakyRead()
+    store = AlertStore(
+        storage,
+        file_issue=lambda title, body: 7,
+        close_issue=lambda number, comment=None: None,
+        search_open=lambda kind, org: [],
+        push_telegram=lambda text: None,
+        issue_open=lambda number: True,
+        comment_issue=lambda number, body: None,
+        repo="daniel-ospina/tortoise",
+    )
+    store.open_incident_state("abuse_review_needed", "org-a", {"detail": "legacy"})
+
+    # the claim read succeeds, the release raises
+    storage.fail_next_read = False
+    orig_delete = storage.delete
+
+    def _bad_delete(key):
+        if key.endswith("/org-a.json"):
+            raise RuntimeError("R2 refused the delete")
+        return orig_delete(key)
+
+    storage.delete = _bad_delete
+    moved = store.migrate_incident_subject(
+        "abuse_review_needed", "org-a:point_create", "org-a")
+
+    assert moved is False
+    assert store.incident_record("abuse_review_needed", "org-a:point_create") == {}, \
+        "a failed migration left a second claimant behind"
+    assert store.incident_record("abuse_review_needed", "org-a").get(
+        "issue_number") == 7
+
+
+def test_an_unreadable_issue_number_does_not_arm_a_silent_window(monkeypatch):
+    """FILED + a failing read-back must DEFER, not spend the window in silence.
+
+    If the store filed WITHOUT a number (deferred filing — the path this guard
+    exists for) it pushes nothing, and suppressing the unattributed message while
+    leaving the window armed would be silent for 24h: "silence is an outcome",
+    which #4872 forbids.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    sent: list[str] = []
+
+    class _Store:
+        def open_incident_state(self, *a, **kw):
+            return OpenOutcome.FILED
+
+        def incident_record(self, *a, **kw):
+            raise RuntimeError("r2 blip")
+
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    notify.notify_abuse("abuse_flag", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 900})
+
+    assert sent == [], "the unattributed text would assert an absence we cannot see"
+    assert notify._delivery == {}, (
+        "the window was armed with nothing sent — a silent 24h for the class")
+
+
 def test_an_anonymous_digest_does_not_claim_a_dashboard_row(
         delivered, monkeypatch):
     """The dashboard row is written only when the detection carried an org.
@@ -792,7 +970,12 @@ def test_a_failing_incident_read_never_raises_from_the_alert_path(monkeypatch):
                         {"rule": "point_create", "count": 900})
 
     assert len(sent) == 1
-    assert "no issue number on record" in sent[0]
+    # The message must state the UNCERTAINTY, not an absence: a read that failed
+    # cannot establish that the incident has no issue number (#14407 round 4) —
+    # asserting one would be the same unattributable-attribution defect this change
+    # removes, on the arm where the read is the thing that broke.
+    assert "could not be read" in sent[0], sent[0]
+    assert "no issue number on record" not in sent[0], sent[0]
     notify.reset_abuse_delivery_for_tests()
 
 
