@@ -69,6 +69,15 @@ version: 1
 # THIS head the same verb packs five shards at 835.7 s (a, c, d, e, k)
 # and six at 835.6 s (b, f, g, h, i, j), `ceil(835.7/60 x 2)` = 28 m: the MINUTE is where the sweep
 # left it and the SECONDS are not, which is the whole reason the sentence below is graded rather than
+# assumed, because the previous cut of this sentence credited the move to one of them and was wrong.
+# `main` has re-packed the pool three more times since (`b143bcacd1` = `#14261`, `9aaaff10ac` = `#14389`,
+# `b82ef88df5c` = `#14362`, each adding a `2.0` `durations` row), so those `835.7` figures are HISTORY and
+# the ones below are read off the tree this block MERGES INTO rather than carried from the branch that
+# first wrote them — the failure mode of every earlier cut of this sentence.
+# At `f7b3e9a5a77` — the `main` this sentence was re-derived on, whose `durations` rows this block does not
+# change — the same verb packs ten shards at 836.2 s (a, b, c, d, e, f, h, i, j, k)
+# and one at 836.1 s (g), `ceil(836.2/60 x 2)` = 28 m: the MINUTE is where the sweep left it and the SECONDS
+# are not, which is the whole reason the sentence below is graded rather than
 # trusted. Those numerals are a
 # SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at this head — re-derive them with
 # that verb rather than trusting them, but a restatement is fine when it cites the emission
