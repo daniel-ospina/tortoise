@@ -3538,6 +3538,28 @@ _PURE_READS = _NON_MUTATING | {"repr", "int", "float", "type", "min", "max", "su
                                "dumps", "dump", "pformat", "copy", "deepcopy"}
 
 
+#: ⛔ AN ITERATOR OVER THE PAGE IS A REACH TO ITS ROWS (#14326 review at `b504b565`, P0
+#: MEASURED END-TO-END). `reversed`/`enumerate`/`zip` were added to `_NON_MUTATING` to stop
+#: four genuinely inert shapes red-ing (that repair stands, and they stay in that set). But
+#: `_NON_MUTATING` is the BASE of `_PURE_READS`, which is the base of `_SCALAR_CALLEES` — the
+#: allow-list whose contract is "build NO CONTAINER AT ALL: a string, a number, a bool, a
+#: class, or `None`", used by `_aliases_of` to DROP a bind as an alias of the page. Adding
+#: them there made `_it = reversed(results)` a "scalar producer", so the `for` target `_r` was
+#: never tainted and the element write became invisible:
+#:
+#:     _it = reversed(results)
+#:     for _r in _it:
+#:         _r["id"] = "X"            -> 44 passed, pin GREEN  <-- measured end-to-end
+#:
+#: while `results[0]["id"] = "X"` red the same suite (1 failed) — i.e. the pin was carrying a
+#: page-mutating edit as `rank_identical: True`. That is the exact false PASS this pin exists
+#: to prevent, and it was INTRODUCED by the false-red repair, so the two are separated here:
+#: the names stay `_NON_MUTATING` (not mutated BY the call) and are excluded from the SCALAR
+#: derivation (they still hand back the page's own rows) — the same treatment `min`/`max`
+#: already had at `_SCALAR_CALLEES`, for the same reason, one hop weaker.
+_ITERATOR_CALLEES = frozenset({"reversed", "enumerate", "zip"})
+
+
 def _names_handed(node: ast.AST) -> set[str]:
     """Names in `node` at a position that could HAND the collection to a mutation.
 
@@ -3553,7 +3575,11 @@ def _names_handed(node: ast.AST) -> set[str]:
         return {node.id}
     if isinstance(node, ast.Call):
         callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-        if callee in _PURE_READS:
+        # ⛔ …EXCEPT AN ITERATOR OVER THE PAGE, WHICH DOES HAND ITS ROWS ON (#14326 review at
+        # `b504b565`, MEASURED): the short-circuit below is what makes `_scrub(zip(results,
+        # results))` invisible to every `handed` arm at once. An iterator is not a read that
+        # CONSUMES the page; the callee it is handed to sees the page's own row objects.
+        if callee in _PURE_READS and callee not in _ITERATOR_CALLEES:
             return set()
     out: set[str] = set()
     for child in ast.iter_child_nodes(node):
@@ -3604,7 +3630,8 @@ _SHALLOW_COPY_CALLEES = frozenset({"list", "tuple", "sorted", "set", "frozenset"
 #: rather than left to fall through to the alias arm.
 #: ⛔ AND `min`/`max` ARE DELIBERATELY **NOT** IN IT: they return an ELEMENT of the page,
 #: which is exactly why the blanket `callee in _PURE_READS` exemption was the P0.
-_SCALAR_CALLEES = frozenset(_PURE_READS - _SHALLOW_COPY_CALLEES - {"min", "max"})
+_SCALAR_CALLEES = frozenset(
+    _PURE_READS - _SHALLOW_COPY_CALLEES - _ITERATOR_CALLEES - {"min", "max"})
 
 
 def _is_scalar_producer(value: ast.AST) -> bool:
@@ -4795,6 +4822,17 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                 return not bool(_names_in(arg.value) & page_container)
             if isinstance(arg, ast.Call):
                 callee_id = getattr(arg.func, "id", None) or getattr(arg.func, "attr", None)
+                # ⛔ AN ITERATOR OVER THE PAGE IS NOT AN ELEMENT (#14326 review at `b504b565`,
+                # P0 MEASURED END-TO-END). `zip(results, results)` is not `results[0]`: it
+                # yields the page's OWN row objects, so handing it to a helper that writes
+                # each row rewrites what the artifact records. Exempting it here is what made
+                # `_scrub(zip(results, results))` GREEN with the page rewritten (44 passed),
+                # while `_scrub(reversed(...))`/`_scrub(enumerate(...))` were GREEN the same
+                # way. Same exclusion as `_names_handed` and `_SCALAR_CALLEES`: `_NON_MUTATING`
+                # answers "does the CALL mutate its argument" (no), not "does it hand the page
+                # on" (yes, for these three).
+                if callee_id in _ITERATOR_CALLEES:
+                    return False
                 return callee_id in _PURE_READS or any(
                     _element_only(a) for a in arg.args)
             return isinstance(arg, ast.JoinedStr)  # an f-string mutates nothing it interpolates
@@ -6068,6 +6106,31 @@ def test_a_COPY_of_the_page_is_NOT_an_alias() -> None:
          '    _c = list(results)\n    _d = _c\n    _d[0]["id"] = "X"\n'),
         ("copy, element write through ITERATION of it",
          '    _c = list(results)\n    for _e in _c:\n        _e["id"] = "X"\n'),
+        # ⛔ AN ITERATOR OVER THE PAGE IS A REACH TO ITS ROWS (#14326 review at `b504b565`,
+        # P0 MEASURED END-TO-END). `reversed`/`enumerate`/`zip` were added to `_NON_MUTATING`
+        # to stop four inert shapes red-ing, and that repair stands — but `_NON_MUTATING` is
+        # the base of `_PURE_READS`, which feeds `_SCALAR_CALLEES` (via `_aliases_of`, so the
+        # `for` target was never tainted), `_names_handed` (whose short-circuit stopped the
+        # walk), and `_element_only` (which exempted the call). All three now exclude
+        # `_ITERATOR_CALLEES`. MEASURED before the fix, against the shipped tool:
+        #
+        #     _it = reversed(results); for _r in _it: _r["id"] = "X"   44 passed  <-- GREEN
+        #     _scrub(zip(results, results))                            44 passed  <-- GREEN
+        #
+        # while the `results[0]["id"] = "X"` control red the same suite — the pin was carrying
+        # a rewritten page as `rank_identical: True`, the exact false PASS it exists to stop.
+        ("reversed() bound, then written through its target",
+         '    _it = reversed(results)\n    for _r in _it:\n        _r["id"] = "X"\n'),
+        ("enumerate() bound, then written through its target",
+         '    _e = enumerate(results)\n    for _i, _r in _e:\n        _r["id"] = "X"\n'),
+        ("zip() bound, then written through its target",
+         '    _z = zip(results, results)\n    for _r, _s in _z:\n        _r["id"] = "X"\n'),
+        # The `handed` axis: the iterator is handed to a helper that writes each row, so the
+        # page is reached THROUGH the iterator. Reverting `_element_only`'s `_ITERATOR_CALLEES`
+        # arm reds this row.
+        ("iterator handed to a helper that writes its rows",
+         '    def _scrub(_rows):\n        for _r in _rows:\n            _r["id"] = "X"\n'
+         '    _scrub(zip(results, results))\n'),
         # ⛔ `min`/`max` ARE NOT COPIES AT ALL — they return an ELEMENT of the page, and the
         # old exemption (`callee in _PURE_READS`, which carries both) treated one as a new
         # container, so these two measured GREEN.
