@@ -8754,13 +8754,13 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
 #: `CYPHER-INVENTORY.md`'s §7 re-cut paragraph tells the reader to "re-TAKE, never carry" a
 #: figure, and then broke that rule in the sentence doing the telling: it claimed the re-taken
 #: range "reads `403 401`", which is its own `381 379` plus `#14260`'s 22-line `sdk.py`
-#: insertion applied a SECOND time. No head on the branch's first-parent line produces that pair,
-#: and ⛔ NO FIGURE is typed for that population: the pair and the head count are both head-bound,
-#: and the two earlier cuts of this very sentence proved it by each typing one the tree did not
-#: produce — re-take them at the head you merge (`git log --first-parent --oneline
+#: insertion applied a SECOND time — a figure no head on the branch's first-parent line produces,
+#: which is why it was the exact class this PR exists to repair, surviving inside the clause
+#: naming it. ⛔ AND NO FIGURE is typed for that population here: the pair and the head count are
+#: both head-bound, and the two earlier cuts of this sentence proved it by each typing one the
+#: tree did not produce. Re-take both at the head you merge (`git log --first-parent --oneline
 #: origin/main..HEAD` for the population, `git diff --numstat <base> <head> --
-#: docs/architecture/CYPHER-INVENTORY.md` for any pair), which is why
-#: the figure was the exact class this PR exists to repair, surviving inside the clause naming it.
+#: docs/architecture/CYPHER-INVENTORY.md` for any pair).
 #:
 #: ⛔ WHY NOTHING SAW IT: every alternative in `_TYPED_INDEX_NUMSTAT` above keys on the word
 #: `numstat` within a window that cannot cross a backtick, or on a command span quoted
