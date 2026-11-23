@@ -630,26 +630,39 @@ def test_the_falsifier_holds(tmp_path):
 # ── Findings from the first review cycle ──────────────────────────────────
 
 
-def test_an_EXPIRED_claim_is_never_RESURRECTED_by_its_own_holder(tmp_path):
-    """A holder that overran its lease must not overwrite the successor a peer
-    legitimately installed.
+def test_an_EXPIRED_lease_is_never_RESURRECTED_by_its_own_holder(tmp_path):
+    """A holder that overran its lease must not renew it back to life.
 
     `renew` reads the record and then `os.replace`s its own — a read-then-replace
-    with no compare. A holder whose lease expired is still the TOKEN OWNER on
-    disk, so without the expiry guard it wins that race and returns True while a
-    live successor believes it holds the spool. Reproduced in review.
+    with no compare. So when OUR claim has EXPIRED but a peer has not yet taken it
+    over, every check `renew` can make still passes (the token on disk IS ours),
+    and without an expiry rule it happily writes a fresh lease and returns `True`.
+    The peer that read the expired claim in that window and took it over is then
+    silently overwritten — two drainers, one of them certain it is alone.
+
+    ⛔ The assertion must be on an EXPIRED-BUT-STILL-OURS claim. Renewing after a
+    successor has already taken over returns False through the TOKEN check, which
+    is a different guard, and a test written that way passes with the expiry rule
+    deleted (measured: it did).
 
     MUTATION THAT REDS THIS: delete the `now >= expires` guard from `renew`.
     """
     root = tmp_path / "spool"
-    slow = drain_claim.acquire(root, leg="python", now=1000.0, ttl_s=60.0)
-    assert slow is not None
-    successor = drain_claim.acquire(root, leg="pi", now=1100.0, ttl_s=60.0)
-    assert successor is not None, "the lease expired, so the peer may take over"
-    assert slow.renew(now_s=1105.0) is False, (
-        "an expired lease is not renewable — that is how a successor gets clobbered")
-    assert drain_claim.read_claim(root)["token"] == successor.token
-    assert successor.renew(now_s=1110.0) is True
+    claim = drain_claim.acquire(root, leg="python", now=1000.0, ttl_s=60.0)
+    assert claim is not None
+    # Inside the lease: renewable.
+    assert claim.renew(now_s=1030.0) is True
+    # Past it, and STILL the token owner on disk — the window the guard exists for.
+    on_disk = drain_claim.read_claim(root)
+    assert on_disk is not None and on_disk["token"] == claim.token
+    assert claim.renew(now_s=1200.0) is False, (
+        "an expired lease is not renewable — that is how a peer's takeover gets "
+        "silently overwritten")
+    assert drain_claim.read_claim(root)["expires_at"] <= 1200.0, (
+        "the record must not have been pushed into the future")
+    # And a peer may then take it, as it always could.
+    successor = drain_claim.acquire(root, leg="pi", now=1201.0, ttl_s=60.0)
+    assert successor is not None
     successor.release()
 
 

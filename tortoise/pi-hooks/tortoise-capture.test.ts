@@ -7709,19 +7709,28 @@ test("#14350: a capacity refusal is NAMED durably, and clears on the next pass",
   assert.equal(readCaptureStatus(spool)?.state, "ok", "a free slot clears the record");
 });
 
-test("#14350: an EXPIRED claim is never RESURRECTED by its own holder", async () => {
-  // `renew` is a read-then-`rename` with no compare, so a holder that overran its
-  // lease is still the token owner on disk and would overwrite the successor a
-  // peer legitimately installed — returning `true` while two drainers exist.
+test("#14350: an EXPIRED lease is never RESURRECTED by its own holder", async () => {
+  // `renew` is a read-then-`rename` with no compare, so when OUR claim has
+  // expired but a peer has not yet taken it over, every check `renew` can make
+  // still passes (the token on disk IS ours) and it reinstates a fresh lease —
+  // silently overwriting the peer that took the expired claim in that window.
+  // ⛔ The assertion must be on an EXPIRED-BUT-STILL-OURS claim: after a
+  // successor has taken over, `renew` returns false via the TOKEN check, which is
+  // a different guard (a test written that way passes with this rule deleted —
+  // measured, in the Python twin).
   // MUTATION THAT REDS THIS: delete the `at >= expires` guard from `renew`.
   const spool = tmpSpool();
-  const slow = acquireDrainClaim(spool, { leg: "python", nowMs: 1000, ttlMs: 60 });
-  assert.ok(slow);
-  const successor = acquireDrainClaim(spool, { leg: "pi", nowMs: 1100, ttlMs: 60 });
-  assert.ok(successor, "the lease expired, so the peer may take over");
-  assert.equal(slow.renew(1105), false, "an expired lease is not renewable");
-  assert.equal(readDrainClaim(spool)?.token, successor.token);
-  assert.equal(successor.renew(1110), true);
+  const claim = acquireDrainClaim(spool, { leg: "python", nowMs: 1000, ttlMs: 60 });
+  assert.ok(claim);
+  assert.equal(claim.renew(1030), true, "inside the lease it renews");
+  assert.equal(readDrainClaim(spool)?.token, claim.token, "still the token owner");
+  assert.equal(claim.renew(1200), false, "an expired lease is not renewable");
+  assert.ok(
+    (readDrainClaim(spool)?.expires_at ?? 0) <= 1200,
+    "the record must not have been pushed into the future",
+  );
+  const successor = acquireDrainClaim(spool, { leg: "pi", nowMs: 1201, ttlMs: 60 });
+  assert.ok(successor, "and a peer may then take it, as it always could");
   successor.release();
 });
 
