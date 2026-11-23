@@ -143,6 +143,32 @@ _INCIDENT_KIND_OF_EVENT: dict[str, str] = {
 _EPISODE_INCIDENT_KINDS: tuple[str, ...] = (
     KIND_ABUSE_FLAG_RAISED, KIND_ABUSE_REVIEW_NEEDED)
 
+
+def _episode_delivery_kinds() -> tuple[str, ...]:
+    """The DELIVERY-LEDGER spellings an episode end must re-arm (#14407).
+
+    The ledger is armed by the notification **event** (``_claim_delivery(kind,
+    ...)`` in ``_notify_abuse_incident`` — ``"abuse_flag"``) while the resolver
+    works in the **incident** vocabulary (``ABUSE_FLAG_RAISED``). For the two
+    classes whose spellings coincide (the grandfathered lowercase
+    ``abuse_review_needed``/``abuse_suspended``) the two vocabularies are the
+    same string and the release worked by luck; for ``abuse_flag`` it did not,
+    so the window armed by an episode was NEVER released and the next episode
+    folded into it — up to a full window of silence for a genuinely new
+    episode. That is invisible in the store path (the store's create-once push
+    carries the opening message) and complete in the no-incident-channel shape,
+    where this ledger is the only delivery there is.
+
+    Returning BOTH vocabularies per incident kind costs one dict walk and makes
+    the release independent of which spelling a caller used — the bound is the
+    episode (``#4872``/R2), and an episode end must never leave a stale window
+    behind in any spelling.
+    """
+    kinds = list(_EPISODE_INCIDENT_KINDS)
+    kinds.extend(event for event, incident in _INCIDENT_KIND_OF_EVENT.items()
+                 if incident in _EPISODE_INCIDENT_KINDS and event not in kinds)
+    return tuple(kinds)
+
 #: Delivery windows (#14407). One message per ``(kind, subject)`` per window.
 #:
 #: INCIDENT kinds: the normal path is the store's create-once lifecycle — the
@@ -487,7 +513,10 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> None:
     # #10576 still carries), so a clean window must clear it too or the old
     # incident outlives the condition it records (the #2844 stale-sentinel class).
     subjects = (subject,) if subject == org_id else (subject, org_id)
-    for kind in kinds:
+    # ...and BOTH KIND spellings: the delivery ledger is armed by the event kind,
+    # so releasing only the incident kind left `abuse_flag`'s window armed across
+    # episodes (see `_episode_delivery_kinds`).
+    for kind in _episode_delivery_kinds():
         for subj in subjects:
             release_abuse_delivery(kind, subj)
     store, reason = _abuse_alert_store()

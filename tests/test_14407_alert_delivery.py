@@ -216,6 +216,47 @@ def test_a_new_episode_re_fires_exactly_once(delivered):
     assert "issue #2" in delivered.pushes[-1]
 
 
+def test_episode_end_re_arms_abuse_flag_where_the_ledger_is_the_only_delivery(
+        monkeypatch):
+    """The ledger is armed by the notification EVENT kind and released by the
+    INCIDENT kind, and for ``abuse_flag`` those are different strings
+    (``abuse_flag`` vs ``ABUSE_FLAG_RAISED``), so episode end released nothing.
+
+    In the store path that is masked (the store's create-once push carries the
+    opening message); in the NO-CHANNEL shape the ledger is the only delivery
+    there is, so a genuinely new episode folded into the previous episode's
+    window — up to 24h of silence, the direction #4872/R2 forbids.
+    """
+    import tortoise.notify as notify
+
+    sent: list[str] = []
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (
+        None, "no alert channel configured (DR_ISSUES_PAT unset)"))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    clock = [1_000.0]
+    monkeypatch.setattr(notify, "_delivery_now", lambda: clock[0])
+
+    _flag(notify)                              # episode 1 opens
+    assert len(sent) == 1, sent
+
+    clock[0] += 600                            # the rule's window goes clean
+    notify.resolve_abuse_episode("org-a", "point_create")
+
+    clock[0] += 600                            # a NEW episode, same day
+    _flag(notify)
+    assert len(sent) == 2, (
+        "a new episode was folded into the previous episode's window — the "
+        f"episode bound had become a mute ({sent})")
+
+    notify.reset_abuse_delivery_for_tests()
+
+
 def test_resolution_announces_before_it_deletes(delivered):
     import tortoise.notify as notify
 
