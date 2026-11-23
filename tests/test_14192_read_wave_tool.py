@@ -374,14 +374,19 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     stays GREEN as an inert label (`_lbl = f"{p}_tortoise_fts_query"; logging.info(_lbl)`,
     measured `refuses=False`, because the `Name` arm requires an executable position).
 
-    ⛔ BUT AN f-STRING WHOSE TEXT IS ASSEMBLED IS **NOT** CAUGHT, AND SAYING OTHERWISE WAS THE
-    DEFECT (#14326 round 8, MEASURED): `_p = "_tortoise"; _N = f"{_p}_fts_query"` builds
-    exactly `_tortoise_fts_query` at runtime and the pin stays GREEN (`refuses=False`,
-    mentions 2 / calls 2 / indirect 0) — the constant fragments are `"_tortoise"` and
-    `"_fts_query"`, neither of which is the name. That is the declared residual, together
-    with `"".join(…)`, `_N + "_x"` and a parameter; the fragment over-approximation buys ONE
-    spelling at the cost of a possible over-red, it does not close the class. Recorded so the
-    next lane does not read the arm above as covering assembled names.
+    ⛔ BUT AN f-STRING WITH A PART THIS FILE CANNOT RESOLVE IS **NOT** CAUGHT — and this note
+    used to say that about an ASSEMBLED f-string whose every part DOES resolve, which was false
+    and unpinned (#14326 round 21, MEASURED at `ff85c6ab73`: `_p = "_tortoise";
+    _N = f"{_p}_fts_query"` now resolves `_N` to
+    `{'_fts_query', '_tortoise', '_tortoise_fts_query'}` — the full name among them — so the
+    pin REFUSES it; `_joined_strings` closed that in round 13 and the paragraph was never
+    corrected). THE TRUE RESIDUAL is a part that does not resolve: `f"{queries[0]}_fts_query"`
+    yields only `{'_fts_query'}`, so the assembled name is absent and a lever over `_N` passes.
+    That is the declared residual, together with `"".join(…)` (measured: `[]`), `_N + "_x"` and
+    a parameter; the fragment over-approximation buys ONE spelling at the cost of a possible
+    over-red, it does not close the class. Recorded so the next lane does not read the arm above
+    as covering an unresolvable part — and does not read this note as saying a fully-literal
+    assembly is open, which it is not.
 
     ⛔ A PLACEHOLDER-FREE f-STRING IS NOT RESIDUAL, AND NEITHER IS A SELECTION BETWEEN
     LITERALS (#14326 review P6, each MEASURED GREEN at `8f13cb24`): `f"_tortoise_fts_query"`
@@ -1414,7 +1419,8 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
                 and node.args[1].value == "__dict__")
 
 
-def _is_module_registry(node: ast.AST | None) -> bool:
+def _is_module_registry(node: ast.AST | None,
+                        sys_names: frozenset[str] = frozenset({"sys"})) -> bool:
     """`sys.modules` — the IMPORT REGISTRY a deferred `from … import …` resolves THROUGH.
 
     ⛔ THE STORE THE PIN WAS BLIND TO (#14326 review P1, MEASURED GREEN): `run()` imports
@@ -1425,7 +1431,11 @@ def _is_module_registry(node: ast.AST | None) -> bool:
     blessed by a test. Aliases are resolved by the caller (`_aliases_of`).
     """
     if isinstance(node, ast.Attribute):
-        return node.attr == "modules"
+        # ⛔ AND THE BASE MUST BE `sys` (#14326 round 21, MEASURED: `other.modules["tortoise
+        # .sdk"] = …` was RED — an unrelated module's own `modules` attribute reddened a pin
+        # that exists to protect a different object). An attribute named `modules` is not the
+        # import registry; `sys`'s is.
+        return node.attr == "modules" and _is_sys_ref(node.value, sys_names)
     # ⛔ SPELLING IS NOT IDENTITY (#14326 round 20, MEASURED GREEN at `57735ab47` for every
     # form below while `import sys as _s; _s.modules[…]` was RED): the registry was recognised
     # only as an `x.modules` ATTRIBUTE, so the SAME OBJECT reached by an import, a `getattr`
@@ -1440,31 +1450,48 @@ def _is_module_registry(node: ast.AST | None) -> bool:
             and len(node.args) >= 2
             and isinstance(node.args[1], ast.Constant)
             and node.args[1].value == "modules"
-            and isinstance(node.args[0], ast.Name) and node.args[0].id == "sys"):
+            and _is_sys_ref(node.args[0], sys_names)):
         return True
     if isinstance(node, ast.Subscript):
         if not (isinstance(node.slice, ast.Constant) and node.slice.value == "modules"):
             return False
         inner = node.value
         if (isinstance(inner, ast.Attribute) and inner.attr == "__dict__"
-                and _is_sys_ref(inner.value)):
+                and _is_sys_ref(inner.value, sys_names)):
             return True
         return bool(isinstance(inner, ast.Call)
                     and _callee_names_of(inner.func) == {"vars"}
                     and len(inner.args) == 1
-                    and _is_sys_ref(inner.args[0]))
+                    and _is_sys_ref(inner.args[0], sys_names))
     return False
 
 
-def _is_sys_ref(node: ast.AST) -> bool:
-    """`sys`, seen through an import alias this file can name statically.
+def _sys_names_of(tree: ast.AST) -> frozenset[str]:
+    """Every name in `tree` that denotes the `sys` MODULE — `sys` plus every import alias.
+
+    ⛔ `import sys as _s` BINDS `sys` TO ANOTHER NAME, AND THE RESOLVED FORMS FOLLOWED THE
+    LITERAL SPELLING ONLY (#14326 round 21, MEASURED GREEN: `import sys as _s` then
+    `getattr(_s, "modules")[…] = …` / `vars(_s)["modules"][…] = …` / `_s.__dict__["modules"]
+    [… ] = …` each left the pin GREEN while `_s.modules[…]` was RED). A set threaded into
+    `_is_module_registry` is how those three close without widening the rule beyond `sys` —
+    which is the narrowing that keeps `other.modules[…]` from red-ing (see that predicate).
+    """
+    names = {"sys"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "sys":
+                    names.add(alias.asname or "sys")
+    return frozenset(names)
+
+
+def _is_sys_ref(node: ast.AST, sys_names: frozenset[str] = frozenset({"sys"})) -> bool:
+    """`sys`, seen through the import aliases `_sys_names_of` collects.
 
     ⛔ NARROWER THAN `_aliases_of` ON PURPOSE (#14326 round 20): this decides "the registry"
-    and a false positive reds an unrelated module, so it accepts only the bare `sys` name and
-    the `import sys as _s` spelling resolved by the same attribute rule, never an arbitrary
-    expression.
+    and a false positive reds an unrelated module, so it accepts only a name that IS `sys`.
     """
-    return isinstance(node, ast.Name) and node.id == "sys"
+    return isinstance(node, ast.Name) and node.id in sys_names
 
 
 def _is_setattr_like(value: ast.AST) -> bool:
@@ -5512,6 +5539,12 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "`with` target": (f'    _r = "_tortoise_fts_query"\n'
                           f'    with _r as _N:\n'
                           f'        {reach.format(name="_N")}\n'),
+        # ⛔ AND ITS `async` HALF IS A SEPARATE ASSERTION BELOW (#14326 round 21, MEASURED:
+        # replacing `(ast.With, ast.AsyncWith)` with `ast.With` in `_str_constants`' arm left
+        # the whole file at **41 passed**, while the same mutant drops `async with _r as _N:`
+        # back to mentions 2 / calls 2 / indirect 0 — a lever-carrying read passing silently).
+        # It cannot ride this dict: every body here is wrapped in a plain `def run(…)`, where
+        # `async with` is a SyntaxError.
         "walrus": f'    (_N := "_tortoise_fts_query")\n    {reach.format(name="_N")}\n',
         # ⛔ A WALRUS ON THE RIGHT-HAND SIDE OF A BIND (#14326 round 8, MEASURED GREEN at
         # `9762589e`): `_str_constants` already treats `NamedExpr` as a bind, so `_values`
@@ -6281,6 +6314,19 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "an `async for` target carrying the read name is a reach — `ast.AsyncFor` is in the "
         "same bind arm as `ast.For`, and removing it must red this row rather than leave "
         "the arm unpinned")
+
+    # ⛔ AND AN `async with` TARGET, FOR THE SAME REASON ONE NODE TYPE OVER (#14326 round 21,
+    # MEASURED at `ff85c6ab73`: replacing `(ast.With, ast.AsyncWith)` with `ast.With` in
+    # `_str_constants`' arm left the whole file at **41 passed**, while the mutant drops this
+    # shape back to mentions 2 / calls 2 / indirect 0 — a lever-carrying read passing silently).
+    # The `` `with` `` row in the table above is wrapped in a plain `def run(…)` and therefore
+    # CANNOT carry it; `_pin_source_async` is what makes the row possible.
+    assert _pin_refuses(_pin_source_async(
+        '    _r = "_tortoise_fts_query"\n'
+        '    async with _r as _N:\n'
+        f'        {reach.format(name="_N")}\n')), (
+        "an `async with` target carrying the read name is a reach — `ast.AsyncWith` is in the "
+        "same bind arm as `ast.With`, and removing it must red this row")
 
     # ⛔ THE *ALIAS* ARM'S `ast.AsyncFor` MEMBER IS PINNED BY THE SIBLING LANE, NOT HERE
     # (#14326 round 18). Dropping it from `_aliases_of`'s `(ast.For, ast.AsyncFor)` tuple left
@@ -7332,16 +7378,22 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     #   setattr(tortoise.sdk, "TortoiseSDK", _Mirror)    setattr(_t, _k, _Mirror)
     #   setattr(*[_t, "TortoiseSDK", _Mirror])           _t.__dict__["Tortoise" + "SDK"] = …
     consts = _str_constants(tree)
+    #: Every name in this tree that denotes the `sys` module — `sys` plus `import sys as _s`
+    #: aliases. Threaded into `_is_module_registry` so the RESOLVED registry forms follow an
+    #: alias instead of the literal spelling (#14326 round 21).
+    sys_names = _sys_names_of(tree)
     # The namespace MAPPINGS, plus the IMPORT REGISTRY `from tortoise.sdk import …`
     # resolves THROUGH (`sys.modules`), each with its one-bind aliases resolved.
     namespaces = frozenset(
-        _aliases_of(tree, lambda _n: _is_namespace_expr(_n) or _is_module_registry(_n), loops=True)
+        _aliases_of(tree, lambda _n: _is_namespace_expr(_n)
+                    or _is_module_registry(_n, sys_names), loops=True)
     )
     launderers = frozenset(_aliases_of(tree, _is_setattr_like, loops=True))
     # ⛔ A NAME ALIAS OF THE REGISTRY IS THE REGISTRY (#14326 review P1, measured:
     # `_sm = sys.modules; _sm |= {"tortoise.sdk": _Mirror}` was GREEN while the direct
     # spelling red — the alias axis, not a new spelling).
-    registry_aliases = frozenset(_aliases_of(tree, _is_module_registry, loops=True))
+    registry_aliases = frozenset(_aliases_of(
+        tree, lambda _n: _is_module_registry(_n, sys_names), loops=True))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
@@ -7389,7 +7441,7 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             # deferred import resolves and was GREEN while the constructor-keyed spelling was
             # red. One receiver, two key vocabularies; the filter follows the receiver.
             keys = set(_mapping_keys_of(node.value, consts))
-            registry = _is_module_registry(target) or (
+            registry = _is_module_registry(target, sys_names) or (
                 isinstance(target, ast.Name) and target.id in registry_aliases)
             receiver = registry or (isinstance(target, ast.Attribute)
                                     and target.attr == "__dict__") or \
@@ -7436,20 +7488,41 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             # owns, so a receiver alias, a laundered key, a `partial`, a splat and the
             # `sys.modules` registry all land in the same red.
             keys = set(_namespace_rebind_names(node, consts, namespaces, launderers))
+            #: `sys.modules` itself, or a NAME ALIAS of it (`_sm = sys.modules`) — the same
+            #: union the `AugAssign` arm above already accepts (#14326 round 21).
+            def _is_registry_receiver(expr: ast.AST | None) -> bool:
+                return _is_module_registry(expr, sys_names) or bool(
+                    isinstance(expr, ast.Name) and expr.id in registry_aliases)
+
             if (
                 isinstance(node, ast.Call)
                 and _callee_names_of(node.func) & _REGISTRY_MUTATORS
-                and _is_module_registry(getattr(node.func, "value", None))
+                and _is_registry_receiver(getattr(node.func, "value", None))
             ):
                 # The DIRECT registry receiver — `_is_namespace_expr` deliberately does not
                 # call `sys.modules` a namespace (a `sys.modules["print"]` key binds no
                 # builtin), so the mapping-mutation spelling is resolved HERE, scoped to the
-                # registry, rather than by widening the shared predicate.
+                # registry, rather than by widening the shared predicate. The receiver is
+                # resolved through `registry_aliases` too: `_m = sys.modules;
+                # _m.__ior__({…})` was GREEN while `_m |= {…}` was RED (#14326 round 21).
                 keys |= _mapping_mutation_keys(node, consts, offset=0)
+            elif (
+                isinstance(node, ast.Call)
+                and _callee_names_of(node.func) & _REGISTRY_MUTATORS
+                and node.args
+                and _is_registry_receiver(node.args[0])
+            ):
+                # ⛔ THE UNBOUND SPELLING PUTS THE REGISTRY IN arg0 (#14326 round 21,
+                # MEASURED GREEN: `dict.__setitem__(sys.modules, "tortoise.sdk", _Mirror)`,
+                # `dict.update(sys.modules, {…})` and `dict.setdefault(sys.modules, …)` all
+                # inserted the entry with the pin green). This is the asymmetry the file
+                # ALREADY pins on the namespace axis ("UNBOUND `dict.__setitem__(<ns>, …)`"),
+                # one predicate over — `offset=1` is the whole of it.
+                keys |= _mapping_mutation_keys(node, consts, offset=1)
             if (
                 isinstance(node, ast.Subscript)
                 and isinstance(node.ctx, ast.Store)
-                and _is_module_registry(node.value)
+                and _is_module_registry(node.value, sys_names)
             ):
                 # ⛔ THE REGISTRY IS THE OTHER SIDE OF THE SAME STORE (#14326 review P1,
                 # MEASURED GREEN): `run()`'s deferred `from tortoise.sdk import …` resolves
@@ -7919,6 +7992,31 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'sys.__dict__["modules"]["tortoise.sdk"] = _Mirror\n',
         "`vars(sys)[\"modules\"]`":
             'vars(sys)["modules"]["tortoise.sdk"] = _Mirror\n',
+        # ⛔ THE ALIAS HALF OF EVERY FORM ABOVE (#14326 round 21, MEASURED GREEN at
+        # `ff85c6ab73`: the resolved forms followed the LITERAL `sys` spelling only, so the
+        # same three shapes through `import sys as _s` walked past while `_s.modules[…]` was
+        # RED). One row per form; the set they share is `_sys_names_of`'s.
+        "`getattr` on an IMPORT ALIAS":
+            'import sys as _s\ngetattr(_s, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`vars` on an IMPORT ALIAS":
+            'import sys as _s\nvars(_s)["modules"]["tortoise.sdk"] = _Mirror\n',
+        "`__dict__` on an IMPORT ALIAS":
+            'import sys as _s\n_s.__dict__["modules"]["tortoise.sdk"] = _Mirror\n',
+        # ⛔ AND THE UNBOUND MUTATOR SPELLINGS (#14326 round 21, MEASURED GREEN: all three
+        # INSERTED into `sys.modules` with the pin green). This is the asymmetry the file
+        # already pins on the NAMESPACE axis — `dict.__setitem__(<ns>, …)` has its own row
+        # there — so the registry axis owed the same three.
+        "UNBOUND `dict.__setitem__(sys.modules, …)`":
+            'dict.__setitem__(sys.modules, "tortoise.sdk", _Mirror)\n',
+        "UNBOUND `dict.update(sys.modules, …)`":
+            'dict.update(sys.modules, {"tortoise.sdk": _Mirror})\n',
+        "UNBOUND `dict.setdefault(sys.modules, …)`":
+            'dict.setdefault(sys.modules, "tortoise.sdk", _Mirror)\n',
+        # …and the ALIAS RECEIVER for the mutator arm (#14326 round 21, MEASURED GREEN: the
+        # receiver test looked only at the literal `sys.modules` expression while the
+        # `AugAssign` arm already unioned `registry_aliases`).
+        "`__ior__` on a NAME ALIAS of the registry":
+            '_sm = sys.modules\n_sm.__ior__({"tortoise.sdk": _Mirror})\n',
     }
     for name, lever in registry_spellings.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
@@ -7929,7 +8027,12 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     # is the expensive direction here.
     for inert in ('from mypkg import modules as _m\n_m["tortoise.sdk"] = _Mirror\n',
                   'getattr(other, "modules")["tortoise.sdk"] = _Mirror\n',
-                  'vars(other)["modules"]["tortoise.sdk"] = _Mirror\n'):
+                  'vars(other)["modules"]["tortoise.sdk"] = _Mirror\n',
+                  # ⛔ THE ATTRIBUTE FORM OF THE SAME CONTROL (#14326 round 21, MEASURED: this
+                  # was RED before the base-name arm was narrowed to a `sys` name — an
+                  # unrelated module's own `modules` attribute reddened a pin that exists to
+                  # protect a different object, which is the expensive direction here).
+                  'other.modules["tortoise.sdk"] = _Mirror\n'):
         assert ctor_findings(shipped + "class _Mirror:\n    pass\n" + inert) == [], inert
 
     # …and the false-red control: `|=` on an ORDINARY container stores a label, not a
@@ -8009,6 +8112,15 @@ def test_the_ALIAS_axis_iterable_residuals_are_NAMED_and_pinned_GREEN() -> None:
             'for _x in (*sys.modules,):\n    _x |= {"tortoise.sdk": _Mirror}\n',
         "`**` spread of a registry ATTRIBUTE":
             'for _x in {**sys.modules}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        # ⛔ `async with` IS THE SAME ARM ONE NODE TYPE OVER, AND IT WAS UNPINNED TOO (#14326
+        # round 21, MEASURED: dropping `ast.AsyncWith` from `_aliases_of`'s With arm left the
+        # file at **41 passed** while `async with sys.modules as _x: _x |= {…}` lost its
+        # finding entirely). The `with` row above cannot carry it — the harness here is a
+        # module-level statement list, where `async with` is a SyntaxError — so the lever
+        # supplies its own `async def`.
+        "import registry via an `async with` TARGET":
+            'async def _a():\n    async with sys.modules as _x:\n'
+            '        _x |= {"tortoise.sdk": _Mirror}\n',
     }
     for name, lever in closed.items():
         assert reds(lever), (name, lever)
