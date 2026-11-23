@@ -3,8 +3,8 @@
 THE MEASUREMENT THIS PINS
 -------------------------
 `#14343` decomposed the extractor's 45,503-token input constant and found its
-largest single region is **S2's embed list, re-sent to S4** — 14,164 of the
-43,567-token attributed composition (32.5 %; 31.1 % of the 45,503 constant, and
+largest single region is **S2's embed list, re-sent to S4** — 14,149 of the
+42,509-token attributed composition (33.3 %; 31.1 % of the 45,503 constant, and
 neither denominator is the other). Measured on the 14 real S2 emissions in
 `tests/eval/write_path/receipts/7947-arms-2026-10-18` (580 items):
 

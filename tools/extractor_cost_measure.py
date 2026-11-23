@@ -339,6 +339,13 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
             os.fsync(fh.fileno())
 
     def _job(item: dict, kind: str, arm: str) -> dict:
+        # ⛔ THE ARM IS A SETTING, NOT A LABEL. It was a label only: nothing on
+        # the measurement path wrote `os.environ`, so `--arms before,after`
+        # measured the SAME render twice in one process and the before→after
+        # delta came back 0 — a false pass with no banner, in the one command
+        # the bundle documents as finishing the job (review cycle 9, P2).
+        # `TORTOISE_S4_EMBED_JSON` is the lever this harness exists to size, so
+        # `after` ARMS it here and `before` pins it off for the call.
         model = _build_model()   # one per call: the adapter carries per-call
                                  # state (last_*), which races under workers>1
         if kind == "doc":
@@ -346,9 +353,23 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
                              "content": item["text"]}]
         else:
             conversation = item["turns"]
-        rec = measure_one(model, conversation,
-                          session_date="2026-11-21T00:00:00+00:00")
+        saved = os.environ.get("TORTOISE_S4_EMBED_JSON")
+        try:
+            if arm == "after":
+                os.environ["TORTOISE_S4_EMBED_JSON"] = "compact"
+            elif arm == "before":
+                os.environ.pop("TORTOISE_S4_EMBED_JSON", None)
+            rec = measure_one(model, conversation,
+                              session_date="2026-11-21T00:00:00+00:00")
+        finally:
+            if saved is None:
+                os.environ.pop("TORTOISE_S4_EMBED_JSON", None)
+            else:
+                os.environ["TORTOISE_S4_EMBED_JSON"] = saved
         rec["arm"] = arm
+        #: the flag the arm actually ran under — a reader must be able to tell
+        #: a real post-change measurement from a mislabelled one.
+        rec["s4_embed_json"] = "compact" if arm == "after" else "indent"
         rec["kind"] = kind
         rec["id"] = item["path"]
         rec["item_tokens"] = item["tokens"]
