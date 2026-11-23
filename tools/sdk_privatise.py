@@ -1943,7 +1943,50 @@ SWEEP_NAMES = 66
 #: counter. The −2 is NOT undone: the typed rewrite is the change's point, and the census follows it.
 #: The pair below is `--repin`'s own output on THIS tree with both edits applied, never arithmetic on
 #: the last pin; `--check` exits 0 on it with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11899, "543a559f66bc5e86")
+#: ⛔ MERGED `origin/main` TWICE, AND THE SECOND FOLD CHANGED THE ANSWER — `main` kept moving under
+#: this PR while it waited. By `148dece31973` its OWN pin had been re-cut DOWN to
+#: `(11899, "543a559f66bc5e86")` by `#14446`/`#14461`: two typed-call rewrites that legitimately
+#: SHRANK the census (`projection.g.query` −2) against a collector that legitimately GREW it
+#: (`reached.update` +3, then fixed rather than declared — see the block just above). That tree
+#: still DERIVES 11903, so `--check` exits 1 on `main`'s OWN tip: the red this PR repairs is a
+#: RECURRENCE, not the original one. The pin below is the RESOLVED tree's own `--repin` reading,
+#: re-measured and never arithmetic on the previous pin; `--check` exits 0 on it with
+#: `typed references still pointing at a public name: 0`.
+#: ⛔ WHAT THE FOLD DID WITH THE TWO BLOCKS, stated plainly rather than as the rule's shorthand:
+#: `main`'s blocks are kept VERBATIM, and this branch's own pre-rebase block was FOLDED INTO THIS
+#: ONE — two of its clauses reworded (the ones this review found false), the rest preserved below.
+#: The file's "BOTH SIDES' BLOCKS ARE KEPT" rule protects the distinct MEASUREMENTS, and here there
+#: is exactly one per transition — `main`'s blocks measure 11901 → 11899, this branch's measured
+#: 11898 → 11901 — so nothing was lost by folding, and the alternative (a second verbatim block
+#: carrying the same transition) would have inflated the graded extent for no record gained.
+#: THE +3 THAT TOOK 11898 → 11901 IS `b2d1e9086a9` (`#14434`), FULLY ATTRIBUTED rather than assumed —
+#: and it is exactly the attribution `main`'s `#14350` blocks twice state they could NOT do ("the
+#: committed pin stores a COUNT and a DIGEST, never the row set, so which of `main`'s new files added
+#: them cannot be recovered from the artifact"). Sorted row sets were diffed in full on both trees
+#: (861 rows each side, `--report --base 28ca66878d7c --top 1000`, at `1de5fa4cfbbc` — whose tree
+#: derives 11898 — and at the merge tree `5f6e3da6a0aa`, which derives 11901): `env.update`
+#: 101 → 102 (+1, one `env.update(env_extra or {})` over a subprocess env) and `projection.g.query`
+#: 24 → 26 (+2, a count and a `DETACH DELETE` against a live projection), NO OTHER SHAPE MOVED and
+#: none decreased. All three are in the ONE file `#14434` added, `tests/test_7879_record_chain.py`,
+#: so 1+2 = 3 = 11901 − 11898 is a cross-check rather than a story. The rows are DECLARED, never
+#: rewritten: re-pointing an ordinary-word receiver inside a peer's test helper would be sabotage
+#: (the `declared_markers.update` precedent).
+#: ⛔ NO SPAN OF RED COMMITS IS COUNTED OR BOUNDED HERE, deliberately, and neither is any per-rev
+#: reading of one. An earlier cut of this block published a "last green" commit plus five sampled
+#: `pin N against a tree deriving M` readings; a fresh-context review measured the span claim FALSE
+#: in three ways (main RE-GREENS the moment someone re-cuts, so that commit was neither the last
+#: green nor the start of an unbroken red) and demonstrated with a mutant that wronging two of the
+#: five readings left all 37 arms green — nothing grades a prose claim about git history. Publishing
+#: an ungraded figure in the section whose subject is unmeasured claims is the defect this section
+#: exists to forbid, so the span is left as a COMMAND (`git log --first-parent --format=%h
+#: <last-green>..origin/main`, one `--check` per commit) that any checkout can re-run.
+#: WHY THE PIN KEEPS FALLING BEHIND, so the next reader does not re-derive the race: `#14394` DID
+#: notice an earlier red and DID re-cut the pin — but against its own merge tree, and its base moved
+#: three rows between that cut and the squash, so the squash carried a reading that was true of the
+#: branch and false of `main`. Nothing was mis-measured; the pin is only as current as the tree the
+#: cutting lane last saw, and `--check` grades a tree that keeps moving under it. That is why this
+#: block is re-pinned at the head that LANDS rather than one commit earlier.
+SWEEP_RESIDUE = (11903, "df4f73cd9d41cdd1")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
