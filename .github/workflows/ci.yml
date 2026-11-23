@@ -1224,8 +1224,11 @@ jobs:
           # required check on all 46 inherited findings in the snapshot.
           #
           # ⛔ #2148/B5: this producer now runs lychee with `--exclude '^https?://'`,
-          # so the REQUIRED check grades LOCAL (relative/fragment) targets only. A
-          # remote host's answer is a property of the run, not of the diff — #14230
+          # so the REQUIRED check grades LOCAL targets only — a relative target by its
+          # PATH half. The ANCHOR half is NOT graded: lychee verifies
+          # `docs/x.md#section` only with `--include-fragments`, and no call site
+          # passes it (see the script header). A remote host's answer, by
+          # contrast, is a property of the run, not of the diff — #14230
           # reddened main's own merged tree because a citation's host 403'd CI's
           # bot user agent. `tools/docs_lint_baseline.py sweep` covers the whole-tree
           # local class network-free; remote liveness is an on-demand run, not a
@@ -1337,6 +1340,19 @@ jobs:
           # A link-free doc is legitimate: lychee reports `total: 0` and the step
           # passes, which is why the script treats 0 as a verdict and only an
           # ABSENT report as a producer failure.
+          # ⛔ #2148/B5 — THIS STEP IS LOCAL-ONLY NOW. The `--exclude '^https?://'`
+          # filter lives in the producer's argv, so the nightly `main-health` call
+          # site (`main-health-nightly.yml`, cron `17 5 * * *`) drops the REMOTE
+          # population too, exactly as the PR path does. Before #2148 that nightly
+          # was the only SCHEDULED check of a remote link in this repo's DOCS, so
+          # after it no automated check covers that class — the deliberate cut,
+          # since a third party's answer (403, rate limit, TLS, DNS) is not a
+          # property of this tree. It is not a claim about remote probing in
+          # general: `availability-watchdog.yml` and `prod-csp-monitor.yml` still
+          # call production URLs on their own crons. What is still graded
+          # here: the PATH half of every relative target. To sweep remote liveness
+          # on demand, run lychee WITHOUT the exclude flag — never add it back to
+          # the producer (the script header says so where the argv is).
           bash .github/scripts/docs-link-check.sh \
             --label "Link check (main health, changed files)" \
             --files-from "$RUNNER_TEMP/changed-md.txt" \
