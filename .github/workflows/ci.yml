@@ -924,13 +924,17 @@ jobs:
           # #5086/#2820/#2852 siblings — and one of its own: the question needs HISTORY,
           # and the `test` job that runs the pytest pin
           # (`tests/test_ci_check_repair.py`, surface `core`) checks out at the default
-          # `fetch-depth: 1`. In a grafted graph an ABSENT ANCESTOR and a BOGUS SHA are
-          # both simply missing objects, so there the pin can only SKIP — and a provenance
-          # gate that runs only where it cannot answer is a no-op gate (#11057 review P2,
+          # `fetch-depth: 1`. In a grafted graph the cited commit can be ABSENT, and there
+          # an absent ancestor and a bogus sha are both simply missing objects, so the pin
+          # can only SKIP. ⚠️ A graft is NOT "no ancestors": a `--depth 2` clone reports
+          # the graft AND holds `HEAD^`, so a cite that is absent there is still
+          # indistinguishable from a bogus one — which is exactly why THIS depth-0 job,
+          # not the pin, is what proves the claim: a provenance gate that runs only where
+          # it cannot answer is a no-op gate (#11057 review P2 at
           # `python-ci.yml:4234-4244` — the note that put that file's own gate at
           # `fetch-depth: 0`; #9075 review r6 P1 made the same call at `:487-492`). This
-          # job checks out
-          # at `fetch-depth: 0`, so this is where the claim is actually proved. Stdlib
+          # job checks out at `fetch-depth: 0`, so this is where the claim is actually
+          # proved. Stdlib
           # only, one file, no network; exit 0 = verified, 1 = a defect in the document,
           # 2 = UNVERIFIED (never a pass).
           python3 tools/ci_check_repair.py --check-doc-citations

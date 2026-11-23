@@ -2813,11 +2813,15 @@ def main(argv: list[str] | None = None) -> int:
 # follow-up commit carried no edit to that file. The pytest pin
 # (`tests/test_ci_check_repair.py::test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit`)
 # checks the same thing, but that file is registered on the `core` surface and so runs
-# in the `test` job, which checks out at the DEFAULT `fetch-depth: 1` — a grafted
-# graph in which a REAL ancestor and a BOGUS sha are both simply absent. There the pin
-# can only SKIP, and "a provenance gate that runs only where it cannot answer is a
-# no-op gate" (python-ci.yml:4234-4244, #11057 review P2 — the note that put that
-# job at `fetch-depth: 0`; #9075 review r6 P1 made the same call at `:487-492`).
+# in the `test` job, which checks out at the DEFAULT `fetch-depth: 1` — a graft in
+# which the cited commit can be absent, and where an absent ancestor and a BOGUS sha
+# are both simply missing objects, so the pin can only SKIP. ⚠️ A graft is NOT "no
+# ancestors": a `--depth 2` clone reports the graft and still holds `HEAD^`, so a
+# deepened grafted clone is caught by NEITHER arm — this depth-0 job is the only place
+# the claim is proved. There the pin can only SKIP, and "a provenance gate that runs
+# only where it cannot answer is a no-op gate" (python-ci.yml:4234-4244, #11057 review
+# P2 — the note that put that job at `fetch-depth: 0`; #9075 review r6 P1 made the same
+# call at `:487-492`).
 #
 # So the history half lives HERE too, and runs in the `docs` job — the depth-0 job
 # this repo already keeps for exactly this: `substrate_map_check.py`,
@@ -2968,7 +2972,7 @@ def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
                 findings.append(
                     f"{rel}: cites `git show --stat {ref}` as its evidence that the "
                     "commit carried NO edit to this file, but the command prints "
-                    f"{len(shown.stdout.splitlines())} line(s) of stat — the citation "
+                    f"{len(shown.stdout.splitlines())} line(s) of output — the citation "
                     "resolves and contradicts its own sentence.")
     if cites == 0:
         return 2, ["docs/ops/ci-wall-clock.md runs no `git show --stat <sha> -- "
