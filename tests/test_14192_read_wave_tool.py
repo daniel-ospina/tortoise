@@ -1608,6 +1608,10 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
 #: code can be reddened (`vars(sys, "modules")` is a TypeError).
 _REGISTRY_BUILTINS = frozenset({"dict", "getattr", "vars"})
 
+#: The two callables that COPY a mapping. A member set rather than a literal so the alias and
+#: `getattr`-fetch arms ask ONE question (#14326 review cycle 8).
+_COPY_CALLEES = frozenset({"copy", "deepcopy"})
+
 
 def _builtins_module_names(tree: ast.AST) -> frozenset[str]:
     """Every name that statically denotes the `builtins` MODULE — roots and their aliases.
@@ -1674,8 +1678,14 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
     callee, this set names the builtin used to BUILD the mapping.
 
     Deliberately does NOT reuse `builtin_aliases` from the registry ctx: that set is built BY
-    `_builtin_lookup_name` at its own construction site, so consuming it here would be a
-    fixpoint. This is a plain transitive name walk, available to every caller.
+    `_builtin_lookup_name` at its own construction site, so consuming THAT SET here would be a
+    fixpoint. The two `_builtin_lookup_name` calls below are a different thing and are NOT a
+    fixpoint either: that function takes its alias sets as PARAMETERS and never calls back into
+    this one, so these pass the LITERAL empty registry sets on purpose — they ask only
+    "is this expression a member fetched out of a mapping / a `getattr` fetch", which needs
+    no aliases. What they cannot resolve is a mapping reached through `__builtins__` (its name
+    set is being built by our caller), and that residual is closed at the inline call site
+    instead.
 
     ⛔ OVER-MATCHING ACROSS THE MEMBERS IS HARMLESS, as `_REGISTRY_BUILTINS`' own note argues,
     BUT THE BOUND IS WIDER THAN THE REGISTRY ARMS' ONE (#14326 review cycle 7, CORRECTED: this
@@ -1690,6 +1700,10 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
     """
     _module_names = _builtins_module_names(tree)
     _copy_module_names_ = _copy_module_names(tree)
+    #: HOISTED, not called per node (#14326 review cycle 8, MEASURED: per-node
+    #: `_str_constants(tree)` took the pin from 30 s to 244 s — a resolver inside an
+    #: `_aliases_of` predicate re-runs the whole tree walk for every node it visits).
+    _bu_consts_ = _str_constants(tree)
     return frozenset(_aliases_of(
         tree,
         lambda n: (isinstance(n, ast.Name) and n.id in _REGISTRY_BUILTINS)
@@ -1702,6 +1716,14 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
         # that enumeration, so a literal here would drift again.
         or (isinstance(n, ast.Attribute) and n.attr in _REGISTRY_BUILTINS
             and isinstance(n.value, ast.Name) and n.value.id in _module_names)
+        # ⛔ AND THE REGISTRY BUILTIN FETCHED OUT OF THE BUILTINS MAPPING (#14326 review cycle
+        # 8, MEASURED GREEN: `_dd = vars(builtins)["dict"]; _x = _dd(builtins.__dict__)`
+        # executed the read while the INLINE `vars(builtins)["dict"](…)` was REFUSED). The
+        # mapping-key spelling is the sibling half of the module-attribute one above and
+        # `_builtin_lookup_name` resolves it — so the bind, not only the inline call, resolves.
+        or _builtin_lookup_name(n, _module_names, _bu_consts_, frozenset(),
+                                frozenset(), members=_REGISTRY_BUILTINS,
+                                getattr_fetchers=frozenset({"getattr"})) is not None
         # ⛔ AND AN ALIAS OF A COPY CALLEE (#14326 review cycles 6-7, MEASURED GREEN:
         # `_f = copy.deepcopy; _x = _f(builtins.__dict__)`; also `copy.copy`, `dict.copy`, and
         # — the twin of THIS commit's own fix (#14326 review cycle 7, MEASURED GREEN one node
@@ -1719,7 +1741,15 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
         # file deletes a clause no mutant can red.
         or (isinstance(n, ast.Attribute) and n.attr in {"copy", "deepcopy"}
             and isinstance(n.value, ast.Name)
-            and n.value.id in ({"dict"} | _copy_module_names_)),
+            and n.value.id in ({"dict"} | _copy_module_names_))
+        # ⛔ AND THE COPY CALLEE FETCHED WITH `getattr` (#14326 review cycle 8, MEASURED GREEN:
+        # `_f = getattr(_z, "copy")` with `_z = copy` executed the read while `_f = _z.copy`
+        # was REFUSED). A `getattr` fetch naming a literal member is statically visible, and
+        # `_builtin_lookup_name` already resolves that shape for the registry members — so the
+        # same `members=` threading, one member set over.
+        or _builtin_lookup_name(n, _copy_module_names_, _bu_consts_, frozenset(),
+                                frozenset(), members=_COPY_CALLEES,
+                                getattr_fetchers=frozenset({"getattr"})) is not None,
         loops=True))
 
 
@@ -7398,6 +7428,21 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    getattr(builtins.__dict__, "get")("exec")('
             '"results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        # ⛔ AND THE TWO BOUND SPELLINGS OF THE CLAUSES ABOVE (#14326 review cycle 8, EACH
+        # MEASURED GREEN while its INLINE sibling was REFUSED): a `getattr` fetch of the copy
+        # callee, and a REGISTRY builtin fetched out of the builtins MAPPING and then called
+        # — `_builtin_name_aliases` resolved the ATTRIBUTE spellings (`_z.copy`,
+        # `builtins.dict`) and neither of these.
+        "a COPY CALLEE fetched with `getattr`": (
+            '    import builtins, copy as _z\n'
+            '    _f = getattr(_z, "copy")\n'
+            '    _d = _f(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "a REGISTRY builtin fetched OUT OF the mapping, then called": (
+            '    import builtins\n'
+            '    _dd = vars(builtins)["dict"]\n'
+            '    _d = _dd(builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         "`builtins.__dict__.__getitem__(\"exec\")`": (
             '    import builtins\n'
             '    builtins.__dict__.__getitem__("exec")('
