@@ -1412,10 +1412,16 @@ def _build_single(provider: str, model_id: str, *, max_tokens, temperature,
     # the SAME suppression the direct member hardcodes. Two gates, one place:
     #
     #   * ``suppress_reasoning`` — the LANE's decision. ``build_extractor_model``
-    #     passes True; ``build_reader_model`` passes False, so the ask lane's
-    #     wire body is BYTE-IDENTICAL before and after this change (its scope
+    #     passes True; ``build_reader_model`` passes False, so the ask lane's two
+    #     HOP members keep the wire body they had before this change (its scope
     #     was never #14357's, and a 500-token reader with thinking on is a
     #     separate, unmeasured product question — not a side effect of this fix).
+    #     ⛔ That sentence is about the hop members only: the ``deepseek-direct``
+    #     member returns above this point and is NOT governed by this flag, and
+    #     its own gate was widened by this same change (it now suppresses for the
+    #     whole flash FAMILY, so an ask spec naming ``deepseek-flash`` gains
+    #     ``thinking: disabled`` — intended, #4129, since that is the id the
+    #     provider serves for the retired one).
     #   * ``_runs_non_thinking(model_id)`` — the FAMILY gate, so a v4-pro
     #     extraction still keeps its default on all three (#1790).
     #

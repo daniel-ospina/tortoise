@@ -147,6 +147,24 @@ def test_v4_pro_pool_members_agree_and_keep_the_default(monkeypatch):
     assert "venice_parameters" not in bodies["venice"]
 
 
+def test_the_lane_gate_cannot_be_re_defaulted_into_existence():
+    """The lane gate is structural, so pin the STRUCTURE.
+
+    ``_build_single``'s docstring says ``suppress_reasoning`` is required and
+    keyword-only on purpose — *"a default would let the next caller silently land
+    back on the thinking-on body #14357 fixed"*. Measured before this test: adding
+    ``= False`` to the annotation left 131 tests green, i.e. the one edit the
+    docstring forbids was invisible to the suite.
+    """
+    from tortoise.model_adapters import _build_single
+
+    with pytest.raises(TypeError):
+        _build_single("openrouter", EXTRACT_MODEL, max_tokens=1,
+                      temperature=0.0)
+    with pytest.raises(TypeError):
+        _build_single("openrouter", EXTRACT_MODEL, 1, 0.0, False, True)
+
+
 def test_the_family_gate_matches_the_family_not_one_literal():
     """#4129: the gate keys on the flash FAMILY, not on one exact id.
 

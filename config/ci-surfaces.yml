@@ -6998,8 +6998,9 @@ surfaces:
   # them selects the default `core` surface), and its siblings
   # (`test_extractor_reliability.py`, `test_model_adapters_routing.py`) live here.
   # Without this row the file classified to NOTHING: `--integrity` reported it as
-  # drift (redding the REQUIRED `manifest-integrity` leg) and no CI leg ran its ten
-  # tests.
+  # drift (redding the REQUIRED `manifest-integrity` leg) and the suite ran on no
+  # CI leg at all. ⛔ Cased by SUBJECT, not by a case count — this file's own rule
+  # (`test_selection_step.py`'s row) is that a stated count goes stale silently.
   - test_14357_fallback_thinking.py
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
   # #10311: the S2/S4 prompt BODIES frame session text as untrusted DATA — the
