@@ -1229,6 +1229,32 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         `test_the_verdict_does_not_depend_on_the_SPELLING`,
     #:         `test_a_semicolon_less_reference_is_LITERAL_in_markdown_text` and
     #:         `test_raw_HTML_is_decoded_the_way_a_browser_decodes_it`.
+    #:       * ⚠️ *THREE* SPELLING MECHANISMS, NOT TWO (#14237 r17, measured fail-open). The
+    #:         gate above the discovery walk said `&` and `\\` are "the only ways the source can
+    #:         differ from the text the reader sees while a retired name is on screen". THAT WAS
+    #:         FALSE — rendering also REMOVES MARKUP, so markup INSIDE the name splits it into
+    #:         raw tokens that are not retired names at all, and the whole unit was skipped
+    #:         before the rendered arm could read it. Measured at the r16 head: `Call
+    #:         tortoise_list_graph*s*(x=1) for names. Use tortoise_graph_overview(...)`,
+    #:         `…grap**hs**…` and two-code-span spellings all returned `R1 [] R2 []` while the
+    #:         reader sees a copyable call — and the dead-end spelling (`The tool
+    #:         tortoise_list_grap*hs* lists names.`) was ACCEPTED where the plain one is an R2
+    #:         dead end. The rendered arm now runs for EVERY unit and only `shown` stays behind
+    #:         the `&` gate, which is exact rather than approximate (`_decoded_source` resolves
+    #:         references and nothing else, so with no `&` it returns the source unchanged). A
+    #:         delimiter strip is NOT the fix: `tortoise*_*list_graphs` renders with its
+    #:         delimiters intact, so it is not the name —
+    #:         `test_a_delimiter_that_does_NOT_render_as_the_name_is_accepted` pins that
+    #:         control. Same round, a second spelling gap in `CALL_FORM`: its class was `[ \t]`,
+    #:         so `Call tortoise_list_graphs&nbsp;(x=1)` — the very `name (args)` shape a plain
+    #:         space already reds — was ACCEPTED, because the renderer emits U+00A0. The class
+    #:         is now `[^\\S\\n\\r]` ("horizontal whitespace": NBSP, EN SPACE, THIN SPACE …) and
+    #:         never a line terminator. ⚠️ RESIDUAL, stated not tuned: an invisible character
+    #:         INSIDE the name (`tortoise&#8203;_list_graphs`) is still ACCEPTED — closing it
+    #:         means stripping a codepoint class from every judged text before tokenizing, and
+    #:         it is pinned as a declared residual by
+    #:         `test_declared_residual_an_invisible_character_INSIDE_the_name_is_accepted` so
+    #:         this paragraph cannot later be read more narrowly than it behaves.
     #:       * the judged UNITS are every leaf block **and the source between them**, so a
     #:         retired name in a link-reference DEFINITION is reached in EVERY spelling. That
     #:         text is in NO block (the parser consumes the definition), which is why R2 already
@@ -1303,7 +1329,14 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: `name (args)`, `` `name`(args) `` and `<code>name</code>(args)` all RENDER as a call a
     #: reader can copy (#14237 r10 review P2 — the tag form was ACCEPTED before it was added).
     #: HORIZONTAL only — a newline is never a call.
-    CALL_FORM = re.compile(r"(?:[ \t]*(?:[`*_~]+|</?[A-Za-z][^>]*>))*[ \t]*\(")
+    #:
+    #: ⛔ HORIZONTAL SPACE IS A CLASS, NOT TWO CHARACTERS (#14237 r17, measured fail-open). The
+    #: class was `[ \t]`, so `Call tortoise_list_graphs&nbsp;(x=1)` — which renders as
+    #: `name (x=1)`, the SAME shape a plain space already reds — was ACCEPTED, because the
+    #: renderer emits U+00A0 and the class did not hold it. `[^\S\n\r]` is exactly "horizontal
+    #: whitespace": every separator a reader sees as a space (NBSP, EN SPACE, THIN SPACE …),
+    #: and neither line terminator, so a newline stays not-a-call by construction.
+    CALL_FORM = re.compile(r"(?:[^\S\n\r]*(?:[`*_~]+|</?[A-Za-z][^>]*>))*[^\S\n\r]*\(")
 
     @classmethod
     def is_call_form(cls, text: str, at: int) -> bool:
@@ -1669,11 +1702,20 @@ class TestEveryReaderNamesTheLiveListingDoor:
         units.sort(key=lambda unit: (unit[0], unit[1]))
         for begin, finish, body, shown, rendered in units:
             raw = text[begin:finish]
-            # `&` and `\` are markdown's TWO spelling mechanisms, and the only ways the source
-            # can differ from the text the reader sees while a retired name is on screen. A
-            # unit carrying neither cannot hide a spelling-variant mention.
-            if "&" not in raw and "\\" not in raw:
-                continue
+            # ⛔ ONE SPELLING MECHANISM CHANGES THE DECODED SOURCE, AND IT IS `&` (#14237 r17,
+            # measured fail-open). This gate used to be `if "&" not in raw and "\\" not in
+            # raw: continue`, on the stated premise that `&` and `\` are "the only ways the
+            # source can differ from the text the reader sees while a retired name is on
+            # screen". THAT PREMISE WAS FALSE and the gate was the bug: rendering also
+            # REMOVES MARKUP, so markup INSIDE the name splits it into raw tokens that are
+            # not retired names at all — `Call tortoise_list_graph*s*(x=1) for names. Use
+            # tortoise_graph_overview(...)` and `…tortoise_list_graph``s``(x=1)…` both render
+            # as a copyable call to the retired door and both returned `R1 [] R2 []`. So the
+            # RENDERED arm now runs for EVERY unit, and only `shown` stays behind the `&`
+            # gate — which is exact rather than approximate, because `_decoded_source`
+            # resolves character references and NOTHING else: with no `&` in the source it
+            # returns the source unchanged.
+            judged_texts = (shown, rendered) if "&" in raw else (rendered,)
             # ONE entry per (name, unit): every arm below can discover the same door, and two
             # entries for one mention would report it twice.
             calls: dict[str, int] = {}
@@ -1684,7 +1726,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
             # the other spelling must not clear it. `rendered` (the parser's own output) is
             # where a spelling-variant CALL is JUDGED, because only the renderer resolves an
             # escape and knows a code span keeps it literal.
-            for judged in (shown, rendered):
+            for judged in judged_texts:
                 for name, call_end in cls._excess_mentions(raw, judged):
                     calls[name] = call_end if call_end >= 0 else calls.get(name, -1)
             # ⛔ A *PLAIN* NAME WHOSE CALL FORM IS SPELLED WITH AN ESCAPE OR A REFERENCE
@@ -2833,15 +2875,19 @@ class TestEveryReaderNamesTheLiveListingDoor:
         red. That is why `_inline_text` takes `breaks` and R1 passes `"\\n"`. Reverting it to
         the default reds exactly this row.
 
-        ⛔ THE STRAY `&` IS THE POINT, NOT NOISE. `_entity_only_mentions` walks only the
-        units whose source carries `&` or `\\` (the only ways a spelling can differ from what
-        a reader sees), so without it this paragraph would never reach the rendered arm and
-        the row would pass for the wrong reason — measured: with the `&` removed, the
-        `breaks=" "` mutant survives the whole class. An `&` that is not a reference is
-        left alone by the decode, so it changes nothing else.
+        ⛔ THE STRAY `&` WAS THE POINT UNTIL ROUND 17, AND IT IS NOW GONE (#14237 r17,
+        measured). `_entity_only_mentions` used to walk only the units whose source carried
+        `&` or `\\`, so without an `&` this paragraph never reached the rendered arm and the
+        row passed for the wrong reason — measured then: with the `&` removed, the
+        `breaks=" "` mutant survived the whole class. The r17 fix runs the rendered arm for
+        EVERY unit (the gate was the bug: markup inside a name splits it into raw tokens that
+        are not retired names at all), so the arm is reached without any `&`. RE-MEASURED at
+        this head with the `&` removed AND `breaks=" "` restored: this row and
+        `test_a_newline_is_never_a_call_form` both red. Keeping the `&` would have left this
+        docstring asserting a condition that no longer decides anything.
         """
         text = ("Call tortoise_list_graphs\n(x=1) for names. "
-                'Use tortoise_graph_overview(section="graphs") instead — mind the & sign.\n')
+                'Use tortoise_graph_overview(section="graphs") instead.\n')
         assert self.retired_call_forms(text) == [], (
             "a HARD-WRAPPED bracket was read as a call: "
             f"{self.retired_call_forms(text)}")
@@ -2961,6 +3007,121 @@ class TestEveryReaderNamesTheLiveListingDoor:
         )
         assert not self.notes_missing_replacement(text)
         assert not self.retired_call_forms(text)
+
+    @pytest.mark.parametrize("split", [
+        "tortoise_list_graph*s*",
+        "tortoise_list_grap**hs**",
+        "tortoise_list_graph``s``",
+    ], ids=["emphasis-inside", "strong-inside", "code-span-split"])
+    @pytest.mark.parametrize("arm", ["call", "dead-end"])
+    def test_a_name_SPLIT_by_inline_markup_is_still_the_name(self, split, arm):
+        """⛔ MEASURED FAIL-OPEN (#14237 r17): markup INSIDE the name defeated the guard.
+
+        The discovery arm skipped every unit whose raw source carried neither `&` nor `\\`,
+        on the stated premise that those are "the only ways the source can differ from the
+        text the reader sees while a retired name is on screen". Rendering also REMOVES
+        markup, so markup inside the name splits it into raw tokens that are not retired
+        names at all — and the unit was then skipped before the rendered arm could read it.
+        Measured at the r16 head: `Call tortoise_list_graph*s*(x=1) for names. Use
+        tortoise_graph_overview(...)` and the `` ``s`` `` spelling both returned `R1 [] R2 []`
+        while the reader sees a copyable call, and the same sentence with the plain name reds
+        R1. The dead-end spelling (`The tool tortoise_list_grap*hs* lists names.`) was
+        ACCEPTED too, where the plain one is an R2 dead end.
+
+        ⛔ WHY THE RENDERED ARM AND NOT A DELIMITER STRIP: a strip is a hand-written guess at
+        what markup removes, and the parser already knows. `tortoise*_*list_graphs` renders
+        with its delimiters intact (they are literal there), so it is NOT the name — pinned
+        by `test_a_delimiter_that_does_NOT_render_as_the_name_is_accepted`, which a strip
+        would red.
+        """
+        replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
+        # TWO ROWS PER SPELLING, one per rule (#14237 r17): the verdict that changes is R1's
+        # for a call and R2's for a dead end, and a single row asserting both would abort on
+        # the first and leave the second with no mutant that can reach it.
+        if arm == "call":
+            call = f"Call {split}(x=1) for names. {replacement}\n"
+            assert self.retired_call_forms(call) == ["tortoise_list_graphs:1"], (
+                f"a copyable call whose NAME is split by markup was accepted: {call!r} -> "
+                f"{self.retired_call_forms(call)}")
+            assert self.notes_missing_replacement(call) == [], (
+                "a call form was graded a dead end as well: "
+                f"{self.notes_missing_replacement(call)}")
+            return
+        dead_end = f"The tool {split} lists names.\n"
+        assert self.retired_call_forms(dead_end) == [], (
+            f"the dead-end arm is not a call, so this row measures nothing: {dead_end!r}")
+        assert self.notes_missing_replacement(dead_end), (
+            f"an INSTRUCTION naming only the retired door was accepted when the name was "
+            f"split by markup: {dead_end!r}")
+
+    def test_a_delimiter_that_does_NOT_render_as_the_name_is_accepted(self):
+        """The control for the row above: only text the RENDERER produces is the name.
+
+        `tortoise*_*list_graphs` and `tortoise_list_~~g~~raphs` keep their delimiters in the
+        rendered text (they are literal there, not markup), so the reader does not see the
+        retired door and there is nothing to report. This is what separates reading the
+        parser's output from stripping `*`/`_`/`~` out of the source: the strip is the cheap
+        approximation, and it would red both of these correct sentences.
+        """
+        replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
+        for literal in ("tortoise*_*list_graphs", "tortoise_list_~~g~~raphs"):
+            text = f"Call {literal}(x=1) for names. {replacement}\n"
+            assert self.retired_call_forms(text) == [], (
+                f"a delimiter the renderer kept LITERAL was read as the retired name in "
+                f"{literal!r}: {self.retired_call_forms(text)}")
+            assert self.notes_missing_replacement(text) == [], (
+                f"{literal!r} -> {self.notes_missing_replacement(text)}")
+
+    @pytest.mark.parametrize("space,spelling", [
+        (" ", "a plain ASCII space"),
+        ("&nbsp;", "U+00A0"),
+        ("&ensp;", "U+2002"),
+        ("&thinsp;", "U+2009"),
+    ], ids=["ascii-space", "nbsp", "en-space", "thin-space"])
+    def test_every_HORIZONTAL_space_before_the_bracket_is_still_a_call(
+            self, space, spelling):
+        """⛔ MEASURED FAIL-OPEN (#14237 r17): the class was `[ \\t]`, so NBSP was accepted.
+
+        `CALL_FORM` already treats `name (args)` — a name, a SPACE, a bracket — as a call, so
+        the shape is in scope by the rule's own wording. The rendered text of
+        `Call tortoise_list_graphs&nbsp;(x=1)` carries U+00A0, not a space, and the class did
+        not hold it: measured at the r16 head that sentence returned `R1 [] R2 []` while its
+        ASCII-space twin reds. The class is now `[^\\S\\n\\r]` — "horizontal whitespace" — so
+        the parametrize covers the members a writer can reach through an entity, and the
+        ASCII row is the control that keeps the others from passing for the wrong reason.
+        """
+        replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
+        text = f"Call tortoise_list_graphs{space}(x=1) for names. {replacement}\n"
+        assert self.retired_call_forms(text) == ["tortoise_list_graphs:1"], (
+            f"a call separated by {spelling} was accepted: {text!r} -> "
+            f"{self.retired_call_forms(text)}")
+        assert self.notes_missing_replacement(text) == [], (
+            "a call form was graded a dead end as well: "
+            f"{self.notes_missing_replacement(text)}")
+
+    def test_declared_residual_an_invisible_character_INSIDE_the_name_is_accepted(self):
+        """⚠️ DECLARED RESIDUAL — the bound of the two fixes above, stated not tuned.
+
+        A ZERO-WIDTH character inside the name (`tortoise&#8203;_list_graphs`) renders as the
+        door with an invisible character in it, and it is ACCEPTED: the decoded text tokenizes
+        as `tortoise` + `_list_graphs`, so no reader of this guard sees a retired name. Closing
+        it means stripping a codepoint class (ZWSP/ZWNJ/ZWJ/word-joiner/soft hyphen) from
+        every judged text before tokenizing, which is a wider change than the two spelling
+        fixes this round and buys a shape nobody writes by hand — a name assembled from a
+        character reference for an invisible codepoint.
+
+        It is pinned here so the class comment cannot later describe the bound more narrowly
+        than it behaves, and so the plain control beside it stays red: the verdict DOES depend
+        on the spelling for this one shape, and that is the honest statement of the residual.
+        """
+        replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
+        plain = f"Call tortoise_list_graphs(x=1) for names. {replacement}\n"
+        hidden = f"Call tortoise&#8203;_list_graphs(x=1) for names. {replacement}\n"
+        assert self.retired_call_forms(plain) == ["tortoise_list_graphs:1"], (
+            f"the plain control no longer reds, so this residual measures nothing: {plain!r}")
+        assert self.retired_call_forms(hidden) == [], (
+            "the invisible-character residual is CLOSED — delete this row and say so in the "
+            f"class comment instead of leaving a stale bound: {self.retired_call_forms(hidden)}")
 
     @pytest.mark.parametrize("relpath", CALL_INSTRUCTION_DOCS)
     def test_no_retired_name_is_offered_as_a_copyable_call(self, relpath):
