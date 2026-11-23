@@ -1,0 +1,21 @@
+{
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "exit_code": null,
+  "heartbeat_at": 1795407485,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14357-fallback-1795407485-p638847-2529ae26",
+  "lease_until": 1795444085,
+  "pid": 638847,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795407485,
+  "state": "RUNNING",
+  "tag": "14357-fallback",
+  "worktree": "/home/cmux/tortoise/.worktrees/14357-fallback"
+}
