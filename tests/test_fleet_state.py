@@ -37,10 +37,14 @@ import pytest
 # `_HARNESS_PREFIX` is imported privately ON PURPOSE: it is the single source of the
 # `HARNESS DEFECT [#5049]` family marker, and every in-tree `HarnessDefect` raise site renders it
 # from this same constant — `tests/_verdict.py` and this file's three arms (census-error, crash,
-# clean-exit); `grep -rn 'raise HarnessDefect(' --include=*.py tests/ tools/ tortoise/` is the
-# census, re-measured rather than listed here, because a list written into prose goes stale the
-# moment a fourth arm lands. Duplicating the literal would let the two drift, and the marker is
-# what makes a harness fault attributable in a log rather than only by its exception class.
+# clean-exit). Re-measured rather than listed, because a list written into prose goes stale the
+# moment a fourth arm lands. The census, ANCHORED on purpose (the unanchored pattern matches this
+# very comment, giving 6 for 5):
+#
+#   grep -rn '^[[:space:]]*raise HarnessDefect(' --include=*.py tests/ tools/ tortoise/
+#
+# Duplicating the literal would let the two drift, and the marker is what makes a harness fault
+# attributable in a log rather than only by its exception class.
 from tests._verdict import _HARNESS_PREFIX, HarnessDefect, inconclusive
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -3705,12 +3709,19 @@ def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
 def _row_for_pid(pid: int) -> str:
     """The `command=` text a census would read for ONE pid — a DIAGNOSTIC, never an oracle.
 
-    Only ever called on a failure path (#12039): when the poll ends without the census seeing
-    the fixture's pid — the deadline expiring, or the child dying early — what settles the
-    cause in one run is whether the table holds the fixture at all, holds it under a
-    truncated argv[0], or does not hold it at all. `""` means the table has no row for the
-    pid. ⚠️ Called BEFORE `proc.poll()` by the test, on purpose: `poll()` collects the child
-    and a collected child has no row left to quote.
+    TWO callers (#12039), and BOTH depend on the same ⚠️: `poll()` collects the status and a
+    collected child has no row left to quote, so every call site reads the row FIRST.
+
+      1. the fixture test's FAILURE path — when the poll ends without the census seeing the
+         fixture's pid (the deadline expiring, or the child dying early), what settles the cause
+         in one run is whether the table holds the fixture at all, holds it under a truncated
+         argv[0], or does not hold it at all;
+      2. `test_child_exited_reads_the_status_without_reaping_the_row`, on a PASSING path, where
+         the row IS the assertion's subject — it is how `_child_exited`'s `WNOWAIT` is proven to
+         have left the status uncollected.
+
+    ("Only ever called on a failure path" was true before caller 2 existed, and is not any more.)
+    `""` means the table has no row for the pid.
     """
     import subprocess  # no module-level import in this file; the caller imports it too
 
@@ -3859,8 +3870,9 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
         arms below: #5049 rule 1 is about a deadline expiring on a LIVE *subject*, never about
         turning THIS arm into a skip;
       * the census **keeps** reporting an error while ``ps`` itself answers — `_CENSUS_ERROR_STREAK`
-        CONSECUTIVE samples, so ONE lost ``ps`` under load is not the census (that is the box,
-        #5049 rule 1, and it does not red a required shard);
+        CONSECUTIVE samples **spanning `_CENSUS_ERROR_MIN_SPAN_S`**. It is a CONJUNCTION: one
+        lost ``ps`` under load is not the census (#5049 rule 1), and neither are TWO that are
+        0.2 s apart — the count-only reading is the gate mutation that redded `late_pair`;
       * a clean exit means the fixture never ran its command (``rc >= 0``);
       * a CRASH signal (SIGSEGV/SIGABRT/…) means the interpreter under it died.
 
@@ -4412,6 +4424,12 @@ def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
     assert "_ps_answers" in doc, (
         "the header's census-error skip must also require `_ps_answers()` to come back empty; "
         "`where the process table cannot be read at all` alone is the permanent-green drift")
+    # And the FAIL boundary is a CONJUNCTION, not a sample count (#12039 cycle 4). Without this
+    # token the header can state "N consecutive samples" alone, and a reader re-deriving the gate
+    # from it writes the count-only form — the mutation that redded `late_pair` with `over 0.20s`.
+    assert "_CENSUS_ERROR_MIN_SPAN_S" in doc, (
+        "the header stopped naming the SPAN half of the census-error FAIL boundary, so the rule "
+        "it publishes is the count-only gate the code does not implement (#12039)")
 
 
 def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
