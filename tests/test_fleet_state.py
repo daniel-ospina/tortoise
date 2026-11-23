@@ -3848,18 +3848,28 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     box without a usable `ps` does not red a census that is fine — **or** where an
     OUTSIDE signal killed the fixture's child while the poll ran (`_OUTSIDE_SIGNALS` — the OOM
     killer, an orphan sweep, the shard's own timeout; a killed child has no `argv[0]` for any
-    census to match). Everything else stays a FAIL, and there are THREE of them — the taxonomy is
+    census to match). Everything else stays a FAIL, and there are FOUR of them — the taxonomy is
     enumerated here so a reader re-deriving from this header cannot reinstate a skip that the
-    arms below deliberately removed (#12039, review cycle 4):
+    arms below deliberately removed (#12039, review cycles 4 and 6):
 
+      * the child stays **ALIVE** and unreported for the whole deadline (``rc is None``) — the
+        `-ww` pin itself, and this test's primary assertion. ⛔ This is NOT one of the substrate
+        arms below: #5049 rule 1 is about a deadline expiring on a LIVE *subject*, never about
+        turning THIS arm into a skip;
       * the census **keeps** reporting an error while ``ps`` itself answers — `_CENSUS_ERROR_STREAK`
         CONSECUTIVE samples, so ONE lost ``ps`` under load is not the census (that is the box,
         #5049 rule 1, and it does not red a required shard);
       * a clean exit means the fixture never ran its command (``rc >= 0``);
       * a CRASH signal (SIGSEGV/SIGABRT/…) means the interpreter under it died.
 
-    The last two are the test substrate's fault, not the box's, and the first is this test's own
-    subject. See the exits far below.
+    The last two are the test substrate's fault, not the box's; the second is this test's own
+    subject; the first is the property under test. See the exits far below.
+
+    ⚠️ THE COUNT IS PART OF THE CONTRACT. Four `raise` sites and two skip paths; a header that
+    states a different count is the drift `test_the_long_path_test_header_names_the_census_error_fail_arm`
+    CANNOT see, because that guard pins two NAMES and not a number. (Measured drift: this block
+    said "THREE" while omitting the ALIVE arm, in the same docstring that says "FOUR
+    classifications" — two contradictory counts, in the block a guard exists to keep honest.)
 
     ⛔ IT IS NOT A COPY OF `sleep` ANY MORE (measured on the `ubuntu-26.04` hosted
     runner `GitHub Actions 1000848497`, `test (c)`, head `70116a870dbb`). On that image
@@ -4218,8 +4228,8 @@ def _verdict_or_fail(expect, why: str, call):
     [
         (None, AssertionError, "was ALIVE and invisible to the census", "the -ww pin still fails"),
         (-9, "skip", "INCONCLUSIVE [#5049]", "SIGKILL from outside is the box (rule 1)"),
-        (-11, HarnessDefect, "HARNESS DEFECT [#5049]", "SIGSEGV is the substrate (rule 4)"),
-        (1, HarnessDefect, "HARNESS DEFECT [#5049]", "a clean exit is the substrate (rule 4)"),
+        (-11, HarnessDefect, "the fixture child CRASHED on", "SIGSEGV is the substrate (rule 4)"),
+        (1, HarnessDefect, "exited rc=", "a clean exit is the substrate (rule 4)"),
     ],
 )
 def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc, expect, marker, why) -> None:
@@ -4230,6 +4240,15 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
     and a fixture that dies ON ITS OWN — a clean exit under a `time.sleep(60)` payload, or a
     crash signal — must not go green by skip (the false PASS the first fix nearly shipped, which
     the `rc >= 0` arm guards and the crash arm guards from the other side).
+
+    ⛔ EACH ARM CARRIES ITS OWN MARKER, NOT THE SHARED FAMILY ONE (#12039 review cycle 2). Both
+    substrate arms used to assert `HARNESS DEFECT [#5049]`, so the `-11` param could not tell a
+    CRASH from a clean exit — measured: DELETING the crash arm (so a SIGSEGV is reported as
+    "exited rc=-11 on its own … the fixture never ran its command") left all four params GREEN.
+    The shared marker pinned "a fixture death FAILs", never "a crash is diagnosed AS a crash".
+    So the crash arm's marker is the phrase only it can produce (`CRASHED on`) and the clean
+    exit's is `exited rc=`. Every `HarnessDefect` message still carries the `HARNESS DEFECT
+    [#5049]` family marker its contract requires — that is a separate assertion, below.
 
     Each `HarnessDefect` message must carry the `HARNESS DEFECT [#5049]` family marker — the
     contract `tests/_verdict.py:56-59` states — or a triager sees the FAIL only by its exception
@@ -4257,6 +4276,12 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
     raised = _verdict_or_fail(
         expect, why, lambda: test_pi_processes_sees_a_real_long_path_lane(monkeypatch))
     assert marker in str(raised), why
+    if expect is HarnessDefect:
+        # The arm-specific `marker` above DISCRIMINATES the two substrate arms; the family marker
+        # is a separate contract every `HarnessDefect` carries (`tests/_verdict.py`), so assert
+        # both — distinct arms must not be allowed to drop the family prefix to look unique.
+        assert _HARNESS_PREFIX in str(raised), (
+            "every HarnessDefect carries the family marker, whatever its own arm-specific text")
     elapsed = clock.now - _FakeClock.START
     if rc is None:
         assert elapsed >= 10.0, "the ALIVE arm must still burn the full deadline and still fail"
