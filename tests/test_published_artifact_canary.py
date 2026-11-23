@@ -2954,11 +2954,58 @@ def _strip_shell_comments(script: str) -> str:
         # …and `_executable_prose_lines` returned `[]` for all three. The expansion is read as
         # a WORD here — each `${` level carrying its OWN inner quote state — so a `$( )` inside
         # it is still scanned, and the comment test below is suppressed while it is open.
-        if ch == "$" and script.startswith("${", i):
-            out.append("${")
-            brace_quotes.append(None)
-            at_word_start, i = False, i + 2
-            continue
+        if ch == "$":
+            # ⛔ A CONTEXT OPENER CAN BE SPLICED AND THEN IT IS STILL AN OPENER (fresh-context
+            # review of #14314, P2, MEASURED). bash deletes a backslash+newline pair BEFORE it
+            # tokenizes, so `$` + splice + `{` IS `${` — and this function already models that
+            # splice for the heredoc operator and `_executable_prose_lines` models it for `$(`,
+            # so a reader of either branch would reasonably conclude it was modelled here too.
+            # It was not, the context stayed untracked, and the `#` after it stripped a
+            # substitution that RAN. Measured, marker created:
+            #
+            #   $ printf 'echo $\\\n{x:-a # $(touch SPB)}\n' | bash -e -   → 'a #', SPB CREATED
+            #   $ printf 'echo $\\\n[ 1 # $(touch SPA) ]\n'   | bash -e -   → SPA CREATED
+            #
+            # …both `[]` from the scan. `opener` skips the splice run and the pair is copied
+            # VERBATIM into the output (it is part of the text; only the shell deletes it), so
+            # the adjacent and spliced spellings take ONE path. `$((` is not handled here on
+            # purpose (MEASURED): its splice is not a silent pass, because the surviving `$(` is
+            # itself one of the detector's tokens, so the line is reported anyway.
+            opener = i + 1
+            while script.startswith("\\\n", opener):
+                opener += 2
+            if script.startswith("{", opener):
+                out.append(script[i : opener + 2])
+                brace_quotes.append(None)
+                at_word_start, i = False, opener + 2
+                continue
+            # ⛔ `$[ … ]` IS THE SAME WORD CONTEXT AS `${ … }` AND `$(( … ))` (fresh-context
+            # review of #14314, P3, MEASURED). It is bash's deprecated arithmetic expansion. A
+            # `#` inside it opens no comment — so everything after it on the line is still CODE
+            # and a substitution there RUNS. ⛔ THE REASON IS *NOT* THAT `#` IS A VALID
+            # ARITHMETIC TOKEN (review cycle 20, P3, MEASURED — an earlier version of this
+            # comment claimed the `16#ff` base specifier and that is FALSE here): bash expands
+            # BEFORE it evaluates, so the `$( )` runs even though the arithmetic then rejects
+            # the text —
+            #
+            #   $ bash -e -c 'echo $[ 1 # $(touch M6) ]'
+            #   bash: 1 #  : syntax error: invalid arithmetic operator (error token is "#  ")
+            #   …and M6 is CREATED anyway.
+            #
+            # This lexer did not track the context, stripped the rest of the line as a comment,
+            # and `_executable_prose_lines` returned `[]` over an executing line: the SILENT
+            # PASS this file calls worse than no pin, reached through an operator it did not
+            # model. ⛔ THE DEPTH IS INCREMENTED, NOT RESET (review cycle 20, P2, MEASURED): a
+            # `$[` inside an open `$[ ]` that set the depth to 1 let the INNER `]` close the
+            # context, and a `#` after it stripped a LIVE substitution —
+            # `echo $[ $[ 1 ] # $(touch NEST) ]` created NEST while the scan reported `[]`.
+            # bash really does bracket-match on `[`/`]` (`echo $[ 1 + 2 [ ] ]` demands a second
+            # `]`), so depth is the right model and only the reset was wrong. A backslash pair
+            # is consumed by the escape branch above, so an escaped `]` closes nothing.
+            if script.startswith("[", opener):
+                out.append(script[i : opener + 2])
+                depr_arith, at_word_start, i = depr_arith + 1, False, opener + 2
+                continue
         # ⛔ A QUOTED `}` DOES NOT CLOSE THE EXPANSION (review cycle 18, P1, MEASURED — a
         # fail-open introduced by the FIRST version of this branch, which kept a bare depth
         # counter). bash quotes the inside of `${x:-word}`, so `"` opens a quote there and a
@@ -2984,25 +3031,6 @@ def _strip_shell_comments(script: str) -> str:
             elif ch == "}":
                 brace_quotes.pop()
             i += 1
-            continue
-        # ⛔ `$[ … ]` IS THE SAME WORD CONTEXT AS `${ … }` AND `$(( … ))` (fresh-context review
-        # of #14314, P3, MEASURED). It is bash's deprecated arithmetic expansion, and a `#`
-        # inside it is an ARITHMETIC token (`16#ff`), not a comment opener — so everything
-        # after it on the line is still CODE and a substitution there RUNS. This lexer did
-        # not track it, stripped the rest of the line as a comment, and
-        # `_executable_prose_lines` returned `[]` over an executing line: the SILENT PASS this
-        # file calls worse than no pin, reached through an operator it did not model.
-        # Measured, marker created by the substitution:
-        #
-        #   $ printf 'echo $[ 1 # $(touch /tmp/lexm6) ]\n' > s6.sh && bash -e s6.sh
-        #   → marker CREATED; `_strip_shell_comments` gave `echo $[ 1 ` and the scan `[]`
-        #
-        # The closing bracket is tracked by DEPTH, not by `find(']')`, so a nested `[` inside
-        # the expression cannot close it early. A backslash pair is consumed by the escape
-        # branch above, so an escaped `]` cannot close it either.
-        if quote is None and script.startswith("$[", i):
-            out.append("$[")
-            depr_arith, at_word_start, i = 1, False, i + 2
             continue
         if depr_arith:
             out.append(ch)
@@ -3714,6 +3742,41 @@ def test_the_prose_pin_sees_the_DEPRECATED_arithmetic_and_PROCESS_substitutions(
     assert _executable_prose_lines(arithmetic_tick), (
         "a backtick inside `$[ … ]` after a `#` EXECUTES and the pin reported nothing"
     )
+
+    # ⛔ A NESTED `$[` MUST NOT RESET THE DEPTH (review cycle 20, P2, MEASURED). Setting the
+    # depth to 1 on every opener let the INNER `]` close the context, and the `#` after it then
+    # stripped a live substitution. bash really does bracket-match here — `echo $[ 1 + 2 [ ] ]`
+    # demands a second `]` — so depth is the right model and only the reset was wrong.
+    m8 = tmp_path / "m8"
+    nested_arith = f"echo $[ $[ 1 ] # $(touch {m8}) ]\n"
+    subprocess.run([*_RUNNER_SHELL, nested_arith], capture_output=True, text=True)
+    assert m8.exists(), (
+        "the nested `$[ $[ … ] # $( ) ]` shape did not execute its substitution — premise gone"
+    )
+    assert _executable_prose_lines(nested_arith), (
+        "a `$[` nested in an open `$[ ]` reset the depth, the inner `]` closed the context and "
+        "the `$( )` after the `#` VANISHED from the report — a silent pass over an executing line"
+    )
+
+    # ⛔ AND THE OPENER IS SPLICEABLE (review cycle 20, P2, MEASURED): bash deletes a
+    # backslash+newline BEFORE it tokenizes, so `$` + splice + `{` IS `${` — the same splice this
+    # function already models for the heredoc operator and `_executable_prose_lines` models for
+    # `$(`. Reading the opener only when the bytes were ADJACENT left the context untracked and
+    # the `#` inside it stripped a substitution that RAN.
+    for label, opener, script in (
+        ("brace", "${", f"echo $\\\n{{x:-a # $(touch {tmp_path / 'sp-brace'})}}\n"),
+        ("bracket", "$[", f"echo $\\\n[ 1 # $(touch {tmp_path / 'sp-bracket'}) ]\n"),
+    ):
+        marker = tmp_path / ("sp-brace" if label == "brace" else "sp-bracket")
+        subprocess.run([*_RUNNER_SHELL, script], capture_output=True, text=True)
+        assert marker.exists(), (
+            f"the spliced `{opener}` opener did not execute its substitution — premise gone: "
+            f"{script!r}"
+        )
+        assert _executable_prose_lines(script), (
+            f"a `$` spliced to `{opener[1:]}…` still opens that context and the `$( )` inside "
+            f"it RAN, but the pin reported nothing: {script!r}"
+        )
 
     # ⛔ AND PLAIN ARITHMETIC IS NOT AN OFFENCE — the fix tracks the CONTEXT, it does not red the
     # operator. Executed, so the clean row is not a vacuous `[]`.
