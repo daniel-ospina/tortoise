@@ -1,0 +1,201 @@
+{
+  "issue": "14344",
+  "ks": [
+    5,
+    10
+  ],
+  "new_rule": "search_engine.fuse_expansion_pass -> rrf_fusion([pass1, expanded])",
+  "old_rule": "expanded + pass-1-only (rank concatenation)",
+  "per_shape": {
+    "pass1=10,expanded=10,shared=0.2": {
+      "new": {
+        "5": {
+          "n": 500,
+          "new_admitted": 774,
+          "pass1_retained": 1726,
+          "pass1_top_in_head": 0
+        },
+        "10": {
+          "n": 500,
+          "new_admitted": 2021,
+          "pass1_retained": 2979,
+          "pass1_top_in_head": 0
+        }
+      },
+      "old": {
+        "5": {
+          "n": 500,
+          "new_admitted": 2016,
+          "pass1_retained": 484,
+          "pass1_top_in_head": 0
+        },
+        "10": {
+          "n": 500,
+          "new_admitted": 4000,
+          "pass1_retained": 1000,
+          "pass1_top_in_head": 0
+        }
+      }
+    },
+    "pass1=10,expanded=10,shared=0.6": {
+      "new": {
+        "5": {
+          "n": 500,
+          "new_admitted": 0,
+          "pass1_retained": 2500,
+          "pass1_top_in_head": 0
+        },
+        "10": {
+          "n": 500,
+          "new_admitted": 1008,
+          "pass1_retained": 3992,
+          "pass1_top_in_head": 0
+        }
+      },
+      "old": {
+        "5": {
+          "n": 500,
+          "new_admitted": 1000,
+          "pass1_retained": 1500,
+          "pass1_top_in_head": 0
+        },
+        "10": {
+          "n": 500,
+          "new_admitted": 2000,
+          "pass1_retained": 3000,
+          "pass1_top_in_head": 0
+        }
+      }
+    },
+    "pass1=10,expanded=20,shared=0.2": {
+      "new": {
+        "5": {
+          "n": 500,
+          "new_admitted": 804,
+          "pass1_retained": 1696,
+          "pass1_top_in_head": 0
+        },
+        "10": {
+          "n": 500,
+          "new_admitted": 2105,
+          "pass1_retained": 2895,
+          "pass1_top_in_head": 0
+        }
+      },
+      "old": {
+        "5": {
+          "n": 500,
+          "new_admitted": 2242,
+          "pass1_retained": 258,
+          "pass1_top_in_head": 0
+        },
+        "10": {
+          "n": 500,
+          "new_admitted": 4497,
+          "pass1_retained": 503,
+          "pass1_top_in_head": 0
+        }
+      }
+    },
+    "pass1=20,expanded=10,shared=0.2": {
+      "new": {
+        "5": {
+          "n": 500,
+          "new_admitted": 697,
+          "pass1_retained": 1803,
+          "pass1_top_in_head": 0
+        },
+        "10": {
+          "n": 500,
+          "new_admitted": 1894,
+          "pass1_retained": 3106,
+          "pass1_top_in_head": 0
+        }
+      },
+      "old": {
+        "5": {
+          "n": 500,
+          "new_admitted": 2009,
+          "pass1_retained": 491,
+          "pass1_top_in_head": 0
+        },
+        "10": {
+          "n": 500,
+          "new_admitted": 4000,
+          "pass1_retained": 1000,
+          "pass1_top_in_head": 0
+        }
+      }
+    },
+    "pass1=5,expanded=20,shared=0.2": {
+      "new": {
+        "5": {
+          "n": 500,
+          "new_admitted": 1066,
+          "pass1_retained": 1434,
+          "pass1_top_in_head": 0
+        },
+        "10": {
+          "n": 500,
+          "new_admitted": 2500,
+          "pass1_retained": 2500,
+          "pass1_top_in_head": 0
+        }
+      },
+      "old": {
+        "5": {
+          "n": 500,
+          "new_admitted": 2381,
+          "pass1_retained": 119,
+          "pass1_top_in_head": 0
+        },
+        "10": {
+          "n": 500,
+          "new_admitted": 4751,
+          "pass1_retained": 249,
+          "pass1_top_in_head": 0
+        }
+      }
+    }
+  },
+  "seed": 14344,
+  "shapes": [
+    "pass1=10,expanded=10,shared=0.2",
+    "pass1=10,expanded=20,shared=0.2",
+    "pass1=20,expanded=10,shared=0.2",
+    "pass1=10,expanded=10,shared=0.6",
+    "pass1=5,expanded=20,shared=0.2"
+  ],
+  "summary": {
+    "k=10": {
+      "new_admitted_mean": {
+        "new": 3.8112,
+        "old": 7.6992
+      },
+      "pass1_retained_mean": {
+        "new": 6.1888,
+        "old": 2.3008
+      },
+      "pass1_top_only_displaced_rate": {
+        "new": 0.0,
+        "old": 0.0
+      }
+    },
+    "k=5": {
+      "new_admitted_mean": {
+        "new": 1.3364,
+        "old": 3.8592
+      },
+      "pass1_retained_mean": {
+        "new": 3.6636,
+        "old": 1.1408
+      },
+      "pass1_top_only_displaced_rate": {
+        "new": 0.0,
+        "old": 0.0
+      }
+    }
+  },
+  "trials_per_shape": 500,
+  "what_this_is": "the MERGE RULE's effect on evidence retained in the leg's first k positions, over seeded randomised pools \u2014 NOT a recall@k figure on any query set, and not comparable to docs/evidence/12186-capstone/measurement.json"
+}
