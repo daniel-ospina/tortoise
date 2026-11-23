@@ -1667,11 +1667,24 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
     # `__builtins__.update({...})` is REFUSED). The key is a literal and the receiver is a
     # namespace expression, which this predicate already owns — the same shape, one composition
     # over, and `_is_builtins_mapping` carries the READ half of it.
-    # (A LITERAL key only — this predicate takes no `consts`, so a computed key is left to the
-    # READ arm in `_is_builtins_mapping`, which does resolve one. Stated rather than implied.)
+    # ⛔ AND THE COMPUTED KEY, AND THE `.get(…)` FETCH (#14326 review cycles 22-23, EACH
+    # MEASURED GREEN **and LIVE**): `globals()["__builtins__" + ""].update({…})`,
+    # `globals()[_k].update({…})` and `globals().get("__builtins__").update({…})` each
+    # reinstated an allow-listed callee while the literal subscript store is REFUSED. The key
+    # is read with `_string_keys_of` — the same slot `_is_builtins_mapping`'s Subscript arm
+    # spells, and it resolves a literal concatenation even with an EMPTY `consts` — and the
+    # fetcher is this file's own enumerated `_BUILTINS_MAPPING_READS` family, applied to the
+    # namespace receiver. Cycle 22's note ("a LITERAL key only … this predicate carries no
+    # `consts`") was an honest statement of a gap, not a bound: the literal-only part of
+    # `_string_keys_of` needs no `consts` at all.
     if (isinstance(node, ast.Subscript)
-            and isinstance(node.slice, ast.Constant) and node.slice.value == "__builtins__"
+            and "__builtins__" in _string_keys_of(node.slice, {})
             and _is_namespace_expr(node.value)):
+        return True
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _BUILTINS_MAPPING_READS and node.args
+            and "__builtins__" in _string_keys_of(node.args[0], {})
+            and _is_namespace_expr(node.func.value)):
         return True
     if isinstance(node, ast.Name):
         # ⛔ AND `__builtins__`, THE ONE ROOT THAT NEEDS NO IMPORT (#14326 review cycle 19,
@@ -8096,6 +8109,14 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # MEASURED GREEN **and LIVE**): in an imported module — how this pin loads the tool —
         # `__builtins__` in the globals IS the builtins `__dict__`, so `globals()["__builtins__"]`
         # is the SAME mapping `__builtins__` names.
+        "a KEYED STORE out of `globals()`, computed key": (
+            '    globals()["__builtins__" + ""].update({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
+        "a KEYED STORE out of `globals().get(…)`": (
+            '    globals().get("__builtins__").update({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
         "a KEYED READ out of `globals()`": (
             '    globals()["__builtins__"]["exec"]'
             '("results = sdk._tortoise_fts_query(query=q)")\n'),
@@ -12308,6 +12329,15 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # NAME that is not itself the mapping — so closing it means teaching the predicate to
         # follow a bound method back to `__self__`, i.e. a different question, not another
         # spelling.
+        # ⛔ AND A NAME-CARRIED KEY INTO THE NAMESPACE (#14326 review cycle 23, MEASURED GREEN:
+        # `_k = "__builtins__"; globals()[_k]["print"] = getattr`). The literal and concatenated
+        # keys ARE closed (the two rows above); this one needs the NAME's value, and
+        # `_is_namespace_expr` takes no `consts` — threading one through a predicate that is
+        # ALSO used as an `_aliases_of` key is a signature change on a fixpoint, not another
+        # arm, which is why it is declared rather than closed here.
+        "`_k = \"__builtins__\"; globals()[_k][\"print\"] = getattr`": (
+            '_k = "__builtins__"', 'globals()[_k]["print"] = getattr',
+            f'print(sdk, "_tortoise_fts_query")("results = {read}", kind="statement")'),
         "`_u = _d.update; _u(builtins.__dict__)`": (
             'import builtins', '_d = {}', '_u = _d.update',
             '_u(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
