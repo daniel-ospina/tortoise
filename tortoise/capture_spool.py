@@ -1664,6 +1664,12 @@ def _scan_spool(
     # it is recorded ONCE per distinct unreadable SET (the aggregate after this
     # loop) rather than once per file per scan.
     unreadable: list[tuple[str, str]] = []
+    # Stems whose meta was READ but is unusable (not JSON, wrong shape, no
+    # session_id). Separate from `unreadable` because the LEDGER distinguishes
+    # them ("cannot read or decode" vs "meta is not valid JSON") — but both are
+    # entries this scan cannot see through, so both are handed back to the
+    # callers that must COUNT them.
+    corrupt: list[str] = []
     d = _entries_dir(root)
     # `Path.is_dir()` is True for a mode-000 directory and `Path.glob` SWALLOWS
     # the EACCES its `scandir` hits — so the old `is_dir()` + glob returned an
@@ -1743,9 +1749,19 @@ def _scan_spool(
             meta = None
         if not isinstance(meta, dict) or not isinstance(meta.get("session_id"), str) \
                 or not meta["session_id"]:
+            stem = path.name[: -len(".meta.json")]
+            # ⛔ COLLECTED WHATEVER `repair` IS — the same rule the read class
+            # above follows, for the same reason (#14347 review, cycle 2,
+            # finding 2). A corrupt meta is an entry that occupies disk and that
+            # `len(metas)` cannot see, so a read-only scan that silently dropped
+            # it UNDER-COUNTED the ceiling it was asked about. That is how the
+            # write path's admission probe, once it stopped repairing, would have
+            # lost a class: `repair=False` returned it to nobody and the bytes
+            # stopped enforcing. Collecting is not a mutation; only the ledger
+            # record and the quarantine below are.
+            corrupt.append(stem)
             if not repair:
                 continue
-            stem = path.name[: -len(".meta.json")]
             discards.append(record_discard(root, {
                 "session_id": f"unreadable:{stem}",
                 "reason": DISCARD_CORRUPT,
@@ -1823,7 +1839,8 @@ def _scan_spool(
             },
             stamp=stamp,
         ))
-    return metas, discards, sorted(stem for stem, _msg in unreadable)
+    return metas, discards, sorted(
+        [stem for stem, _msg in unreadable] + corrupt)
 
 
 # #3516 §B / #3515 piece 12: the closed set of clocks a leg may CLAIM. Pinned
@@ -2136,10 +2153,11 @@ def write_spool_entry(
         )
     )
 
-    # The stored turn count this write would QUARANTINE if it is admitted —
+    # The stored turns and BYTES this write would QUARANTINE if it is admitted —
     # resolved here so the disposition can be decided BEFORE the guards and
     # APPLIED after them (#14347 review F3).
     divergent_turns = 0
+    divergent_bytes = 0
     if unusable:
         # ⛔ THE WRITE PATH MUST NOT OVERWRITE WHAT IT COULD NOT USE AS A PRIOR
         # (#12487). Measured on this head, with an unreadable meta beside a
@@ -2214,6 +2232,16 @@ def write_spool_entry(
             # record are deferred to the admitted path; refusing here is not a
             # no-op, it is a mutation.
             divergent_turns = len(stored)
+            # ⛔ THE GATE IS "THE LOG HAS BYTES", NOT "THE LOG PARSED TO
+            # TURNS" (#14347 review, cycle 2, finding 1). `stored` is the PARSED
+            # list, so a log that HAS bytes but parses to ZERO turns — a torn
+            # first append, a foreign/partial format — left
+            # `divergent_turns == 0`, skipped the quarantine entirely, and was
+            # OVERWRITTEN by the full-snapshot `_atomic_write` below:
+            # `written: True`, no discard record, no `.orphan`. Measured. That is
+            # #12487's own signature, reintroduced by gating a BYTE decision on
+            # a PARSE result.
+            divergent_bytes = _file_size(log_path)
             stored = []
             extends = False
 
@@ -2476,9 +2504,31 @@ def write_spool_entry(
         # or not its meta was readable. Passing `None` for the unusable arm made
         # the byte total count the entry twice (its retained bytes, then the full
         # projected entry instead of the delta), which refused growths the health
-        # line called healthy AND inflated the count term by one for a write that
-        # adds no entry.
+        # line called healthy.
         replaces_session_id=replaces_session_id,
+        # …but a REPLACEMENT is not the same as ALREADY COUNTED (#14347 review,
+        # cycle 2, finding 4). `_saturated_for_metas` counts entries by
+        # `len(metas)`, and an entry whose meta cannot be read is in NEITHER that
+        # list nor its byte sum — so suppressing the count `+1` for it admitted
+        # a write the health line called SATURATED (measured at
+        # `max_entries=1` with one readable + one read-refused entry). The count
+        # term follows the PARSED list, the byte term follows OCCUPANCY; they
+        # are two different questions and they have two different answers:
+        # `prior is None` ⇒ this session is NOT in `len(metas)` ⇒ it ADDS one,
+        # whether it is a fresh session or an unreadable one being resynced.
+        adds_entry=(prior is None),
+        # ⛔ THE BYTES THIS WRITE IS ABOUT TO QUARANTINE ARE NOT IN THE
+        # PROJECTION (#14347 review, cycle 2, finding 3). The resync renames the
+        # stored log to `.orphan` AFTER this decision, so those bytes appear in
+        # the post-write total but in neither `entry_bytes` nor
+        # `_entry_bytes(replaces)` — an admitted resync could land the spool over
+        # `max_total_bytes` and the `prune_spool` on the SAME call would then
+        # evict the orphan it had just promised to keep (measured: QUARANTINED
+        # followed one line later by `evicted a quarantined log`). Counting them
+        # here refuses that resync BEFORE the rename instead of admitting it and
+        # then reaping what it preserved. They are NOT reclaimable credit: credit
+        # would say "prune may delete them", which is the outcome being avoided.
+        pending_orphan_bytes=divergent_bytes,
     ):
         discards.append(_record_refusal(root, {
             "session_id": snapshot.session_id,
@@ -2503,7 +2553,11 @@ def write_spool_entry(
                           if entry_on_disk else 0),
                 "discards": discards}
 
-    if divergent_turns:
+    if divergent_bytes:
+        # ⛔ THE GATE IS THE BYTES ON DISK, NOT THE PARSED TURN COUNT — see the
+        # diverge arm above (cycle-2 finding 1): a byte-bearing log that parses
+        # to zero turns must still be quarantined, never overwritten.
+        #
         # ⛔ THE QUARANTINE HAPPENS HERE, ON THE ADMITTED PATH ONLY (#14347 review
         # F3/F4). Above the guards it mutated the spool before the decision, so a
         # refusal had already moved the only addressable copy of the transcript.
@@ -2685,6 +2739,8 @@ def spool_saturated(
     *,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    adds_entry: bool | None = None,
+    pending_orphan_bytes: int = 0,
     repair: bool = True,
 ) -> bool:
     """Is the spool at a ceiling with NOTHING EVICTABLE left to reclaim?
@@ -2743,7 +2799,10 @@ def spool_saturated(
         root, metas, bounds,
         projected_bytes=projected_bytes,
         replaces_session_id=replaces_session_id,
-        unreadable_bytes=_unreadable_entry_bytes(root, unreadable))
+        adds_entry=adds_entry,
+        pending_orphan_bytes=pending_orphan_bytes,
+        unreadable_bytes=_unreadable_entry_bytes(root, unreadable),
+        unreadable_count=len(unreadable))
 
 
 def _saturated_for_metas(
@@ -2753,7 +2812,10 @@ def _saturated_for_metas(
     *,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    adds_entry: bool | None = None,
+    pending_orphan_bytes: int = 0,
     unreadable_bytes: int = 0,
+    unreadable_count: int = 0,
 ) -> bool:
     """The ceiling arithmetic of :func:`spool_saturated`, over an ALREADY-READ scan.
 
@@ -2777,18 +2839,37 @@ def _saturated_for_metas(
     # moment an entry became unreadable — measured 5,228 bytes in `entries/`
     # against `max_total_bytes=1000` with the predicate answering False.
     total += unreadable_bytes
+    # Orphan bytes are the only credit prune may spend, so they are in the total
+    # AND in `reclaimable_orphan_bytes` (subtracted at every comparison below).
     total += reclaimable_orphan_bytes
+    # …and the SAME argument holds for the COUNT ceiling (#12483 said "both
+    # ceilings"; only the byte axis was fixed first). An unreadable entry is not
+    # in `len(metas)`, so counting only parsed metas let writes be admitted past
+    # `max_entries` without limit — measured: 6 unreadable metas with
+    # `Bounds(max_entries=3)` answered not-saturated. They are permanent (no meta
+    # to rank, never evicted) so they belong in the FLOOR as well as the total,
+    # exactly like the byte term.
+    total += pending_orphan_bytes
+    parsed_count = len(metas) + unreadable_count
+    # `adds_entry` is the COUNT answer and `replaces_session_id` is the BYTE
+    # answer, and they are NOT the same question (#14347 review, cycle 2,
+    # finding 4): an entry whose meta is unreadable occupies disk (so it is a
+    # byte REPLACEMENT) but is absent from `len(metas)` (so it still ADDS one to
+    # the count — otherwise the writer admitted a write the health line called
+    # SATURATED). Defaults keep every existing caller's behaviour.
+    if adds_entry is None:
+        adds_entry = replaces_session_id is None
     if projected_bytes is None and replaces_session_id is None:
         # STRICT: the question is whether ADDING an entry would cross the ceiling,
         # so a spool exactly AT the count ceiling is already saturated.
-        over_count = len(metas) >= bounds.max_entries
+        over_count = parsed_count >= bounds.max_entries
         over_bytes = total - reclaimable_orphan_bytes >= bounds.max_total_bytes
         strict = True
-        count = len(metas)
+        count = parsed_count
         if not over_count and not over_bytes:
             return False
     else:
-        count = len(metas) + (0 if replaces_session_id is not None else 1)
+        count = parsed_count + (1 if adds_entry else 0)
         if replaces_session_id is not None:
             # A GROWTH replaces this entry's bytes instead of adding a second
             # copy of them, and adds no count.
@@ -2837,6 +2918,8 @@ def _admission_saturated(
     session_id: str,
     projected_bytes: int | None = None,
     replaces_session_id: str | None = None,
+    adds_entry: bool | None = None,
+    pending_orphan_bytes: int = 0,
 ) -> bool:
     """Is THIS write refused? The write path's entry point to ``spool_saturated``.
 
@@ -2871,14 +2954,37 @@ def _admission_saturated(
     cheap = _cheap_spool_scan(root)
     if cheap is not None:
         names, total = cheap
-        added = 0 if replaces_session_id is not None else 1
+        added = 0 if (adds_entry is False or
+                      (adds_entry is None and replaces_session_id is not None)) else 1
         if (names + added <= bounds.max_entries
-                and total + (projected_bytes or 0) <= bounds.max_total_bytes):
+                and total + (projected_bytes or 0)
+                + pending_orphan_bytes <= bounds.max_total_bytes):
             return False
+    # ⛔ THE PROBE MUST NOT REPAIR (#14347 review, cycle 2, finding 2). This used
+    # to fall through to `spool_saturated`'s DEFAULT `repair=True`, so the write
+    # path called the repairing scanner directly — and on a spool near a ceiling a
+    # write that was then REFUSED had ALREADY had this session's meta unlinked and
+    # its turn log renamed to `.orphan`, which the next `prune_spool` evicts. The
+    # refusal text said "the turns the spool already holds are kept" about turns
+    # the probe had just moved. `spool_saturated`'s own docstring states the rule
+    # this call site broke: "A refused write therefore repairs nothing itself".
+    # A read-only probe is also why the corrupt-meta class now comes back from
+    # `_scan_spool` regardless of `repair` — with the repair off, an uncounted
+    # class is an unenforced ceiling.
+    #
+    # ⚠️ STATED CONSEQUENCE: with `repair=False` a CORRUPT meta counts as
+    # permanent (its `.orphan`-able log is not yet an orphan), so admission is
+    # more conservative than the post-repair state. That refusal loses nothing —
+    # the entry is intact, the conversation is still in the harness session log,
+    # and the DRAIN (`flush_spool`) still repairs and prunes, which unblocks it.
+    # Conservative-and-intact beats admitted-and-destroyed.
     return spool_saturated(
         root, bounds,
         projected_bytes=projected_bytes,
-        replaces_session_id=replaces_session_id)
+        replaces_session_id=replaces_session_id,
+        adds_entry=adds_entry,
+        pending_orphan_bytes=pending_orphan_bytes,
+        repair=False)
 
 
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:
@@ -3176,7 +3282,7 @@ def _unrecorded_from_metas(metas: list[dict]) -> list[str]:
     return found
 
 
-def _health_scan(root: Path) -> tuple[int, list[dict], int] | None:
+def _health_scan(root: Path) -> tuple[int, list[dict], int, int] | None:
     """ONE read-only pass over `entries/`: the pending count AND the metas.
 
     A health line needs two answers from the same directory — "how many captures
@@ -3202,6 +3308,14 @@ def _health_scan(root: Path) -> tuple[int, list[dict], int] | None:
     same SATURATED verdict the write path reaches, without a second walk. A meta
     it can read but not USE (invalid JSON, no ``session_id``) is not counted:
     the repairing scan quarantines it, and its log then counts as an orphan.
+
+    ⛔ THE FOURTH ELEMENT IS THE COUNT HALF OF THE SAME ARGUMENT (#12483 said
+    "both ceilings"). `len(metas)` cannot see either unreadable class, so a health
+    line that counted only parsed metas described a spool of THREE entries as
+    having none — and the write path, which now counts them, disagreed with it
+    about one directory. The stems are returned rather than their count because
+    the fourth element is also their identity, and one number derived from one
+    list cannot drift.
     """
     metas, discards, unreadable = _scan_spool(root, repair=False)
     if any(d.get("reason") == DISCARD_SPOOL_UNREADABLE for d in discards):
@@ -3216,7 +3330,8 @@ def _health_scan(root: Path) -> tuple[int, list[dict], int] | None:
     pending = max(0, on_disk - len(metas)) + sum(
         1 for m in metas
         if _terminal_marker(m) is None and not _entry_is_filed(m))
-    return pending, metas, _unreadable_entry_bytes(root, unreadable)
+    return (pending, metas, _unreadable_entry_bytes(root, unreadable),
+            len(unreadable))
 
 
 class CaptureHealth(NamedTuple):
@@ -3373,7 +3488,7 @@ def _spool_health_line(
         return CaptureHealth(
             "unreadable", 0, None,
             f"capture: UNREADABLE (cannot list {_entries_dir(root)})")
-    queued, scan_metas, unreadable_bytes = scan
+    queued, scan_metas, unreadable_bytes, unreadable_count = scan
     # #12379: the unrecorded-outcome ids are taken from THIS scan's metas (see
     # `CaptureHealth.unrecorded`) — the caller prints them, the pinned line never
     # carries them, and no second walk over `entries/` is needed.
@@ -3390,7 +3505,8 @@ def _spool_health_line(
     # construction: a health line must not quarantine, record or unlink the spool
     # it is describing.
     saturated = _saturated_for_metas(root, scan_metas, bounds,
-                                     unreadable_bytes=unreadable_bytes)
+                                     unreadable_bytes=unreadable_bytes,
+                                     unreadable_count=unreadable_count)
     status = recorded.get("status") if recorded is not None else None
     blocked_status = (
         status

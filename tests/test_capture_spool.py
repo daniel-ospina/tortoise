@@ -1084,11 +1084,18 @@ def test_the_ONE_health_scan_answers_both_questions_the_same_way(tmp_path):
     try:
         scanned = _health_scan(tmp_path)
         assert scanned is not None
-        pending, metas, unreadable_bytes = scanned
+        pending, metas, unreadable_bytes, unreadable_count = scanned
 
         assert unreadable_bytes > 0, (
             "the forwarded operand must be able to VARY, or the equivalence below "
             "is a tautology and a mutant returning a constant 0 stays green")
+        # The COUNT half of the same operand (#12483's "both ceilings"): the
+        # read-refused entry is absent from `len(metas)`, so a caller that counts
+        # only parsed metas reaches a DIFFERENT verdict than the write path.
+        assert unreadable_count == 3, (
+            "a constant 0 for the fourth element is the same tautology one "
+            "ceiling over; the three entries `len(metas)` cannot see are the "
+            "READ-REFUSED one, the corrupt meta and the one with no session id")
 
         assert pending == count_pending_captures(tmp_path) == 4, (
             "pending must mean the same thing on both walks: `undelivered`, plus "
@@ -1104,7 +1111,8 @@ def test_the_ONE_health_scan_answers_both_questions_the_same_way(tmp_path):
                        Bounds(max_entries=1000, max_total_bytes=1,
                               max_entry_bytes=1 << 20)):
             assert _saturated_for_metas(tmp_path, metas, bounds,
-                                        unreadable_bytes=unreadable_bytes) is \
+                                        unreadable_bytes=unreadable_bytes,
+                                        unreadable_count=unreadable_count) is \
                 spool_saturated(tmp_path, bounds, repair=False), (
                     f"the reused metas must reach the SAME verdict: {bounds}")
     finally:

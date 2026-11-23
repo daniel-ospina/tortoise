@@ -502,3 +502,201 @@ def test_a_FAILED_quarantine_refuses_instead_of_overwriting_the_log(tmp_path, mo
     assert len(log.read_text(encoding="utf-8").splitlines()) == len(stored), (
         "a quarantine that failed must never be followed by an overwrite of the "
         "very log it could not move")
+
+
+# ── cycle 2 — the seams the THIRD state opens ───────────────────────────────
+#
+# The three-state prior read (`PRIOR_META_OK` / `ABSENT` / `UNUSABLE`) is right;
+# these pin the places where the NEW state still met arithmetic and control flow
+# written for the old two. Each one is a distinct defect with its own mutation.
+
+
+def test_a_byte_bearing_log_that_parses_to_ZERO_turns_is_quarantined_not_overwritten(tmp_path):
+    """The gate on the diverging disposition is BYTES, not PARSED TURNS.
+
+    `stored` is the parsed turn list, so a log that has bytes but yields ZERO
+    turns — a torn first append, a foreign/partial format — made
+    ``divergent_turns == 0``, skipped the quarantine entirely and was
+    OVERWRITTEN by the full-snapshot write: ``written: True``, no discard record,
+    no ``.orphan``. That is #12487's own signature, reintroduced by gating a BYTE
+    decision on a PARSE result.
+
+    MUTATION THAT REDS THIS: gate the quarantine on ``divergent_turns`` instead of
+    ``divergent_bytes`` -> `written` is True with no record and the 22 stored
+    bytes are replaced.
+    """
+    locked = _write_meta(tmp_path, "sess-z")
+    # JSON lines, but no line is a TURN (no usable role/content) — the log is
+    # byte-bearing and parses to nothing.
+    log = _log_path(tmp_path, "sess-z")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text('{"note": "half-written"}\n[1, 2, 3]\n', encoding="utf-8")
+    original = log.read_bytes()
+    assert original, "the premise: the stored log really has bytes"
+    _lock(locked)
+    try:
+        res = write_spool_entry(tmp_path, _snapshot("sess-z"), ROOMY)
+    finally:
+        _unlock(locked)
+
+    orphans = list(_entries(tmp_path).glob("*.orphan*"))
+    assert res["written"] is True
+    assert orphans, "the stored bytes must be PRESERVED, not overwritten"
+    assert orphans[0].read_bytes() == original, (
+        "the quarantined orphan must hold exactly the bytes that were on disk")
+    detail = res["discards"][-1]["detail"]
+    assert "QUARANTINED" in detail
+    assert "(none)" not in detail, "the record must name the file it preserved"
+    assert len(log.read_text(encoding="utf-8").splitlines()) == len(TURNS)
+
+
+def test_a_REFUSED_write_mutates_NOTHING_even_when_the_prior_is_unreadable(tmp_path):
+    """The refusal contract: "a refused write therefore repairs nothing itself".
+
+    The admission probe is itself a scan, and that scan used to repair — so a
+    write REFUSED with ``spool_saturated`` had already had its meta unlinked and
+    its turn log renamed to ``.orphan``, which the next ``prune_spool`` evicts.
+    The refusal text said "the turns the spool already holds are kept" about
+    turns the probe had just moved.
+
+    MUTATION THAT REDS THIS: let the admission probe repair (``_scan_spool(...,
+    repair=True)`` from ``_admission_saturated``) -> an ``.orphan`` appears and
+    the live log is gone, on a write that was rejected.
+    """
+    # A full spool of undelivered entries, so admission is refused.
+    for sid in ("sess-a", "sess-b"):
+        _write_meta(tmp_path, sid, capture_lane="hook")
+        _write_turns(tmp_path, sid, TURNS)
+    locked = _write_meta(tmp_path, "sess-r")
+    log = _write_turns(tmp_path, "sess-r",
+                       [{"role": "user", "content": f"t{i}"} for i in range(6)])
+    before = log.read_bytes()
+    _lock(locked)
+    try:
+        res = write_spool_entry(
+            tmp_path, _snapshot("sess-r"), Bounds(max_entries=2))
+    finally:
+        _unlock(locked)
+
+    assert res["written"] is False
+    assert log.exists(), "a REFUSED write must leave the turn log in place"
+    assert log.read_bytes() == before, "…and byte-identical"
+    assert not list(_entries(tmp_path).glob("*.orphan*")), (
+        "a REFUSED write is not a mutation: nothing may be moved aside")
+    assert read_spool_meta(tmp_path, "sess-a") is not None
+    assert read_spool_meta(tmp_path, "sess-b") is not None
+
+
+def test_the_COUNT_ceiling_counts_retained_unreadable_entries(tmp_path):
+    """#12483 says the entry was invisible to **both** ceilings — the count one
+    was still blind after the byte axis was fixed.
+
+    ``_saturated_for_metas`` counts ``len(metas)``, and an unreadable meta never
+    reaches that list, so six unreadable entries with ``max_entries=3`` answered
+    False and writes were admitted past the count ceiling without limit.
+
+    MUTATION THAT REDS THIS: drop ``unreadable_count`` from ``parsed_count`` ->
+    False with six entries on disk and a ceiling of three.
+    """
+    locked = []
+    for i in range(6):
+        sid = f"sess-u{i}"
+        locked.append(_write_meta(tmp_path, sid))
+        _write_turns(tmp_path, sid, TURNS)
+    try:
+        for path in locked:
+            _lock(path)
+        bounds = Bounds(max_entries=3)
+        assert spool_saturated(tmp_path, bounds) is True
+        assert list_spool_metas(tmp_path)[0] == [], "the premise: none of them parse"
+    finally:
+        for path in locked:
+            _unlock(path)
+
+
+def test_the_writer_and_the_health_line_AGREE_at_the_count_ceiling(tmp_path):
+    """`entry_on_disk` is the BYTE answer; the COUNT answer is `prior is None`.
+
+    The unusable entry is absent from ``len(metas)``, so suppressing the count
+    `+1` for it (the F2 fix, over-applied) admitted a write the health line
+    called SATURATED. The two readers must not disagree about one directory.
+
+    MUTATION THAT REDS THIS: pass ``adds_entry=(prior is not None)`` (the F2 fix
+    applied to the count term too) -> the write is ADMITTED while the health line
+    says SATURATED.
+    """
+    _write_meta(tmp_path, "sess-ok", capture_lane="hook")
+    _write_turns(tmp_path, "sess-ok", TURNS)
+    locked = _write_meta(tmp_path, "sess-locked")
+    _write_turns(tmp_path, "sess-locked", TURNS)
+    bounds = Bounds(max_entries=1)
+    _lock(locked)
+    try:
+        line = capture_health_line(tmp_path, bounds=bounds).line
+        assert "SATURATED" in line, f"the premise: the health line is saturated: {line}"
+        res = write_spool_entry(tmp_path, _snapshot("sess-locked"), bounds)
+    finally:
+        _unlock(locked)
+
+    assert res["written"] is False, (
+        "the writer must not admit what the health line calls saturated")
+    assert res["discards"][-1]["reason"] == "spool_saturated"
+
+
+def test_a_resync_that_could_not_KEEP_its_orphan_is_refused_BEFORE_the_rename(tmp_path):
+    """The bytes a resync is about to quarantine belong in the projection.
+
+    The quarantine happens after the admission decision, so the bytes that become
+    the ``.orphan`` were in neither ``entry_bytes`` nor the replaced entry's
+    size — an admitted resync could land the spool over the byte ceiling and the
+    ``prune_spool`` on the SAME call then evicted the orphan it had just promised
+    to keep (measured: ``QUARANTINED`` followed one line later by ``evicted a
+    quarantined log``).
+
+    MUTATION THAT REDS THIS: drop ``pending_orphan_bytes`` from the admission
+    call -> the write is admitted and the stored six turns are reaped by the
+    prune that follows it.
+    """
+    locked = _write_meta(tmp_path, "sess-o")
+    stored = [{"role": "user", "content": "z" * 100} for _ in range(6)]
+    log = _write_turns(tmp_path, "sess-o", stored)
+    before = log.read_bytes()
+    # The CURRENT total fits; the post-write total cannot, because the orphan
+    # those bytes become is not reclaimable at decision time.
+    bounds = Bounds(max_entries=1000, max_total_bytes=len(before) + 50,
+                    max_entry_bytes=1 << 20)
+    _lock(locked)
+    try:
+        assert spool_saturated(tmp_path, bounds) is False, (
+            "the premise: today's bytes alone are under the ceiling")
+        res = write_spool_entry(tmp_path, _snapshot("sess-o", turns=TURNS[:1]), bounds)
+    finally:
+        _unlock(locked)
+
+    assert res["written"] is False
+    assert log.exists() and log.read_bytes() == before
+    assert not list(_entries(tmp_path).glob("*.orphan*"))
+
+
+def test_a_corrupt_meta_is_COUNTED_by_a_READ_ONLY_probe(tmp_path):
+    """A corrupt meta (read, but unusable) is a class the read-only scan must
+    still hand back, or the ceiling it was asked about is unenforced.
+
+    The admission probe must not repair, so it scans with ``repair=False`` — and
+    the corrupt arm used to ``continue`` before collecting anything, which would
+    have made a stop-repairing fix silently stop COUNTING. ``os.replace`` failing
+    is not needed to see it: the entry is 5,000 bytes on a 1,000-byte ceiling.
+
+    MUTATION THAT REDS THIS: collect corrupt stems only under ``repair`` (the
+    pre-fix arm) -> False, with 5,000 bytes on disk and nothing counted.
+    """
+    meta = _meta_path(tmp_path, "sess-corrupt")
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text("{ this is not json", encoding="utf-8")
+    _write_turns(tmp_path, "sess-corrupt",
+                 [{"role": "user", "content": "y" * 5000}])
+    bounds = Bounds(max_entries=1000, max_total_bytes=1000, max_entry_bytes=1 << 20)
+
+    assert spool_saturated(tmp_path, bounds, repair=False) is True
+    assert meta.exists(), "a read-only probe must not touch the entry"
+    assert list(_entries(tmp_path).glob("*.orphan*")) == []
