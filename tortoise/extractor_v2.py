@@ -19430,12 +19430,6 @@ def _embed_json_kwargs() -> dict:
     the trade `#14343` forbids, so the lever ships ARMED-ABLE, not armed:
     set ``TORTOISE_S4_EMBED_JSON=compact`` to take the 1,801 tokens/emission
     and re-run the capstone corpus in the same session to prove the bars hold.
-    ⛔ That path is executable: the capstone CARRIES this seam instead of
-    pinning it (`capstone_measure.DOOR_CARRIED`) and prints the value it
-    measured as ``TORTOISE_S4_EMBED_JSON=<value> (CARRIED)`` on its ``arm:``
-    and ``door:`` lines, so a run that armed it cannot be read as an indent
-    measurement — popping it was the fabricated green #14343's review (cycle 10,
-    P1) found, because the read-back then reported ``None``.
 
     Returns the ``json.dumps`` keywords — ``{"indent": 1}`` is the pre-#14343
     call, byte-for-byte, so an unset flag renders identically.
