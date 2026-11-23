@@ -1463,9 +1463,21 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: ⛔ HORIZONTAL SPACE IS A CLASS, NOT TWO CHARACTERS (#14237 r17, measured fail-open). The
     #: class was `[ \t]`, so `Call tortoise_list_graphs&nbsp;(x=1)` — which renders as
     #: `name (x=1)`, the SAME shape a plain space already reds — was ACCEPTED, because the
-    #: renderer emits U+00A0 and the class did not hold it. `[^\S\n\r]` is exactly "horizontal
-    #: whitespace": every separator a reader sees as a space (NBSP, EN SPACE, THIN SPACE …),
-    #: and neither line terminator, so a newline stays not-a-call by construction.
+    #: renderer emits U+00A0 and the class did not hold it. `[^\S\n\r]` is "what `\s` calls
+    #: whitespace, less LF and CR": the Zs family (NBSP, EN SPACE, THIN SPACE …) PLUS the three
+    #: line terminators that are NEITHER `\n` nor `\r` — U+0085 NEL, U+2028 LS, U+2029 PS
+    #: (`str.isspace()` is True for all three, measured).
+    #: ⛔ THE PREVIOUS WORDING HERE SAID "neither line terminator, so a newline stays not-a-call
+    #: by construction", AND THAT STATED BOUND WAS WIDER THAN THE BEHAVIOUR (#14237 r24) — the
+    #: `\n`/`\r` exclusion covers two of Unicode's six line terminators, and the other three ARE
+    #: matched, so `name\x85(`, `name\u2028(` and `name\u2029(` all return R1 today. That is a
+    #: DECLARED OVER-BLOCK and it is deliberately LEFT in place: excluding those three would turn
+    #: a RED shape GREEN, which is the fail-open direction. Pinned by
+    #: `test_a_LINE_TERMINATOR_that_is_not_newline_is_a_DECLARED_OVER_BLOCK`, which also pins the
+    #: DUPLICATE these shapes used to produce (the parser splits the block at the terminator, so
+    #: the unit's source ends before the bracket and the unit walk's block-local dedup could not
+    #: see that the whole-text scan had already reported the same mention). A newline proper —
+    #: `\n`/`\r` — stays not-a-call by construction.
     #:
     #: ⛔ AN INVISIBLE SEPARATOR IS NOT ADDED TO THIS CLASS, ON PURPOSE (#14237 r18). The
     #: `tortoise_list_graphs&#8203;(x=1)` shape is NOT closed here: widening the separator run
@@ -1500,9 +1512,18 @@ class TestEveryReaderNamesTheLiveListingDoor:
         text a reader reads as `tortoise_list_graphs(x=1)`. r19 asked `unicodedata.category`,
         which fixed those and still MISSED every invisible character outside Cf: a variation
         selector, the combining grapheme joiner, a Hangul filler, a Mongolian free variation
-        selector — measured ACCEPTED at the r20 head in both placements. `Default_Ignorable_Code_Point`
-        is the property that means "invisible", so it is the only correct answer to this
-        question, and it is asked of `regex` because `unicodedata` does not expose it.
+        selector — measured ACCEPTED at the r20 head in both placements. r21 then asked
+        `Default_Ignorable_Code_Point` and this docstring said the class was closed a THIRD time
+        — it was not, and that sentence is the one replaced here (#14237 r22): the property is
+        Unicode's answer to "may a renderer drop this?", not to "does the reader see nothing",
+        so the class is the DERIVATION in `INVISIBLE_PROPERTY` above — that property UNION the
+        Cf members it excludes for layout and the Cc controls it never covers, MINUS the
+        Prepended_Concatenation_Marks and White_Space. ⛔ ONE PROPERTY IS NOT AN ANSWER, and
+        saying it was is how two families stayed open for a round: at r21's head U+FFF9..FFFB /
+        U+13430..1343F (Cf, excluded from the property for layout) and every Cc control were
+        ACCEPTED. All of it is asked of `regex` because `unicodedata` exposes `category` only,
+        and of NO hand list because a list disagrees with Unicode the day a character is minted
+        (#4170).
         """
         return cls.INVISIBLE_RE.sub("", text)
 
@@ -1982,7 +2003,17 @@ class TestEveryReaderNamesTheLiveListingDoor:
             if call_end < 0:
                 continue
             found.append(f"{name}:{text.count(chr(10), 0, begin) + 1}")
-        return found
+        # ⛔ ONE MENTION, ONE REPORT (#14237 r24, measured). The two loops answer DIFFERENT
+        # questions — the raw scan reports a call whose separator markdown-it tolerates inside
+        # a block, the unit walk reports one whose call form only appears after the reader's
+        # text is normalised — and for `name` + a LINE TERMINATOR + `(` BOTH answer yes: the
+        # parser splits the block AT the terminator, so the unit's source slice ends before the
+        # bracket and `_entity_only_mentions`' block-local `raw_calls` dedup cannot see that the
+        # whole-text scan already reported it. Measured at `22aa85c7b2`: `name\x85(`,
+        # `name\u2028(` and `name\u2029(` each returned the same `name:1` TWICE. Deduping here is
+        # scoped to this function's own report format (`name:line`), so it cannot hide a
+        # mention — two calls of one name on one line are already indistinguishable in it.
+        return list(dict.fromkeys(found))
 
     @classmethod
     def notes_missing_replacement(cls, text: str) -> list[str]:
@@ -3265,6 +3296,39 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "a call form was graded a dead end as well: "
             f"{self.notes_missing_replacement(text)}")
 
+    @pytest.mark.parametrize("codepoint,spelling", [
+        (0x0085, "U+0085 NEL"),
+        (0x2028, "U+2028 LINE SEPARATOR"),
+        (0x2029, "U+2029 PARAGRAPH SEPARATOR"),
+    ], ids=["nel", "line-separator", "paragraph-separator"])
+    def test_a_LINE_TERMINATOR_that_is_not_newline_is_a_DECLARED_OVER_BLOCK(
+            self, codepoint, spelling):
+        r"""⚠️ DECLARED OVER-BLOCK — and the shape that reported ONE mention TWICE (#14237 r24).
+
+        `CALL_FORM`'s separator run is `[^\S\n\r]`, which excludes `\n` and `\r` and nothing
+        else, so it ALSO holds the three line terminators that are neither: U+0085, U+2028 and
+        U+2029 (`str.isspace()` is True for all three — measured, and asserted below so this row
+        cannot silently stop measuring). A renderer breaks `name` + one of them + `(x=1)` into
+        two lines, so the shape is RED — the FAIL-CLOSED direction, deliberately not closed,
+        because excluding these three would turn a red shape GREEN. The `CALL_FORM` comment now
+        states that bound instead of claiming "neither line terminator".
+
+        ⛔ THE DUPLICATE THIS SHAPE USED TO PRODUCE, measured at `22aa85c7b2`: the parser splits
+        the block AT the terminator, so the unit's source slice ends before the bracket, and the
+        unit walk's block-local `raw_calls` dedup missed that the whole-text scan had already
+        reported the same mention — `name:1` came back TWICE. `retired_call_forms` now dedupes
+        by its own report format, and the assertion below is on the EXACT list, which is what
+        makes the pre-fix doubling falsifiable instead of invisible.
+        """
+        ch = chr(codepoint)
+        assert ch.isspace() and ch not in ("\n", "\r"), (
+            f"{spelling} is not a separator `[^\\S\\n\\r]` holds, so this row measures nothing")
+        replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
+        text = f"Call tortoise_list_graphs{ch}(x=1) for names. {replacement}\n"
+        assert self.retired_call_forms(text) == ["tortoise_list_graphs:1"], (
+            f"a {spelling} separator must yield EXACTLY ONE report of the call — the shape "
+            f"was red before and it was reported twice: {self.retired_call_forms(text)}")
+
     @pytest.mark.parametrize("placement", ("inside-the-name", "before-the-bracket"))
     @pytest.mark.parametrize("codepoint", (
         # the six r18 shipped…
@@ -3562,8 +3626,9 @@ class TestEveryReaderNamesTheLiveListingDoor:
 
         U+2800 BRAILLE PATTERN BLANK renders as an EMPTY CELL, not as nothing, so Unicode does
         not list it as Default_Ignorable (measured: the property is false for it, and for the
-        other blank-RENDERING glyphs, while it is true for all 4174 members the tests above
-        span). A reader sees a blank between the name and its bracket and a line copied out of
+        other blank-RENDERING glyphs, while it is true for all 4174 members of the property
+        itself — the rows above span ONE member per family, not the whole set). A reader sees a
+        blank between the name and its bracket and a line copied out of
         the doc carries the cell, so this is not the cleanly copyable `name(` the R1 rule
         forbids — which is why it is declared rather than chased.
 
