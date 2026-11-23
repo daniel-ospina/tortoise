@@ -6894,6 +6894,30 @@ def test_finding_provenance_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_extractor_cost_measure_tool_change_fails_closed_to_full():
+    # #14343: tools/extractor_cost_measure.py owns test_extractor_cost_measure.py
+    # and test_extractor_embed_json_14343.py. Same silent-drop class as
+    # tools/edge_census.py below, and the arms are MEASURED rather than
+    # predicted: without the TOOL_CARVEOUTS entry, `select(['tools/
+    # extractor_cost_measure.py'], 'pull_request')` returns `full=False`,
+    # `surfaces=[]` (the docs-only return) and neither suite is in the
+    # selection — so the instrument's own pins would not run on the PR that
+    # edits the instrument, with no red anywhere. That is the #1349/#2938 class
+    # the entry's comment cites, and a registration with no pin is exactly how
+    # it comes back (review cycle 5 measured the removal reddening NOTHING).
+    r = _sel(["tools/extractor_cost_measure.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    # the fail-closed-to-FULL branch rather than a narrow surface: the
+    # instrument's own surfaces span core + api + eval, so naming a subset
+    # would be a claim the tool cannot support.
+    assert set(r["surfaces"]) == {
+        "api", "battery", "classify", "core", "ep", "eval", "onboarding", "sdk"}
+    # the entry itself, so deleting it from the tuple reds here rather than
+    # silently leaving the two suites unselected.
+    assert "tools/extractor_cost_measure.py" in cs.TOOL_CARVEOUTS
+
+
 def test_edge_census_tool_change_fails_closed_to_full():
     # #4503: tools/edge_census.py owns
     # tests/test_4503_edge_relationship_accounting.py. Same silent-drop class

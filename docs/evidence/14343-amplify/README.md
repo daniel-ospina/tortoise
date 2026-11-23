@@ -38,17 +38,26 @@ uv run python tools/extractor_cost_measure.py decompose \
 ```
 
 ⚠️ **The live arms of this issue are BLOCKED on this box, and the block is environmental,
-not a shortcut.** `compose` (which runs the real pipeline over one document to capture
-prompts *and emissions*) needs a provider key. This cell has **none**: `OPENROUTER_API_KEY`,
-`DEEPSEEK_API_KEY`, `VENICE_API_KEY`, `OPENAI_API_KEY` and `TORTOISE_API_KEY` are all unset,
-there is no repo-root `.env`, and there is no `~/pi-keys.env` — the three homes
-`.env.example` names are "evals → this repo-root `.env`", "fleet → `~/pi-keys.env` on the
-workstation", "production → Fly secrets". `build_extractor_model()` therefore degrades to its
-"no key at all" default, a single OpenRouter adapter, and every call returns
-`401 Client Error: Unauthorized`. So the **before → after** measurement and the `#7949`
-quality re-run are **not delivered here** — they need a key, on a box that has one. The
-composition, the output breakdown and the lever sizes are all offline-measured and are
-delivered in full.
+not a shortcut** (`compose`'s measured arm and the `#7949` re-run both need a provider key).
+The full diagnosis, and what is and is not delivered because of it, is **§0**.
+
+---
+
+## 0. What could not run here
+
+**No provider key on this box.** `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` /
+`VENICE_API_KEY` / `OPENAI_API_KEY` / `TORTOISE_API_KEY` are all unset, there is no
+repo-root `.env` and no `~/pi-keys.env` — the three homes the `.env.example` names.
+`build_extractor_model()` therefore degrades to its "no key at all" default (a single
+OpenRouter adapter) and every call returns `401 Client Error: Unauthorized`.
+
+**Not delivered:** a model-run before → after, and the `#7949` quality re-run.
+**Delivered:** the composition, the output breakdown, the exact lever sizes, and the lever
+itself behind a flag. Every figure below is either an **offline render measurement** (exact,
+`tiktoken` on the real prompt bytes) or **derived from `#14295`'s measured token counts and
+the real S2 emissions in `tests/eval/write_path/receipts/`**. `compose` says which of the two
+it is printing (`⚠️ OFFLINE / STUB TRANSPORT — NOT A MEASUREMENT`), because a stub whose
+output is indistinguishable from a measurement is the false pass this bundle must not be.
 
 ---
 
@@ -99,7 +108,7 @@ document text once **per call**, and 34 of 50 documents take a **second** S1 cal
 | s4 | 3,354 | 18.8 % | 1.14 |
 | **composition total** | **17,830** | 100 % | |
 | *fitted constant (this arm's own intercept)* | *22,802* | — | |
-| **unattributed** | **4,972** | 21.8 % | |
+| **unattributed** | **4,972** | 27.9 % of the composition · 21.8 % of the fitted constant | |
 
 **Two estimators, both reported — the 4,972 is not noise, and it is a result.** The rows are
 per-call **medians** × the measured call counts (the median document's shape). The fitted

@@ -1462,8 +1462,12 @@ def _output_structure(text: str) -> dict:
             payload_tokens = len(enc.encode(json.dumps(value, indent=1)))
             out["sections"][section] = {
                 "items": len(value),
-                "item_chars": (round(sum(len(json.dumps(i)) for i in items)
-                                     / len(items), 1) if items else 0),
+                # ⛔ ADDITIVE, not a mean. `item_chars` was a per-call mean, and
+                # `_merge_sections` added it across a stage's calls — so the
+                # published JSON carried the SUM OF TWO MEANS as if it were a
+                # mean. A character total folds correctly and the mean is
+                # derived once, at publish time, where the denominator is known.
+                "chars_sum": sum(len(json.dumps(i)) for i in items),
                 "tokens": payload_tokens,
                 "kinds": dict(sorted(kinds.items(),
                                      key=lambda kv: -kv[1])[:12]),
@@ -1710,10 +1714,21 @@ def compose_report(artifacts: list[dict]) -> dict:
             acc["output"]["sections"] = _merge_sections(
                 acc["output"].get("sections") or {}, out.get("sections") or {})
         rows.append({"doc": art["doc"], "stages": per_stage})
-    return {"rows": rows}
+    # ⛔ `live` is propagated or the renderer cannot tell a stub run from a
+    # measured one, and the report is the artifact a reader quotes.
+    return {"rows": rows,
+            "live": all(a.get("live", False) for a in artifacts)}
 
 
 def _merge_sections(a: dict, b: dict) -> dict:
+    """Fold two per-call section maps.
+
+    Two keys are not sums and must not be added blindly, which is what the
+    previous revision did (review cycle 5, P3): `distinct_kinds` is a per-CALL
+    count of a call-local histogram, so it is read off the UNION of the kind
+    maps, and the per-item character figure is accumulated as `chars_sum`
+    (additive) with the mean derived at publish time.
+    """
     merged = {k: dict(v) for k, v in a.items()}
     for section, val in b.items():
         cur = merged.setdefault(section, {})
@@ -1722,18 +1737,37 @@ def _merge_sections(a: dict, b: dict) -> dict:
                 kinds = dict(cur.get("kinds") or {})
                 for kind, count in value.items():
                     kinds[kind] = kinds.get(kind, 0) + count
-                cur["kinds"] = kinds
+                cur["kinds"] = dict(sorted(
+                    kinds.items(), key=lambda kv: -kv[1])[:12])
             elif isinstance(value, (int, float)) and isinstance(
                     cur.get(key), (int, float)):
                 cur[key] = cur[key] + value
             else:
                 cur.setdefault(key, value)
+        if cur.get("kinds"):
+            cur["distinct_kinds"] = len(cur["kinds"])
+        # (no `item_chars` here: nothing renders it, and a derived key with no
+        # reader is the dead field review cycle 5 caught as `contract_tokens`.
+        # `chars_sum / items` is the mean, both halves published.)
     return merged
 
 
 def render_compose(report: dict) -> str:
     """The #14343 deliverable: a table whose parts SUM to the prompt."""
     lines: list[str] = ["## Prompt composition (#14343)", ""]
+    # ⛔ THE MARKER IS THE POINT. An `--offline` run swaps only the TRANSPORT for
+    # a stub, so its region map and its emission shapes are real while its
+    # per-stage token counts are the stub's. Without this line the rendered
+    # table is structurally identical to a measured one, and a bundle whose
+    # whole purpose is that a stub must never read as a measurement would print
+    # exactly that (review cycle 5, P3).
+    if not report.get("live", True):
+        lines.append(
+            "⚠️ **OFFLINE / STUB TRANSPORT — NOT A MEASUREMENT.** The region map "
+            "and the emission shapes below are real render output, but every "
+            "`completion` figure is the stub's, not a model's. Re-run without "
+            "`--offline` on a box with a provider key before quoting any of it.")
+        lines.append("")
     for row in report["rows"]:
         lines.append(f"### `{row['doc']['path']}` — "
                      f"{row['doc']['item_tokens']} tokens")
