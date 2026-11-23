@@ -2048,9 +2048,9 @@ class AbuseEngine:
                 # COST, stated honestly: a retry costs the same incident reads as
                 # the first attempt (~2 R2 GETs per rule), so a close that keeps
                 # failing costs those reads on each clean window until it succeeds
-                # or `_MAX_EPISODE_RESOLVE_ATTEMPTS` drops it. That is bounded and
-                # rare; it is NOT free, and it must not be described as a bare dict
-                # lookup.
+                # or `_EPISODE_RESOLVE_RETRY_TTL_S` drops the hint. That is bounded
+                # and rare; it is NOT free, and it must not be described as a bare
+                # dict lookup.
                 self._end_alert_episode(org_id, rule)
             return None
         details = {"rule": rule, "count": total,
