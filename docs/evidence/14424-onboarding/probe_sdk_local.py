@@ -3,8 +3,10 @@
 Reproduces the UNGATED half of the onboarding criterion on whatever tree the
 caller runs it from (no extractor, no deploy, no hosted credential):
 
-    HOME=$(mktemp -d) uv run python -m tortoise init          # embedded graph
-    HOME=$(mktemp -d) uv run python docs/evidence/14424-onboarding/probe_sdk_local.py
+    export HOME=$(mktemp -d)   # ONE home for both lines: a second `mktemp -d`
+                               # would point the probe at a DB `init` never made
+    uv run python -m tortoise init          # embedded graph
+    uv run python docs/evidence/14424-onboarding/probe_sdk_local.py
 
 Prints one JSON document: per-step wall clock in milliseconds, the created
 node verbatim, the by-id read, and the search hit that names the marker. Exit

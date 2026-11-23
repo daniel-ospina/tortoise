@@ -6092,8 +6092,20 @@ def _cmd_create_point(args) -> int:
         return 1
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
-        print("Nothing was sent, so nothing was written; re-run once the API is "
-              "reachable.", file=_sys.stderr)
+        # #14424 review: "nothing was sent" is NOT a fact this error can
+        # establish, and the neighbouring HTTPError arm already says so about
+        # the same write. `urlopen` raises `URLError` from `h.request(...)` — a
+        # send phase an EPIPE/ECONNRESET can cut AFTER the bytes reached the
+        # wire — and it FOLLOWS REDIRECTS, so a 301/302/303 answering this POST
+        # is a request the server already processed and a failure on the SECOND
+        # hop lands here with the write already committed. RFC 9110 permits
+        # retrying a POST only when the client knows the operation is
+        # idempotent OR can determine the original request was never applied;
+        # this error cannot determine the second, so name the override rather
+        # than assert the retry is free.
+        print("The request did not complete — that does not prove it failed to "
+              "land. Re-run with --dedup (or read back first) so a retry "
+              "cannot duplicate the write.", file=_sys.stderr)
         return 1
 
     point_id = result.get("id", result.get("point_id", "unknown"))
@@ -6156,9 +6168,15 @@ def _create_point_retry_hint(exc, *, dedup_used: bool) -> str:
             retry_after = None
     lines: list[str] = []
     if retry_after:
+        # RFC 9110: `Retry-After = HTTP-date / delay-seconds`. Appending " s"
+        # unconditionally renders a proxy's HTTP-date as
+        # "Retry-After: Wed, 21 Oct 2015 07:28:00 GMT s" (#14424 review), so
+        # echo the value as supplied and add the unit only where it IS seconds.
+        _ra = str(retry_after).strip()
         lines.append(
-            f"The server advertised Retry-After: {retry_after} s — wait that "
-            f"long before re-sending.")
+            f"The server advertised Retry-After: {_ra}"
+            f"{' s' if _ra.isdigit() else ''} — wait that long before "
+            f"re-sending.")
     else:
         lines.append(
             "The server advertised no Retry-After; wait the delay its body "

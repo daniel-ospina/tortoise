@@ -258,6 +258,73 @@ class TestCreatePointRetrySafety:
         assert "Retry-After" not in err
         assert "re-sending" not in err
 
+    def test_a_retry_after_http_date_keeps_its_own_units(self, tmp_path, capsys):
+        """RFC 9110: `Retry-After = HTTP-date / delay-seconds`. The hint used to
+        append a bare `" s"`, so a proxy emitting an HTTP-date rendered as
+        `Retry-After: Wed, 21 Oct 2015 07:28:00 GMT s` — a nonsense delay a
+        first-run user cannot act on (#14424 review)."""
+        _seed_global(tmp_path)
+        when = "Wed, 21 Oct 2015 07:28:00 GMT"
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(504, {"Retry-After": when})):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert when in err, "the header value must be echoed as supplied"
+        assert f"{when} s" not in err, (
+            "a seconds unit was appended to an HTTP-date — the load-bearing gap")
+
+    def test_a_refusal_with_no_retry_after_names_the_header_it_lacks(
+            self, tmp_path, capsys):
+        """COVERAGE PIN, not a mutation witness — measured, so nobody reads it as
+        one: this assertion **passes on the pre-fix code**, because the
+        header-less wording predates this change. It is here because the #14424
+        review named this arm as *untested* and an untested branch is one an
+        edit can silently break.
+
+        What it protects: a `503` from a proxy during a rolling deploy carries no
+        `Retry-After`, so "the server advertised N seconds" would be fabricated;
+        and, being a `503` rather than a wait-bound `504`, it must not inherit
+        the "may have completed" claim. The mutation that reds it is reverting
+        the `if retry_after:` branch to the header-only arm."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(503)):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "no Retry-After" in err
+        assert "advertised Retry-After:" not in err, (
+            "invented a delay the response did not carry")
+        assert "does NOT mean nothing was written" not in err, (
+            "the 504 completion claim must not leak onto the 503 arm")
+
+    def test_an_unreachable_api_does_not_claim_nothing_was_written(
+            self, tmp_path, capsys):
+        """#14424 review: the `URLError` arm asserted "Nothing was sent, so
+        nothing was written". That is not a fact this error can establish —
+        `urlopen` follows redirects, so a 3xx answering this POST is already a
+        server-processed write and a failure on the SECOND hop arrives here;
+        and RFC 9110 only permits a POST retry when the client can determine the
+        original was never applied. The neighbouring `HTTPError` arm says "may
+        have landed" for the same reason; the two must not carry opposite
+        epistemics. Consequence of the old wording: "nothing was written" tells
+        the user to re-run WITHOUT `--dedup`, and the retry folds nothing."""
+        from urllib.error import URLError
+
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=URLError("Connection refused")):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "Connection refused" in err, "the transport reason must survive"
+        assert "Nothing was sent" not in err, (
+            "the unprovable claim this test exists to remove")
+        assert "does not prove it failed to land" in err
+        assert "--dedup" in err, (
+            "the retry override must be named, or the user re-runs without it")
+
     def test_a_rate_limit_refusal_does_not_claim_a_duplicate_risk(
             self, tmp_path, capsys):
         """The arms are NOT interchangeable: a 429 is an admission refusal — the

@@ -1,3 +1,14 @@
+---
+title: "#14424 — the recorded first run: install/key → write → read back → search"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-23
+subjects.team: epistemic-team
+aboutSubjects: Tortoise first-run onboarding, create-point CLI retry safety, doctor Graph: health row
+aboutObjects: "#14424, #1643, #3834, #10183, #10656, #11609, #14086, #10893, tortoise/__main__.py, tortoise/hosted_api.py, docs/quickstart-cloud.md"
+---
+
 # #14424 — the recorded first run: install/key → write → read back → search
 
 **Recorded:** 2026-11-23, 21:40–22:00 UTC, on the `cmux` cell (Linux, 8-core), from a
@@ -69,7 +80,7 @@ the server's own 10 s budget, so success is a coin-flip rather than a state:
 | `GET /v1/search?q=ZQ-14424-RECORDED-PAIR` (attempt 1) | 10.79 s | `504` |
 | `GET /v1/search?q=ZQ-14424-RECORDED-PAIR` (attempt 2) | **8.73 s** | **`200` — the item just written is hit #1** |
 
-```
+```console
 $ tortoise create-point "The onboarding probe marker is ZQ-14424-RECORDED-PAIR." --dedup
 API error (504): {"detail":"The server's wait budget … retry only if repeating the operation is safe."}
 The server advertised Retry-After: 10 s — wait that long before re-sending.
@@ -99,7 +110,7 @@ Two writes of **identical content**, both with `--dedup`:
 | A | 9.24 s | `200` | created `1a20a7f2e22-00af3f274a2f`, `createdAt` **22:20:36.710085** |
 | B (same content) | 10.49 s | `504` | **folded onto A** — the org still holds **1** copy, and A's `updatedAt` became **22:20:58.695485** |
 
-```
+```console
 $ GET /v1/points?limit=100
 count 9   copies of "(hosted pair, dedup)": 1
   {"id": "1a20a7f2e22-00af3f274a2f",
@@ -118,7 +129,7 @@ That is the differential the duplicate class needs: **without** `--dedup`, 4 att
 `docs/evidence/14424-onboarding/probe_sdk_local.py`, fresh `HOME`, embedded graph
 (`tortoise init` 1.7 s), total probe **1.6 s**:
 
-```
+```text
 create_entity  879.0 ms  -> node.id 1a20a657a39-bc5df918fb63
 get_entity       6.5 ms  -> "The onboarding probe marker is ZQ-14424-ORCHID (local SDK door)."
 search_knowledge 37.0 ms -> 1 hit, id 1a20a657a39-bc5df918fb63,
@@ -134,7 +145,7 @@ the hit is FTS-only. **A keyword hit is not a semantic hit** — the pair is pro
 
 First write (attempt 1 and 2 identical except for the duration):
 
-```
+```text
 POST /v1/points -> 504 in 11.96 s        retry-after: 10
 {"detail":"The server's wait budget for this request was exceeded before a response was ready.
  The work may still complete on the server. Wait for the advertised delay before retrying, and
@@ -143,7 +154,7 @@ POST /v1/points -> 504 in 11.96 s        retry-after: 10
 
 Read back — **4 copies** of one intended write:
 
-```
+```text
 GET /v1/points?limit=50 -> 200
 1a20a5edcc5-397733efd45b 2026-11-23T21:45:18.789218+00:00 'The onboarding probe marker is ZQ-14424-ORCHID.'
 1a20a5e4caf-b9bd631b4f80 2026-11-23T21:44:41.902945+00:00 'The onboarding probe marker is ZQ-14424-ORCHID.'
@@ -153,7 +164,7 @@ GET /v1/points?limit=50 -> 200
 
 Search: (the first window — every attempt `504`; the recovery is recorded in §1.1)
 
-```
+```text
 GET /v1/search?q=ZQ-14424-ORCHID&limit=5 -> 504 in 10.63 s
 {"detail":"The server's wait budget … retry only if repeating the operation is safe.",
  "stage":"retrieval",
@@ -188,7 +199,7 @@ sees instead.
 Run through the real CLI, in a clean `HOME` holding only the fresh credential, against
 prod `e74cf1d13da7`:
 
-```
+```console
 $ tortoise create-point "The onboarding probe marker is ZQ-14424-ORCHID (hint verification)."
 API error (504): {"detail":"The server's wait budget … retry only if repeating the operation is safe."}
 The server advertised Retry-After: 10 s — wait that long before re-sending.
@@ -213,7 +224,7 @@ which is precisely why the refusal is unactionable without a reconciliation path
 caller cannot infer from the status whether the write landed. (The `--dedup` fold itself
 stays **code-verified only** — the second attempt had nothing to fold onto.)
 
-```
+```console
 $ tortoise doctor --offline      # clean HOME holding ONLY a credential, no local graph
   ⚠️ Graph: health: not used by this setup — you have a hosted credential (credentials.json,
      https://api.premiselabs.co), so your memory lives there and a local graph is not required.
@@ -231,8 +242,9 @@ $ tortoise doctor --offline      # clean HOME holding ONLY a credential, no loca
 **The SDK pair: yes.** Two commands, no credential, no tenant:
 
 ```bash
-HOME=$(mktemp -d) uv run python -m tortoise init
-HOME=$(mktemp -d) uv run python docs/evidence/14424-onboarding/probe_sdk_local.py   # exit 0 == the pair held
+export HOME=$(mktemp -d)      # ONE home for BOTH lines — a second `mktemp -d` would be a different DB
+uv run python -m tortoise init
+uv run python docs/evidence/14424-onboarding/probe_sdk_local.py   # exit 0 == the pair held
 ```
 
 **The hosted walk: yes, given a signup budget** (2 anonymous teams/IP/24 h):
@@ -257,8 +269,11 @@ on **how many times the refusal was obeyed** — that is the defect, not a varia
 - **`--dedup` IS host-verified** (§1.2): two identical writes, one copy, `createdAt` unchanged
   and `updatedAt` bumped. The field is `CreatePointRequest.dedup` (`hosted_api.py`), default
   `False`, forwarded to `sdk._create_point(dedup=…)` — the same content-hash fold the SDK door
-  already applies by default (measured: re-creating identical content returned the **same**
-  node id).
+  applies. ⛔ **Name the method: the fold is NOT a default on every SDK door.** `create_entity`'s
+  point/diary path sets `dedup=True` (`sdk.py:58154`), which is the door §2 walks — but
+  `_create_point` pops `dedup` with a **False** default (`sdk.py:17617`), and that divergence is
+  `#11609`. Measured on `create_entity`: re-creating identical content returned the **same**
+  node id.
 - **`#10656`** (relocate `init --api-key`'s working-tree key) and **`#13224`** (subject-create
   latency) are **not** attempted here — both need their own review and neither is a message fix.
 - **No capture caps** (#4010) and **no second token meter** (#14275) are involved: this run made
