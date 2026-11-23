@@ -12604,6 +12604,22 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
             'import builtins',
             'dict.__dict__.__getitem__("get")(builtins.__dict__, "exec")'
             f'("results = {read}")'),
+        # ⛔ AND ITS ALIAS-RECEIVER TWINS (#14395 round-5 review P3): the row above said
+        # "aliased twin included" and carried only the literal receiver, which is the
+        # half-closed guarantee this file deletes on sight. EACH MEASURED GREEN and LIVE
+        # before it was rowed.
+        "`_dc.__dict__.__getitem__(\"get\")(m, \"exec\")` — via the module ALIAS (`_dc = dict`)": (
+            'import builtins', '_dc = dict',
+            '_dc.__dict__.__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`vars(_dc).__getitem__(\"get\")(m, \"exec\")` — ALIAS via `vars`": (
+            'import builtins', '_dc = dict',
+            'vars(_dc).__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`getattr(_dc, \"__dict__\").__getitem__(\"get\")(m, \"exec\")` — ALIAS via `getattr`": (
+            'import builtins', '_dc = dict',
+            'getattr(_dc, "__dict__").__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
         # ⛔ THE SAME COMPOSITION VIA THE COPY MODULE'S `import … as` ALIAS (#14395 round-4 P2):
         # the comment above MEASURED the class GREEN "for the literal receiver and the `import …
         # as` alias alike" while the table encoded only the literal — the same claim-beyond-the-
@@ -12616,16 +12632,18 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # MEASURED GREEN — `refused=False` — at this head and on `origin/main`). The two rows
         # above pinned the `.get` member for the literal namespace and for its `import … as`
         # alias, so the paragraph's guarantee (closing the class must EDIT this table) held for
-        # TEN of the class's eighteen spellings and not the other EIGHT — THREE members
-        # (`.get`, `.pop`, `.setdefault`) × SIX receivers (literal/alias × `.__dict__`, `vars`,
-        # `getattr(…, "__dict__")`). MEASURED by DERIVING the grid from those two dimensions and
-        # diffing it against this dict's own bindings, not by counting rows: at `9cd89e62800` the
-        # dict carried 32 rows and 10 of the grid; at this head it carries 40 and 18 of 18. The
-        # round-4 review found the eight below still missing (and MEASURED them GREEN, two
-        # spot-checked LIVE: `vars(copy).setdefault("copy") is copy.copy` → True, and the
-        # `getattr` twin likewise), so every one of the eighteen now has a row — and the
-        # completeness assertion below re-derives that grid, so the count cannot drift again.
-        # The class's home is `#14449`.
+        # TEN of the class's spellings and not the other EIGHT — and ⛔ THE CLASS IS **FOUR**
+        # MEMBERS, NOT THREE: `.get`, `.pop`, `.setdefault` AND `__getitem__`, because
+        # `_BUILTINS_MAPPING_READS` is exactly those four (§:1990). Times SIX receivers
+        # (literal/alias × `.__dict__`, `vars`, `getattr(…, "__dict__")`) = **24**. MEASURED by
+        # DERIVING the grid from those two dimensions and diffing it against this dict's own
+        # bindings, not by counting rows — the round-5 review found the six `__getitem__`
+        # spellings unrowed, GREEN (`refused=False`) and LIVE (`copy.__dict__.__getitem__("copy")
+        # is copy.copy` → True; a module `__dict__` is a real dict, so its `__getitem__` is
+        # BOUND, unlike the mappingproxy under a TYPE, which is why `builtins.dict.__getitem__`
+        # raises where this does not). All 24 now have rows, and the completeness assertion below
+        # re-derives the grid, so the count cannot drift again. The class's home is `#14449`,
+        # whose scope names this table.
         # ⛔ THE BOUNDARY, STATED RATHER THAN IMPLIED: this is the class's spelling set for the
         # `copy` module at the two bind depths the refused read-method rows above also pin. An
         # alias of an alias is the same class one bind further and is NOT rowed, for the reason
@@ -12687,6 +12705,37 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`_g = getattr(_z, \"__dict__\").pop; _f = _g(\"copy\")` — IMPORT ALIAS via `getattr` + `pop`": (
             'import builtins, copy as _z',
             '_g = getattr(_z, "__dict__").pop', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        # ⛔ AND THE FOURTH MEMBER: `__getitem__` (#14395 round-5 review P2).
+        # `_BUILTINS_MAPPING_READS` is {get, pop, setdefault, __getitem__}, so the copy class
+        # is FOUR members x SIX receivers = 24, not the 18 an earlier sentence claimed. Each
+        # of these six was MEASURED GREEN (`refused=False`) and LIVE before it was rowed:
+        # `copy.__dict__.__getitem__("copy") is copy.copy` -> True (a module `__dict__` is a
+        # real dict, so its `__getitem__` is BOUND - unlike the mappingproxy under a TYPE,
+        # which is why `builtins.dict.__getitem__("get")` raises and this does not).
+        "`_g = copy.__dict__.__getitem__; _f = _g(\"copy\")` — the `__getitem__` member": (
+            'import builtins, copy',
+            '_g = copy.__dict__.__getitem__', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = vars(copy).__getitem__; _f = _g(\"copy\")` — `vars` + `__getitem__`": (
+            'import builtins, copy',
+            '_g = vars(copy).__getitem__', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = getattr(copy, \"__dict__\").__getitem__; _f = _g(\"copy\")` — `getattr` + `__getitem__`": (
+            'import builtins, copy',
+            '_g = getattr(copy, "__dict__").__getitem__', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = _z.__dict__.__getitem__; _f = _g(\"copy\")` — IMPORT ALIAS + `__getitem__`": (
+            'import builtins, copy as _z',
+            '_g = _z.__dict__.__getitem__', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = vars(_z).__getitem__; _f = _g(\"copy\")` — IMPORT ALIAS via `vars` + `__getitem__`": (
+            'import builtins, copy as _z',
+            '_g = vars(_z).__getitem__', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = getattr(_z, \"__dict__\").__getitem__; _f = _g(\"copy\")` — IMPORT ALIAS via `getattr` + `__getitem__`": (
+            'import builtins, copy as _z',
+            '_g = getattr(_z, "__dict__").__getitem__', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
             f'_d["exec"]("results = {read}")'),
         # ⛔ AND THE NAMESPACE-BOUND RECEIVERS OF THAT SAME TWO-STEP COMPOSITION (#14395 round-4
         # P2). The BOUNDARY sentences above named "the levels the closure rows distinguish" but
@@ -12759,7 +12808,7 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "entries is several STATEMENTS, and the read is then produced and discarded (#14395)")
 
     # ⛔ THE COPY-CALLEE GRID IS COMPLETE — ASSERTED, NOT HAND-COUNTED (#14395 round-4 P2). The
-    # paragraph above this table claims the guarantee holds for EVERY spelling of THREE members ×
+    # paragraph above this table claims the guarantee holds for EVERY spelling of FOUR members ×
     # SIX receivers, and a hand-kept count of that claim has drifted TWICE: the prose said
     # FOUR-of-EIGHT while the dict carried 10 of the 18, and the round-4 correction then said
     # TWO-of-SIXTEEN while the dict carried 18 of the 18. So the grid is DERIVED from the two
@@ -12774,7 +12823,7 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     _copy_grid = {
         f"_g = {receiver}{member}"
         for receiver in _copy_receivers
-        for member in (".get", ".pop", ".setdefault")}
+        for member in (".get", ".pop", ".setdefault", ".__getitem__")}
     _rowed_bindings = {line for lines in declared_residual.values() for line in lines}
     _unrowed = sorted(_copy_grid - _rowed_bindings)
     assert not _unrowed, (
