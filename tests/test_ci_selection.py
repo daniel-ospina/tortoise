@@ -10785,10 +10785,13 @@ def test_the_14357_pins_run_on_the_diffs_they_guard_14362():
     exact diffs they exist to guard — the #2938/#3154/#4367 silent-drop class.
 
     Asserts the SELECTION, not the registration (so it reds on the pre-fix state) and
-    iterates every source file the suite guards, because a row can cover one subject and
-    miss another: `tortoise/extractor_v2.py` (the yield guard + census) and
-    `tools/longmem_eval/run.py` (the fingerprint plumbing) are named here for the same
-    reason.
+    iterates every source file this PR edits that selects a surface carrying the suite —
+    because a row can cover one subject and miss another: `tortoise/extractor_v2.py` (the
+    yield guard + census) is a further subject of the suite, and
+    `tools/longmem_eval/run.py` is a file this PR edits whose fingerprint pins live in
+    `tests/longmem_eval/test_vector_arm.py` — its pair is asserted here because the eval
+    row is what puts THAT file's diff on a leg at all, so the same one-line deletion
+    silences it.
     """
     name = "test_14357_fallback_thinking.py"
     for paths, surface in (
