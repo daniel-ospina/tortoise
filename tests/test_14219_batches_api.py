@@ -1447,3 +1447,39 @@ def test_a_drain_does_not_re_enter_a_peer_s_fresh_claim(store, monkeypatch):
     assert rows[claimed.item_id].attempts == 1, (
         "and must not be counted as one of OUR attempts")
     assert rows[queued.item_id].state is bi.BatchItemState.INDEXED
+
+
+def test_a_peer_s_fresh_claim_is_not_metered_by_this_process(store, monkeypatch):
+    """⛔ ROUND-6 HIGH: the meter was keyed on the RETURNED row.
+
+    `run_item` returns a fresh claim untouched when a peer may hold it, and that
+    row can carry the peer's interim tokens (a staged runner's `embedded` write is
+    a legal non-terminal write). Metering the return value charged 500 tokens per
+    tick — five passes over a 900 s window — for work this process never ran. A
+    non-terminal return means "I did nothing here", which owes the ledger nothing.
+    """
+    from tortoise import batch_ingest as bi
+
+    charged: list[int] = []
+    monkeypatch.setattr(bi, "record_item_spend",
+                        lambda org_id, item: charged.append(int(item.tokens_in)))
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_batch_item_runner",
+                        lambda sdk, corpus, org_id: (
+                            lambda item: bi.ItemOutcome(bi.BatchItemState.INDEXED,
+                                                        tokens_in=1)))
+
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/live.md"])
+    # A PEER is mid-item and has already written interim tokens.
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING,
+                  tokens_in=500, reason="interim spend by the peer")
+
+    for _ in range(5):
+        ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert charged == [], (
+        f"this process charged {charged} tokens for work a peer ran — the meter "
+        "must fire only for items THIS call settled")

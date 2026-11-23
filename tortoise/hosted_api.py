@@ -17009,7 +17009,16 @@ def _drain_batch(org: dict, batch_id: str) -> None:
                 # against headroom no batch can consume (#14219 review round 2,
                 # BLOCKING 1). Zero-token items (everything the current per-file
                 # indexer produces) make no ledger call — see `record_item_spend`.
-                _batch_ingest.record_item_spend(org["org_id"], done)
+                #
+                # ⛔ AND ONLY WHEN THIS CALL SETTLED THE ITEM (#14415 review
+                # round 6, HIGH). `run_item` returns a FRESH CLAIM untouched when
+                # a peer may hold it (the reclaim window), and that row can carry
+                # a peer's interim tokens from a staged runner — metering it
+                # charged 500 tokens per tick, five passes over a 900 s window,
+                # for work this process never ran. A non-terminal return is "I
+                # did nothing here", which owes the ledger nothing.
+                if done.terminal:
+                    _batch_ingest.record_item_spend(org["org_id"], done)
             except Exception:
                 # ⛔ ONE ITEM'S FAILURE MUST NOT ABANDON THE REST (#14219
                 # review, NB1). A graph-timeout on a bookkeeping statement used
