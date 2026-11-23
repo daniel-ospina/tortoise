@@ -536,9 +536,68 @@ def test_a_second_arm_is_refused_rather_than_mixed(clean_posture):
     So `--arm warm` would publish warm's call structure and solved region
     beside cold's medians, under a label naming one of them. Measured before
     the guard: the team cell moved 398 → 397 on a quantity belonging to neither
-    arm.
+    arm. The refusal must also cost NO tokenizer work — it runs above the
+    observation window, so this test needs no BPE cache and no network.
     """
-    clean_posture.setenv("TIKTOKEN_CACHE_DIR", str(_BPE_CACHE))
+    if _BPE_CACHE is not None:  # a None cache dir must never address ./None
+        clean_posture.setenv("TIKTOKEN_CACHE_DIR", str(_BPE_CACHE))
     with pytest.raises(SystemExit) as exc:
         m.embed_json_measurement(_RECEIPTS, _EVIDENCE, arm="warm")
     assert exc.value.code == 2
+
+
+def test_the_arm_refusal_costs_no_tokenizer_work(clean_posture, monkeypatch):
+    """The refusal must come BEFORE anything tokenizes (a cold box must not
+    fetch the BPE ranks to learn that it asked for the wrong arm).
+
+    `report_from_rows` is asserted not to touch the encoder, which is what makes
+    the hoist safe — the whole measurement then runs inside the observation
+    window.
+    """
+    def _boom(*args, **kwargs):
+        raise AssertionError("the tokenizer ran during an arm refusal")
+
+    monkeypatch.setattr(m, "_encoding", _boom)
+    rows = m.load_rows(_EVIDENCE)
+    # the arm resolves without the encoder ...
+    costs = (m.report_from_rows(rows).get("costs") or {})
+    assert costs.get("arm") == "cold"
+    # ... and the refusal fires without it too
+    with pytest.raises(SystemExit) as exc:
+        m.embed_json_measurement(_RECEIPTS, _EVIDENCE, arm="warm")
+    assert exc.value.code == 2
+
+
+def test_the_verb_writes_only_when_told_to(clean_posture, monkeypatch, tmp_path):
+    """The published invariant: a bare run PRINTS, a flagged run WRITES.
+
+    Three artifacts publish it (the generated doc says so in its own text, §7
+    and the README pointer repeat it). A default on either `--out` flag would
+    make a "read" silently overwrite the committed evidence, so both halves are
+    pinned behaviourally — with the measurement stubbed out, so this leg needs no
+    tokenizer and no cache.
+    """
+    stub = {"tokenizer": "cl100k_base",
+            "offline": True, "provider_calls": 0,
+            "encoder_cache": {"network_used": False, "cache_dir": "<x>",
+                              "fetched": [], "caching_disabled": False},
+            "posture": {"verdict": "production", "problems": [],
+                        "observed": {"TORTOISE_S4_EMBED_JSON": "indent"}},
+            "receipts": "r", "evidence": "e", "arm": "cold",
+            "corpus": {}, "per_emission": [], "aggregate": {},
+            "per_document": {}, "documents_per_month": [],
+            "not_delivered": "stub"}
+    monkeypatch.setattr(m, "embed_json_measurement", lambda *a, **k: stub)
+    monkeypatch.setattr(m, "render_embed_json_measurement", lambda _m: "STUB\n")
+    monkeypatch.chdir(tmp_path)
+
+    args = ["embed-json", "--receipts", str(_RECEIPTS),
+            "--evidence", str(_EVIDENCE)]
+    assert m.main(args) == 0
+    assert list(tmp_path.iterdir()) == [], (
+        "a bare run wrote a file — the artifacts publish that it only prints")
+
+    out, js = tmp_path / "m.md", tmp_path / "m.json"
+    assert m.main([*args, "--out", str(out), "--json-out", str(js)]) == 0
+    assert out.read_text(encoding="utf-8") == "STUB\n"
+    assert js.exists()

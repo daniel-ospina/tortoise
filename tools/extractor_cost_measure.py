@@ -3020,24 +3020,22 @@ def embed_json_measurement(receipts: Path, evidence: Path, *,
             file=sys.stderr)
         raise SystemExit(2)
 
-    with _observe_encoder_fetches() as fetched:
-        lev = serialization_lever(receipts)
-        if not lev:
-            raise SystemExit(
-                f"no usable write-path receipts in {receipts} — the verb's "
-                "entire subject is the real S2 emissions they carry")
-        rows = load_rows(evidence)
-        dec = decompose(rows, arm=arm, receipts=None)
-        costs = (report_from_rows(rows).get("costs") or {})
+    #: ⛔ ONE ARM OR NO ARTIFACT, AND REFUSED BEFORE THE TOKENIZER RUNS.
+    #: `cost_table` prices the COLD arm whenever the corpus carries one (it
+    #: must — its `hit_ratio` comes from the same arm), so `--arm warm` would
+    #: publish a hybrid: warm's call structure and solved region beside cold's
+    #: medians, under a label naming only one of them. Measured before this
+    #: guard: `--arm warm` moved the team cell 398 → 397 on a quantity belonging
+    #: to neither arm. The check sits ABOVE the observation window because the
+    #: refusal must cost no tokenizer work — the same ordering the posture guard
+    #: keeps, and the reason a `warm` run on a cold box used to attempt a fetch
+    #: before discovering it was being refused. `report_from_rows` does not
+    #: tokenize (verified), so nothing is measured outside the window.
+    rows = load_rows(evidence)
+    costs = (report_from_rows(rows).get("costs") or {})
     median_row = (costs.get("rows") or [None])[0]
     if not median_row:
         raise SystemExit(f"no usable `{arm}` median document in {evidence}")
-    #: ⛔ ONE ARM OR NO ARTIFACT. `cost_table` prices the COLD arm whenever the
-    #: corpus carries one (it must — its `hit_ratio` comes from the same arm), so
-    #: `--arm warm` would publish a hybrid: warm's call structure and solved
-    #: region beside cold's medians, under a label that names only one of them.
-    #: Measured before this guard: `--arm warm` moved the team cell 398 → 397 on
-    #: a quantity that belongs to neither arm.
     if costs.get("arm") != arm:
         print(
             f"refusing to mix arms: `--arm {arm}` was asked for, but the "
@@ -3049,6 +3047,13 @@ def embed_json_measurement(receipts: Path, evidence: Path, *,
             file=sys.stderr)
         raise SystemExit(2)
     cache_dir = _tiktoken_cache_dir()
+    with _observe_encoder_fetches() as fetched:
+        lev = serialization_lever(receipts)
+        if not lev:
+            raise SystemExit(
+                f"no usable write-path receipts in {receipts} — the verb's "
+                "entire subject is the real S2 emissions they carry")
+        dec = decompose(rows, arm=arm, receipts=None)
 
     #: ⛔ EXACT ratio, not the rounded 32.5: the published bundle applies the
     #: rounded share and prints 4,598, this applies the exact one and prints
