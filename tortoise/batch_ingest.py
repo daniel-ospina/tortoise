@@ -899,7 +899,15 @@ def _finish_counts(raw: Mapping[str, Any]) -> dict[str, int]:
 
 
 def _copy_item(i: BatchItem) -> BatchItem:
-    return BatchItem(**{**i.__dict__})
+    # ⛔ THE CHARGE FIELDS ARE NON-PERSISTED, SO THE COPY MUST DROP THEM (#14415
+    # review round 9, MEDIUM). `BatchItem` documents `charge_in`/`charge_out` as
+    # "cannot be re-read and charged a second time", and `GraphBatchStore.put_item`
+    # honours that by never SETting them — but a field-by-field copy carried them
+    # straight back out of the store, so the ONE store every other guarantee is
+    # proven against violated the invariant (`charge_in` 735 read back from an
+    # in-memory row). The drain hands a stored row back as `done.charge_in`, so a
+    # caller that wrote a charge and re-read the row would bill it twice.
+    return BatchItem(**{**i.__dict__, "charge_in": 0, "charge_out": 0})
 
 
 def _copy_batch(b: Batch) -> Batch:
@@ -1063,7 +1071,19 @@ class GraphBatchStore:
                            if expected_attempts is not None else "")
         rows = self._q(
             f"MATCH (i:{ITEM_LABEL} {{id:$iid, batch_id:$bid, org_id:$org, "
-            "state:$expect}}) "
+            # ⛔ THIS LINE MUST BE AN f-STRING (#14415 review round 9, BLOCKING):
+            # the sentence above escapes its opening brace as `{{`, so the
+            # matching `}}` only closes correctly in an f-string. A plain literal
+            # emits a DOUBLE brace and FalkorDB refuses the statement —
+            # `Invalid input '}': expected ')'` — which made EVERY item-state
+            # write fail on the production store while 135 hermetic tests stayed
+            # green (a fake `query` accepts any string). Measured on the docker
+            # lane: without the prefix `run_item` and `cancel` both raise and the
+            # batch sits `resuming` for ever; with it the CAS behaves exactly as
+            # documented. `test_every_emitted_statement_is_brace_balanced` pins
+            # the shape so a string this module hands to FalkorDB cannot be
+            # malformed again.
+            f"state:$expect}}) "
             f"WHERE 1=1 {attempts_clause}"
             "SET i.ref=$ref, i.name=$name, i.staged_path=$staged, "
             "    i.state=$state, i.reason=$reason, "
@@ -2138,7 +2158,8 @@ class BatchCoordinator:
         return batch, self._store.items(org_id, batch_id)
 
     # -- resume (brief item 4) -------------------------------------------
-    def abandon_dead_claims(self, org_id: str, batch_id: str) -> None:
+    def abandon_dead_claims(self, org_id: str, batch_id: str, *,
+                            reclaim_after: float | None = None) -> None:
         """Settle a CANCELLED batch's claims that NO runner is holding.
 
         ⛔ NOTHING MAY RUN AFTER A CANCEL (#14415 review round 3, BLOCKING 2).
@@ -2154,10 +2175,35 @@ class BatchCoordinator:
         The claim is void, so it settles `cancelled` with no token counts
         invented for a run nothing can observe — the same rule the boot path has
         always applied, now in ONE place both callers use.
+
+        ⛔ BUT "VOID" IS THE CLAIM'S AGE, NOT OUR HOPE (#14415 review round 9,
+        HIGH). This method had NO age check, so it released a claim that was
+        SECONDS old: `_resume_batch` is not a boot-only hook — `recover()` is a
+        throttled re-scan re-entered from every batch read — so on multi-replica
+        deployment replica B settled replica A's LIVE in-flight row `cancelled`
+        (measured: claim age 0.0 s against a 900 s window, released and settled).
+        The runner's outcome then could not be applied (`queued`/`indexed` is not
+        reachable from `cancelled`), so `run_item`'s terminal arm BILLED the
+        spend and dropped the document — the customer charged for work the cancel
+        copy promised to keep. A fresh claim is left alone, exactly as `run_item`
+        and `_resume_batch` do; the re-scan returns and settles it once it is
+        stale, which is the ONE rule this file states.
+
+        ``reclaim_after`` is how a caller states what it knows: ``None`` means
+        "nothing I know of is running these claims" (a process start, where every
+        claim belongs to a dead predecessor), and a number means "a claim younger
+        than this may belong to a live peer" — the recovery re-scan passes
+        :data:`BATCH_RECLAIM_AFTER_S`. ⚠️ DECLARED RESIDUAL: the in-process drain
+        path still passes ``None``, so it settles a claim a PEER REPLICA may be
+        holding — the same 15-minute-window-not-a-lease residual this module
+        already declares, and the reason the window exists at all.
         """
         for item in self._store.items(org_id, batch_id):
             if item.state in (BatchItemState.EXTRACTING,
                               BatchItemState.EMBEDDED):
+                if (reclaim_after is not None
+                        and _age_seconds(item.updated_at) < reclaim_after):
+                    continue
                 released = self.advance(org_id, item, BatchItemState.QUEUED,
                                         reason="cancelled batch, claim released",
                                         expected=item.state,
@@ -2174,7 +2220,8 @@ class BatchCoordinator:
     def recover(self, org_id: str, *,
                 live_batches: Collection[str] | Callable[[str], bool] = (),
                 stale_after_s: float | None = None,
-                limit: int = 50, offset: int = 0) -> list[str]:
+                limit: int = 50, offset: int = 0,
+                settle_fresh_claims: bool = True) -> list[str]:
         """Re-open every batch with unfinished items. Returns the batch ids.
 
         ⛔ **What "recoverable" has to mean.** An item found ``extracting`` (or
@@ -2271,9 +2318,10 @@ class BatchCoordinator:
                 # would destroy the outcome of work that is still running.
                 continue
             try:
-                moved = self._resume_batch(org_id, batch_id,
-                                           reclaim_after=reclaim_after,
-                                           stamp=stamp)
+                moved = self._resume_batch(
+                    org_id, batch_id, reclaim_after=reclaim_after,
+                    stamp=stamp,
+                    settle_fresh_claims=settle_fresh_claims)
             except Exception:
                 _logger.exception("batch %s: recovery of this batch failed; "
                                   "continuing the scan", batch_id)
@@ -2283,7 +2331,8 @@ class BatchCoordinator:
         return resumed
 
     def _resume_batch(self, org_id: str, batch_id: str, *,
-                      reclaim_after: float, stamp: str) -> bool | None:
+                      reclaim_after: float, stamp: str,
+                      settle_fresh_claims: bool) -> bool | None:
         """Re-open ONE batch. Returns ``True`` when reported, ``None`` when not.
 
         Split out of :meth:`recover` so ONE batch's read fault cannot abort the
@@ -2313,8 +2362,13 @@ class BatchCoordinator:
             # resolved — an inert row). At boot nothing is running, so its claim
             # is void: settle it ``cancelled``, without inventing token counts for
             # a run we cannot observe.
-            self.abandon_dead_claims(org_id, batch_id)
+            self.abandon_dead_claims(
+                org_id, batch_id,
+                reclaim_after=None if settle_fresh_claims else reclaim_after)
             return None
+        # The state the row is in NOW — the compare key for the `resuming` write
+        # below, so a cancel landing in the loop is not overwritten.
+        observed = batch.state
         items = self._store.items(org_id, batch_id)
         moved = False
         for item in items:
@@ -2352,9 +2406,22 @@ class BatchCoordinator:
             # a 500-item batch. Return it (a later pass must revisit it) without
             # touching its state.
             if moved or any(i.state is BatchItemState.QUEUED for i in items):
+                # ⛔ THE ROW IS WRITTEN THROUGH A COMPARE-AND-SET (#14415 review
+                # round 9, HIGH). This was an unconditional `put_batch`, so a
+                # `cancel()` landing between the read above and this write was
+                # ERASED: `cancelled_at`/`cancel_reason` cleared, the row
+                # non-terminal again, `pending_batches()` re-selected it and the
+                # items were re-driven and CHARGED after the customer cancelled
+                # (measured by injecting a cancel immediately before the write).
+                # `cancel()`'s and `settle()`'s writes were already hardened;
+                # this one — one method away, and the same defect — was not.
                 batch.state = BatchState.RESUMING
                 batch.updated_at = stamp
-                self._store.put_batch(batch)
+                if not self._store.put_batch_if_state(
+                        batch, expected=(observed,)):
+                    # The row moved on: report nothing as resumed. A cancel that
+                    # won is authoritative; a peer's own state is theirs to fix.
+                    return None
             return True
         if items:
             # ⛔ A LAGGING BATCH ROW IS REPAIRED HERE (#14415 review round 2, B1

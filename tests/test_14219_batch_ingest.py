@@ -8,6 +8,7 @@ acceptance, and the docstring says which.
 """
 from __future__ import annotations
 
+import os
 import threading
 
 import pytest
@@ -1538,22 +1539,43 @@ def test_a_receipt_and_the_meter_agree_when_the_row_moved_on():
             return ItemOutcome(BatchItemState.INDEXED, tokens_in=700,
                                tokens_out=30)
 
+        billed_arms: list[str] = []
         if variant == "cas-lost":
-            # The row moves BETWEEN the coordinator's `_fresh` and its write, so
-            # the compare-and-set loses and the outcome cannot be applied.
-            real = coord.advance
+            # ⛔ THE COMPARE MUST ACTUALLY LOSE (#14415 review round 9, LOW). The
+            # first version of this arm moved the peer row to `EXTRACTING` — the
+            # very state the caller already expects — so the compare-and-set MATCHED
+            # and the write landed: the test exercised the ordinary landed path and
+            # `_bill` was never entered (`_bill calls: []`), i.e. it would have
+            # stayed green with the arm deleted. A peer settling the row to a
+            # DIFFERENT state is what makes the compare lose.
+            # `run_item` settles through `_advance_landed` (not `advance`), so
+            # that is the seam the peer write has to land behind.
+            real = coord._advance_landed
 
-            def _advance(org_id, item, new_state, _store=store, _real=real,
-                         **kw):
+            def _advance_landed(org_id, item, new_state, _store=store,
+                                _real=real, **kw):
                 if new_state is BatchItemState.INDEXED:
                     peer = _store.get_item(org_id, item.batch_id, item.item_id)
-                    BatchCoordinator(_store).advance(
-                        org_id, peer, BatchItemState.EXTRACTING, attempt=True)
+                    peer.state = BatchItemState.CANCELLED
+                    _store.put_item(org_id, peer)
                 return _real(org_id, item, new_state, **kw)
 
-            coord.advance = _advance  # type: ignore[method-assign]
+            coord._advance_landed = _advance_landed  # type: ignore[method-assign]
+            real_bill = coord._bill
+
+            def _spy(org_id, item, tokens_in, tokens_out, _arms=billed_arms,
+                     _real_bill=real_bill):
+                _arms.append("_bill")
+                return _real_bill(org_id, item, tokens_in, tokens_out)
+
+            coord._bill = _spy  # type: ignore[method-assign]
 
         out = coord.run_item(ORG, items[0], runner)
+        if variant == "cas-lost":
+            assert billed_arms == ["_bill"], (
+                "the compare never lost, so the arm this variant exists for was "
+                f"not entered ({billed_arms} — the row is "
+                f"{store.get_item(ORG, batch.batch_id, items[0].item_id).state})")
         billed = out.charge_in + out.charge_out
         row = store.get_item(ORG, batch.batch_id, items[0].item_id)
         assert billed == 730, f"{variant}: our call spent 730, billed {billed}"
@@ -1562,3 +1584,225 @@ def test_a_receipt_and_the_meter_agree_when_the_row_moved_on():
             f"{variant}: the meter bills {billed} (+{peer_spend} by the peer) but "
             f"the row reports {row.tokens_in + row.tokens_out} — the receipt must "
             "match the bill")
+
+
+# ── round 9: the malformed statement, the cancel a rescan erased, and the
+#    liveness rule's third site ────────────────────────────────────────────
+def _every_store_statement() -> list[str]:
+    """Every Cypher statement `GraphBatchStore` can emit, by driving all of it.
+
+    A recording `query` returns an empty result set, so nothing is asserted about
+    RESULTS here — only about the STATEMENTS this module hands to FalkorDB. That
+    is deliberate: the fake `query` in the rest of this suite accepts ANY string,
+    which is exactly why a malformed statement went unnoticed.
+    """
+    seen: list[str] = []
+
+    class _Res:
+        def __init__(self) -> None:
+            self.result_set: list = []
+
+    def _record(cypher, params=None, timeout=None, _seen=seen):
+        _seen.append(cypher)
+        return _Res()
+
+    store = GraphBatchStore(_record)
+    batch, items = BatchCoordinator(InMemoryBatchStore()).submit(
+        ORG, ["/a.md", "/b.md"])
+    store.put_batch(batch)
+    store.get_batch(ORG, batch.batch_id)
+    store.put_item(ORG, items[0])
+    store.put_item_if_state(ORG, items[0], BatchItemState.QUEUED)
+    store.put_item_if_state(ORG, items[0], BatchItemState.QUEUED,
+                            expected_attempts=1)
+    store.put_batch_if_state(batch, (BatchState.ACCEPTED,))
+    store.items(ORG, batch.batch_id)
+    store.get_item(ORG, batch.batch_id, items[0].item_id)
+    store.list_recent_batches(ORG)
+    store.pending_batches(ORG)
+    store.batch_counts(ORG, [batch.batch_id])
+    store.find_settled_by_content_key(ORG, "k")
+    store.discard(ORG, batch.batch_id)
+    return seen
+
+
+def test_every_emitted_statement_is_brace_balanced():
+    """⛔ BLOCKING: `put_item_if_state`'s pattern closed with TWO braces.
+
+    The `MATCH` pattern escapes its opening brace as `{{`, so the matching `}}`
+    only closes correctly inside an f-string. One line of the statement was a
+    PLAIN literal, so the emitted Cypher read
+    `... org_id:$org, state:$expect}}) WHERE ...` and FalkorDB refused it —
+    `Invalid input '}': expected ')'`. Measured on the docker lane: EVERY item
+    state transition raised, so `run_item` never indexed a document, `cancel`
+    always answered 503, and the batch sat `resuming` for ever, while 135
+    hermetic tests stayed green because `InMemoryBatchStore` and every fake
+    `query` accept any string.
+
+    This asserts the shape rather than the text, so it catches the class (a
+    doubled brace anywhere in any statement) and not only that one line.
+    """
+    seen = _every_store_statement()
+    assert len(seen) >= 14, f"only {len(seen)} statements reached the store"
+    bad = [s for s in seen if "{{" in s or "}}" in s
+           or s.count("{") != s.count("}")]
+    assert not bad, (
+        "a statement this module emits is malformed Cypher (unbalanced or "
+        f"doubled braces): {bad[0] if bad else ''}")
+    assert any("state:$expect}" in s for s in seen), (
+        "the compare-and-set statement was not reached — the assertion above "
+        "would be vacuous")
+
+
+def test_a_rescan_never_settles_a_fresh_claim_of_a_cancelled_batch():
+    """⛔ HIGH: `abandon_dead_claims` released a claim that was SECONDS old.
+
+    `recover()` is not a boot-only hook — it is a throttled re-scan re-entered
+    from every batch read — so on a second replica it settled the FIRST
+    replica's live in-flight row `cancelled` (measured: claim age 0.0 s against a
+    900 s window). The live runner's outcome could then not be applied, so
+    `run_item`'s terminal arm billed the spend and dropped the document: the
+    customer charged for work the cancel copy promised to keep.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    # TWO items: `cancel()` records the cancellation only when it can settle a
+    # queued sibling (`/b.md`); with every item in flight it leaves the row
+    # `running` and the in-flight work alone, which is the documented behaviour
+    # for "their result is kept".
+    batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+    coord.cancel(ORG, batch.batch_id)
+    assert store.get_batch(ORG, batch.batch_id).state is BatchState.CANCELLED
+    live = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    assert live.state is BatchItemState.EXTRACTING, (
+        "a re-scan settled a FRESH claim: the peer holding it loses its outcome "
+        "and the customer is billed for a dropped document")
+
+    # …and the boot pass (the default: nothing this process knows of is running)
+    # still settles it, so the row cannot strand non-terminal for ever.
+    BatchCoordinator(store).recover(ORG)
+    settled = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    assert settled.state is BatchItemState.CANCELLED
+    assert settled.tokens_in == 0 and settled.tokens_out == 0
+
+
+def test_a_cancel_landing_during_the_resume_scan_is_not_erased():
+    """⛔ HIGH: the `resuming` write was unconditional, so it erased a cancel.
+
+    `_resume_batch` read the row, walked the items and wrote `resuming` with a
+    plain `put_batch`. A `cancel()` landing in that window was overwritten —
+    `cancelled_at`/`cancel_reason` cleared, the row non-terminal again,
+    `pending_batches()` re-selected it and the items were re-driven and charged
+    AFTER the customer cancelled. `cancel()` and `settle()` had already been
+    hardened with a compare-and-set; this third writer had not.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md"])
+    stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    stale.updated_at = _ancient_stamp()  # a genuinely dead claim
+    store.put_item(ORG, stale)
+
+    real_put = store.put_batch_if_state
+
+    def _cancel_first(b, expected):
+        BatchCoordinator(store).cancel(ORG, batch.batch_id, reason="customer")
+        return real_put(b, expected)
+
+    store.put_batch_if_state = _cancel_first  # type: ignore[method-assign]
+    assert coord.recover(ORG) == [], (
+        "the scan reported the batch as resumed after the cancel won")
+
+    row = store.get_batch(ORG, batch.batch_id)
+    assert row.state is BatchState.CANCELLED, (
+        "the resume scan overwrote the customer's cancel")
+    assert row.cancelled_at and row.cancel_reason == "customer"
+    assert store.pending_batches(ORG) == [], (
+        "the cancelled batch is drainable again — its items would be re-driven "
+        "and charged after the cancel")
+
+
+def test_the_in_memory_store_never_hands_back_a_charge():
+    """⛔ MEDIUM: a non-persisted charge field came back out of the store.
+
+    `charge_in`/`charge_out` are documented as "cannot be re-read and charged a
+    second time", and `GraphBatchStore.put_item` honours that by never setting
+    them — but the in-memory store copied every dataclass field, so the ONE store
+    every other guarantee in this suite is proven against was the one that broke
+    the invariant (`charge_in` 735 read back from a stored row).
+    """
+    store = InMemoryBatchStore()
+    batch, items = store_ok = BatchCoordinator(store).submit(ORG, ["/a.md"])
+    assert store_ok is not None
+    row = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    row.charge_in, row.charge_out = 735, 0
+    store.put_item(ORG, row)
+    back = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    assert (back.charge_in, back.charge_out) == (0, 0), (
+        "the in-memory store round-trips a charge mark, so a caller that "
+        "re-reads the row would bill the same spend twice")
+
+
+def test_the_graph_store_speaks_real_cypher():
+    """⛔ BLOCKING, AND ONLY A REAL ENGINE CATCHES IT (#14415 review round 9).
+
+    `put_item_if_state`'s `MATCH` pattern closed with two braces on one line
+    because that line was a plain literal in an implicit concatenation, so the
+    statement FalkorDB received read `... state:$expect}}) ...` and was refused:
+    `Invalid input '}': expected ')'`. Measured on the docker lane, EVERY item
+    transition raised — `run_item` indexed nothing, `cancel()` always answered
+    503, and the batch sat `resuming` for ever — while the hermetic suite stayed
+    green because `InMemoryBatchStore` and every fake `query` accept ANY string.
+
+    This drives the production store against the live engine: accept, claim,
+    settle, read the counts and cancel, i.e. exactly the statements the feature
+    depends on. It skips VISIBLY (never early-return-green) where the docker lane
+    is not configured, the same rule `tests/_live_utils` applies to its peers.
+    """
+    from urllib.parse import urlparse
+
+    from _live_utils import _skip_unless_live_uri
+
+    _skip_unless_live_uri()
+    uri = os.environ["TORTOISE_DB_URI"]
+    from falkordb import FalkorDB
+
+    parsed = urlparse(uri.replace("docker://", "http://"))
+    db = FalkorDB(host=parsed.hostname, port=parsed.port,
+                  password=parsed.username or None)
+    graph_name = parsed.path.strip("/") or "tortoise"
+    graph = db.select_graph(f"{graph_name}_batch_store_probe")
+    graph.query("MATCH (n) DETACH DELETE n")
+
+    def _query(cypher, params=None, timeout=None):
+        return graph.query(cypher, params or {}, timeout=timeout)
+
+    try:
+        store = GraphBatchStore(_query)
+        coord = BatchCoordinator(store)
+        batch, items = coord.submit(ORG, ["/live-a.md", "/live-b.md"])
+        assert [i.state for i in items] == [BatchItemState.QUEUED] * 2
+        assert store.pending_batches(ORG) == [batch.batch_id]
+
+        out = coord.run_item(
+            ORG, store.get_item(ORG, batch.batch_id, items[0].item_id),
+            lambda i: ItemOutcome(BatchItemState.INDEXED, tokens_in=700,
+                                  tokens_out=30))
+        assert out.state is BatchItemState.INDEXED
+        row = store.get_item(ORG, batch.batch_id, items[0].item_id)
+        assert (row.state, row.tokens_in, row.tokens_out) == (
+            BatchItemState.INDEXED, 700, 30)
+        assert store.batch_counts(ORG, [batch.batch_id])[batch.batch_id][
+            "indexed"] == 1
+
+        stopped, after = coord.cancel(ORG, batch.batch_id, reason="customer")
+        assert stopped.state is BatchState.CANCELLED
+        assert after[1].state is BatchItemState.CANCELLED
+        assert store.pending_batches(ORG) == []
+        assert BatchCoordinator(store).recover(ORG) == []
+        store.discard(ORG, batch.batch_id)
+        assert store.list_recent_batches(ORG) == []
+    finally:
+        graph.query("MATCH (n) DETACH DELETE n")
+        graph.delete()

@@ -1690,9 +1690,18 @@ def test_a_peer_settling_the_same_state_is_not_charged_by_this_pass(store,
                                                                    monkeypatch):
     """⛔ ROUND-5 REVIEW P2/HIGH: "landed" cannot be inferred from the row.
 
-    The peer's first cut tested `landed.state is outcome.state` — which a PEER's
-    write to the SAME state also satisfies, so a settlement this process did not
+    The peer's first cut tested `landed.state is outcome.state` — a PEER's write
+    to the SAME state satisfies that too, so a settlement this process did not
     make was still charged. The landing flag is explicit (`_advance_landed`).
+
+    ⛔ AND THE PEER MUST WIN THE *SETTLE*, NOT THE CLAIM (#14415 review round 9,
+    MEDIUM). The first version of this test wrote the peer row on EVERY advance,
+    so the CLAIM lost and `run_item` returned before the runner ever ran
+    (`runner calls: 0`) — the assertions then held because nothing was spent, and
+    the test stayed green with the `landed` flag and the `_bill` path deleted.
+    This version lets the claim succeed and only steals the settlement, which is
+    the interleaving the finding is about; it also asserts the set did not come
+    back empty, so the vacuous shape cannot return.
     """
     charged: list[int] = []
     monkeypatch.setattr(bi, "record_item_spend",
@@ -1700,11 +1709,16 @@ def test_a_peer_settling_the_same_state_is_not_charged_by_this_pass(store,
                         charged.append(tokens_in + tokens_out) or 0)
     coord = bi.BatchCoordinator(store)
     batch, items = coord.submit(ORG_ID, ["/d/a.md"])
-    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
-
+    # ⛔ NOT pre-claimed: `run_item` leaves a FRESH claim alone (the one liveness
+    # rule), so pre-claiming here would make the runner never run and the test
+    # vacuous again. The claim is this call's to win; only the settle is stolen.
     real_advance = coord._advance_landed
+    calls: list[str] = []
 
     def losing_advance(org_id, item, new_state, **kw):
+        calls.append(str(new_state))
+        if new_state is bi.BatchItemState.EXTRACTING:
+            return real_advance(org_id, item, new_state, **kw)  # the claim wins
         # A PEER settles it to the SAME state the runner is about to write…
         store.put_item(org_id, bi.BatchItem(
             batch_id=item.batch_id, item_id=item.item_id, ref=item.ref,
@@ -1717,9 +1731,23 @@ def test_a_peer_settling_the_same_state_is_not_charged_by_this_pass(store,
     out = coord.run_item(
         ORG_ID, store.get_item(ORG_ID, batch.batch_id, items[0].item_id),
         lambda i: bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=700))
-    assert out.charge_in == 0 and out.charge_out == 0, (
-        "this pass charged a settlement a peer made — its write did not land")
-    assert charged == []
+    assert str(bi.BatchItemState.INDEXED) in calls, (
+        "the runner's settlement never reached the store — the peer stole the "
+        f"CLAIM instead of the settle ({calls}), so this test proves nothing")
+    # The row moved on, so the outcome could not be applied — but the tokens are
+    # a real spend of THIS call, so the row total and the charge mark both carry
+    # them (round 8's rule) and `_bill` is the arm that does it. The METER call is
+    # the drain's (it reads `charge_in/charge_out`), so assert the mark here and
+    # bill it the way `_drain_batch` does.
+    assert out.state is bi.BatchItemState.INDEXED
+    assert (out.charge_in, out.charge_out) == (700, 0), (
+        "this pass lost the settle, so it must mark exactly its own spend for "
+        f"the meter — got {(out.charge_in, out.charge_out)}")
+    if out.charge_in or out.charge_out:
+        bi.record_item_spend(ORG_ID, tokens_in=out.charge_in,
+                            tokens_out=out.charge_out)
+    assert charged == [700], (
+        f"the spend was not billed exactly once: {charged}")
 
 
 # ── round 7: the receipt agrees with the meter, and the row keeps its spend ─
