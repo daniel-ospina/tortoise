@@ -16580,6 +16580,18 @@ def _batch_item_runner(sdk, corpus_name: str):
     return run
 
 
+#: Batch ids a drain is CURRENTLY working in this process. Two drains of one
+#: batch would both see a `queued` row and both call the runner — double work and
+#: double spend, the one race this layer can actually cause. A process-local
+#: claim closes it. ⛔ CROSS-PROCESS IS NOT CLOSED and is declared: there is no
+#: lease on the row, so a second replica draining the same batch can still race.
+#: The fleet runs one batch worker per process and a batch is drained by the
+#: process that accepted it; a multi-replica claim needs a lease/cas on the graph
+#: row and is a follow-up, not a silent gap.
+_BATCH_DRAINING: set[str] = set()
+_BATCH_DRAINING_LOCK = threading.Lock()
+
+
 def _drain_batch(org: dict, batch_id: str) -> None:
     """Work every non-terminal item of one batch. Runs ON the batch pool.
 
@@ -16591,6 +16603,10 @@ def _drain_batch(org: dict, batch_id: str) -> None:
     carried across a request boundary and each item's writes use the tenant's own
     projection.
     """
+    with _BATCH_DRAINING_LOCK:
+        if batch_id in _BATCH_DRAINING:
+            return  # already being worked by this process — never run it twice
+        _BATCH_DRAINING.add(batch_id)
     try:
         store = _batch_store_for(org)
         coord = _batch_ingest.BatchCoordinator(store)
@@ -16604,6 +16620,9 @@ def _drain_batch(org: dict, batch_id: str) -> None:
         # The rows are durable; an escaped failure leaves items `extracting`,
         # which the next boot's `recover()` requeues. Never swallow silently.
         _logger.exception("batch %s drain failed", batch_id)
+    finally:
+        with _BATCH_DRAINING_LOCK:
+            _BATCH_DRAINING.discard(batch_id)
 
 
 @app.post("/v1/batches", status_code=201)
@@ -16651,7 +16670,15 @@ async def create_batch(body: BatchRequest,
     try:
         from tortoise.allowance_gate import ALLOWANCE_KEYS as _AK
 
-        carried = await _carry_allowances_off_loop(org, "batches",
+        # ⛔ The resource label is `sessions`, and that is not a typo: the
+        # `capture_extraction` dimension DECLARES `resources={"sessions"}` — that
+        # is where the meter lives and therefore where the carry runs
+        # (`_carry_allowances` returns the org UNCHANGED for a label no dimension
+        # declares, which would silently report "no included amount"). This call
+        # READS the same allowance; it does not enforce it — a batch is never
+        # refused for want of tokens (#4010, and the issue's "degrade, never
+        # lose"): a document that cannot be extracted yet is stored, not dropped.
+        carried = await _carry_allowances_off_loop(org, "sessions",
                                                   op="batch_estimate")
         raw = carried.get(_AK["capture_extraction"])
         included_tokens = int(raw) if raw is not None else None
@@ -16719,6 +16746,7 @@ async def create_batch(body: BatchRequest,
 async def list_batches(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     """The caller's recent batches (newest first) — the dashboard's entry point."""
     _require_scope(org, "graphs:read", "batch list")
+    _reject_graph_bound_org_surface(org, "batch list")
     try:
         rows = await _run_off_loop(
             _BATCH_EXECUTOR,
@@ -16739,6 +16767,7 @@ async def get_batch(batch_id: str,
     list is built from, so the summary can never disagree with the items.
     """
     _require_scope(org, "graphs:read", "batch status")
+    _reject_graph_bound_org_surface(org, "batch status")
 
     def _read():
         store = _batch_store_for(org)
@@ -16775,6 +16804,7 @@ async def cancel_batch(batch_id: str,
     stop — and the response says exactly how much had already run.
     """
     _require_scope(org, "graphs:write", "batch cancel")
+    _reject_graph_bound_org_surface(org, "batch cancel")
 
     def _cancel():
         store = _batch_store_for(org)
