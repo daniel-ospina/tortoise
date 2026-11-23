@@ -4928,26 +4928,27 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: head — updated in place during the PR rather than spending a generation 34 on
 #: a refinement of the same unreleased seam. From the moment 33 appears on main,
 #: the entries are frozen: the next byte change needs a NEW generation.
-#: ⚠️ 33's CAPTURE digest was re-cut TWICE under that same never-shipped exception,
-#: and the SECOND re-cut is NOT a comment-only edit — say so, because this is the
-#: note a later re-pinner reads to justify reusing 33:
-#:
-#: 1. the #14423 review found the takedown's restore arm had no test (the sibling
-#:    row in `tortoise-capture.test.ts` claimed a mutant that did not red it), so
-#:    `takedownClaim` / `disposeQuarantine` became the exported test seam — an
-#:    export-only edit, but a comment IS bytes here;
-#: 2. the next cycle found the Pi leg's `release()` still took a claim it did not
-#:    own (and its `state.raced` flag missed the arm reached after a successful
-#:    takedown), which is a BEHAVIOUR change on shipped bytes — the digest covers
-#:    the whole file (`sha256` of `tortoise-capture.ts`, graded at
-#:    `test_a_shipped_pi_seam_byte_change_moves_the_generation`), so it moved with
-#:    it. Reusing an unreleased generation for a behaviour fix is the same
-#:    exception, not a licence: from the moment 33 reaches `main` the entries are
-#:    FROZEN and the next byte change needs a NEW generation.
-#:
-#: The READ half is untouched (`904d2742…`), exactly as generation 31's re-cut did.
+#: ⚠️ 33's CAPTURE digest has been re-cut NINE times under that same never-shipped
+#: exception, and the count is stated because THIS note is what a later re-pinner
+#: reads to justify reusing 33: measured over `origin/main..HEAD`, the pinned value
+#: takes TEN distinct forms in this branch's commits —
+#: `3660e09d` → `2416b186` → `15393a96` → `a2314416` → `a97a8a0a` → `5a47bb65` →
+#: `d0e8e41d` → `35235567` → `2d011c33` → `442d76f5` → (this head) — because the PR
+#: has been through seven review cycles and every one of them moved shipped bytes.
+#: Several of those re-cuts are BEHAVIOUR, not comments, and the digest covers them
+#: because it is the `sha256` of the whole file (graded at
+#: `test_a_shipped_pi_seam_byte_change_moves_the_generation`):
+#:   * `c214f341` — the two legs' clock units unified (`CLAIM_VERSION` 1 → 2);
+#:   * `e3577f40` — a claim we cannot READ is honoured, never deleted;
+#:   * `7ed7ca32` — reads `lstat`-gated (the FIFO hang) and the lease format guarded;
+#:   * `9bc74585` — `release` reads the token BEFORE moving anything;
+#:   * this head — the `release`-ordering test seam.
+#: ⛔ Reusing an unreleased generation for a behaviour fix is the same exception, not
+#: a licence, and it does NOT generalise: from the moment 33 reaches `main` the
+#: entries are FROZEN and the next byte change needs a NEW generation. The READ half
+#: is untouched throughout (`904d2742…`), exactly as generation 31's re-cut did.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "72d2cf62900cdc89db16c42a5106b9a5bb575fef84bddaab834f80cb9b165deb")
+    33, "2a907c37a7d15816f7fb258940f32604adc071cb94faf3bd728089b4df718636")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5127,7 +5128,13 @@ _GENERATION_DIGESTS = {
     # before it moves anything. Generation 33 has never been on `main`, so no
     # installed copy carries it and no "local edit" verdict can be falsified — the
     # one rewrite the rule below permits (#14423 cycle-6 review, P1+P2).
-    33: "72d2cf62900cdc89db16c42a5106b9a5bb575fef84bddaab834f80cb9b165deb",
+    # ⛔ AND ONE MORE, from the cycle-7 review: `acquireDrainClaim` gained an
+    # injectable `takedown` seam so THIS leg's release ORDER can be graded on the
+    # CALL, as the Python twin grades it by monkeypatching `_takedown`. The
+    # byte-indistinguishability that made the first attempt vacuous (rename + link
+    # preserves inode, mtime and content) is why the order has to be observed at the
+    # call site rather than at the filesystem.
+    33: "2a907c37a7d15816f7fb258940f32604adc071cb94faf3bd728089b4df718636",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

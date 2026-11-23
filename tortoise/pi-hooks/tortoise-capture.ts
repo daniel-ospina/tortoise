@@ -5417,6 +5417,17 @@ export function acquireDrainClaim(
      *  (#14423 review, P2). Mirrors the Python leg, where any `None` from
      *  `acquire` is `held_by_claim`. */
     state?: { raced: boolean };
+    /** ⛔ TEST SEAM for `release`'s ORDERING, and nothing else. The not-ours
+     *  release must take NO destructive step, and that is a fact about which
+     *  function was CALLED — not about the bytes afterwards: a rename + restore
+     *  preserves the inode, the mtime and the content, so the pre-fix order is
+     *  byte-indistinguishable from the fixed one whenever no third process fills
+     *  the gap (#14423 review, cycle 7: reverting `release` to takedown-first left
+     *  the whole suite green, including two release tests). The Python leg asserts
+     *  the same fact by monkeypatching `_takedown`; this is the Pi equivalent. */
+    takedown?: (
+      path: string, token: string,
+    ) => { quarantine: string; raw: string } | undefined;
   },
 ): DrainClaim | undefined {
   const ttlMs = opts.ttlMs ?? DRAIN_CLAIM_TTL_MS;
@@ -5592,7 +5603,7 @@ export function acquireDrainClaim(
         // Ours. The takedown's quarantine compare is what makes the disposal safe
         // against a peer that replaces the record between the read above and the
         // rename below.
-        const moved = takedownClaim(path, token);
+        const moved = (opts.takedown ?? takedownClaim)(path, token);
         if (!moved) return false;
         if (moved.raw !== rawNow) {
           disposeQuarantine(moved.quarantine, moved.raw, path, "\u0000<not-ours>");
