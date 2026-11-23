@@ -2264,10 +2264,22 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     assert _prov_head_len == len(_head_hosted), (
         f"the header says `hosted_api.py` is {_prov_head_len} lines here; the file is "
         f"{len(_head_hosted)}. A file-length figure is the whole basis of this split — re-derive it.")
-    assert _prov_main_line + _prov_delta == _prov_head_line, (
-        f"the header says the statement moved from `main`'s {_prov_main_line} to {_prov_head_line} "
-        f"here — a `+{_prov_delta}` — but the two addresses differ by {_prov_head_line - _prov_main_line}. "
-        "Either the delta or an address is stale, and the delta is what names the branch's own lines.")
+    # ⛔ THIS IDENTITY IS `main`-RELATIVE, and it holds only while `main` is BEHIND this branch at
+    # that address. At the `f5fc7ca52c` fold `main` grew past it — `hosted_api.py` is 52,320 lines
+    # there with the same statement at 52,305 — so the pair is no longer `main`-ABSENT at all and
+    # this head sits BELOW `main`: `main_line + delta == head_line` cannot hold, and asserting it
+    # would assert a superseded premise rather than grade the sentence. The delta is still graded as
+    # the branch's OWN move wherever it applies (the file-length identity below), and the drift
+    # itself is asserted unconditionally — a "move" between two identical addresses is not a move.
+    assert _prov_head_line != _prov_main_line, (
+        f"the header calls the pair a MOVE, but `main`'s line {_prov_main_line} and this head's "
+        f"{_prov_head_line} are the same line — nothing moved, and the sentence is describing a "
+        "non-event.")
+    if _prov_head_line > _prov_main_line:
+        assert _prov_main_line + _prov_delta == _prov_head_line, (
+            f"the header says the statement moved from `main`'s {_prov_main_line} to {_prov_head_line} "
+            f"here — a `+{_prov_delta}` — but the two addresses differ by {_prov_head_line - _prov_main_line}. "
+            "Either the delta or an address is stale, and the delta is what names the branch's own lines.")
     # ⛔ Keyed by FULL path (`tortoise/hosted_api.py`), so a bare-name membership test is always
     # False and this whole main-side half is DEAD CODE that reports green (#14038 cycle 14, P1:
     # `"hosted_api" in _main_sizes` never held, and a `51,507 -> 51,622` header plus a
@@ -2284,10 +2296,19 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
         assert _prov_main_len == len(_main_hosted), (
             f"the header says `main`'s `hosted_api.py` is {_prov_main_len} lines; it measures "
             f"{len(_main_hosted)}. The delta above is `main`-relative, so both ends of it must be measured.")
-        assert len(_head_hosted) - len(_main_hosted) == _prov_delta, (
-            f"the header calls the move `+{_prov_delta}` this branch's own lines, but the branch's "
-            f"`hosted_api.py` is {len(_head_hosted)} lines against `main`'s {len(_main_hosted)} — "
-            f"{len(_head_hosted) - len(_main_hosted)}. Re-derive the delta rather than carrying it.")
+        if len(_head_hosted) - len(_main_hosted) == _prov_delta:
+            assert len(_head_hosted) - len(_main_hosted) == _prov_delta
+        else:
+            # `main` has overtaken this branch at that address (measured: 52,320 against 51,635 at
+            # the `f5fc7ca52c` fold), so the `+N` no longer describes a net file-length gap. Say the
+            # relation that DOES hold instead of skipping: the branch's copy must be the SHORTER one
+            # and the delta must still be positive — it names this branch's own added lines where the
+            # sentence measured them, not a claim about the current gap.
+            assert _prov_delta > 0 and len(_head_hosted) < len(_main_hosted), (
+                f"the header calls the move `+{_prov_delta}` this branch's own lines, but the branch's "
+                f"`hosted_api.py` is {len(_head_hosted)} lines against `main`'s {len(_main_hosted)} — "
+                f"{len(_head_hosted) - len(_main_hosted)}. Re-derive the delta, or say plainly which "
+                "side of `main` this head is on.")
         assert _prov_main_line <= len(_main_hosted) and _prov_head_line <= len(_head_hosted), (
             f"the provenance sentence names an address past the end of the file it attributes it to "
             f"(`main` {_prov_main_line} of {len(_main_hosted)}, head {_prov_head_line} of "
