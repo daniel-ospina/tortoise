@@ -3810,6 +3810,150 @@ def _css_reaching_decls(css: str, prop: str, compound: str,
     return out
 
 
+#: Every property that can SET `padding-bottom` on one element. `padding` and
+#: `padding-block` are SHORTHANDS and their omitted sides are set to `initial`,
+#: so they reset it — the same family `SLACK_PROPS` pins for `margin`, and the
+#: half `padding-bottom`/`padding-block-end` alone cannot see (#14406 review
+#: round 5, finding 1: `padding: 1.75rem` and `padding-block: 1.75rem` both
+#: restored the owner-reported defect with every row in the class GREEN).
+PADDING_END_PROPS = ("padding-bottom", "padding-block-end", "padding",
+                     "padding-block")
+
+
+def _css_tokens(value: str) -> list[str]:
+    """A declaration value split on whitespace, but keeping `calc(…)` whole.
+
+    A plain `value.split()` shreds `calc(1.75rem - 1px)` into three tokens, so a
+    shorthand author who wrote `padding: calc(1.75rem - 1px)` would be read as
+    setting a `calc(1.75rem` block-end side and would RED a correct page. Depth
+    tracking removes that false red for the cost of six lines.
+    """
+    tokens: list[str] = []
+    depth, current = 0, []
+    for char in value:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char.isspace() and depth == 0:
+            if current:
+                tokens.append("".join(current))
+                current = []
+        else:
+            current.append(char)
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
+def _css_block_end(prop: str, value: str) -> str:
+    """The value `prop` gives the BLOCK-END (bottom) side of the box.
+
+    Both shorthands are ordered box-side lists, so the token that lands on
+    block-end is positional: for `padding-block` one value sets both sides and
+    two are `(start, end)`; for `padding`, one value sets all four sides, two are
+    `(block, inline)`, three are `(block-start, inline, block-end)` and four are
+    `(block-start, inline-end, block-end, inline-start)` — so block-end is the
+    THIRD token for 3 and 4 values and the FIRST otherwise. `SLACK_PROPS` uses
+    the same rule for `margin`/`margin-block`'s block-START side (first token).
+    """
+    if prop not in ("padding", "padding-block"):
+        return value
+    tokens = _css_tokens(value)
+    if not tokens:
+        return value
+    if prop == "padding-block":
+        return tokens[-1] if len(tokens) > 1 else tokens[0]
+    return tokens[2] if len(tokens) >= 3 else tokens[0]
+
+
+def _css_specificity(selector: str) -> tuple[int, int, int] | None:
+    """`(ids, classes, types)` for ONE selector part, or `None` if unmodellable.
+
+    Deliberately small. It answers one question — does a rule that disagrees
+    with a pinned value out-rank or TIE the pinned rule? — and a functional
+    pseudo-class (`:is()`, `:where()`, `:not()`, `:has()`) changes specificity in
+    ways this counter does not model, so it returns `None` and the one caller
+    treats that as MAXIMALLY specific (fail closed) rather than guessing.
+    """
+    if re.search(r":(?:is|where|not|has|matches)\(", selector):
+        return None
+    attrs = re.findall(r"\[[^\]]*\]", selector)
+    bare = re.sub(r"\[[^\]]*\]", " ", selector)
+    pseudo = re.findall(r"::?[\w-]+", bare)
+    elements = len([p for p in pseudo if p.startswith("::")])
+    rest = re.sub(r"::?[\w-]+|\.[\w-]+|#[\w-]+", " ", bare)
+    elements += len(re.findall(r"(?<![\w-])[a-zA-Z][\w-]*", rest))
+    return (len(re.findall(r"#[\w-]+", bare)),
+            len(re.findall(r"\.[\w-]+", bare)) + len(attrs)
+            + len(pseudo) - elements,
+            elements)
+
+
+def _css_block_end_cascade(css: str, compound: str,
+                           props: tuple[str, ...] = PADDING_END_PROPS,
+                           ) -> list[tuple[str, str, str]]:
+    """Every declaration that sets `compound`'s block-END inset, weakest → strongest.
+
+    The LAST entry is the one a browser applies, so a caller can assert the
+    WINNER's value. That is the difference from `_css_reaching_decls`'s
+    agreement invariant, and for this property it is the difference between a
+    guard and a false pass: the popular card's own `.pricing-card.popular`
+    `padding-bottom: calc(1.75rem - 1px)` (0,2,0) and the base `.pricing-card`
+    `padding: 1.75rem` (0,1,0) DISAGREE ON PURPOSE, so "every candidate must
+    agree" reds a correct page; and `.pricing-grid .pricing-card { padding-bottom:
+    1.75rem }` (0,2,0, appended after) TIES the winner and takes it, which a
+    `('.popular',)`-filtered sweep cannot see at all (#14406 review round 5,
+    finding 1 — two cascade-valid mutants, both 1px off, both GREEN).
+
+    Order is the author-origin cascade: `!important` first, then specificity,
+    then source order (rule index, then declaration index inside the block, so a
+    later `padding-bottom` beats an earlier `padding` in the SAME block).
+
+    Reach — and it is NOT full CSS:
+
+    * The subject is the RIGHTMOST compound of each comma part, matched by
+      SUBSTRING (`compound in rightmost`), the same slack `_css_reaching_decls`
+      documents: ancestors are reached, `.pricing-cardx` matches too.
+    * `*` and `*::…` count as reaching — a universal selector out-ranks nothing
+      on specificity but `* { padding: 0 !important }` bypasses the cascade
+      entirely, and leaving it out is a fail-open hole of exactly the class this
+      row guards.
+    * A property the caller does not list is invisible; a selector whose
+      specificity cannot be modelled (`:is()` etc.) is ranked MAXIMALLY
+      specific, so an unmodelled override fails closed (red).
+    * It does not model `@layer`, `@supports`, inheritance or `revert` — none of
+      which this page uses, and each of which would need its own reader.
+    """
+    ranked: list[tuple[tuple, str, str, str]] = []
+    for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
+        for part in (p.strip() for p in prelude.split(",")):
+            # `_css_desktop_rules` yields everything before a rule's `{`, so the
+            # FIRST rule of the sheet (the `*` reset) carries the document's
+            # `<head>` … `<style>` text as its prelude. A part that still holds
+            # markup or a newline is not a selector — without this, the junk
+            # prefix's `#060b14` / `#d1d5db` out-count every real id in the file
+            # and the `*` reset WINS the cascade with `padding: 0` (measured on
+            # the first draft of this helper).
+            if "<" in part or "\n" in part:
+                continue
+            rightmost = re.split(r"[\s>+~]+", part)[-1].strip()
+            if compound not in rightmost and not rightmost.startswith("*"):
+                continue
+            specificity = _css_specificity(part) or (9, 9, 9)
+            for decl_index, decl in enumerate(_css_blanked(body).split(";")):
+                name, sep, value = decl.partition(":")
+                prop = name.strip().lower()
+                if not sep or prop not in props:
+                    continue
+                important = bool(re.search(r"!\s*important\s*$", value))
+                clean = re.sub(r"!\s*important\s*$", "", value).strip()
+                ranked.append(((important, specificity, rule_index, decl_index),
+                               part, prop, _css_block_end(prop, clean)))
+    ranked.sort(key=lambda entry: entry[0])
+    return [(part, prop, value) for _rank, part, prop, value in ranked]
+
+
 def _css_rule_preludes(css: str, selector: str) -> list[tuple[str, str]]:
     """Every rule whose selector LIST contains `selector`, as `(prelude, body)`.
 
@@ -10881,7 +11025,11 @@ class TestProductTeamsCopy:
         assert _beat_text(h2.group(1)) == self.COMPUTE_H2, (
             f"the compute beat's title reads {_beat_text(h2.group(1))!r}; the "
             f"owner asked for {self.COMPUTE_H2!r} (#13645 item 2)")
-        assert "beat-num" not in h2.group(1), (
+        # `group(0)` — the WHOLE `<h2 …>…</h2>`, attributes included. Reading
+        # `group(1)` looked only at the inner HTML, so a `.beat-num` carried ON
+        # the heading (`<h2 class="beat-num">…`) was GREEN while the message
+        # below asserts the title carries one (#14406 review round 5, finding 3).
+        assert "beat-num" not in h2.group(0), (
             "the compute beat's title carries a `.beat-num`. The numbered beats "
             "are the three STEPS (01/02/03); this one is a claim, and a number "
             "on it would invent a fourth step")
@@ -11089,6 +11237,16 @@ class TestProductTeamsPricingCardCtaBaseline:
     the competing-selector half — for ancestor selectors, the logical aliases
     and `min-width` media blocks too, each of which was a measured false PASS
     in that row's first draft (#14406 review round 4, G1-G3).
+
+    ⛔ ONE ROW RESOLVES THE CASCADE INSTEAD OF ASKING FOR AGREEMENT, and the
+    difference is not cosmetic: the popular card's `padding-bottom`
+    compensation must OVERRIDE the base `.pricing-card`'s `padding: 1.75rem`, so
+    an agreement invariant reds a correct page there while still missing a
+    TYING rule appended later. The popular-card row therefore reads
+    `_css_block_end_cascade` — the whole `padding` family (both longhands, both
+    shorthands) ranked by `!important`, specificity and source order — and
+    asserts what a browser applies (#14406 review round 5, finding 1, measured
+    with two cascade-valid mutants that both left every row GREEN).
     """
 
     def test_each_card_is_a_flex_column_and_its_cta_takes_the_slack(self):
@@ -11227,22 +11385,26 @@ class TestProductTeamsPricingCardCtaBaseline:
             "the popular card's bottom inset does not compensate for its 2px "
             "border, so its CTA sits 1px above the other three (measured "
             "744.78 vs 745.78 at 1440x900 — #13645 item 6)")
-        # Same cascade caveat as the flex row above: `.pricing-card`'s `padding`
-        # shorthand and any `.pricing-card.popular` rule under another prelude
-        # reach this element without naming this selector text, so every rule
-        # that can select it must agree with the compensating value — and
-        # `padding-block-end` is the LOGICAL alias `padding-bottom`
-        # delegates to (#14406 review round 4, finding G2's shape).
-        for prop in ("padding-bottom", "padding-block-end"):
-            disagreeing = [(p, v) for p, v in _css_reaching_decls(
-                css, prop, ".pricing-card", (".popular",))
-                if v != "calc(1.75rem - 1px)"]
-            assert disagreeing == [], (
-                f"a rule that can select `.pricing-card.popular` declares "
-                f"`{prop}: {disagreeing[0][1]}` ({disagreeing[0][0]!r}), "
-                "overriding the 1px compensation — the popular card's CTA "
-                "lands 1px off the other three (#14406 review round 3 P2, "
-                "same exact-selector limit as the flex row)")
+        # Same cascade caveat as the flex row above, but this one is answered by
+        # RESOLVING the cascade instead of demanding agreement: `.pricing-card`'s
+        # `padding` shorthand (0,1,0) and this rule (0,2,0) disagree ON PURPOSE,
+        # so "every rule that can select it must agree" would red a correct page
+        # — while `.pricing-grid .pricing-card { padding-bottom: 1.75rem }`
+        # (0,2,0) or `#pricing-section .pricing-card.popular { padding: 1.75rem }`
+        # (1,2,0) override the compensation with every row in this class GREEN
+        # (#14406 review round 5, finding 1 — the same 1px defect, measured).
+        # `_css_block_end_cascade` reads the whole `padding` FAMILY (both
+        # longhands, both shorthands, block-end side) and returns it in cascade
+        # order, so the row asserts what a browser actually applies.
+        cascade = _css_block_end_cascade(css, ".pricing-card")
+        assert cascade, "no rule sets the pricing card's block-END inset"
+        prelude, prop, winner = cascade[-1]
+        assert winner == "calc(1.75rem - 1px)", (
+            f"the declaration that WINS the popular card's bottom inset is "
+            f"`{prop}: {winner}` ({prelude!r}), not the 1px compensation, so its "
+            "CTA sits 1px above the other three (measured 744.78 vs 745.78 at "
+            "1440x900 — #13645 item 6). The losing declarations, weakest first: "
+            f"{cascade[:-1]!r}")
 
     def test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render(self):
         """`margin-top: auto` aligns the LAST item — so nothing may follow the CTA.
