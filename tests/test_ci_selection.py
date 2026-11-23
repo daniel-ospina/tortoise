@@ -10515,6 +10515,20 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(load_manifest()) == []
 
 
+# ⛔ THE GENERAL ENTRY RULE WAS RETIRED — READ THIS BEFORE CITING THE PARAGRAPH BELOW
+# AS CURRENT FACT (#2148/B9, PR #14416). `config/ci-surfaces.yml`'s contract block above
+# `durations:` now says the row is OPTIONAL: a fast-pool file with no row is NOT an
+# `--integrity` failure and not a coverage defect — it packs at the header's flat
+# `DEFAULT_FAST_WEIGHT` (2.0 s, the number a hand-written row carried) and
+# `tools/ci_timing.py --refresh-durations` writes the measured row from the next
+# push-to-main junit sweep. So NO NEW FILE OWES A ROW, and "the row must EXIST" is not
+# a rule an author joins. The pin is still here, and what it is NOW is FILE-SPECIFIC:
+# `ROWED_BY_THIS_FOLD` names the files whose row THESE TESTS require, and dropping a
+# row it names still reds required CI — the map block relaxes none of them, it retires
+# only the obligation on a file that is merely new. The `ENTRY-RULE pin` /
+# `entry-rule pin` phrasings further down this block are the historical name for the
+# same tuple, kept with the comments they annotate; read them as "file-specific pin".
+#
 # #2148 (the batch fold's PR #10726) review P3: the map's own ENTRY RULE is that a
 # fast file added by a PR must carry a `durations:` row at all — "a default is not a
 # reading" — and the coverage FLOOR cannot police it, because the floor is a RATIO

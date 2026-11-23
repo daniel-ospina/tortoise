@@ -244,9 +244,9 @@ behind them. Everything else in the search path is unchanged.
 
 **What the move costs, stated so it is not discovered late:**
 
-- `public.point/source/event.embedding` (and, since #13220, `public.object/subject.embedding`) is **`jsonb`** and **stays `jsonb`**, and **`pgvector` appears in 2 of 88
+- `public.point/source/event.embedding` (and, since #13220, `public.object/subject.embedding`) is **`jsonb`** and **stays `jsonb`**, and **`pgvector` appears in 2 of 89
   migrations** (`20261109000001_record_embedding_vector.sql`, `#11642`, and `20261117000001_record_object_subject_embedding.sql`,
-  `#13220` — the `object`/`subject` fingerprint columns, GENERATED vectors and HNSW indexes, owner ruling 2026-11-17; the denominator is 88 at this head — `#11827`'s
+  `#13220` — the `object`/`subject` fingerprint columns, GENERATED vectors and HNSW indexes, owner ruling 2026-11-17; the denominator is 89 at this head — `#11827`'s
   `20261110000001_record_point_retire_as_of_11827.sql` added no vector, and neither do the 83rd, #12764's
   `20261114000001_per_org_postgres_bytes.sql`, nor the 84th and 85th, #12894's
   `20261116000001_record_cursor_allocator.sql` and `20261116000002_record_cursor_meter_grant.sql`, the 86th IS one (#13220's), nor the 87th, #13277's `20261117000002_postgres_residency_gauge.sql`, nor the 88th, #13315's `20261117000003_postgres_residency_zero_vanished.sql` — the forward migration correcting the residency refresh's zeroing, which adds no table, no vector and no embedding column) — so this WAS a full index build and a
