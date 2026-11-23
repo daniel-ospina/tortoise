@@ -3324,4 +3324,9 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
 - **§10.40's own status bullet is corrected in this same commit.** It was added reading
   "*This entry is LIVE for this tree — it has no successor*" while the supersede marker above it
   already named §10.41, so the entry stated two mutually exclusive things about itself. It now uses
-  the historical form §§10.36–10.38 already carry, so exactly one entry is designated live again.
+  the historical form §10.36 and §10.37 carry. ⛔ **`§10.38` does NOT carry it** — `:3158` still reads
+  "*This entry is LIVE for the merged tree — it has no successor*", which §10.39–§10.41 falsify — so
+  **two** entries still carry a present-tense live designation, not one. §10.38's correction is filed
+  as **#14377** rather than made here: frozen §10.x cites are never re-pointed by a merge lane, and a
+  status bullet re-cut inside this one would move `document_sha256` again for an unrelated change.
+  Naming that gap here, rather than claiming it was swept, is the point of the bullet.
