@@ -77,21 +77,21 @@ output is indistinguishable from a measurement is the false pass this bundle mus
 
 Median document 5,211 tokens · 3.98 calls/document (s1 1.68, s2 1.16, s4 1.14).
 
-| region | tokens/doc | share of the composition (43,675) | what it is |
+| region | tokens/doc | share of the composition (42,509) | what it is |
 |---|---|---|---|
-| **S2's embed list, re-sent to S4** | **14,058** | **32.2 %** | S4's prompt re-serializes S2's *entire* output (`json.dumps(embed_list, indent=1)`) |
-| kind vocabulary (`master_list`) | 7,330 | 16.8 % | the pack kind catalogue + glosses, identical bytes on every S2 **and** S4 call |
-| stage instructions (template prose) | 6,430 | 14.7 % | the three templates' own prose (edge semantics, value filter, carve-outs) |
-| **S1's story, re-sent to S2 and S4** | **6,323** | **14.5 %** | S1's narrative is S2's user message *and* S4's `{story}` slot — **both** pay the `#10311` untrusted-data envelope, 93 tokens a call |
-| mapping rules (`anti_routine`) | 4,467 | 10.2 % | `ANTI_ROUTINE_EXCLUSION` + `VALUE_FIDELITY_RULE` + `OPERATOR_SEMANTICS_RULE` + `SHORT_SESSION_FACT_RULE`, spliced into both mapping stages |
-| output schema (`output_contract`) | 2,187 | 5.0 % | the JSON contract every stage must satisfy |
+| **S2's embed list, re-sent to S4** | **14,149** | **33.3 %** | S4's prompt re-serializes S2's *entire* output (`json.dumps(embed_list, indent=1)`) |
+| kind vocabulary (`master_list`) | 7,330 | 17.2 % | the pack kind catalogue + glosses, identical bytes on every S2 **and** S4 call |
+| stage instructions (template prose) | 6,430 | 15.1 % | the three templates' own prose (edge semantics, value filter, carve-outs) |
+| **S1's story, re-sent to S2 and S4** | **5,066** | **11.9 %** | S1's narrative is S2's user message *and* S4's `{story}` slot — **both** pay the `#10311` untrusted-data envelope, 93 tokens a call. ⚠️ The 9 documents whose prompts carry a SOURCE TRANSCRIPT block have that block **subtracted per document before the medians**, so this row is narrative — not verbatim source text |
+| mapping rules (`anti_routine`) | 4,467 | 10.5 % | `ANTI_ROUTINE_EXCLUSION` + `VALUE_FIDELITY_RULE` + `OPERATOR_SEMANTICS_RULE` + `SHORT_SESSION_FACT_RULE`, spliced into both mapping stages |
+| output schema (`output_contract`) | 2,187 | 5.1 % | the JSON contract every stage must satisfy |
 | memory granularity (S1 only) | 1,551 | 3.6 % | the per-namespace durability rules S1 keeps/drops by |
 | date anchor | 653 | 1.5 % | the `when`/`startedAt` emission rules |
 | chains | 547 | 1.3 % | the chain-position block |
 | graph search results (S4) | 129 | 0.3 % | empty (`sdk=None`) — a **floor**; a populated graph adds candidates |
-| **composition total** | **43,675** | 100 % | |
+| **composition total** | **42,509** | 100 % | |
 | *fitted constant (`#14295`)* | *45,503* | — | |
-| **unattributed** | **1,828** | **4.0 %** | the fit's intercept is an OLS line through 50 points, and one of them is far outside the others: the 127,914-token document is 9.3 % of the corpus's prompt tokens but 29.7 % of its *document* tokens, and it is a **high-leverage** point — drop it and the intercept falls 45,503 → 30,156 (R² 0.715 → 0.523). So the fit's intercept sits ABOVE the composition, and 1,828 is what an OLS line does at `T=0` where the composition is a measurement at the median. This bundle does not close that gap by pro-rating it — an unexplained remainder is a finding, and the finding here is that fit and composition agree to 4.0 %. |
+| **unattributed** | **2,994** | **6.6 %** | the fit's intercept is an OLS line through 50 points, and one of them is far outside the others: the 127,914-token document is 9.3 % of the corpus's prompt tokens but 29.7 % of its *document* tokens, and it is a **high-leverage** point — drop it and the intercept falls 45,503 → 30,156 (R² 0.715 → 0.523). So the fit's intercept sits ABOVE the composition, and 2,994 is what an OLS line does at `T=0` where the composition is a measurement at the median. This bundle does not close that gap by pro-rating it — an unexplained remainder is a finding, and the finding here is that fit and composition agree to 6.6 %. |
 
 **The document itself is not in that table.** It is the fit's *slope*: S1 sends the whole
 document text once **per call**, and 34 of 50 documents take a **second** S1 call
@@ -109,7 +109,7 @@ document text once **per call**, and 34 of 50 documents take a **second** S1 cal
    `graph search results (S4)` row is **not** in it — that row is the empty `sdk=None`
    lookup, a *floor*, and adding it would give 23,294.)
 3. **S1's story is charged three times per document**: once as S1's output, once as S2's
-   user message, once as S4's `{story}` slot. 6,323 tokens of the input constant are a
+   user message, once as S4's `{story}` slot. 5,066 tokens of the input constant are a
    *re-read* of an emission that does not scale with the document (§2).
 
 ---
@@ -214,10 +214,10 @@ So S1's per-document input is `1.68 × (1,630 static + T)` and the mechanism tha
 
 | lever | size | quality-neutral? |
 |---|---|---|
-| **`indent=1` → compact separators on S4's `embed_list_json`** — ⚠️ **SHIPPED, default OFF** | **−4,569 tokens/doc (−7.1 %)**: 32.5 % of the 14,058-token region | **Information-neutral**: the list's content is byte-identical, only its layout differs. ⚠️ The *formatting* effect on the model is unmeasured here (§0), which is exactly why the default is today's bytes |
-| **Bound / shape S2's emission** (the 14,058-token re-read is `items × ~101 tokens`) | dominant by construction: −30 % of the record removes ~3,500 output + ~4,200 S4 input per document | **NO** — half of each record is E2/E3 provenance (`quote`, `search_keys`, `slots`); this is the `#7949` trade, and it is a measurement, not arithmetic |
+| **`indent=1` → compact separators on S4's `embed_list_json`** — ⚠️ **SHIPPED, default OFF** | **−4,598 tokens/doc (−7.1 %)**: 32.5 % of the 14,149-token region | **Information-neutral**: the list's content is byte-identical, only its layout differs. ⚠️ The *formatting* effect on the model is unmeasured here (§0), which is exactly why the default is today's bytes |
+| **Bound / shape S2's emission** (the 14,149-token re-read is `items × ~101 tokens`) | dominant by construction: −30 % of the record removes ~3,500 output + ~4,200 S4 input per document | **NO** — half of each record is E2/E3 provenance (`quote`, `search_keys`, `slots`); this is the `#7949` trade, and it is a measurement, not arithmetic |
 | compact kind render (`TORTOISE_EXTRACTOR_PROMPT=compact`) | **−1,960 tokens/doc** (master render 3,187 → 2,335 per call × 2.30 mapping calls) | **NO** — compact mode **story-filters** the pack kinds: a document that misses every trigger word falls back to all packs, one that hits a single trigger drops the other packs. That is a vocabulary-visibility change, i.e. exactly the class of change `#7949` arbitrates. It is also already-shipped, opt-in, and off. |
-| S1 truncation double-send | **−4,652 tokens/doc** (68 % × (T + 1,630)) | **NO** — a longer narrative is *more* content, but the story then grows inside both later prompts (6,323 tokens/doc today), so the net is a measurement, not arithmetic |
+| S1 truncation double-send | **−4,652 tokens/doc** (68 % × (T + 1,630)) | **NO** — a longer narrative is *more* content, but the story then grows inside both later prompts (5,066 tokens/doc today), so the net is a measurement, not arithmetic |
 
 **One lever was shipped, disarmed.** `TORTOISE_S4_EMBED_JSON=compact` switches S4's
 embed-list serialization from `indent=1` to compact separators — the one change whose *content*
@@ -275,17 +275,17 @@ prompt builder, not by the model.
 
 **Before → after, in the measured unit.** The document corpus's embed region is
 **12,332 tokens per S4 call** (solved in §1) — about twice the receipts' ~5,540, because a
-document yields a longer list — which is **14,058 tokens per document** at the measured
+document yields a longer list — which is **14,149 tokens per document** at the measured
 1.14 S4 calls/document. ⚠️ The 32.5 % ratio is applied to the **per-document** figure, because
-the before→after table below is per document: 32.5 % × 14,058 = **4,569**. (Applying it to
+the before→after table below is per document: 32.5 % × 14,149 = **4,598**. (Applying it to
 12,332 would give 4,008 — the per-CALL saving — which is a different row, not a different
 answer.)
 
 | | before | after (flag armed) | Δ |
 |---|---|---|---|
-| input tokens / median document | 48,461 | 43,892 | −4,569 |
+| input tokens / median document | 48,461 | 43,863 | −4,598 |
 | output tokens / median document | 16,338 | 16,338 (unchanged by construction) | 0 |
-| **tokens / median document** | **64,799** | **60,230** | **−7.1 %** |
+| **tokens / median document** | **64,799** | **60,201** | **−7.1 %** |
 | documents / month · solo (3M) | 46 | 50 | +8.7 % |
 | documents / month · pro (4M) | 62 | 66 | +6.5 % |
 | documents / month · team (24M) | 370 | 399 | +7.8 % |
