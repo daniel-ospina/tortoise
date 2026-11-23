@@ -44,23 +44,19 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and at THIS head it is re-measured, not
-# carried: `--emit-push-matrix` packs ALL ELEVEN shards at 721.6 s (a-k, two runs, byte-identical), so
-# `ceil(721.6/60 x 2)` = 25 m governs (a shard's job-level
-# wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 25`, so
-# the two agree by construction rather than by a hand re-read. The 0.1-0.2 s over `main` at THIS
-# merge base `588cf7ae` (721.4/721.5 s, measured there with the same verb — NOT 720.7, which is the max
-# of a 720.6-720.7 emission at the `10e51693f1` MERGE tree `c0b929403aa9` with those three suites UNREGISTERED, not an emission of main's own tree) is the union of both
-# parents' registrations plus this branch's
-# `tests/test_13998_capacity_notice.py` at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only
-# because it sits a fraction of a second from rounding the OTHER way: two
-# intermediate folds of this branch emitted 24 m before main's next fold re-packed the pool down
-# to 720.0 s, and this head is one main fold away from that again. Re-run
-# `--emit-push-matrix`; never carry the last revision's minute. Those numerals are a
-# 2026-11-16 durations sweep re-packed the same 11 shards to a 23 m worst-shard watchdog, and
-# #12926's own 10.0 s row moved that emission one whole minute further; #14015's M5 row moved it
-# once more, to a 25 m worst shard: arm-2 SUM 56.64 m,
-# x 1.5 = 85.0 m, 5.0 m of headroom — and the 2026-11-23 sweep moved it AGAIN, to a 28 m worst
-# shard: arm-2 SUM 59.64 m, x 1.5 = 89.5 m, 0.5 m of headroom. Those numerals are a
+# carried: `--emit-push-matrix` packs ALL ELEVEN shards at 835.8-835.9 s (a-k; two runs,
+# byte-identical — `| shasum` on the emission, measured 2026-11-23), so `ceil(835.9/60 x 2)` = 28 m
+# governs (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
+# `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two agree by construction rather
+# than by a hand re-read. That map is the union of both parents' registrations plus this branch's
+# `tests/test_13998_capacity_notice.py` (`--emit-push-matrix` lists it in shard c) at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`, and it matters only because it sits one main fold from rounding again. Re-run `--emit-push-matrix`; never carry the last revision's minute.
+#
+# The history, so a reader can see the direction: the 2026-11-16 durations sweep re-packed the same
+# 11 shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,
+# #14015's M5 row to a 25 m worst shard (arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom), and
+# the 2026-11-23 sweep to the 28 m above (arm-2 SUM 59.64 m, x 1.5 = 89.5 m, 0.5 m of headroom).
+# Those numerals are a
 # SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at this head — re-derive them with
 # that verb rather than trusting them, but a restatement is fine when it cites the emission
 # it came from.) ⛔ The cap was NOT

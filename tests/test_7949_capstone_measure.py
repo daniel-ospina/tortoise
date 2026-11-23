@@ -8113,22 +8113,35 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # stated last line must still be the blank line immediately before
     # `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
-    assert _i7.count("`hosted_api.py:15563-15640`") == 1, (
+    _i7_row = [ln for ln in _i7.splitlines() if "| **I7** |" in ln]
+    assert len(_i7_row) == 1, (
+        f"I7 must be exactly ONE line of 04-plan.md to scope its range cite to, found "
+        f"{len(_i7_row)} — re-word this guard rather than letting it bind the easier of two")
+    _i7_cite = re.search(r"`hosted_api\.py:(\d+)-(\d+)`", _i7_row[0])
+    assert _i7_cite is not None, (
         "04-plan.md I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
         "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
+    _i7_start, _i7_end = int(_i7_cite.group(1)), int(_i7_cite.group(2))
+    assert _i7.count(f"`hosted_api.py:{_i7_start}-{_i7_end}`") == 1, (
+        "04-plan.md states I7's range cite more than once — this guard reads the ONE the row "
+        "carries, so a second spelling would be ungraded")
     _org_info = _EPIC_CITE_SOURCES["hosted_api"].read_text(encoding="utf-8").splitlines()
-    _span = _org_info[15563 - 1:15640]
+    _span = _org_info[_i7_start - 1:_i7_end]
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
                           ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
         assert sum(_needle in _l for _l in _span) == 1, (
-            f"04-plan.md I7 says `:15563-15640` publishes `nodes_used` / `max_nodes`, but "
-            f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
-            "range has moved, so re-derive it (start AND end) rather than bumping one end")
+            f"04-plan.md I7 says `:{_i7_start}-{_i7_end}` publishes `nodes_used` / "
+            f"`max_nodes`, but {_what} occurs "
+            f"{sum(_needle in _l for _l in _span)} time(s) in that span — the range has "
+            "moved, so re-derive it (start AND end) rather than bumping one end")
     # …and the END by structure, because membership inside a window cannot see it move.
-    _i7_end_ok = _org_info[15640 - 1].strip() == "" and bool(
-        _org_info[15640].lstrip().startswith("return OrgInfoResponse("))
+    assert 0 < _i7_end < len(_org_info), (
+        f"04-plan.md I7's range ends at `:{_i7_end}`, past the end of `hosted_api.py` "
+        f"({len(_org_info)} lines) — re-derive both endpoints from the file")
+    _i7_end_ok = _org_info[_i7_end - 1].strip() == "" and bool(
+        _org_info[_i7_end].lstrip().startswith("return OrgInfoResponse("))
     assert _i7_end_ok, (
-        "04-plan.md I7's range end (`:15640`) is no longer the blank line before "
+        f"04-plan.md I7's range end (`:{_i7_end}`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
 
