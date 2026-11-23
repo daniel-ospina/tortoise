@@ -66,6 +66,15 @@ DOCS_DRIFT_STEP_COMMANDS = (
     # that a cosmetic edit leaves the verdict unchanged. An arm nothing runs is
     # not a guard.
     "python3 tools/findings_ledger_check.py --self-test",
+    # #13998: the wall-clock document's citation guard, whose claim needs HISTORY —
+    # the `git show --stat <sha> -- docs/ops/ci-wall-clock.md` its §2 rests on must
+    # name a commit this checkout can resolve. The pytest pin for the same claim
+    # (`tests/test_ci_check_repair.py`, surface `core`) runs in the depth-1 `test`
+    # job, where an absent ancestor and a bogus sha are both missing objects — so it
+    # can only SKIP there, and a gate that runs only where it cannot answer is a
+    # no-op gate (#4244). It is pinned INSIDE this exact list rather than exempted,
+    # for the reason this module's docstring gives: the exactness is the point.
+    "python3 tools/ci_check_repair.py --check-doc-citations",
 )
 
 # The step's `run:` block, as `_code()`-filtered text, must equal this exactly.

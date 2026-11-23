@@ -4404,26 +4404,128 @@ def test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit():
             f"`git show --stat {ref}` is cited in docs/ops/ci-wall-clock.md but {ref!r} is "
             "not a commit — a placeholder here reads as evidence while being unrunnable, "
             "so name the sha the claim was measured at")
-        probe = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
-             f"{ref}^{{commit}}"],
-            capture_output=True, text=True)
+        try:
+            probe = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+                capture_output=True, text=True)
+        except FileNotFoundError:  # no `git` on this host at all
+            pytest.skip("`git` is not installed here, so no commit can be resolved")
         if probe.returncode != 0:
-            # ⛔ A `fetch-depth: 1` checkout cannot contain an ANCESTOR, so an
-            # unresolvable cite there is UNCHECKED, not disproved — the same
-            # premise `tests/test_7949_capstone_measure.py` states for its own
-            # pre-flip head. Measured: CI's shallow clone reds this arm on a sha
-            # that IS an ancestor of the head (run 45081971415, shard `g`), which
-            # is a false block, not a defect in the document.
+            # ⛔ THIS CHECK NEEDS HISTORY, SO IT CANNOT DISCIPLINE A GRAFTED GRAPH.
+            # CI's `test` job checks out at the default `fetch-depth: 1`; measured
+            # there on run 45081971415 (shard `g`), this arm redded on a sha that IS
+            # an ancestor of the head (`git merge-base --is-ancestor 8abf4844 HEAD`
+            # → rc=0; `git rev-list --count 8abf4844..HEAD` → 5 — the clone simply
+            # cannot see it). A false block is not a finding.
+            #
+            # So an unresolvable cite asks whether this clone's history is GRAFTED
+            # (`--is-shallow-repository` reports a graft EXISTS — not that there are
+            # no ancestors: a `--depth 2` clone reports `true` and still holds
+            # `HEAD^`), and skips with that reason. In a FULL clone the same
+            # condition still FAILS, which is this arm's point.
+            #
+            # ⛔ AND THE SKIP IS NOT A COVERAGE LOSS — the same claim has a home that
+            # CAN answer it: `tools/ci_check_repair.py --check-doc-citations`, run by
+            # the depth-0 `docs` job (.github/workflows/ci.yml). A gate that runs only
+            # where it cannot answer is a no-op gate (#4244), so the history half
+            # lives there and this arm keeps the half that needs no history: the
+            # hex-token arm above, which fires in EVERY clone.
             shallow = subprocess.run(
                 ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
                 capture_output=True, text=True).stdout.strip()
             if shallow == "true":
                 pytest.skip(
-                    f"`git show --stat {ref}` cannot be checked in a shallow clone "
-                    f"(`fetch-depth: 1` has no ancestors, so {ref!r} is UNCHECKED "
-                    "here rather than disproved) — re-derive on a full clone: "
-                    "`git fetch --unshallow origin`.")
+                    f"`git show --stat {ref}` cannot be checked in a shallow clone: "
+                    f"it reports a grafted history, so an ABSENT ANCESTOR and a BOGUS "
+                    f"SHA are both simply missing objects and {ref!r} is UNVERIFIED "
+                    "rather than disproved. The depth-0 `docs` job answers this via "
+                    "`tools/ci_check_repair.py --check-doc-citations`; re-derive here "
+                    "on a full clone: `git fetch --unshallow origin`.")
             raise AssertionError(
                 f"docs/ops/ci-wall-clock.md cites `git show --stat {ref}` but {ref} "
-                f"does not resolve in this FULL checkout: {probe.stderr.strip()}")
+                "does not resolve in this FULL checkout (a depth-0 graph holds every "
+                f"ancestor), so the command the paragraph invites cannot be run: "
+                f"{probe.stderr.strip()}")
+
+
+# ── the depth-0 home for the wall-clock doc's citations (#13998 review P2) ────
+#
+# `tests/test_ci_check_repair.py::test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit`
+# can only SKIP the resolve arm in the `test` job — it checks out at `fetch-depth: 1`, where an
+# absent ancestor and a bogus sha are both missing objects. The claim therefore also lives in
+# `tools/ci_check_repair.py --check-doc-citations`, which the depth-0 `docs` job runs. These four
+# cases pin that tool's own verdicts, because a guard whose exit codes nobody asserts is a guard
+# nobody runs.
+
+def _citation_tree(tmp_path, cited: str):
+    """A throwaway git checkout holding only the document, citing `cited`."""
+    import subprocess as sp
+    root = tmp_path / "tree"
+    (root / "docs" / "ops").mkdir(parents=True)
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        f"… `git show --stat {cited} -- docs/ops/ci-wall-clock.md` carried no edit …\n")
+    sp.run(["git", "init", "-q", str(root)], check=True)
+    sp.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=c",
+            "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    return root
+
+
+def test_the_wall_clock_citations_resolve_at_this_head():
+    """The tree this pin is written on must be GREEN — else the tool is the defect."""
+    from tools.ci_check_repair import doc_citation_defects
+    rc, findings = doc_citation_defects(Path(__file__).resolve().parents[1])
+    assert rc == 0, f"the wall-clock doc's own citations are a defect at this head: {findings}"
+
+
+def test_a_mistyped_sha_in_a_full_clone_is_a_DEFECT(tmp_path):
+    """Discriminating arm: a hex token that no commit answers must exit 1, not 2."""
+    from tools.ci_check_repair import doc_citation_defects
+    root = _citation_tree(tmp_path, "8abf4845")
+    rc, findings = doc_citation_defects(root)
+    assert rc == 1, f"a bogus sha must be a DEFECT (exit 1), got rc={rc}: {findings}"
+    assert "does not resolve in this FULL checkout" in findings[0]
+
+
+def test_a_placeholder_is_a_DEFECT(tmp_path):
+    """The shape that actually shipped: `<that commit>` is not a commit at all."""
+    from tools.ci_check_repair import doc_citation_defects
+    root = _citation_tree(tmp_path, "<that")
+    rc, findings = doc_citation_defects(root)
+    assert rc == 1, f"a placeholder must be a DEFECT (exit 1), got rc={rc}: {findings}"
+    assert "is not a commit" in findings[0]
+
+
+def test_a_grafted_history_is_UNVERIFIED_not_a_DEFECT(tmp_path, monkeypatch):
+    """A shallow clone cannot separate an absent ancestor from a bogus sha — exit 2.
+
+    Shallow-ness is simulated on `subprocess.run` (a real `--depth 1` clone of this
+    repo is not something a unit test may do), which is the ONLY thing being stubbed:
+    the resolve probe still really fails, and the tool must then ask the graft
+    question and report UNVERIFIED rather than blaming the document.
+    """
+    from tools import ci_check_repair as R
+
+    root = _citation_tree(tmp_path, "8abf4845")
+    real_run = R.subprocess.run
+
+    def fake_run(argv, *a, **kw):
+        if "rev-parse" in argv and "--is-shallow-repository" in argv:
+            return subprocess.CompletedProcess(argv, 0, "true\n", "")
+        return real_run(argv, *a, **kw)
+
+    monkeypatch.setattr(R.subprocess, "run", fake_run)
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 2, (
+        "in a grafted graph an absent ancestor and a bogus sha are indistinguishable, "
+        f"so this must be UNVERIFIED (exit 2), not a finding: rc={rc} {findings}")
+    assert "UNVERIFIED" in findings[0] and "grafted" in findings[0]
+
+
+def test_a_directory_that_is_not_a_checkout_is_UNVERIFIED(tmp_path):
+    """No git history at all is UNVERIFIED — exit 2, never a pass and never a defect."""
+    from tools import ci_check_repair as R
+    (tmp_path / "docs" / "ops").mkdir(parents=True)
+    (tmp_path / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        "… `git show --stat 8abf4844 -- docs/ops/ci-wall-clock.md` …\n")
+    rc, findings = R.doc_citation_defects(tmp_path)
+    assert rc == 2, f"a non-checkout must be UNVERIFIED (exit 2), got rc={rc}: {findings}"

@@ -2369,7 +2369,30 @@ def main(argv: list[str] | None = None) -> int:
                          "for the pass — a cancel may not be authorised by a queue "
                          "nobody read. The report says so (queue_congestion_measured)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--check-doc-citations", action="store_true",
+                    help="verify every `git show --stat <sha> -- docs/ops/ci-wall-clock.md` "
+                         "cited in that document resolves; 0 = verified, 1 = a defect in "
+                         "the document, 2 = UNVERIFIED in this checkout (a shallow graph "
+                         "cannot tell an absent ancestor from a bogus sha). Needs "
+                         "HISTORY, so it is run by the depth-0 `docs` job, not the "
+                         "depth-1 `test` job")
     args = ap.parse_args(argv)
+
+    if args.check_doc_citations:
+        # History-dependent, so its home is the depth-0 job (see the section comment
+        # above `doc_citation_defects`). Exit 2 is UNVERIFIED — never a pass, never a
+        # finding against the document.
+        rc, findings = doc_citation_defects(Path(__file__).resolve().parent.parent)
+        if args.json:
+            print(json.dumps({"rc": rc, "findings": findings}, indent=2))
+        elif rc == 0:
+            print("doc-citations: every `git show --stat <sha>` cite in "
+                  "docs/ops/ci-wall-clock.md resolves at this head")
+        else:
+            label = "UNVERIFIED" if rc == 2 else "DEFECT"
+            for f in findings:
+                print(f"{label}: {f}", file=sys.stderr)
+        return rc
 
     if args.workflow_state:
         # The coverage question lives here rather than in the launcher's shell: it
@@ -2782,5 +2805,83 @@ def main(argv: list[str] | None = None) -> int:
     return code
 
 
+# ── the wall-clock document's own citations (#13998 review P2) ────────────────
+#
+# `docs/ops/ci-wall-clock.md` §2 rests its restored shard split on one runnable
+# command — the `git show --stat <sha> -- docs/ops/ci-wall-clock.md` that proves the
+# follow-up commit carried no edit to that file. The pytest pin
+# (`tests/test_ci_check_repair.py::test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit`)
+# checks the same thing, but that file is registered on the `core` surface and so runs
+# in the `test` job, which checks out at the DEFAULT `fetch-depth: 1` — a grafted
+# graph in which a REAL ancestor and a BOGUS sha are both simply absent. There the pin
+# can only SKIP, and "a provenance gate that runs only where it cannot answer is a
+# no-op gate" (python-ci.yml, the #4244 note that put that job at `fetch-depth: 0`).
+#
+# So the history half lives HERE too, and runs in the `docs` job — the depth-0 job
+# this repo already keeps for exactly this: `substrate_map_check.py`,
+# `problem_map_check.py` and `findings_ledger_check.py` all prove an
+# `measured_at_commit`-style ancestry claim there for the same reason. Stdlib only,
+# one file, no network. verify-only: it never edits the document.
+
+DOC_CITATION_PATHS = ("docs/ops/ci-wall-clock.md",)
+
+
+def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
+    """Every `git show --stat <sha> -- <doc>` cited in DOC_CITATION_PATHS must resolve.
+
+    Returns `(rc, findings)` where rc is 0 = every cite verified, 1 = a defect in the
+    document (an unrunnable placeholder, or a sha this checkout cannot resolve), and
+    2 = UNVERIFIED — the question the claim needs cannot be answered in THIS checkout
+    (no git, not a repo, or a grafted/shallow graph), which is reported as unverified
+    rather than as a defect in the document. Exit 2 is never a pass.
+    """
+    findings: list[str] = []
+    cites = 0
+    inside = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True)
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        # Not a checkout at all: the citations are UNVERIFIED here, not wrong.
+        return 2, [f"{root} is not inside a git work tree, so no cited sha can be "
+                   "resolved — the citations are UNVERIFIED, not disproved"]
+    for rel in DOC_CITATION_PATHS:
+        path = root / rel
+        if not path.is_file():
+            return 2, [f"{rel}: missing, so its citations are UNVERIFIED"]
+        text = path.read_text(encoding="utf-8")
+        for ref in re.findall(
+                r"git show\s+--stat\s+([^\s`]+)[^`]*?--\s+docs/ops/ci-wall-clock\.md",
+                text):
+            cites += 1
+            if not re.fullmatch(r"[0-9a-f]{7,40}", ref):
+                findings.append(
+                    f"{rel}: `git show --stat {ref}` — {ref!r} is not a commit. A "
+                    "placeholder here reads as evidence while being unrunnable: name "
+                    "the sha the claim was measured at.")
+                continue
+            probe = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
+                 f"{ref}^{{commit}}"],
+                capture_output=True, text=True)
+            if probe.returncode == 0:
+                continue
+            shallow = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+                capture_output=True, text=True).stdout.strip()
+            if shallow == "true":
+                return 2, [f"{rel}: `git show --stat {ref}` cannot be checked in this "
+                           "clone — it reports a grafted (shallow) history, so an "
+                           f"absent ancestor and a bogus sha are indistinguishable "
+                           f"here. {ref} is UNVERIFIED, not disproved. Re-derive on a "
+                           "full clone: `git fetch --unshallow origin`."]
+            findings.append(
+                f"{rel}: `git show --stat {ref}` — {ref} does not resolve in this "
+                "FULL checkout, so the command the paragraph invites cannot be run.")
+    if cites == 0:
+        return 2, ["docs/ops/ci-wall-clock.md runs no `git show --stat <sha> -- "
+                   "docs/ops/ci-wall-clock.md`; if the command was reworded, re-aim "
+                   "THIS check at the new shape rather than deleting it — an "
+                   "unrunnable citation is what it exists to catch."]
+    return (1 if findings else 0), findings
 if __name__ == "__main__":
     sys.exit(main())
