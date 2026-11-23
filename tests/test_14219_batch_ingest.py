@@ -759,3 +759,39 @@ def test_inline_text_without_storage_is_refused_rather_than_acked(tmp_path):
     coord = BatchCoordinator(InMemoryBatchStore())
     with pytest.raises(ValueError, match="TORTOISE_INGEST_BASE_DIR"):
         coord.submit(ORG, ["a.md"], contents=["text"], stage_base=None)
+
+
+# ── a drain is linear in items, not quadratic ──────────────────────────────
+def test_the_coordinator_reads_one_item_row_per_step_not_the_whole_batch(
+        monkeypatch):
+    """A 500-item batch must not re-list 500 rows per item.
+
+    `_fresh` re-reads the item it is about to write (a cancel or a peer drain may
+    have moved it). Doing that by listing the batch is ~250 000 materialised rows
+    for 500 items; one row per call is what makes the batch scale.
+    """
+    store = InMemoryBatchStore()
+    calls = {"get_item": 0, "items": 0}
+    real_get = store.get_item
+    real_items = store.items
+
+    def _get(org_id, batch_id, item_id):
+        calls["get_item"] += 1
+        return real_get(org_id, batch_id, item_id)
+
+    def _items(org_id, batch_id):
+        calls["items"] += 1
+        return real_items(org_id, batch_id)
+
+    monkeypatch.setattr(store, "get_item", _get)
+    monkeypatch.setattr(store, "items", _items)
+
+    coord = BatchCoordinator(store)
+    _batch, items = coord.submit(ORG, [f"/d/{n}.md" for n in range(50)])
+    for it in items:
+        coord.run_item(ORG, it, lambda i: ItemOutcome(BatchItemState.INDEXED))
+
+    assert calls["items"] <= 2, (
+        f"the batch was listed {calls['items']} times for 50 items — the drain "
+        "must read rows, not re-list the batch")
+    assert calls["get_item"] >= 50

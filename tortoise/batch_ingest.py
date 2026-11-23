@@ -606,6 +606,17 @@ class BatchStore(Protocol):
 
     def items(self, org_id: str, batch_id: str) -> list[BatchItem]: ...
 
+    def get_item(self, org_id: str, batch_id: str, item_id: str
+                 ) -> BatchItem | None:
+        """ONE item by id — the coordinator's per-item read.
+
+        ⛔ Not `items()` filtered: a drain that re-lists the whole batch for every
+        item turns a 500-item batch into ~250 000 materialised rows of work. One
+        row per call is the difference between a batch that scales and one that
+        is quadratic for no reason.
+        """
+        ...
+
     def pending_batches(self, org_id: str) -> list[str]:
         """Batch ids with at least one non-terminal item — the resume input."""
         ...
@@ -665,6 +676,12 @@ class InMemoryBatchStore:
         with self._lock:
             bucket = self._items.get((org_id, batch_id), {})
             return [_copy_item(i) for i in bucket.values()]
+
+    def get_item(self, org_id: str, batch_id: str, item_id: str
+                 ) -> BatchItem | None:
+        with self._lock:
+            found = self._items.get((org_id, batch_id), {}).get(item_id)
+            return _copy_item(found) if found else None
 
     def pending_batches(self, org_id: str) -> list[str]:
         with self._lock:
@@ -847,6 +864,27 @@ class GraphBatchStore:
             attempts=int(r[8] or 0), content_changed=bool(r[9]),
             updated_at=r[10] or "",
             staged_path=(r[11] or "") if len(r) > 11 else "") for r in rows]
+
+    def get_item(self, org_id: str, batch_id: str, item_id: str
+                 ) -> BatchItem | None:
+        rows = self._q(
+            f"MATCH (i:{ITEM_LABEL} {{id:$iid, batch_id:$bid, org_id:$org}}) "
+            "RETURN i.ref, i.name, i.state, i.reason, i.content_key, "
+            "       i.tokens_in, i.tokens_out, i.attempts, i.content_changed, "
+            "       i.updated_at, i.staged_path",
+            {"iid": item_id, "bid": batch_id, "org": org_id},
+        )
+        if not rows:
+            return None
+        r = rows[0]
+        return BatchItem(
+            batch_id=batch_id, item_id=item_id, ref=r[0] or "", name=r[1] or "",
+            state=_as_state(BatchItemState, r[2], BatchItemState.QUEUED),
+            reason=r[3] or "", content_key=r[4] or "",
+            tokens_in=int(r[5] or 0), tokens_out=int(r[6] or 0),
+            attempts=int(r[7] or 0), content_changed=bool(r[8]),
+            updated_at=r[9] or "",
+            staged_path=(r[10] or "") if len(r) > 10 else "")
 
     def pending_batches(self, org_id: str) -> list[str]:
         rows = self._q(
@@ -1223,8 +1261,7 @@ class BatchCoordinator:
         if fresh.state is BatchItemState.CANCELLED:
             return fresh
         if fresh.duplicate_of:
-            twin = next((i for i in self._store.items(org_id, fresh.batch_id)
-                         if i.item_id == fresh.duplicate_of), None)
+            twin = self._store.get_item(org_id, fresh.batch_id, fresh.duplicate_of)
             if twin is not None and twin.state is BatchItemState.INDEXED:
                 return self.advance(
                     org_id, fresh, BatchItemState.SKIPPED_DUPLICATE,
@@ -1279,10 +1316,8 @@ class BatchCoordinator:
             return self._fresh(org_id, fresh)
 
     def _fresh(self, org_id: str, item: BatchItem) -> BatchItem:
-        for stored in self._store.items(org_id, item.batch_id):
-            if stored.item_id == item.item_id:
-                return stored
-        return item
+        stored = self._store.get_item(org_id, item.batch_id, item.item_id)
+        return stored if stored is not None else item
 
     # -- cancel (owner requirement, brief item 6) ------------------------
     def cancel(self, org_id: str, batch_id: str, *, reason: str = ""
