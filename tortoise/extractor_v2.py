@@ -17050,7 +17050,7 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
     last exception propagates. Fatal 4xx (401/402/403 + other 4xx, via P2's
     taxonomy) raise immediately with ZERO retries; unknown classes are
     treated as transient (the census records them — the retry-then-fix loop
-    tightens the class, not the code).
+    tightens the class, not the code). ⛔ An EMPTY ``finish_reason="length"`` reply is NOT retried — it raises ``_ReasoningCollapse`` (#14357, census class ``reasoning_collapse``).
 
     ``max_tokens`` bounds the generation (None = caller-applied stage cap;
     0 = documented uncapped escape hatch). ``deadline_s`` defaults to None →

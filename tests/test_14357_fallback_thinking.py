@@ -358,6 +358,22 @@ def test_empty_length_response_raises_the_yield_guard(monkeypatch):
     assert "model=" in str(ei.value), str(ei.value)
 
 
+def test_complete_docstring_names_the_yield_guard_raise():
+    """The function's OWN contract names the raise a caller must handle.
+
+    ``_complete`` raises ``_ReasoningCollapse`` on the collapse shape and that
+    raise is fatal BY TYPE — no retry, and a census class the eval gate vetoes
+    on. The behaviour was documented on the exception class and at the guard
+    site, but not in ``_complete``'s docstring, which described only
+    retry/backoff: a caller reading the contract it calls saw a policy that
+    suggests every failure is retried, and nothing that warned a call can come
+    back as a fatal, censused raise.
+    """
+    doc = v2._complete.__doc__ or ""
+    assert "_ReasoningCollapse" in doc, doc
+    assert "reasoning_collapse" in doc, doc
+
+
 def test_escalated_collapse_stays_fatal_not_a_recoverable_truncation(monkeypatch):
     """#14357 — a collapse on the ESCALATED call is the collapse, not a
     truncated parse.
