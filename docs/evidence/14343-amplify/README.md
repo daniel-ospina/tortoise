@@ -146,11 +146,13 @@ measured the delta contract's *aggregate* saving on 26-turn sessions; this is th
 contract on **documents**, and it is not uniformly complying. That is a finding of this bundle,
 not a lever: it is a re-emission of the embed list, which is the `#7949` channel.
 
-⚠️ **Reconciliation with §4a/§5.** §2's 17,829 is `Σ(calls × median per call)`; §4a/§5's
-16,338 is the **median of the per-document totals**. They are different estimators of the same
-quantity and agree to 9 %; neither is a typo, and the fitted constant (22,802) is a third. The
-headline bill in §5 uses the median-of-totals because that is the number `#14295` measured
-a document at.
+⚠️ **Reconciliation with §4a/§5.** §2's 17,829 is `Σ(calls × median per call)`, i.e. the
+median document's *shape*; §4a/§5's **16,338 is the median of the per-document COMPLETION
+column** — not of the totals. They are different estimators of the same quantity and agree to
+9 %; neither is a typo, and the fitted constant (22,802) is a third. (The median of the
+per-document *totals* is 67,322, and the sum of the two per-column medians is 64,799 — the
+headline bill in §5 uses the latter, because that is the number `#14295` measured
+a document at.)
 
 `#14295`'s per-stage *input* fits say the same thing from the other side: S1 is
 `1,909 + 2.056 × T` (R²=0.995, the only stage that reads the text), S2 is

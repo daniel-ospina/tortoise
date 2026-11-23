@@ -1914,7 +1914,19 @@ def compose_report(artifacts: list[dict]) -> dict:
 #: received (schema validation, parsing) keeps the response content and its
 #: token usage and records an `error.type`, while only a request failure means
 #: nothing was measured.
-_LOST_CALL_MARKERS = ("chunk failed", "S2 failed", "no embed list produced")
+#: ⛔ EVERY MEMBER MUST NAME A CALL THAT WAS NEVER RECORDED. `_Recording.complete`
+#: appends a call only AFTER the adapter returns, so a marker appended by code
+#: that runs *after* a stage returned describes a post-processing failure on a
+#: call that WAS measured — a note, not a lost call. Review cycle 13 measured two
+#: members that are exactly that, and refused a complete run for them:
+#:   * `"no embed list produced (S2/S4 empty)"` is appended in the **S5** branch
+#:     (`tortoise/extractor_v2.py:15615`), i.e. only after `run_s2` AND `run_s4`
+#:     returned and merged. It cannot indicate a lost call by construction.
+#:   * `"S2 failed"` is the SAME shape as the `"S4 failed"` this list already
+#:     dropped in cycle 12 — one broad `except` around `run_s2(...)`, whose
+#:     `_complete_parsed` raises `_ParseError` after the adapter already returned.
+#: A genuinely call-less stage is refused structurally by `_REQUIRED_STAGES`.
+_LOST_CALL_MARKERS = ("chunk failed",)
 
 _REQUIRED_STAGES = ("s1", "s2", "s4")
 
