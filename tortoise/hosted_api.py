@@ -4046,6 +4046,14 @@ app.add_middleware(
             _body_limits.CAPTURE_SESSION_MAX_BYTES,
             _body_limits.CAPTURE_SESSION_413_DETAIL,
         ),
+        # #14219: a batch carries DOCUMENT text, which the 256 KiB default
+        # cannot hold. The handler's own `_BATCH_MAX_INLINE_BYTES` check then
+        # applies the batch-specific guidance — which is why the two numbers are
+        # the same constant, not two.
+        "/v1/batches": (
+            _batch_ingest.BATCH_MAX_INLINE_BYTES,
+            _batch_ingest.BATCH_INLINE_413_DETAIL,
+        ),
     },
     exempt_prefixes=("/mcp", "/internal", "/v1/internal"),
     exempt_regexes=_APP_BODY_CAP_EXEMPT_REGEXES,
@@ -16418,10 +16426,20 @@ async def upload_pack_manifest(
 #: documents submits another batch; nothing is dropped, and the refusal says so.
 _BATCH_MAX_ITEMS = max(1, _int_env("TORTOISE_BATCH_MAX_ITEMS", 1000))
 
+#: The allowance "door" the batch ESTIMATE reads its numbers through. Named (not
+#: inlined) because it is the one thing that must not drift: `capture_extraction`
+#: declares `resources={"sessions"}` and `_carry_allowances` returns the org
+#: UNCHANGED for a label no dimension declares — so a wrong label here silently
+#: reports "no included amount" for ever. Pinned by a test.
+_BATCH_ALLOWANCE_RESOURCE = "sessions"
+
 #: Inline item text bound (bytes) — the same body-size reality as the count
 #: above. Path/URL items carry no inline bytes and are unaffected.
+#: The handler's own bound, from the SAME constant the body-cap middleware
+#: registers for this route — two numbers for one limit is how an advertised
+#: bound becomes unreachable (review, BLOCKING 6).
 _BATCH_MAX_INLINE_BYTES = max(1024, _int_env("TORTOISE_BATCH_MAX_INLINE_BYTES",
-                                             4_194_304))
+                                             _batch_ingest.BATCH_MAX_INLINE_BYTES))
 
 #: The batch worker's OWN pool (see `batch_ingest.BATCH_ITEMS_IN_FLIGHT` for why
 #: the bound is 2 and why it must not be the capture pool). Created at import so
@@ -16432,10 +16450,26 @@ _BATCH_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(1, min(_int_env("TORTOISE_BATCH_WORKERS", 2), 4)),
     thread_name_prefix="batch-ingest")
 
+#: ⛔ A SECOND pool for the batch BOOKKEEPING (accept, status, list, cancel), and
+#: the reason is the capture lane's own rule (`hosted_api.py`: *"long or
+#: stallable work gets its OWN pool"*) applied in the right direction (#14219
+#: review, BLOCKING 3). A drain holds a worker for the WHOLE batch — ~56 s per
+#: document, so ~15 h for 1 000 — and this was measured on the single pool: with
+#: two drains running, a `_run_off_loop(_BATCH_EXECUTOR, …)` (the status path)
+#: waited the full 2 s the drains had left, and the 10 s transport bound would
+#: turn the third such request into a 504 for a handler that then WRITES the
+#: rows anyway. Splitting the pool is what keeps the ACK inside the budget
+#: (owner decision (a)) rather than merely intending to.
+_BATCH_DB_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(_int_env("TORTOISE_BATCH_DB_WORKERS", 2), 4)),
+    thread_name_prefix="batch-db")
+
 
 def _dispose_batch_executor() -> None:
     with contextlib.suppress(Exception):
         _BATCH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    with contextlib.suppress(Exception):
+        _BATCH_DB_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 if hasattr(threading, "_register_atexit"):
@@ -16535,7 +16569,38 @@ def _batch_store_for(org: dict) -> _batch_ingest.GraphBatchStore:
     return _batch_ingest.GraphBatchStore(proj.g.query)
 
 
-def _batch_item_runner(sdk, corpus_name: str):
+def _batch_org_root(org_id: str, *, create: bool = False) -> str | None:
+    """The ORG's own document root under ``TORTOISE_INGEST_BASE_DIR``.
+
+    ⛔ **This is the tenancy bound, and it is not optional** (#14219 review,
+    BLOCKING). ``TORTOISE_INGEST_BASE_DIR`` is ONE directory for the whole
+    deployment (``/data/ingest``), and its documented layout is
+    ``$TORTOISE_INGEST_BASE_DIR/<org>/...``. Resolving a caller-supplied ``ref``
+    against the DEPLOYMENT root would let any tenant index any other tenant's
+    file — a cross-tenant read reachable with an ordinary ``graphs:write`` key.
+    The same hazard is why ``/v1/index/docs`` allowlists every client-supplied
+    path component ("an unvalidated branch like ``../../victimorg/…`` would
+    traverse the org boundary", #2114/#1845).
+
+    So every path a batch reads or writes is resolved under
+    ``<base>/<org_id>``, and ``org_id`` comes from the request's auth, never from
+    the body. A tenant therefore cannot name another tenant's document even with
+    a path that is perfectly valid on this server.
+    """
+    base = os.environ.get("TORTOISE_INGEST_BASE_DIR") or None
+    if not base:
+        return None
+    root = os.path.join(os.path.realpath(os.path.expanduser(base)), str(org_id))
+    if create:
+        try:
+            os.makedirs(root, mode=0o700, exist_ok=True)
+        except OSError:
+            _logger.exception("batch: could not prepare %s", root)
+            return None
+    return root
+
+
+def _batch_item_runner(sdk, corpus_name: str, org_id: str):
     """The production item runner: the repo's EXISTING per-file indexer unit.
 
     ``sdk._index_process_unit`` is the body of the ``index_sources_from_directory``
@@ -16548,14 +16613,18 @@ def _batch_item_runner(sdk, corpus_name: str):
     door as any other document; this layer adds identity, status and durability,
     not a second pipeline.
     """
-    base = os.environ.get("TORTOISE_INGEST_BASE_DIR") or None
-    root = os.path.realpath(os.path.expanduser(base)) if base else None
+    root = _batch_org_root(org_id)
 
     def run(item: _batch_ingest.BatchItem) -> _batch_ingest.ItemOutcome:
         from pathlib import Path
 
         from tortoise.security import resolve_under_base
-        ref = item.ref
+        # ⛔ An uploaded (inline-text) item was staged under the ORG root at
+        # acceptance, so it is an ordinary document on disk here — that is the
+        # ONLY way a customer's bytes reach us, and the staged path is theirs.
+        # A path item uses its ref, bounded by the same rule (#329) under the
+        # SAME org root — never the deployment root: see `_batch_org_root`.
+        ref = item.staged_path or item.ref
         if root is None:
             return _batch_ingest.ItemOutcome(
                 _batch_ingest.BatchItemState.FAILED,
@@ -16564,11 +16633,12 @@ def _batch_item_runner(sdk, corpus_name: str):
                        "recorded and nothing was lost")
         resolved = resolve_under_base(ref, root)
         if resolved is None:
-            # #329: a path outside the base is a REFUSAL, never a read.
+            # #329: a path outside the ORG's own storage is a REFUSAL, never a
+            # read. A ref that names another tenant's file lands here too.
             return _batch_ingest.ItemOutcome(
                 _batch_ingest.BatchItemState.FAILED,
-                reason="ref is not a path under the configured document "
-                       "storage — refused before any read")
+                reason="ref is not a path under this team's document storage "
+                       "— refused before any read")
         per_file = sdk._index_process_unit(
             resolved, corpus_root=Path(root),
             corpus_name=corpus_name or Path(root).name,
@@ -16578,6 +16648,116 @@ def _batch_item_runner(sdk, corpus_name: str):
         return _batch_ingest.runner_result_to_outcome(per_file)
 
     return run
+
+
+#: Batches accepted but NOT yet handed to a worker, because the ceiling was full
+#: or the off-peak window was closed (#14219 review, BLOCKING 4). Without this a
+#: deferred batch is accepted, ACKed with an ETA and never worked — the exact
+#: shape an "off-peak only" switch must not produce. The retry thread below
+#: drains it; the entries are `(org, batch_id)` only, never a credential.
+_BATCH_RETRY: list[tuple[dict, str]] = []
+_BATCH_RETRY_LOCK = threading.Lock()
+_BATCH_RETRY_INTERVAL_S = max(5, _int_env("TORTOISE_BATCH_RETRY_S", 60))
+_BATCH_RETRY_THREAD: threading.Thread | None = None
+
+#: Orgs whose unfinished batches have already been recovered in this process —
+#: the `recover()` hook's own idempotence (one scan per tenant per boot).
+_BATCH_RECOVERED: set[str] = set()
+
+
+def _batch_retry_enqueue(org: dict, batch_id: str) -> None:
+    with _BATCH_RETRY_LOCK:
+        if any(bid == batch_id for _o, bid in _BATCH_RETRY):
+            return
+        # Bound the queue: an org cannot accumulate unbounded deferred batches in
+        # memory. Overflow is not lost — `recover()` re-derives the pending
+        # batches from the graph, which is the record.
+        if len(_BATCH_RETRY) < 1000:
+            _BATCH_RETRY.append((org, batch_id))
+
+
+def _batch_retry_once() -> int:
+    """One retry pass over the deferred batches. Returns how many were handed off.
+
+    Split out of the loop so the pass is testable WITHOUT sleeping through an
+    interval — a "tick" that can only be tested by waiting a minute is a tick
+    nobody tests.
+    """
+    with _BATCH_RETRY_LOCK:
+        pending = list(_BATCH_RETRY)
+    handed = 0
+    for org, batch_id in pending:
+        if _BATCH_WORKER.submit(_drain_batch, org, batch_id):
+            handed += 1
+            with _BATCH_RETRY_LOCK, contextlib.suppress(ValueError):
+                _BATCH_RETRY.remove((org, batch_id))
+    return handed
+
+
+def _batch_retry_tick() -> None:
+    """Re-submit every deferred batch, once per interval. The off-peak TICK."""
+    while True:
+        time.sleep(_BATCH_RETRY_INTERVAL_S)
+        with contextlib.suppress(Exception):
+            _batch_retry_once()
+
+
+def _ensure_batch_retry_thread() -> None:
+    """Start the retry thread on first use (a daemon: it must not block exit)."""
+    global _BATCH_RETRY_THREAD
+    if _BATCH_RETRY_THREAD is not None and _BATCH_RETRY_THREAD.is_alive():
+        return
+    with _BATCH_RETRY_LOCK:
+        if _BATCH_RETRY_THREAD is not None and _BATCH_RETRY_THREAD.is_alive():
+            return
+        _BATCH_RETRY_THREAD = threading.Thread(
+            target=_batch_retry_tick, name="batch-retry", daemon=True)
+        _BATCH_RETRY_THREAD.start()
+
+
+def _submit_or_defer(org: dict, batch_id: str) -> None:
+    """Hand a batch to the worker, or REMEMBER it. One place, both outcomes."""
+    _ensure_batch_retry_thread()
+    if _BATCH_WORKER.submit(_drain_batch, org, batch_id):
+        return
+    _batch_retry_enqueue(org, batch_id)
+
+
+def _recover_org_batches(org: dict) -> list[str]:
+    """Resume this tenant's unfinished batches, ONCE per process (#14219 item 4).
+
+    ⛔ THE RESUME HOOK THE COORDINATOR NEEDS A CALLER FOR. `recover()` is
+    idempotent and tenant-scoped, and the record is the graph, so "on boot" is
+    implemented as "the first time this process touches this tenant's batch
+    surface" — a boot-time enumeration of every org would be a full-graph scan
+    on the hot path of every deploy, for tenants that may not exist any more.
+
+    Returns the batch ids it re-opened (and re-submitted). Runs on the
+    BOOKKEEPING pool; a failure is logged and never fails the caller's request,
+    because a recovery fault must not refuse a read.
+    """
+    org_id = org.get("org_id")
+    if not org_id:
+        return []
+    with _BATCH_RETRY_LOCK:
+        if org_id in _BATCH_RECOVERED:
+            return []
+        _BATCH_RECOVERED.add(org_id)
+    try:
+        store = _batch_store_for(org)
+        coord = _batch_ingest.BatchCoordinator(store)
+        resumed = coord.recover(org_id)
+    except Exception:
+        _logger.exception("batch recovery failed for team %s", org_id)
+        with _BATCH_RETRY_LOCK:
+            _BATCH_RECOVERED.discard(org_id)  # let a later request retry it
+        return []
+    for batch_id in resumed:
+        _submit_or_defer(org, batch_id)
+    if resumed:
+        _logger.info("batch recovery resumed %d batch(es) for team %s",
+                     len(resumed), org_id)
+    return resumed
 
 
 #: Batch ids a drain is CURRENTLY working in this process. Two drains of one
@@ -16610,11 +16790,24 @@ def _drain_batch(org: dict, batch_id: str) -> None:
     try:
         store = _batch_store_for(org)
         coord = _batch_ingest.BatchCoordinator(store)
-        runner = _batch_item_runner(_org_sdk_for_credential(org), "")
+        batch = store.get_batch(org["org_id"], batch_id)
+        corpus_name = batch.corpus_name if batch else ""
+        runner = _batch_item_runner(_org_sdk_for_credential(org),
+                                    corpus_name, org["org_id"])
         for item in store.items(org["org_id"], batch_id):
             if item.terminal:
                 continue
-            coord.run_item(org["org_id"], item, runner)
+            try:
+                coord.run_item(org["org_id"], item, runner)
+            except Exception:
+                # ⛔ ONE ITEM'S FAILURE MUST NOT ABANDON THE REST (#14219
+                # review, NB1). A graph-timeout on a bookkeeping statement used
+                # to abort the whole drain, leaving every LATER item unwritten
+                # and the batch silently stuck — the opposite of the AX rule this
+                # layer is built on. The item keeps whatever state it reached
+                # (`extracting` → requeued by `recover()`), and the loop goes on.
+                _logger.exception("batch %s: item %s failed", batch_id,
+                                  getattr(item, "item_id", "?"))
         coord.settle(org["org_id"], batch_id)
     except Exception:
         # The rows are durable; an escaped failure leaves items `extracting`,
@@ -16678,7 +16871,7 @@ async def create_batch(body: BatchRequest,
         # READS the same allowance; it does not enforce it — a batch is never
         # refused for want of tokens (#4010, and the issue's "degrade, never
         # lose"): a document that cannot be extracted yet is stored, not dropped.
-        carried = await _carry_allowances_off_loop(org, "sessions",
+        carried = await _carry_allowances_off_loop(org, _BATCH_ALLOWANCE_RESOURCE,
                                                   op="batch_estimate")
         raw = carried.get(_AK["capture_extraction"])
         included_tokens = int(raw) if raw is not None else None
@@ -16719,20 +16912,32 @@ async def create_batch(body: BatchRequest,
     contents = [it.text for it in body.items]
     names = [it.name or "" for it in body.items]
 
-    stage_base = os.environ.get("TORTOISE_INGEST_BASE_DIR") or None
+    # Inline text is staged under THIS ORG's root (tenancy bound, above); with
+    # no storage configured there is nowhere durable for it, and the layer
+    # refuses rather than ACKing bytes it cannot keep.
+    stage_base = (_batch_org_root(org_id, create=any(c is not None
+                                                     for c in contents))
+                  if any(c is not None for c in contents) else None)
 
     def _accept():
         store = _batch_store_for(org)
         return _batch_ingest.BatchCoordinator(store).submit(
             org_id, refs, names=names, contents=contents,
-            stage_base=stage_base, estimate=est.as_dict())
+            stage_base=stage_base, corpus_name=body.corpus_name or "",
+            estimate=est.as_dict())
 
     try:
-        batch, items = await _run_off_loop(_BATCH_EXECUTOR, _accept)
+        batch, items = await _run_off_loop(_BATCH_DB_EXECUTOR, _accept)
     except ValueError as exc:
         # The one refusal raised by the layer at acceptance: inline text with
-        # nowhere durable to put it. 400 (the caller's body), not 503.
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+        # nowhere durable to put it. 503, because that is a SERVER missing its
+        # configuration, not a bad request (a valid body retried for ever is
+        # what a 400 here would buy — #14219 review).
+        raise HTTPException(status_code=503,
+                            detail="Batch storage is unavailable on this "
+                                   "server — send items as paths under the "
+                                   "configured document storage instead."
+                            ) from exc
     except Exception:
         _logger.exception("batch acceptance failed for team %s", org_id)
         raise HTTPException(status_code=503,
@@ -16742,7 +16947,7 @@ async def create_batch(body: BatchRequest,
     # Work starts AFTER the rows exist, on the batch's own pool. A deferral
     # (ceiling or off-peak window) leaves the items `queued`: durable, visible,
     # and picked up by the next tick — never lost.
-    _BATCH_WORKER.submit(_drain_batch, org, batch.batch_id)
+    _submit_or_defer(org, batch.batch_id)
 
     return _batch_ingest.acceptance_receipt(
         batch, items, status_url=f"/v1/batches/{batch.batch_id}")
@@ -16753,14 +16958,33 @@ async def list_batches(org: dict = Depends(get_current_org_gated)):  # noqa: B00
     """The caller's recent batches (newest first) — the dashboard's entry point."""
     _require_scope(org, "graphs:read", "batch list")
     _reject_graph_bound_org_surface(org, "batch list")
+
+    def _list():
+        # The tenant's first batch touch after a boot is what RESUMES its
+        # unfinished work (`_recover_org_batches`), so "a restart resumes" has a
+        # caller in production and not only in a test.
+        _recover_org_batches(org)
+        store = _batch_store_for(org)
+        rows = store.list_batches(org["org_id"], limit=20)
+        counts = store.batch_counts(org["org_id"], [b.batch_id for b in rows])
+        return rows, counts
+
     try:
-        rows = await _run_off_loop(
-            _BATCH_EXECUTOR,
-            lambda: _batch_store_for(org).list_batches(org["org_id"], limit=20))
+        rows, counts = await _run_off_loop(_BATCH_DB_EXECUTOR, _list)
     except Exception:
         _logger.exception("batch list failed for team %s", org.get("org_id"))
         raise HTTPException(status_code=503, detail="Batches unavailable")  # noqa: B904
-    return {"batches": [b.as_dict() for b in rows]}
+    # ⛔ Counts, not an empty item list: this surface used to report
+    # `items_total: 0` for a 500-item batch (found in review). The detail route
+    # carries the items; the list carries the truth about their number.
+    out = []
+    for b in rows:
+        body_b = b.as_dict()
+        body_b["counts"] = counts.get(b.batch_id) or _batch_ingest.item_counts([])
+        body_b["items_total"] = body_b["counts"]["total"]
+        body_b.pop("items", None)
+        out.append(body_b)
+    return {"batches": out}
 
 
 @app.get("/v1/batches/{batch_id}")
@@ -16776,6 +17000,7 @@ async def get_batch(batch_id: str,
     _reject_graph_bound_org_surface(org, "batch status")
 
     def _read():
+        _recover_org_batches(org)
         store = _batch_store_for(org)
         batch = store.get_batch(org["org_id"], batch_id)
         if batch is None:
@@ -16783,7 +17008,7 @@ async def get_batch(batch_id: str,
         return _batch_ingest.status_body(batch, store.items(org["org_id"], batch_id))
 
     try:
-        body = await _run_off_loop(_BATCH_EXECUTOR, _read)
+        body = await _run_off_loop(_BATCH_DB_EXECUTOR, _read)
     except Exception:
         _logger.exception("batch status failed (batch %s)", batch_id)
         raise HTTPException(status_code=503, detail="Batch status unavailable")  # noqa: B904
@@ -16792,7 +17017,11 @@ async def get_batch(batch_id: str,
     # #14219 item 7, DECLARED RESIDUAL rather than a silent gap: every item of a
     # batch whose work is not finished says so, and the receipt never implies
     # completion it cannot observe.
-    body["worker"] = _BATCH_WORKER.stats()
+    # Only the CONFIGURED bound, never the process-global counters: `submitted`/
+    # `completed`/`deferred` describe every tenant on this process, and a
+    # customer-facing field that reports someone else's work is a leak of
+    # activity at best and a false "nothing is running" at worst (review, NB9).
+    body["worker"] = {"ceiling": _BATCH_WORKER.ceiling}
     return body
 
 
@@ -16818,7 +17047,7 @@ async def cancel_batch(batch_id: str,
             org["org_id"], batch_id, reason="cancelled by the customer")
 
     try:
-        batch, items = await _run_off_loop(_BATCH_EXECUTOR, _cancel)
+        batch, items = await _run_off_loop(_BATCH_DB_EXECUTOR, _cancel)
     except KeyError:
         raise HTTPException(status_code=404, detail="Batch not found")  # noqa: B904
     except Exception:

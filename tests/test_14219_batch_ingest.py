@@ -652,7 +652,7 @@ def test_graph_store_writes_and_reads_the_batch_with_the_org_scope():
     assert "estimate_json" in cypher
 
     rec2 = _Recorder(answers=[[["accepted", "t0", "t0", '{"items":2}',
-                                None, None]]])
+                                None, None, "corpus"]]])
     got = GraphBatchStore(rec2).get_batch(ORG, "batch_1")
     assert got and got.batch_id == "batch_1"
     assert got.estimate == {"items": 2}

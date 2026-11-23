@@ -260,7 +260,7 @@ def test_a_batch_drain_takes_no_capture_slot_and_uses_its_own_pool(store,
                         lambda key: slots_taken.append(key))
     monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
     monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
-    monkeypatch.setattr(ha, "_batch_item_runner", lambda sdk, corpus: (
+    monkeypatch.setattr(ha, "_batch_item_runner", lambda sdk, corpus, org_id: (
         lambda item: bi.ItemOutcome(bi.BatchItemState.INDEXED)))
 
     coord = bi.BatchCoordinator(store)
@@ -284,7 +284,7 @@ def test_a_drain_that_raises_leaves_the_rows_recoverable(store, monkeypatch):
     monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
     monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
 
-    def _explode(sdk, corpus):
+    def _explode(sdk, corpus, org_id):
         def _run(item):
             raise RuntimeError("the indexer pool is gone")
         return _run
@@ -317,11 +317,19 @@ def test_a_drain_that_dies_mid_item_leaves_it_recoverable(store, monkeypatch):
 
 # ── the production runner, driven through the REAL indexer ──────────────────
 def _corpus(tmp_path):
+    """``(deployment_base, org_root)`` — the batch reads ONLY the org's subtree.
+
+    The deployment base is shared by every tenant (``/data/ingest``) and its
+    layout is ``<base>/<org>/…``; a batch resolves every path under
+    ``<base>/<THIS org>``, so the fixture has to build that shape or it would be
+    testing a boundary that does not exist.
+    """
     base = tmp_path / "corpus"
-    base.mkdir()
-    (base / "a.md").write_text("# Doc A\n\nbody one\n", encoding="utf-8")
-    (base / "b.md").write_text("# Doc B\n\nbody two\n", encoding="utf-8")
-    return base
+    root = base / ORG_ID
+    root.mkdir(parents=True)
+    (root / "a.md").write_text("# Doc A\n\nbody one\n", encoding="utf-8")
+    (root / "b.md").write_text("# Doc B\n\nbody two\n", encoding="utf-8")
+    return base, root
 
 
 def test_the_production_runner_indexes_through_the_existing_per_file_door(
@@ -332,14 +340,14 @@ def test_the_production_runner_indexes_through_the_existing_per_file_door(
     per-file body of the `index_sources_from_directory` walk, so a batch item is
     filed through the SAME door as any other document — not a second pipeline.
     """
-    base = _corpus(tmp_path)
+    base, root = _corpus(tmp_path)
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
     sdk = sdk_factory(namespace="test_suite_batch14219a")
-    runner = ha._batch_item_runner(sdk, "corpus")
+    runner = ha._batch_item_runner(sdk, "corpus", ORG_ID)
 
     store = bi.InMemoryBatchStore()
     coord = bi.BatchCoordinator(store)
-    _batch, items = coord.submit(ORG_ID, [str(base / "a.md")])
+    _batch, items = coord.submit(ORG_ID, [str(root / "a.md")])
     out = coord.run_item(ORG_ID, items[0], runner)
 
     assert out.state is bi.BatchItemState.INDEXED, out.reason
@@ -355,19 +363,19 @@ def test_a_re_submitted_file_is_a_no_op_through_the_real_gate(
     `unchanged`, which this layer surfaces as `skipped-duplicate` — one meaning
     of "duplicate" across the two layers.
     """
-    base = _corpus(tmp_path)
+    base, root = _corpus(tmp_path)
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
     sdk = sdk_factory(namespace="test_suite_batch14219b")
-    runner = ha._batch_item_runner(sdk, "corpus")
+    runner = ha._batch_item_runner(sdk, "corpus", ORG_ID)
     store = bi.InMemoryBatchStore()
     coord = bi.BatchCoordinator(store)
 
-    _, first = coord.submit(ORG_ID, [str(base / "a.md")])
+    _, first = coord.submit(ORG_ID, [str(root / "a.md")])
     assert coord.run_item(ORG_ID, first[0], runner).state is (
         bi.BatchItemState.INDEXED)
 
     # A DIFFERENT batch, the same bytes.
-    _, second = coord.submit(ORG_ID, [str(base / "a.md")])
+    _, second = coord.submit(ORG_ID, [str(root / "a.md")])
     dup = coord.run_item(ORG_ID, second[0], runner)
     assert dup.state is bi.BatchItemState.SKIPPED_DUPLICATE, dup.reason
     assert dup.tokens_in == 0 and dup.tokens_out == 0
@@ -382,19 +390,19 @@ def test_a_changed_file_is_re_written_not_skipped(sdk_factory, tmp_path,
     Source and re-embeds — the stale vector is refreshed rather than left
     describing text that no longer exists.
     """
-    base = _corpus(tmp_path)
+    base, root = _corpus(tmp_path)
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
     sdk = sdk_factory(namespace="test_suite_batch14219c")
-    runner = ha._batch_item_runner(sdk, "corpus")
+    runner = ha._batch_item_runner(sdk, "corpus", ORG_ID)
     store = bi.InMemoryBatchStore()
     coord = bi.BatchCoordinator(store)
 
-    _, first = coord.submit(ORG_ID, [str(base / "a.md")])
+    _, first = coord.submit(ORG_ID, [str(root / "a.md")])
     assert coord.run_item(ORG_ID, first[0], runner).state is (
         bi.BatchItemState.INDEXED)
 
-    (base / "a.md").write_text("# Doc A\n\nbody ONE CHANGED\n", encoding="utf-8")
-    _, second = coord.submit(ORG_ID, [str(base / "a.md")])
+    (root / "a.md").write_text("# Doc A\n\nbody ONE CHANGED\n", encoding="utf-8")
+    _, second = coord.submit(ORG_ID, [str(root / "a.md")])
     changed = coord.run_item(ORG_ID, second[0], runner)
     assert changed.state is bi.BatchItemState.INDEXED, changed.reason
     assert changed.state is not bi.BatchItemState.SKIPPED_DUPLICATE
@@ -403,25 +411,25 @@ def test_a_changed_file_is_re_written_not_skipped(sdk_factory, tmp_path,
 def test_one_bad_file_does_not_fail_the_batch_on_the_real_indexer(
         sdk_factory, tmp_path, monkeypatch):
     """ACCEPTANCE, AX: one unreadable file leaves the rest of the batch usable."""
-    base = _corpus(tmp_path)
-    (base / "bad.md").write_bytes(b"# Bad\n\n\xff\xfe not utf-8\n")
+    base, root = _corpus(tmp_path)
+    (root / "bad.md").write_bytes(b"# Bad\n\n\xff\xfe not utf-8\n")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
     sdk = sdk_factory(namespace="test_suite_batch14219d")
-    runner = ha._batch_item_runner(sdk, "corpus")
+    runner = ha._batch_item_runner(sdk, "corpus", ORG_ID)
     store = bi.InMemoryBatchStore()
     coord = bi.BatchCoordinator(store)
 
-    batch, items = coord.submit(ORG_ID, [str(base / "a.md"),
-                                         str(base / "bad.md"),
-                                         str(base / "b.md")])
+    batch, items = coord.submit(ORG_ID, [str(root / "a.md"),
+                                         str(root / "bad.md"),
+                                         str(root / "b.md")])
     for it in items:
         coord.run_item(ORG_ID, it, runner)
     settled = coord.settle(ORG_ID, batch.batch_id)
     rows = {i.ref: i for i in store.items(ORG_ID, batch.batch_id)}
 
-    assert rows[str(base / "a.md")].state is bi.BatchItemState.INDEXED
-    assert rows[str(base / "b.md")].state is bi.BatchItemState.INDEXED
-    bad = rows[str(base / "bad.md")]
+    assert rows[str(root / "a.md")].state is bi.BatchItemState.INDEXED
+    assert rows[str(root / "b.md")].state is bi.BatchItemState.INDEXED
+    bad = rows[str(root / "bad.md")]
     assert bad.state is bi.BatchItemState.FAILED
     assert bad.reason, "a failure must carry a reason a customer can act on"
     assert settled.state is bi.BatchState.PARTIAL
@@ -430,12 +438,12 @@ def test_one_bad_file_does_not_fail_the_batch_on_the_real_indexer(
 def test_a_ref_outside_the_ingest_base_is_refused_before_any_read(
         sdk_factory, tmp_path, monkeypatch):
     """#329: the path bound is a REFUSAL, never a read (and never a loss)."""
-    base = _corpus(tmp_path)
+    base, _root = _corpus(tmp_path)
     outside = tmp_path / "outside.md"
     outside.write_text("# Nope\n\nsecret\n", encoding="utf-8")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
     sdk = sdk_factory(namespace="test_suite_batch14219e")
-    runner = ha._batch_item_runner(sdk, "corpus")
+    runner = ha._batch_item_runner(sdk, "corpus", ORG_ID)
     store = bi.InMemoryBatchStore()
     coord = bi.BatchCoordinator(store)
     _, items = coord.submit(ORG_ID, [str(outside)])
@@ -457,7 +465,7 @@ def test_a_second_drain_of_the_same_batch_does_not_double_run_items(
     monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
     monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
 
-    def _runner(sdk, corpus):
+    def _runner(sdk, corpus, org_id):
         def _run(item):
             calls.append(item.item_id)
             # The second drain, if it were allowed, would enter here too.
@@ -504,7 +512,9 @@ def test_inline_text_is_accepted_and_staged_under_the_ingest_base(client, store,
     assert r.status_code == 201, r.text
     batch_id = r.json()["batch_id"]
     row = store.items(ORG_ID, batch_id)[0]
-    assert row.staged_path.startswith(str(base))
+    # ⛔ Under THIS ORG's subtree, never the deployment root: the staged file is
+    # the tenant's own document and another tenant must not be able to name it.
+    assert row.staged_path.startswith(str(base / ORG_ID))
     from pathlib import Path
 
     assert Path(row.staged_path).read_text(encoding="utf-8") == (
@@ -514,10 +524,234 @@ def test_inline_text_is_accepted_and_staged_under_the_ingest_base(client, store,
     assert row.content_key == bi.content_key("# Contract\n\nterms\n")
 
 
-def test_inline_text_without_configured_storage_is_a_400_not_a_fake_ack(
+def test_inline_text_without_configured_storage_is_a_503_not_a_fake_ack(
         client, monkeypatch):
+    """A server missing its storage config is 503, never a 400 that a client
+    with a valid body would retry for ever (#14219 review, NB5)."""
     monkeypatch.delenv("TORTOISE_INGEST_BASE_DIR", raising=False)
     r = client.post("/v1/batches", json={"items": [
         {"ref": "contract.md", "text": "# Contract\n\nterms\n"}]})
-    assert r.status_code == 400, r.text
-    assert "TORTOISE_INGEST_BASE_DIR" in r.json()["detail"]
+    assert r.status_code == 503, r.text
+    assert "storage" in r.json()["detail"].lower()
+    assert "paths under" in r.json()["detail"]
+
+
+# ── the review's BLOCKING findings, pinned ─────────────────────────────────
+def test_a_ref_naming_another_tenants_file_is_refused(client, store, tmp_path,
+                                                      monkeypatch):
+    """BLOCKING 1: the ingest base is deployment-wide; the BOUND is per org.
+
+    `TORTOISE_INGEST_BASE_DIR` is one directory for every tenant (its documented
+    layout is `<base>/<org>/…`), so resolving a caller's `ref` against it would
+    let any tenant index any other tenant's file — a cross-tenant read with an
+    ordinary write key. Both the org's own file and another org's are laid out
+    here, and only the first may be read.
+    """
+    base = tmp_path / "corpus"
+    (base / ORG_ID).mkdir(parents=True)
+    (base / "victim-org").mkdir(parents=True)
+    (base / ORG_ID / "mine.md").write_text("# Mine\n\nmine\n", encoding="utf-8")
+    (base / "victim-org" / "secret.md").write_text(
+        "# Victim\n\nsecret\n", encoding="utf-8")
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
+
+    r = client.post("/v1/batches", json={"items": [
+        {"ref": str(base / ORG_ID / "mine.md")},
+        {"ref": str(base / "victim-org" / "secret.md")},
+    ]})
+    assert r.status_code == 201, r.text
+    batch_id = r.json()["batch_id"]
+
+    from tortoise import hosted_api as _ha
+    sdk = object()  # never reached: both items are settled by the path bound
+    runner = _ha._batch_item_runner(sdk, "corpus", ORG_ID)
+    coord = bi.BatchCoordinator(store)
+    out = [coord.run_item(ORG_ID, i, runner) for i in store.items(ORG_ID, batch_id)]
+
+    assert out[0].state is bi.BatchItemState.FAILED, (
+        "an object() sdk cannot index — the first item's refusal is the sdk, "
+        "not the bound")
+    assert out[1].state is bi.BatchItemState.FAILED
+    assert "this team's document storage" in out[1].reason, (
+        f"the other tenant's path must be refused by the TENANCY bound, not by "
+        f"accident (got {out[1].reason!r})")
+
+
+def test_bookkeeping_does_not_queue_behind_a_running_drain(client, store,
+                                                           monkeypatch):
+    """BLOCKING 3: the status surface must not wait for a drain (~15 h/batch).
+
+    Two drains hold every worker of the DRAIN pool for the whole batch; a status
+    read that shared that pool would wait behind them and the 10 s transport
+    bound would turn it into a 504 for a handler that had already done its work.
+    """
+    import time
+
+    r = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
+    batch_id = r.json()["batch_id"]
+
+    release = __import__("threading").Event()
+    try:
+        held = [ha._BATCH_EXECUTOR.submit(release.wait, 10)
+                for _ in range(ha._BATCH_EXECUTOR._max_workers)]
+        started = time.monotonic()
+        s = client.get(f"/v1/batches/{batch_id}")
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        for f in held:
+            f.result(timeout=5)
+
+    assert s.status_code == 200, s.text
+    assert elapsed < 3.0, (
+        f"the status route waited {elapsed:.2f}s behind the drain pool — it must "
+        "run on its own pool")
+    assert ha._BATCH_DB_EXECUTOR is not ha._BATCH_EXECUTOR
+
+
+def test_a_deferred_batch_is_remembered_and_retried(client, store, monkeypatch):
+    """BLOCKING 4: an ACKed batch the ceiling/gate deferred must not be orphaned.
+
+    `submit` returning False (ceiling full, or the off-peak window closed) used
+    to be discarded: the batch was ACKed with an ETA and never worked. The
+    deferral is now remembered, and the retry tick hands it over once it can.
+    """
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
+        "ceiling": 2,
+        "submit": staticmethod(lambda *a, **k: False),
+    })())
+
+    r = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
+    assert r.status_code == 201
+    batch_id = r.json()["batch_id"]
+    deferred = [bid for _org, bid in ha._BATCH_RETRY]
+    assert batch_id in deferred, (
+        "a refused submit must be REMEMBERED, not dropped on the floor")
+
+    # The window opens: the retry tick hands it to the worker and forgets it.
+    submitted: list[str] = []
+    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
+        "ceiling": 2,
+        "submit": staticmethod(lambda fn, *a, **k: submitted.append(a[1]) or True),
+    })())
+    ha._batch_retry_once()
+
+    assert submitted == [batch_id]
+    assert [bid for _org, bid in ha._BATCH_RETRY] == []
+
+
+def test_the_first_batch_touch_after_a_boot_resumes_unfinished_work(
+        client, store, monkeypatch):
+    """BLOCKING 5: `recover()` needs a CALLER, or "a restart resumes" is prose."""
+    monkeypatch.setattr(ha, "_BATCH_RECOVERED", set())
+    submitted: list[str] = []
+    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
+        "ceiling": 2,
+        "submit": staticmethod(lambda fn, *a, **k: submitted.append(a[1]) or True),
+    })())
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    # …the process died mid-item.
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+
+    listed = client.get("/v1/batches")
+    assert listed.status_code == 200, listed.text
+
+    rows = store.items(ORG_ID, batch.batch_id)
+    assert rows[0].state is bi.BatchItemState.QUEUED, (
+        "the interrupted item must be requeued by the tenant's first touch")
+    assert batch.batch_id in submitted, (
+        "resumed work must be handed to a worker, not just relabelled")
+    recovered = store.get_batch(ORG_ID, batch.batch_id)
+    assert recovered.state is bi.BatchState.RESUMING
+
+
+def test_the_advertised_inline_bound_is_reachable(client, store, tmp_path,
+                                                  monkeypatch):
+    """BLOCKING 6: the route's body cap and its own bound are ONE number.
+
+    The default 256 KiB body cap made the handler's 4 MiB bound dead code, so a
+    customer uploading real documents got the generic cap message and the
+    "send it as several batches" guidance could never fire.
+    """
+    from tortoise import body_limits
+
+    assert bi.BATCH_MAX_INLINE_BYTES > body_limits.BODY_MAX_BYTES
+
+    base = tmp_path / "corpus"
+    (base / ORG_ID).mkdir(parents=True)
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
+    # 400 KiB of text: past the DEFAULT cap, inside the batch route's own.
+    big = "# Doc\n\n" + ("x" * 400_000)
+    r = client.post("/v1/batches", json={"items": [{"ref": "big.md", "text": big}]})
+    assert r.status_code == 201, (
+        f"a 400 KiB document must be accepted on this route (got "
+        f"{r.status_code}: {r.text[:200]})")
+
+    # …and past the batch's own bound it is a 413 that says what to do.
+    huge = "# Doc\n\n" + ("x" * (bi.BATCH_MAX_INLINE_BYTES + 1024))
+    too_big = client.post("/v1/batches",
+                          json={"items": [{"ref": "huge.md", "text": huge}]})
+    assert too_big.status_code == 413, too_big.text
+
+
+def test_an_embedded_item_can_be_finished_not_re_claimed(store):
+    """NB10: `embedded` is a legal starting point, not an illegal re-entry."""
+    coord = bi.BatchCoordinator(store)
+    _batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EMBEDDED)
+    out = coord.run_item(ORG_ID, items[0],
+                         lambda i: bi.ItemOutcome(bi.BatchItemState.INDEXED))
+    assert out.state is bi.BatchItemState.INDEXED
+
+
+def test_the_list_surface_reports_real_item_counts(client, store):
+    """NB3: a list saying `items_total: 0` for a 500-item batch is a lie."""
+    r = client.post("/v1/batches", json={"items": [
+        {"ref": "/d/a.md"}, {"ref": "/d/b.md"}]})
+    batch_id = r.json()["batch_id"]
+    items = store.items(ORG_ID, batch_id)
+    coord = bi.BatchCoordinator(store)
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.INDEXED)
+
+    listed = client.get("/v1/batches").json()["batches"]
+    row = next(b for b in listed if b["batch_id"] == batch_id)
+    assert row["items_total"] == 2
+    assert row["counts"]["indexed"] == 1
+    assert row["counts"]["pending"] == 1
+    assert "items" not in row, "the list must not ship every item payload"
+
+
+def test_a_staged_path_is_never_put_on_the_wire(client, store, tmp_path,
+                                               monkeypatch):
+    """NB4: the server's absolute filesystem path is not a customer field."""
+    base = tmp_path / "corpus"
+    base.mkdir()
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
+    r = client.post("/v1/batches", json={"items": [
+        {"ref": "x.md", "text": "# X\n\nx\n"}]})
+    assert r.status_code == 201
+    batch_id = r.json()["batch_id"]
+    detail = client.get(f"/v1/batches/{batch_id}").json()
+    assert all("staged_path" not in it for it in detail["items"])
+    assert str(base) not in str(detail)
+
+
+def test_the_estimate_reads_the_door_that_declares_the_token_dimension():
+    """NB7: pin the resource label, or the regression it fixed returns silently.
+
+    `capture_extraction` DECLARES `resources={"sessions"}`, and
+    `_carry_allowances` returns the org UNCHANGED for a label no dimension
+    declares — so an estimate carrying any other label silently reports "no
+    included amount" for ever.
+    """
+    from tortoise.allowance_gate import DIMENSIONS
+
+    dim = next(d for d in DIMENSIONS if d.dimension == "capture_extraction")
+    assert ha._BATCH_ALLOWANCE_RESOURCE in dim.resources, (
+        f"the estimate reads {ha._BATCH_ALLOWANCE_RESOURCE!r} but the dimension "
+        f"is declared on {sorted(dim.resources)} — the carry would return the org "
+        "unchanged and the estimate would report 'no included amount'")

@@ -62,11 +62,25 @@ path that wrote raw points would produce exactly the bloat the capability audit
     door's own gate.
 
 (f) **content-hash dedup BEFORE spending** tokens (``billing.cost_basis.dedup =
-    content_hash``; ``tortoise/idempotency.py``'s ``IngestKey``). A duplicate
-    item is settled ``skipped_duplicate`` WITHOUT the runner being called, so it
-    cannot spend an extraction token. See :func:`content_key` for what
-    "identical" means and how a CHANGED file is distinguished from a duplicate
-    (#13451's stale-vector trap).
+    content_hash``; ``tortoise/idempotency.py``'s ``IngestKey``). The key is
+    derived from the TEXT (:func:`content_key`) and there are exactly TWO
+    enforcement points, both ahead of any spend:
+
+    * **items whose text the caller supplied** (an upload) are keyed at
+      acceptance, so a duplicate is settled ``skipped-duplicate`` by the
+      coordinator WITHOUT the runner being called — the layer's structural
+      check, and the one a test pins with a runner that fails if reached;
+    * **path items** are keyed by the INDEXER once it has read the file (its
+      stored ``:Source.contentHash`` vs the file's hash). That is the SAME rule
+      (:func:`content_key` is asserted equal to ``file_indexer.hash_text``), and
+      it is still decided before the three LLM passes — the layer cannot pre-read
+      a file it has not opened, and doing so would double every read. What the
+      layer does guarantee there is that the verdict is *surfaced* as
+      ``skipped-duplicate`` rather than silently reported as success
+      (``runner_result_to_outcome``).
+
+    See :func:`content_key` for what "identical" means and how a CHANGED file is
+    distinguished from a duplicate (#13451's stale-vector trap).
 
 (g) ``#4010``: no capture caps — items are never dropped for lack of budget.
     When the allowance is exhausted the document is **stored, not extracted**
@@ -118,6 +132,17 @@ OVERAGE_USD_PER_MILLION_TOKENS = 1.00
 #: items the work is small enough to be interactive, above it the customer is
 #: told it is batch-processed.
 ON_DEMAND_MAX_ITEMS = 10
+
+#: The largest inline payload ONE batch request may carry (the sum of its items'
+#: text). ⛔ The same constant is registered as the route's body cap in
+#: ``hosted_api``'s ``CappedBodyMiddleware`` (``path_caps["/v1/batches"]``), so the
+#: bound the handler advertises is REACHABLE: without that entry the middleware's
+#: 256 KiB default refused first and the handler's "send it as several batches"
+#: guidance was dead code (#14219 review).
+BATCH_MAX_INLINE_BYTES = 4 * 1024 * 1024
+BATCH_INLINE_413_DETAIL = (
+    "batch request body exceeds the size cap (4 MiB) — send it as several "
+    "batches; nothing is dropped")
 
 #: Above this many tokens of expected spend, the acceptance requires an explicit
 #: acknowledgement (owner, 2026-11-23 §4: "for a large processing batch we should
@@ -471,7 +496,6 @@ class BatchItem:
             "item_id": self.item_id,
             "ref": self.ref,
             "name": self.name,
-            "staged_path": self.staged_path,
             "status": str(self.state),
             "reason": self.reason,
             "tokens_in": self.tokens_in,
@@ -493,6 +517,10 @@ class Batch:
     updated_at: str = ""
     #: The estimate shown and (above the threshold) ACKNOWLEDGED at acceptance.
     estimate: dict[str, Any] = field(default_factory=dict)
+    #: The corpus label the caller asked for. Persisted rather than dropped: it
+    #: is an input to the pack/kind resolution, and a field accepted on the wire
+    #: and then ignored is the #14263 class (echo the user's meaning).
+    corpus_name: str = ""
     #: Who asked for the cancel, and when — the audit half of a billing-visible
     #: act. Empty until cancelled.
     cancelled_at: str = ""
@@ -506,6 +534,7 @@ class Batch:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "estimate": dict(self.estimate),
+            "corpus_name": self.corpus_name,
             "counts": counts,
             "items_total": len(items),
             "complete": self.state in TERMINAL_BATCH_STATES,
@@ -581,6 +610,16 @@ class BatchStore(Protocol):
         """Batch ids with at least one non-terminal item — the resume input."""
         ...
 
+    def batch_counts(self, org_id: str, batch_ids: Sequence[str]
+                     ) -> dict[str, dict[str, int]]:
+        """Per-batch item counts, for the LIST surface (#14219 review).
+
+        A list that reports ``items_total: 0`` for a 500-item batch is a status
+        surface that lies, and shipping the full item array for 20 batches is a
+        payload nobody asked for. Counts only, in one query.
+        """
+        ...
+
     def find_settled_by_content_key(self, org_id: str, key: str
                                     ) -> BatchItem | None:
         """A previously INDEXED item with this exact content — the cross-batch
@@ -650,6 +689,32 @@ class InMemoryBatchStore:
                         return _copy_item(i)
         return None
 
+    def batch_counts(self, org_id: str, batch_ids: Sequence[str]
+                     ) -> dict[str, dict[str, int]]:
+        with self._lock:
+            return {bid: item_counts(
+                self._items.get((org_id, bid), {}).values())
+                for bid in batch_ids}
+
+
+def _finish_counts(raw: Mapping[str, Any]) -> dict[str, int]:
+    """Complete a state->count map with the derived totals `item_counts` emits.
+
+    ONE shape for the counters on every surface: the detail route derives them
+    from rows, the list route derives them from a grouped query, and a client
+    must not have to know which it is reading.
+    """
+    counts: dict[str, int] = {str(s_): 0 for s_ in BatchItemState}
+    for state, n in raw.items():
+        counts[str(state)] = int(n)
+    total = sum(v for k, v in counts.items() if k not in ("total", "terminal",
+                                                          "pending"))
+    terminal = sum(counts[str(s_)] for s_ in TERMINAL_ITEM_STATES)
+    counts["total"] = total
+    counts["terminal"] = terminal
+    counts["pending"] = total - terminal
+    return counts
+
 
 def _copy_item(i: BatchItem) -> BatchItem:
     return BatchItem(**{**i.__dict__})
@@ -701,37 +766,39 @@ class GraphBatchStore:
             f"MERGE (b:{BATCH_LABEL} {{id:$bid, org_id:$org}}) "
             "SET b.state=$state, b.created_at=$created, b.updated_at=$updated, "
             "    b.estimate_json=$estimate, b.cancelled_at=$cancelled_at, "
-            "    b.cancel_reason=$cancel_reason",
+            "    b.cancel_reason=$cancel_reason, b.corpus_name=$corpus",
             {"bid": batch.batch_id, "org": batch.org_id,
              "state": str(batch.state), "created": batch.created_at,
              "updated": batch.updated_at,
              "estimate": _json_dumps(batch.estimate),
              "cancelled_at": batch.cancelled_at,
-             "cancel_reason": batch.cancel_reason},
+             "cancel_reason": batch.cancel_reason,
+             "corpus": batch.corpus_name},
         )
 
     def get_batch(self, org_id: str, batch_id: str) -> Batch | None:
         rows = self._q(
             f"MATCH (b:{BATCH_LABEL} {{id:$bid, org_id:$org}}) "
             "RETURN b.state, b.created_at, b.updated_at, b.estimate_json, "
-            "       b.cancelled_at, b.cancel_reason",
+            "       b.cancelled_at, b.cancel_reason, b.corpus_name",
             {"bid": batch_id, "org": org_id},
         )
         if not rows:
             return None
-        state, created, updated, est, cancelled_at, cancel_reason = rows[0][:6]
+        state, created, updated, est, cancelled_at, cancel_reason, corpus = rows[0][:7]
         return Batch(
             batch_id=batch_id, org_id=org_id,
             state=_as_state(BatchState, state, BatchState.ACCEPTED),
             created_at=created or "", updated_at=updated or "",
             estimate=_json_loads(est), cancelled_at=cancelled_at or "",
-            cancel_reason=cancel_reason or "")
+            cancel_reason=cancel_reason or "", corpus_name=corpus or "")
 
     def list_batches(self, org_id: str, *, limit: int = 20) -> list[Batch]:
         rows = self._q(
             f"MATCH (b:{BATCH_LABEL} {{org_id:$org}}) "
             "RETURN b.id, b.state, b.created_at, b.updated_at, "
-            "       b.estimate_json, b.cancelled_at, b.cancel_reason "
+            "       b.estimate_json, b.cancelled_at, b.cancel_reason, "
+            "       b.corpus_name "
             "ORDER BY b.created_at DESC LIMIT $lim",
             {"org": org_id, "lim": int(limit)},
         )
@@ -742,7 +809,8 @@ class GraphBatchStore:
                 state=_as_state(BatchState, r[1], BatchState.ACCEPTED),
                 created_at=r[2] or "", updated_at=r[3] or "",
                 estimate=_json_loads(r[4]), cancelled_at=r[5] or "",
-                cancel_reason=r[6] or ""))
+                cancel_reason=r[6] or "",
+                corpus_name=(r[7] or "") if len(r) > 7 else ""))
         return out
 
     def put_item(self, org_id: str, item: BatchItem) -> None:
@@ -788,6 +856,20 @@ class GraphBatchStore:
             {"org": org_id, "terminal": [str(s) for s in TERMINAL_ITEM_STATES]},
         )
         return [r[0] for r in rows]
+
+    def batch_counts(self, org_id: str, batch_ids: Sequence[str]
+                     ) -> dict[str, dict[str, int]]:
+        rows = self._q(
+            f"MATCH (i:{ITEM_LABEL} {{org_id:$org}}) "
+            "WHERE i.batch_id IN $bids "
+            "RETURN i.batch_id, i.state, count(*)",
+            {"org": org_id, "bids": list(batch_ids)},
+        )
+        out: dict[str, dict[str, int]] = {}
+        for r in rows:
+            bucket = out.setdefault(r[0], {})
+            bucket[str(r[1])] = int(r[2] or 0)
+        return {bid: _finish_counts(out.get(bid, {})) for bid in batch_ids}
 
     def find_settled_by_content_key(self, org_id: str, key: str
                                     ) -> BatchItem | None:
@@ -984,9 +1066,12 @@ class BatchWorker:
 class ItemRunner(Protocol):
     """Does the work for ONE item. Production: the per-file indexer unit.
 
-    The runner is called ONLY for items the coordinator has already settled as
-    non-duplicates and admitted, so a dedup decision can never spend tokens.
-    It must not raise for an ordinary per-item failure — that is
+    The runner is called only for items the coordinator has already settled as
+    non-duplicates and admitted. For an item whose text the caller supplied that
+    is a structural guarantee (the key is known at acceptance); for a PATH item
+    the verdict needs the file's bytes, so it is the indexer's own hash gate that
+    decides — before the LLM passes — and this layer reports the verdict
+    faithfully. It must not raise for an ordinary per-item failure — that is
     ``ItemOutcome(FAILED, reason=...)``, an item outcome (AX). A raise is
     treated as a failed item by :meth:`BatchCoordinator.run_item`, with the
     exception type in the reason, because an escaped exception must never leave
@@ -1016,6 +1101,7 @@ class BatchCoordinator:
                names: Sequence[str] | None = None,
                contents: Sequence[str | None] | None = None,
                stage_base: str | None = None,
+               corpus_name: str = "",
                estimate: dict[str, Any] | None = None,
                batch_id: str | None = None) -> tuple[Batch, list[BatchItem]]:
         """Write ONE durable batch row and one durable row per item, then return.
@@ -1063,6 +1149,7 @@ class BatchCoordinator:
             items.append(item)
         batch = Batch(batch_id=bid, org_id=org_id, state=BatchState.ACCEPTED,
                       created_at=stamp, updated_at=stamp,
+                      corpus_name=str(corpus_name or ""),
                       estimate=dict(estimate or {}))
         self._store.put_batch(batch)
         return batch, items
@@ -1159,7 +1246,14 @@ class BatchCoordinator:
         active = runner or self._runner
         if active is None:
             raise RuntimeError("no item runner configured")
-        self.advance(org_id, fresh, BatchItemState.EXTRACTING, attempt=True)
+        # ⛔ Only a QUEUED item is CLAIMED here. An item already `embedded` was
+        # requeued by a runner that reports the staged pipeline (…→EXTRACTING→
+        # EMBEDDED→INDEXED) and then resumed: `extracting` is not a legal edge
+        # from `embedded`, so re-claiming it would raise IllegalTransition and
+        # abort the whole drain (found in review; the current production runner
+        # never reports `embedded`, which is the only reason it was invisible).
+        if fresh.state is BatchItemState.QUEUED:
+            self.advance(org_id, fresh, BatchItemState.EXTRACTING, attempt=True)
         try:
             outcome = active(fresh)
         except Exception as exc:  # an escaped exception is a FAILED ITEM
@@ -1171,11 +1265,18 @@ class BatchCoordinator:
         latest = self._fresh(org_id, fresh)
         if latest.state is BatchItemState.CANCELLED:
             return latest
-        return self.advance(
-            org_id, latest, outcome.state, reason=outcome.reason,
-            tokens_in=outcome.tokens_in, tokens_out=outcome.tokens_out,
-            content_changed=outcome.content_changed,
-            content_key=outcome.content_key or None)
+        try:
+            return self.advance(
+                org_id, latest, outcome.state, reason=outcome.reason,
+                tokens_in=outcome.tokens_in, tokens_out=outcome.tokens_out,
+                content_changed=outcome.content_changed,
+                content_key=outcome.content_key or None)
+        except IllegalTransition:
+            # Another writer settled this item while the runner was working (a
+            # cancel, or the same item drained twice across processes). The
+            # item's row is authoritative — report it rather than crash the
+            # drain, which is what would lose every LATER item.
+            return self._fresh(org_id, fresh)
 
     def _fresh(self, org_id: str, item: BatchItem) -> BatchItem:
         for stored in self._store.items(org_id, item.batch_id):
@@ -1245,8 +1346,21 @@ class BatchCoordinator:
         stamp = self._now()
         for batch_id in self._store.pending_batches(org_id):
             batch = self._store.get_batch(org_id, batch_id)
-            if batch is None:  # pragma: no cover - store inconsistency
-                continue
+            if batch is None:
+                # ⛔ ORPHAN ROWS, not an inconsistency (#14219 review). Acceptance
+                # writes the items BEFORE the batch row (so an ACK never names a
+                # document we did not record); a crash between the two leaves
+                # items with no batch. Skipping them would strand those rows on
+                # every boot, invisible on every surface. Adopt them: the items
+                # ARE the record of accepted work.
+                orphan_items = self._store.items(org_id, batch_id)
+                if not orphan_items:
+                    continue
+                batch = Batch(batch_id=batch_id, org_id=org_id,
+                              state=BatchState.RESUMING,
+                              created_at=orphan_items[0].updated_at,
+                              updated_at=orphan_items[0].updated_at)
+                self._store.put_batch(batch)
             if batch.state is BatchState.CANCELLED:
                 # A cancelled batch is NOT resumed: the customer stopped it, and
                 # a restart is not a reason to spend their allowance. But an item
