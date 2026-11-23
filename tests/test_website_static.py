@@ -10354,7 +10354,7 @@ class TestProductTeamsCopy:
     #: PDF's paragraph is pinned ABSENT below, so "restore the PDF's copy" is a
     #: revert of an owner edit, not a return to verbatim. (`fdd3a6a60f` reverted
     #: it once already, which is why the message has to name the right source.)
-    STEP_SOURCES = {
+    STEP_SOURCES: ClassVar[dict[str, str]] = {
         "beat-ingest": "the PDF",
         "beat-organize": "the PDF",
         "beat-reason": (
