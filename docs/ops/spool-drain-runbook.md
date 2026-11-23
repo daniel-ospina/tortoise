@@ -86,17 +86,9 @@ find "$SPOOL/entries" -type f | sort | xargs sha256sum > /tmp/spool-before.txt
 sha256sum "$SPOOL"/entries/*.turns.jsonl | sort | sha256sum   # THE transcript digest
 ```
 
-Record the file count (`wc -l < /tmp/spool-before.txt`), the transcript digest,
-**and the session count the API holds right now** — Stage 3's row 6 grades a
-*delta* against it, and a total read after the drain cannot be compared to
-`filed` at all (production holds every previously-filed session):
-
-```bash
-curl -sS -H "Authorization: Bearer $TORTOISE_API_KEY" \
-  "$TORTOISE_API_URL/v1/sessions" | python3 -c \
-  'import json,sys; d=json.load(sys.stdin); print(len(d["sessions"]))' \
-  | tee /tmp/sessions-before.txt
-```
+Record the file count (`wc -l < /tmp/spool-before.txt`) and the transcript
+digest. The **`filed_key` arithmetic** is what row 6 grades later — take it now,
+with the same script that produced the counts above (`filed + unfiled == entries`).
 
 **Pass:** you have both numbers written down somewhere outside the box.
 
@@ -185,12 +177,24 @@ same lesson measured three ways: an ambient `TORTOISE_SESSION_LLM_MOCK=1` made
 `head-keyless` mock-extract, an ambient `TORTOISE_CAPTURE_IN_FLIGHT=1` put
 `head-mock` on a 1-slot ceiling with `capture_capacity_saturated` 429s (the mode
 whose claim is zero 429s), and an ambient `TORTOISE_SESSION_EXTRACTOR=m2` left
-`pre-14261`'s slow-extraction seam inert. A provider key is the fourth and the one
-no knob can pin away — it would run REAL extraction (real spend) under a label
-that says keyless — so that mode stops and names the remedy (unset the key, or
-use `head-mock`). What each run executed under is recorded in `<mode>.json` as
-`capture_env`, so a polluted run is visible afterwards instead of being a silent
-measurement of another mode.
+`pre-14261`'s slow-extraction seam inert. A `RATE_LIMIT_DISABLED=1` in the
+ambient environment — which `tests/conftest.py` exports by default — would have
+switched the 100/min budget OFF and erased this whole section's finding, so that
+knob is pinned too. A provider key is the fourth and the one no knob can pin away
+— it would run REAL extraction (real spend) under a label that says keyless — so
+that mode stops and names the remedy (unset the key, or use `head-mock`). What
+each run executed under is recorded in `<mode>.json` as `capture_env`, so a
+polluted run is visible afterwards instead of being a silent measurement of
+another mode.
+
+⚠️ **The four committed `<mode>.json` artefacts predate `capture_env`** — they
+were produced by the build that pinned `TORTOISE_SESSION_LLM_MOCK` for the mock
+modes only and set no `TORTOISE_CAPTURE_IN_FLIGHT` for the others, so they carry
+no provenance field at all. Their numbers are reproducible on a keyless box with
+none of those variables exported (`head-keyless` in particular now REFUSES to
+start if a provider key is configured), and a re-run of `all` rewrites them with
+`capture_env`. Read them as the measurement they are, not as evidence about the
+environment.
 
 **Rollback:** none — nothing outside the temp dir and the throwaway graph was
 written.
@@ -265,12 +269,12 @@ uv run tortoise session drain --retry-terminal 2>&1 | tee /tmp/drain-$(date -u +
 | # | Stage | Observable (where) | PASS | FAIL — and what it is |
 |---|---|---|---|---|
 | 1 | terminal re-arm | `spool drain: cleared terminal state on N entries` | N is any number (0 is normal) | — |
-| 2 | POST batch | server-side: `POST /v1/sessions` → `200` | all `200` | `504` → extraction outran the ack window; ⛔ the record may have LANDED anyway — measured `filed 3, deferred 0`, `filed_key 3/3` — the confirm path files it, so check `filed_key` before re-running. A `504` is a lost **response**, not a lost capture |
+| 2 | POST batch | the per-request records — in a REHEARSAL the instrument's `requests.jsonl` (installed by `tools/spool_drain_rehearsal.py`, **not** by the drain); on a real drain the summary's `F`/`D` (row 4), because `session drain` prints aggregates plus per-entry lines only for `discarded` and `probe_refusals` (`tortoise/__main__.py:9840-9861`) and has no per-POST output | rehearsing: no `5xx`/`504` among the recorded POSTs. ⛔ Never a 5xx storm / wrong host / limiter, a real drain shows it only as `D > 0` (row 4) — a real drain has no "all 200" to read | `504` → extraction outran the ack window; ⛔ the record may have LANDED anyway — measured `filed 3, deferred 0`, `filed_key 3/3` — the confirm path files it, so check `filed_key` before re-running. A `504` is a lost **response**, not a lost capture |
 | 3 | ACK honesty | `spool drain: outcome unrecorded N (…)` | N may equal the filed count — this is the ACK path saying extraction is behind the answer | ⛔ not a failure. It becomes one only if it is still `N` after Stage 5 |
-| 4 | drain summary | `spool drain: filed F, deferred D, skipped S …, terminal T, discarded X` | **`F + D == unfiled` and `F > 0`**; `X == 0`; `T == 0`; `S == entries − unfiled` | `discarded > 0` → READ the `spool discard (<reason>)` lines; `terminal > 0` → a PERMANENT 4xx, see below; ⛔ **`F == 0` → FAIL, and this row alone cannot see it**: an unreachable API defers every entry (`classify_failure` returns `retry` for `status=None`, `tortoise/capture_spool.py:663-667`), so `F 0, D 264, T 0, X 0, S = 265 − 264` satisfies every other criterion here |
-| 5 | completion (no client action) | `GET /v1/sessions/{id}` → `extraction.outcome_known: true`, no `phase` | every session terminal | still `phase` after minutes → extraction worker stuck; the capture is still durable — do NOT re-drain blindly |
-| 6 | the record | graph: `Session` count, turn `Point`s, extracted points | **`sessions Δ` (vs the Stage 0 count) == `F`**; turn points ≈ turns | a `sessions Δ` SHORT of `F` → **read `#14342` D2 before re-running**. ⛔ Not `sessions == POSTs`: already-filed entries never POST (Stage −1), and a refused `429` creates no session, so a healthy rehearsal measured 264 POSTs against 214 sessions |
-| 7 | idempotency | run the drain a second time | **`sessions Δ 0`** across the second pass (seconds, not minutes) | a second drain that re-POSTs / raises the session count = the `capture_key` short-circuit is broken. ⛔ Not the drain's summary line: `tortoise/__main__.py:9849` prints `spool drain: filed …` only when something was attempted, held, discarded or terminal, so a CLEAN second pass prints only `cleared terminal state on 0 entries — retrying` — success is silence, not a `filed 0` line |
+| 4 | drain summary | `spool drain: filed F, deferred D, skipped S (N waiting on backoff), terminal T, discarded X` | **`unfiled == 0` → PASS (nothing to file)**; otherwise **`F == unfiled` (i.e. `D == 0`)**, `X == 0`, `T == 0`, and **`S − N == entries − unfiled`** | ⛔ **`F == 0` → FAIL**; ⛔ **`D > 0` is NOT a pass** — it must be justified entry-by-entry as the key-budget refusal Stage 3b paces against. The arithmetic alone cannot see a failed drain: `F 1, D 263, S 1 (0 waiting), T 0, X 0` satisfies `F + D == unfiled` (1+263 = 264), `F > 0`, and `S − N = 1 = entries − unfiled`, while 99.6 % of the corpus never landed — a `5xx` storm is classified `retry` exactly like a `429` (`tortoise/capture_spool.py:663-670`) and only ever increments `deferred`. `S` counts three different things (already filed, backoff-held, concurrently filed), so it is graded as `S − N` against the Stage −1 subtraction, never against it directly; `discarded > 0` → READ the `spool discard (<reason>)` lines; `terminal > 0` → see "Reading `terminal`" below |
+| 5 | completion (no client action) | `GET /v1/sessions/{id}` → `extraction.outcome_known: true`, no `phase`, for the ids the drain printed (`spool drain: filed …` names at most a handful; `tortoise/__main__.py:9885-9889`) | every session you can name is terminal | still `phase` after minutes → extraction worker stuck; the capture is still durable — do NOT re-drain blindly |
+| 6 | the record | the SPOOL: entries carrying `filed_key` (Stage 0's script), which is cap-free; in a rehearsal, additionally the graph's `Session` count | **`filed_key` after == `filed` at Stage −1 + `F`** (rehearsal: also `sessions Δ == F`) | a `filed_key` shortfall → **read `#14342` D2 before re-running**. ⛔ Not `sessions == POSTs`: already-filed entries never POST (Stage −1) and a refused `429` creates no session (measured: 264 POSTs, 214 sessions), and ⛔ **not a session count from the API either** — `GET /v1/sessions` is `LIMIT 50` with no pagination (`hosted_api.py:26181`), so it cannot show a 264-entry delta in either direction |
+| 7 | idempotency | run the drain a second time; read the SAME spool count from row 6 | **`filed_key` does not change** across the second pass (seconds, not minutes) | a second drain that re-POSTs / raises `filed_key` = the `capture_key` short-circuit is broken. ⛔ Not the drain's summary line: `tortoise/__main__.py:9849` prints `spool drain: filed …` only when something was attempted, held, discarded or terminal, so a CLEAN second pass prints only `cleared terminal state on 0 entries — retrying` — success is silence, not a `filed 0` line |
 
 ⛔ **Every failure above is recorded by the DRAIN, never by deleting anything.**
 The single most important property of this operation: a failed entry stays on the
@@ -297,8 +301,8 @@ same rehearsal (`docs/evidence/14232-spool-drain-rehearsal/SUMMARY.md`):
 
 Same work. The only difference is the pace, and the pace is what the limiter acts
 on. **A 265-entry drain at full speed loses ~19 % of its POSTs to the limiter;
-allocate for ~100/min, i.e. ≈6 min for 500 entries, not the ~2 min an unthrottled
-run takes.**
+allocate from the measured rate rather than from the budget — at 124 POST/min a
+500-entry drain takes ≈4 min, where the 265-entry run itself took 129 s.**
 
 ### ⛔ The trap: a refusal parks the entry for up to SIX HOURS
 
@@ -353,10 +357,27 @@ are three shapes and they are all recoverable:
 
 ### Reading "terminal" correctly
 
-`terminal N` means a **permanent** 4xx (402/403/422-class) was recorded and the
-entry is deliberately not retried. The entry is still on disk. The supported exit
-is `--retry-terminal` (which is why the command above carries it) **after** the
-cause is fixed — a corrected lane/harness, a lifted quota, a re-minted key.
+`terminal T` counts entries that ALREADY carried a terminal marker when the pass
+started (`tortoise/capture_spool.py:4056`). ⛔ On the documented command it is
+structurally **0**: `--retry-terminal` clears every marker before the flush
+(`reset_terminal_entries`), and `clear_terminal_failure` returns `False` when the
+key is already absent. So `T > 0` is a bug signal about your invocation, not the
+usual failure mode.
+
+The classes, as the code actually sorts them (`capture_spool.classify_failure`):
+
+| status | class | what the drain does | where you see it |
+|---|---|---|---|
+| `429` | transient | kept, retried | `deferred`, `N waiting on backoff` |
+| `402` (quota), `5xx`, `3xx`, **no status** | transient | kept, retried | `deferred` |
+| `401`/`403`/`407` | policy (reversible) | kept, retried | `deferred` — **not** `terminal` |
+| `422`-class | permanent | `terminal_failure` recorded, entry KEPT | `terminal`, or `discarded` when non-retryable |
+
+⛔ A quota (402) or an auth refusal therefore arrives as `deferred`, never as
+`terminal` — which is why the production backlog reads as `deferred 264` rather
+than as a permanent failure. The supported exit from a terminal marker is
+`--retry-terminal` **after** the cause is fixed (a corrected lane/harness, a
+lifted quota, a re-minted key); nothing is deleted either way.
 
 ---
 
@@ -450,7 +471,7 @@ and files everything".
 | Symptom | What it is | Do this |
 |---|---|---|
 | `spool drain: capture declined` | consent off — the drain did nothing | `export TORTOISE_CAPTURE=1`, re-run |
-| `filed 0` everything | consent, auth, or an unreachable URL | `spool drain: nothing filed — …` names it; `tortoise session verify` reads the install |
+| `filed 0` everything | consent, auth, or an unreachable URL | ⛔ three different lines, only one of them `nothing filed`: consent prints `spool drain: capture declined — …` (exit **0**, a no-op); auth/URL failures print the ordinary summary as `filed 0, deferred N` / `terminal N` / `discarded N`; `spool drain: nothing filed — …` comes from the blanket exception handler and means a config/crash case. `tortoise session verify` reads the install |
 | `404`/`401` on every POST | wrong host or a read-only key | re-check `TORTOISE_API_URL`; re-run the capture-POST probe in Stage 3 (NOT `gh_write_preflight.py` — that one proves the GitHub credential) |
 | `429 Rate limit exceeded. 100 points/minute per API key.` | the KEY's request budget, not the capture ceiling | wait 60 s; drain slower / in batches (Stage 3b). Entries are deferred, not lost |
 | `429 capture_capacity_saturated` | the in-flight ceiling (`#12992`): the previous capture's extraction still holds its slot | wait (`retry_after` 30 s); drain with ONE drainer paced under its own extraction latency (that is `#14342` D1). The rehearsal reproduced this with ONE drainer, so it is not evidence that a second client is needed to hit it |

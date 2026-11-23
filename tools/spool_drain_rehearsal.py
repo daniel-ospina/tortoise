@@ -216,8 +216,19 @@ def _mode_knobs(mode: str) -> dict[str, str]:
     `head-keyless` extract for real under a label that says keyless — is refused
     at startup by `_assert_keyless`.
 
-    Setting all three explicitly is what makes the recorded `<mode>.json`
-    reproducible on another box; the effective trio is written into it
+    ⛔ A fifth is the worst of them and it is a knob, just not one this function
+    used to state: `RATE_LIMIT_DISABLED=1` sets
+    `RateLimitMiddleware._disabled` (`hosted_api.py:5331`) and the middleware
+    serves with NO 100/min key budget, so `head-keyless` files 265/265 with zero
+    429s and the 50-entry six-hour park — this PR's central operational finding,
+    and `#14342` D1's input — silently never happens. It is not hypothetical: the
+    repo's own `tests/conftest.py:26` does
+    `os.environ.setdefault("RATE_LIMIT_DISABLED", "1")`, so any run started under
+    pytest inherits it. `"0"` restores the limiter (the middleware compares
+    `== "1"`).
+
+    Setting every knob explicitly is what makes the recorded `<mode>.json`
+    reproducible on another box; the effective set is written into it
     (`capture_env`) so a polluted run is distinguishable after the fact.
     """
     return {
@@ -227,6 +238,9 @@ def _mode_knobs(mode: str) -> dict[str, str]:
         "TORTOISE_CAPTURE_IN_FLIGHT": "1" if mode == "backpressure" else "8",
         # `_slow_extraction` patches the v2 lane; m2 would make that seam inert.
         "TORTOISE_SESSION_EXTRACTOR": "v2",
+        # EVERY mode measures the server's 100/min budget, so the limiter must be
+        # ON — see the fifth consequence above (`tests/conftest.py` sets `1`).
+        "RATE_LIMIT_DISABLED": "0",
     }
 
 
@@ -1090,7 +1104,15 @@ def _run(argv: list[str] | None = None) -> int:
     # defaults to a 3-entry slice and `backpressure` to 4, so re-measuring the
     # live spool on such a run describes a corpus no mode drained — the same
     # defect `162e9cd9` fixed on the `summary` path, still live here.
-    writes_cost = all(limit is None for _, limit, _ in plan)
+    # ⛔ `any`, not `all`: `all` is the DEFAULT mode and its plan always includes
+    # the two SLICED modes (`pre-14261` 3 entries, `backpressure` 4), so `all(...)`
+    # is False on every `all` invocation — the two full-corpus modes are outvoted by
+    # the two sliced ones. Measured consequence: on a clean output dir `all` drained
+    # all four modes and then exited with "records no corpus cost … run `all`" (the
+    # remedy it prints is the command that just failed) and wrote no `SUMMARY.md`
+    # either; on an existing dir it kept a stale cost while re-rendering a summary
+    # beside it. A mode that drained the WHOLE corpus is what licenses a cost.
+    writes_cost = any(limit is None for _, limit, _ in plan)
     if writes_cost:
         cost = _corpus_cost(args.spool_src)
     else:
