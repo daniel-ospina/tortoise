@@ -1397,25 +1397,26 @@ SWEEP_NAMES = 66
 #: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
 #: and diffed, and EXACTLY ONE row differs
 #: out of an UNCHANGED 856-row SHAPE set on both sides:
-#:   * `proj.g.query` **3643 → 3646** (+3). `94d75667dc76` (#14224) adds three `proj.g.query(...)`
-#:     call sites in the new `tools/read_wave_latency.py` (two pass a `count(n)` query, the third a
-#:     multiline A/B id query), and it is the only commit in `9f83a63bfab7..10e51693f166` that adds
-#:     a `proj.g.query` call SITE. Measured per rev, with BOTH non-zero readings printed rather
-#:     than one: `git show <rev> --format='' -- '*.py' | grep -c '^+.*proj\.g\.query'` reads **3**
-#:     for `94d75667dc76` (the three sites above) and **2** for `10e51693f166` itself — both of
-#:     those inside DOCSTRING text in `tests/test_14125_retired_name_calls.py`, which is a string
-#:     the AST counter does not read — and **0** for each of the other eight of the ten
-#:     `.py`-touching revs in that range (`git log --oneline 9f83a63bfab7..10e51693f166 -- '*.py'
-#:     | wc -l` → 10). A `proj.g` receiver chain is this sweep's documented edge — `proj.g` binds a
-#:     `_GuardedGraph` over the FalkorDB `Graph`, and a graph handle is never the SDK — and the ROW
-#:     already existed, so a count moved; no shape appeared.
+#:   * `proj.g.query` **3643 → 3646** (+3), every one of the three in `tools/read_wave_latency.py`
+#:     (that file: 0 → 3; no other file moves), which is `94d75667dc76` (#14224)'s contribution —
+#:     it ADDS those three `proj.g.query(...)` call sites in the new file (two pass a `count(n)`
+#:     query, the third a multiline A/B id query), and it is the only commit in
+#:     `9f83a63bfab7..10e51693f166` that adds a `proj.g.query` call SITE. Measured per rev, with
+#:     BOTH non-zero readings printed rather than one: `git show <rev> --format='' -- '*.py' |
+#:     grep -c '^+.*proj\.g\.query'` reads **3** for `94d75667dc76` (the three sites above) and
+#:     **2** for `10e51693f166` itself — both of those inside DOCSTRING text in
+#:     `tests/test_14125_retired_name_calls.py`, which is a string the AST counter does not read —
+#:     and **0** for each of the other eight of the ten `.py`-touching revs in that range (`git log
+#:     --oneline 9f83a63bfab7..10e51693f166 -- '*.py' | wc -l` → 10). A `proj.g` receiver chain is
+#:     this sweep's documented edge — `proj.g` binds a `_GuardedGraph` over the FalkorDB `Graph`,
+#:     and a graph handle is never the SDK — and the ROW already existed, so a count moved; no
+#:     shape appeared.
 #: ⛔ `out.update` IS NOT PART OF THAT DELTA, and saying it was is the inversion this paragraph was
 #: rewritten to remove: the row reads **43** on `#14160`'s pre-squash tip `0351fe856942` AND on
-#: `main` at
-#: `70fbd1a27dd5`, so it sits INSIDE the committed pair rather than on top of it. It moves only
-#: against `9f83a63bfab7` (**42 → 43**), the merge base this branch carried — `#14160`'s own row,
-#: which the block above already DECLARES (`_global_declarations` in
-#: `tests/test_14125_retired_name_calls.py`), and never the reason the squash reds.
+#: `main` at `70fbd1a27dd5`, so it sits INSIDE the committed pair rather than on top of it. It
+#: moves only against `9f83a63bfab7`, where `out.update` **42 → 43** is `#14160`'s own row — which
+#: the block above already DECLARES (`_global_declarations` in
+#: `tests/test_14125_retired_name_calls.py`) — and it is never the reason the squash reds.
 #: No other row differs in either direction, so nothing was absorbed: `typed references still
 #: pointing at a public name` is **0** on this tree, and the direction the pin exists to catch — a
 #: NEW row SHAPE — is not what happened here. Re-measured on the MERGED tree with `--repin`,
@@ -1438,6 +1439,18 @@ SWEEP_NAMES = 66
 #: that does not parse is a reading of a DIFFERENT tree — the same class this block keeps
 #: naming, one layer out. Re-pin only from a tree whose covering suites are green.
 SWEEP_RESIDUE = (11864, "2a6400518a87775c")
+#: ⛔ THIS PR'S OWN CONTRIBUTION IS ZERO ROWS, and that is measured rather than asserted:
+#: `edits_for` run over BOTH files whose CENSUS text this change touches yields zero typed
+#: references and ZERO residue rows (`tools/sdk_privatise.py` contributes only the two
+#: `residue_all.update`/`after_residue.update` accumulators already inside the pinned set, and
+#: `tests/test_sdk_privatise_sweep.py` contributes nothing), so the pair this file pins is the
+#: base's and not the branch's — the attribution above is `main`'s drift, re-measured on the
+#: MERGED tree, never carried from either side's figure by arithmetic. `--check` prints
+#: `typed references still pointing at a public name: 0`, so no public name was legitimised in
+#: either direction and no new SHAPE was absorbed: both rows are DECLARED here rather than
+#: rewritten away — re-pointing an ordinary-word receiver on a `Graph` would be sabotage, which is
+#: the `declared_markers.update` precedent, and a plain `set[str]` in a test helper is the
+#: `terms.update` precedent.
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

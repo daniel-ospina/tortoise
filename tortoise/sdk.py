@@ -5706,13 +5706,13 @@ _SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
 #: drop the reserved names before splatting, and `create_source` — the one door
 #: that bypasses intake — drops them itself. With every relay covered, the
 #: collision is impossible and live == replay.
-#: ``record_sink`` (#10000) and ``write_sink`` (#14111) are the two PER-CALL
-#: OUTCOME sinks the signature owns, and neither decides where a write lands:
-#: `live_write.write` fills `record_sink` INSIDE the chokepoint, `_emit_event`
-#: fills `write_sink` once it returns. A caller prop of either name binds the
-#: parameter at the splat, one frame up, so the chokepoint's own outcome is
-#: delivered into the CALLER's value — `write_sink`'s measured forms: a list
-#: prop absorbed the ``LiveWrite``; a non-list prop raised.
+#: ``record_sink`` (#10000) is the second PER-CALL object the signature owns:
+#: the capture writer hands in a list and `_emit_event` appends the record
+#: write's OUTCOME to it, so the caller can decide a store from what the write
+#: actually did. A caller prop of that name splatted into the call would bind
+#: the parameter and silently suppress the outcome (the capture would then treat
+#: every turn as unrecorded and fall back to the graph — the safe direction, but
+#: a silent one), so it is reserved like the rest. ``write_sink`` (#14111) is the same KIND of name — an append-only OUTCOME sink, NOT a write target (one physical line on purpose: this file's line count is itself pinned by the doc corpus's ``sdk.py:`` cites, so a paragraph here moves every one of them and buys nothing one line does not). `live_write.write` settles the destination BEFORE the parameter is read and its only use is `write_sink.append(write)`, so no caller value can redirect a write: the harm is REINTERPRETATION — a caller prop binds the parameter at the splat, so the chokepoint's verdict lands in the CALLER's value instead of the sink the caller named, silently for a list and as an ``AttributeError`` at the append for anything else (after the journal line committed, so the door's ``except`` turns it into a WARNING). Proven by ``test_a_caller_write_sink_prop_is_not_bound_as_the_internal_sink``.
 _RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
                             "record_sink", "write_sink")
 
