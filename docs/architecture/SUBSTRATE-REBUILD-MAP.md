@@ -208,7 +208,9 @@ each module, at `4f68a2aa7`): `fanout` **2** · `source_identity` **4** ·
 `embeddings` **14** · `vet_gate` **1** — its one importer is
 `extractor_v2.py:157` (`from . import vet_gate as _vet_gate`, a module-level
 import beside `value_gate`), which is what reaches
-`vet_gate.vet_candidates` at `extractor_v2.py:8464`. That importer is L3's
+`vet_gate.vet_candidates` at `extractor_v2.py:8464` (⛔ as-of the PIN — §5's numbers below are
+`measured_at_commit`'s by rule, while at HEAD the same call is `:14498`, so re-pointing this one names
+two heads in a single paragraph; `e87d8108c0` did exactly that, `#14183` final review). That importer is L3's
 declared family (§3), so the single inbound edge is inside one lane rather than
 across the dependency graph: a `vet_gate` interface change is L3's business.
 The leaves created by the merged lanes are still leaves. **The contention
@@ -234,7 +236,7 @@ private helpers still has those call sites to consider.
 
 `vet_gate.py` is consequently **not** a `depends on` leaf: it carries one
 internal dependency of its own — `value_gate`, the stdlib-only identifier
-predicate that both it and `extractor_v2` import (`vet_gate.py:149`).
+predicate that both it and `extractor_v2` import (`vet_gate.py:150`).
 `tools/substrate_map_check.py`'s `check_leaf_rows` re-measures exactly this: a
 row whose `depends on` cell says `*leaf*` must import nothing under `tortoise/`
 at module level, and a row that does is a drift (§10).
@@ -306,18 +308,18 @@ map had to go) — measured at this head as `tortoise/live.py:1237,1247` and
 `tortoise/why.py:200`. That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
-retirement prose in `tortoise/mcp_server.py:4477`, IS a retirement. The eighth
+retirement prose in `tortoise/mcp_server.py:4543`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:37547` and `_file_human_approval`'s `:37589`, one line each in a file this population already
+`tortoise/sdk.py:37835` and `_file_human_approval`'s `:37877`, one line each in a file this population already
 reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
-DELETED, re-measured at this head: `mcp_server.py:4382` is the `# prop named "error"
-must not suppress the onboarding observation.` comment (not blank) and the
-`:Document` retirement prose is at `:4477`; `sdk.py:37026` is a
-``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37002`
+DELETED, re-measured at this head: `mcp_server.py:4448` is the `# prop named "error"
+must not suppress the onboarding observation.` comment and the
+`:Document` retirement prose is at `:4543`; `sdk.py:37126` is a
+``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37157`
 is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
-`:Document` docstring lines are `:37547` in `record_decision` (opening `:37527`;
-`:37491` is the `:Source` line immediately above it, which is what a re-measure by that
-phrase alone lands on) and `:37589` in `_file_human_approval` (opening `:37567`)**), whose
+`:Document` docstring lines are `:37835` in `record_decision` (opening `:37815`;
+`:37545` is the `url of the document Source` line above it, which is what a re-measure by that
+phrase alone lands on) and `:37877` in `_file_human_approval` (opening `:37855`)**), whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a
 ``:Document`` node") because the retired label is what a reader arriving from the

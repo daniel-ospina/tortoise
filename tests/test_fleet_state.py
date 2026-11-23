@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import inspect
 import json
 import os
+import signal
 import stat
 import sys
 import threading
@@ -27,6 +29,29 @@ import time
 from pathlib import Path
 
 import pytest
+
+# #5049 rule 1: a wall-clock expiry is an INCONCLUSIVE skip that NAMES the deadline — never a
+# product-defect FAIL. Imported at module level (stdlib + pytest only, so the #1686 test-mode
+# import ordering is untouched) because `test_pi_processes_sees_a_real_long_path_lane` needs it
+# on the path where the FIXTURE — not the census — is what went away.
+#
+# `_HARNESS_PREFIX` is imported privately ON PURPOSE: it is the single source of the
+# `HARNESS DEFECT [#5049]` family marker, and every in-tree `HarnessDefect` raise site renders it
+# from this same constant — `tests/_verdict.py` and this file's three arms (census-error, crash,
+# clean-exit). Re-measured rather than listed, because a list written into prose goes stale the
+# moment a fourth arm lands. The census, ANCHORED on purpose (the unanchored pattern matches this
+# very comment, giving 6 for 5):
+#
+#   grep -rn '^[[:space:]]*raise HarnessDefect(' --include=*.py tests/ tools/ tortoise/
+#
+# Duplicating the literal would let the two drift, and the marker is what makes a harness fault
+# attributable in a log rather than only by its exception class.
+from tests._verdict import (
+    _HARNESS_PREFIX,
+    INCONCLUSIVE_PREFIX,
+    HarnessDefect,
+    inconclusive,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -3688,12 +3713,25 @@ def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
 
 
 def _row_for_pid(pid: int) -> str:
-    """The `command=` text a census would read for ONE pid — a DIAGNOSTIC, never an oracle.
+    """The `command=` text a census would read for ONE pid — see the two callers for its role.
 
-    Only ever called on a failure path (#12039): when the poll above times out, what
-    settles the cause in one run is whether the table holds the fixture at all, holds
-    it under a truncated argv[0], or does not hold it at all. `""` means the table has
-    no row for the pid.
+    ⚠️ IT IS NOT ONE THING. In caller 1 it is a DIAGNOSTIC interpolated into a failure message;
+    in caller 2 it IS the assertion's subject (that test's verdict is `assert row`). Calling it
+    "never an oracle" was true of caller 1 only, and contradicts caller 2 below.
+
+    TWO callers (#12039), and BOTH depend on the same ⚠️: `poll()` collects the status and a
+    collected child has no row left to quote, so every call site reads the row FIRST.
+
+      1. the fixture test's FAILURE path — when the poll ends without the census seeing the
+         fixture's pid (the deadline expiring, or the child dying early), what settles the cause
+         in one run is whether the table holds the fixture at all, holds it under a truncated
+         argv[0], or does not hold it at all;
+      2. `test_child_exited_reads_the_status_without_reaping_the_row`, on a PASSING path, where
+         the row IS the assertion's subject — it is how `_child_exited`'s `WNOWAIT` is proven to
+         have left the status uncollected.
+
+    ("Only ever called on a failure path" was true before caller 2 existed, and is not any more.)
+    `""` means the table has no row for the pid.
     """
     import subprocess  # no module-level import in this file; the caller imports it too
 
@@ -3702,6 +3740,194 @@ def _row_for_pid(pid: int) -> str:
         capture_output=True, text=True,
     ).stdout.strip()
     return out
+
+
+#: The signals a signal-death most often comes from OUTSIDE the fixture: SIGKILL/SIGTERM from
+#: an OOM killer or an orphan sweep, SIGINT from the shard's own `timeout -s INT`, SIGHUP from
+#: a dropped controlling terminal. These are evidence about the BOX — a killed child has no
+#: argv[0] for any census to match — so a deadline expiry on one of them is INCONCLUSIVE
+#: (#5049 rule 1). Every OTHER signal is TREATED AS a substrate fault and must stay a FAIL
+#: (#5049 rule 4): SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE are the interpreter aborting, and the arm
+#: names the signal rather than assuming one.
+#:
+#: ⚠️ KNOWN RESIDUAL, stated rather than implied: `_OUTSIDE_SIGNALS` is a four-signal allow-list,
+#: so a signal the KERNEL sends on a resource limit — `SIGXCPU` (24) on `RLIMIT_CPU`/`ulimit -t`,
+#: `SIGXFSZ` (25) on `RLIMIT_FSIZE` — lands in the crash arm and is reported as the substrate's
+#: fault. That attribution direction is the one this PR exists to fix, on the signals it was
+#: measured against; widening the allow-list changes verdicts and needs its own measurement, so
+#: it is left as a named residual rather than a quiet guess.
+_OUTSIDE_SIGNALS = frozenset({signal.SIGKILL, signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
+
+#: How many CONSECUTIVE census errors make the error the census's fault rather than the box's.
+#: ONE is not enough: `pi_processes()` folds a timeout, a refusal and an argument rejection into
+#: the same empty string, and a loaded self-hosted runner can lose a single `ps` — that is
+#: #5049 rule 1 (a deadline/load expiry must not produce a FAIL), and it is the box that
+#: produced the 2026-11-23 incident. Persisting across samples, on a box whose own `ps -p <pid>`
+#: answers, is not load.
+_CENSUS_ERROR_STREAK = 2
+
+#: …and how LONG that streak must last before it stops being load. A streak alone measures
+#: nothing: the samples are 0.1 s apart, so `_CENSUS_ERROR_STREAK` fires in 0.2 s, while
+#: `pi_processes()` folds a 30 s `_run` timeout, a refusal and an argument rejection into the
+#: same empty string — and a memory-pressure burst (the box that produced the 2026-11-23
+#: incident OOM-killed a child) outlasts 0.2 s by construction. Two seconds of CONTINUOUS
+#: failure on a box whose own `ps -p <pid>` answers is the census; anything shorter is #5049
+#: rule 1 (load must not produce a FAIL).
+_CENSUS_ERROR_MIN_SPAN_S = 2.0
+
+#: How long a census SAMPLE may spend failing before it is a wall-clock expiry rather than a
+#: broken invocation (#12039 cycle 8, P1). `pi_processes()` reads the table through
+#: `_run(..., timeout=30)` (`tools/fleet_state.py`), whose `except Exception: return ""` folds
+#: a `TimeoutExpired` into the SAME empty string as a rejected argument — so the error TEXT
+#: cannot tell load from a census fault, and the only signal that separates them is how long
+#: the sample took. A census whose invocation is wrong fails in milliseconds; one that burned
+#: `_run`'s whole subprocess budget on a loaded box is a `ps` timeout, which is #5049 rule 1
+#: (load must not produce a FAIL). ⚠️ THIS IS `_run`'s TIMEOUT SPELLED HERE because it is passed
+#: EXPLICITLY at `pi_processes`'s own call (`_run(["ps", "-ww", …], timeout=30)`), not taken from
+#: `_run`'s default (`timeout: int = 60`), so it cannot be imported — keep the two in step.
+_CENSUS_SAMPLE_TIMEOUT_S = 30.0
+
+#: The budget the long-path poll runs on — ONE home for the number, because the body's
+#: `deadline` and the arms' PREMISES must read the same value (#12039 review cycle 11, F1).
+#: A premise that carries its own copy of the budget (`assert 6 * step >= 10.0` beside a body
+#: that says `deadline = time.time() + 10.0`) is decoupled from the thing it names: raise the
+#: body's budget and the premise keeps passing while the arm silently grades a different poll.
+_LONG_PATH_POLL_BUDGET_S = 10.0
+
+#: How many `time()` reads carry the poll's clock from its start to the FIRST erroring sample's
+#: own deadline check — the multiplier in `once_slow`'s and `death_after_streak`'s premises.
+#: MEASURED by line trace at `b353771b43`: TWO reads before the loop (`deadline`,
+#: `poll_started`) plus FIVE inside the sample (`sample_started`, the duration read,
+#: `streak_started`, the span read, the error branch's deadline check) is SEVEN; this is
+#: deliberately BELOW the true count, so a step derived from it still carries the clock with one
+#: read of slack. ⛔ NOT A GUESS, BUT NOT A STATIC PIN EITHER (#12039 cycle 13, F1) — for a TYPO
+#: in either direction. MEASURED on copies at this head, implementation unmutated, only this
+#: constant moved:
+#: `6 -> 7` leaves `184 passed`, `19` leaves `184 passed`, and `1` and `2` also leave `184 passed`
+#: (they DO move the `max()` below — `10/1 + 0.1 = 10.1` — and still red nothing, because the step
+#: has to pass `_CENSUS_SAMPLE_TIMEOUT_S = 30.0` to change a verdict, which this integer domain
+#: cannot reach). Only a raise to `>= 20` reds (`20 * 0.5 = 10.0` is no longer `< 10`) — MEASURED,
+#: `11 failed`, the premise-(b) assertion firing across all 11 params. The behavioural pins are the
+#: `once_slow` and `death_after_streak` ROWS, not a bare assertion on this constant.
+_LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
+
+#: How many `time()` reads span the STREAK at the sample where the count+span conjunction fires
+#: (`death_after_streak`'s premise (a)): `sample_started` -> the span read is FIVE reads, which
+#: is what `_CENSUS_ERROR_MIN_SPAN_S / 5 + 0.1` is derived from.
+#: ⛔ AND IT HAS NO STATIC PIN, SO A TYPO HERE RETIRES THE ORDERING GUARD SILENTLY (#12039 cycle
+#: 13, F1). The guard that looks like a pin —
+#: `_LONG_PATH_STREAK_TIME_CALLS * death_step_s >= _CENSUS_ERROR_MIN_SPAN_S` — expands to
+#: `0.1 * K >= 0` and is true for every positive K, because the divisor cancels against its own
+#: product. MEASURED at this head, on copies, restored after each run:
+#:   K = 8, implementation unmutated      -> `184 passed`  (the deleted assertion saw nothing)
+#:   K = 8, `_child_exited` moved BELOW the conjunction -> `184 passed`  (the row goes VACUOUS)
+#:   K = 5, same mutant                    -> `1 failed`   (the row reds — it IS the real pin)
+#: ⛔ MEASURE THE MUTANT YOU NAME (#12039 cycle 13). An earlier version of this paragraph reported
+#: "still `2 failed` at `K = 8`" from a mutant that made the check UNREACHABLE rather than moving it
+#: below the gate — that is DELETE-entirely, not a reordering. It reds at every K at which the file
+#: is green unmutated, for a different reason (nothing observes the death), and the two are NOT
+#: interchangeable: the difference is the finding.
+#: WHY the typo is NOT survivable: with the gate not yet qualified at the death sample the poll
+#: keeps going; a moved-below check then meets the already-dead child on that same sample and
+#: breaks to the same outside-signal SKIP the shipped order produces — both orderings agree, and
+#: the arm can no longer distinguish them. (Deleting the check instead reds the row on every K at
+#: which the file is green unmutated — for a DIFFERENT reason, since nothing observes the death at
+#: all — which is exactly why the wrong mutant looked reassuring. ⛔ SCOPE A CLAIM TO THE K IT WAS
+#: MEASURED AT: the deletion raises on the death sample itself at the shipped `K = 5`
+#: (`on 2 consecutive samples over 2.50s`) and only one sample later from `K = 7` (`K = 8`: count 3,
+#: span 3.15 s), and at `K = 1` nothing at all is attributable — premise (b) below reds the FILE
+#: with no mutant applied, the same `11 failed, 173 passed` either way.)
+#: SO: no static assertion can pin this constant. The `death_after_streak` ROW pins the ORDERING
+#: wherever the gate is satisfied at the death sample — `5 * (2/K + 0.1) >= 2.0`, i.e. `K <= 6` —
+#: MEASURED: `1 failed` at `K` = 2, 3, 4, 5, 6, and `184 passed` (vacuous) at `K` = 7 and 8. A typo
+#: past that boundary therefore retires the guard silently, with nothing static to red. ⛔ SCOPE IT
+#: THAT WAY rather than to "the shipped value": the row covers a RANGE of K, and writing the range
+#: as one point is the same over-claim in the safe direction.
+_LONG_PATH_STREAK_TIME_CALLS = 5
+
+
+def _signal_name(num: int) -> str:
+    """`SIGNAME (n)` for a signal number — TOTAL over the numbers, unlike `signal.Signals`.
+
+    ⛔ `signal.Signals` is NOT total, so a message may not format a name unguarded. On Linux the
+    realtime band is enumerated at its two ENDS only (`SIGRTMIN` = 34, `SIGRTMAX` = 64), so every
+    number in between — 35..63 — raises `ValueError`, measured on the shipped enum:
+
+        signal.Signals(9).name  -> 'SIGKILL'          signal.Signals(35) -> ValueError
+        signal.Signals(11).name -> 'SIGSEGV'          signal.Signals(40) -> ValueError
+
+    The CRASH arm below interpolates a name into the `HarnessDefect` it raises, so an unguarded
+    `signal.Signals(-rc).name` replaces that verdict with a `ValueError` traceback about the
+    FIXTURE's death — which reads as a bug in this file, not as "the substrate aborted". The
+    number is the one fact the diagnosis always has, so the fallback keeps it.
+    """
+    try:
+        return f"{signal.Signals(num).name} ({num})"
+    except ValueError:  # unnamed on this platform: e.g. SIGRTMIN < n < SIGRTMAX
+        return f"signal {num}"
+
+
+def _child_exited(proc) -> bool:
+    """Has the child EXITED? Never collects its status, so `ps` still renders the zombie row.
+
+    `proc.poll()` answers the same question but COLLECTS the status (`waitpid`), and a collected
+    child disappears from the process table — the diagnosis below interpolates exactly that row
+    (`'[python] <defunct>'`) as its evidence. `waitid(WNOWAIT)` reports an exited child without
+    reaping it, so the evidence survives. Without `waitid` the fallback is `poll()`: the answer
+    is still right and the row is then empty.
+    """
+    try:
+        return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except AttributeError:  # pragma: no cover — POSIX waitid absent
+        return proc.poll() is not None
+    except (ChildProcessError, OSError):  # ECHILD — every hermetic arm (their pid is no child)
+        return proc.poll() is not None
+
+
+def test_signal_name_is_total_over_every_signal_number() -> None:
+    """The CRASH arm's message must never *be* the exception it reports (#5049 rule 4).
+
+    `signal.Signals(n)` is not total — the realtime band is enumerated at `SIGRTMIN`/`SIGRTMAX`
+    only — so `signal.Signals(35).name` raises. Formatting a name unguarded inside the
+    `HarnessDefect(...)` message would lose the verdict the message exists to deliver and leave
+    a `ValueError` traceback pointing at this file instead of at the aborted fixture. The gap is
+    MEASURED here rather than assumed: if `Signals` ever becomes total the fallback is dead code
+    and this test says so, instead of quietly passing over it.
+    """
+    assert _signal_name(signal.SIGKILL).startswith("SIGKILL")
+    assert _signal_name(signal.SIGSEGV).startswith("SIGSEGV")
+    unnamed: list[int] = []
+    for num in range(1, 128):
+        try:
+            signal.Signals(num)
+        except ValueError:
+            unnamed.append(num)
+        # NO number may cost the verdict, whether or not `Signals` can name it.
+        assert _signal_name(num)
+    assert unnamed, "signal.Signals names 1..127 here, so this fallback is dead code"
+    for num in unnamed:
+        assert _signal_name(num) == f"signal {num}"
+
+
+def _ps_answers() -> bool:
+    """Can THIS box's `ps` answer at all? The control for the census's own error path.
+
+    `tools.fleet_state.pi_processes()` reports an error whenever its `ps` call yields nothing,
+    and `_run` folds a refusal, an argument rejection and a timeout into that same empty string.
+    A box with no usable `ps` may legitimately skip this test; a box whose `ps` answers and whose
+    census still fails is the defect the test exists to find. This is the question that tells the
+    two apart, asked about our OWN pid so it cannot depend on the fixture.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(os.getpid()), "-o", "command="],
+            capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):  # `ps` absent/unusable — driven by its own test
+        return False
+    return bool(out)
 
 
 def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
@@ -3717,9 +3943,50 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     census cannot see a live lane. Verified red with the flag removed.
 
     A real process carrying an arbitrary argv[0] (never a `#!` script — the kernel
-    rewrites argv[0] to the interpreter, which `_pi_pids_from_ps` documents). SKIPS only
-    where the process table cannot be read at all (reported as an error by the reader),
-    so a box without that does not red a census that is fine.
+    rewrites argv[0] to the interpreter, which `_pi_pids_from_ps` documents). SKIPS on FOUR
+    paths and no more: where the process table cannot be read at all, which means the reader
+    reports an error AND ``ps`` itself cannot answer (`_ps_answers()` asks about our own pid, so a
+    box without a usable `ps` does not red a census that is fine); where an
+    OUTSIDE signal killed the fixture's child while the poll ran (`_OUTSIDE_SIGNALS` — the OOM
+    killer, an orphan sweep, the shard's own timeout; a killed child has no `argv[0]` for any
+    census to match); where ONE census sample burned `_run`'s whole subprocess budget
+    (`_CENSUS_SAMPLE_TIMEOUT_S`) — a `ps` timeout is load, and `pi_processes` folds it into the
+    same string as a broken invocation; **or** where the census NEVER answered the poll
+    (`healthy_samples == 0`) — with no healthy sample there is nothing to judge the `-ww` flag by.
+    Everything
+    else stays a FAIL, and there are FOUR of them — the taxonomy is
+    enumerated here so a reader re-deriving from this header cannot reinstate a skip that the
+    arms below deliberately removed (#12039, review cycles 4, 6 and 9):
+
+      * the child stays **ALIVE** and unreported for the whole deadline (``rc is None``) — the
+        `-ww` pin itself, and this test's primary assertion. ⛔ This is NOT one of the substrate
+        arms below, and it is the ONE arm that deliberately DEPARTS from #5049 rule 1 (a
+        wall-clock expiry FAILS here): the census has already answered NEGATIVELY about a subject
+        the test can see is alive, so the expiry is the MEASUREMENT rather than a budget standing
+        in for an unmeasurable one, and rule 1's premise does not hold. Recorded as an
+        `OVERRIDES:` line on #12039 — never turn THIS arm into a skip;
+      * the census **keeps** reporting an error while ``ps`` itself answers — `_CENSUS_ERROR_STREAK`
+        CONSECUTIVE samples **spanning `_CENSUS_ERROR_MIN_SPAN_S`**. It is a CONJUNCTION: one
+        lost ``ps`` under load is not the census (#5049 rule 1), and neither are TWO that are
+        0.2 s apart — the count-only reading is the gate mutation that redded `late_pair`;
+      * a clean exit means the fixture never ran its command (``rc >= 0``);
+      * a CRASH signal (SIGSEGV/SIGABRT/…) means the interpreter under it died.
+
+    The last two are the test substrate's fault, not the box's; the second is this test's own
+    subject; the first is the property under test. See the exits far below.
+
+    ⚠️ THE COUNT IS PART OF THE CONTRACT. Four `raise` sites and **FOUR** skip paths — the table
+    unreadable at all (`_ps_answers`), one sample over `_CENSUS_SAMPLE_TIMEOUT_S`, a census that
+    never answered (`healthy_samples == 0`), and `_OUTSIDE_SIGNALS`; a header that
+    states a different count is the drift `test_the_long_path_test_header_names_the_census_error_fail_arm`
+    guards BY NAME (`_CENSUS_ERROR_STREAK`, `_ps_answers`, `_CENSUS_ERROR_MIN_SPAN_S`,
+    `_CENSUS_SAMPLE_TIMEOUT_S`, `healthy_samples`, `OVERRIDES`) **and BY NUMBER** — it parses the
+    word after `SKIPS on ` and compares it to the `pytest.skip` + `inconclusive` calls the body
+    actually has, by AST, so re-wording the number is a RED rather than an assumption. (Measured
+    drift: this block said "THREE" while
+    omitting the ALIVE arm, in the same docstring that says "FOUR classifications" — two
+    contradictory counts, in the block a guard exists to keep honest. Cycle 9 caught the same class
+    again from the other side: the count said "two skip paths" after a third one landed.)
 
     ⛔ IT IS NOT A COPY OF `sleep` ANY MORE (measured on the `ubuntu-26.04` hosted
     runner `GitHub Actions 1000848497`, `test (c)`, head `70116a870dbb`). On that image
@@ -3760,6 +4027,46 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     legible (the deadline plus the table's own row, below), NOT because a race here was
     measured. It does not widen the match, so the truncation pin keeps its power: a
     `-ww`-less census truncates on every sample, burns the deadline and fails.
+
+    ⛔ THE EXPIRY SPLITS ON WHAT ACTUALLY HAPPENED TO THE FIXTURE — FOUR classifications,
+    not the three this list carried before the crash arm landed (#5049 rules 1 and 4). The
+    pin's claim is "a `-ww`-less census misses a LIVE child", so:
+
+      * child **ALIVE** (`poll() is None`) and unreported → **FAIL**. The real regression.
+      * child killed by an **OUTSIDE** signal (`-rc in _OUTSIDE_SIGNALS`: SIGKILL, SIGTERM,
+        SIGINT, SIGHUP) → **INCONCLUSIVE**, naming the 10 s deadline. The box killed it (OOM,
+        an orphan sweep, the shard's own `timeout`) and a killed child has no `argv[0]` for
+        any census to match, so the expiry says nothing about the flag. Before this split
+        that case redded a REQUIRED shard on a diff (`tests/test_12184_shifted_cites.py`)
+        that cannot reach this file.
+
+        ⛔ HOW THE 2026-11-23 INCIDENT IS ATTRIBUTED — THE INFERENCE, NOT THE ROW TEXT. The
+        failing log carried `pids seen: [1104635]` (a healthy census matching a *different*
+        `pi` the runner box itself runs) and `the table's row for the fixture pid read
+        '[python] <defunct>'`, but it printed NO returncode — and a cleanly-exited child is an
+        unreaped zombie too, leaving the identical `'[python] <defunct>'` row. So the row text
+        identifies NEITHER arm. The attribution rests on the command itself: the payload is
+        `import time; time.sleep(60)`, which cannot return inside a 10 s deadline, so a child
+        that vanished did so by being KILLED, not by exiting on its own. That is the
+        inference — stated here because the row text cannot carry it.
+
+        ⛔ AND IF THAT INFERENCE IS WRONG, THIS REDS RATHER THAN SKIPS — deliberately. A child
+        that exits `>= 0` under a `sleep(60)` payload means the interpreter never ran it, and a
+        CRASH signal (SIGSEGV/SIGABRT/…) means the interpreter died under it; both are
+        substrate faults that rule 4 requires to FAIL (see the last two exits). An honest red
+        that names the substrate beats a permanent green that hides it; the cost is that such
+        an image fails this required shard until the fixture is updated, and the
+        `HarnessDefect` message says so.
+
+      * child killed by a **CRASH** signal (any other signal → `HarnessDefect`), deliberately
+        a FAIL per rule 4: the interpreter aborted, which is the substrate, never the box.
+      * child **EXITED CLEANLY** (`poll() >= 0`) → **`HarnessDefect`**, deliberately a FAIL per
+        rule 4. `time.sleep(60)` cannot return inside a 10 s deadline, so a clean exit means the
+        fixture never ran its command — the class the docstring above records as a CAUGHT bug
+        (the `ubuntu-26.04` uutils multi-call `sleep` that exited 1). Skipping *this* one would
+        make a permanently-refusing fixture green-by-skip on every run: a false PASS that no
+        instrument reds, since neither static nodeid manifest carries this file and the
+        INCONCLUSIVE family deliberately trips no skip-guard.
     """
     import shutil
     import subprocess
@@ -3783,24 +4090,1130 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
             # A census missing `-ww` still never matches (its rows are cut before the
             # basename), so the truncation pin keeps its discriminating power: it takes
             # the FULL deadline and fails, it does not go green.
-            deadline = time.time() + 10.0
+            deadline = time.time() + _LONG_PATH_POLL_BUDGET_S
+            poll_started = time.time()
+            err_streak = 0
+            streak_started: float | None = None
             pids: list[int] = []
+            # ⛔ HOW MANY SAMPLES THE CENSUS ACTUALLY ANSWERED, and the first error it reported
+            # (#12039 cycles 9 and 10). Whether the ALIVE arm's "invisible for 10 s of polling" is
+            # true depends on this count, NOT on how long the errors took: a cumulative-time test
+            # skipped the `-ww` pin after ONE 5 s error even when fifteen healthy samples had come
+            # back without the fixture — a FAIL-OPEN, which is worse than the false red it fixed.
+            healthy_samples = 0
+            err_samples = 0
+            first_census_err = ""
             while True:
+                # ⛔ HOW LONG THE SAMPLE ITSELF TOOK, measured around the call (#12039 cycle 8, P1).
+                # `pi_processes` reads the table through `_run(..., timeout=30)`
+                # (`tools/fleet_state.py`), and `_run`'s `except Exception: return ""` folds a
+                # `TimeoutExpired` into the SAME empty string as a rejected argument. So the error
+                # TEXT cannot tell load from a broken invocation — but the sample's own DURATION
+                # can: a census whose invocation is wrong fails in milliseconds, while a sample
+                # that burned a timeout-scale budget failed on the wall clock. This is the only
+                # signal in the loop that distinguishes them.
+                sample_started = time.time()
                 procs, err = fs.pi_processes()
+                sample_s = time.time() - sample_started
                 if err:
-                    pytest.skip(f"the process table is unreadable here: {err}")
+                    err_samples += 1
+                    if not first_census_err:
+                        first_census_err = err
+                    # ⛔ A CENSUS ERROR IS NOT A PERMANENT SKIP — BUT ONE SAMPLE IS NOT A VERDICT
+                    # (#12039, review rounds 3 and 4). This branch used to skip on ANY census
+                    # error, which fused two different facts: a box whose `ps` cannot answer at
+                    # all (legitimately not this test's business), and the CENSUS's own
+                    # invocation failing on a box whose `ps` works — precisely the regression
+                    # this test exists to catch, and it would stay green forever (neither static
+                    # nodeid manifest carries this file; no skip-guard trips).
+                    # The first fix for that redded on ONE `ps` failure out of ~100 samples,
+                    # which is #5049 rule 1 inverted: `pi_processes()` folds a timeout, a refusal
+                    # and an argument rejection into the same empty string, and a loaded runner
+                    # can lose a single `ps`. So:
+                    #   box cannot answer at all  → skip (unchanged);
+                    #   one isolated error        → keep polling (the load class);
+                    #   _CENSUS_ERROR_STREAK consecutive errors on a box whose `ps` answers → FAIL.
+                    # ⛔ THE FIXTURE'S OWN DEATH IS CLASSIFIED FIRST (#12039 review round 5,
+                    # P1). Asking the census before this made the outside-signal skip arm
+                    # unreachable while the census was erroring: a child the BOX killed
+                    # (SIGKILL from an OOM sweep) plus a simultaneous `ps` failure reported
+                    # `HarnessDefect … the census's own invocation is what failed` — the exact
+                    # inversion this PR exists to stop, and the header promises that kill as
+                    # one of the FOUR skip paths. A dead child ends the poll; the four arms
+                    # below classify it.
+                    if _child_exited(proc):
+                        break
+                    # ⛔ THE SPAN IS MEASURED FROM THE STREAK, NOT FROM THE POLL (#12039 review
+                    # cycle 6, P1). `poll_started` was set ONCE before the loop, so two
+                    # consecutive errors arriving AFTER 2 s of HEALTHY polling satisfied
+                    # `_CENSUS_ERROR_MIN_SPAN_S` — a 0.2 s `ps` blip, the load class rule 1
+                    # protects, redded a REQUIRED shard, and the message below asserted a span
+                    # the streak never had. MEASURED on the shipped form (hermetic probe, fake
+                    # clock, ALIVE fixture): 50 healthy samples (~5 s), then exactly TWO
+                    # consecutive errors, then healthy -> `HarnessDefect … spanning at least 2s`.
+                    # The documented invariant is CONTINUOUS failure, so the clock starts at the
+                    # streak's own first error and any successful sample resets it.
+                    if err_streak == 0:
+                        streak_started = time.time()
+                    err_streak += 1
+                    streak_span_s = time.time() - streak_started
+                    # ⛔ A WALL-CLOCK EXPIRY INSIDE THE CENSUS IS NOT THE CENSUS'S FAULT
+                    # (#12039 cycle 8, P1). Every census error carries the same string, so a `ps`
+                    # that ran into `_run`'s 30 s timeout and a `ps` that REJECTED an argument are
+                    # indistinguishable by TEXT. Calling the timeout a census fault reds a
+                    # REQUIRED shard for load — the #5049 rule-1 inversion this test exists to
+                    # remove, one layer down. The sample's own DURATION separates them: a census
+                    # whose invocation is wrong fails in milliseconds, a timed-out one burned
+                    # `_run`'s whole budget. ⛔ CHECKED BEFORE THE CONJUNCTION, not inside it: a
+                    # 30 s timeout spends the poll's entire budget on its FIRST sample, so the
+                    # healthy-branch deadline `break` below would otherwise turn it into the
+                    # ALIVE arm's FAIL before the count gate was ever reached (measured).
+                    if sample_s >= _CENSUS_SAMPLE_TIMEOUT_S:
+                        inconclusive(
+                            f"the census itself spent {sample_s:.1f}s failing, so the error "
+                            f"may be a `ps` timeout rather than the census's own invocation",
+                            deadline_s=sample_s,
+                            diagnosis=(
+                                f"The error text is {err!r}, and `pi_processes` returns exactly "
+                                f"that string for a timeout AND for a rejected argument, so the "
+                                f"KIND is only visible in how long the sample took."),
+                        )
+                    if (
+                        err_streak >= _CENSUS_ERROR_STREAK
+                        and streak_span_s >= _CENSUS_ERROR_MIN_SPAN_S
+                    ):
+                        # The verdict is due NOW, so the `ps` control runs at most once per
+                        # poll instead of once per erroring sample (review round 5, P2: the
+                        # branch paid one subprocess per sample — ~100 in one budget).
+                        if not _ps_answers():
+                            pytest.skip(f"the process table is unreadable here: {err}")
+                        raise HarnessDefect(
+                            f"{_HARNESS_PREFIX}: the census reported an error on "
+                            f"{err_streak} consecutive samples over {streak_span_s:.2f}s "
+                            f"(the continuous-failure bound is {_CENSUS_ERROR_MIN_SPAN_S:g}s) "
+                            f"on a box whose `ps` answers: "
+                            f"{err!r} — `ps -p {os.getpid()} -o command=` answered, so the "
+                            f"census's own invocation is what failed, which is this test's "
+                            f"subject")
+                    # ⛔ THE ERROR BRANCH ALSO ANSWERS TO THE POLL DEADLINE (review cycle 5, P2).
+                    # It used to `continue` unconditionally, so on a continuously-erroring census
+                    # the loop's ONLY exit was the count+span gate — and the SPAN half is a tunable
+                    # constant. Raise that bound above the poll budget and the gate can never fire,
+                    # the healthy branch that checks `deadline` is never reached, and the REQUIRED
+                    # shard HANGS instead of reding: measured on a copy with
+                    # `_CENSUS_ERROR_MIN_SPAN_S = 1e9`, the `census_error` selection was killed at
+                    # 45 s having printed ZERO output. The poll has ONE budget and this branch now
+                    # spends it the same way the healthy branch does — `break`, so a spent budget
+                    # lands in the exits below and reaches a verdict.
+                    # ⛔ NOT `inconclusive()` HERE, DELIBERATELY (cycle-8, after the `once_slow`
+                    # arm landed): whether the expiry is the machine's or the census's is the
+                    # CONJUNCTION's decision, and this branch is upstream of it. A skip raised here
+                    # pre-empted `once_slow` — one erroring sample whose own `time()` pair spans the
+                    # bound, which must stay the ALIVE arm because the COUNT half was never reached
+                    # (measured: `1 failed` with the skip, `once_slow` receiving INCONCLUSIVE where
+                    # AssertionError is required). Breaking instead lets the arms classify.
+                    if time.time() >= deadline:
+                        break
+                    time.sleep(0.1)
+                    continue
+                err_streak = 0
+                streak_started = None
+                healthy_samples += 1
                 pids = [p["pid"] for p in procs]
-                if proc.pid in pids or time.time() >= deadline:
+                # ⛔ A DEAD CHILD ENDS THE POLL (#12039 review finding 4a). Liveness was
+                # consulted only AFTER the 10 s deadline burned, so on a box where the child
+                # dies the conclusion available at the first sample cost the deadline plus ~100
+                # `ps` invocations. The exits below are untouched — this only reaches them
+                # sooner. `_child_exited` does not collect the status on purpose: reaping here
+                # would empty the table row the diagnosis quotes.
+                if proc.pid in pids or _child_exited(proc) or time.time() >= deadline:
                     break
                 time.sleep(0.1)
-            assert proc.pid in pids, (
-                f"a lane whose argv[0] is {str(pi)!r} was invisible to the census for "
-                f"{10.0:.0f}s of polling (pids seen: {pids}; the table's row for the "
-                f"fixture pid read {_row_for_pid(proc.pid)!r}) — a narrow/`-ww`-less "
-                f"census truncates the argv[0] on every sample, so this is either the "
-                f"flag removed or the process is genuinely not matchable on this box")
+            if proc.pid not in pids:
+                # ⛔ FOUR EXITS, SPLIT ON WHAT ACTUALLY HAPPENED TO THE FIXTURE (#5049 rules 1
+                # and 4; measured on `pi-runner-cell3-x64-1` 2026-11-23).
+                # ⛔ ONE OF THEM IS A DELIBERATE DEPARTURE FROM RULE 1, AND IT IS STATED AS ONE.
+                # Rule 1 forbids a fixed wall-clock budget from producing FAIL (`tests/_verdict.py`
+                # :4-8: *"never a product-defect FAIL"*), and the `rc is None` exit below DOES fail
+                # on a wall-clock expiry. Say that instead of pretending otherwise: the expiry there
+                # is not a budget standing in for an outcome nobody can observe — the census has
+                # already ANSWERED, negatively, about a subject the test can see is alive, so "not
+                # reported while alive" is the measurement and `-ww` is its subject. A skip would
+                # make that regression green forever. (Recorded as an `OVERRIDES:` line on #12039;
+                # a reader holding `tests/_verdict.py` should read it as RAISED, not overlooked.)
+                # A fixture that died on its own MUST fail as well, because the property was then
+                # never testable. Those are different facts, and before this split the test could
+                # not tell them apart:
+                #
+                #   FAILED … test_pi_processes_sees_a_real_long_path_lane — … invisible to the
+                #   census for 10s of polling (pids seen: [1104635]; the table's row for the
+                #   fixture pid read '[python] <defunct>')
+                #
+                # `[python] <defunct>` is the row a DEAD child leaves, and `pids seen` matching
+                # some OTHER `pi` (the runner box itself runs one) is a healthy census. Ten
+                # seconds of polling cannot make a dead process visible, so that red measured
+                # what happened to the FIXTURE, not the `-ww` flag — and it redded a REQUIRED
+                # shard on a diff (`tests/test_12184_shifted_cites.py`) that cannot reach this
+                # file at all. WHICH exit a dead child gets depends on WHY it died, and the
+                # returncode only says that much — its SIGN decides between "the box killed it"
+                # and "it died on its own": `_OUTSIDE_SIGNALS` (SIGKILL/SIGTERM/SIGINT/SIGHUP)
+                # is the box's doing; a CRASH signal and a clean exit are both the substrate's.
+                # The four arms, in order below:
+                #
+                #   rc is None                    → ALIVE and unreported → AssertionError. THE
+                #                                   `-ww` PIN, and the one arm that deliberately
+                #                                   OVERRIDES #5049 rule 1 (see the block above and
+                #                                   the `OVERRIDES:` line on #12039). If a reader
+                #                                   is tempted to turn it into a skip "to satisfy
+                #                                   rule 1", that is the override being reverted: a
+                #                                   skip here makes the regression this pin exists
+                #                                   for green forever.
+                #                                   (Round 1 of this review caught exactly that
+                #                                   version — a `poll() is not None` skip that
+                #                                   sent a cleanly-exiting fixture green. Do not
+                #                                   reinstate it.)
+                #   rc < 0, -rc outside-signal    → inconclusive. Rule 1: the box, not the flag.
+                #   rc < 0, any other signal      → HarnessDefect. Rule 4: the interpreter
+                #                                   crashed, so the substrate never ran the
+                #                                   command.
+                #   rc >= 0                       → HarnessDefect. Rule 4: it exited on its own
+                #                                   under a `sleep(60)` payload, so it never ran.
+                row = _row_for_pid(proc.pid)
+                rc = proc.poll()
+                if rc is None and healthy_samples == 0:
+                    # ⛔ THE CENSUS NEVER ANSWERED, SO NOTHING HERE CAN JUDGE THE `-ww` FLAG (#12039
+                    # cycles 9 and 10). Measured band: one erroring sample costing 9.5 s..29 s falls
+                    # through the count+span conjunction (`err_streak == 1`), spends the deadline,
+                    # and used to land in the ALIVE arm — which then asserted `invisible for 10s of
+                    # polling` after ONE sample, `pids seen: []` when the census never answered, and
+                    # the `-ww` cause while dropping `err`. Rule 1: the budget ran out and the census
+                    # gave no answer, so the outcome is unknown; this is INCONCLUSIVE and it quotes
+                    # what the census actually said.
+                    # ⛔ KEYED ON `healthy_samples == 0`, NOT on cumulative error TIME. A time test
+                    # skipped a GENUINE `-ww` regression after one 5 s error even when fifteen
+                    # healthy samples had come back without the fixture — a fail-open, and it
+                    # falsified the `OVERRIDES:` scope on #12039, which justifies the ALIVE FAIL
+                    # with "the census has already answered NEGATIVELY". Measured verdict flip on
+                    # the time test at 4.9 s with 15 healthy samples; the count test keeps the FAIL.
+                    inconclusive(
+                        "a long-path `pi` lane observed by a census that never answered",
+                        deadline_s=_LONG_PATH_POLL_BUDGET_S,
+                        diagnosis=(
+                            f"Every one of the poll's {err_samples} census sample(s) failed — the "
+                            f"first reported {first_census_err!r} — so there is no healthy sample "
+                            f"to judge the `-ww` flag by and the error itself is the evidence; the "
+                            f"table's row for the fixture pid read {row!r}."),
+                    )
+                if rc is None:
+                    # ALIVE and unreported after the full deadline: the census, or the `-ww`
+                    # flag, is broken. This is the assertion the pin exists for.
+                    err_note = (
+                        f" ({err_samples} of {healthy_samples + err_samples} samples failed and "
+                        f"the first reported {first_census_err!r})" if err_samples else "")
+                    raise AssertionError(
+                        f"a lane whose argv[0] is {str(pi)!r} was ALIVE and invisible to the "
+                        f"census for {_LONG_PATH_POLL_BUDGET_S:.0f}s of polling (pids seen: "
+                        f"{pids}; the table's row "
+                        f"for the fixture pid read {row!r}){err_note} — a narrow/`-ww`-less census "
+                        f"truncates "
+                        f"the argv[0] on every sample, so this is the flag removed or the matcher "
+                        f"broken")
+                if rc < 0 and -rc in _OUTSIDE_SIGNALS:
+                    # A signal from OUTSIDE the fixture — the OOM killer, an orphan sweep, the
+                    # shard's `timeout -s INT`. That is evidence about the machine, never about
+                    # the census — #5049 rule 1.
+                    inconclusive(
+                        "a long-path `pi` lane visible to the census",
+                        deadline_s=_LONG_PATH_POLL_BUDGET_S,
+                        diagnosis=(
+                            f"The fixture process {proc.pid} was killed by "
+                            f"{_signal_name(-rc)} after {(time.time() - poll_started):.2f}s of "
+                            f"the poll (its budget was {_LONG_PATH_POLL_BUDGET_S:g}s), before "
+                            f"the census could observe it; the table's row read {row!r} and the "
+                            f"census matched {pids!r}. A killed child has no argv[0] left to "
+                            f"match, so the property was never observable and this expiry is "
+                            f"evidence about the box, not the census."),
+                    )
+                if rc < 0:
+                    # ⛔ A CRASH IS NOT THE BOX'S DOING (#5049 rule 4). `SIGSEGV`/`SIGABRT`/
+                    # `SIGBUS`/`SIGILL`/`SIGFPE` is the CHILD aborting — the same defect class
+                    # as the clean-exit arm below, and skipping it would make a crashing
+                    # fixture green on EVERY run: a false PASS that no instrument reds (neither
+                    # static nodeid manifest carries this file, and the INCONCLUSIVE family
+                    # deliberately trips no skip-guard). Only signals the box sends are the
+                    # machine's; an abort belongs to the substrate.
+                    raise HarnessDefect(
+                        f"{_HARNESS_PREFIX}: the fixture child CRASHED on "
+                        f"{_signal_name(-rc)} before the {_LONG_PATH_POLL_BUDGET_S:.0f}s "
+                        f"deadline "
+                        f"(table row read {row!r}) — an abort is the TEST SUBSTRATE at fault, "
+                        f"neither the box nor the census.")
+                # ⛔ rc >= 0 is NOT the box and NOT the census: the child exited ON ITS OWN.
+                # `time.sleep(60)` cannot return inside the poll's budget, so a clean exit means
+                # the fixture never slept at all — a HARNESS defect, which
+                # `tests/_verdict.py` rule 4 keeps a FAIL on purpose. The docstring above cites
+                # exactly this class as a CAUGHT bug (the `ubuntu-26.04` uutils multi-call
+                # `sleep` that printed `coreutils: unknown program 'pi'` and exited 1).
+                # Skipping it here would make a permanently-refusing fixture green-by-skip on
+                # every run: a false PASS, and nothing reds it — neither static manifest carries
+                # this file, and the INCONCLUSIVE family deliberately trips no skip-guard.
+                raise HarnessDefect(
+                    f"{_HARNESS_PREFIX}: the fixture child exited rc={rc} on its own before "
+                    f"the {_LONG_PATH_POLL_BUDGET_S:.0f}s deadline — `time.sleep(60)` cannot do "
+                    f"that, so the "
+                    f"fixture never ran its command (table row read {row!r}). This is the TEST "
+                    f"SUBSTRATE at fault, not the census: the child must stay alive for the "
+                    f"poll to observe it.")
         finally:
             proc.terminate()
             proc.wait(timeout=10)
     finally:
         shutil.rmtree(long_dir, ignore_errors=True)
+
+
+class _FakeClock:
+    """A clock that advances a fixed step only when the code under test asks the time.
+
+    Monkeypatched over this module's `time` binding, so `time.sleep` costs nothing and the
+    loop's own `time.time()` calls are the only thing that moves it — which is what makes
+    "did the poll end EARLY?" measurable without waiting ten real seconds.
+    """
+
+    START = 1_000.0
+
+    def __init__(self, step_s: float) -> None:
+        self.now = self.START
+        self.step_s = step_s
+
+    def time(self) -> float:
+        self.now += self.step_s
+        return self.now
+
+    def sleep(self, _s: float) -> None:
+        return None
+
+
+class _FakeChild:
+    """A stand-in for the fixture's `Popen`: a scripted `poll()`, no process behind it."""
+
+    def __init__(self, rc: int | None) -> None:
+        # A pid that is NOT THIS PROCESS's CHILD, so `os.waitid` raises ECHILD
+        # (`ChildProcessError`, `[Errno 10] No child processes`) and `_child_exited` takes its
+        # documented `poll()` fallback.
+        self.pid = 4_000_001
+        self._rc = rc
+
+    def poll(self) -> int | None:
+        return self._rc
+
+    def die_with(self, rc: int) -> None:
+        """Become a DEAD child from now on — ALIVE until this is called.
+
+        The `death_after_streak` arm needs a child that is live while the census streak
+        qualifies and dies on the sample the count+span gate would fire: the only state in which
+        the ORDER of `_child_exited` against that gate is observable (#12039 cycle 10, P2).
+        """
+        self._rc = rc
+
+    def terminate(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0 if self._rc is None else self._rc
+
+
+def _verdict_or_fail(expect, why: str, call):
+    """Call the fixture and RETURN the exception it raised, requiring the EXPECTED kind.
+
+    ⛔ A SKIP IS NOT A VERDICT, AND `pytest.raises` CANNOT SEE ONE. `pytest.skip.Exception`
+    derives from `OutcomeException`/`BaseException`, not from `AssertionError` — measured:
+    `issubclass(pytest.skip.Exception, AssertionError) is False`
+    (`Skipped.__mro__` -> `Skipped, OutcomeException, BaseException, object`). So an arm that
+    expects `AssertionError` or `HarnessDefect` and instead gets a skip does NOT fail: the
+    `Skipped` escapes `pytest.raises(expect)` and THIS guard test is reported as **SKIPPED**,
+    i.e. green. That is precisely the false PASS these arms exist to pin — the file's own
+    comments note that neither static nodeid manifest carries it and the INCONCLUSIVE family
+    trips no skip-guard — and it was MEASURED on the shipped form of this test: mutating the
+    ALIVE arm back to `pytest.skip(...)` gave `3 passed, 1 skipped` with the pin-green, and
+    the pre-fix census skip left the `persistent/ps-answers` and `once` params skipped.
+
+    So in every verdict-bearing arm an escaping skip is converted into a FAILURE. The
+    skip-expecting arm is unchanged (that is its verdict, and `why` still discriminates it).
+    """
+    if expect == "skip":
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            call()
+        return excinfo.value
+    try:
+        with pytest.raises(expect) as excinfo:
+            call()
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"the code SKIPPED where {expect.__name__} is required ({why}): {exc}")
+    return excinfo.value
+
+
+@pytest.mark.parametrize(
+    ("rc", "expect", "marker", "why"),
+    [
+        (None, AssertionError, "was ALIVE and invisible to the census", "the -ww pin still fails"),
+        (
+            -9, "skip", "was killed by SIGKILL (9)",
+            "SIGKILL from outside is the box (rule 1) — ⛔ the ARM-SPECIFIC phrase, not just the "
+            "`INCONCLUSIVE [#5049]` family prefix (cycle-11 F2): the never-answered skip carries "
+            "that prefix too, so a family-only marker cannot tell this arm from the one that "
+            "fires when the span bound is raised past the poll budget",
+        ),
+        (
+            -15, "skip", "was killed by SIGTERM (15)",
+            "SIGTERM is the box too — an orphan sweep or the shard's own `timeout -s TERM` "
+            "(cycle-8 P2: only `-9` was driven, so the set could shrink silently). The marker is "
+            "arm-specific for the same reason as `-9`: the two signals must not be "
+            "interchangeable",
+        ),
+        (-11, HarnessDefect, "the fixture child CRASHED on", "SIGSEGV is the substrate (rule 4)"),
+        (1, HarnessDefect, "exited rc=", "a clean exit is the substrate (rule 4)"),
+    ],
+)
+def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc, expect, marker, why) -> None:
+    """The expiry's FOUR exits, driven without spawning anything (#12039; #5049 rules 1 and 4).
+
+    Both directions of the split this PR exists to get right are pinned here, and neither needs
+    the real fixture: a DEAD fixture must not red a required shard (the 2026-11-23 incident),
+    and a fixture that dies ON ITS OWN — a clean exit under a `time.sleep(60)` payload, or a
+    crash signal — must not go green by skip (the false PASS the first fix nearly shipped, which
+    the `rc >= 0` arm guards and the crash arm guards from the other side).
+
+    ⛔ EACH ARM CARRIES TWO MARKERS WITH TWO DIFFERENT JOBS (#12039 review cycles 2 and 3).
+    The ARM-SPECIFIC phrase is the DISCRIMINATOR; the family marker is a separate CONTRACT. Both
+    substrate arms used to assert only `HARNESS DEFECT [#5049]`, which discriminates nothing —
+    measured: DELETING the crash arm (so a SIGSEGV is reported as "exited rc=-11 on its own …
+    the fixture never ran its command") left all four params GREEN, because the shared marker
+    pinned "a fixture death FAILs" and never "a crash is diagnosed AS a crash". So the crash
+    arm now asserts the phrase only it can produce (`CRASHED on`) and the clean exit asserts
+    `exited rc=`. ⛔ THE TWO OUTSIDE-SIGNAL SKIP ARMS HAD THE SAME DEFECT ONE CYCLE LATER
+    (cycle-11 F2): they asserted `INCONCLUSIVE [#5049]`, which `inconclusive()` prepends to ALL
+    FOUR skip exits in the function — so with `_CENSUS_ERROR_MIN_SPAN_S` raised past ~7.84 the
+    poll breaks before the child dies and the NEVER-ANSWERED skip satisfies this row's marker,
+    silently retiring the arm. They now assert `was killed by SIGKILL (9)` / `… SIGTERM (15)`,
+    the text only their own arm interpolates. The family marker is asserted SEPARATELY below,
+    for every arm, so an arm cannot drop the prefix merely to look unique.
+
+    The elapsed-time assertion pins the poll's EARLY BREAK (`_child_exited`, `be6161b7`): a dead
+    child must end the loop on the first sample, not after the poll budget. The ALIVE arm is the
+    control — it still burns the whole deadline AND still fails, which is why the early break
+    cannot convert the `-ww` pin into a skip.
+    """
+    module = sys.modules[__name__]
+    clock = _FakeClock(step_s=0.1)
+    child = _FakeChild(rc)
+
+    class _Completed:
+        stdout = ""
+
+    monkeypatch.setattr(module, "time", clock)
+    monkeypatch.setattr(module.fs, "pi_processes", lambda: ([], None))
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: child)
+    # `_row_for_pid` shells out to `ps` for a DIAGNOSTIC only; stub it so the arm stays hermetic.
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _Completed())
+
+    raised = _verdict_or_fail(
+        expect, why, lambda: test_pi_processes_sees_a_real_long_path_lane(monkeypatch))
+    assert marker in str(raised), why
+    if expect is HarnessDefect:
+        # The arm-specific `marker` above DISCRIMINATES the two substrate arms; the family marker
+        # is a separate contract every `HarnessDefect` carries (`tests/_verdict.py`), so assert
+        # both — distinct arms must not be allowed to drop the family prefix to look unique.
+        assert _HARNESS_PREFIX in str(raised), (
+            "every HarnessDefect carries the family marker, whatever its own arm-specific text")
+    elif marker.startswith("was killed by"):
+        # …and the same two-jobs rule for the outside-signal SKIP arm (cycle-11 F2): the phrase
+        # above is the DISCRIMINATOR, this prefix is the #5049 rule-1 family contract.
+        assert INCONCLUSIVE_PREFIX in str(raised), (
+            "every outside-signal skip carries the INCONCLUSIVE family marker, whatever its own "
+            "arm-specific text (#5049 rule 1)")
+    elapsed = clock.now - _FakeClock.START
+    if rc is None:
+        assert elapsed >= _LONG_PATH_POLL_BUDGET_S, (
+            "the ALIVE arm must still burn the full deadline and still fail")
+    else:
+        assert elapsed < _LONG_PATH_POLL_BUDGET_S, (
+            "a dead child must end the poll on the first sample, not at the poll budget")
+
+
+@pytest.mark.parametrize(
+    ("census_kind", "ps_answers", "child_rc", "expect", "marker", "why"),
+    [
+        (
+            "persistent", True, None, HarnessDefect, "HARNESS DEFECT [#5049]",
+            "a census that keeps failing on a box whose `ps` answers is the census",
+        ),
+        (
+            "persistent", False, None, "skip", "the process table is unreadable here",
+            "no usable `ps` on this box is that box's limitation, not the census's",
+        ),
+        (
+            "death_after_streak", True, -9, "skip", "was killed by SIGKILL (9)",
+            "a child that dies on the very sample where the census streak has ALREADY qualified "
+            "is classified by the FIXTURE's death, not by the census — `_child_exited` must stay "
+            "ABOVE the count+span conjunction. ⛔ THE ORDERING WAS PINNED BY NOTHING (cycle-10 "
+            "P2): the plain `persistent`/`-9` row has the child dead from sample 1, so both "
+            "orders break before the gate is reached and moving the check BELOW the conjunction "
+            "left the whole file green (measured here: the ordering mutant applied with this arm "
+            "removed -> 183 passed). Here it reds: the child is live "
+            "while the streak starts and dies exactly where the gate would fire, so the shipped "
+            "order yields the outside-signal skip and the swapped order a HarnessDefect — the "
+            "2026-11-23 misattribution this PR exists to remove. ⛔ THE MARKER IS ARM-SPECIFIC "
+            "(cycle-11 F2): it used to be the `INCONCLUSIVE [#5049]` family prefix, which the "
+            "NEVER-ANSWERED skip also carries — so a span bound large enough to break the poll "
+            "before the death sample (`_CENSUS_ERROR_MIN_SPAN_S >= 7.84`, premise (b) below) "
+            "satisfied this row through the WRONG exit and the ordering pin went quietly vacuous",
+        ),
+        (
+            "once", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "ONE isolated `ps` death is the load class (#5049 rule 1) and must not red the shard",
+        ),
+        (
+            "once_slow", True, None, "skip", "observed by a census that never answered",
+            "ONE counting sample whose streak span the CLOCK steps past the bound — without the "
+            "COUNT half, a >= _CENSUS_ERROR_MIN_SPAN_S gap between the streak's own two `time()` "
+            "reads reds a required shard (cycle-7: dropping the count left 175 passed; cycle-8: "
+            "the mechanism is the clock, NOT `ps` cost — `streak_started` is taken after "
+            "`pi_processes()` returns, so a slow `ps` is spent before the streak clock starts). "
+            "The verdict is INCONCLUSIVE, not the ALIVE FAIL, because a clock that slow exhausts "
+            "the poll before a healthy sample is ever taken — so this arm is the COUNT pin and "
+            "`never_answered` is the SKIP pin; deleting the count flips THIS one to HarnessDefect",
+        ),
+        (
+            "costly_once", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "ONE expensive erroring sample followed by HEALTHY samples that never see the fixture "
+            "must stay the ALIVE FAIL: the census DID answer, so the `-ww` regression is live. ⛔ "
+            "This is the cycle-10 P1 pin — a skip keyed on cumulative error TIME flipped exactly "
+            "this shape to INCONCLUSIVE with 15 healthy samples (measured), i.e. a fail-open that "
+            "retires the pin the whole test exists for",
+        ),
+        (
+            "never_answered", True, None, "skip", "observed by a census that never answered",
+            "ONE erroring sample costing almost the whole poll budget breaks before a healthy "
+            "sample is taken, so the census never ANSWERED — it used to land in the ALIVE arm, "
+            "which then asserted 'invisible for 10s of polling' after ONE sample, 'pids seen: []' "
+            "when the census never answered, and dropped `err` (cycle-9 P1, the 9.5s..29s band). "
+            "⛔ Scope is `healthy_samples == 0`: with healthy samples back and no fixture the "
+            "`-ww` pin still FAILS (cycle-10 P1 — a cumulative-time test skipped that, a "
+            "fail-open)",
+        ),
+        (
+            "persistent_slow", True, None, "skip", "may be a `ps` timeout",
+            "a census sample that consumes the SPAN BOUND to fail is a wall-clock expiry inside "
+            "`pi_processes` (its `_run` timeout), i.e. load — rule 1 says INCONCLUSIVE, and "
+            "calling it the census's own invocation was the cycle-8 P1",
+        ),
+        (
+            "persistent_beyond_budget", True, None, "skip", "observed by a census that never answered",
+            "a span bound the poll budget cannot contain must still reach a VERDICT: the error "
+            "branch spends the budget and breaks, so the loop cannot spin (cycle-6 P2: deleting "
+            "that break left the file fully green, and a constant bump then HANGS the shard)",
+        ),
+        (
+            "late_pair", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "a burst that satisfies the ERROR COUNT but not the SPAN, arriving AFTER "
+            "_CENSUS_ERROR_MIN_SPAN_S of healthy polling, is still the load class — the span "
+            "belongs to the STREAK, not to the poll (cycle-6 P1)",
+        ),
+        (
+            "persistent", True, -9, "skip", "was killed by SIGKILL (9)",
+            "a fixture the BOX killed is classified by its own arm, whatever the census did — "
+            "arm-specific text for the same reason as `death_after_streak` (cycle-11 F2)",
+        ),
+    ],
+)
+def test_long_path_census_error_is_the_census_only_when_it_persists(
+    monkeypatch, census_kind, ps_answers, child_rc, expect, marker, why
+) -> None:
+    """The census ERROR path: neither a permanent skip nor a one-sample failure (#12039).
+
+    The skip this replaces was a false PASS (the regression the test exists to catch would have
+    stayed green forever), and the first fix for it was the opposite error — one `ps` lost under
+    load redded a required shard, because `pi_processes()` folds a timeout, a refusal and an
+    argument rejection into the same empty string. This pins BOTH directions and the load case:
+
+      * persistent error, box's `ps` answers → `HarnessDefect` (a FAIL, with the family marker);
+      * persistent error, no usable `ps`      → skip (the box cannot answer at all);
+      * ONE error, then recovery              → the ordinary ALIVE arm, i.e. no verdict from the
+                                                error at all (#5049 rule 1: load is not a defect);
+      * persistent error AND the box killed the fixture → the outside-signal SKIP. The fixture's
+                                                own death is classified FIRST; asking the census
+                                                first turns a box-caused kill into a census FAIL,
+                                                which is the 2026-11-23 class this PR removes.
+
+    The harness also pins the streak's SPAN: the fake clock advances one `step_s` per `time()`
+    call (`0.1 s`, except the two arms whose own premise sets it — `once_slow`'s and
+    `death_after_streak`'s DERIVED steps, which are what make ONE sample span the bound and are
+    how the COUNT half stays pinned), so the verdict may only fire after
+    `_CENSUS_ERROR_MIN_SPAN_S` of simulated failure, and the assertion below fails a
+    sample-count-only rule. Hermetic throughout: no child is spawned, `ps` never runs, and the
+    clock only advances when the code asks it.
+    """
+    module = sys.modules[__name__]
+    # ⛔ NOT A GLOBAL STEP: `once_slow` reads a DESCHEDULING gap — the two adjacent `time()` reads
+    # inside the streak straddle the bound while the sample itself was instant — so its clock is
+    # what is stepped. `persistent_slow` reads a `ps` TIMEOUT instead, where the cost is inside the
+    # census call, and spends the clock there rather than here: a per-call step cannot express the
+    # difference, and conflating the two is what let a `ps` timeout stay a FAIL (cycle 8, P1).
+    # ⛔ DERIVED FROM THE CONSTANTS, never the literal 2.5 (#12039 cycle 10): a hard step retires
+    # the COUNT-half pin the moment `_CENSUS_ERROR_MIN_SPAN_S` is raised past it — measured, at
+    # `_CENSUS_ERROR_MIN_SPAN_S = 2.6` with the count half deleted the whole file stayed green.
+    # ⛔ AND DERIVED FROM THE PREMISE, NOT FROM A RATIO (#12039 cycle 10, P1). `* 1.25` alone holds
+    # only premise (a) — one sample's own `time()` pair clears the bound — and it went RED on the
+    # CORRECT implementation for every `_CENSUS_ERROR_MIN_SPAN_S` in 0.2 .. 1.33 (measured on
+    # copies, implementation UNMUTATED, only the constant changed). Premise (b) is that the FIRST
+    # erroring sample spends the poll's WHOLE budget, so `healthy_samples` stays 0 and the
+    # verdict is this row's skip: that needs `_LONG_PATH_ERROR_SAMPLE_TIME_CALLS x step >=
+    # _LONG_PATH_POLL_BUDGET_S`, because the reads taken before the loop plus the first sample's
+    # own reads are what carry the clock to `deadline`. Without (b) the poll took a HEALTHY sample
+    # and landed in the ALIVE arm where this row requires the skip — a false red produced by
+    # LOWERING a documented load-sensitivity constant, the same #5049 rule-1 inversion cycle 9
+    # fixed on the raising axis.
+    # ⛔ AND BOTH SIDES READ THE SAME TWO CONSTANTS (#12039 cycle 11, F1). The assertion here used
+    # to be `assert 6 * once_slow_step_s >= 10.0` beside a step whose `max()` second term was
+    # `10.0 / 6 + 0.1` — `assert max(x, y) >= y`, true for EVERY positive `_CENSUS_ERROR_MIN_SPAN_S`
+    # and decoupled from the body's own budget literal, so changing the body's `deadline` left the
+    # premise green while the arm graded a poll it no longer described. There is no STATIC form of
+    # (b) that can fail, because the `max()` below is itself the enforcement of (b) (measured:
+    # typoing its divisor 6 -> 7 left all 184 green, premise (a)'s term dominating) — so the claim
+    # is not written as an assertion that cannot fail, as agent-infra#3442 rule 3 requires.
+    # WHAT IS FALSIFIABLE IS THE BEHAVIOUR: drop the second term (or move the body's budget off
+    # `_LONG_PATH_POLL_BUDGET_S`) and `once_slow` takes a HEALTHY sample and lands in the ALIVE
+    # arm where this row requires the never-answered skip — the row REDS. Measured on a copy:
+    # second term dropped at `_CENSUS_ERROR_MIN_SPAN_S = 0.6` -> 1 failed (`[once_slow-…]`). So the
+    # premise (b) pin is the row itself, and it is stated here instead of shadowed by a tautology.
+    once_slow_premise_a_step_s = _CENSUS_ERROR_MIN_SPAN_S * 1.25
+    assert once_slow_premise_a_step_s > _CENSUS_ERROR_MIN_SPAN_S, (
+        "premise (a): the `once_slow` step must place ONE erroring sample's own `time()` pair "
+        "past _CENSUS_ERROR_MIN_SPAN_S, or the COUNT half is unpinnable")
+    once_slow_step_s = max(
+        once_slow_premise_a_step_s,
+        _LONG_PATH_POLL_BUDGET_S / _LONG_PATH_ERROR_SAMPLE_TIME_CALLS + 0.1,
+    )
+    # ⛔ `death_after_streak` NEEDS ITS OWN STEP, from its own premise (#12039 cycle 10, P2): the
+    # child dies on the sample where the streak QUALIFIES, so the span the conjunction would read
+    # there is five `time()` calls long and must already clear the bound — otherwise the ordering
+    # this arm exists to pin is never exercised and the arm is vacuous. The `+ 0.1` is margin for
+    # the reads taken before the loop.
+    death_step_s = _CENSUS_ERROR_MIN_SPAN_S / _LONG_PATH_STREAK_TIME_CALLS + 0.1
+    # ⛔ PREMISE (a) IS **STATED, NOT ASSERTED** — AND THE CONSTANT IT LEANS ON IS UNPINNED
+    # (#12039 cycle 13, F1). The obvious guard here is
+    # `_LONG_PATH_STREAK_TIME_CALLS * death_step_s >= _CENSUS_ERROR_MIN_SPAN_S`, and it is a
+    # TAUTOLOGY: expand the left side and it reduces to
+    # `_CENSUS_ERROR_MIN_SPAN_S + 0.1 * _LONG_PATH_STREAK_TIME_CALLS >= _CENSUS_ERROR_MIN_SPAN_S`,
+    # i.e. `0.1 * K >= 0` — true for EVERY span and every positive read count, because the divisor
+    # cancels against its own product. It was shipped that way under the claim "Derived, so raising
+    # the constant cannot silently make it so", which is exactly inverted: deriving the step FROM
+    # the constant is what makes the assertion unfalsifiable on that axis (agent-infra#3442 rule 3
+    # — an assertion that cannot vary under ANY mutation of the diff is dead weight that actively
+    # misleads the next reader into thinking the guard is covered).
+    # ⛔ SO `_LONG_PATH_STREAK_TIME_CALLS` HAS NO STATIC PIN — and, unlike the `once_slow` premise
+    # (b) above, its typo is NOT survivable. This premise is therefore STATED, not asserted, and
+    # the absence of a pin is named rather than papered over with a cleverer assertion that also
+    # cannot fail. MEASURED on copies at this head, restored after each run:
+    #   K = 8, implementation unmutated                     -> `184 passed` (the assertion: blind)
+    #   K = 8, `_child_exited` moved BELOW the conjunction   -> `184 passed`
+    #        ^ the row goes VACUOUS: `death_step_s` is 0.35 s, the streak spans `5 * 0.35 = 1.75 s
+    #          < 2.0` at the death sample, the gate is not satisfied, and the moved-below check then
+    #          meets the already-dead child ON THAT SAME SAMPLE and breaks to the same outside-signal
+    #          SKIP the shipped order produces — so both orderings agree and nothing discriminates.
+    #   K = 5, same mutant                                   -> `1 failed`  (the row IS the pin)
+    # ⛔ MEASURE THE MUTANT YOU NAME (#12039 cycle 13): a "reorder" mutant that DELETES the check
+    # instead reports `2 failed` at BOTH values, because nothing observes the death at all — and that
+    # is what made an earlier version of this comment claim the typo was survivable. It is not.
+    # WHAT IS FALSIFIABLE IS THE BEHAVIOUR, at the shipped value: move `_child_exited` below the
+    # conjunction and the `death_after_streak` row REDS (`1 failed` — the PR body's own number).
+    # That is this premise's pin — stated here instead of shadowed by a tautology, exactly as
+    # `once_slow`'s premise (b) was corrected one cycle ago (block above). Premise (b) below DOES
+    # stay an assertion: there both sides are independent constants, so it can fail.
+    # (#12039 cycle 11, F2, still honoured for (b): at `_CENSUS_ERROR_MIN_SPAN_S >= 7.84` the poll
+    # broke on the FIRST sample (clock 11.68 vs deadline 11.67), `child.die_with()` never ran,
+    # `healthy_samples == 0` and the NEVER-ANSWERED skip satisfied the row's family-only marker —
+    # the ordering pin retired itself on the one axis a maintainer actually moves, UP. The row's
+    # marker is arm-specific now (see the parametrization), and this line reds the FILE with the
+    # derivation to repair rather than letting the arm grade a different exit.)
+    assert _LONG_PATH_ERROR_SAMPLE_TIME_CALLS * death_step_s < _LONG_PATH_POLL_BUDGET_S, (
+        "premise (b): the death sample must arrive BEFORE the poll's deadline, or the fixture is "
+        "never killed where the gate would fire and this row grades the never-answered skip "
+        "instead (measured: the break happens on sample 1 from _CENSUS_ERROR_MIN_SPAN_S = 7.84). "
+        "Re-derive death_step_s for the new bound — do not delete the arm")
+    if census_kind == "once_slow":
+        arm_step_s = once_slow_step_s
+    elif census_kind == "death_after_streak":
+        arm_step_s = death_step_s
+    else:
+        arm_step_s = 0.1
+    clock = _FakeClock(step_s=arm_step_s)
+    # `death_after_streak` must start ALIVE and die MID-POLL: its subject is the ORDER of the
+    # child check against the census conjunction, and that order is only observable while the
+    # child is still live as the streak qualifies.
+    child = _FakeChild(None if census_kind == "death_after_streak" else child_rc)
+    err = "`ps -ww -axo pid=,ppid=,uid=,command=` produced nothing"
+    calls = {"n": 0}
+    # DERIVED from the constants, never literal (see the `late_pair` arm below): a literal burst
+    # pins today's numbers, so raising `_CENSUS_ERROR_STREAK` — the natural direction for a
+    # load-sensitivity constant — silently retires the pin instead of reding.
+    step_s = clock.step_s
+    # `burst` = how many consecutive errors: at least the count `_CENSUS_ERROR_STREAK` so the COUNT
+    # condition is always reachable.
+    burst = max(2, _CENSUS_ERROR_STREAK)
+    # ⛔ THE BURST IS PLACED BY SIMULATED TIME, NOT BY A SAMPLE INDEX (#12039 cycle 9, P1). The old
+    # placement was `late = 2 + int(MIN_SPAN / step_s)` — a SAMPLE index derived as if one sample
+    # cost one `time()` call — while the poll's deadline is SIMULATED TIME. The implementation's
+    # per-sample call count has changed twice (one, then three, then five for an erroring sample),
+    # and each change silently moved the burst: at `_CENSUS_ERROR_MIN_SPAN_S = 3.1` the placement
+    # put it past the poll's break, so `assert calls["n"] > started_at + burst` fired on the
+    # CORRECT implementation — a FALSE RED from raising a documented load-sensitivity constant, the
+    # #5049 rule-1 inversion in the one arm that pins rule 1. MEASURED on copies at the head that
+    # carried it, implementation UNMUTATED: span 2.0/2.5/3.0 green, 3.1 RED, 3.2/3.3 RED. Waiting
+    # for the CLOCK instead makes the placement independent of that count, which is the whole point.
+    burst_state: dict[str, int | None] = {"left": 0, "started_at": None}
+
+    def _census():
+        calls["n"] += 1
+        if census_kind == "persistent":
+            return [], err
+        if census_kind == "persistent_beyond_budget":
+            # ⛔ THE CAP IS THE INSTRUMENT, NOT THE SUBJECT (cycle-6 P2). With a span bound the
+            # budget cannot contain, the count+span gate can NEVER fire, so the only thing that
+            # ends this poll is the error branch's own deadline check. Without it this loop never
+            # ends, and a hang is indistinguishable from a slow box — so the cap converts that into
+            # a RED. It cannot masquerade as a pass: the post-condition requires the ALIVE arm's
+            # marker, and this AssertionError does not carry it.
+            assert calls["n"] < 500, (
+                "the error branch never spent the poll budget: 500 consecutive erroring samples "
+                "with a span bound the budget cannot contain means the poll cannot reach a "
+                "verdict — it HANGS, which is the failure this arm exists to catch")
+            return [], err
+        if census_kind == "once_slow":
+            # ⛔ THE MECHANISM IS THE CLOCK, NOT `ps` (#12039 cycle 8, P2). `streak_started` is
+            # taken AFTER `pi_processes()` returns, so a slow or hung `ps` is spent BEFORE the
+            # streak clock starts and contributes nothing to the span. What can reach the bound
+            # on ONE counting sample is a >= `_CENSUS_ERROR_MIN_SPAN_S` gap between the streak's
+            # two ADJACENT `time()` reads — a descheduled process or a wall-clock step — and the
+            # fake clock is the only affordable way to place it. `err_streak` is 1, so the COUNT
+            # half is the only thing between this and a `HarnessDefect` on a required shard.
+            return ([], err) if calls["n"] == 1 else ([], None)
+        if census_kind == "costly_once":
+            # ONE erroring sample that costs most of the poll budget, then a HEALTHY census that
+            # simply never sees the fixture. `healthy_samples` is therefore >= 1: the census
+            # answered, so the `-ww` pin must still FAIL (#12039 cycle 10, P1).
+            if calls["n"] == 1:
+                clock.now += 5.0
+                return [], err
+            return [], None
+        if census_kind == "never_answered":
+            # ONE erroring sample that costs almost the whole poll budget, so the poll's own budget
+            # check breaks before a healthy sample is ever taken — `healthy_samples` stays 0. That is
+            # the 9.5s..29s band on a loaded runner: too cheap to reach `_CENSUS_SAMPLE_TIMEOUT_S`,
+            # far too expensive to leave the "10 s of polling" claim true. ⛔ Deliberately NOT the
+            # "one costly error then 15 healthy samples" shape: there the census DID answer, the
+            # `-ww` pin must still FAIL, and a test that skipped it would pin a fail-open.
+            if calls["n"] == 1:
+                clock.now += 9.8
+                return [], err
+            return [], None
+        if census_kind == "persistent_slow":
+            # One sample that COSTS `_run`'s whole subprocess budget and then fails — the shape of
+            # a `ps` that ran into `_run(..., timeout=30)` (`tools/fleet_state.py`), whose
+            # `except Exception: return ""` folds a `TimeoutExpired` into the SAME empty string as
+            # a broken invocation. Modelled by SPENDING the clock INSIDE the sample, not by raising
+            # the per-call step: `sample_s` is `time.time() - sample_started` around this call, so
+            # the spend is what a real 30 s timeout looks like, while the per-sample step stays
+            # 0.1 s and `once_slow` (a descheduling gap, not a slow `ps`) stays distinguishable.
+            clock.now += _CENSUS_SAMPLE_TIMEOUT_S
+            return [], err
+        if census_kind == "late_pair":
+            # Healthy samples first, then a burst of consecutive errors, then healthy again. The
+            # burst STARTS once the POLL's own simulated clock is past `_CENSUS_ERROR_MIN_SPAN_S`
+            # (see `burst_state` above), which is what makes the old gate's from-`poll_started`
+            # span already over the bound when the burst begins — it raises `HarnessDefect` on a
+            # required shard, while the fixed gate measures the span from the STREAK and keeps
+            # polling.
+            # ⛔ BOTH the placement AND the length are DERIVED (measured, #12039). They were the
+            # literals 40..42 — a burst of exactly two — so raising `_CENSUS_ERROR_STREAK` to 3
+            # made the COUNT condition unreachable: the case degenerated to the deadline arm and
+            # the from-`poll_started` mutant passed IDENTICALLY to the correct implementation
+            # (measured on throwaway copies: streak 3 → `6 passed` for BOTH; streak 2 →
+            # `1 failed, 5 passed` for the mutant). A pin that goes QUIET on a constant bump is
+            # the same false-PASS class this PR removes.
+            # ⛔ AND THE CLOCK IS FROZEN ACROSS THE BURST so its SPAN is structurally ZERO, not
+            # merely "one sample". MEASURED per-sample cost of the implementation's own `time()`
+            # calls on this very poll, by line trace: the FIRST erroring sample costs FIVE (the
+            # `sample_started` read, the `streak_started` read, the span read, the error branch's
+            # own deadline check, and the next `sample_started`) and every later one FOUR, so the
+            # streak's span reaches `step_s + 4(k - 1) * step_s` at its k-th erroring sample. At
+            # `_CENSUS_ERROR_STREAK = 20` that is `0.1 + 19 x 0.4 = 7.7 s`, past the 2.0 s bound —
+            # MEASURED with the freeze removed: the CORRECT implementation trips (`1 failed`,
+            # reporting `over 7.70s`), so the freeze is required, not a flourish. A burst long
+            # enough to reach a large `_CENSUS_ERROR_STREAK` would otherwise
+            # trip the span bound in the CORRECT implementation too — the same silent retirement,
+            # moved from the count axis to the span axis. Freezing makes the arm independent of
+            # BOTH constants: the mutant's from-`poll_started` span is frozen at >= the bound
+            # (fires), the streak's own span is frozen at 0 (does not).
+            # (This block has now been re-measured TWICE — it cited `Counter({1: 99, 2: 1})` before
+            # the borrow-into-the-error-branch deadline check existed, then a 3/2 split before the
+            # sample-duration reads landed. Both times the numbers were true at the commit that
+            # wrote them and false one commit later, which is why the method is stated here.)
+            # ⛔ AND ONLY WHILE THE SPAN BOUND STAYS BELOW THE POLL'S OWN 10 s DEADLINE (#12039
+            # cycle 8, P2): the premise is ASSERTED above, not assumed — at
+            # `_CENSUS_ERROR_MIN_SPAN_S = 9.8` the placement runs past the break and this arm
+            # reds the CORRECT implementation.
+            if burst_state["started_at"] is None:
+                # Still in the healthy prefix. Wait until the POLL has genuinely run past the span
+                # bound in SIMULATED TIME — measured on the clock, so no derivation has to assume
+                # what a sample costs. The margin is THREE steps: TWO cover the reads taken before
+                # the loop (`deadline`, `poll_started`, both visible a few lines above), so a
+                # from-`poll_started` span is strictly GREATER than the bound at the burst's first
+                # sample, and the third is slack. MEASURED at `+ step_s`: span 1.90 < 2.0, i.e. the
+                # mutant did NOT fire and this arm went SILENT — the margin is load-bearing, not
+                # decoration.
+                if clock.now - _FakeClock.START < _CENSUS_ERROR_MIN_SPAN_S + 3 * step_s:
+                    return [], None
+                burst_state["started_at"] = calls["n"]
+                burst_state["left"] = burst
+            if burst_state["left"]:
+                burst_state["left"] -= 1
+                clock.step_s = 0.0
+                return [], err
+            if clock.step_s == 0.0:
+                clock.step_s = step_s
+            return [], None
+        if census_kind == "death_after_streak":
+            # ⛔ THE FIXTURE DIES WHERE THE GATE WOULD FIRE (#12039 cycle 10, P2). Sample 1 errors
+            # while the child is ALIVE, so the streak STARTS and no arm can classify the death
+            # yet; on sample 2 the child dies (SIGKILL — an OOM sweep's first signal) on the same
+            # sample the count+span conjunction has just been satisfied. Shipped order:
+            # `_child_exited` breaks first, so the four exits below classify a BOX-caused kill and
+            # the verdict is the outside-signal INCONCLUSIVE. Move that check below the
+            # conjunction and this sample raises `HarnessDefect` instead — a required shard red
+            # for what the box did, at the exact moment the census was also broken.
+            if calls["n"] == 1:
+                return [], err
+            assert child_rc is not None
+            child.die_with(child_rc)
+            return [], err
+        return ([], err) if calls["n"] == 1 else ([], None)
+
+    class _Completed:
+        stdout = ""
+
+    monkeypatch.setattr(module, "time", clock)
+    monkeypatch.setattr(module.fs, "pi_processes", _census)
+    monkeypatch.setattr(module, "_ps_answers", lambda: ps_answers)
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: child)
+    # `_row_for_pid` shells out to `ps` for a DIAGNOSTIC only; stub it so the arm stays hermetic.
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _Completed())
+    if census_kind == "persistent_beyond_budget":
+        # Override the bound AFTER the placement state is built (it describes `late_pair`) and
+        # BEFORE the call, because the gate being unreachable inside the budget is precisely the
+        # case.
+        monkeypatch.setattr(module, "_CENSUS_ERROR_MIN_SPAN_S", 1e9)
+
+    raised = _verdict_or_fail(
+        expect, why, lambda: test_pi_processes_sees_a_real_long_path_lane(monkeypatch))
+    assert marker in str(raised), why
+    if expect is HarnessDefect:
+        assert clock.now - _FakeClock.START >= _CENSUS_ERROR_MIN_SPAN_S, (
+            "the census verdict must wait for the streak to SPAN a real interval — two 0.1 s "
+            "samples are the load class (#5049 rule 1), not a broken census"
+        )
+    elif marker.startswith("was killed by"):
+        # The outside-signal skip's phrase DISCRIMINATES it from the never-answered skip, which
+        # carries the same family prefix; the prefix is a separate rule-1 contract (cycle-11 F2).
+        assert INCONCLUSIVE_PREFIX in str(raised), (
+            "every outside-signal skip carries the INCONCLUSIVE family marker, whatever its own "
+            "arm-specific text (#5049 rule 1)"
+        )
+    if census_kind == "once":
+        assert calls["n"] > _CENSUS_ERROR_STREAK, "a single error must not decide the verdict"
+    if census_kind == "late_pair":
+        assert burst_state["started_at"] is not None, (
+            "the burst never started: `_CENSUS_ERROR_MIN_SPAN_S` was not reachable inside the "
+            "poll's own budget, so this arm never placed the blip and graded the deadline arm "
+            "instead — raise the poll's budget or lower the bound (#12039)")
+        assert calls["n"] > burst_state["started_at"] + burst, (
+            "the poll must keep running after a burst that satisfies the COUNT but not the SPAN "
+            f"(started_at={burst_state['started_at']}, burst={burst}) — a census verdict here is "
+            "the #5049 rule-1 false red this arm pins against")
+
+
+def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
+    """The docstring's skip/FAIL taxonomy must name the arm the code actually has (#12039 cycle 4).
+
+    Review cycle 4 at `70caad8392` measured this drift in the VERY block the previous commit
+    repaired: the header said the test skips where the process table cannot be read at all and
+    listed only two FAIL arms, while the code FAILs the census error on a box whose ``ps``
+    answers — a third arm. A reader who re-derives the skip rule from that header writes
+    ``pytest.skip(...)`` on any census error and re-creates the permanent green the fix removes:
+    a false PASS that no instrument reds, since neither static nodeid manifest carries this file
+    and the INCONCLUSIVE family trips no skip-guard.
+
+    Text, not behaviour, on purpose. The ARMS' behaviour is pinned at their own raise sites by
+    `test_long_path_census_expiry_splits_on_the_fixture_exit_kind` and
+    `test_long_path_census_error_is_the_census_only_when_it_persists`; what nothing else pins is
+    the prose a reader derives from. Both tokens are absent from the header this finding was
+    raised against — measured at `70caad8392`: `'_CENSUS_ERROR_STREAK' not in doc` and
+    `'_ps_answers' not in doc` — and the streak token is still absent at `16b24c83e9`, which
+    narrowed the skip but never named the arm. So each guard reds on the version of the drift it
+    exists for rather than passing vacuously.
+    """
+    doc = test_pi_processes_sees_a_real_long_path_lane.__doc__ or ""
+    # ⛔ GRADE THE TAXONOMY, NOT THE WHOLE DOCSTRING (#12039 cycle 9, P1). The count paragraph below
+    # ENUMERATES every token this guard asserts — it lists them to say the guard pins them by NAME —
+    # so asserting against the whole docstring made the guard VACUOUS: measured at this head,
+    # deleting the ENTIRE four-arm taxonomy (all four FAIL classifications and the skip paths, 1171
+    # chars) left it PASSING, because that enumeration alone satisfies all six tokens. A guard that
+    # cannot fail is the false-PASS class this PR exists to remove, so the split is part of the pin:
+    # the boundary must exist, or this guard has nothing to grade and must say so.
+    taxonomy, marker, _count_paragraph = doc.partition("THE COUNT IS PART OF THE CONTRACT")
+    assert marker, (
+        "the header no longer separates its taxonomy from the count paragraph, so this guard "
+        "cannot tell the prose that PUBLISHES the rule from the prose that DESCRIBES the guard — "
+        "re-derive the boundary rather than deleting it (#12039)")
+    # The third FAIL arm, named by the constant that decides it — and the STREAK is the point:
+    # one lost `ps` under load is the box (#5049 rule 1), not the census.
+    assert "_CENSUS_ERROR_STREAK" in taxonomy, (
+        "the header stopped naming the census-error FAIL arm, so a reader re-deriving the skip "
+        "rule from it can reinstate `pytest.skip(...)` on any census error (#12039)")
+    # And the census-error SKIP is narrowed, never "the table cannot be read" on its own.
+    assert "_ps_answers" in taxonomy, (
+        "the header's census-error skip must also require `_ps_answers()` to come back empty; "
+        "`where the process table cannot be read at all` alone is the permanent-green drift")
+    # And the FAIL boundary is a CONJUNCTION, not a sample count (#12039 cycle 4). Without this
+    # token the header can state "N consecutive samples" alone, and a reader re-deriving the gate
+    # from it writes the count-only form — the mutation that redded `late_pair` with `over 0.20s`.
+    assert "_CENSUS_ERROR_MIN_SPAN_S" in taxonomy, (
+        "the header stopped naming the SPAN half of the census-error FAIL boundary, so the rule "
+        "it publishes is the count-only gate the code does not implement (#12039)")
+    # ⛔ AND THE TWO SKIP-PATH CONSTANTS (#12039 cycle 9, P2). A third skip path landed and the
+    # header went on saying "SKIPS on TWO paths", with the count explicitly declared part of the
+    # contract one paragraph below it. The count is guarded here the only way it can be: by NAME,
+    # because a guard cannot count what a future reader is free to re-word.
+    for const in ("_CENSUS_SAMPLE_TIMEOUT_S", "healthy_samples"):
+        assert const in taxonomy, (
+            f"the header stopped naming {const}, so a reader re-deriving the verdict rules from "
+            f"it cannot see that a slow / budget-consuming census SKIPS instead of reding — the "
+            f"drift the paragraph calling the count 'part of the contract' exists to forbid "
+            f"(#12039)")
+    # And the ONE arm that deliberately fails against #5049 rule 1 must stay declared as an
+    # override, not left as three contradictory glosses (#12039 cycle 7). A reader holding
+    # `tests/_verdict.py` — which says a wall-clock expiry is *never* a product-defect FAIL — has
+    # nothing but this word to tell a raised departure from an oversight, and the "fix" for an
+    # oversight is exactly the skip that makes the `-ww` regression green forever.
+    assert "OVERRIDES" in taxonomy, (
+        "the header stopped declaring that the ALIVE arm OVERRIDES #5049 rule 1, so a reader "
+        "holding `tests/_verdict.py` reads a FAILING wall-clock expiry as an oversight and "
+        "turns it into a skip — the permanent green this file's arms exist to prevent (#12039)")
+    # ⛔ AND THE COUNT ITSELF, NOT ONLY THE NAMES (#12039 cycle 10, P2). The paragraph below declares
+    # the count "part of the contract" and NOTHING compared it to the code: the header said "SKIPS
+    # on THREE paths" while enumerating four, twice, one sentence after the declaration. Names
+    # cannot catch that — so the declared number is parsed out of the header and checked against the
+    # skip exits actually present in the function, by AST.
+    words = {"ZERO": 0, "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5}
+    tail = taxonomy.split("SKIPS on ", 1)
+    assert len(tail) == 2, "the header stopped declaring how many skip paths the test has"
+    word = tail[1].split()[0].strip("*_ `")
+    assert word in words, f"unreadable skip-path count {word!r} in the header"
+    fn = next(
+        n for n in ast.walk(ast.parse(Path(__file__).read_text()))
+        if isinstance(n, ast.FunctionDef)
+        and n.name == "test_pi_processes_sees_a_real_long_path_lane")
+    exits = 0
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name in ("skip", "inconclusive"):
+            exits += 1
+    assert words[word] == exits, (
+        f"the header declares {words[word]} skip paths but the test body has {exits} skip exits "
+        f"(pytest.skip + inconclusive) — the count is contractual and this is the drift the "
+        f"paragraph above it forbids (#12039)")
+
+
+def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
+    """`_ps_answers` must ANSWER in both directions — nothing else ran its body (#12039 cycle 8).
+
+    This one function decides the two verdicts the census-error arm can reach: `False` skips
+    ("the box cannot read its process table") and `True` FAILs ("the census's own invocation is
+    what failed") — which is the regression this PR exists to catch. No test exercised it: the
+    arm stubs it (`monkeypatch.setattr(module, "_ps_answers", lambda: ps_answers)`), so measured
+    on copies, forcing the body to `return False` (EVERY persistent census error becomes a skip —
+    the permanent green this PR removes) or to `return True` (the rule-1 inversion on a box with
+    no `ps`) left the whole file passing. The realistic breakage is the silent one: spelling the
+    field `-o "commandx="` makes `ps` exit non-zero with EMPTY stdout and raise NOTHING, so the
+    `except (OSError, SubprocessError)` arm never fires and `bool("")` decides.
+
+    So the BODY is pinned here rather than stubbed, in all three shapes: empty stdout (the silent
+    non-zero exit), a real row, and a `ps` that cannot be executed at all. Hermetic on purpose —
+    stubbing `subprocess.run` pins the parsing and every arm without depending on the box's `ps`,
+    which is exactly what `test_child_exited_reads_the_status_without_reaping_the_row` does for
+    `_child_exited`'s real branch.
+    """
+    import subprocess
+
+    class _Completed:
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def _raise(*_a, **_k):
+        raise OSError(2, "No such file or directory")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", lambda *a, **k: _Completed(""))
+        assert _ps_answers() is False, (
+            "a `ps` that exits non-zero with empty stdout must read as `no usable ps`: it raises "
+            "nothing, so `bool('')` is the only thing that decides, and `True` here FAILs a "
+            "required shard on a box whose `ps` cannot read the table")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", lambda *a, **k: _Completed("python -c pass\n"))
+        assert _ps_answers() is True, (
+            "a `ps` that DOES answer our own pid must read as `ps works`, or every census error "
+            "is excused as the box's and the regression stays green forever")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", _raise)
+        assert _ps_answers() is False, (
+            "a `ps` that cannot be executed at all is `no usable ps`, not an exception from the "
+            "control that is supposed to classify the census's error")
+
+    # ⛔ AND THE REAL INVOCATION MUST STILL ANSWER (the half a stub cannot see). The breakage this
+    # arm most plausibly suffers is a source-level typo in the `ps` ARGUMENTS — `-o command=`
+    # spelled one character wrong exits non-zero with empty stdout and raises NOTHING — and every
+    # stub above replaces that invocation, so a stubbed test cannot red it. Measured on a copy:
+    # with `commandx=` the stubbed directions all pass. This direction is why it reds.
+    import shutil
+
+    # ⛔ THE TEXTUAL PIN RUNS ON EVERY BOX, SO IT COMES FIRST — ABOVE `shutil.which` (#12039 cycle
+    # 12 P2, cycle 13 F2). It needs no `ps` at all, so a `ps`-less box must still be able to red a
+    # mistyped invocation; behind any availability gate it silently stops being a pin there.
+    # It pins the WHOLE argv, not two substrings: `-p <pid>` is the selector the function's own
+    # docstring rests on ("asked about our OWN pid so it cannot depend on the fixture"), and
+    # dropping just that token left this file `184 passed` (measured), so substrings are not the
+    # property. The census invocation (`ps -ww -axo …`) is pinned separately, in the header guard.
+    invocation = inspect.getsource(_ps_answers)
+    assert (
+        '["ps", "-p", str(os.getpid()), "-o", "command="]' in invocation
+    ), (
+        "`_ps_answers` stopped asking `ps -p <our pid> -o command=`. Dropping ONLY the `-p` "
+        "selector leaves the tokens this test used to look for intact while the control starts "
+        "answering from the whole table, and every census error would then be excused as the "
+        f"box's. Its invocation is: {invocation!r}")
+
+    if shutil.which("ps") is None:  # pragma: no cover — no `ps` to ask
+        pytest.skip("no `ps` on this box: the positive direction cannot be measured")
+    # ⛔ THE SKIP NEEDS A WITNESS THAT IS NOT THE PREDICATE UNDER TEST (#12039 cycle 13 P1). This
+    # was `if not _ps_answers(): skip` plus `assert _ps_answers() is True`, i.e. the assert could
+    # only fire if two adjacent calls flipped — so a BROKEN `_ps_answers` (the exact thing this
+    # test exists to catch) read as "this box cannot answer" and SKIPPED a required-shard FAIL arm.
+    # Measured: `_ps_answers`'s real call given `timeout=0.000001` → `182 passed, 2 skipped, 0
+    # failed` here, against `1 failed` on the parent commit. The witness is now a DIFFERENT
+    # invocation: the census itself, asked about our own pid. A table one probe can read while the
+    # other says it cannot is the CONTROL's breakage, and it FAILS.
+    answers = _ps_answers()
+    if not answers and not _row_for_pid(os.getpid()):
+        # pragma: no cover — a `ps` that exists and cannot answer
+        pytest.skip(
+            "`ps` exists but neither `-p <pid> -o command=` nor a full table read can answer, so "
+            "this box cannot measure the positive direction; the invocation was pinned TEXTUALLY "
+            "above")
+    assert answers is True, (
+        "`ps -p <our pid> -o command=` answered nothing while the census's own `ps -ww -axo …` "
+        "DID return our row, so the control is what broke — every census error would be excused "
+        "as the box's and the regression this file pins would stay green")
+
+
+def test_the_outside_signal_set_is_exactly_the_signals_the_box_sends() -> None:
+    """`_OUTSIDE_SIGNALS` is the rule-1/rule-4 boundary, so its MEMBERSHIP must be pinned.
+
+    A signal in this set SKIPS (the box killed the fixture — orphan sweep, OOM sweep, the shard's
+    `timeout`); a signal outside it FAILS as a substrate crash. Shrinking the set therefore routes
+    a box-caused kill into the crash arm — a FAIL on a required shard for something the box did,
+    which is the inversion this PR exists to remove. Nothing pinned the membership: measured on a
+    copy at the cycle-8 head, `_OUTSIDE_SIGNALS = frozenset({signal.SIGKILL})` left the whole file
+    green (`175 passed`), because the parametrized expiry arm only drove `-9`. The `-15` case above
+    now covers the second most likely signal behaviourally; this assertion covers the other two
+    (`SIGINT` from an interrupt, `SIGHUP` from a dropped session), which no arm drives.
+    """
+    assert frozenset(
+        {signal.SIGKILL, signal.SIGTERM, signal.SIGINT, signal.SIGHUP}) == _OUTSIDE_SIGNALS, (
+        "`_OUTSIDE_SIGNALS` is the boundary between 'the box killed it' (skip, #5049 rule 1) and "
+        "'the substrate crashed' (FAIL, rule 4). A member added here excuses a real crash; one "
+        "removed FAILs a required shard for the box's own doing — state the change deliberately "
+        "in the arms above rather than editing this set (#12039)")
+
+
+def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
+    """`_child_exited` must NOT collect the status: the `ps` row is the diagnosis's evidence.
+
+    `waitid(WNOWAIT)` over `Popen.poll()` is the whole reason the helper exists — `poll()` calls
+    `waitpid()`, and a COLLECTED child leaves no row for the `HarnessDefect` message to quote
+    (the 2026-11-23 incident's evidence is exactly that row: `'[python] <defunct>'`).
+
+    ⛔ NOTHING ELSE IN THIS FILE EXERCISES THE REAL BRANCH (review cycle 6, P2). Every hermetic arm
+    drives `_FakeChild`, whose pid `4_000_001` makes `os.waitid` raise `ChildProcessError`, so all
+    of them take the documented `poll()` fallback — measured: mutating this helper to
+    `return proc.poll() is not None` (i.e. reaping the evidence away) left the suite fully GREEN.
+    (No totals quoted: every one this block has carried has gone stale within one commit, which is
+    the same drift class the rest of this file keeps repairing.) So the property is pinned here
+    with a REAL, short-lived child: exited, row still readable, and only THEN `poll()` returns the
+    code.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("ps") is None:  # pragma: no cover — no `ps` to read a row with
+        pytest.skip("no `ps` on this box: the row this test grades cannot be read")
+    # ⛔ AND THE SAME CAPABILITY GATE AS THE CONTROL, ON THE SAME INDEPENDENT WITNESS (#12039 cycle
+    # 12 P2, cycle 13 P1). Without a gate, a `ps` that exists but cannot answer turns the row
+    # assertion below into a required-shard FAIL for a box reason — the inversion this PR removes
+    # everywhere else. Keyed on `_ps_answers()` ALONE the gate is a fail-open: a broken control
+    # would skip this test too. The census is the witness, so only a box where BOTH invocations
+    # come back empty skips.
+    if not _ps_answers() and not _row_for_pid(os.getpid()):
+        # pragma: no cover — a `ps` that exists and cannot answer
+        pytest.skip(
+            "`ps` exists but neither `-p <pid> -o command=` nor a full table read can answer, so "
+            "the row this test grades cannot be read on this box")
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline_s = 10.0
+        deadline = time.time() + deadline_s
+        while not _child_exited(proc) and time.time() < deadline:
+            time.sleep(0.05)
+        # ⛔ A WALL-CLOCK EXPIRY IS NOT A FAIL (#5049 rule 1, review cycle 5 P2). This used to be
+        # `assert _child_exited(proc), "the child exited but ..."`, so on a loaded box a
+        # `python -c pass` child that had not exited within 10 s redded a REQUIRED shard with a
+        # message asserting the helper was broken — the same rule-1 inversion this PR removes
+        # everywhere else (the outside-signal arm above converts the identical situation). The
+        # real pins below are untouched and still discriminate: mutating `_child_exited` back to
+        # `return proc.poll() is not None` reds this test on the missing `ps` row (measured).
+        if not _child_exited(proc):
+            inconclusive(
+                "a short-lived child's exit observed by `_child_exited` without reaping it",
+                deadline_s=deadline_s,
+                diagnosis=(
+                    "The child was still running when the budget expired, so the `WNOWAIT` "
+                    "probe was never exercised — a load observation, not evidence about the "
+                    "helper."),
+            )
+        row = _row_for_pid(proc.pid)
+        assert row, (
+            "the exited child has no `ps` row, so its status was COLLECTED rather than "
+            "observed — the `HarnessDefect` message would lose the evidence it quotes "
+            "(`_child_exited` must keep `WNOWAIT`)")
+        assert proc.poll() is not None, (
+            "the status was not collectable after `_child_exited` read it, so the returncode "
+            "the exit arms classify would be lost")
+    finally:
+        if proc.poll() is None:  # pragma: no cover — child still alive on a slow box
+            proc.kill()
+        proc.wait(timeout=10)

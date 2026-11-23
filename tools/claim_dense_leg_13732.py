@@ -1434,6 +1434,9 @@ class SeedReport:
         "record_applied",
         "record_armed",
         "record_declined",
+        "record_deferred",
+        "record_deferred_failures",
+        "record_deferred_undrained",
         "record_dsn_fingerprint",
         "record_unprojected",
         "written",
@@ -1455,6 +1458,9 @@ class SeedReport:
         last_seq: int | None,
         record_declined: int = 0,
         record_dsn_fingerprint: str | None = None,
+        record_deferred: int = 0,
+        record_deferred_failures: int = 0,
+        record_deferred_undrained: int = 0,
     ) -> None:
         self.journal = journal
         self.org_id = org_id
@@ -1468,6 +1474,9 @@ class SeedReport:
         self.first_seq = first_seq
         self.last_seq = last_seq
         self.record_declined = record_declined
+        self.record_deferred = record_deferred
+        self.record_deferred_failures = record_deferred_failures
+        self.record_deferred_undrained = record_deferred_undrained
         self.record_dsn_fingerprint = record_dsn_fingerprint
 
     def _fold_needed(self) -> bool:
@@ -1484,10 +1493,92 @@ class SeedReport:
         fold over a scratch buffer has nothing to fold — so pointing the operator at
         one would be a repair command that cannot work. It is published as
         ``record_declined``/``declined`` instead: a visible fact, not a silent zero.
+
+        ⛔ AND A DRAINED DEFERRAL NEEDS NONE — BUT AN UNDRAINED ONE DOES (#14222
+        review, finding 6). ``record_deferred`` counts writes whose fold was
+        QUEUED, so it says nothing about whether the queue reached them: the seed
+        drains before reporting, and a converged drain still leaves
+        ``record_deferred=N`` with ``applied=0``. Reading ``record_deferred`` here
+        would therefore emit a repair for a queue that already ran. What DOES need
+        a fold is the remainder a drain that did not finish left behind, and that
+        is ``record_deferred_undrained`` — the positions still queued when the
+        drain returned ``False``. Without that term the report answered "no fold
+        needed" for a record the loop provably had not reached, which is the
+        silent-short-record class this file exists to make visible.
         """
         if self.record_unprojected:
             return True
+        if self.record_deferred_undrained:
+            return True
+        # ⛔ AND THE FOLDS THAT RAN AND LOST THE ROW (#14222 review round 16, P2).
+        # A drain that CONVERGED proves the queue reached every item; it proves
+        # nothing about whether the fold wrote. `circuit_open` — the named outage
+        # in this branch's own vocabulary — refuses every deferred fold, drains
+        # immediately, and used to report "no fold needed" for a record short by
+        # every queued row. The loop's own `failures` delta is the one reading that
+        # separates that from a healthy seed.
+        if self.record_deferred_failures:
+            return True
         return bool(self.positions_unproven) and self.record_armed is not False
+
+    def _fold_note(self) -> str:
+        """WHY a fold is named — one sentence per cause.
+
+        ⛔ THE EMISSION ORDER IS NOT RESTATED HERE. It is documented where it is
+        enforced — the comment at the `record_deferred_failures` block below —
+        because a second copy of an ordering claim is exactly what went wrong in
+        round 17: that round moved the block into `_fold_needed()`'s order (the
+        right fix) and then rewrote this docstring to claim the block does NOT
+        follow that order, so the file carried two mutually exclusive
+        instructions and the false one would have reinstated the defect. One
+        statement of the order, at the site that makes it true.
+
+        ⛔ THE NOTE USED TO BE WRITTEN FOR TWO OF THE THREE TRIGGERS (#14222
+        review, P2 of the round that read the undrained arm). It opened
+        *"0 write(s) came back unprojected and 0 append(s) proved no position"* —
+        true and useless on a run that needs a fold because `record_deferred_
+        undrained` is non-zero, which is exactly the state the note exists to
+        explain. A reader was told the repair was owed, handed two zero counts and
+        no reason. So every cause that can set `_fold_needed()` names itself here,
+        and the unproven clause keeps the SAME armed guard `_fold_needed()` uses:
+        an unproven position on an unarmed deployment is not a fold, and this note
+        is only emitted when a fold IS named.
+        """
+        causes: list[str] = []
+        if self.record_unprojected:
+            causes.append(
+                f"{self.record_unprojected} write(s) came back unprojected — caught "
+                f"by the `record_dense` arm's id-scoped guard")
+        if self.record_deferred_undrained:
+            causes.append(
+                f"{self.record_deferred_undrained} queued position(s) were still "
+                f"undrained when the projection loop's drain timed out — the "
+                f"journal line committed and the loop had not reached the record "
+                f"(#14185)")
+        # ⛔ EMITTED AFTER `undrained`, i.e. in ``_fold_needed``'s order (that
+        # predicate tests ``unprojected`` → ``deferred_undrained`` →
+        # ``deferred_failures``). Round 17 of #14222's review found this block had
+        # been inserted ABOVE `undrained`, which made this docstring's ordering
+        # claim false; the order is the fix, not the sentence.
+        if self.record_deferred_failures:
+            causes.append(
+                f"{self.record_deferred_failures} deferred fold(s) RAN and did not "
+                f"write a row (the loop's own failure counter: `projection_raised`, "
+                f"`record_no_outcome` or `projection_refused`) — a converged drain "
+                f"is not a written record, so this needs the fold from the journal")
+        if self.positions_unproven and self.record_armed is not False:
+            causes.append(
+                f"{self.positions_unproven} append(s) proved no position — such a "
+                f"row lands but not its `public.journal_event` row, so "
+                f"`journal_ready` reads the tenant as behind and the arm is "
+                f"declined to the graph (refused by the mechanism check)")
+        return (
+            "The journal holds the population and the record does not (yet): "
+            + "; ".join(causes)
+            + ". All are healed by `fold`'s two commands, reported here rather "
+            "than run in-process because the fold is the record's own door, not a "
+            "second writer (#13345)"
+        )
 
     def as_dict(self) -> dict:
         payload = {
@@ -1504,6 +1595,33 @@ class SeedReport:
             "record_applied": self.record_applied,
             "record_unprojected": self.record_unprojected,
             "record_declined": self.record_declined,
+            # ⛔ THE FIFTH STORE ANSWER, AND IT IS NOT A LOSS (#14185). With the
+            # projection worker armed, `live_write` acknowledges the write and
+            # QUEUES the record's fold: `applied` is False and `unprojected` is 1
+            # *because the row is not written YET*, not because it was lost. Left
+            # unfolded here, a HEALTHY armed seed reported "N write(s) came back
+            # unprojected" plus a repair command, and its measurement ran against
+            # a record the queue had not drained. So the seed drains the queue
+            # before reporting (see `_seed_population`) and counts these apart —
+            # a deferred write is neither applied nor unprojected nor declined.
+            "record_deferred": self.record_deferred,
+            # ⛔ THE PART OF `record_deferred` THE QUEUE DID NOT REACH (#14222
+            # review, finding 6). A drain that returned ``False`` leaves positions
+            # queued; this is how many, read from the worker's own
+            # `pending_positions` (the same quantity `journal_coverage` measures
+            # from the record's side). It is what `_fold_needed()` consults, so a
+            # report can no longer say "no fold needed" about a record the loop
+            # provably had not reached — and a CONVERGED drain still reports 0 here,
+            # which is what keeps a healthy armed seed from naming a repair.
+            "record_deferred_undrained": self.record_deferred_undrained,
+            # ⛔ AND THE PART THE QUEUE REACHED AND LOST (#14222 review round 16,
+            # P2). The field above says "the loop did not get there"; this one says
+            # "the loop got there and no row came out" — the loop's own failure
+            # counter, differenced around this seed. A CONVERGED drain leaves the
+            # previous field 0 while every deferred fold was REFUSED
+            # (`circuit_open`), so without this the two runs were byte-identical
+            # here and both read as healthy.
+            "record_deferred_failures": self.record_deferred_failures,
             "positions_unproven": self.positions_unproven,
             "folded": self.folded,
             "first_seq": self.first_seq,
@@ -1580,18 +1698,7 @@ class SeedReport:
                     "is the allocator's operator path, not this fold"
                 ),
             }
-            payload["note"] = (
-                f"{self.record_unprojected} write(s) came back unprojected and "
-                f"{self.positions_unproven} append(s) proved no position — the "
-                f"journal holds the population and the record does not (yet). An "
-                f"unprojected write is caught by the `record_dense` arm's id-scoped "
-                f"guard; an unproven position leaves the row but not its "
-                f"`public.journal_event` row, so `journal_ready` reads the tenant as "
-                f"behind and the arm is declined to the graph (refused by the "
-                f"mechanism check). Both are healed by `fold`'s two commands, "
-                f"reported here rather than run in-process because the fold is the "
-                f"record's own door, not a second writer (#13345)"
-            )
+            payload["note"] = self._fold_note()
         # ⛔ A DECLINED WRITE IS PUBLISHED, never left as a clean-looking zero
         # (#13839 review, finding 1). `live_write.write` reports the seam's durable
         # DECLINE as `applied=False, unprojected=0` — the SAME shape an UNARMED
@@ -1746,7 +1853,25 @@ def _seed_population(
             exit_code=2,
         )
     log = EventLog(journal_path)
-    applied = unprojected = unproven = declined = folded = 0
+    # ⛔ THE LOOP'S LOSS COUNTER, SNAPSHOTTED BEFORE THE FIRST WRITE (#14222 review
+    # round 16, P2). `ProjectionStats.failures` is PROCESS-CUMULATIVE, so it must be
+    # DIFFERENCED around this seed or an earlier run in the same process would
+    # attribute its losses here. Without it the artifact could not tell the two
+    # shapes apart that matter most: a converged drain of folds that WROTE, and a
+    # converged drain of folds that all FAILED (the `circuit_open` outage, where
+    # `_classify_fold_outcome` counts `projection_refused`). Both leave
+    # `deferred=N, applied=0, undrained=0`, so `_fold_needed()` answered "no fold
+    # needed" for a record that is short by every queued row — the silent-short
+    # class this file exists to make visible.
+    failures_before = 0
+    try:
+        from tortoise import projection_worker as _worker_for_baseline
+
+        if _worker_for_baseline.armed():
+            failures_before = int(_worker_for_baseline.stats().failures)
+    except Exception:      # noqa: BLE001, RUF100 — the worker is optional here
+        failures_before = 0
+    applied = unprojected = unproven = declined = folded = deferred = 0
     armed_yes = armed_unmeasured = False
     first_seq = last_seq = None
     for row, vec in zip(population, vectors, strict=True):
@@ -1785,6 +1910,14 @@ def _seed_population(
             last_seq = outcome.seq
         if outcome.applied:
             applied += 1
+        elif getattr(outcome, "deferred", False):
+            # ⛔ CHECKED BEFORE `unprojected` (#14185). A deferred write carries
+            # `unprojected=1` — truthfully, since the record has not taken the line
+            # YET — so the branch below would count a healthy queued write as a
+            # lost one. `deferred` is the discriminator `live_write` added for
+            # exactly this, and the DRAIN below is what makes the count converged
+            # by the time the report is built.
+            deferred += 1
         elif outcome.unprojected:
             unprojected += 1
         elif outcome.refusal:
@@ -1802,6 +1935,54 @@ def _seed_population(
             armed_unmeasured = True
         if outcome.folded:
             folded += 1
+    # ⛔ DRAIN THE PROJECTION QUEUE BEFORE REPORTING (#14185). A deferred write is
+    # acknowledged before its record row exists, so a report built from the acks
+    # alone describes a record the queue has not reached — and
+    # `require_population_in_record` downstream would then refuse the arm for a
+    # seed that is perfectly healthy, or (worse) the measurement would run against
+    # a half-folded population. `wait_for_drain` is the one call that IS correct
+    # here: this is an operator tool at the end of a bounded seed, not a read path.
+    deferred_undrained = 0
+    deferred_failures = 0
+    try:
+        from tortoise import projection_worker as _worker
+
+        if _worker.armed() and not _worker.wait_for_drain(timeout=120):
+            # A drain that did not finish is REPORTED, never assumed: the rows are
+            # queued and `live_write`'s own counters name the rest.
+            print(
+                "WARNING: the projection worker did not drain within 120 s — the "
+                "record may be short of positions this seed queued (#14185)",
+                file=sys.stderr)
+            # ⛔ HOW MANY ARE STILL QUEUED, FROM THE WORKER (#14222 review, finding
+            # 6). Without this the report built a `_fold_needed()` from
+            # `record_deferred` alone and answered "no fold needed" for a record the
+            # loop had provably not reached. `pending_positions` is the queue's own
+            # count of journal positions the record has NOT taken. If it cannot be
+            # read, fall back to the TOTAL deferred count: a drain that returned
+            # `False` leaves at least one, so the conservative answer is the upper
+            # bound — a repair suggestion that turns out unnecessary is cheaper than
+            # a silently short record.
+            try:
+                deferred_undrained = max(0, int(_worker.stats().pending_positions))
+            except Exception:  # noqa: BLE001, RUF100
+                deferred_undrained = deferred
+        # ⛔ AND THE LOSSES, whether or not the drain converged (#14222 review round
+        # 16, P2): a DRAINED queue is not a WRITTEN record. `wait_for_drain` answers
+        # "the folds finished", and a fold that RAISED or was REFUSED finished too —
+        # so the delta of the loop's own failure counter is the only reading that
+        # separates "the record caught up" from "the loop dropped every row on the
+        # floor". Differenced against the pre-write snapshot because the counter is
+        # process-cumulative; read inside this try so an unreadable stats object
+        # leaves it at zero rather than failing the seed.
+        try:
+            deferred_failures = max(0, int(_worker.stats().failures) - failures_before)
+        except Exception:      # noqa: BLE001, RUF100
+            deferred_failures = 0
+    except Exception:
+        # The worker is OPTIONAL; the seed is not. An unimportable or failing loop
+        # leaves the counts below exactly as the inline door reported them.
+        pass
     # The STORE this run wrote, in the only publishable form of a DSN
     # (`record_writer.dsn_fingerprint`, #2903/#2796) — and only when a DSN was
     # resolved at all, so an unarmed run publishes `null` rather than a hash of the
@@ -1825,6 +2006,9 @@ def _seed_population(
         last_seq=last_seq,
         record_declined=declined,
         record_dsn_fingerprint=dsn_fingerprint,
+        record_deferred=deferred,
+        record_deferred_failures=deferred_failures,
+        record_deferred_undrained=deferred_undrained,
     )
 
 

@@ -70,7 +70,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:15706-15712`` and
 ``result["vet"]`` at ``:15716-15720``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:22073``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:22074``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -278,7 +278,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:3058-3083``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:22471`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:22472`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -495,7 +495,7 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
                    # i.e. it moves the population this run measures under a header
                    # that would still claim the door held. Default-OFF, so pinning
                    # it OFF matches today's behaviour and needs no value.
-                   "TORTOISE_PARTIAL_GAP_FILL")
+                   "TORTOISE_PARTIAL_GAP_FILL", "TORTOISE_S4_EMBED_JSON")  # #14343 S4 embed JSON
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
@@ -553,7 +553,7 @@ SEAM_LEDGER = (
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2846`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2847`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -643,7 +643,7 @@ def measured_arm():
             # switch is the ON arm, so a pop would be a lie in the header below.
             os.environ[key] = "0"
         for key in door_off:
-            os.environ.pop(key, None)
+            _pin_off_the_door(key)
         for key, value in DOOR_PINNED_ON:
             os.environ[key] = value
         observed = {key: os.environ.get(key)
@@ -1844,7 +1844,7 @@ _IDLE_CITES: dict[str, str] = {
         "BEFORE the `if not edus:` early return that emits {'enabled': "
         "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:14788, the "
         "flag; :14792, the early return; :14823, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:17967), "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:17970), "
         "`if vet_enabled and complete_list:` (:15372) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
@@ -1885,8 +1885,8 @@ def _pass_ran(block: dict) -> bool | None:
     ``if not edus:`` early return (``:14792``) emits literally ``"vet": {"enabled":
     vet_enabled, "s2": {}, "union": {}}`` (``:14823``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:17967``) and ``if vet_enabled and complete_list:``
-    (``:15372``). So a session whose conversation produced no list emits
+    embed_list:`` (``:17970``) and ``if vet_enabled and complete_list:`` (``:15372``).
+    So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
     exception path (``extractor_v2.py:14512-14515``). ``enabled: true`` therefore
@@ -3372,7 +3372,7 @@ def _a4_pointkind(projection) -> dict:
     `projection/entities.py:3078`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
     not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
-    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2846`)
+    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2847`)
     inside `_write_capture_turns` — and 159 of
     the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
     them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
@@ -5511,6 +5511,33 @@ def main(argv: list[str] | None = None) -> int:
     print(f"capstone-measure: sessions failed: {failed or 'none'}",
           file=sys.stderr)
     return 0
+
+
+def _pin_off_the_door(key: str) -> None:
+    """Pin one ``DOOR_PINNED_OFF`` switch OFF — and SAY SO when it was armed.
+
+    ⛔ `TORTOISE_S4_EMBED_JSON` (#14343) is on this list, and four documents used
+    to tell an operator to arm it and "re-run the capstone in the same session to
+    prove the bars hold". This function pops it, so that run scored the DEFAULT
+    render while the log's `pinned_off` read-back said `None` and nothing said
+    the flag the operator exported had been discarded — a fabricated green for
+    anyone who believed the armed layout had been validated (review cycle 10,
+    P1).
+
+    The pin is a REGISTERED decision (`preregistration.json`: UNSET is the only
+    state the corpus was scored under), so it stays. What changes is the silence:
+    an armed value is now announced on stderr, with what the run measures
+    instead and where the real path is. Documents must not promise what this
+    function discards.
+    """
+    armed = os.environ.get(key)
+    if armed not in (None, ""):
+        print(f"capstone-measure: ⛔ PINNED-OFF OVERRIDE — {key} was armed as "
+              f"{armed!r} in the shell and is pinned UNSET for this door, so "
+              f"this run measures the pinned value, NOT {armed!r}. Scoring an "
+              f"alternative arm is a change-control edit to DOOR_PINNED_OFF "
+              f"(#14371), not an environment variable.", file=sys.stderr)
+    os.environ.pop(key, None)
 
 
 if __name__ == "__main__":

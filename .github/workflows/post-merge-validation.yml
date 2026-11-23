@@ -302,8 +302,33 @@ jobs:
         run: |
           set -o pipefail  # don't let `tail` mask a pip failure
           # pytest-asyncio: tests/test_github_indexer.py uses @pytest.mark.asyncio
-          # (mirrors the python-ci.yml '.[test,embeddings]' surface, #493).
-          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio uv 2>&1 | tail -2
+          #
+          # ⛔ HAND-ENUMERATED, AND THAT IS A STANDING HAZARD. This leg has never installed
+          # the `test` extra; it names a minimal subset (#493). The rule that follows from
+          # that is not optional: every package that a test this leg COLLECTS imports has to
+          # be named on the install line below. It runs `python -m pytest tests/` on the
+          # AMBIENT interpreter — `uv sync --frozen` fills `.venv`, and nothing in this
+          # workflow activates or exports it — so a package declared only in the `dev` group
+          # is NOT importable here, however complete that group looks.
+          #
+          # `tiktoken` is the case that proved it (#14277):
+          # `tools/extractor_cost_measure.py::_encoding` imports it lazily, so the two corpus
+          # cases in `tests/test_extractor_cost_measure.py` — NOT in `slow_files`, so this leg
+          # collects them — would red with `ModuleNotFoundError`. ⚠️ That is PREDICTED for THIS
+          # leg, not observed: the measurement is the shard leg (run 45007564269, `test (f)`:
+          # both cases fail at `tools/extractor_cost_measure.py:120`), and no post-merge run
+          # has completed since #14295 merged — the one at `ee0e460f` was cancelled 11 s in.
+          # The `test` extra declares it for the python-ci shards for the same reason in a
+          # different place: those legs DO install through that extra, and it simply did not
+          # carry the entry.
+          #
+          # Switching this leg to `'.[test,embeddings]'` would end the drift class, and is
+          # NOT done here: that is a separate decision, because it also installs
+          # `playwright` + `pytest-playwright` (a plugin surface this leg never arms — it
+          # runs no `python -m playwright install`). The guard in
+          # `tests/test_extractor_cost_measure.py` accepts EITHER shape, so whoever makes
+          # that call is not blocked by it.
+          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio 'tiktoken>=0.14.0' uv 2>&1 | tail -2
           # uv (#2216): test_battery_corpus.py::test_builder_determinism_cross_process
           # and tests/eval/retrieval/test_gate_1349.py::test_cli_python_dash_m_entrypoint
           # shell out to bare `uv run` (default groups = dev included) — the runner
