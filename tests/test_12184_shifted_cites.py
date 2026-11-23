@@ -4275,6 +4275,8 @@ def test_the_13854_range_spans_end_inside_the_statement_their_anchor_opens() -> 
             f"span (anchor {path}:{line}) — the range's END was carried instead of re-derived. Move it "
             f"by the same MEASUREMENT that moved the start (grep the row's own closing fragment)."
         )
+
+
 def test_a_def_range_pin_ends_on_the_functions_own_last_line() -> None:
     """A `def …` span pins BOTH ends, not only its start.
 
