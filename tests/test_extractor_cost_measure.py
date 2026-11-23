@@ -1634,57 +1634,64 @@ def test_a_row_whose_render_missed_its_arm_is_REFUSED_not_mislabelled(
 
 
 def test_the_real_install_arm_actually_arms_the_after_batch(monkeypatch, tmp_path):
-    """⛔ THE BATCH TEST ABOVE CANNOT SEE THE ARMING, because it INJECTS the
-    arming: it monkeypatches `_install_arm` with a `fake_install` that
-    re-implements the function body, so every assertion about "the flag its own
-    arm installed" is made about the fake. Measured (review cycle 11, BLOCKING):
-    replace the real `_install_arm`'s body with `return` — the exact defect this
-    PR exists to fix, "the arm is a label again" — and the whole file reports
-    71 passed. The one line that makes the `after` arm an arm
-    (`os.environ[_TOGGLE] = "compact"`) was pinned by NOTHING, so the
-    before→after table could silently return to being the before arm twice.
+    """⛔ THE BATCH TEST ABOVE CANNOT SEE THE ARMING, because it INJECTS it: it
+    monkeypatches `_install_arm` with a `fake_install` that re-implements the
+    function body, so every assertion about "the flag its own arm installed" is
+    made about the fake. MEASURED: replace the real `_install_arm`'s body with
+    `return` — the exact defect this PR exists to fix, "the arm is a label
+    again" — and the whole file reported 71 passed.
 
-    This pin therefore runs the REAL function end to end and asserts the row the
-    production code writes: `after` must render `compact`, `before` must render
-    `indent`. It reds on the mutation above.
+    ⛔ AND ONE `run_measurement` CALL CANNOT PIN BOTH HALVES. Each half needs the
+    OPPOSITE ambient posture, and the two postures fight:
+      * `after` is only pinned if the ambient starts DISARMED — otherwise the
+        batch renders `compact` because the ambient says so, with or without
+        any arming (that vacuous "fix" was measured at 74 passed with
+        `os.environ[_TOGGLE] = "compact"` replaced by `pass`).
+      * `before` is only pinned if the ambient starts ARMED — otherwise the
+        batch renders `indent` because the toggle is absent, with or without
+        the `pop` (measured at 74 passed with the `pop` deleted).
+    So: two runs, two out paths (`_existing_rows` would skip the second arm's
+    rows as already done if they shared one file).
     """
     def fake_measure(model, conversation, *, session_date):
         return {"prompt_tokens": 100, "completion_tokens": 10}
 
     docs = [{"path": "README.md", "tokens": 10 + i} for i in range(2)]
-    # ⛔ THE AMBIENT IS SET TO THE OPPOSITE VALUE, NOT DELETED. Deleting it makes
-    # this pin VACUOUS for the `before` half: with the toggle unset, `before`
-    # resolves to `indent` whether or not `_install_arm`'s `elif arm ==
-    # "before": os.environ.pop(...)` branch exists. Measured (review cycle 12,
-    # P2): deleting that branch left 74 passed. The branch only has an effect
-    # when the ambient is `compact` — which is exactly the posture `after`
-    # exists to move production TOWARD, so a box in that posture would spend a
-    # whole `before` column on FAILED rows and no test would have said the
-    # branch was gone. Starting from `compact` forces the real pop.
-    monkeypatch.setenv(m._TOGGLE, "compact")
     monkeypatch.setattr(m, "pick_corpus", lambda limit, seed: docs)
     monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
     monkeypatch.setattr(m, "_build_model", lambda: object())
     monkeypatch.setattr(m, "measure_one", fake_measure)
     # ⛔ NO setattr on `_install_arm` — the real one must run.
 
-    out = tmp_path / "measurements.jsonl"
-    m.run_measurement(out=out, docs_limit=2, sessions_limit=0, workers=1,
-                      seed=1, arms=("before", "after"), arm_gap_s=0.0,
-                      long_split=False)
+    def _rows(name: str) -> dict[str, dict]:
+        out = tmp_path / name
+        m.run_measurement(out=out, docs_limit=2, sessions_limit=0, workers=1,
+                          seed=1, arms=arms, arm_gap_s=0.0, long_split=False)
+        got = [json.loads(line) for line in out.read_text().splitlines() if line]
+        assert not any(r.get("failed") for r in got), got
+        return {r["arm"]: r for r in got}
 
-    rows = [json.loads(line) for line in out.read_text().splitlines() if line]
-    by_arm = {r["arm"]: r for r in rows}
-    assert set(by_arm) == {"before", "after"}, sorted(by_arm)
-    assert not any(r.get("failed") for r in rows), rows
-    assert by_arm["after"]["s4_embed_json"] == "compact", (
+    # ── half 1: `after` must ARM it. Ambient DISARMED, so only the arming line
+    # can make the render `compact`.
+    monkeypatch.delenv(m._TOGGLE, raising=False)
+    arms = ("after",)
+    after_rows = _rows("after.jsonl")
+    assert after_rows["after"]["s4_embed_json"] == "compact", (
         "the `after` arm must ARM the lever: `_install_arm('after')` sets "
         f"{m._TOGGLE}=compact. Got "
-        f"{by_arm['after'].get('s4_embed_json')!r} — if this is 'indent', the "
-        "arm is a label again and the before→after delta measures nothing")
-    assert by_arm["before"]["s4_embed_json"] == "indent", (
+        f"{after_rows['after'].get('s4_embed_json')!r} from a DISARMED ambient "
+        "— if this is 'indent', the arm is a label again and the before→after "
+        "delta measures nothing")
+
+    # ── half 2: `before` must PIN IT OFF. Ambient ARMED, so only the pop can
+    # make the render `indent`.
+    monkeypatch.setenv(m._TOGGLE, "compact")
+    arms = ("before",)
+    before_rows = _rows("before.jsonl")
+    assert before_rows["before"]["s4_embed_json"] == "indent", (
         "the `before` arm must POP an ambient `compact` and render today's "
-        "bytes — starting from `compact` is what makes this assertion real")
+        f"bytes. Got {before_rows['before'].get('s4_embed_json')!r} — starting "
+        "from `compact` is what makes this assertion real")
     # …and the ambient `compact` is RESTORED, not left armed or left unset
     assert os.environ.get(m._TOGGLE) == "compact", (
         f"the ambient value must come back as it was, got "
@@ -1825,7 +1832,7 @@ def test_a_content_level_error_is_a_note_not_an_incompleteness():
         "was clean when it was not")
 
 
-def test_an_unknown_arm_is_refused_rather_than_measured(monkeypatch, tmp_path):
+def test_an_unknown_arm_is_refused_rather_than_measured(monkeypatch, tmp_path, capsys):
     """A typo must cost an EXIT CODE, not a 360-call provider run.
 
     `_install_arm` acts only on `after`/`before`; `cold`/`warm` deliberately
@@ -1867,6 +1874,26 @@ def test_an_unknown_arm_is_refused_rather_than_measured(monkeypatch, tmp_path):
         m.main(["run", "--docs", "0", "--arms", ",",
                 "--out", str(tmp_path / "m2.jsonl")])
     assert exc.value.code == 2, exc.value.code
+
+    # ⛔ THE MESSAGE AND ITS CHANNEL ARE PART OF THE CONTRACT. A bare exit 2 with
+    # no diagnostic is the "no arm installed AND no diagnostic" failure the
+    # guard exists to remove — a user cannot tell which token was rejected.
+    # Measured (review cycle 13, P3): deleting both stderr writes and keeping
+    # `SystemExit(2)` left this pin green.
+    err = capsys.readouterr().err
+    assert "unknown arm" in err, f"the refusal must SAY what was refused; stderr={err!r}"
+    assert "'After'" in err, f"the refused token must be named; stderr={err!r}"
+    assert "named no arm" in err, (
+        f"the empty selection must say so; stderr={err!r}")
+
+    # ⛔ THE UPPER BOUND IS A SEPARATE ASSERTION FROM THE POSITIVE LEG, and the
+    # positive leg cannot replace it: it proves the four members are ACCEPTED,
+    # never that nothing ELSE is. Measured (review cycle 13, P2): adding
+    # `"lukewarm"` to _ARMS left the suite green, and a member `_install_arm`
+    # does not act on reproduces the cycle-11 defect verbatim (both batches
+    # inherit the ambient, delta 0, `run` exits 0). Keep both bounds.
+    assert sorted(m._ARMS) == ["after", "before", "cold", "warm"], (
+        f"the accepted set must be exactly the four arms, got {sorted(m._ARMS)}")
 
     # POSITIVE LEG: the accepted set must pass THROUGH the guard. `cold,warm` is
     # the argument DEFAULT, so a guard that refused them would break the

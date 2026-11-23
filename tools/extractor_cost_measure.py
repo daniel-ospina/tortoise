@@ -187,6 +187,13 @@ def pick_corpus(limit: int = 50, seed: int = 7) -> list[dict]:
         nearest = min(inv, key=lambda r: abs(r["tokens"] - landmark))
         picked[nearest["path"]] = nearest
     rows = sorted(picked.values(), key=lambda r: r["tokens"])[:limit]
+    # ⛔ A LIMIT OF 0 IS A LEGAL REQUEST ("measure no documents"), not a crash.
+    # `rows[-1] = inv[-1]` below used to raise `IndexError: list assignment
+    # index out of range` on an empty slice — a traceback instead of a result,
+    # reached by `run --docs 0` (review cycle 13, P3). The landmark loop above
+    # always fills `picked`, so the empty case is only ever this slice.
+    if limit <= 0 or not rows:
+        return []
     if inv[-1]["path"] not in {r["path"] for r in rows}:
         rows[-1] = inv[-1]
     return rows
