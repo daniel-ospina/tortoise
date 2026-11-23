@@ -546,8 +546,10 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
                     binds.append((ast.Name(id=name, ctx=ast.Store()), node.subject))
         # ⛔ A `with` TARGET IS A BIND TOO (#14326 round 20, MEASURED at `57735ab47`: `_r =
         # "_tortoise_fts_query"` then `with _r as _N: getattr(sdk, _N)(…, kind="statement")`
-        # left `_N` UNRESOLVED — mentions 0 / calls 0 / indirect 0, i.e. a lever reached the
-        # read — while the `for`/`match`/parameter-default spellings of the same bind all
+        # left `_N` UNRESOLVED — mentions 2 / calls 2 / indirect 0, i.e. the census saw only
+        # the pin's OWN two reads and the lever contributed nothing (restated #14326 round 22:
+        # "0 / 0 / 0" was the lever's DELTA, not the totals, and this file states totals) —
+        # while the `for`/`match`/parameter-default spellings of the same bind all
         # landed on `indirect=1`. The target binds what `__enter__` RETURNS, which is not
         # statically knowable, so the CONTEXT EXPRESSION is the over-approximation: the same
         # rule `_aliases_of` applies to this node.
@@ -1456,15 +1458,43 @@ def _is_module_registry(node: ast.AST | None, sys_names: frozenset[str]) -> bool
     if isinstance(node, ast.Subscript):
         if not (isinstance(node.slice, ast.Constant) and node.slice.value == "modules"):
             return False
-        inner = node.value
-        if (isinstance(inner, ast.Attribute) and inner.attr == "__dict__"
-                and _is_sys_ref(inner.value, sys_names)):
-            return True
-        return bool(isinstance(inner, ast.Call)
-                    and _callee_names_of(inner.func) == {"vars"}
-                    and len(inner.args) == 1
-                    and _is_sys_ref(inner.args[0], sys_names))
-    return False
+        return _is_sys_dict_mapping(node.value, sys_names)
+    # ⛔ `sys.__dict__.get("modules")` IS THE SAME READ (#14326 round 22, MEASURED GREEN at
+    # `f6214869`: both `.get(…)` spellings below inserted the entry with the pin GREEN while
+    # the `[…]` subscript of the identical mapping was RED). A `.get("modules")` on the
+    # module's OWN namespace is a read of the registry in the same sense `getattr(sys,
+    # "modules")` already is — the forms are distinguished by spelling, not by object.
+    return bool(isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and len(node.args) == 1
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "modules"
+                and _is_sys_dict_mapping(node.func.value, sys_names))
+
+
+def _is_sys_dict_mapping(node: ast.AST, sys_names: frozenset[str]) -> bool:
+    """`sys`'s OWN namespace mapping — `sys.__dict__`, `getattr(sys, "__dict__")`, `vars(sys)`.
+
+    ⛔ THE COMPOSITION IS THE SAME MAPPING (#14326 round 22, MEASURED GREEN at `f6214869`:
+    `getattr(sys, "__dict__")["modules"][…] = …` left the pin GREEN while the plainly
+    spelled `sys.__dict__["modules"][…]` was RED). It is one `getattr` away from a spelling
+    this arm already resolved — the exact asymmetry `_is_namespace_expr` had already closed
+    on the sibling mapping ("`getattr(x, "__dict__")` IS THE MAPPING", #14326 review F1a).
+    Narrowed to `sys` by name, as every form of `_is_module_registry` is: an unrelated
+    module's own `__dict__["modules"]` is not the import registry and must stay GREEN.
+    """
+    if isinstance(node, ast.Attribute) and node.attr == "__dict__":
+        return _is_sys_ref(node.value, sys_names)
+    if not isinstance(node, ast.Call):
+        return False
+    if (_callee_names_of(node.func) == {"vars"} and len(node.args) == 1
+            and _is_sys_ref(node.args[0], sys_names)):
+        return True
+    return bool(_callee_names_of(node.func) == {"getattr"} and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "__dict__"
+                and _is_sys_ref(node.args[0], sys_names))
 
 
 def _sys_names_of(tree: ast.AST) -> frozenset[str]:
@@ -1482,6 +1512,14 @@ def _sys_names_of(tree: ast.AST) -> frozenset[str]:
     GREEN — it was RED before the narrowing, so the first version of this function traded a
     false red for a FAIL-OPEN, the wrong direction). Assignment aliases resolve to a fixpoint
     (two hops covers `_t = _s`); `os.sys.modules` is accepted by `_is_sys_ref`'s `x.sys` arm.
+
+    ⛔ AND THE SAME BIND WITH NO `Assign` NODE — A LOOP TARGET (#14326 round 22b, MEASURED
+    GREEN at `2975fdf32165`: `for _s in (sys,): _s.modules["tortoise.sdk"] = _Mirror` inserted
+    the entry with the pin GREEN, while the `_s = sys` assignment spelling of the same bind is
+    RED). `_loop_target_sources` gives the element of a literal iterable — CPython's own
+    semantics for a loop target — so `for`/`async for` feed the same fixpoint; a NAME or a
+    call there binds an unstatable value and stays GREEN, exactly as it does on the registry
+    axis.
     """
     names = {"sys"}
     for node in ast.walk(tree):
@@ -1491,6 +1529,15 @@ def _sys_names_of(tree: ast.AST) -> frozenset[str]:
                     names.add(alias.asname)
     for _ in range(2):
         for node in ast.walk(tree):
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                # ⛔ A LOOP TARGET IS THE SAME BIND WITHOUT AN `Assign` NODE (round 22b): the
+                # target takes each ELEMENT of a literal iterable, so `for _s in (sys,)` binds
+                # `sys` to `_s` exactly as `_s = sys` does.
+                if isinstance(node.target, ast.Name) and any(
+                        isinstance(source, ast.Name) and source.id in names
+                        for source in _loop_target_sources(node.iter)):
+                    names.add(node.target.id)
+                continue
             if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
                 continue
             value = node.value
@@ -5557,9 +5604,10 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "unpack target": f'    (_N,) = ("_tortoise_fts_query",)\n    {reach.format(name="_N")}\n',
         "chained assign": f'    _N = _M = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n',
         # ⛔ A `with` TARGET (#14326 round 20, MEASURED at `57735ab47`: `_N` stayed
-        # UNRESOLVED — mentions 0 / calls 0 / indirect 0, so a lever reached the read — while
-        # the `for`/`match`/parameter-default spellings of the same bind all gave
-        # `indirect=1`). The target binds what `__enter__` returns, so the CONTEXT EXPRESSION
+        # UNRESOLVED — totals mentions 2 / calls 2 / indirect 0, so the lever contributed no
+        # mention and reached the read — while the `for`/`match`/parameter-default spellings
+        # of the same bind all gave `mentions=3, indirect=1`). The target binds what
+        # `__enter__` returns, so the CONTEXT EXPRESSION
         # is the over-approximation: the rule `_aliases_of` already applied to this node.
         "`with` target": (f'    _r = "_tortoise_fts_query"\n'
                           f'    with _r as _N:\n'
@@ -8061,6 +8109,25 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         # `AugAssign` arm already unioned `registry_aliases`).
         "`__ior__` on a NAME ALIAS of the registry":
             '_sm = sys.modules\n_sm.__ior__({"tortoise.sdk": _Mirror})\n',
+        # ⛔ ONE HOP, ONE CHAIN AND ONE LOOP TARGET for the module alias the row above pins
+        # (#14326 round 22b): the chain pins the fixpoint, and the loop target is the SAME
+        # bind with no `Assign` node — `_s = sys` was RED while `for _s in (sys,)` stayed
+        # GREEN, an in-file asymmetry on the bind form this axis already resolves elsewhere
+        # (`_sm = sys.modules` is resolved by `_aliases_of`'s `loops=True`).
+        "assignment-alias CHAIN `_a = sys; _b = _a`":
+            '_a = sys\n_b = _a\n_b.modules["tortoise.sdk"] = _Mirror\n',
+        "`for _s in (sys,)` TARGET":
+            'for _s in (sys,):\n    _s.modules["tortoise.sdk"] = _Mirror\n',
+        # ⛔ THE COMPOSED `__dict__` SPELLINGS (#14326 round 22, MEASURED GREEN at `f6214869`:
+        # both inserted the entry while `sys.__dict__["modules"]` — the arm this one is a
+        # `getattr`/`.get` away from — was RED). `_is_namespace_expr` already resolves
+        # `getattr(x, "__dict__")` on the sibling mapping, so the registry axis owes it.
+        "`getattr(sys, \"__dict__\")[\"modules\"]`":
+            'getattr(sys, "__dict__")["modules"]["tortoise.sdk"] = _Mirror\n',
+        "`sys.__dict__.get(\"modules\")`":
+            'sys.__dict__.get("modules")["tortoise.sdk"] = _Mirror\n',
+        "`getattr(sys, \"__dict__\").get(\"modules\")`":
+            'getattr(sys, "__dict__").get("modules")["tortoise.sdk"] = _Mirror\n',
     }
     for name, lever in registry_spellings.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
@@ -8076,7 +8143,13 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   # was RED before the base-name arm was narrowed to a `sys` name — an
                   # unrelated module's own `modules` attribute reddened a pin that exists to
                   # protect a different object, which is the expensive direction here).
-                  'other.modules["tortoise.sdk"] = _Mirror\n'):
+                  'other.modules["tortoise.sdk"] = _Mirror\n',
+                  # ⛔ AND THE ALIAS/COMPOSITION CONTROLS FOR ROUND 22, for the same reason: an
+                  # assignment alias of ANOTHER module, and the `__dict__` compositions on
+                  # one, must all stay GREEN or the narrowing has been lost.
+                  '_o = other\n_o.modules["tortoise.sdk"] = _Mirror\n',
+                  'getattr(other, "__dict__")["modules"]["tortoise.sdk"] = _Mirror\n',
+                  'other.__dict__.get("modules")["tortoise.sdk"] = _Mirror\n'):
         assert ctor_findings(shipped + "class _Mirror:\n    pass\n" + inert) == [], inert
 
     # …and the false-red control: `|=` on an ORDINARY container stores a label, not a
