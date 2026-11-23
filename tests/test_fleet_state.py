@@ -20,6 +20,7 @@ import argparse
 import ast
 import json
 import os
+import signal
 import stat
 import sys
 import threading
@@ -3710,6 +3711,15 @@ def _row_for_pid(pid: int) -> str:
     return out
 
 
+#: The signals a signal-death most often comes from OUTSIDE the fixture: SIGKILL/SIGTERM from
+#: an OOM killer or an orphan sweep, SIGINT from the shard's own `timeout -s INT`, SIGHUP from
+#: a dropped controlling terminal. These are evidence about the BOX — a killed child has no
+#: argv[0] for any census to match — so a deadline expiry on one of them is INCONCLUSIVE
+#: (#5049 rule 1). Any OTHER signal is the child CRASHING (SIGSEGV/SIGABRT/SIGBUS/SIGILL/
+#: SIGFPE), which is the substrate's defect and must stay a FAIL (#5049 rule 4).
+_OUTSIDE_SIGNALS = frozenset({signal.SIGKILL, signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
+
+
 def _child_exited(proc) -> bool:
     """Has the child EXITED? Never collects its status, so `ps` still renders the zombie row.
 
@@ -3873,9 +3883,10 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                         f"for the fixture pid read {row!r}) — a narrow/`-ww`-less census truncates "
                         f"the argv[0] on every sample, so this is the flag removed or the matcher "
                         f"broken")
-                if rc < 0:
-                    # A SIGNAL, not an exit: the box killed the child (OOM, an orphan sweep).
-                    # That is evidence about the machine, never about the census — #5049 rule 1.
+                if rc < 0 and -rc in _OUTSIDE_SIGNALS:
+                    # A signal from OUTSIDE the fixture — the OOM killer, an orphan sweep, the
+                    # shard's `timeout -s INT`. That is evidence about the machine, never about
+                    # the census — #5049 rule 1.
                     inconclusive(
                         "a long-path `pi` lane visible to the census",
                         deadline_s=10.0,
@@ -3886,6 +3897,19 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                             f"match, so the property was never observable and this expiry is "
                             f"evidence about the box, not the census."),
                     )
+                if rc < 0:
+                    # ⛔ A CRASH IS NOT THE BOX'S DOING (#5049 rule 4). `SIGSEGV`/`SIGABRT`/
+                    # `SIGBUS`/`SIGILL`/`SIGFPE` is the CHILD aborting — the same defect class
+                    # as the clean-exit arm below, and skipping it would make a crashing
+                    # fixture green on EVERY run: a false PASS that no instrument reds (neither
+                    # static nodeid manifest carries this file, and the INCONCLUSIVE family
+                    # deliberately trips no skip-guard). Only signals the box sends are the
+                    # machine's; an abort belongs to the substrate.
+                    raise HarnessDefect(
+                        f"the fixture child CRASHED on signal {-rc} "
+                        f"({signal.Signals(-rc).name}) before the {10.0:.0f}s deadline "
+                        f"(table row read {row!r}) — an abort is the TEST SUBSTRATE at fault, "
+                        f"neither the box nor the census.")
                 # ⛔ rc >= 0 is NOT the box and NOT the census: the child exited ON ITS OWN.
                 # `time.sleep(60)` cannot return inside a 10 s deadline, so a clean exit means
                 # the fixture never slept at all — a HARNESS defect, which
