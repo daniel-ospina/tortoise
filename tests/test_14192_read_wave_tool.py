@@ -2217,11 +2217,37 @@ def _carries_read_name(node: ast.AST, consts: dict[str, frozenset[str]]) -> bool
     return not _possible_strings(node, consts).isdisjoint(_READ_NAMES)
 
 
+#: Callees that turn a STRING into EXECUTED CODE. Fail-closed by name: the census asks
+#: whether an operand IS the read name, and a code string only CONTAINS it — widening the
+#: census to substring containment would restore the blanket mention false red (#14326
+#: review P0-3, measured: `exec`/`eval`/`compile` over a literal were GREEN while the read
+#: executed). `__import__` is NOT here: its argument is a module name, not code.
+_CODE_EXECUTING_CALLEES = frozenset({"exec", "eval", "compile"})
+
+
 def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
                  consts: dict[str, frozenset[str]],
                  rebound: frozenset[str] = frozenset()) -> bool:
     """True when `node` is a REACH on the read — a mention the census must account for."""
     if isinstance(node, ast.Attribute) and node.attr in _READ_NAMES:
+        return True
+    # ⛔ A SUBSCRIPT WHOSE KEY RESOLVES TO THE READ NAME IS ITSELF A REACH (#14326 review
+    # P0-2, measured). The `Constant` arm below grades the EXACT literal, and this file's
+    # docstring claims a value "SELECTED out of a LITERAL container or slice IS resolved",
+    # but a key ASSEMBLED from literals is statically resolvable and was not consulted:
+    #
+    #     vars(type(sdk))["_tortoise" + "_fts_query"](sdk, query=…, kind="statement")
+    #     → mentions=2 calls=2 indirect=0, refuses=False
+    #
+    # while the direct spelling of the SAME key is refused. `_possible_strings` already
+    # resolves `+`/f-string/selection/sequence subscripts, so this arm asks the resolver the
+    # question the `Constant` arm asks the literal — one axis, one form over. The `ctx` test
+    # is preserved: a subscript STORE (`_counts[_N] = 0`) stays green. ⛔ IT MUST SIT HERE,
+    # ABOVE the `Constant` gate: that gate returns False for every non-`Constant` node, so
+    # an arm placed below it is DEAD CODE that its own row would still pass (measured — the
+    # row went red only after the arm moved up).
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load) \
+            and not _possible_strings(node.slice, consts).isdisjoint(_READ_NAMES):
         return True
     # ⛔ A NAME IS ONLY A REACH WHERE IT CAN BE EXECUTED (#14281 review P2, measured): the
     # Name arm was blanket, so a provenance constant beside `git_sha`/`db_uri` —
@@ -2335,11 +2361,27 @@ def _dict_display_leaves(node: ast.Dict) -> list[ast.AST]:
 
 
 def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
-    """The operands of `call` that are NOT the object being read.
+    """EVERY operand of `call` — every positional (the first one included) and every keyword.
 
-    Everything after the first positional, plus EVERY splat: a splat's own arity and
-    position are not statically knowable here, so it is fail-closed — `getattr(*_pair)`, a
-    one-element positional list, still inspects `_pair` (#14279 review F3).
+    ⛔ THE FIRST POSITIONAL IS AN OPERAND, AND EXCLUDING IT WAS A MEASURED FAIL-OPEN
+    (#14326 review P0-1). The exclusion rested on a claim that is false for any spelling
+    that does not fold to a single `Constant`:
+
+        a literal in the FIRST position is already a mention through the `Constant` arm,
+        so the slice only ever subtracts an operand the census has already counted
+
+    — the `Constant` arm keys on EXACT equality with `_READ_NAMES`, so `"_tortoise" +
+    "_fts_query"` in the first position is two `Constant`s, neither in that set, and the
+    slice subtracted an operand the census had NOT counted:
+
+        sdk.__getattribute__("_tortoise" + "_fts_query")(…, kind="statement")   GREEN
+        vars(type(sdk)).get("_tortoise" + "_fts_query")(sdk, …)                GREEN
+        _helper(sdk, "_tortoise" + "_fts_query")                                 GREEN
+
+    All three `m=2 c=2 i=0` with a third reach executing the read, while the DIRECT
+    spelling of each is refused. A splat is included for the same reason `getattr(*_pair)`
+    is fail-closed (#14279 review F3): its arity and position are not statically knowable
+    here, so a one-element positional list is still inspected.
     """
     # ⛔ THE LITERAL-SPLAT EXPANSION IS GONE (#14326 review P3): `_splat_operands`
     # expanded a `Starred` over a literal one level, and NO mutant could red those two
@@ -2347,14 +2389,13 @@ def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
     # THROUGH a `Starred` into its literal container (measured: deleting the expansion
     # leaves `getattr(*[sdk, "…"])` red). A clause no mutant can red reads to the next lane
     # as an independent check; this file deletes them instead.
-    # ⛔ `[1:]`, AND IT IS UNPINNED (#14326 round 8, measured BOTH ways: widening to
-    # `list(call.args)` leaves 25 passed, and so does the slice) — because a literal in the
-    # FIRST position is already a mention through the `Constant` arm, so the slice only ever
-    # subtracts an operand the census has already counted. Kept as the narrower statement of
-    # intent (`getattr`'s object position is not a name), with the measurement recorded so the
-    # next lane does not read the exclusion as a guard.
-    operands = list(call.args)[1:]
-    operands.extend(arg for arg in call.args if isinstance(arg, ast.Starred))
+    # ⛔ NO `[1:]` (#14326 review P0-1, measured — see the docstring). Round 8 recorded the
+    # slice as "UNPINNED either way" on the strength of a false premise: widening left 25
+    # passed because NO row held a literal assembled in the first position. Rows do now, and
+    # the slice reds them back to GREEN, so the exclusion is a fail-open rather than a
+    # narrower statement of intent. `list(call.args)` includes every `Starred` already (a
+    # splat is an expression in this list), so the separate extend is gone with it.
+    operands = list(call.args)
     # ⛔ A KEYWORD IS A DELIVERY TOO (#14326 round 6, MEASURED GREEN at `81973329`):
     # `_name_reaching_operands` scanned `call.args` only, and CPython's grammar puts a
     # keyword in a SEPARATE `keyword` node (`Call(expr func, expr* args, keyword*
@@ -2417,45 +2458,48 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         if (_callee in _PURE_READS or _callee in _RECORDING_CALLEES) \
                 and _callee not in rebound:
             continue
+        # ⛔ CODE BUILT IN A STRING IS A REACH THE CENSUS CANNOT SEE (#14326 review P0-3,
+        # measured). Every arm below asks whether an OPERAND *IS* the read name; a code
+        # string only CONTAINS it, and widening the census to substring containment is the
+        # blanket mention red this file deleted (a provenance note that merely names the read
+        # would red). `exec`/`eval`/`compile` are therefore fail-closed BY NAME — a door
+        # mirror has no reason to build code at runtime, and the three shapes were MEASURED
+        # GREEN through the pin's own predicate while the read executed:
+        #
+        #     exec("results = sdk._tortoise_fts_query(query=…, limit=10)")   m=2 c=2 i=0
+        #     eval("sdk._tortoise_fts_query(query=…, limit=10)")            m=2 c=2 i=0
+        #     exec(compile(<literal>, "<s>", "exec"))                      m=2 c=2 i=0
+        #
+        # NOT fail-closed, deliberately: `__import__` / `importlib.import_module`, whose
+        # name argument is a MODULE (the import path axis, graded by `_is_import_path_object`),
+        # not code. Unconditional on the name: a REBOUND `exec` is graded as an unknown
+        # here, the same polarity round 6 chose for a rebound pure name.
+        if _callee in _CODE_EXECUTING_CALLEES:
+            out.append(n)
+            continue
         if not any(_carries_read_name(arg, consts)
                    for arg in _name_reaching_operands(n)):
             continue
-        # ⛔ TWO DELIVERY SHAPES, BOTH PINNED (#14326 round 5, corrected by the merge with
-        # `8d221fab93`). A SPLAT's arity and position are not statically knowable, so the
-        # fetcher behind it cannot be excluded by name — fail-closed on ANY non-pure callee.
-        # The NAMED pair carries the non-splat container delivery, whose operand is not a
-        # `Name` and therefore produces no mention the census can see:
+        # ⛔ THE OPERAND TEST IS THE WHOLE TEST — NO CALLEE-SHAPE GATE (#14326 review P0-1,
+        # measured). This used to require `_callee in _NAMEFETCH_CALLEES or n.keywords or
+        # <a splat>`, on a claim that named fetchers other than `getattr`/`setattr` "all
+        # deliver through a SPLAT" and were therefore DEAD. That claim is false: they also
+        # deliver through ONE PLAIN POSITIONAL, which the gate then dropped — the split-name
+        # spelling of each callee measured GREEN (`refuses=False`, mentions=2, calls=2,
+        # indirect=0) while its direct-literal spelling was refused:
         #
-        #     getattr(sdk, f"_tortoise_fts_query")(…)          # JoinedStr, not a Name
-        #     getattr(sdk, ("_tortoise_fts_query" if q else "x"))(…)
+        #     sdk.__getattribute__("_tortoise" + "_fts_query")(…, kind="statement")
+        #     vars(type(sdk)).get("_tortoise" + "_fts_query")(sdk, …)
+        #     operator.attrgetter("_tortoise" + "_fts_query")(sdk)(…)
+        #     _helper(sdk, "_tortoise" + "_fts_query")            # the name in arg 1
+        #     exec("results = sdk._tortoise_fts_query(…)")         # static code in a string
         #
-        # ⛔ MEASURED HISTORY, because it looks removable and is not: at `4044c287` emptying
-        # this set left all 25 tests green (every shape it fired on was already refused by
-        # the mention census), so it was deleted; the merge with `8d221fab93` added the
-        # f-string / `IfExp` / `BoolOp` rows whose inline delivery ONLY reaches the pin
-        # through this branch, and emptying the set now reds
-        # `test_EVERY_static_binding_form_is_a_READ_reach` — which is what makes it
-        # load-bearing rather than decorative.
-        # ⛔ A SPLAT OR A KEYWORD IS THE CONTAINER DELIVERY (#14326 round 5, round 6). A
-        # SPLAT's arity and position are not statically knowable, so the fetcher behind it
-        # cannot be excluded by name. A KEYWORD delivers by name too (`_PageFetcher(name="…")`,
-        # `**{"name": "…"}`), which is why `_name_reaching_operands` carries keywords.
-        if (_callee in _NAMEFETCH_CALLEES
-                or n.keywords
-                or any(isinstance(arg, ast.Starred) for arg in n.args)):
-            out.append(n)
+        # So `_NAMEFETCH_CALLEES` is DELETED: once the operand carries the read name, every
+        # non-pure callee is fail-closed, which is the rule the splat and keyword arms had
+        # already reached by different routes. The `print("…")` control is unaffected —
+        # purity is decided by `_PURE_READS`/`_RECORDING_CALLEES` ABOVE, not here.
+        out.append(n)
     return out
-
-
-#: Callees that can turn a STRING argument into an attribute read by that name. This pair
-#: carries the NON-SPLAT container delivery, which the mention census cannot see
-#: (`getattr(sdk, f"_tortoise_fts_query")` — a `JoinedStr`, not a `Name`). It is pinned by
-#: the f-string / `IfExp` / `BoolOp` rows: emptying it reds
-#: `test_EVERY_static_binding_form_is_a_READ_reach`. Every OTHER fetcher name tried
-#: (`__getattribute__`, `attrgetter`, `methodcaller`, `get`, `__getitem__`, `__call__`) was
-#: measured DEAD — those escapes all deliver through a SPLAT, which the second arm refuses
-#: under any callee name — so they are deleted rather than kept as unreachable entries.
-_NAMEFETCH_CALLEES = frozenset({"getattr", "setattr"})
 
 
 def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
@@ -6211,6 +6255,59 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    _fetcher = _PageFetcher()\n'
             '    _lever = _fetcher(**{"name": "_tortoise_fts_query"})\n'
             '    _lever(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE OPERAND POSITION AND THE CALLEE NAME WERE BOTH WRONG (#14326 review P0-1,
+        # EACH MEASURED GREEN at `cb5c2c81d9`: `refuses=False`, mentions=2, calls=2,
+        # indirect=0, while the DIRECT spelling of each callee was refused). Two independent
+        # clauses are pinned here, one row each, because they revert independently:
+        #   * `[1:]` in `_name_reaching_operands` — a name ASSEMBLED from literals in the
+        #     FIRST position is not the `Constant` arm's (that arm keys on exact equality with
+        #     `_READ_NAMES`, and neither `"_tortoise"` nor `"_fts_query"` is in it), so the
+        #     slice subtracted an operand the census had NOT counted;
+        #   * `_NAMEFETCH_CALLEES` — the claim that `__getattribute__`/`.get`/any unknown
+        #     callee "all deliver through a SPLAT" is false for the non-splat POSITIONAL
+        #     delivery, so the shape gate dropped the fetch entirely.
+        #
+        # The `getattr` row isolates the slice (its callee is in the named pair, so only the
+        # position can decide it); the other three isolate the callee gate (the name is at
+        # position 1+, so only the gate can decide them). Restoring either clause reds its
+        # row(s) back to GREEN, measured.
+        "`getattr` with the name assembled in the FIRST position": (
+            '    getattr("_tortoise" + "_fts_query", sdk)'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`__getattribute__` over a split literal, NO keyword": (
+            '    _g = sdk.__getattribute__("_tortoise" + "_fts_query")\n'
+            '    _g(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`vars(type(sdk)).get(…)` over a split literal": (
+            '    vars(type(sdk)).get("_tortoise" + "_fts_query")(sdk)'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "UNKNOWN helper with the name in a LATER argument": (
+            '    _helper(sdk, "_tortoise" + "_fts_query")\n'),
+        # ⛔ CODE BUILT IN A STRING (#14326 review P0-3, EACH MEASURED GREEN at
+        # `cb5c2c81d9`: mentions=2, calls=2, indirect=0 while the read executed). The census
+        # asks whether an operand **IS** the read name; a code string only CONTAINS it, so
+        # no operand arm can see it — `_CODE_EXECUTING_CALLEES` is fail-closed BY NAME. One
+        # row per member, because a member with no row is a member a later lane can delete
+        # with the suite green (this file's own round-21 finding).
+        "`exec` of a static code string": (
+            '    exec(\'results = sdk._tortoise_fts_query(query=queries[0]["query"], '
+            'limit=10)\')\n'),
+        "`eval` of a static expression string": (
+            '    eval(\'sdk._tortoise_fts_query(query=queries[0]["query"], limit=10)\')\n'),
+        "`compile` of a static code string": (
+            '    _code = compile("sdk._tortoise_fts_query(query=x)", "<pin>", "exec")\n'
+            '    exec(_code)\n'),
+        # ⛔ AND A SUBSCRIPT WHOSE KEY IS ASSEMBLED (#14326 review P0-2, MEASURED GREEN at
+        # `cb5c2c81d9`: mentions=2, calls=2, indirect=0) — while the DIRECT key is refused by
+        # the `Constant` arm and the SLICED key by `_possible_strings`. The key is the same
+        # axis one form over, so the arm asks `_possible_strings` the question the `Constant`
+        # arm asks the literal. Deleting the arm reds this row; the store twin below it stays
+        # GREEN (`ctx` is preserved), which is the polarity the recording direction needs.
+        "subscript key ASSEMBLED from literals": (
+            '    vars(type(sdk))["_tortoise" + "_fts_query"](sdk)'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "subscript key assembled INLINE as an f-string": (
+            '    vars(type(sdk))[f"_tortoise_{\'fts_query\'}"](sdk)'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         # ⛔ THE LEVER THE `Name` ARM EXISTS FOR (#14326 round 6, measured): NO row
         # exercised it — every other row was refused by `indirect`, so deleting the whole
         # `Name` arm left 25 green while `vars(type(sdk))[_N]` (its own comment's example)
