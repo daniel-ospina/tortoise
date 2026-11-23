@@ -252,30 +252,30 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1677 lines at this head, measured through THIS function's own
-    walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
-    moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
-    what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
-    line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
-    prose commits grew it to 1066 while this sentence still said 985, which was true at
-    `04afeb811d` and 1010 at `main` `70fbd1a27dd5` (review of #14258, P3), and this re-cut's
-    restoration of the branch's dropped blocks took the merged run to 1079, a peer's prose to 1084,
-    dropping the duplicated `#:` separator that restoration had left to 1083, the measured erratum
-    rework below to 1087, and the merge with `origin/main` `10e51693` — which KEPT both sides'
-    blocks and added the re-measure note — to 1122; THIS re-cut merges `origin/main` `0467ba32`
-    (base `70fbd1a2`) and then a PEER's own copy of that same re-cut, KEEPING both sides' blocks at
-    each merge for the same reason: the peer's copy read 1185 and then 1196 as its prose grew
-    while this lane's read 1197, and the per-line difference between the two LIVES is exactly what
-    a merged run is — so the figure above is RE-MEASURED here rather than inherited from either
-    side, and the next reflow repeats that), the fold of `origin/main` `414761ae` (which brought
-    its own `#14282` re-cut blocks AND re-cut `SWEEP_RESIDUE` on its own tree) kept both sides'
-    blocks again and took the run to 1583, the `#:` block recording that fold in
-    `tools/sdk_privatise.py` took it to 1594, and RESTORING the one `main` block the three-way
-    merge had dropped WITHOUT a conflict marker (`THE BASE FIGURE IS THE BASE **TREE's**
-    MEASUREMENT`) took it to 1607 — that block names `1b0db0489408`'s own pair, so its absence
-    orphaned that `OWN_PINS` entry and the orphan arm redded; the figure is RE-MEASURED by this
-    function's walk on the RESOLVED file, never inherited, and 1677 is the figure above,
-    AND THE ARMS GRADE ALL OF IT
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1737 lines at this head, measured through THIS
+    function's own walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`, so a
+    prose edit that moves the run REDS naming both numbers instead of quietly publishing a stale
+    figure, which is what the sentence this one replaces asked a reader to do by hand; re-derive it
+    after a prose edit rather than trusting the figure: `#14086` left one blank line inside the run
+    and it silently shrank to 22 until the #14188 repair; PR #14258's own two prose commits grew it
+    to 1066 while this sentence still said 985, which was true at `04afeb811d` and 1010 at `main`
+    `70fbd1a27dd5` (review of #14258, P3); this re-cut's restoration of the branch's dropped blocks
+    took the merged run to 1079, a peer's prose to 1084, dropping the duplicated `#:` separator that
+    restoration had left to 1083, the measured erratum rework below to 1087, the merge with
+    `origin/main` `10e51693` — which KEPT both sides' blocks and added the re-measure note — to 1122,
+    this branch's merge of `main` `0467ba32` and of a PEER's copy of that same re-cut to 1197, and
+    PR #14283's zero-net re-pin rewrites to 1328 (main's 1327 plus the net `+1` those two
+    rewrites make INSIDE this run — the 12-line block it adds sits BELOW the pin, so it is not in
+    this count); #14284's own merge of `main` `38f2ab7fc594` then
+    KEPT both sides again and re-read 1363 on ITS tree. Every one of those is a reading of the tree
+    it NAMES, and this pair-merge keeps both sides at every step for that reason, so the figure
+    above is RE-MEASURED on THIS merged tree rather than inherited from either side — which the
+    next reflow repeats; THIS BRANCH's own review-round prose then took the run past `main`'s
+    1376 to 1400, measured through this walk on each blob (1376 on `origin/main`'s, 1400 here) —
+    the same rule, applied once more; the fold of `origin/main` `9aaaff10acd9` KEPT both sides'
+    blocks again (`main`'s `#14232` capture-path split brought its own rewrite of this run) and
+    re-read **1737** on the resolved tree, so the figure above is that reading, not a sum of the
+    two — the rule holds for the fifth time), AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
