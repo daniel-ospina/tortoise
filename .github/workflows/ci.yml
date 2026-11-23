@@ -915,17 +915,21 @@ jobs:
           # #13998: `docs/ops/ci-wall-clock.md` §2 rests its restored shard split on ONE
           # runnable command — the `git show --stat <sha> -- docs/ops/ci-wall-clock.md`
           # that is supposed to prove the follow-up commit carried no edit to that file.
-          # At the head its pytest pin was written, that slot held a literal placeholder
-          # (`<that commit>`), so the paragraph named NO commit: the command it invites
-          # could not be run, and the "carried no edit" claim stayed unverifiable while
-          # reading as verified. It joins THIS step for the same #4454 reason as its
+          # The paragraph was WRITTEN with a literal placeholder (`<that commit>`, measured
+          # at `600257c3a25`), so it named NO commit: the command it invites could not be
+          # run, and the "carried no edit" claim stayed unverifiable while reading as
+          # verified. The same commit that added the pytest pin (`b5618e52063`) replaced
+          # it with `8abf4844` — so the placeholder held at the pin's PARENT head, not at
+          # the head the pin was written on. It joins THIS step for the same #4454 reason as its
           # #5086/#2820/#2852 siblings — and one of its own: the question needs HISTORY,
           # and the `test` job that runs the pytest pin
           # (`tests/test_ci_check_repair.py`, surface `core`) checks out at the default
           # `fetch-depth: 1`. In a grafted graph an ABSENT ANCESTOR and a BOGUS SHA are
           # both simply missing objects, so there the pin can only SKIP — and a provenance
-          # gate that runs only where it cannot answer is a no-op gate (#4244, the note
-          # that put `python-ci.yml`'s own gate at `fetch-depth: 0`). This job checks out
+          # gate that runs only where it cannot answer is a no-op gate (#11057 review P2,
+          # `python-ci.yml:4234-4244` — the note that put that file's own gate at
+          # `fetch-depth: 0`; #9075 review r6 P1 made the same call at `:487-492`). This
+          # job checks out
           # at `fetch-depth: 0`, so this is where the claim is actually proved. Stdlib
           # only, one file, no network; exit 0 = verified, 1 = a defect in the document,
           # 2 = UNVERIFIED (never a pass).

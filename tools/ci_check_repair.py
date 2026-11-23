@@ -2816,7 +2816,8 @@ def main(argv: list[str] | None = None) -> int:
 # in the `test` job, which checks out at the DEFAULT `fetch-depth: 1` — a grafted
 # graph in which a REAL ancestor and a BOGUS sha are both simply absent. There the pin
 # can only SKIP, and "a provenance gate that runs only where it cannot answer is a
-# no-op gate" (python-ci.yml, the #4244 note that put that job at `fetch-depth: 0`).
+# no-op gate" (python-ci.yml:4234-4244, #11057 review P2 — the note that put that
+# job at `fetch-depth: 0`; #9075 review r6 P1 made the same call at `:487-492`).
 #
 # So the history half lives HERE too, and runs in the `docs` job — the depth-0 job
 # this repo already keeps for exactly this: `substrate_map_check.py`,
@@ -2921,10 +2922,13 @@ def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
             # DURABILITY. A cite that resolves TODAY can still expire: this repo
             # squash-merges with `delete_branch_on_merge`, so a sha that only a PR
             # branch holds is gone from a fresh clone the moment that branch lands.
-            # Fail CLOSED when the base ref itself is unresolvable (#4244: an ancestry
-            # question a checkout cannot answer is UNVERIFIED, never a pass) — the
-            # depth-0 `docs` job always has `origin/main`, so this cannot false-block
-            # it, and anywhere it cannot be answered the claim is simply not verified.
+            # Fail CLOSED when the base ref itself is unresolvable — an ancestry
+            # question a checkout cannot answer is UNVERIFIED, never a pass (the same
+            # doctrine as `python-ci.yml:4236`, #11057 review P2, which is where the
+            # "a gate that runs only where it cannot answer is a NO-OP gate" rule lives)
+            # — the depth-0 `docs` job always has `origin/main`, so this cannot
+            # false-block it, and anywhere it cannot be answered the claim is simply not
+            # verified.
             base = subprocess.run(
                 ["git", "-C", str(root), "rev-parse", "--verify",
                  DOC_CITATION_BASE],
