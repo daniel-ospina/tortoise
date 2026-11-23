@@ -212,11 +212,17 @@ def test_key_limit_403_census_fires_the_extraction_killer_gate():
 
 
 def test_classify_error_vocabulary_is_the_pinned_nine_classes():
-    """#4959: the census vocabulary is a fixed 9-class set (#1524) and #4959
-    REROUTES a 403 within it rather than adding a class. Pin the exact set so a
-    future add/rename is detectable — the #1787 ``llm_error_census`` emission
-    contract that also names it has no code presence (#5526), so this frozenset
-    is the only executable record of the contract."""
+    """#4959: the STATUS-MAPPED census vocabulary is a fixed 9-class set (#1524)
+    and #4959 REROUTES a 403 within it rather than adding a class. Pin the exact
+    set so a future add/rename is detectable — the #1787 ``llm_error_census``
+    emission contract that also names it has no code presence (#5526), so this
+    frozenset is the only executable record of the contract.
+
+    The 9-set is the status-mapped SUBSET only: ``_classify_error`` also returns
+    the one class it decides by TYPE, ``reasoning_collapse`` (#14357). That half
+    is pinned below, because the probe list here is all HTTP/transport errors and
+    would stay green if a future add were type-decided (i.e. invisible to the
+    "future add/rename is detectable" purpose this test exists for)."""
     assert frozenset({
         "fatal_401_auth", "fatal_402_billing", "fatal_403_forbidden",
         "fatal_4xx", "transient_429_rate_limit", "transient_5xx",
@@ -231,6 +237,13 @@ def test_classify_error_vocabulary_is_the_pinned_nine_classes():
     ]
     assert {v2._classify_error(e) for e in probes} \
         <= v2._LLM_ERROR_CENSUS_CLASSES
+    # …and the type-decided half, deliberately OUTSIDE the 9 (a status-mapped
+    # class for it does not exist, and #4959's "reroute within the set" rule is
+    # about status mapping, not about this one). Pinned as an EQUALITY so that
+    # renaming or re-bucketing it (#14357's fail-open) reds here.
+    assert v2._classify_error(v2._ReasoningCollapse("empty content")) \
+        == "reasoning_collapse"
+    assert "reasoning_collapse" not in v2._LLM_ERROR_CENSUS_CLASSES
 
 
 def test_classify_error_generic_limit_403_is_billing_broad_by_design():
