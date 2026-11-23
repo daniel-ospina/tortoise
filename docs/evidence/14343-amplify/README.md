@@ -22,9 +22,14 @@ count already in `#14295`'s `measurements.jsonl`.
 **Reproduce (no provider call, no spend):**
 
 ```bash
-# Requires TORTOISE_S4_DELTA unset (the production default): the LEGACY arm
-# renders different S4 prose, so a revert-flagged shell regenerates different
-# §1/§2 numbers. `tests/test_extractor_cost_measure.py` pins the unset posture.
+# Requires the PRODUCTION render posture — `TORTOISE_S4_DELTA`,
+# `TORTOISE_EXTRACTOR_PROMPT` and `TORTOISE_CLASSIFY_LATER` all unset: each
+# moves S2/S4's static prose, so a shell in compact/classify-later mode (or a
+# revert-flagged S4_DELTA) regenerates different §1/§2 numbers and the diff
+# reads as rot. `tests/test_extractor_cost_measure.py` pins all three. The
+# `#14343` layout toggle (`TORTOISE_S4_EMBED_JSON`) is NOT in that set: measured,
+# it moves no recorded number here — the embed-list region is priced from the
+# receipts, not re-rendered.
 uv run python tools/extractor_cost_measure.py decompose \
     --evidence docs/evidence/14277-extractor-cost/measurements.jsonl \
     --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
