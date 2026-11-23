@@ -3735,6 +3735,15 @@ _OUTSIDE_SIGNALS = frozenset({signal.SIGKILL, signal.SIGTERM, signal.SIGINT, sig
 #: answers, is not load.
 _CENSUS_ERROR_STREAK = 2
 
+#: …and how LONG that streak must last before it stops being load. A streak alone measures
+#: nothing: the samples are 0.1 s apart, so `_CENSUS_ERROR_STREAK` fires in 0.2 s, while
+#: `pi_processes()` folds a 30 s `_run` timeout, a refusal and an argument rejection into the
+#: same empty string — and a memory-pressure burst (the box that produced the 2026-11-23
+#: incident OOM-killed a child) outlasts 0.2 s by construction. Two seconds of CONTINUOUS
+#: failure on a box whose own `ps -p <pid>` answers is the census; anything shorter is #5049
+#: rule 1 (load must not produce a FAIL).
+_CENSUS_ERROR_MIN_SPAN_S = 2.0
+
 
 def _signal_name(num: int) -> str:
     """`SIGNAME (n)` for a signal number — TOTAL over the numbers, unlike `signal.Signals`.
@@ -3975,13 +3984,30 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     #   box cannot answer at all  → skip (unchanged);
                     #   one isolated error        → keep polling (the load class);
                     #   _CENSUS_ERROR_STREAK consecutive errors on a box whose `ps` answers → FAIL.
-                    if not _ps_answers():
-                        pytest.skip(f"the process table is unreadable here: {err}")
+                    # ⛔ THE FIXTURE'S OWN DEATH IS CLASSIFIED FIRST (#12039 review round 5,
+                    # P1). Asking the census before this made the outside-signal skip arm
+                    # unreachable while the census was erroring: a child the BOX killed
+                    # (SIGKILL from an OOM sweep) plus a simultaneous `ps` failure reported
+                    # `HarnessDefect … the census's own invocation is what failed` — the exact
+                    # inversion this PR exists to stop, and the header promises that kill as
+                    # one of exactly two skip paths. A dead child ends the poll; the four arms
+                    # below classify it.
+                    if _child_exited(proc):
+                        break
                     err_streak += 1
-                    if err_streak >= _CENSUS_ERROR_STREAK:
+                    if (
+                        err_streak >= _CENSUS_ERROR_STREAK
+                        and (time.time() - poll_started) >= _CENSUS_ERROR_MIN_SPAN_S
+                    ):
+                        # The verdict is due NOW, so the `ps` control runs at most once per
+                        # poll instead of once per erroring sample (review round 5, P2: the
+                        # branch paid one subprocess per sample — ~100 in one budget).
+                        if not _ps_answers():
+                            pytest.skip(f"the process table is unreadable here: {err}")
                         raise HarnessDefect(
                             f"{_HARNESS_PREFIX}: the census reported an error on "
-                            f"{err_streak} consecutive samples on a box whose `ps` answers: "
+                            f"{err_streak} consecutive samples spanning at least "
+                            f"{_CENSUS_ERROR_MIN_SPAN_S:g}s on a box whose `ps` answers: "
                             f"{err!r} — `ps -p {os.getpid()} -o command=` answered, so the "
                             f"census's own invocation is what failed, which is this test's "
                             f"subject")
@@ -4198,24 +4224,28 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
 
 
 @pytest.mark.parametrize(
-    ("census_kind", "ps_answers", "expect", "marker", "why"),
+    ("census_kind", "ps_answers", "child_rc", "expect", "marker", "why"),
     [
         (
-            "persistent", True, HarnessDefect, "HARNESS DEFECT [#5049]",
+            "persistent", True, None, HarnessDefect, "HARNESS DEFECT [#5049]",
             "a census that keeps failing on a box whose `ps` answers is the census",
         ),
         (
-            "persistent", False, "skip", "the process table is unreadable here",
+            "persistent", False, None, "skip", "the process table is unreadable here",
             "no usable `ps` on this box is that box's limitation, not the census's",
         ),
         (
-            "once", True, AssertionError, "was ALIVE and invisible to the census",
+            "once", True, None, AssertionError, "was ALIVE and invisible to the census",
             "ONE isolated `ps` death is the load class (#5049 rule 1) and must not red the shard",
+        ),
+        (
+            "persistent", True, -9, "skip", "INCONCLUSIVE [#5049]",
+            "a fixture the BOX killed is classified by its own arm, whatever the census did",
         ),
     ],
 )
 def test_long_path_census_error_is_the_census_only_when_it_persists(
-    monkeypatch, census_kind, ps_answers, expect, marker, why
+    monkeypatch, census_kind, ps_answers, child_rc, expect, marker, why
 ) -> None:
     """The census ERROR path: neither a permanent skip nor a one-sample failure (#12039).
 
@@ -4227,14 +4257,20 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
       * persistent error, box's `ps` answers → `HarnessDefect` (a FAIL, with the family marker);
       * persistent error, no usable `ps`      → skip (the box cannot answer at all);
       * ONE error, then recovery              → the ordinary ALIVE arm, i.e. no verdict from the
-                                                error at all (#5049 rule 1: load is not a defect).
+                                                error at all (#5049 rule 1: load is not a defect);
+      * persistent error AND the box killed the fixture → the outside-signal SKIP. The fixture's
+                                                own death is classified FIRST; asking the census
+                                                first turns a box-caused kill into a census FAIL,
+                                                which is the 2026-11-23 class this PR removes.
 
-    Hermetic: no child is spawned, `ps` never runs, and the clock only advances when the code
-    asks it — so the ALIVE arm's 10 s deadline costs nothing.
+    The harness also pins the streak's SPAN: the fake clock advances 0.1 s per `time()` call, so
+    the verdict may only fire after `_CENSUS_ERROR_MIN_SPAN_S` of simulated failure, and the
+    assertion below fails a sample-count-only rule. Hermetic throughout: no child is spawned,
+    `ps` never runs, and the clock only advances when the code asks it.
     """
     module = sys.modules[__name__]
     clock = _FakeClock(step_s=0.1)
-    child = _FakeChild(None)
+    child = _FakeChild(child_rc)
     err = "`ps -ww -axo pid=,ppid=,uid=,command=` produced nothing"
     calls = {"n": 0}
 
@@ -4263,7 +4299,10 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
 
     assert marker in str(excinfo.value), why
     if expect is HarnessDefect:
-        assert calls["n"] >= _CENSUS_ERROR_STREAK, "the FAIL must wait for the streak, not one sample"
+        assert clock.now - _FakeClock.START >= _CENSUS_ERROR_MIN_SPAN_S, (
+            "the census verdict must wait for the streak to SPAN a real interval — two 0.1 s "
+            "samples are the load class (#5049 rule 1), not a broken census"
+        )
     if census_kind == "once":
         assert calls["n"] > _CENSUS_ERROR_STREAK, "a single error must not decide the verdict"
 
