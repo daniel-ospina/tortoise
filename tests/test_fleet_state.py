@@ -3915,9 +3915,11 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     unreadable at all (`_ps_answers`), one sample over `_CENSUS_SAMPLE_TIMEOUT_S`, a census that
     never answered (`healthy_samples == 0`), and `_OUTSIDE_SIGNALS`; a header that
     states a different count is the drift `test_the_long_path_test_header_names_the_census_error_fail_arm`
-    guards by NAME rather than by number (it pins `_CENSUS_ERROR_STREAK`, `_ps_answers`,
-    `_CENSUS_ERROR_MIN_SPAN_S`, `_CENSUS_SAMPLE_TIMEOUT_S`, `_ps_answers` and `OVERRIDES`).
-    (Measured drift: this block said "THREE" while
+    guards BY NAME (`_CENSUS_ERROR_STREAK`, `_ps_answers`, `_CENSUS_ERROR_MIN_SPAN_S`,
+    `_CENSUS_SAMPLE_TIMEOUT_S`, `healthy_samples`, `OVERRIDES`) **and BY NUMBER** — it parses the
+    word after `SKIPS on ` and compares it to the `pytest.skip` + `inconclusive` calls the body
+    actually has, by AST, so re-wording the number is a RED rather than an assumption. (Measured
+    drift: this block said "THREE" while
     omitting the ALIVE arm, in the same docstring that says "FOUR classifications" — two
     contradictory counts, in the block a guard exists to keep honest. Cycle 9 caught the same class
     again from the other side: the count said "two skip paths" after a third one landed.)
