@@ -4094,7 +4094,7 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
         "search_results": _render_search_results(search),
         # #14343: `indent=1` costs 32.5% of this region in whitespace (measured
         # on 14 real emissions). Default unchanged; `TORTOISE_S4_EMBED_JSON=
-        # compact` arms the saving — see `_embed_json_separators`.
+        # compact` arms the saving — see `_embed_json_kwargs`.
         "embed_list_json": json.dumps(embed_list, **_embed_json_kwargs()),
         "date_anchor": _date_anchor(session_date, include_emission_rules=True),
         "output_contract": contract,

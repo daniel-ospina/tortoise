@@ -11,6 +11,7 @@ re-run without spending money to check itself.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import tomllib
@@ -752,6 +753,55 @@ def test_the_output_constant_is_dominated_by_the_mapping_stage():
 def test_decompose_refuses_an_arm_the_evidence_does_not_carry():
     with pytest.raises(SystemExit):
         m.decompose(_evidence_rows(), arm="tepid")
+
+
+def test_the_documented_reproduce_command_regenerates_the_committed_bundle(
+        monkeypatch):
+    """The bundle's README says these two files are reproducible; pin it.
+
+    An evidence bundle whose own documented command cannot regenerate it is a
+    false pass on the one property the bundle exists to carry. The README used
+    to omit `--receipts`, which silently dropped the whole serialization
+    section — the headline 32.5% finding — while still exiting 0. The command
+    below is the README's, verbatim.
+
+    The one env pin is deliberate: `tests/conftest.py` sets
+    `TORTOISE_S4_DELTA=0` to keep the suite on the LEGACY complete-list
+    contract, while PRODUCTION defaults it ON — and the two render different
+    S4 prose (1,903 vs 1,666 tokens). The bundle was generated under the
+    production default, so the pin is restored here (the pattern conftest
+    documents for exactly this). Without it the comparison fails on the S4
+    statics and the whole embed-list region, and a reader would reasonably
+    conclude the artifacts had rotted.
+    """
+    monkeypatch.delenv("TORTOISE_S4_DELTA", raising=False)
+    committed = json.loads(
+        (_REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+         / "decomposition.json").read_text())
+    regenerated = m.decompose(
+        m.load_rows(_REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
+                    / "measurements.jsonl"),
+        receipts=(_REPO_ROOT / "tests" / "eval" / "write_path" / "receipts"
+                  / "7947-arms-2026-10-18"))
+    assert regenerated == committed, (
+        "the documented reproduce command no longer regenerates the committed "
+        "decomposition — regenerate the artifact or fix the command")
+
+
+def test_an_explicitly_passed_receipts_path_that_yields_nothing_is_refused(
+        tmp_path):
+    """An explicit `--receipts` that matches nothing must not quietly emit an
+    artifact whose serialization section is missing — that is the same false
+    pass as omitting the flag from the documented command."""
+    with pytest.raises(SystemExit, match="no usable write-path receipts"):
+        m.main([
+            "decompose",
+            "--evidence", str(_REPO_ROOT / "docs" / "evidence"
+                              / "14277-extractor-cost" / "measurements.jsonl"),
+            "--receipts", str(tmp_path / "does-not-exist"),
+            "--out", str(tmp_path / "out.md"),
+            "--json-out", str(tmp_path / "out.json"),
+        ])
 
 
 def test_the_offline_compose_arm_makes_no_provider_call():

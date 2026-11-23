@@ -71,7 +71,12 @@ def _embed_list(n: int = 12) -> dict:
 def test_the_default_is_the_pre_change_bytes(monkeypatch):
     """Unset == blank == garbage == today's `indent=1` render."""
     default = _render(_embed_list())
-    assert json.dumps({"a": [1]}, indent=1) in default or '"entities"' in default
+    # The property the test's NAME claims: the default render carries exactly the
+    # serialization the PRE-CHANGE `json.dumps(embed_list, indent=1)` produced.
+    # An assertion comparing only the head's four arms to EACH OTHER would stay
+    # green if the default were flipped to compact — every arm would agree.
+    assert json.dumps(_embed_list(), indent=1) in default
+    assert json.dumps(_embed_list(), separators=(",", ":")) not in default
     monkeypatch.setenv(_TOGGLE, "")
     assert _render(_embed_list()) == default
     monkeypatch.setenv(_TOGGLE, "not-a-mode")

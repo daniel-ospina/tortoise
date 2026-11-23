@@ -2247,6 +2247,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "decompose":
         decomposition = decompose(load_rows(args.evidence), arm=args.arm,
                                   receipts=args.receipts)
+        # A `--receipts` path that yielded NOTHING is a user error, and the
+        # artifact it would produce is one whose serialization section (the
+        # headline 32.5% finding) is silently absent — the exact false pass
+        # this bundle exists to carry. Refuse instead of writing it.
+        if args.receipts is not None and not decomposition.get("serialization"):
+            raise SystemExit(
+                f"no usable write-path receipts in {args.receipts} — refusing "
+                "to emit an artifact whose serialization section is missing")
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(finalize_markdown(render_decompose(decomposition)),
                             encoding="utf-8")
