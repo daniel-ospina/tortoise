@@ -283,6 +283,48 @@ def test_candidate_flakes_across_samples() -> None:
     assert ci_timing.candidate_flakes([history[0]]) == []
 
 
+def test_a_published_flake_id_is_the_raw_id_pytest_prints_and_collects() -> None:
+    r"""#14366 cycle-4 review P1: the published id is VERBATIM, and that is a correction
+    of a correction.
+
+    A previous round decoded the pytest escapes out of `candidate_flakes()["test"]`
+    on the premise that the escaped form is not a test id. **The premise is false,
+    and the fix made the artifact worse — measured, not argued:**
+
+        $ pytest tests/test_7949_capstone_measure.py -q --collect-only | grep -c u2014
+        25                       # ESCAPED; a real em dash appears 0 times
+        $ pytest '<…[\`config/ci-surfaces.yml\` \u2014 155 lines of rows]' --collect-only
+        1 test collected         # the ESCAPED form collects
+        $ pytest '<…[\`config/ci-surfaces.yml\` — 155 lines of rows]' --collect-only
+        no tests collected       # the DECODED form collects NOTHING
+
+    pytest's own durable nodeid agrees — `.pytest_cache/v/cache/lastfailed` keys on
+    the escaped form — so the decoded value was a "lookup key" no lookup accepts,
+    and it also stopped joining to the history rows it came from.
+
+    Two arms, because the contract has two halves: the emitted `test` is the RAW id,
+    AND the claim still compares the RAW id, so a later sample that re-lists it still
+    refutes the claim.
+    """
+    escaped = ("tests/test_beta.py::test_gamma[<lambda>-`_ONE_ENTRY` "
+               "(`re.escape` \\u2014 the filename's `.` is a wildcard unescaped)]")
+    newer = {"sample_time": "2026-11-23T04:38:02Z", "run_id": "45071394329",
+             "created_at": "2026-11-23T04:38:02Z", "failed_tests": []}
+    older = {"sample_time": "2026-11-16T04:44:19Z", "run_id": "43792641690",
+             "created_at": "2026-11-16T04:44:19Z", "failed_tests": [escaped]}
+    flakes = ci_timing.candidate_flakes([newer, older])
+    assert [f["test"] for f in flakes] == [escaped], (
+        "the published flake id was DECODED — pytest prints, stores and collects the "
+        "ESCAPED id, so the decoded form is one no `pytest <id>` accepts and one that "
+        "no longer joins to the history row it came from")
+
+    later = dict(newer, sample_time="2026-11-24T00:00:00Z",
+                 created_at="2026-11-24T00:00:00Z", failed_tests=[escaped])
+    assert ci_timing.candidate_flakes([later, newer, older]) == [], (
+        "a sample stamped at/after the `passed_at` instant still lists the id as "
+        "failing, so the claim must be dropped (#9134 review, P1)")
+
+
 # --- eligible-run selection (ci-timing.yml `find` step) ---------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -3631,6 +3673,277 @@ def test_render_md_emits_one_emphasis_style() -> None:
         "an underscore emphasis remains in the render — one stray underscore "
         "flips MD049's expected style for the whole document"
     )
+
+
+def _gfm_cells(line: str) -> list[str]:
+    r"""The cells a GFM table parser reads out of one `| a | b | c |` row.
+
+    A pipe is a LIVE delimiter unless it follows an ODD run of backslashes: cmark-gfm
+    consumes escapes PAIRWISE, so `\|` is an escaped pipe (content) while `\\|` is an
+    escaped backslash followed by a live delimiter. A single-backslash lookbehind —
+    `re.split(r"(?<!\\)\|", line)`, which this test used until #14366 review P3-2 —
+    cannot tell those apart: it reads a 4-cell row as 3, i.e. it models the failure to
+    agree with the gate it stands in for. Same rule, same reason, as
+    `tests/test_attest_census.py::test_a_pipe_in_a_record_field_cannot_break_the_table`'s
+    local `escaped()` (#10687 cycle 2), which was fixed for exactly this blind spot.
+    """
+
+    def escaped(text: str, i: int) -> bool:
+        n = 0
+        while i - n - 1 >= 0 and text[i - n - 1] == "\\":
+            n += 1
+        return n % 2 == 1
+
+    body = line.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|") and not escaped(body, len(body) - 1):
+        body = body[:-1]
+    cells: list[str] = []
+    start = 0
+    for i, ch in enumerate(body):
+        if ch == "|" and not escaped(body, i):
+            cells.append(body[start:i])
+            start = i + 1
+    cells.append(body[start:])
+    return cells
+
+
+def _code_spans(md: str) -> list[str | None]:
+    """CommonMark code spans in `md`, scanned LEFT TO RIGHT (#1477).
+
+    Deliberately NOT the helper `tools/ci_timing.py` uses, and deliberately not a
+    regex round-trip: the bug this test pins is invisible to `re.fullmatch(r"(`+)(.*)\\1")`,
+    which happily matches the BROKEN render (the outer fence and the trailing
+    backtick pair up, with the inner backticks counted as content). What
+    CommonMark actually does is close a span at the NEXT run of EXACTLY the
+    opening run's length, so the broken render closes at the first inner backtick
+    and re-opens a span on the tail — a span whose content begins with a space,
+    which is MD038 (`no-space-in-code`). This scanner reproduces that.
+
+    Returns the span contents in order (`None` for an unclosed opening run), with
+    the documented one-leading-and-one-trailing space stripped when BOTH are
+    present — so a padded edge-backtick span round-trips to its original content.
+    """
+    spans: list[str | None] = []
+    i, n = 0, len(md)
+    while i < n:
+        if md[i] != "`":
+            i += 1
+            continue
+        j = i
+        while j < n and md[j] == "`":
+            j += 1
+        width = j - i
+        k = j
+        close = -1
+        while k < n:
+            m = md.find("`", k)
+            if m < 0:
+                break
+            e = m
+            while e < n and md[e] == "`":
+                e += 1
+            if e - m == width:
+                close = m
+                break
+            k = e
+        if close < 0:
+            spans.append(None)
+            break
+        body = md[j:close]
+        if len(body) >= 2 and body.startswith(" ") and body.endswith(" "):
+            body = body[1:-1]
+        spans.append(body)
+        i = close + width
+    return spans
+
+
+#: The production shape that redded the required `docs` check on the 2026-11-23 sweep:
+#: a `parametrize`-controlled nodeid carrying its own backtick pair. Taken verbatim
+#: from the `_HOLD_NONE` row of the 2026-11-23 sweep's flake table (run
+#: `45071394329`) in `docs/ci-timing.md`. ⛔ Cited by ROW IDENTITY, never by line
+#: number: that artifact is regenerated every week and the flake table gains and
+#: loses rows with each sample, so `docs/ci-timing.md:823` names this row today and
+#: an unrelated one after the next sweep — the exact rot the 2026-11-23 refresh
+#: re-cut in `docs/ops/ci-wall-clock.md` §6.
+_BACKTICK_NODEID = ("tests/test_7949_capstone_measure.py::"
+                    "test_each_block_arm_reds_on_the_mutation_it_guards"
+                    "[<lambda>-`_HOLD_NONE` (the clause is negated)]")
+
+
+def test_the_flake_table_fences_a_nodeid_that_contains_backticks() -> None:
+    """#1477: a nodeid with backticks must not break the flake table's markup.
+
+    `_md_code_span` was added by the 2026-11-23 repair to size the fence from the
+    longest backtick run inside the span, but NOTHING reached it: every
+    `render_md` call in this suite passed `flakes=[]`, so `if flakes:` — the only
+    caller — never executed. A revert to the pre-fix single-backtick wrap
+    therefore reddened no row, and the 19-MD038 regression that redded the
+    REQUIRED `docs` check could return silently on the next weekly refresh.
+
+    This pins the reachable path through `render_md` AND the helper's edge-padding
+    contract, and it is non-vacuous in the direction that actually failed: the
+    pre-fix wrap is rendered here and its span must be rejected (that is the
+    MD038 shape), while the emitted one must round-trip.
+    """
+    flakes = [
+        {"test": _BACKTICK_NODEID, "run_id": "43792641690",
+         "passed_at": "2026-11-23T05:12:36Z", "passed_run_id": "45071394329"},
+        # an id that ends with a backtick: the cell must be space-padded on both
+        # sides, which is the only CommonMark way to embed an edge backtick
+        {"test": "tests/test_alpha.py::test_p[a`", "run_id": "1",
+         "passed_at": "2026-11-23T05:12:36Z"},
+    ]
+    md = ci_timing.render_md(
+        {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
+         "conclusion": "success"},
+        {}, {}, {k: 0 for k in ci_timing.COUNT_KEYS}, False, "4242", [], flakes,
+    )
+    rows = {ln.split(" | ")[0].removeprefix("| "): ln
+            for ln in md.splitlines() if "::" in ln and ln.startswith("| ")}
+    assert len(rows) == len(flakes), (
+        "the flake table did not render one row per candidate flake — the `if flakes:` "
+        f"branch may be unreachable again; rows={sorted(rows)}")
+
+    for flake in flakes:
+        # locate this flake's own row by its nodeid, then take the first cell
+        line = next(ln for ln in rows.values() if flake["test"] in ln)
+        rendered_cell = line.split(" | ")[0].removeprefix("| ").strip()
+        spans = _code_spans(rendered_cell)
+        assert spans == [flake["test"]], (
+            f"the flake row for {flake['test']!r} renders its nodeid as "
+            f"{rendered_cell!r}, which CommonMark parses as {spans!r} rather than one "
+            "code span holding the nodeid. A parametrize id is user-controlled and may "
+            "contain backticks, which a single-backtick span cannot hold (#1477).")
+        # ⛔ NO EDGE-SPACE ASSERTION HERE: `spans == [flake["test"]]` above already pins
+        # the exact span text, and both fixture ids are whitespace-free at their edges, so
+        # an `s != s.strip()` check in this loop is a CONSTANT and can never fire (#14366
+        # review P2). The predicate itself is exercised where it CAN fire — against the
+        # pre-fix wrap below, which must reproduce the MD038 shape.
+
+    # NON-VACUITY, in the direction that failed: the pre-fix wrap (one backtick
+    # either side, no padding) must be REJECTED by the same scanner it is judged by.
+    pre_fix = f"`{_BACKTICK_NODEID}`"
+    pre_fix_spans = _code_spans(pre_fix)
+    assert pre_fix_spans != [_BACKTICK_NODEID], (
+        "the pre-fix single-backtick wrap round-trips, so this test cannot tell the "
+        "fix from the bug it fixes")
+    assert any(s and s != s.strip() for s in pre_fix_spans), (
+        "the pre-fix wrap did not reproduce the MD038 shape (a span with a leading "
+        f"space); got {pre_fix_spans!r} — the scanner is not modelling CommonMark")
+
+    # …and the helper's own contract on content that begins or ends with a backtick.
+    for text in ("`lead", "trail`", "`both`", "no-backtick", "``two``", "a`b``c"):
+        assert _code_spans(ci_timing._md_code_span(text)) == [text], (
+            f"_md_code_span({text!r}) does not round-trip: it renders "
+            f"{ci_timing._md_code_span(text)!r}, which CommonMark parses as "
+            f"{_code_spans(ci_timing._md_code_span(text))!r}")
+
+
+def test_a_flake_id_with_a_pipe_or_control_byte_cannot_break_the_table_row() -> None:
+    r"""#14366 cycle-4 review P2: a cell cannot hold a raw pipe or a control byte.
+
+    A nodeid is parametrize-controlled. What pytest actually EMITS is the pivot here, and
+    it is narrower than the parametrize VALUE (#14366 review P3-3): `pytest` escapes
+    control bytes in a collected id (`\n` reaches the nodeid as the two characters
+    backslash-n, so it cannot arrive raw), while a `|` passes through UNESCAPED. The
+    repo's own hostile parametrize (`tests/test_attest_census.py:1422`) is the live shape:
+    value `"a\nb|c"` → emitted id `a\nb|c` (newline escaped, pipe raw), and it is the RAW
+    PIPE that redded the required `docs` check. The control-byte arms below are therefore
+    defence for the byte CLASS, not a reproduction of that id — which is why the fixture
+    carries a raw newline on purpose: it is the worst case the renderer must survive.
+
+    A raw newline splits the markdown row in two; a raw `|` is worse, because it does not
+    split the ROW — it adds a CELL, so the table stays "valid" to the eye while
+    `MD056/table-column-count` reds the required `docs` check. Measured: the bare pipe
+    gives `MD056 … [Expected: 3; Actual: 4]`; `\|` gives `0 issues in 0 files`.
+
+    The JSON keeps the id VERBATIM (it is the lookup key, and the escaped form is the
+    one pytest collects); only the DISPLAY escapes. It escapes the PIPE but NOT the
+    backslash, because the output goes inside a code span where a backslash is
+    literal — escaping it would publish `\\u2014` for an id whose sequence is
+    `\u2014`, corrupting every escaped id, which is most of them.
+    """
+    nodeid = "tests/test_attest_census.py::test_hostile[a\nb|c]"
+    assert "\n" in nodeid and "|" in nodeid, (
+        "the fixture must carry BOTH a raw control byte and a raw pipe, or one arm "
+        "of this pin is vacuous")
+    flakes = [{"test": nodeid, "run_id": "1",
+               "passed_at": "2026-11-23T05:12:36Z"}]
+    md = ci_timing.render_md(
+        {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
+         "conclusion": "success"},
+        {}, {}, {k: 0 for k in ci_timing.COUNT_KEYS}, False, "4242", [], flakes,
+    )
+    rows = [ln for ln in md.splitlines() if "test_hostile" in ln]
+    assert len(rows) == 1, (
+        f"the flake row was split across {len(rows)} lines — a raw newline landed in "
+        "the markdown table cell, which breaks the row and reds the `docs` check")
+    row = rows[0]
+    # ⛔ Count LIVE delimiters, not every `|`. `\\|` is an ESCAPED backslash followed by
+    # a live delimiter, so "preceded by a backslash means escaped" is wrong (#14366 P3-2);
+    # `_gfm_cells` applies cmark-gfm's parity rule and is itself pinned below.
+    cells = _gfm_cells(row)
+    assert len(cells) == 3, (
+        f"the row is {len(cells)} cells, not 3 — an unescaped `|` in the nodeid added "
+        f"a cell and reds `MD056`: {row!r}")
+    rendered_cell = cells[0].strip()
+    assert _code_spans(rendered_cell) == [
+        "tests/test_attest_census.py::test_hostile[a\\nb\\|c]"], (
+        f"the cell renders as {rendered_cell!r}, not as the escape-only form")
+    # `render_md` must only READ the flake record: the id is the lookup key, so the
+    # display escaping must not be written back into it, nor may a decode leak into it
+    # in place. This asserts the SOURCE RECORD is untouched after a render — it reddens
+    # if a future edit makes `_md_display_text`/`_md_code_span` mutate `f["test"]`.
+    # ⛔ It does NOT reach the publisher (`render_md` only reads `f['test']`,
+    # `f['passed_at']`, `f['run_id']`), and `main()` re-publishes this same list
+    # object as `candidate_flakes`, so there is no separately-published value to pin;
+    # an earlier label here claimed otherwise (#14366 review P2).
+    assert flakes[0]["test"] == nodeid
+
+    # #14366 review P3-1: `_CONTROL_DISPLAY`'s `\t`/`\r` entries were UNPINNED — dropping
+    # them reddened nothing, because the generic `ord(ch) < 0x20` arm escapes the same
+    # bytes to `\x09`/`\x0d`. Both forms are valid table cells, so a cell-count check
+    # cannot see the difference; only the exact display text can. The entries exist so a
+    # control byte renders as the escape a reader recognises, and this pins it.
+    for raw, display in (("\t", "\\t"), ("\r", "\\r"), ("\n", "\\n"),
+                         ("\x00", "\\x00"), ("\x1f", "\\x1f"), ("\x7f", "\\x7f"),
+                         ("|", "\\|")):
+        assert ci_timing._md_display_text(raw) == display, (
+            f"_md_display_text({raw!r}) renders {ci_timing._md_display_text(raw)!r}, "
+            f"not {display!r} — either the named `_CONTROL_DISPLAY` entry or the "
+            "generic control arm was dropped, and nothing else reds for it")
+
+
+def test_the_gfm_cell_model_agrees_with_cmark_on_even_backslash_runs() -> None:
+    r"""#14366 review P3-2: the cell model must apply cmark-gfm's escape PARITY.
+
+    `_gfm_cells` stands in for the pinned markdownlint gate in the row-count arm above, and
+    a model that disagrees with its gate certifies the wrong thing. The shape that
+    discriminates it from a single-backslash lookbehind is the EVEN-run case: `\|` is one
+    escaped pipe (3 cells), while `\\|` is an escaped backslash then a LIVE delimiter
+    (4 cells) and the lookbehind reads it as 3. ⛔ The ODD run does NOT discriminate —
+    both models return 3 there (measured), and a fixture built on it alone leaves this
+    pin vacuous; the parity arm below asserts that the pre-fix regex mis-counts the
+    even-run row, which is what makes it bite.
+
+    The even-run case is reachable only through the documented trade-away in
+    `tools/ci_timing.py` (`_md_display_text` escapes the pipe and adds one more backslash,
+    so an id carrying an odd run before a pipe loses its cell) — which is why this pins the
+    MODEL rather than feeding that id through `render_md`: pytest doubles every backslash
+    in a collected id, so no real nodeid reaches it. Recording it here is what keeps the
+    next reader from "simplifying" the parity scan back into a regex.
+    """
+    assert _gfm_cells("| a | b | c |") == [" a ", " b ", " c "]
+    assert _gfm_cells("| a\\|b | c | d |") == [" a\\|b ", " c ", " d "]
+    assert _gfm_cells("| a\\\\|b | c | d |") == [" a\\\\", "b ", " c ", " d "]
+    # …and the pre-fix model must MIS-count the even-run shape, or this pin is vacuous.
+    pre_fix = re.split(r"(?<!\\)\|", "a\\\\|b | c | d".strip("|"))
+    assert len(pre_fix) == 3, (
+        f"the single-backslash lookbehind counted {len(pre_fix)} cells; it is expected to "
+        "read the 4-cell even-run row as 3 — if it agrees with `_gfm_cells` the parity "
+        "scan is not what this test is measuring")
 
 
 def test_refresh_durations_is_reproducible(tmp_path: Path) -> None:
