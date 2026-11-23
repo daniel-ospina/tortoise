@@ -242,12 +242,19 @@ uv run python tools/extractor_cost_measure.py compose \
     --out docs/evidence/14343-amplify/compose-after.json
 
 # 2. before → after on the SAME corpus. ⛔ The ARM IS A SETTING, NOT A LABEL:
-#    `run --arms before,after` sets TORTOISE_S4_EMBED_JSON=compact for the
-#    `after` rows and pins it OFF for the `before` rows, in-process, and records
-#    `s4_embed_json` on every row so a mislabelled measurement cannot hide.
-#    (Until review cycle 9 it wrote nothing and measured the same render twice,
-#    returning a −0 delta with no banner.) The resume key is (arm, kind, id), so
-#    a separate `--arms after` invocation appends to the same file correctly.
+#    `run --arms before,after` installs TORTOISE_S4_EMBED_JSON=compact for the
+#    `after` batch and pins it OFF for the `before` batch, and every row records
+#    `s4_embed_json` so a mislabelled measurement cannot hide.
+#    ⚠️ The flag is PROCESS-GLOBAL (`os.environ`), so the arms run as SEQUENTIAL
+#    BATCHES, not interleaved: the value is installed once per batch, before any
+#    worker thread starts, and restored after the batch joins. That matters at
+#    the default `--workers 6` — an install wrapped around the single call would
+#    let a `before` thread trip over an `after` thread, which is a race rather
+#    than an arm. (Until review cycle 9 nothing was installed at all and the same
+#    render was measured twice, returning a −0 delta with no banner; cycle 10
+#    moved the install out of the per-call path for the reason above.)
+#    The resume key is (arm, kind, id), so a separate `--arms after` invocation
+#    appends to the same file correctly.
 uv run python tools/extractor_cost_measure.py run --docs 50 --arms before,after \
     --out docs/evidence/14343-amplify/measurements.jsonl
 uv run python tools/extractor_cost_measure.py decompose \

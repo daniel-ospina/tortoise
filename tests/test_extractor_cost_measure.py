@@ -1381,3 +1381,106 @@ def test_the_source_transcript_tail_is_subtracted_before_the_per_call_medians():
         f"the published S2 per-call prompt ({dec['per_call']['s2']['prompt']}) "
         f"is not below the raw median ({raw}) — the transcript tail is back "
         f"inside the story row, which is the misattribution this pins out")
+
+
+
+# ── #14343 review cycle 10: the arm is a SETTING, and the setting is
+#    PROCESS-GLOBAL — so it must be installed per BATCH, never per call ────────
+
+def test_embed_mode_reads_the_environment_instead_of_a_label(monkeypatch):
+    """`_embed_mode` must READ the env, not re-encode an arm name.
+
+    The recorded field exists so a mislabelled row is VISIBLE. A value derived
+    from the label (`"compact" if arm == "after" else "indent"`) is a function of
+    that label, so it can never disagree with it — and so can never catch the
+    defect the field was added for. The resolution must be the one production
+    uses (`extractor_v2._embed_json_kwargs`): only `compact` arms it.
+    """
+    for value, expected in ((None, "indent"), ("", "indent"),
+                            ("   ", "indent"), ("garbage", "indent"),
+                            ("indent", "indent"),
+                            ("compact", "compact"), (" COMPACT ", "compact")):
+        if value is None:
+            monkeypatch.delenv(m._TOGGLE, raising=False)
+        else:
+            monkeypatch.setenv(m._TOGGLE, value)
+        assert m._embed_mode() == expected, (
+            f"{value!r} must resolve to {expected!r} — the same resolution "
+            f"`extractor_v2._embed_json_kwargs` uses at call time")
+
+
+def test_the_arm_is_installed_once_per_batch_not_once_per_call(
+        monkeypatch, tmp_path):
+    """⛔ THE REGRESSION THIS PINS (review cycle 10, P2).
+
+    `os.environ` is process-global and shared by every worker thread, so an
+    install wrapped around the SINGLE `measure_one` call lets a `before` thread
+    pop the flag while an `after` thread is inside its own measure. That is a
+    RACE, not an arm — and at the documented `--arms before,after` with the
+    DEFAULT `--workers 6` (4 in this test) it reproduces the original false
+    pass: a before→after delta that is an artefact of thread scheduling.
+
+    So two arms over eight jobs must install each arm's value exactly ONCE, and
+    every row must record the flag its own batch installed.
+
+    ⛔ WHAT THIS DOES AND DOES NOT PROVE. It pins the CONTRACT — one install per
+    arm, env-derived per-row record, ambient restored — and it fails if anyone
+    moves the install back into the per-call path, because the spy would then
+    fire once per JOB (8) instead of once per ARM (2). It does NOT replay the
+    original race itself; a timing-based reproduction would be flaky in both
+    directions and would fail silently on a fast machine.
+    """
+    import os
+    import time
+
+    docs = [{"path": "README.md", "tokens": 10 + i} for i in range(4)]
+    installed: list[str] = []
+
+    def fake_install(arm: str) -> None:
+        installed.append(arm)
+        if arm == "after":
+            os.environ[m._TOGGLE] = "compact"
+        elif arm == "before":
+            os.environ.pop(m._TOGGLE, None)
+
+    def fake_measure(model, conversation, *, session_date):
+        # Hold the call long enough that a per-call install/restore WOULD be
+        # interleaved by another worker thread.
+        time.sleep(0.02)
+        return {"prompt_tokens": 100, "completion_tokens": 10,
+                "cache_hit_tokens": 0}
+
+    monkeypatch.setenv(m._TOGGLE, "garbage")   # ambient must come back
+    monkeypatch.setattr(m, "pick_corpus", lambda limit, seed: docs)
+    monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
+    monkeypatch.setattr(m, "_build_model", lambda: object())
+    monkeypatch.setattr(m, "_install_arm", fake_install)
+    monkeypatch.setattr(m, "measure_one", fake_measure)
+
+    out = tmp_path / "measurements.jsonl"
+    m.run_measurement(out=out, docs_limit=4, sessions_limit=0, workers=4,
+                      seed=1, arms=("before", "after"), arm_gap_s=0.0,
+                      long_split=False)
+
+    # (1) the install is per BATCH — one call per arm, not one per job.
+    assert sorted(installed) == ["after", "before"], (
+        f"the arm must be installed once per BATCH (2 calls for 2 arms), got "
+        f"{installed!r} — an install per JOB is the per-call race (8 jobs)")
+
+    # (2) every row records the flag its OWN arm was installed with. `_job`
+    #     reads it back from the environment, so a batch that installed the
+    #     wrong value — or nothing — shows up here.
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line]
+    assert len(rows) == 8, f"expected 8 rows, got {len(rows)}"
+    assert {r["arm"] for r in rows} == {"before", "after"}
+    for row in rows:
+        want = "compact" if row["arm"] == "after" else "indent"
+        assert row["s4_embed_json"] == want, (
+            f"arm {row['arm']!r} recorded {row['s4_embed_json']!r}, expected "
+            f"{want!r} — the flag was not installed for its batch")
+
+    # (3) the ambient value is restored, so a measurement cannot leak the lever
+    #     into whatever runs next in the same process.
+    assert os.environ.get(m._TOGGLE) == "garbage", (
+        "the ambient TORTOISE_S4_EMBED_JSON was not restored after the run — "
+        "a measurement must not leave the lever armed for the next caller")

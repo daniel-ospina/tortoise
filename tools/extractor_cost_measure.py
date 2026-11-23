@@ -314,6 +314,38 @@ def _existing_rows(path: Path) -> set[tuple[str, str, str]]:
     return done
 
 
+_TOGGLE = "TORTOISE_S4_EMBED_JSON"
+
+
+def _embed_mode() -> str:
+    """The serialization `render_s4_prompt` will really use, resolved the SAME
+    way production resolves it (`extractor_v2._embed_json_kwargs`): only
+    ``compact`` arms it, case- and whitespace-insensitively; unset, blank and
+    garbage are all ``indent``.
+
+    ⛔ RECORDED PER ROW, AND RECORDED BY READING THE ENVIRONMENT — never by
+    re-deriving it from the arm label. A value computed as
+    ``"compact" if arm == "after" else "indent"`` is a function of the label, so
+    it can never disagree with it and can never catch a mislabelled run — which
+    is the one thing the field exists to make visible (review cycle 10, P2).
+    """
+    return ("compact" if (os.environ.get(_TOGGLE) or "").strip().lower()
+            == "compact" else "indent")
+
+
+def _install_arm(arm: str) -> None:
+    """Arm the lever for a whole BATCH.
+
+    ``after`` arms compact; ``before`` pins it off; any other arm name (the
+    ``cold``/``warm`` cache arms) leaves the ambient value alone, because those
+    arms size the cache ladder rather than this lever.
+    """
+    if arm == "after":
+        os.environ[_TOGGLE] = "compact"
+    elif arm == "before":
+        os.environ.pop(_TOGGLE, None)
+
+
 def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
                     workers: int, seed: int, arms: tuple[str, ...],
                     arm_gap_s: float, long_split: bool,
@@ -339,13 +371,14 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
             os.fsync(fh.fileno())
 
     def _job(item: dict, kind: str, arm: str) -> dict:
-        # ⛔ THE ARM IS A SETTING, NOT A LABEL. It was a label only: nothing on
-        # the measurement path wrote `os.environ`, so `--arms before,after`
-        # measured the SAME render twice in one process and the before→after
-        # delta came back 0 — a false pass with no banner, in the one command
-        # the bundle documents as finishing the job (review cycle 9, P2).
-        # `TORTOISE_S4_EMBED_JSON` is the lever this harness exists to size, so
-        # `after` ARMS it here and `before` pins it off for the call.
+        # ⛔ THE ARM IS A SETTING, NOT A LABEL — but the setting is installed by
+        # the BATCH, not by this function (see the `by_arm` loop below). It was
+        # a label only: nothing on the measurement path wrote `os.environ`, so
+        # `--arms before,after` measured the SAME render twice in one process and
+        # the before→after delta came back 0 — a false pass with no banner, in
+        # the one command the bundle documents as finishing the job (review
+        # cycle 9, P2). `TORTOISE_S4_EMBED_JSON` is the lever this harness exists
+        # to size, so `after` ARMS it and `before` pins it off.
         model = _build_model()   # one per call: the adapter carries per-call
                                  # state (last_*), which races under workers>1
         if kind == "doc":
@@ -353,23 +386,13 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
                              "content": item["text"]}]
         else:
             conversation = item["turns"]
-        saved = os.environ.get("TORTOISE_S4_EMBED_JSON")
-        try:
-            if arm == "after":
-                os.environ["TORTOISE_S4_EMBED_JSON"] = "compact"
-            elif arm == "before":
-                os.environ.pop("TORTOISE_S4_EMBED_JSON", None)
-            rec = measure_one(model, conversation,
-                              session_date="2026-11-21T00:00:00+00:00")
-        finally:
-            if saved is None:
-                os.environ.pop("TORTOISE_S4_EMBED_JSON", None)
-            else:
-                os.environ["TORTOISE_S4_EMBED_JSON"] = saved
+        rec = measure_one(model, conversation,
+                          session_date="2026-11-21T00:00:00+00:00")
         rec["arm"] = arm
-        #: the flag the arm actually ran under — a reader must be able to tell
-        #: a real post-change measurement from a mislabelled one.
-        rec["s4_embed_json"] = "compact" if arm == "after" else "indent"
+        #: the serialization the render ACTUALLY used — read back from the
+        #: environment at measure time, so a mislabelled row is VISIBLE instead
+        #: of self-consistent.
+        rec["s4_embed_json"] = _embed_mode()
         rec["kind"] = kind
         rec["id"] = item["path"]
         rec["item_tokens"] = item["tokens"]
@@ -397,27 +420,52 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
     print(f"running {total} measurements at {workers} workers "
           f"(arms: {', '.join(arms)})", flush=True)
     finished = 0
-    with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_job, item, kind, arm): (item, kind, arm)
-                   for item, kind, arm in jobs}
-        for fut in cf.as_completed(futures):
-            item, kind, arm = futures[fut]
-            finished += 1
-            try:
-                rec = fut.result()
-            except Exception as exc:
-                # a 360-call measurement; the failure is recorded as a row so
-                # the report can state how many items did not measure.
-                rec = {"arm": arm, "kind": kind, "id": item["path"],
-                       "item_tokens": item["tokens"], "failed": True,
-                       "error": f"{type(exc).__name__}: {exc}"}
-                _emit(rec)
-            print(f"  [{finished}/{total}] {arm:4} {kind:7} "
-                  f"{rec['id'][-58:]:58} "
-                  f"in={rec.get('prompt_tokens', 0):>7} "
-                  f"out={rec.get('completion_tokens', 0):>5} "
-                  f"hit={rec.get('cache_hit_tokens', 0):>7} "
-                  f"{'FAILED' if rec.get('failed') else ''}", flush=True)
+    # ⛔ ARMS RUN AS SEQUENTIAL BATCHES — NEVER INTERLEAVED (review cycle 10, P2).
+    # `os.environ` is PROCESS-GLOBAL and every worker thread shares it, so the
+    # first cut of this fix — installing the flag per JOB, around the single
+    # `measure_one` call — let an `after` row and a `before` row overwrite each
+    # other between a thread's install and its measure. At the documented
+    # `--arms before,after` and the DEFAULT `--workers 6`, that is a race rather
+    # than an arm, and it reproduces the very false pass the fix was meant to
+    # remove (a before→after delta that is an artefact of thread scheduling).
+    # Installing the value ONCE per batch, before any thread starts, and
+    # restoring it only after the batch has joined, makes it constant for every
+    # call in that batch.
+    by_arm: dict[str, list[tuple[dict, str]]] = {}
+    for item, kind, arm in jobs:
+        by_arm.setdefault(arm, []).append((item, kind))
+    for batch_arm, batch_jobs in by_arm.items():
+        saved_embed = os.environ.get(_TOGGLE)
+        try:
+            _install_arm(batch_arm)
+            with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_job, item, kind, batch_arm):
+                           (item, kind, batch_arm)
+                           for item, kind in batch_jobs}
+                for fut in cf.as_completed(futures):
+                    item, kind, arm = futures[fut]
+                    finished += 1
+                    try:
+                        rec = fut.result()
+                    except Exception as exc:
+                        # a 360-call measurement; the failure is recorded as a
+                        # row so the report can state how many items did not
+                        # measure.
+                        rec = {"arm": arm, "kind": kind, "id": item["path"],
+                               "item_tokens": item["tokens"], "failed": True,
+                               "error": f"{type(exc).__name__}: {exc}"}
+                        _emit(rec)
+                    print(f"  [{finished}/{total}] {arm:4} {kind:7} "
+                          f"{rec['id'][-58:]:58} "
+                          f"in={rec.get('prompt_tokens', 0):>7} "
+                          f"out={rec.get('completion_tokens', 0):>5} "
+                          f"hit={rec.get('cache_hit_tokens', 0):>7} "
+                          f"{'FAILED' if rec.get('failed') else ''}", flush=True)
+        finally:
+            if saved_embed is None:
+                os.environ.pop(_TOGGLE, None)
+            else:
+                os.environ[_TOGGLE] = saved_embed
 
     if long_split:
         _measure_long_split(out, docs, arms, _emit, split_max_turns
@@ -456,10 +504,24 @@ def _measure_long_split(out: Path, docs: list[dict], arms: tuple[str, ...],
         turns.append("\n\n".join(paras[lo:hi]))
     for arm in arms:
         model = _build_model()
-        rec = measure_one(model,
-                          [{"role": "user", "content": t} for t in turns],
-                          session_date="2026-11-21T00:00:00+00:00")
+        # Same lever, same contract as the batch loop in `run_measurement`: the
+        # arm is a SETTING. This block is serial, so install/restore around the
+        # single call is race-free — it is written this way so the two paths
+        # cannot disagree about what an arm means.
+        saved_embed = os.environ.get(_TOGGLE)
+        try:
+            _install_arm(arm)
+            rec = measure_one(model,
+                              [{"role": "user", "content": t} for t in turns],
+                              session_date="2026-11-21T00:00:00+00:00")
+            mode = _embed_mode()
+        finally:
+            if saved_embed is None:
+                os.environ.pop(_TOGGLE, None)
+            else:
+                os.environ[_TOGGLE] = saved_embed
         rec["arm"] = arm
+        rec["s4_embed_json"] = mode
         rec["kind"] = "doc_split"
         rec["id"] = f"{longest['path']}#{len(turns)}turns"
         rec["item_tokens"] = longest["tokens"]
