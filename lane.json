@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-14362-1795451934-p2847774-2e24195f",
+  "_sha": "e5b867e2fde73316fd4f2b19738050eae2334f1d",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-14362.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/14357-fallback-thinking"
+    },
+    {
+      "kind": "sha",
+      "value": "f78c3a5c639d3c0464f6121ce29da9a5ef8628d3"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14357-fallback"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 8444,
+  "ended_at": 1795460378,
+  "exit_code": 0,
+  "heartbeat_at": 1795460378,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-14362-1795451934-p2847774-2e24195f",
+  "lease_until": 1795496978,
+  "pid": 2847774,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795451934,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-14362",
+  "worktree": "/home/cmux/tortoise/.worktrees/14357-fallback"
+}
