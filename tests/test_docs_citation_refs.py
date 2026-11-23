@@ -9135,8 +9135,8 @@ _ATTRIBUTION_PHRASES = (
     # (#14386 review rounds 7-8, P2): each literal below sits IN this file, in the tuple and in
     # whatever sentence reports it, so a count taken here counts the sentence that states it —
     # the self-count that rule refuses — and no per-literal tally is asserted in its place,
-    # because the tallies differ per literal and a single number would be false for most of
-    # them (measured, round 9). The claim those two sentences make is exactly what `_basis`
+    # because the tallies differ per literal (measured `{2,2,2,2,3,3,5,8}`) so any single number
+    # is false for half of them. The claim those two sentences make is exactly what `_basis`
     # refuses, so the tuple has to know the words it was made of.
     "DO move at this head",
     "copy of the index carries the OLD pair",

@@ -227,8 +227,8 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    ⛔ THESE FIGURES ARE HISTORICAL, NOT LIVE, and they went stale the moment `origin/main` advanced
    under them: the merge of `#13971` (`e0accb8fe6`) inserted 43 lines into `tortoise/sdk.py`, 31 of
    them above this writer (the live cite above is `sdk.py:22525`), so at the merged head
-   `22494` is `sourceKind="agentSession",`, `22439` is ``# re-capture kept the display column live and the replay wrote `''` ``, and the
-   mint opens at `21243` (`21243-21267`, same `-A 24` window). They are stamped by head and NOT
+   `22441` is `sourceKind="agentSession",`, `22386` is ``# re-capture kept the display column live and the replay wrote `''` ``, and the
+   mint opens at `21190` (`21243-21267`, same `-A 24` window). They are stamped by head and NOT
    re-pointed, because re-pointing a past-tense sentence to a new number is the false claim this
    note exists to catch; the LIVE figures are the prose cite above, which was re-derived on the
    merged tree (`sdk.py:22525`). No arm reads the numbers in THIS block — which is why they rot
