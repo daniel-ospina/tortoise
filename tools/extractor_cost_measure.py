@@ -2988,6 +2988,69 @@ def _observe_encoder_fetches():
         _load.read_file = original
 
 
+def _today() -> str:
+    """The regeneration date, in one place so the payload and a render agree."""
+    import datetime
+    return datetime.date.today().isoformat()
+
+
+def per_document_arithmetic(*, ratio: float, region_per_call: float,
+                           s4_calls: float, before_in: float,
+                           before_out: float) -> dict:
+    """The saving's per-document arithmetic, as a PURE function of its inputs.
+
+    ⛔ Extracted so the published cells can be re-derived WITHOUT a tokenizer.
+    Before this, every assertion on `saved_per_doc` / the share / the region
+    multiplication lived inside the `cl100k_base`-cache `skipif`, and ephemeral
+    CI runners' caches are always cold — so `saved_per_doc = ratio *
+    region_per_CALL` (dropping the calls-per-document factor) shipped green.
+    The inputs below are all published in the artifact's own JSON
+    (`aggregate.saved_ratio_exact`, `per_document.embed_region_per_s4_call`,
+    `corpus.s4_calls_per_doc`, `corpus.median_document_in/out`), so a cold box
+    recomputes exactly what the verb computed and a drifted formula reds.
+
+    The three factors are independent on purpose:
+
+    * `region_per_doc = region_per_call * s4_calls` — the region is re-sent once
+      per S4 CALL, so a document pays it once per call;
+    * `saved_per_doc = ratio * region_per_doc` — the share applies to the whole
+      per-document region, not to one call's;
+    * `after = before - saved_per_doc`, with `before` measured (in + out), never
+      assumed.
+    """
+    region_per_doc = region_per_call * s4_calls
+    saved_per_call = ratio * region_per_call
+    saved_per_doc = ratio * region_per_doc
+    before = before_in + before_out
+    after = before - saved_per_doc
+    return {
+        "embed_region_per_s4_call": region_per_call,
+        "s4_calls_per_doc": s4_calls,
+        "embed_region_per_doc": round(region_per_doc, 1),
+        "saved_per_call": round(saved_per_call, 1),
+        "saved_per_doc": round(saved_per_doc, 1),
+        "before_in": before_in, "before_out": before_out,
+        "before_total": before,
+        "after_in": round(before_in - saved_per_doc, 1),
+        "after_total": after,
+        "saved_pct": round(100.0 * saved_per_doc / before, 2),
+    }
+
+
+def allowance_plan(before: float, after: float) -> list[dict]:
+    """The documents-per-month cells, from the two per-document totals.
+
+    Pure for the same reason as `per_document_arithmetic`: a cold box can
+    recompute these from the artifact's own `before_total` / `after_total`, so
+    a mutation of `affordable_count` (floor → round) reds instead of being
+    validated by the recorded cells it can no longer produce.
+    """
+    return [{"tier": tier, "allowance": allowance,
+             "documents_before": affordable_count(allowance, before),
+             "documents_after": affordable_count(allowance, after)}
+            for tier, allowance in _ALLOWANCES]
+
+
 def embed_json_measurement(receipts: Path, evidence: Path, *,
                            arm: str = "cold") -> dict:
     """#14371: tokens before → after for the S4 embed-list layout, OFFLINE.
@@ -3062,21 +3125,22 @@ def embed_json_measurement(receipts: Path, evidence: Path, *,
     ratio = lev["saved_tokens"] / lev["indented_tokens"]
     region_per_call = float(dec["solved"]["embed_list_tokens"])
     s4_calls = float(dec["calls_per_doc"]["s4"])
-    region_per_doc = region_per_call * s4_calls
-    saved_per_call = ratio * region_per_call
-    saved_per_doc = ratio * region_per_doc
-    before_in = float(median_row["measured_in"])
-    before_out = float(median_row["measured_out"])
-    before = before_in + before_out
-    after = before - saved_per_doc
-    buys = [{"tier": tier, "allowance": allowance,
-             "documents_before": affordable_count(allowance, before),
-             "documents_after": affordable_count(allowance, after)}
-            for tier, allowance in _ALLOWANCES]
+    doc = per_document_arithmetic(
+        ratio=ratio, region_per_call=region_per_call, s4_calls=s4_calls,
+        before_in=float(median_row["measured_in"]),
+        before_out=float(median_row["measured_out"]))
+    buys = allowance_plan(doc["before_total"], doc["after_total"])
     shares = [(r["indented_tokens"] - r["compact_tokens"]) / r["indented_tokens"]
               for r in lev["rows"] if r["indented_tokens"]]
     return {
         "lever": "TORTOISE_S4_EMBED_JSON",
+        #: The REGENERATION date, carried IN the payload so the committed
+        #: artifact's markdown is exactly `render(json.load(json))` on any day,
+        #: not only on the day it was written. A generator that stamped
+        #: `today()` at render time made the document's own "regenerate with the
+        #: command at the foot" false the next morning, which is the difference
+        #: between a re-derivable artifact and a plausible one.
+        "created": _today(),
         "offline": True,
         "provider_calls": 0,
         "tokenizer": "cl100k_base",
@@ -3104,9 +3168,9 @@ def embed_json_measurement(receipts: Path, evidence: Path, *,
             "documents": dec["documents"],
             "median_doc_tokens": dec["median_doc_tokens"],
             "s4_calls_per_doc": s4_calls,
-            "median_document_in": before_in,
-            "median_document_out": before_out,
-            "median_document_total": before,
+            "median_document_in": doc["before_in"],
+            "median_document_out": doc["before_out"],
+            "median_document_total": doc["before_total"],
         },
         "per_emission": lev["rows"],
         "aggregate": {
@@ -3123,16 +3187,7 @@ def embed_json_measurement(receipts: Path, evidence: Path, *,
             "per_emission_share_max_pct": round(100.0 * max(shares), 2),
         },
         "per_document": {
-            "embed_region_per_s4_call": region_per_call,
-            "s4_calls_per_doc": s4_calls,
-            "embed_region_per_doc": round(region_per_doc, 1),
-            "saved_per_call": round(saved_per_call, 1),
-            "saved_per_doc": round(saved_per_doc, 1),
-            "before_in": before_in, "before_out": before_out,
-            "before_total": before,
-            "after_in": round(before_in - saved_per_doc, 1),
-            "after_total": after,
-            "saved_pct": round(100.0 * saved_per_doc / before, 2),
+            **doc,
             #: EVERY term of the solve `decompose` performs, so the artifact can
             #: print a subtraction a reader can re-derive. The embed region is
             #: NOT just `prompt − static`: S1's re-sent story and the #10311
@@ -3157,8 +3212,13 @@ def embed_json_measurement(receipts: Path, evidence: Path, *,
 
 
 def render_embed_json_measurement(m: dict) -> str:
-    """The measurement as a document: cells, then the arithmetic behind them."""
-    import datetime
+    """The measurement as a document: cells, then the arithmetic behind them.
+
+    ⛔ A PURE function of `m`: `finalize_markdown(render(json.load(json)))` is
+    the committed `.md`, byte for byte, on ANY day — the date is read from the
+    payload (`created`), not from the clock, so the artifact's own "regenerate
+    with the command at the foot" holds for a reader who only has the JSON.
+    """
     lev, agg = m["per_document"], m["aggregate"]
     corpus = m["corpus"]
     lines = [
@@ -3169,8 +3229,9 @@ def render_embed_json_measurement(m: dict) -> str:
         "doc_status: final",
         # ⛔ GENERATED FILE, and the frontmatter says so: a reader must not
         # hand-edit a measurement (the test that pins these cells would then
-        # pin prose). `created` is the REGENERATION date for that reason.
-        f"created: {datetime.date.today().isoformat()}",
+        # pin prose). `created` is the REGENERATION date, carried in the payload
+        # for the reason in the docstring.
+        f"created: {m.get('created') or _today()}",
         "subjects.team: epistemic-team",
         'aboutSubjects: "extractor v2 S4 prompt embed-list serialization; '
         'TORTOISE_S4_EMBED_JSON"',
@@ -3629,8 +3690,14 @@ def main(argv: list[str] | None = None) -> int:
             args.out.write_text(text, encoding="utf-8")
         if args.json_out:
             args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            #: ⛔ NO `sort_keys`: the payload's own insertion order is what the
+            #: renderer prints (the posture switches most visibly), so sorting
+            #: here made the committed `.md` un-re-renderable from the committed
+            #: `.json` while every NUMBER still matched — the artifact's stated
+            #: provenance silently became false. Serialize the object the
+            #: document was rendered from, in the order it was rendered.
             args.json_out.write_text(
-                json.dumps(measured, indent=1, sort_keys=True),
+                json.dumps(measured, indent=1),
                 encoding="utf-8")
         sys.stdout.write(text)
         return 0

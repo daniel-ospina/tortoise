@@ -510,6 +510,85 @@ def test_the_committed_allowance_cells_are_the_recorded_floors():
     assert cells == {"solo": (46, 49), "pro": (61, 66), "team": (370, 398)}
 
 
+# ── the artifact's OWN re-derivation (no tokenizer, so it runs in CI) ───
+#
+#: ⛔ These two legs exist because everything that used to check the arithmetic
+#: lived inside the `_BPE_CACHE is None` skipif below, and ephemeral CI runners'
+#: caches are always cold (the repo says so itself at
+#: `tests/test_s2_decision_record_5087.py:562`) — so `saved_per_doc = ratio *
+#: region_per_CALL`, a mutated share, or `affordable_count` switching floor→round
+#: all shipped green. They need no cache, because the inputs the verb used are
+#: all PUBLISHED in the artifact's own JSON.
+
+
+def test_the_committed_markdown_is_the_committed_json_rendered():
+    """`finalize_markdown(render(json.load(json)))` IS the committed `.md`.
+
+    Two claims rest on this and neither was checkable before: (1) the document
+    is a render of the payload, not prose that happens to agree with it — a
+    renderer edit (a dropped cell, a reworded equation, a moved row) reds on a
+    box with no tokenizer, which is every CI runner; and (2) the artifact's own
+    instruction — *regenerate with the command at the foot* — is true for a
+    reader who has only the JSON.
+
+    ⛔ Deliberately NOT `pytest.approx` or a cell-by-cell comparison: a
+    byte-identical document is the property the frontmatter claims, and the day
+    it stops holding is the day a reader stops being able to tell a
+    regeneration from a hand-edit.
+    """
+    payload = json.loads(_ARTIFACT_JSON.read_text(encoding="utf-8"))
+    rendered = m.finalize_markdown(m.render_embed_json_measurement(payload))
+    assert rendered == _ARTIFACT_MD.read_text(encoding="utf-8"), (
+        "the committed `.md` is not the committed `.json` rendered — regenerate "
+        "BOTH from the verb (`--out` AND `--json-out`), never one of them. If "
+        "only the posture line differs, the JSON was written with "
+        "`sort_keys=True`, which reorders the switches the renderer prints in "
+        "insertion order")
+
+
+def test_the_committed_artifact_is_re_derivable_from_its_own_inputs():
+    """The published cells recompute from the artifact's own inputs, cold.
+
+    Feeds the module's own `per_document_arithmetic` / `allowance_plan` the
+    values the artifact publishes for its INPUTS (`saved_ratio_exact`, the
+    solved region, calls per document, the median document's in/out) and
+    requires every published OUTPUT back. Discriminating on purpose:
+
+    * `saved_per_doc = ratio * region_per_call` (dropping calls/doc) gives
+      4,035.4 where the artifact prints 4,599.9 → red;
+    * `region_per_doc = region_per_call` gives 12,411.5 where it prints
+      14,149.1 → red;
+    * `affordable_count`: floor → `round()` gives solo 50 where it prints 49 →
+      red, which no recorded cell could catch before because the recorded cell
+      was the only thing asserted.
+    """
+    data = json.loads(_ARTIFACT_JSON.read_text(encoding="utf-8"))
+    doc = data["per_document"]
+    expected = m.per_document_arithmetic(
+        ratio=data["aggregate"]["saved_ratio_exact"],
+        region_per_call=doc["embed_region_per_s4_call"],
+        s4_calls=data["corpus"]["s4_calls_per_doc"],
+        before_in=data["corpus"]["median_document_in"],
+        before_out=data["corpus"]["median_document_out"])
+    for key, value in expected.items():
+        assert doc[key] == pytest.approx(value, rel=1e-9, abs=1e-9), (
+            f"the published `per_document.{key}` is {doc[key]}, but the "
+            f"artifact's OWN inputs recompute it to {value} — the arithmetic "
+            "that produces the cell has moved")
+
+    plan = m.allowance_plan(doc["before_total"], doc["after_total"])
+    assert plan == data["documents_per_month"], (
+        "the published capacity cells are not what this artifact's own unit "
+        f"buys (recomputed: {plan})")
+    # and each cell is still a FLOOR of that unit, not the nearest integer
+    for cell in plan:
+        n = cell["documents_after"]
+        assert n * doc["after_total"] <= cell["allowance"], (
+            f"{cell['tier']}: {n} documents do not fit in its allowance")
+        assert (n + 1) * doc["after_total"] > cell["allowance"], (
+            f"{cell['tier']}: {n} is not the FLOOR — one more document fits")
+
+
 # ── the live measurement (runs where the BPE ranks are already cached) ───
 
 
