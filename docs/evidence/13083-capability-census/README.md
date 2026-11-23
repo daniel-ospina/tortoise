@@ -24,7 +24,8 @@ is **not** `8762578f8c` (`origin/main` at dispatch — the probe does not exist 
 either: **both arms record `6850b74c14`**, because the instrument was corrected under review and both were
 re-run at that head.
 **The tree to reproduce these figures from is the commit that contains the probe AND both JSONs** (they land
-together), not the sha inside the JSON. The audit's base is `8762578f8c`.
+together), not the sha inside the JSON. The deleted `CAPABILITY-PLACEMENT-AUDIT.md`'s base is
+`8762578f8c` (see the note above).
 
 **Why this file exists.** The capability audit (`#13083`) SPECIFIED a per-shape reader census, and that
 census was committed as `docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` — deleted on 2026-11-23 under
