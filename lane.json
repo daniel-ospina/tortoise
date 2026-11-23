@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-spool-rehearse-1795465132-p662759-f2b90f33",
+  "_sha": "45f87431631ac96341b8ffc1be4486c86509b519",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/spool-rehearse.log"
+    },
+    {
+      "kind": "branch",
+      "value": "chore/spool-drain-rehearsal"
+    },
+    {
+      "kind": "sha",
+      "value": "6008508a957d84e94094ae0575d6c4daedc66088"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/spool-rehearse"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 4405,
+  "ended_at": 1795469537,
+  "exit_code": 0,
+  "heartbeat_at": 1795469537,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-spool-rehearse-1795465132-p662759-f2b90f33",
+  "lease_until": 1795506137,
+  "pid": 662759,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795465132,
+  "state": "DONE",
+  "tag": "spool-rehearse",
+  "worktree": "/home/cmux/tortoise/.worktrees/spool-rehearse"
+}
