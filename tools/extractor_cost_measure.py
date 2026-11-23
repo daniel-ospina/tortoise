@@ -1834,10 +1834,27 @@ def render_compose(report: dict) -> str:
         lines.append("|---|---|---|")
         for stage, acc in sorted(row["stages"].items()):
             out = acc.get("output") or {}
-            secs = "; ".join(
-                f"{name}: {val.get('items', val.get('keys', 0))} "
-                f"({val.get('tokens', 0):,} tok)"
-                for name, val in sorted((out.get("sections") or {}).items()))
+            # ⛔ RENDER THE PUBLISHED KEYS — do not leave a derived key readerless.
+            # `chars_sum` and `distinct_kinds` were both published in `_output_
+            # structure` and neither was printed by ANYTHING, which is the same
+            # "derived key with no reader" this module's own comment criticises
+            # (measured, review cycle 7 P3 — the reviewer had to open the JSON to
+            # see them). Printing the two stored halves is the reader: no third
+            # derived number is created here (a `chars_sum / items` mean is the
+            # consumer's to compute, and the render does not). `distinct_kinds`
+            # is the UNION across a stage's calls, kept whole in `_merge_sections`
+            # so it can never report the display cap instead of the count.
+            parts = []
+            for name, val in sorted((out.get("sections") or {}).items()):
+                n = val.get("items", val.get("keys", 0))
+                label = "items" if "items" in val else "keys"
+                bits = [f"{n} {label}", f"{val.get('tokens', 0):,} tok"]
+                if "chars_sum" in val:
+                    bits.append(f"{val['chars_sum']:,} chars")
+                if "distinct_kinds" in val:
+                    bits.append(f"{val['distinct_kinds']} kinds")
+                parts.append(f"{name}: " + ", ".join(bits))
+            secs = "; ".join(parts)
             lines.append(f"| {stage} | {out.get('tokens', 0):,} | {secs or '—'} |")
         lines.append("")
     return "\n".join(lines)

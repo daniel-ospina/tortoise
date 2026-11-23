@@ -1186,3 +1186,28 @@ def test_merged_sections_add_the_halves_and_union_the_full_kind_histogram():
         f"{points['distinct_kinds']} — read off the display slice it reports 12")
     assert points["distinct_kinds"] == len(points["kinds"]), (
         "the published count and the published histogram must agree")
+
+
+def test_the_rendered_table_reads_the_published_chars_and_kind_keys():
+    """`chars_sum` / `distinct_kinds` must have a READER, not just a JSON home.
+
+    Both keys were published by `_output_structure`/`_merge_sections` and printed by
+    NOTHING — the tables above assert they exist and fold correctly, and a reader who
+    wanted the number had to open the JSON (measured, review cycle 7 P3). A derived key
+    nobody renders is free to be wrong, which is why the module's own comment at
+    `_output_structure` criticises exactly that shape one function over.
+
+    The mutation this reds: drop either `bits.append(...)` arm from `render_compose`.
+    """
+    report = m.compose_report([_compose_artifact(live=True, calls=[_call(sections={
+        "points": {"items": 2, "chars_sum": 100, "tokens": 7,
+                   "kinds": {"a": 1, "b": 1}, "distinct_kinds": 2}})])])
+    table = m.render_compose(report)
+    assert "100 chars" in table, (
+        "the rendered table must READ `chars_sum` — it is published and folded, so a "
+        f"readerless key is a number nothing can see. Table:\n{table}")
+    assert "2 kinds" in table, (
+        "the rendered table must READ `distinct_kinds` — a published count with no "
+        f"reader is the shape the module criticises. Table:\n{table}")
+    assert "2 items" in table and "7 tok" in table, (
+        f"the pre-existing columns must survive the new ones. Table:\n{table}")
