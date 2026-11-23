@@ -19532,7 +19532,7 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
         if number not in hits:
             failures.append(
                 f"the `docs/00_index.md` row states {label} at `:{number}` as CURRENT, but "
-                f"`sdk`'s `{number}` is {actual.strip()[:90]!r} — the fragment {fragment!r} is "
+                f"`{source_key}`'s `{number}` is {actual.strip()[:90]!r} — the fragment {fragment!r} is "
                 f"at {hits}. Re-derive by CONTENT (`grep -n`), never by carrying the number "
                 "forward (#14386 review, P1: all four anchors were one line off)")
             continue
@@ -19545,7 +19545,7 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
         if hits != [number]:
             failures.append(
                 f"the `docs/00_index.md` row states {label} at `:{number}`, but {fragment!r} "
-                f"occurs at {hits} in `sdk` ({len(hits)} place(s)) — the pin binds the ONE "
+                f"occurs at {hits} in `{source_key}` ({len(hits)} place(s)) — the pin binds the ONE "
                 f"line it names, so an AMBIGUOUS needle is a red too: it would accept a "
                 f"re-point to any of them (#14386 review, P2). Give the entry a fragment "
                 f"unique to `:{number}`, as the `_logger.warning(` entry does.")
