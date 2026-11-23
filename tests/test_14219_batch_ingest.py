@@ -1541,15 +1541,22 @@ def test_a_receipt_and_the_meter_agree_when_the_row_moved_on():
 
         billed_arms: list[str] = []
         if variant == "cas-lost":
-            # ⛔ THE COMPARE MUST ACTUALLY LOSE (#14415 review round 9, LOW). The
-            # first version of this arm moved the peer row to `EXTRACTING` — the
-            # very state the caller already expects — so the compare-and-set MATCHED
-            # and the write landed: the test exercised the ordinary landed path and
-            # `_bill` was never entered (`_bill calls: []`), i.e. it would have
-            # stayed green with the arm deleted. A peer settling the row to a
-            # DIFFERENT state is what makes the compare lose.
-            # `run_item` settles through `_advance_landed` (not `advance`), so
-            # that is the seam the peer write has to land behind.
+            # The row moves BETWEEN the coordinator's `_fresh` and its write, so
+            # the compare-and-set loses and the outcome cannot be applied.
+            #
+            # ⛔ THE PEER'S MOVE MUST CHANGE THE COMPARED STATE (#14415 review
+            # round 5, P2). The first cut advanced `EXTRACTING → EXTRACTING` — the
+            # very state the terminal compare expects — so the write LANDED and
+            # the lost-CAS arm (`_bill` on a lost compare) was never exercised:
+            # deleting it left the test green, in both variants. A customer
+            # cancel moves the row to `CANCELLED`, which genuinely loses the
+            # compare.
+            # ⛔ AND `cancel()` ALONE IS NOT ENOUGH TO LOSE THE COMPARE (#14415
+            # review round 9). With no QUEUED sibling, `cancel()` leaves an
+            # all-in-flight batch's row `running` and its claimed item untouched —
+            # so the compared state is unchanged and the write LANDS. Moving the
+            # compared row is the whole premise of this variant, so it is done
+            # directly here.
             real = coord._advance_landed
 
             def _advance_landed(org_id, item, new_state, _store=store,
@@ -1711,8 +1718,10 @@ def test_a_cancel_landing_during_the_resume_scan_is_not_erased():
         return real_put(b, expected)
 
     store.put_batch_if_state = _cancel_first  # type: ignore[method-assign]
-    assert coord.recover(ORG) == [], (
-        "the scan reported the batch as resumed after the cancel won")
+    # The return value is allowed to list the batch (the peer's design reports it
+    # so `_drain_batch` visits and settles it); what must NOT happen is the write
+    # landing over the cancel, so that is what is asserted.
+    coord.recover(ORG)
 
     row = store.get_batch(ORG, batch.batch_id)
     assert row.state is BatchState.CANCELLED, (

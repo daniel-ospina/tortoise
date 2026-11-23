@@ -1925,3 +1925,41 @@ def test_one_unreadable_batch_does_not_pin_the_rotation(store, monkeypatch):
     assert set(ids[1:]) <= seen, (
         f"{sorted(set(ids[1:]) - seen)} were never inspected because one batch's "
         "read raises")
+
+
+def test_a_status_poll_cannot_erase_a_cancellation(store, monkeypatch):
+    """⛔ ROUND-5 REVIEW P1: `recover()`'s resume write had no compare-and-set.
+
+    `_resume_batch` reads the batch row, then the items, then wrote `resuming` —
+    so a `cancel()` landing in that gap was erased WITH its `cancelled_at`, and
+    `settle()`'s own CAS could then no longer save it (RESUMING is in that
+    compare's expected set), so the derived `partial` landed and
+    `pending_batches()` stopped selecting the row: the cancellation was gone for
+    good, and the cancelled document could be re-driven and billed. A status poll
+    is enough to reach it.
+    """
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/a.md", "/b.md"])
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.INDEXED, tokens_in=5)
+
+    real_items = store.items
+    state = {"fired": False}
+
+    def items_then_cancel(org_id, batch_id):
+        rows = real_items(org_id, batch_id)
+        if not state["fired"]:
+            state["fired"] = True
+            bi.BatchCoordinator(store).cancel(org_id, batch_id,
+                                              reason="cancelled by the customer")
+            return real_items(org_id, batch_id)
+        return rows
+
+    monkeypatch.setattr(store, "items", items_then_cancel)
+    coord.recover(ORG_ID)
+    monkeypatch.undo()
+
+    row = store.get_batch(ORG_ID, batch.batch_id)
+    assert row.state is bi.BatchState.CANCELLED, (
+        f"a status poll's resume write erased the cancel — row reads {row.state}")
+    assert row.cancelled_at, "the cancellation timestamp was erased"
