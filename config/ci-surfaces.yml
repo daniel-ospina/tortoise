@@ -48,14 +48,6 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
-# `b2d1e9086a`, plus this PR's two `core`-registered rows — `tests/test_14371_offline_embed_json.py`
-# and `tests/test_14186_embedder_seam_batching.py` — both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
-# the verb packs two shards at 837.0 s (a, e) and nine at 836.9 s (b, c, d, f, g, h, i, j, k), so
-# `ceil(837.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
-# reading of this pool from 835.5 s to 837.0 s while the SECONDS moved under it, so NO arithmetic
 # MERGES INTO, never carried from the branch that first wrote it. On the tree this sentence was
 # re-derived on (`origin/main` at `b2d1e9086a`, the tree this branch merges into — it carries BOTH
 # `core` rows that moved this pool, #14371's `tests/test_14371_offline_embed_json.py` and #14434's
