@@ -1286,7 +1286,7 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
 _NONCOMPARABLE_FRAGMENTS: dict[tuple[str, int], str] = {
     ("tortoise/sdk.py", 58611): "hybrid = self._tortoise_fts_query(",
     ("tortoise/sdk.py", 58612): 'entity_type="event"',
-    ("tortoise/sdk.py", 58828): "proj.g.query(",  # noqa: E501
+    ("tortoise/sdk.py", 58828): "proj.g.query(",
     ("tortoise/sdk.py", 58830): "s.turn_count, s.actor_user_id, s.harness,",
     ("tortoise/sdk.py", 59479): "MATCH (s:Source {url:$url})-[:references]->(n)",
     ("tortoise/sdk.py", 62810): "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
