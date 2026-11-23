@@ -6813,6 +6813,30 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("probes/capstone_measure.py", "with the flag ON", (
             ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
+        # ⛔ THE GATES `_IDLE_CITES["vet"]` NAMES, in the rule's own docstring — the second
+        # surface of one claim (#14269 review). `_IDLE_CITES["vet"]` above was re-pointed
+        # `:17967` -> `:17970`; this docstring, whose whole subject is "the FLAG is not the
+        # GATE", kept `:17967`, which reads `vet_s2_pool: dict = {}` — so a reader following
+        # the sentence landed on an assignment. No leg could see it: `_BUNDLE_CITE` needs a
+        # cite to NAME its file (this is a bare continuation), and the only other row reaching
+        # this docstring scopes on "with the flag ON", whose number sits one markdown line
+        # ABOVE the gate sentence. Measured pre-fix, `git grep -n -F '17967'` here also hits 2
+        # JSON substrings — no other CITE carried it.
+        # ⛔ RE-ADDED after the merge resolution with `origin/main` `588cf7aeb6` dropped it: the
+        # resolution took `main`'s whole copy of this file, which was right for the D5 block
+        # (unreachable) but ALSO discarded THIS row, ~900 lines away and not D5 machinery. The
+        # claim it guards is live and is in this PR's own net diff —
+        # `probes/capstone_measure.py`'s `` ``embed_list:`` (``:17970``) and ``if vet_enabled
+        # and complete_list:`` (``:15372``) `` sentence. Measured: WITHOUT this row, mutating
+        # `:17970` -> `:17967` in that probe leaves `444 passed` (green); WITH it, the same
+        # mutation reds `test_the_bare_continuation_cites_name_what_they_say`.
+        # Non-vacuity: on the pre-fix line `:17970` is ABSENT (it carried `:17967`), so this row
+        # reds on exactly the number it was added for, and the `_locate_hint` leg names the live
+        # line (`if vet_enabled and embed_list:` at `:17970`).
+        ("probes/capstone_measure.py", "and ``if vet_enabled and complete_list:``", (
+            ("17970", "if vet_enabled and embed_list:"),
+            ("15372", "if vet_enabled and complete_list:"),
+        )),
         ("probes/capstone_measure.py", "follows at", (
             ("14791", "edus = _edus_from_conversation(conversation)"),
         )),
