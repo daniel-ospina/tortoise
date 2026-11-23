@@ -449,8 +449,14 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     #: comprehension's element OR `if` clause, a `while` body, or a loop whose iterable is a
     #: NAME, an attribute, a call or a STARRED literal (`for _p in (*("_fts","_query"),)`).
     #: Each of those is pinned GREEN by
-    #: `test_an_accumulation_over_several_iterations_is_the_DECLARED_residual`, so a later
+    #: `test_an_accumulation_over_several_ITERATIONS_is_the_DECLARED_residual`, so a later
     #: change that starts resolving them must edit the note instead of leaving it stale.
+    #: ⛔ THAT NAME IS SPELLED IN ITS REAL CASE ON PURPOSE (#14326 round 18): this note used to
+    #: say `..._several_iterations_...`, which is NO TEST — the real one capitalises
+    #: `ITERATIONS`, so the sentence pointed the next author at a red they could never get and
+    #: at nothing they could edit. A reference that resolves to no test is the same stale-claim
+    #: class as this file's other residual notes, and round 17's reviewer measured it and
+    #: passed it; it is corrected here rather than carried.
     #: ⛔ THE `AsyncFor` *BIND* IS PINNED SOMEWHERE ELSE, AND SAYING "EACH IS PINNED BELOW"
     #: WAS FALSE FOR IT (#14326 round 17, MEASURED at `689708686b`: deleting `ast.AsyncFor`
     #: from the bind tuple below left the whole file at **39 passed**). The residual test
@@ -2429,11 +2435,45 @@ def _loop_target_sources(iterable: ast.AST) -> list[ast.AST]:
     a `for` target over a literal (there it unions the elements' VALUES, which is why the
     string axis was never affected). Iterating a dict yields its KEYS, `None` being a
     `**spread` and no key at all; anything else binds the iterable itself.
+
+    ⛔ A `*`/`**` INSIDE THE LITERAL IS THE SAME ELEMENT ONE SPLICE OVER (#14326 round 18,
+    MEASURED at `7ba358467252`: `(*(sys.modules,),)` and `{**{sys.modules: 1}}` both left
+    the pin GREEN while `(sys.modules,)` was RED). A `Starred` element is not a value the
+    target can take — the splice is — so a starred LITERAL is expanded and a starred
+    ANYTHING-ELSE binds that expression (the `for _x in _R:` over-approximation already
+    used for a NAME iterable). The same holds for a `**spread`: `{**d}` yields `d`'s keys,
+    so a spread of a dict LITERAL is expanded and a spread of anything else binds it.
+    ⛔ AND THE RESIDUAL IS NAMED, NOT IMPLIED: an iterable whose elements this does not
+    expand — a `IfExp`/`BoolOp`/`BinOp` over literals, a comprehension or generator, a
+    subscript — binds the container expression, so every SHAPE predicate
+    (`_is_module_registry`, `_is_namespace_expr`, `_is_setattr_like`) is blind to it. It is
+    deliberately NOT enumerated here (the power-set blow-up the `_str_constants` note
+    measures). It is pinned GREEN, and named, by
+    `test_the_ALIAS_axis_iterable_residuals_are_NAMED_and_pinned_GREEN` — not claimed as
+    coverage by this docstring.
     """
     if isinstance(iterable, (ast.Tuple, ast.List, ast.Set)):
-        return list(iterable.elts)
+        expanded: list[ast.AST] = []
+        for element in iterable.elts:
+            if not isinstance(element, ast.Starred):
+                expanded.append(element)
+            elif isinstance(element.value, (ast.Tuple, ast.List, ast.Set, ast.Dict)):
+                expanded.extend(_loop_target_sources(element.value))
+            else:
+                expanded.append(element.value)
+        return expanded
     if isinstance(iterable, ast.Dict):
-        return [key for key in iterable.keys if key is not None]
+        keys: list[ast.AST] = []
+        # `ast.Dict` guarantees `len(keys) == len(values)`, so `strict=True` states the
+        # invariant rather than tolerating a silently shorter `values`
+        for key, value in zip(iterable.keys, iterable.values, strict=True):
+            if key is not None:
+                keys.append(key)
+            elif isinstance(value, ast.Dict):
+                keys.extend(_loop_target_sources(value))
+            else:
+                keys.append(value)
+        return keys
     return [iterable]
 
 
@@ -6091,6 +6131,17 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "same bind arm as `ast.For`, and removing it must red this row rather than leave "
         "the arm unpinned")
 
+    # ⛔ THE *ALIAS* ARM'S `ast.AsyncFor` MEMBER IS PINNED BY THE SIBLING LANE, NOT HERE
+    # (#14326 round 18). Dropping it from `_aliases_of`'s `(ast.For, ast.AsyncFor)` tuple left
+    # this whole file at **39 passed** (re-measured by this lane before it saw the peer's
+    # work), and `45a7d205c7c4` pins that member end-to-end through `aug_levers` with the
+    # `async for` lever above; `c54f4f22d3cd` pins the other two LOAD-BEARING `ast.AsyncFor`
+    # members (`_in_loop`, `_extra_bindings`) and NAMES the four that are redundant. A second
+    # row asserting the same deletion from the resolver side would add no discriminating power
+    # — two rows for one member is the double-pinning the peer's own note declines — so the
+    # finding is recorded here and the pin is theirs. The `_pin_source_async` wrapper that
+    # makes such a row possible is still exercised by round 17's `_str_constants` row.
+
     # ⛔ THE CONTROL, in the false-red direction: a constant that only NAMES the read.
     inert = ('    _NOTE = "_tortoise_fts_query"\n'
              '    print(f"measuring {_NOTE}")\n')
@@ -6321,8 +6372,12 @@ def test_a_value_READ_OUT_of_a_LITERAL_container_is_a_reach() -> None:
     # a NAME-held container is not statically pairable, and resolving a name's whole value set
     # here would false-red the provenance lookup the `_is_read_ref` narrowing exists to keep
     # green. An author who makes this resolve must DELETE the residual note, not leave it
-    # contradicting the code — the reason `test_a_loop_over_a_NAME_stays_the_DECLARED_residual`
-    # pins its own boundary the same way.
+    # contradicting the code — the reason
+    # `test_an_accumulation_over_several_ITERATIONS_is_the_DECLARED_residual` (its `loop over a
+    # NAME` row) pins its own boundary the same way. ⛔ IT USED TO NAME
+    # `test_a_loop_over_a_NAME_stays_the_DECLARED_residual`, WHICH DOES NOT EXIST (#14326 round
+    # 18, MEASURED: no such `def test_`, in this file or under `tests/`) — a stale reference is
+    # a claim no test can red, which is the defect class this file deletes clauses for.
     name_held = ('    _CFG = {"read": "_tortoise_fts_query"}\n'
                  '    _N = _CFG["read"]\n'
                  f'    {reach.format(name="_N")}\n')
@@ -7636,6 +7691,17 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "import registry via an `async for` target over a TUPLE literal":
             'async def _a():\n    async for _x in (sys.modules,):\n'
             '        _x |= {"tortoise.sdk": _Mirror}\n',
+        # ⛔ A SPLICE INSIDE THE LITERAL IS THE SAME ELEMENT ONE `*`/`**` OVER (#14326 round
+        # 18, MEASURED GREEN at `7ba358467252` while the plain tuple/spread rows above were
+        # RED). `_loop_target_sources` returned the `Starred` NODE as the value the target
+        # binds, and DROPPED a `**spread` key entirely (`keys` carries `None` there) — so the
+        # two shapes round 17 closed stayed open one operator over, and the docstring's "no
+        # key at all" read as coverage. One row per splice kind. The `async for` row above is
+        # the SIBLING lane's (round 18, `45a7d205`); these two are disjoint from it.
+        "import registry via a `for` target over a STARRED tuple literal":
+            'for _x in (*(sys.modules,),):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "import registry via a `for` target over a `**` dict spread":
+            'for _x in {**{sys.modules: 1}}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
     }
     for name, lever in aug_levers.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
@@ -7669,6 +7735,69 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     no_import = "def run(queries):\n    sdk = TortoiseSDK()\n"
     got = ctor_findings(no_import)
     assert got and "no `from tortoise.sdk import TortoiseSDK`" in got[0], got
+
+
+def test_the_ALIAS_axis_iterable_residuals_are_NAMED_and_pinned_GREEN() -> None:
+    """The alias axis' closed set and its DECLARED residual, each pinned (#14326 round 18).
+
+    ⛔ TWO SHAPES WERE FAIL-OPEN ONE OPERATOR OVER FROM THE ROUND-17 FIX, MEASURED at
+    `7ba358467252`: `_loop_target_sources` returned a `Starred` element AS ITSELF (matching no
+    shape predicate) and DROPPED a `**spread` key entirely, because `ast.Dict.keys` carries
+    `None` there and the old arm filtered those out. So `for _x in (*(sys.modules,),):` and
+    `for _x in {**{sys.modules: 1}}:` left the pin GREEN while `for _x in (sys.modules,):` was
+    RED — the same bind, the same class, one splice over. Both are closed above (the splices
+    are expanded), and the first block below is what reds if either arm regresses.
+
+    ⛔ AND THE RESIDUAL IS NAMED RATHER THAN IMPLIED. An iterable whose elements this does not
+    expand binds the CONTAINER expression, so the SHAPE predicates (`_is_module_registry`,
+    `_is_namespace_expr`, `_is_setattr_like`) are blind to it — the same over-approximation
+    the axis already makes for a NAME iterable, not a new boundary, but a real one, and the
+    second block pins it GREEN so the note cannot drift. Closing any of them (e.g. widening a
+    shape predicate to walk a container, as `_mentions_mapping` already does) must EDIT this
+    table, not leave it contradicting the code.
+    """
+    shipped = ("from tortoise.sdk import TortoiseSDK\n"
+               "def run(queries):\n"
+               "    sdk = TortoiseSDK()\n")
+
+    def reds(lever: str) -> bool:
+        return bool(_constructor_provenance_findings(ast.parse(shipped + lever)))
+
+    closed = {
+        "tuple literal": 'for _x in (sys.modules,):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "list literal": 'for _x in [sys.modules]:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "set literal": 'for _x in {sys.modules}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "dict literal (keys)":
+            'for _x in {sys.modules: 1}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "STARRED literal":
+            'for _x in (*(sys.modules,),):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "`**` dict spread":
+            'for _x in {**{sys.modules: 1}}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "STARRED NAME (the alias fixpoint, not the literal arm)":
+            '_R = sys.modules\nfor _x in (*_R,):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+    }
+    for name, lever in closed.items():
+        assert reds(lever), (name, lever)
+
+    residual = {
+        "IfExp over literals":
+            'for _x in ([sys.modules] if queries else []):\n'
+            '    _x |= {"tortoise.sdk": _Mirror}\n',
+        "BoolOp over literals":
+            'for _x in ([sys.modules] or []):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "BinOp concat":
+            'for _x in ([sys.modules] + []):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "list comprehension":
+            'for _x in [g for g in (sys.modules,)]:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "generator expression":
+            'for _x in (g for g in (sys.modules,)):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "call": 'for _x in list((sys.modules,)):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "subscript":
+            'for _x in ((sys.modules,),)[0]:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+    }
+    for name, lever in residual.items():
+        assert not reds(lever), ("declared residual went CLOSED without this table being "
+                                 "edited", name, lever)
 
 
 def test_every_door_contract_clause_reds() -> None:
