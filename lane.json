@@ -1,0 +1,21 @@
+{
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "exit_code": null,
+  "heartbeat_at": 1795446480,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-14365-1795446480-p3066304-6cffd4a2",
+  "lease_until": 1795483080,
+  "pid": 3066304,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795446480,
+  "state": "RUNNING",
+  "tag": "prd-daniel-ospina-tortoise-14365",
+  "worktree": "/home/cmux/tortoise/.worktrees/14343-amplify"
+}
