@@ -12353,19 +12353,21 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     `_g = dict.__dict__.get; _g("get")`, and every `[…"get"]`/`dict.get` spelling OF THE MODULE
     SPELLED `dict` — are REFUSED and pinned by rows. ⛔ THE SCOPE OF THAT WORD "EVERY" IS MEASURED,
     and it does NOT reach the module fetched out of the builtins namespace (#14395 review, P1):
-    `_f = builtins.dict.get; _f(builtins.__dict__, "exec")(<read>)` is GREEN and LIVE
-    (`builtins.dict.get is dict.get` → True), as are `__builtins__["dict"].get`,
-    `builtins.__dict__["dict"].get`, `vars(builtins)["dict"].get` and `getattr(builtins,
-    "dict").get` — while the inline `builtins.dict.get(m, "exec")` and
-    `builtins.dict.__dict__["get"]` are RED. ⛔ AND ONE SPELLING THIS PARAGRAPH USED TO CALL
-    LIVE IS NOT: `_g = builtins.dict.__getitem__; _g("get")` reads GREEN but CANNOT EXECUTE —
-    `builtins.dict.__getitem__("get")` raises `TypeError: descriptor '__getitem__' for 'dict'
-    objects doesn't apply to a 'str' object` (MEASURED, #14395 review P3). It stays GREEN in the
-    census and is NOT a lever, which is why it is named here as GREEN rather than folded into
-    the LIVE list above. That class is PRE-EXISTING on `main`
-    (measured: the same seven shapes read GREEN there) and is FILED rather than claimed closed
-    here; the arm is a receiver the `{"dict", "copy"}` union cannot supply, because the module is
-    reached through the namespace and not named.
+    `_f = builtins.dict.get; _f(builtins.__dict__, "exec")(<read>)` EXECUTES the read
+    (`builtins.dict.get is dict.get` → True), and so do the four other spells that fetch the same
+    member through the namespace — `__builtins__["dict"].get`, `builtins.__dict__["dict"].get`,
+    `vars(builtins)["dict"].get` and `getattr(builtins, "dict").get`. TWO further spells read
+    GREEN but cannot RUN, and they are recorded rather than counted as liveness: `_g =
+    builtins.dict.__getitem__; _g("get")` and `_g = builtins.dict.get; _f = _g("get")` raise
+    `TypeError` (`method_descriptor` does not apply to a `str`) — the class this file already
+    records as a lever that cannot execute. ⛔ ALL SEVEN — the five that execute the read and the
+    two that raise — read GREEN on `origin/main` as well (MEASURED through `origin/main`'s OWN
+    `_pin_refuses` at `b2d1e9086a`: 7 of 7, bound-first as this paragraph spells them, and the two
+    inline twins named below are RED there too), so the class is PRE-EXISTING and is FILED rather
+    than claimed closed here (`#14315`, whose root is exactly that a spelling list cannot be
+    completed); the arm is a receiver the `{"dict", "copy"}` union cannot supply, because the
+    module is reached through the namespace and not named. While the inline
+    `builtins.dict.get(m, "exec")` and `builtins.dict.__dict__["get"]` are RED.
     ⛔ THE INLINE FORM OF THE SAME COMPOSITION IS **NOT** REFUSED, and it is rowed BELOW with the
     class rather than here: `dict.__dict__.get("get")(m, "exec")` applies the resolved read to a
     literal key and then applies THAT, in one expression, which is the two-step application and
