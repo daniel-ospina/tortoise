@@ -332,6 +332,21 @@ PY
 carry (measured 21.7 % here — so "sample the big ones first" is not a saving,
 it is the same cost in a different order).
 
+### The 516-entry figure, stated both ways
+
+The backlog is quoted as **516 sessions** at a **36 415-token** median
+(`#14277`) ⇒ **≈18.8M tokens** of extraction, landing on the **session-extraction
+provider allowance** (the key behind `TORTOISE_SESSION_LLM_MODEL` /
+`DEEPSEEK_API_KEY`), **not** on the hosted API's own quota — the capture POST
+itself is turns + a Session row and makes no model call inside the ACK.
+
+If the production size distribution has the skew this corpus shows (top 10 %
+≈ 22 % of tokens), then of that ~18.8M roughly **4.1M sits in the largest ~52
+sessions** and **~14.7M in the remaining ~464** — i.e. the cost is broad, not
+concentrated, and batching by size does not change the total. ⚠️ That is a
+**projection from a different corpus's skew**, not a measurement: measure the
+drain box's own spool with the command above before committing a budget.
+
 **If no provider key is configured the extraction does not run at all**
 (`extraction: {"status": "stored", "extractor": "none"}`), and the drain files
 everything for ~zero model cost — with `extracted: 0`. That is a legitimate
