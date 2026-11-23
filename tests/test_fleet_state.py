@@ -3802,13 +3802,42 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: deliberately BELOW the true count, so a step derived from it still carries the clock with one
 #: read of slack. ⛔ NOT A GUESS, BUT NOT A STATIC PIN EITHER (#12039 cycle 13, F1) — for a TYPO
 #: in either direction. MEASURED on copies at this head, implementation unmutated, only this
-#: constant moved:
-#: `6 -> 7` leaves `184 passed`, `19` leaves `184 passed`, and `1` and `2` also leave `184 passed`
-#: (they DO move the `max()` below — `10/1 + 0.1 = 10.1` — and still red nothing, because the step
-#: has to pass `_CENSUS_SAMPLE_TIMEOUT_S = 30.0` to change a verdict, which this integer domain
-#: cannot reach). Only a raise to `>= 20` reds (`20 * 0.5 = 10.0` is no longer `< 10`) — MEASURED,
-#: `11 failed`, the premise-(b) assertion firing across all 11 params. The behavioural pins are the
-#: `once_slow` and `death_after_streak` ROWS, not a bare assertion on this constant.
+#: constant moved: `6 -> 7` leaves `186 passed`, `19` leaves `186 passed`, and `1` and `2` also
+#: leave `186 passed` (they DO move the `max()` below — `10/1 + 0.1 = 10.1` — and still red
+#: nothing, because the step has to pass `_CENSUS_SAMPLE_TIMEOUT_S = 30.0` to change a verdict,
+#: which no positive value of this integer can reach). A raise to `>= 20` reds, by the premise-(b)
+#: assertion (`20 * 0.5 = 10.0` is no longer `< 10`) — MEASURED, `12 failed, 174 passed` across
+#: all 12 params; `0` reds the SAME 12, but by `ZeroDivisionError` rather than premise (b), so `0`
+#: is not a silent typo but a crash. Every OTHER value tried stayed green (`7`, `18`, `19`, `1`,
+#: `2`). ⚠️ THE TOTALS ABOVE ARE THIS HEAD's, AND `origin/main`'s TOO: the `184` in the prose
+#: below was measured at `a7baa98d05`, BEFORE #14287 merged, so every TOTAL here was re-measured
+#: rather than inherited. The behavioural pins are the `once_slow` and `death_after_streak` ROWS,
+#: not a bare assertion on this constant.
+#: ⛔ EVERY `184 passed` / `173 passed` TOTAL IN THIS WHOLE FILE — ABOVE *AND* BELOW, in this
+#: block, in the `_LONG_PATH_STREAK_TIME_CALLS` commentary, in `test_...` bodies and in the
+#: `:51xx` measured notes — IS `main`'s AS OF `a7baa98d05` (#14387), BEFORE #14287 merged.
+#: #14287 adds TWO tests, so those totals are NOT inheritable on ANY tree carrying it: this
+#: branch, and `origin/main` since `9d6d2e347fd4` — RE-MEASURE EACH SITE, because the delta
+#: differs by site (two measured below): PR #14287 restores
+#: `test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail`, which drives `_verdict_or_fail`
+#: with a STUB and never constructs a child, a census or these constants, and adds the `blip` census
+#: ROW (a prior error, a recovery, then a derived late burst — #14287 review P3). So `184 passed` ->
+#: `186 passed` (verified at `K = 6`), and the `K = 1` site — which records `11 failed, 173
+#: passed` at `a7baa98d05` — reads `12 failed, 174 passed` here (verified) — the passed delta is
+#: ONE there, not two, because that site's run already fails the peer's row as well. The FAILING
+#: count at `K >= 20` is `12`, not `11`: the peer's `blip` row joins the failure set (it jumps the
+#: simulated clock by the bound + 1 s). ⛔ It does NOT red through the
+#: `calls["n"] > burst_state["started_at"] + burst` assertion —
+#: at `K = 20` EVERY one of the 12 params, `blip` included, reds at the GLOBAL premise (b) above
+#: ("the death sample must arrive BEFORE the poll's deadline"), which runs BEFORE the poll, so no
+#: arm-specific assertion is reached at all (measured with `--tb=line` at `K = 20`: `12 failed, 174
+#: passed`, every failure on the premise-(b) `assert _LONG_PATH_ERROR_SAMPLE_TIME_CALLS *
+#: death_step_s < _LONG_PATH_POLL_BUDGET_S`). ⚠️ That assert is cited by SYMBOL, not by line: an
+#: earlier cut of this note printed a line number, and it was false on the tree that shipped it
+#: (`4811` was the line two commits BEFORE the tree that printed it; a later cut printed `4835`,
+#: which was not the line on ANY tree — it was `4822` on the head that printed it). The assert's
+#: own edits move it, so the symbol is the durable address.
+#: Attributed after review: an earlier cut named that later assertion as the mechanism.
 _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 
 #: How many `time()` reads span the STREAK at the sample where the count+span conjunction fires
@@ -3819,8 +3848,8 @@ _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 #: `_LONG_PATH_STREAK_TIME_CALLS * death_step_s >= _CENSUS_ERROR_MIN_SPAN_S` — expands to
 #: `0.1 * K >= 0` and is true for every positive K, because the divisor cancels against its own
 #: product. MEASURED at this head, on copies, restored after each run:
-#:   K = 8, implementation unmutated      -> `184 passed`  (the deleted assertion saw nothing)
-#:   K = 8, `_child_exited` moved BELOW the conjunction -> `184 passed`  (the row goes VACUOUS)
+#:   K = 8, implementation unmutated      -> `186 passed`  (the deleted assertion saw nothing)
+#:   K = 8, `_child_exited` moved BELOW the conjunction -> `186 passed`  (the row goes VACUOUS)
 #:   K = 5, same mutant                    -> `1 failed`   (the row reds — it IS the real pin)
 #: ⛔ MEASURE THE MUTANT YOU NAME (#12039 cycle 13). An earlier version of this paragraph reported
 #: "still `2 failed` at `K = 8`" from a mutant that made the check UNREACHABLE rather than moving it
@@ -3830,19 +3859,36 @@ _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 #: WHY the typo is NOT survivable: with the gate not yet qualified at the death sample the poll
 #: keeps going; a moved-below check then meets the already-dead child on that same sample and
 #: breaks to the same outside-signal SKIP the shipped order produces — both orderings agree, and
-#: the arm can no longer distinguish them. (Deleting the check instead reds the row on every K at
-#: which the file is green unmutated — for a DIFFERENT reason, since nothing observes the death at
-#: all — which is exactly why the wrong mutant looked reassuring. ⛔ SCOPE A CLAIM TO THE K IT WAS
-#: MEASURED AT: the deletion raises on the death sample itself at the shipped `K = 5`
-#: (`on 2 consecutive samples over 2.50s`) and only one sample later from `K = 7` (`K = 8`: count 3,
-#: span 3.15 s), and at `K = 1` nothing at all is attributable — premise (b) below reds the FILE
-#: with no mutant applied, the same `11 failed, 173 passed` either way.)
+#: the arm can no longer distinguish them. (Deleting the check instead reds the row for a DIFFERENT
+#: reason — nothing observes the death at all — at every K at which the file is green unmutated
+#: that has been measured: 2, 3, 5, 6, 7, 8, 12, 16, 17, 19, 37, 38, 50, 113, 114. That is exactly
+#: why the wrong mutant looked reassuring. ⛔ SCOPE A CLAIM TO THE K IT WAS MEASURED AT: the
+#: deletion raises on the death sample itself at the shipped `K = 5` (`on 2 consecutive samples
+#: over 2.50s`), and the count it needs GROWS with `K`, so it is a RANGE carrying its endpoints —
+#: never a bare "from K = …": 2 at `K = 2..6` (2.50 s at the shipped `K = 5`), 3 at `7..16` (3.47 /
+#: 3.15 / 2.40 / 2.03 s at 7 / 8 / 12 / 16), 4 at `17..37` (2.83 / 2.67 / 2.00 s at 17 / 19 / 37),
+#: 5 at `38..113` (2.59 / 2.38 / 2.00 s at 38 / 50 / 113), 6 at `K >= 114` (2.47 s at 114). Every
+#: bracketed value is MEASURED with the deletion mutant, and each boundary is the PAIR where the
+#: count crosses (`6|7`, `16|17`, `37|38`, `113|114`). ⛔ THE LAST SEGMENT HAS NO UPPER END, so
+#: writing it as the point `6 at K = 114` would be the same over-claim in the safe direction: past
+#: 114 the count SATURATES at `6` (MEASURED: 6 samples, 2.47 s at `K = 115` and 2.31 s at `K = 200`),
+#: which is the ceiling the derivation below explains: the model is the one the `time()`-read
+#: note already documents — `step_s + 4(k - 1) * step_s`, i.e.
+#: `(4k - 3) * step_s` with `step_s = 2/K + 0.1` — so `k` is the FIRST `k >= 2` clearing
+#: `(4k - 3) * (2/K + 0.1) >= 2.0`. That reproduces every span above, and `6` is the CEILING
+#: because the step never falls below `0.1` (`17 * 0.1 = 1.7 < 2.0` at `k = 5`), so the count rises
+#: as the STEP shrinks. ⛔ The point `4 from K = 17` stood here and is FALSE at `K = 50` (5 samples,
+#: 2.38 s) — a K this same comment lists as measured. And at `K = 1` nothing at all is
+#: attributable: premise (b) below reds the FILE with no mutant applied — all 12 params on the
+#: same assertion, MEASURED at this head — the same `12 failed, 174 passed` either way.)
 #: SO: no static assertion can pin this constant. The `death_after_streak` ROW pins the ORDERING
 #: wherever the gate is satisfied at the death sample — `5 * (2/K + 0.1) >= 2.0`, i.e. `K <= 6` —
-#: MEASURED: `1 failed` at `K` = 2, 3, 4, 5, 6, and `184 passed` (vacuous) at `K` = 7 and 8. A typo
+#: MEASURED: `1 failed` at `K` = 2, 3, 4, 5, 6, and `186 passed` (vacuous) at `K` = 7 and 8. A typo
 #: past that boundary therefore retires the guard silently, with nothing static to red. ⛔ SCOPE IT
 #: THAT WAY rather than to "the shipped value": the row covers a RANGE of K, and writing the range
-#: as one point is the same over-claim in the safe direction.
+#: as one point is the same over-claim in the safe direction. Same discipline on the other side:
+#: state a range with its derivation and its endpoints, never a bare "from K = 7" — that phrase
+#: was written once here and was already false by `K = 17`.
 _LONG_PATH_STREAK_TIME_CALLS = 5
 
 
@@ -4217,6 +4263,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     time.sleep(0.1)
                     continue
                 err_streak = 0
+                # ⛔ INDIVIDUALLY REDUNDANT WITH THE `err_streak == 0` STAMP ABOVE, and that is
+                # deliberate: the stamp restarts the clock on the next error either way, so
+                # deleting THIS line alone leaves every row green — measured on this tree. The
+                # PROPERTY (a recovery restarts the streak clock) is graded as a PAIR by the
+                # `blip` row, whose recorded mutant is the two-line revert to the pre-#12039
+                # `if streak_started is None:` semantics. Read the row, not this line, before
+                # concluding a deletion here should have redded something (#14287 review P3).
                 streak_started = None
                 healthy_samples += 1
                 pids = [p["pid"] for p in procs]
@@ -4452,6 +4505,56 @@ def _verdict_or_fail(expect, why: str, call):
     return excinfo.value
 
 
+def test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail() -> None:
+    """The skip→FAIL conversion needs its OWN witness (restored after the #12039 rebase).
+
+    `_verdict_or_fail` is the mechanism every verdict-bearing arm of the four-way split relies
+    on: `pytest.skip.Exception` derives from `BaseException` (measured:
+    `Skipped.__mro__` -> `Skipped, OutcomeException, BaseException, object`), so
+    `pytest.raises(...)` never sees an escaping skip and a must-FAIL arm regressed to
+    `pytest.skip(...)` would record its witness as SKIPPED rather than failing it — the false
+    PASS this file's own comments record as nearly shipping.
+
+    ⛔ THIS ROW WAS LOST IN THE REBASE ONTO `origin/main` `d2cd8ab06e` (#14287 review, P2). The
+    rebase took main's landed #12039 repair (`10d54ad03d8a`, #14372) wholesale, which renamed
+    the helper `_drive_long_path_arm` -> `_verdict_or_fail` and is otherwise a superset — but
+    main carries NO row that drives the helper with a skipping stub, so its
+    `except pytest.skip.Exception: pytest.fail(...)` branch was left UNGRADED. Measured on
+    main's text: `_verdict_or_fail` appears THREE times — one definition and TWO call sites,
+    both passing the real fixture (`lambda: test_pi_processes_sees_a_real_long_path_lane(...)`)
+    — so nothing stubs a skip into it, and a simplification of the helper back to a bare
+    `pytest.raises(...)` would restore the hole with nothing red. (⛔ NOT `grep -c 'SKIPPED
+    where'` -> 0, which an earlier cut of this paragraph printed: that string lives INSIDE the
+    helper, so the count is AT LEAST 1 on any tree carrying `_verdict_or_fail` — 1 on
+    `origin/main`, and 2 on this tree, where this row's own assertion is the second — so it
+    cannot support the inference either way, and the `-> 0` was a reading of the
+    pre-`10d54ad03d8a` tree. Corrected after review, twice: the first correction said `1`
+    unconditionally, which is false HERE for exactly that reason.)
+
+    ⛔ AND THE WITNESS ITSELF MUST NOT BE ABLE TO PASS BY SKIPPING (the finding that produced the
+    form below). Delegating to the helper inside `pytest.raises` measures `passed, 1 skipped`
+    once the helper's skip-`except` is deleted — the witness skipping over the hole. So the
+    outcome is asserted DIRECTLY: a raised skip here is caught and FAILED, never propagated.
+
+    What this grades: replacing the helper's `pytest.fail(...)` body with `pass`, or deleting
+    its skip-`except`, reds this row. It does NOT grade the helper's `expect == "skip"` re-raise
+    branch — that branch is graded by the NINE `expect="skip"` parametrizations below (two
+    expiry arms and seven census arms), which red when it is neutered (measured: `9 failed`).
+    """
+
+    def _skipping():
+        pytest.skip("STUB: an arm that must never skip")
+
+    try:
+        _verdict_or_fail(AssertionError, "the stub witness", _skipping)
+    except pytest.fail.Exception as exc:
+        assert "SKIPPED where AssertionError is required" in str(exc), exc
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"_verdict_or_fail let a skip escape instead of converting it: {exc}")
+    else:
+        pytest.fail("_verdict_or_fail returned without converting the skip into a FAIL")
+
+
 @pytest.mark.parametrize(
     ("rc", "expect", "marker", "why"),
     [
@@ -4618,6 +4721,14 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
             "a burst that satisfies the ERROR COUNT but not the SPAN, arriving AFTER "
             "_CENSUS_ERROR_MIN_SPAN_S of healthy polling, is still the load class — the span "
             "belongs to the STREAK, not to the poll (cycle-6 P1)",
+        ),
+        (
+            "blip", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "ONE `ps` blip, TWO healthy samples, then a DERIVED late burst: the span belongs to "
+            "the CURRENT streak, so a recovery must restart the clock. ⛔ THE ONLY ROW THAT "
+            "GRADES IT — with this arm removed, the pre-#12039 `if streak_started is None:` "
+            "revert leaves 17 passed; with it, that revert reds this row alone (#14287 review "
+            "P3, lost in the #12039 rebase)",
         ),
         (
             "persistent", True, -9, "skip", "was killed by SIGKILL (9)",
@@ -4883,6 +4994,53 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
             if clock.step_s == 0.0:
                 clock.step_s = step_s
             return [], None
+        if census_kind == "blip":
+            # ⛔ THE STREAK CLOCK MUST RESTART AFTER A RECOVERY (#14287 review P3, restored here
+            # after the #12039 rebase dropped it). `_CENSUS_ERROR_MIN_SPAN_S` bounds the age of
+            # the CURRENT CONTINUOUS streak, not of the poll's first-ever error: a sample-1 blip,
+            # a long healthy stretch, then a 0.2 s late burst is the load class rule 1 protects,
+            # and a `streak_started` that still holds the blip's timestamp turns it into a
+            # `HarnessDefect` on a REQUIRED shard.
+            # ⛔ THIS IS THE ONLY SHAPE WHERE A STALE `streak_started` IS OBSERVABLE, and the
+            # `late_pair` row above does NOT subsume it: that poll has no prior error at all, so
+            # its first burst sample stamps the clock from `None` either way. MEASURED on this
+            # tree with this arm removed — revert the pair below to the pre-#12039 semantics
+            # (`if streak_started is None:` stamp, reset line deleted) and the census selection
+            # stays `17 passed`, i.e. the term was UNGRADED. With this arm, the same revert reds
+            # exactly this row.
+            # Shape: ONE erroring sample (the blip), TWO healthy samples (the recovery that must
+            # clear the streak), then the derived burst. The healthy prefix is TWO rather than the
+            # one sample the reset needs, so the arm does not hinge on the loop's first-sample
+            # bookkeeping (a census error and a census answer both cost reads).
+            # ⛔ THE PLACEMENT IS A CLOCK JUMP, NOT A SAMPLE INDEX AND NOT A WAIT. `late_pair`
+            # waits because its premise is the poll's OWN elapsed time; here the premise is a gap
+            # between the BLIP's stamp and the burst, and a wait on the shared clock budgets for
+            # reads the blip sample itself consumed (MEASURED on the first version of this arm,
+            # which waited for `MIN_SPAN + 3 steps`: the mutant's span came out 1.9 s < 2.0 and the
+            # row passed on the regression it exists to catch). Jumping the clock by the bound plus
+            # ONE SECOND makes the gap structural: the correct implementation stamps AFTER the
+            # jump, so its span is 0; a stale stamp is >= 1 s over the bound whatever the per-sample
+            # read count is. The burst length stays DERIVED (`burst`), so raising
+            # `_CENSUS_ERROR_STREAK` moves the arm with the constant instead of retiring it.
+            # The premise that keeps this honest — the jump must stay inside the poll's budget, or
+            # the poll breaks before the burst completes and the row goes vacuous — is ASSERTED in
+            # the post-block below (`calls["n"] > started_at + burst`), the same guard `late_pair`
+            # carries.
+            if calls["n"] == 1:
+                return [], err
+            if calls["n"] <= 3:
+                return [], None
+            if burst_state["started_at"] is None:
+                clock.now += _CENSUS_ERROR_MIN_SPAN_S + 1.0
+                burst_state["started_at"] = calls["n"]
+                burst_state["left"] = burst
+            if burst_state["left"]:
+                burst_state["left"] -= 1
+                clock.step_s = 0.0
+                return [], err
+            if clock.step_s == 0.0:
+                clock.step_s = step_s
+            return [], None
         if census_kind == "death_after_streak":
             # ⛔ THE FIXTURE DIES WHERE THE GATE WOULD FIRE (#12039 cycle 10, P2). Sample 1 errors
             # while the child is ALIVE, so the streak STARTS and no arm can classify the death
@@ -4931,15 +5089,15 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
         )
     if census_kind == "once":
         assert calls["n"] > _CENSUS_ERROR_STREAK, "a single error must not decide the verdict"
-    if census_kind == "late_pair":
+    if census_kind in {"late_pair", "blip"}:
         assert burst_state["started_at"] is not None, (
             "the burst never started: `_CENSUS_ERROR_MIN_SPAN_S` was not reachable inside the "
             "poll's own budget, so this arm never placed the blip and graded the deadline arm "
             "instead — raise the poll's budget or lower the bound (#12039)")
         assert calls["n"] > burst_state["started_at"] + burst, (
             "the poll must keep running after a burst that satisfies the COUNT but not the SPAN "
-            f"(started_at={burst_state['started_at']}, burst={burst}) — a census verdict here is "
-            "the #5049 rule-1 false red this arm pins against")
+            f"(kind={census_kind}, started_at={burst_state['started_at']}, burst={burst}) — a "
+            "census verdict here is the #5049 rule-1 false red this arm pins against")
 
 
 def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
