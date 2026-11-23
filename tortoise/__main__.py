@@ -6098,6 +6098,14 @@ def _cmd_create_point(args) -> int:
     print(f"  Kind: {args.kind or 'statement'}")
     content_preview = args.content[:100] + "..." if len(args.content) > 100 else args.content
     print(f"  Content: {content_preview}")
+    # #14424: the criterion's real moment is the SEARCH, and this verb is where
+    # a first-run user stands when they need it. The CLI has no search verb
+    # (declared in docs/evidence/14424-onboarding/README.md D5), so the next
+    # action must name the doors that do — otherwise "Created point: <id>" is a
+    # success with no next step, and the memory is never found again.
+    print(f"  Next: search for it — GET {api_url}/v1/search?q=<a word from it> "
+          "(hosted), or the `tortoise_search` MCP tool / "
+          "`TortoiseSDK.search_knowledge` — this CLI has no search verb yet (#14424).")
     return 0
 
 

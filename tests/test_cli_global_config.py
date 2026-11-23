@@ -207,6 +207,17 @@ class TestCreatePointRetrySafety:
             assert main(["create-point", "hello world"]) == 0
         assert "dedup" not in json.loads(urlopen.call_args.args[0].data.decode())
 
+    def test_a_successful_create_names_where_to_search(self, tmp_path, capsys):
+        """D5: the verb has no search sibling, so the success message must name
+        the door that does — otherwise the memory is written and never found."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok({"id": "p1"})):
+            assert main(["create-point", "hello world"]) == 0
+        out = capsys.readouterr().out
+        assert "Created point: p1" in out
+        assert "/v1/search?q=" in out
+        assert "tortoise_search" in out
+
     def test_wait_bound_refusal_names_the_delay_and_the_safe_retry(
             self, tmp_path, capsys):
         _seed_global(tmp_path)
