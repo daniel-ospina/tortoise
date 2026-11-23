@@ -802,6 +802,21 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
                 and node.args[1].value == "__dict__")
 
 
+def _is_module_registry(node: ast.AST | None) -> bool:
+    """`sys.modules` — the IMPORT REGISTRY a deferred `from … import …` resolves THROUGH.
+
+    ⛔ THE STORE THE PIN WAS BLIND TO (#14326 review P1, MEASURED GREEN): `run()` imports
+    `TortoiseSDK` INSIDE its body, so the import consults `sys.modules["tortoise.sdk"]` at
+    CALL time — an entry swapped before the call constructs the mirror exactly as an
+    attribute write would. The pin's own control row asserted this shape was GREEN ("an
+    unrelated KEY is not this store"), so the fail-open was not merely uncaught: it was
+    blessed by a test. Aliases are resolved by the caller (`_aliases_of`).
+    """
+    if isinstance(node, ast.Attribute):
+        return node.attr == "modules"
+    return False
+
+
 def _is_setattr_like(value: ast.AST) -> bool:
     """A value that IS `setattr`, or a `functools.partial` of it — the LAUNDERER.
 
@@ -816,6 +831,71 @@ def _is_setattr_like(value: ast.AST) -> bool:
                 and _callee_names_of(value.func) & _PARTIAL_SPELLINGS
                 and value.args
                 and _callee_names_of(value.args[0]) & _SETATTR_SPELLINGS)
+
+
+def _is_partial_setattr(value: ast.AST) -> bool:
+    """`functools.partial(setattr, …)` — the LAUNDERER with its receiver PRE-BOUND.
+
+    ⛔ TWO SHAPES, ONE PREDICATE, AND THE KEY MOVES (#14326 review P1, EACH MEASURED GREEN
+    through the pin's own predicate at `b6be337`): a bare `setattr` carries the attribute
+    NAME at `args[1]`, while `partial(setattr, mod)` carries it at the CALL's `args[0]` —
+    so an arm that read a fixed index missed the other shape. Worse, an arm that tested
+    `callee & launderers` FIRST classified an ALIAS of `partial(setattr, …)` as a bare
+    launderer and read the WRONG positional, so both the alias and the pre-bound key
+    walked past.
+
+        _p = functools.partial(setattr, _bi);  _p("print", getattr)      -> key at args[0]
+        functools.partial(setattr, _bi, "print")(getattr)                -> key PRE-BOUND
+        _sa = setattr;  _sa(_bi, "print", getattr)                      -> key at args[1]
+
+    This predicate names the third one; `_setattr_key_operands` is the resolver.
+    """
+    return bool(
+        isinstance(value, ast.Call)
+        and _callee_names_of(value.func) & _PARTIAL_SPELLINGS
+        and value.args
+        and _callee_names_of(value.args[0]) & _SETATTR_SPELLINGS
+    )
+
+
+def _is_setattr_family(expr: ast.AST, launderers: frozenset[str] = frozenset()) -> bool:
+    """The callee IS a `setattr`-family launderer — spelled, aliased, or a `partial`."""
+    return bool(
+        _callee_names_of(expr) & (_SETATTR_SPELLINGS | launderers) or _is_partial_setattr(expr)
+    )
+
+
+def _setattr_key_operands(
+    callee: ast.AST, call: ast.Call, launderers: frozenset[str] = frozenset()
+) -> list[ast.AST]:
+    """Every AST node that can carry the attribute NAME a `setattr`-family call binds.
+
+    ⛔ THE KEY POSITION IS A PROPERTY OF THE SPELLING (#14326 review P1):
+
+      - bare `setattr(obj, "<name>", v)`          -> `args[1]` (a SPLAT makes the arity
+        unknowable, so every arg is a candidate — this file's splat polarity);
+      - a `partial(setattr, …)` (inline or aliased) -> the partial's own `args[1:]` (a
+        PRE-BOUND key) **or** the call's `args[0]`;
+      - an ALIAS (`_sa = setattr`) does NOT say which of the two it is, and resolving the
+        binding is more machinery than the question needs — take BOTH positions, which can
+        only over-collect (fail closed).
+
+    Returning too MUCH can only RED a namespace store whose key is an allow-listed name;
+    returning too little is the fail-open measured at `b6be337`.
+    """
+    names = _callee_names_of(callee)
+    if names & _SETATTR_SPELLINGS:
+        if len(call.args) >= 2:
+            return [call.args[1]]
+        return list(call.args) if any(isinstance(a, ast.Starred) for a in call.args) else []
+    if names & launderers:
+        return list(call.args[:2])
+    # an INLINE `partial(setattr, …)`: only the call's first arg is read here. Its
+    # PRE-BOUND key needs nothing from this resolver — the walk visits the partial
+    # EXPRESSION itself, which `_namespace_rebind_names`' `_is_partial_setattr` arm reads
+    # (measured: dropping `args[1:]` from this return leaves 31 passed, i.e. it was a
+    # second spelling of one resolution and this file deletes clauses no mutant can red).
+    return list(call.args[:1])
 
 
 def _mapping_keys_in_keywords(call: ast.Call,
@@ -931,23 +1011,20 @@ def _namespace_rebind_names(node: ast.AST, consts: dict[str, frozenset[str]],
     out: set[str] = set()
     if isinstance(node, ast.Call):
         callee = _callee_names_of(node.func)
-        # `setattr(<obj>, "<name>", …)`, its ALIASES, and `partial(setattr, …)(…)`.
-        if callee & (_SETATTR_SPELLINGS | launderers):
-            if len(node.args) >= 2:
-                out |= _string_keys_of(node.args[1], consts)
-            elif any(isinstance(arg, ast.Starred) for arg in node.args):
-                # ⛔ A SPLAT'S ARITY AND POSITION ARE NOT STATICALLY KNOWABLE — FAIL CLOSED
-                # (#14326 review F2, MEASURED GREEN): `setattr(*[_bi, "print", getattr])` is
-                # ONE `Starred` arg, so `len(args) >= 2` is False and the arm never fired.
-                # This file's own rule for splats is this polarity (`_name_reaching_operands`).
-                for arg in node.args:
-                    out |= _string_keys_of(arg, consts)
-        elif (isinstance(node.func, ast.Call)
-                and _callee_names_of(node.func.func) & _PARTIAL_SPELLINGS
-                and node.func.args
-                and _callee_names_of(node.func.args[0]) & (_SETATTR_SPELLINGS | launderers)):
-            if node.args:
-                out |= _string_keys_of(node.args[0], consts)
+        # `setattr(<obj>, "<name>", …)`, its ALIASES, and `partial(setattr, …)(…)` — ONE arm
+        # (#14326 review P1): the key POSITION differs per spelling, so it is RESOLVED by
+        # `_setattr_key_operands` instead of read off a fixed index.
+        if _is_setattr_family(node.func, launderers):
+            for arg in _setattr_key_operands(node.func, node, launderers):
+                out |= _string_keys_of(arg, consts)
+        elif _is_partial_setattr(node):
+            # ⛔ A PRE-BOUND KEY IS BOUND WHEN THE PARTIAL IS BUILT, not when it is called
+            # (#14326 review P1, MEASURED GREEN: `_p = functools.partial(setattr, _bi,
+            # "print")` then `_p(getattr)` left the pin at `m=2 c=2 i=0`). The CALL SITE is
+            # a bare name this pin does not follow, so the key is read where it actually is:
+            # on the partial expression the walk already visits.
+            for arg in node.args[1:]:
+                out |= _string_keys_of(arg, consts)
         # `<ns>.update({"<name>": …})`, `<ns>.update(<name>=…)`, `<ns>.update(**{…})`,
         # `<ns>.setdefault("<name>", …)` — and the UNBOUND spelling of each.
         elif (callee & _MAPPING_MUTATORS
@@ -4811,6 +4888,29 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    setattr(_bi, _p, getattr)\n'
             '    print(sdk, "_tortoise_fts_query")'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE KEY'S POSITION IS THE SPELLING'S (#14326 review P1, EACH MEASURED GREEN at
+        # `b6be337` through the pin's own predicate: `census=(2, 2, 0)`, `refuses=False`, the
+        # read executing with `kind="statement"`). The inline `partial` row above passed only
+        # because the arm read the CALL's `args[0]`; an ALIAS of the partial was classified
+        # as a bare launderer and read `args[1]` — the VALUE — while a key PRE-BOUND in the
+        # partial was never read at all. `_setattr_key_operands` resolves the position.
+        "ALIASED `functools.partial(setattr, …)` (key at the call)": (
+            '    import builtins as _bi, functools\n'
+            '    _p = functools.partial(setattr, _bi)\n'
+            '    _p("print", getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "PRE-BOUND key in `functools.partial(setattr, …)`": (
+            '    import builtins as _bi, functools\n'
+            '    functools.partial(setattr, _bi, "print")(getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "ALIASED `partial` with a PRE-BOUND key": (
+            '    import builtins as _bi, functools\n'
+            '    _p = functools.partial(setattr, _bi, "print")\n'
+            '    _p(getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "`globals().update({…})` rebinding a PURE callee": (
             '    globals().update({"print": getattr})\n'
             '    print(sdk, "_tortoise_fts_query")'
@@ -5723,6 +5823,9 @@ def _call_argument_findings(calls: list[ast.Call], allowed: set[str]) -> list[st
 
 
 _SDK_CONSTRUCTOR = "TortoiseSDK"
+#: The MODULE `run()` imports that class from, inside its body. A `sys.modules` store under
+#: this path is the same store as an attribute write, one level up (#14326 review P1).
+_SHIPPED_MODULE = "tortoise.sdk"
 
 
 def _receiver_findings(run_def: ast.AST) -> list[str]:
@@ -5863,6 +5966,29 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     """
     out: list[str] = []
     bound_from_shipped = 0
+    # ⛔ ONE ROOT, NOT SIX SPELLINGS (#14326 review P1, EACH MEASURED GREEN at `b6be337`).
+    # The three arms below matched a LITERAL (`ast.Constant` key, a bare `setattr` name, an
+    # `ast.Name` receiver) while the file already owned resolvers for exactly these hops —
+    # `_string_keys_of`/`_possible_strings` for the KEY, `_namespace_rebind_names` for the
+    # mapping mutators, `_aliases_of` for the receiver and the LAUNDERER. Matching the
+    # spelling instead of resolving it is the same in-file asymmetry that let
+    # `_p = partial(setattr, …); _p("print", getattr)` past the READ census.
+    #
+    # The artifact's `run()` imports the class INSIDE its body, so EVERY one of these is a
+    # store the deferred import resolves at CALL time, and the pin cannot prove WHICH object
+    # receives it — so the store reds:
+    #
+    #   _t.__dict__.update(TortoiseSDK=_Mirror)        vars(_t).update(TortoiseSDK=_Mirror)
+    #   _t.__dict__.__setitem__("TortoiseSDK", _Mirror) sys.modules["tortoise.sdk"] = _Mirror
+    #   setattr(tortoise.sdk, "TortoiseSDK", _Mirror)    setattr(_t, _k, _Mirror)
+    #   setattr(*[_t, "TortoiseSDK", _Mirror])           _t.__dict__["Tortoise" + "SDK"] = …
+    consts = _str_constants(tree)
+    # The namespace MAPPINGS, plus the IMPORT REGISTRY `from tortoise.sdk import …`
+    # resolves THROUGH (`sys.modules`), each with its one-bind aliases resolved.
+    namespaces = frozenset(
+        _aliases_of(tree, lambda _n: _is_namespace_expr(_n) or _is_module_registry(_n), loops=True)
+    )
+    launderers = frozenset(_aliases_of(tree, _is_setattr_like, loops=True))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
@@ -5914,27 +6040,62 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
                     out.append(
                         f"line {node.lineno} ASSIGNS `{_SDK_CONSTRUCTOR}` — the receiver "
                         "clause would accept whatever was assigned there as the shipped SDK")
-        elif isinstance(node, ast.Call):
-            # ⛔ THE SAME STORE, CARRIED AS A STRING CONSTANT (#14326 review P1): the
-            # module-attribute arm above is a spelling, and `setattr(mod, "TortoiseSDK", X)`
-            # binds exactly the same attribute. Fail-closed on the NAME alone — this pin
-            # cannot resolve which receiver the setattr targets.
-            if (getattr(node.func, "id", None) == "setattr" and len(node.args) >= 2
-                    and isinstance(node.args[0], ast.Name)
-                    and isinstance(node.args[1], ast.Constant)
-                    and node.args[1].value == _SDK_CONSTRUCTOR):
+        elif isinstance(node, (ast.Call, ast.Subscript)):
+            # ⛔ THE SAME STORE, CARRIED AS A STRING / A MAPPING / A PARTIAL (#14326 review
+            # P1 — FIVE spellings, EACH MEASURED GREEN at `b6be337`). One root: the store
+            # was matched as a SPELLING (`ast.Constant` key, a bare `setattr`, an
+            # `ast.Name` receiver). It is now RESOLVED with the machinery this file already
+            # owns, so a receiver alias, a laundered key, a `partial`, a splat and the
+            # `sys.modules` registry all land in the same red.
+            keys = set(_namespace_rebind_names(node, consts, namespaces, launderers))
+            if (
+                isinstance(node, ast.Call)
+                and _callee_names_of(node.func) & _MAPPING_MUTATORS
+                and _is_module_registry(getattr(node.func, "value", None))
+            ):
+                # The DIRECT registry receiver — `_is_namespace_expr` deliberately does not
+                # call `sys.modules` a namespace (a `sys.modules["print"]` key binds no
+                # builtin), so the mapping-mutation spelling is resolved HERE, scoped to the
+                # registry, rather than by widening the shared predicate.
+                keys |= _mapping_mutation_keys(node, consts, offset=0)
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.ctx, ast.Store)
+                and _is_module_registry(node.value)
+            ):
+                # ⛔ THE REGISTRY IS THE OTHER SIDE OF THE SAME STORE (#14326 review P1,
+                # MEASURED GREEN): `run()`'s deferred `from tortoise.sdk import …` resolves
+                # THROUGH `sys.modules`, so replacing that entry replaces the class just as
+                # an attribute write does.
+                # ⛔ NOT name-alone (#14326 review, measured: a name-alone union left 31
+                # passed when dropped, because the namespace path already resolved every
+                # row — and it would FALSE RED `_CACHE["TortoiseSDK"]`, a dict store that
+                # binds no class. `__builtins__["TortoiseSDK"]` is not a lever either:
+                # `run()`'s own `from … import` binds a LOCAL that shadows a builtin).
+                keys |= _string_keys_of(node.slice, consts)
+            hits = keys & {_SDK_CONSTRUCTOR, _SHIPPED_MODULE}
+            if not hits:
+                continue
+            if isinstance(node, ast.Call) and _is_setattr_family(node.func, launderers):
+                # `setattr`'s position for the key is the SPELLING's, not a constant index.
                 out.append(
-                    f"line {node.lineno} `setattr`s `{_SDK_CONSTRUCTOR}` on "
-                    f"`{node.args[0].id}` — the same store as an attribute write, carried "
-                    "as a string constant, so `run()`'s deferred import can resolve to a "
-                    "different class")
-        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) \
-                and isinstance(node.slice, ast.Constant) \
-                and node.slice.value == _SDK_CONSTRUCTOR:
-            # …and through a mapping key, the third spelling of the same store.
-            out.append(
-                f"line {node.lineno} stores `{_SDK_CONSTRUCTOR}` under a string key on "
-                f"`{ast.unparse(node.value)}` — the same rebind as an attribute store")
+                    f"line {node.lineno} `setattr`s "
+                    f"`{'` / `'.join(sorted(hits))}` — the same store as an attribute "
+                    "write, carried as a string constant, so `run()`'s deferred import "
+                    "can resolve to a different class"
+                )
+            else:
+                # The RECEIVER, not the mutator: for a call the store's target is
+                # `func.value` (`_t.__dict__`), for a subscript it is `value`.
+                receiver = (
+                    node.value
+                    if isinstance(node, ast.Subscript)
+                    else getattr(node.func, "value", node.func)
+                )
+                out.append(
+                    f"line {node.lineno} stores "
+                    f"`{'` / `'.join(sorted(hits))}` under a string key on "
+                    f"`{ast.unparse(receiver)}` — the same rebind as an attribute store")
     if not bound_from_shipped:
         out.append(
             f"no `from tortoise.sdk import {_SDK_CONSTRUCTOR}` binding exists in this file — "
@@ -6072,11 +6233,73 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     got = ctor_findings(setattr_store)
     assert got and any("setattr`s" in g for g in got), got
 
-    keyed_store = (shipped + 'sys.modules["tortoise.sdk"] = _M\n')
-    assert ctor_findings(keyed_store) == []          # an unrelated KEY is not this store
     keyed_ctor = (shipped + '_t.__dict__["TortoiseSDK"] = _Mirror\n')
     got = ctor_findings(keyed_ctor)
     assert got and any("under a string key" in g for g in got), got
+
+    # ⛔ THE STORE WAS MATCHED AS A SPELLING, AND FIVE MORE SPELLINGS WALKED PAST (#14326
+    # review P1). EACH of the shapes below was MEASURED GREEN (`31 passed`, the real tool
+    # mutated at module level, restored byte-identically) at `b6be337`, whose three arms
+    # matched a literal `ast.Constant` key, a bare `setattr` name and an `ast.Name` receiver:
+    #
+    #   _t.__dict__.update(TortoiseSDK=_Mirror)             -> 31 passed
+    #   vars(_t).update(TortoiseSDK=_Mirror)                -> 31 passed
+    #   _t.__dict__.__setitem__("TortoiseSDK", _Mirror)      -> 31 passed
+    #   setattr(tortoise.sdk, "TortoiseSDK", _Mirror)        -> 31 passed  (dotted receiver)
+    #   setattr(_t, _k, _Mirror)                            -> 31 passed  (laundered key)
+    #   setattr(*[_t, "TortoiseSDK", _Mirror])               -> 31 passed  (splat arity)
+    #   functools.partial(setattr, _t, "TortoiseSDK")(_M)   -> 31 passed  (pre-bound key)
+    #
+    # …and the `sys.modules` swap below was not merely uncaught, it was BLESSED: the control
+    # row that stood here asserted `sys.modules["tortoise.sdk"] = _M` was GREEN ("an
+    # unrelated KEY is not this store"). It is the same store one level up — `run()`'s
+    # deferred `from tortoise.sdk import …` resolves THROUGH that entry — so the row is
+    # re-pointed at a key that genuinely cannot reach `run()`.
+    unresolved = "tortoise._compat"  # a module swap that cannot touch `tortoise.sdk`
+    assert ctor_findings(shipped + f"sys.modules[{unresolved!r}] = _M\n") == []
+
+    module_swap = shipped + 'sys.modules["tortoise.sdk"] = _Mirror\n'
+    got = ctor_findings(module_swap)
+    assert got and any("under a string key" in g for g in got), got
+
+    # The registry reached through a one-bind alias, and a registry MAPPING-MUTATOR store.
+    aliased_registry = shipped + '_REG = sys.modules\n_REG["tortoise.sdk"] = _Mirror\n'
+    got = ctor_findings(aliased_registry)
+    assert got and any("under a string key" in g for g in got), got
+
+    # Every one of the store spellings above, each its OWN row — a spelling the previous
+    # round matched literally, so the deletion of any single resolution arm below reds.
+    store_spellings = {
+        "module-attribute update (keywords)":
+            '_t.__dict__.update(TortoiseSDK=_Mirror)\n',
+        "module-attribute update (mapping)":
+            '_t.__dict__.update({"TortoiseSDK": _Mirror})\n',
+        "`vars()` mapping mutator":
+            'vars(_t).update(TortoiseSDK=_Mirror)\n',
+        "`__setitem__` spelling":
+            '_t.__dict__.__setitem__("TortoiseSDK", _Mirror)\n',
+        "KEY carried by a NAME":
+            '_k = "TortoiseSDK"\n_t.__dict__[_k] = _Mirror\n',
+        "KEY is a literal-only `+`":
+            '_t.__dict__["Tortoise" + "SDK"] = _Mirror\n',
+        "DOTTED setattr receiver":
+            'import tortoise.sdk\nsetattr(tortoise.sdk, "TortoiseSDK", _Mirror)\n',
+        "setattr KEY carried by a NAME":
+            '_k = "TortoiseSDK"\nsetattr(_t, _k, _Mirror)\n',
+        "SPLATTED setattr argument list":
+            'setattr(*[_t, "TortoiseSDK", _Mirror])\n',
+        "setattr through `functools.partial` (pre-bound key)":
+            'import functools\nfunctools.partial(setattr, _t, "TortoiseSDK")(_Mirror)\n',
+        "ALIASED `setattr` (a name bound to the launderer)":
+            '_sa = setattr\n_sa(_t, "TortoiseSDK", _Mirror)\n',
+        "ALIASED namespace RECEIVER":
+            '_ns = _t.__dict__\n_ns.update(TortoiseSDK=_Mirror)\n',
+        "registry MAPPING-MUTATOR store":
+            'sys.modules.update({"tortoise.sdk": _Mirror})\n',
+    }
+    for name, lever in store_spellings.items():
+        got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
+        assert got, f"the store `{name}` was not refused"
 
     # ⛔ THE `asname` HALF IS ITS OWN CLAUSE (#14326 review P2, measured: deleting it left
     # 31 passed, because the `subclass` row above satisfies the arm's FIRST disjunct).
