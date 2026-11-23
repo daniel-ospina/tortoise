@@ -25,7 +25,10 @@ import time
 
 import numpy as np
 
-from . import embed_gate  # #5008: the S5 EMBED gate (which rows earn a vector)
+from . import (
+    embed_gate,  # #5008: the S5 EMBED gate (which rows earn a vector)
+    embed_seam,  # #14186: the ONE embedder seam (inprocess|worker|external)
+)
 from .env_truthy import env_flag  # #4097: the declared truthy contract
 from .exceptions import FAILURE_KINDS, EmbedderUnavailableError  # #4861: the REQUIRED contract
 from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
@@ -1398,10 +1401,12 @@ class EmbeddingModel:
     def await_write_ready_reason(cls, budget: float) -> str | None:
         """``None`` when the model is loaded — else WHY, waiting at most ``budget`` s (#13224).
 
-        ⛔ THE ANSWER IS A CAUSE, NOT A BOOLEAN (#13229 review F2). There are four
+        ⛔ THE ANSWER IS A CAUSE, NOT A BOOLEAN (#13229 review F2). There are five
         distinct reasons a bounded write declines, and they need OPPOSITE operator
         responses: install the extra / repair a broken load / retry later / wait
-        longer. Collapsing them into one ``False`` forced the decline's one log
+        longer / re-encode once the BACKING answers (``backing_cold``, #14186 — the
+        encoder is another process, so nothing here needs warming). Collapsing
+        them into one ``False`` forced the decline's one log
         line to assert a cause and a wait that had not happened — measured: a
         designed absence (``not_installed``, the DOCUMENTED default install)
         reported "still COLD … after waiting 0.25s" when nothing was waited and no
@@ -1442,12 +1447,34 @@ class EmbeddingModel:
         backfill, in exchange for a create that cannot exceed the budget.
 
         ⛔ ``TORTOISE_EMBEDDER_WARMUP=0`` (the test/dev opt-out) keeps the
-        PRE-#13224 behaviour EXACTLY: with no background lane to kick, this
-        returns True and the caller's ``get()`` loads synchronously as it always
-        did. A test that relies on a write producing a vector is therefore
-        unaffected, and the bounded path can only run where a background load is
-        the declared behaviour.
+        PRE-#13224 behaviour EXACTLY **for an ``inprocess`` backing**: with no
+        background lane to kick, this returns ``None`` and the caller's ``get()``
+        loads synchronously as it always did, so a test that relies on a write
+        producing a vector is unaffected. ⛔ That promise does NOT extend to
+        ``worker``/``external`` (review P2, cycle 5): the seam precondition is
+        decided ABOVE the opt-out, so a write bound to a booting worker still
+        answers ``backing_cold`` with the flag off. It must — with the encoder
+        elsewhere the flag is a statement about a LOCAL background lane that this
+        process does not have, and honouring it would send the create into the
+        seam to pay the worker's 600 s boot.
         """
+        # ⛔ THIS DECISION IS MADE ABOVE BOTH LOCAL FAST PATHS (review P1, cycle
+        # 4). It used to sit below them, so in any process holding a LOADED local
+        # model it never ran: that process answered READY while the worker was
+        # booting, `encode_for_row` went on into the seam, and the create paid the
+        # worker's 600 s start-up — the very charge this gate exists to refuse.
+        # Both fast paths below are statements about a LOCAL encoder
+        # (`_model is not None` = it is warm here; `TORTOISE_EMBEDDER_WARMUP=0` =
+        # nobody hands a load to a background lane), so neither is an answer to
+        # "does the encoder this write will use live in this process". And the
+        # state is reachable, not theoretical: the lever is re-read per call
+        # (documented retargeting without a restart), and
+        # `entity_resolver`/`cross_lens` reach `EmbeddingModel.get()` directly,
+        # which loads the local model even under `worker`.
+        if not embed_seam.encodes_in_process():
+            if embed_seam.backing_booting():
+                return _WRITE_DECLINE_BACKING_COLD
+            return None
         inst = cls._instance
         if inst is not None and inst._model is not None:
             return None
@@ -1580,6 +1607,23 @@ class EmbeddingModel:
         still can create one. Declining setup is the same principle applied one
         step earlier: neither charged, and now not waited for either.
         """
+        # ⛔ ORDERED LIKE THE WRITE BOUND (review P1, cycle 4): the seam question
+        # is about WHERE the encoder lives, so it precedes both local fast paths
+        # — the write side was measurably wrong below them, and keeping the two
+        # ladders in the same order is what stops the next edit from reproducing
+        # that on this side. Both arms here answer READY, so this is ordering for
+        # the reader's sake rather than a behaviour change: a read that declined
+        # on a booting backing would have to change BOTH of these together.
+        # ⛔ AND THIS METHOD IS NOT THE BOUND THAT ACTUALLY RUNS (review P3). The
+        # live read path asks the seam FIRST: `sdk` computes
+        # ``_seam_remote = backing != inprocess`` and takes the seam branch
+        # (``encode_query``) BEFORE this ladder, so on `worker`/`external` no
+        # caller reaches this method at all. The guard is therefore DEFENCE IN
+        # DEPTH for a future caller — do not delete the `_seam_remote` branch
+        # believing this method covers it: that branch is what keeps a read from
+        # calling ``EmbeddingModel.get()`` unconditionally.
+        if not embed_seam.encodes_in_process():
+            return None
         inst = cls._instance
         if inst is not None and inst._model is not None:
             return None
@@ -2090,8 +2134,15 @@ def compute_embeddings(
     """
     if not texts:
         return []
-    model = EmbeddingModel.get()
-    if model is None:
+    # ⛔ #14186: only the IN-PROCESS backing needs the local model resolved here.
+    # It is the same singleton the seam's in-process backing will use, and the
+    # unavailability check below must keep the exact pre-#14186 shape (one
+    # ``get()``, one skip note, ``[None] * n``) so nothing about the default
+    # posture moved. A worker or external backing carries its OWN encoder, so
+    # demanding a local one would make the seam unable to move the embedder out
+    # of this process at all — the whole point of the issue.
+    if (embed_seam.resolve_backing() == embed_seam.BACKING_INPROCESS
+            and EmbeddingModel.get() is None):
         _note_embed_skip(len(texts))
         return [None] * len(texts)
     try:
@@ -2100,15 +2151,38 @@ def compute_embeddings(
         return [None] * len(texts)
     try:
         _t0 = time.perf_counter()
-        ensure_embed_threads()
-        vecs = model.encode(truncated)
-    except Exception:
+        # ⛔ #14186: the encode now goes through the seam. For the in-process
+        # backing this is byte-for-byte the pre-#14186 call (the backing does
+        # ``EmbeddingModel.get()`` + ``ensure_embed_threads()`` +
+        # ``model.encode(list)`` with no kwargs, which is what stood here), so
+        # the default posture and every existing double keep working. A worker
+        # or external backing answers from its own encoder and ``model`` is
+        # never consulted.
+        vecs = embed_seam.encode_texts(truncated)
+    except Exception as exc:
         # An encode that RAISED produced no model work, so it is counted as
         # ``skipped`` rather than silently counted as neither — otherwise the
         # figure (0 calls, 0 skipped) is indistinguishable from "no encode was
         # ever attempted", which is exactly the ambiguity ``skipped`` exists to
         # remove (#4488 failure-mode table).
         _note_embed_skip(len(texts))
+        # ⛔ #5275 STILL BINDS ON THE WRITE PATH (#14186 review F2). Before the
+        # seam, ``EmbeddingModel.get()`` was this path's only exit and it returns
+        # through ``_unavailable``, which RAISES in an armed process. A worker or
+        # external backing never calls ``get()`` at all, so an armed process whose
+        # worker or endpoint is dead fell through to a silent ``[None] * n``: no
+        # vectors stored and NO refusal named — the #2985 shape this PR closes on
+        # the READ path, left open here. Name it in the same terms.
+        # The in-process backing is deliberately unchanged: its absence exit
+        # already reaches ``_unavailable`` through ``get()`` above, so routing a
+        # plain encode failure through it would move behaviour no finding covers.
+        if embed_seam.resolve_backing() != embed_seam.BACKING_INPROCESS:
+            EmbeddingModel._unavailable(
+                context=(
+                    f"write: the embed seam declined on the "
+                    f"{embed_seam.resolve_backing()} backing "
+                    f"({type(exc).__name__}: {exc})")[:400],
+                kind=EmbeddingModel.absent_reason())
         return [None] * len(texts)
     # ⛔ The measurement call sits OUTSIDE every value-guarding ``try``: a
     # measurement fault must never discard a batch of successfully computed
@@ -2118,7 +2192,13 @@ def compute_embeddings(
     if vecs is None or len(vecs) != len(texts):
         return [None] * len(texts)
     try:
-        return [vec.tolist() for vec in vecs]
+        # ⛔ ``vector_to_list``, not ``vec.tolist()`` (#14186): the seam returns
+        # plain float lists, and ``.tolist()`` on a list raises ``AttributeError``
+        # — inside THIS try, whose handler returns ``[None] * n``. That would
+        # discard a whole batch of successfully computed vectors, the same
+        # fail-open shape as above. Accepting both shapes is strictly safer than
+        # requiring the one a given encoder happens to return.
+        return [embed_seam.vector_to_list(vec) for vec in vecs]
     except Exception:
         return [None] * len(texts)
 
@@ -2234,15 +2314,21 @@ def encode_for_store(
 #: wait; never by an operator (a bigger number just moves the stall back).
 WRITE_EMBED_BUDGET_S = 0.25
 
-#: #13229 review F2 — the four DISTINCT reasons a bounded write declines.
+#: #13229 review F2 — the DISTINCT reasons a bounded write declines.
 #: They are not interchangeable: a designed absence needs the extra installed, a
-#: failed load needs the cause repaired, a spent attempt needs a later write, and
-#: only the last one actually waited. `await_write_ready_reason` is the ONE
-#: predicate that decides them; `_note_cold_write` reports the one it was handed.
+#: failed load needs the cause repaired, a spent attempt needs a later write,
+#: only one actually waited, and one is not even THIS process's encoder (#14186).
+#: `await_write_ready_reason` is the ONE predicate that decides them;
+#: `_note_cold_write` reports the one it was handed.
 _WRITE_DECLINE_NOT_INSTALLED = "not_installed"
 _WRITE_DECLINE_FAIL_COOLDOWN = "fail_cooldown"
 _WRITE_DECLINE_ATTEMPT_SPENT = "attempt_spent"
 _WRITE_DECLINE_BUDGET_EXPIRED = "budget_expired"
+#: #14186: the encoder is served by ANOTHER process (``worker`` / ``external``).
+#: Not a cold LOCAL load and not the same repair: nothing here needs warming, the
+#: row is declined so the create keeps #13224's promise, and the vector is
+#: recomputed by `graph-scripts/backfill_embeddings.py` once the backing answers.
+_WRITE_DECLINE_BACKING_COLD = "backing_cold"
 
 #: Poll interval for the bounded wait above — small enough that a model that
 #: becomes ready mid-budget is used, coarse enough not to spin (<= 25 wakeups).
@@ -2518,6 +2604,12 @@ def _note_cold_write(budget: float, *, reason: str) -> None:
     * ``budget_expired`` — a load is genuinely in flight and the budget ran out ⇒
       WARNING; the only cause where a wait happened, so the only one that names
       the budget it waited.
+    * ``backing_cold`` — the encoder is served by another process (``worker`` /
+      ``external``, #14186) and that backing is mid-BOOT ⇒ **INFO**. Nothing local
+      was waited for or loaded: the create kept #13224's promise instead of
+      paying the boot, and the repair is a backfill once the backing answers (no
+      install, no load to fix). A WARM remote backing is not this cause — it
+      answers ready and the encode goes through the seam.
 
     Latched per cause on module state rather than a counter so a bulk write costs
     at most one line per cause, and re-armed by `EmbeddingModel._reset()` (tests)
@@ -2567,6 +2659,21 @@ def _note_cold_write(budget: float, *, reason: str) -> None:
             "`graph-scripts/backfill_embeddings.py` once the vector leg returns. "
             "Further occurrences are counted on embed metering's `skipped` term, "
             "not logged.",
+        )
+        return
+    if reason == _WRITE_DECLINE_BACKING_COLD:
+        from tortoise import embed_seam as _seam
+
+        logger.info(
+            "the encoder is served by the %r embed backing and is not warm YET "
+            "— this DERIVED entity row was stored WITHOUT a vector (#14186, "
+            "#13224). Nothing local was loaded and nothing was waited: charging "
+            "the backing's boot to this create is what #4055/#13224 forbid. "
+            "Re-encode the graph row with "
+            "`graph-scripts/backfill_embeddings.py` once the backing answers. "
+            "Further occurrences are counted on embed metering's `skipped` "
+            "term, not logged.",
+            _seam.resolve_backing(),
         )
         return
     logger.warning(
