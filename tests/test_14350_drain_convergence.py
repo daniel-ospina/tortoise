@@ -1158,3 +1158,120 @@ def test_an_EMPTY_only_session_id_is_UNTARGETED_and_takes_the_claim(tmp_path):
         "an empty session id drained a spool another process was draining")
     assert posts == [], "and it posted nothing"
     holder.release()
+
+
+def test_a_renew_never_overwrites_a_successor_installed_in_the_window(
+    tmp_path, monkeypatch,
+):
+    """R2, the half the read-back could not cover.
+
+    The window the two-drainer defect lives in is between the moment a holder
+    decides it may still renew and the moment its bytes land. `renew` used to
+    close that window with `os.replace` (which cannot fail on a live target) plus a
+    read-back — and the read-back read back THE BYTES THE PROCESS HAD JUST WRITTEN,
+    so it reported success while the successor was gone.
+
+    This models the interleaving at the seam: a peer completes a takeover after the
+    holder has committed to renewing and before its write. The holder must lose, and
+    the SUCCESSOR'S record must be the one on disk afterwards.
+
+    MUTATION THAT REDS THIS: write unconditionally after the takedown (restore the
+    `os.replace` semantics) — the first assertion passes, the successor's claim is
+    clobbered and the second reds.
+    """
+    root = tmp_path / "spool"
+    claim = drain_claim.acquire(root, leg="python", now=1000.0, ttl_s=60.0)
+    assert claim is not None
+
+    real_takedown = drain_claim._takedown
+    peer_token = "peer-successor-1234"
+
+    def interleaved(path, token):
+        # The window: a peer judged OUR expired record stale and installed its own
+        # claim, all after this holder committed to renewing. Written directly (a
+        # real `acquire` here would re-enter the very function under test).
+        peer_record = {
+            "version": drain_claim.CLAIM_VERSION,
+            "token": peer_token,
+            "leg": "pi",
+            "pid": os.getpid(),
+            "host": drain_claim._host(),
+            "boot_id": drain_claim._boot_id(),
+            "started_at": _ms(1061.0),
+            "expires_at": _ms(1121.0),
+        }
+        tmp = path.with_name(f"{path.name}.tmp-peer")
+        tmp.write_text(json.dumps(peer_record) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return real_takedown(path, token)
+
+    monkeypatch.setattr(drain_claim, "_takedown", interleaved)
+    assert claim.renew(now_s=1010.0) is False, (
+        "a holder that finds a successor in its window must lose, not overwrite it")
+    monkeypatch.undo()
+
+    on_disk = drain_claim.read_claim(root)
+    assert on_disk is not None and on_disk["token"] == peer_token, (
+        "the successor's claim must survive the slow holder's renewal")
+
+
+def test_a_renew_yields_when_a_peer_links_a_claim_in_the_same_window(
+    tmp_path, monkeypatch,
+):
+    """The other side of the same window: the peer's `link` wins the race.
+
+    `renew` installs with `link`, which is create-if-absent. When a peer has
+    installed a claim since our takedown, that install MUST fail rather than
+    replace — the EEXIST is the successor winning, not an error to retry.
+
+    MUTATION THAT REDS THIS: install with `os.replace` (an unconditional write) —
+    the peer's claim disappears and the last assertion reds.
+    """
+    root = tmp_path / "spool"
+    claim = drain_claim.acquire(root, leg="python", now=1000.0, ttl_s=60.0)
+    assert claim is not None
+
+    real_link = drain_claim._link_claim_atomic
+    seen: dict[str, object] = {}
+
+    def link_after_peer(path, record):
+        peer = drain_claim.acquire(root, leg="pi", now=1000.5, ttl_s=60.0)
+        assert peer is not None, "the path is free after our takedown"
+        seen["peer"] = peer
+        return real_link(path, record)  # must raise FileExistsError
+
+    monkeypatch.setattr(drain_claim, "_link_claim_atomic", link_after_peer)
+    assert claim.renew(now_s=1010.0) is False
+    monkeypatch.undo()
+
+    peer = seen["peer"]
+    on_disk = drain_claim.read_claim(root)
+    assert on_disk is not None and on_disk["token"] == peer.token
+    peer.release()
+
+
+def test_a_renew_write_failure_keeps_the_lease_and_never_vanishes(
+    tmp_path, monkeypatch,
+):
+    """A failed refresh is not a lost claim, and it must not leave a hole.
+
+    The record is restored (not deleted) when the install raises, so a peer never
+    finds the spool unclaimed merely because one `fsync` hit ENOSPC.
+
+    MUTATION THAT REDS THIS: dispose the quarantine on the failure path instead of
+    restoring it — the claim file is gone and the second assertion reds.
+    """
+    root = tmp_path / "spool"
+    claim = drain_claim.acquire(root, leg="python", now=1000.0, ttl_s=60.0)
+    assert claim is not None
+
+    def failing_link(path, record):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(drain_claim, "_link_claim_atomic", failing_link)
+    assert claim.renew(now_s=1010.0) is True, (
+        "a write failure keeps the un-refreshed lease: the claim is still ours")
+    monkeypatch.undo()
+    assert drain_claim.read_claim(root)["token"] == claim.token, (
+        "and the record is back on disk, not lost to the failed install")
+    claim.release()

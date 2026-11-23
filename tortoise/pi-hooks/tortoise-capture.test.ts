@@ -7736,6 +7736,53 @@ test("#14350: an EXPIRED lease is never RESURRECTED by its own holder", async ()
   successor.release();
 });
 
+test("#14350: a renew never overwrites a successor installed in its window", async () => {
+  // The window the two-drainer defect lives in is between the moment a holder
+  // decides it may still renew and the moment its bytes land. `renew` used to close
+  // it with `renameSync` (which cannot fail on a live target) plus a read-back — and
+  // the read-back read back THE BYTES THE PROCESS HAD JUST WRITTEN, so it reported
+  // success while the successor was gone. Now the write is a `linkSync` after an
+  // atomic takedown, so a peer that installs in that window WINS.
+  // MUTATION THAT REDS THIS: install with `renameSync` again (an unconditional
+  // replace) — the peer's claim is clobbered and the last assertion reds.
+  const spool = tmpSpool();
+  let peer: ReturnType<typeof acquireDrainClaim>;
+  const claim = acquireDrainClaim(spool, {
+    leg: "python", nowMs: 1000, ttlMs: 60,
+    hooks: {
+      beforeRenewLink: () => {
+        // The path is free after our takedown, so this is a real takeover.
+        peer = acquireDrainClaim(spool, { leg: "pi", nowMs: 1001, ttlMs: 60 });
+        assert.ok(peer, "the peer installs in the window");
+      },
+    },
+  });
+  assert.ok(claim);
+  assert.equal(claim.renew(1030), false, "a holder that finds a successor must lose");
+  assert.equal(readDrainClaim(spool)?.token, peer!.token,
+    "and the successor's claim must survive the slow holder's renewal");
+  peer!.release();
+});
+
+test("#14350: an expired renew RESTORES the record, it never leaves a hole", async () => {
+  // The expired branch must not resurrect the lease, and it must not DELETE the
+  // record either: a claim that simply vanishes mid-pass would let a second drainer
+  // start while this one is still winding down, and the peer entitled to take over
+  // should find the stale claim it expects.
+  // MUTATION THAT REDS THIS: dispose the quarantine on the expired branch instead of
+  // restoring it — the claim file is gone and the second assertion reds.
+  const spool = tmpSpool();
+  const claim = acquireDrainClaim(spool, { leg: "python", nowMs: 1000, ttlMs: 60 });
+  assert.ok(claim);
+  assert.equal(claim.renew(1200), false, "an expired lease is not renewable");
+  const onDisk = readDrainClaim(spool);
+  assert.ok(onDisk, "the stale record is still there for the peer to take over");
+  assert.equal(onDisk.token, claim.token);
+  const successor = acquireDrainClaim(spool, { leg: "pi", nowMs: 1201, ttlMs: 60 });
+  assert.ok(successor, "and a peer takes it over exactly as before");
+  successor.release();
+});
+
 test("#14350: a takedown never disposes of a claim it did not judge", async () => {
   // The read-compare-unlink takedown was racy in the direction that restores the
   // two-drainer defect: the stale taker's `unlink` removes the LIVE claim a peer

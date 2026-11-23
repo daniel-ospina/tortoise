@@ -5378,6 +5378,15 @@ export function acquireDrainClaim(
     host?: string;
     bootId?: string;
     alive?: (pid: unknown) => boolean;
+    // ⛔ THE RENEW INTERLEAVING SEAM, for tests only (#14350 review, P1).
+    // `renew` is a compare-and-swap (takedown → verify in quarantine → `linkSync`),
+    // and the window it closes is the one between that verify and that link: a peer
+    // that takes the spool over in it must WIN. There is no other way to observe
+    // that ordering deterministically in this leg — the module-local callee cannot
+    // be monkeypatched the way the Python twin's `_link_claim_atomic` can — so the
+    // hook is called INSIDE that window, immediately before the link. It never fires
+    // in production: nothing sets it except the suite.
+    hooks?: { beforeRenewLink?: () => void };
   },
 ): DrainClaim | undefined {
   const ttlMs = opts.ttlMs ?? DRAIN_CLAIM_TTL_MS;
@@ -5468,17 +5477,43 @@ export function acquireDrainClaim(
     return {
       token,
       renew(nowMsArg?: number): boolean {
+        // ⛔ COMPARE-AND-SWAP, and that is the whole point (review finding, P1 —
+        // the Python twin states the reasoning in full). This used to read the
+        // record and then `renameSync` its own over whatever was there. `rename`
+        // cannot fail on a live target, so a holder that stalled between the read
+        // and the write overwrote the successor a peer had legitimately installed
+        // once its lease ran out — and the read-back below read back THE BYTES THIS
+        // PROCESS HAD JUST WRITTEN, so it returned `true` while two drainers POSTed.
+        //
+        // The arbiter is the one a takeover already uses: move the record aside
+        // (`takedownClaim` — exactly one contender can), verify IN QUARANTINE that
+        // the bytes are ours, then install the refreshed record with `linkSync`,
+        // which fails EEXIST if a peer installed a claim in the window — so the
+        // SUCCESSOR WINS and this caller reports "not ours".
+        //
+        // ⛔ EXPIRY IS JUDGED AT THE MOMENT OF WRITING (the clock read below happens
+        // AFTER the takedown), never once at entry: a lease that ran out during the
+        // window must not be resurrected.
+        const moved = takedownClaim(path, token);
+        if (!moved) return false;  // a peer released or took it over
+        const { quarantine, raw } = moved;
+        let displaced: unknown;
+        try { displaced = JSON.parse(raw); } catch { displaced = undefined; }
+        if (!displaced || typeof displaced !== "object"
+            || (displaced as Record<string, unknown>).token !== token) {
+          // A successor holds it: put its bytes back exactly as we took them.
+          disposeQuarantine(quarantine, raw, path, "<not-ours>");
+          return false;
+        }
         const at = nowMsArg ?? Date.now();
-        const current = readDrainClaim(dir);
-        if (!current || current.token !== token) return false;
-        // ⛔ An ALREADY-EXPIRED claim is never resurrected (review finding):
-        // `renew` is a read-then-`rename` with no compare, so a holder that
-        // overran its lease is still the token owner on disk and would overwrite
-        // the successor a peer legitimately installed — returning `true` while
-        // two drainers exist. Refusing converts that into "no longer the holder",
-        // which the caller already handles by stopping.
-        const expires = (current as unknown as Record<string, unknown>).expires_at;
-        if (typeof expires === "number" && at >= expires) return false;
+        const expires = (displaced as Record<string, unknown>).expires_at;
+        if (typeof expires === "number" && at >= expires) {
+          // Never resurrect an expired lease — but RESTORE the record rather than
+          // deleting it, so the peer entitled to take over finds the stale claim it
+          // expects (`linkSync` cannot overwrite a claim installed in the window).
+          disposeQuarantine(quarantine, raw, path, "<not-ours>");
+          return false;
+        }
         const next: DrainClaimRecord = {
           ...record,
           started_at: record.started_at,
@@ -5486,23 +5521,26 @@ export function acquireDrainClaim(
         };
         const tmpPath = join(dir, `${DRAIN_CLAIM_FILE}.tmp-${process.pid}-${token}`);
         try {
+          opts.hooks?.beforeRenewLink?.();
           writeFileSync(tmpPath, `${JSON.stringify(next)}\n`, { mode: 0o600 });
-          renameSync(tmpPath, path);
-        } catch {
+          linkSync(tmpPath, path);
+        } catch (err) {
           try { unlinkSync(tmpPath); } catch { /* best effort */ }
+          if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
+            // A peer installed its own claim in the window. It wins; our displaced
+            // record is DROPPED rather than restored over it.
+            disposeQuarantine(quarantine, raw, path, raw);
+            return false;
+          }
           // A failed WRITE is not "not ours" (review finding): reporting it as a
           // lost claim aborts a pass that still owns the spool AND parks the claim
           // with a live pid, so every later pass reads `heldByClaim` for up to the
           // full lease while the operator is told a peer took it.
+          disposeQuarantine(quarantine, raw, path, "<not-ours>");
           const still = readDrainClaim(dir);
           return !!still && still.token === token;
         }
-        // ⛔ VERIFY AFTER WRITING (the Python twin states the reasoning): the write
-        // REPLACES the inode and the read above is not a compare, so a peer's
-        // takeover landing in that window would have its fresh claim overwritten
-        // while this returns `true` — two drainers (found in review).
-        const written = readDrainClaim(dir);
-        if (!written || written.token !== token) return false;
+        disposeQuarantine(quarantine, raw, path, raw);
         renewedAt = at;
         return true;
       },

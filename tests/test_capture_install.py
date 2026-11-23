@@ -4934,8 +4934,14 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: `takedownClaim` / `disposeQuarantine` are now exported as the test seam — an
 #: EXPORT-ONLY edit, no behaviour change, but a comment IS bytes here. The READ
 #: half is untouched (`904d2742…`), exactly as generation 31's re-cut did.
+#: ⚠️ 33's CAPTURE digest was re-cut a SECOND time, by the same never-shipped
+#: exception and for a real behaviour change: the #14423 cycle-5 review found
+#: `renew` could overwrite a successor (read → `replace`, with a read-back that
+#: re-read the writer's own bytes), so renewal is now the takeover's own
+#: compare-and-swap — takedown, verify in quarantine, install by `link`. That is
+#: BYTES, not an export, so the digest moves; the READ half stays `904d2742…`.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "35235567c45960d4a31160471d7f8980f2a3ddf35bb3b8a033ca2aec9b84375d")
+    33, "b0eb460a0b857fcbae144a133b8c7d86083cbb60605cb2e469e8363d45066462")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5107,7 +5113,7 @@ _GENERATION_DIGESTS = {
     # keeps draining concurrently with the Python leg and keeps charging the
     # box's refusals to per-entry exponential backoff — the 908-entry /
     # attempts-10-17 shape #14342 starts from — so it must read STALE.
-    33: "35235567c45960d4a31160471d7f8980f2a3ddf35bb3b8a033ca2aec9b84375d",
+    33: "b0eb460a0b857fcbae144a133b8c7d86083cbb60605cb2e469e8363d45066462",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

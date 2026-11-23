@@ -15,7 +15,7 @@ Two independent mechanisms, both measured:
 
 | | |
 |---|---|
-| **One drainer** | `tortoise/drain_claim.py` (new): a lease on `<spool>/drain.claim`, taken by an **untargeted** `flush_spool` pass. A second drainer returns immediately (`held_by_claim`, zero POSTs) — nothing is lost, the holder is working the same oldest-first list. |
+| **One drainer** | `tortoise/drain_claim.py` (new): a lease on `<spool>/drain.claim`, taken by an **untargeted** `flush_spool` pass. A second drainer returns immediately for the SPOOL (`held_by_claim`, zero spool POSTs) — nothing is lost, the holder is working the same oldest-first list. ⚠️ It does **not** skip the separate session-events leg of the same command; see the residual below, and #12992 for that leg's contention. |
 | **A stated ceiling** | `DRAIN_MAX_IN_FLIGHT = 1` POST in flight, *per box*. It is a cap on how much of the shared 8-slot budget the drain may hold (7 stay available to live captures), not a throughput knob, and no configuration raises it. |
 | **Capacity charges nobody** | `capacity_refusal()` + `_flush_one`'s early return: no `attempts` increment, no backoff armed, and the **pass stops**. It then yields, honouring the server's own `retry_after`, bounded at `DRAIN_CAPACITY_YIELDS = 3`, and retries **the same** entry — so a busy box starves nothing and a head never rises. |
 | **Named, durably** | The refusal is recorded as `blocked` + 429 + the code, so the health line reads `capture: BLOCKED (n queued, 429 capture capacity)` instead of a box that cannot file looking healthy. Self-healing on both ends. |
@@ -95,9 +95,11 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```text
-# 45 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
+# 48 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG,
+# and the three that pin the renew CAS (a successor in the window, an EEXIST
+# install, and a failed install that must not lose the lease)
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-45 passed
+48 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
@@ -105,12 +107,12 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-407 passed
+737 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-294 pass / 0 fail
+301 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -180,15 +182,39 @@ The review's last mutation-table row ("`tortoise-capture.test.ts` … stays GREE
 what the P2 row above removes: the row now names the behaviour it protects, and
 the mutant reds it.
 
+**Cycle 5** (fresh-context reviewer at `ffc6d3fa`) — 1 P1, 1 P2, plus four
+non-blocking observations:
+
+| finding | disposition |
+|---|---|
+| **P1** `renew` could still overwrite a successor: it read the record, then `os.replace`d its own, and the read-back added for that race read back THE BYTES THE PROCESS HAD JUST WRITTEN — so it returned `True` while two drainers POSTed. That is R1's whole point. | **fixed, both legs.** Renewal is now a real compare-and-swap, reusing the takeover's own arbiter: `_takedown` moves the record aside (exactly one contender can), the bytes are verified IN QUARANTINE, and the refreshed record is installed with `link` — which fails `EEXIST` if a peer installed a claim in that window, so the SUCCESSOR WINS. Expiry is judged with a clock read taken AFTER the takedown, so a lease that ran out during the window is never resurrected; and the expired branch RESTORES the stale record rather than deleting it, so the peer finds the claim it expects instead of a hole. Three new Python cases and two new TS cases, each mutation-checked: dropping the quarantine token check reds; installing with `replace`/`rename` reds; disposing instead of restoring reds. |
+| **P2** the loser of the claim is not a no-op as printed: `held_by_claim` only PRINTS, and the same command still runs the session-events leg, which posts to `/v1/sessions` and consumes capture slots. | **corrected, not coded.** The spool half of R1 holds — the spool is serialized and the loser makes no spool POST — but the session-events leg is a different substrate whose serialization is outside D1's scope, and stopping it early would starve its backlog on a short holder pass. The `One drainer` row now says "zero SPOOL POSTs", a residual states the leg, and the evidence is recorded on **#12992** (the open root for "normal fleet activity saturates a gate of 8") rather than filed as a peer issue. |
+
+The four non-blocking observations: the Python leg reporting an unreadable claim without naming a
+holder (the TS leg names it) is a real honesty gap, **filed as #14437** rather than fixed here;
+the corrupt-record `boot_id` rule divergence is unreachable from either writer; `renew_if_due`
+returning `True` without an ownership check is the documented design; and the Python transport
+confirming a `429` before `capacity_refusal` inspects it is pre-existing behaviour that costs one
+round trip and changes no verdict.
+
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `35235567…`, re-cut once more for the export-only test seam above;
+  (capture half `b0eb460a…`, re-cut twice more while 33 is still unreleased — once for the
+  export-only test seam above, and once for the cycle-5 compare-and-swap `renew`, which is
+  real bytes;
   the read half moved `708b6a…`→`904d2742…` because its
   generation MARKER moved 32→33 with the pair) instead of
   spending a generation 34 on a refinement of the same unreleased seam. From the
   moment 33 reaches `main` the entries are frozen and a byte change needs 34.
+* **The claim serializes the SPOOL, not the whole `session drain` command.** When a
+  second drainer loses the claim it makes no spool POST and says so, but the same
+  command still runs the separate session-events leg (`tortoise/__main__.py`,
+  `drain_session_events`), which posts to `/v1/sessions` and therefore still holds
+  capture slots. That leg has no claim of its own and never had one; serializing it
+  is out of D1's scope (stopping it early would starve its backlog on a short holder
+  pass), and it is recorded with evidence on **#12992**, whose root it shares.
 * **A wedged pass holds the claim until its lease (≤120 s).** That is what a lease is; the bound is derived from the transport (`REQUEST_TIMEOUT_MS` 10 s / `urlopen` 30 s), and a real fetch always ends. A hung *mock* does not — which is why the #2100 case above had to release it.
 * **A claim we cannot READ is HONOURED, not taken over** (both legs): a transient
   local error on a regular claim file is not evidence about its holder, and the
