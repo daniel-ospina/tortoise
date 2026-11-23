@@ -1886,7 +1886,25 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
 
 def _composition_callee_is(func: ast.AST, wanted: str,
                            names: frozenset[str], launderers: frozenset[str]) -> bool:
-    """Is `func` the builtin `wanted` (`vars`/`getattr`), however the source spells it?
+    """Is `func` the builtin `wanted` (`vars`/`getattr`) in one of the THREE spellings this asks?
+
+    ⛔ THE CONTRACT IS ENUMERATED, NOT "however the source spells it" (#14395 review, P1 —
+    MEASURED at `b5cf5fc95992`, and the general form was FALSE): this predicate asks a bare
+    `Name`, a launderer alias of one, or `<module>.<builtin>` for a module in `names`. The
+    FETCHED spellings are NOT asked and read GREEN — DECLARED here rather than claimed closed:
+
+        getattr(builtins, "vars")(builtins)["exec"](<read>)              GREEN
+        vars(builtins)["vars"](builtins)["exec"](<read>)                 GREEN
+        builtins.__dict__["vars"](builtins)["exec"](<read>)              GREEN
+        _v = getattr(builtins, "vars"); _v(builtins)["exec"](<read>)     REFUSED
+
+    ⛔ THE INSTRUMENT SHOWS IT IS THE SAME LEVER: `_builtin_lookup_name` on
+    `getattr(builtins, "vars")` with `members={"vars","getattr"}` already returns `'vars'` —
+    which is why the BOUND twin above refuses — while this predicate's Name and Attribute arms
+    both answer False for that node, so the mapping predicate never learns the receiver is
+    `builtins.__dict__` and `["exec"]` is never put to the question. Closing it means asking
+    that resolver from here; it is FILED on `#14449` (the home of this composition class)
+    rather than grown in a review round, and the three GREEN rows are the measurement.
 
     ⛔ THE MODULE-ATTRIBUTE SPELLING IS THE SAME LEVER (#14395 review, EACH MEASURED GREEN
     through the pin's own `_read_reach` **and LIVE** at `7334b6ace4`, while its BOUND twin was
