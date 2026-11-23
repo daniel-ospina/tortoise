@@ -3859,8 +3859,18 @@ _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 #: that has been measured: 3, 5, 7, 8, 12, 16, 17, 19, 50. That is exactly why the wrong mutant
 #: looked reassuring. ⛔ SCOPE A CLAIM TO THE K IT WAS MEASURED AT: the deletion raises on the death
 #: sample itself at the shipped `K = 5` (`on 2 consecutive samples over 2.50s`), and the count it
-#: needs GROWS with `K` — 3 at `K = 8` (`span 3.15 s`) and at `K = 16` (`2.03 s`), 4 from `K = 17`
-#: (`2.83 s`) — so it is not "one sample later" in general. And at `K = 1` nothing at all is
+#: needs GROWS with `K`, so it is a RANGE carrying its endpoints — never a bare "from K = …": 2
+#: at `K = 2..6` (2.50 s at the shipped `K = 5`), 3 at `7..16` (3.47 / 3.15 / 2.40 / 2.03 s at
+#: 7 / 8 / 12 / 16), 4 at `17..37` (2.83 / 2.67 / 2.00 s at 17 / 19 / 37), 5 at `38..113` (2.59 /
+#: 2.38 / 2.00 s at 38 / 50 / 113), 6 at `K = 114` (2.47 s). Every bracketed value is MEASURED with
+#: the deletion mutant, and each range ends where it does because the next K crosses to the next
+#: count: the boundary pairs are `6|7`, `16|17`, `37|38`, `113|114`. The model is the one the
+#: `time()`-read note below already documents — `step_s + 4(k - 1) * step_s`, i.e. `(4k - 3) *
+#: step_s` with `step_s = 2/K + 0.1` — so `k` is the FIRST `k >= 2` clearing
+#: `(4k - 3) * (2/K + 0.1) >= 2.0`. That reproduces every span above, and `6` is the CEILING
+#: because the step never falls below `0.1` (`17 * 0.1 = 1.7 < 2.0` at `k = 5`), so the count rises
+#: as the STEP shrinks. ⛔ The point `4 from K = 17` stood here and is FALSE at `K = 50` (5 samples,
+#: 2.38 s) — a K this same comment lists as measured. And at `K = 1` nothing at all is
 #: attributable: premise (b) below reds the FILE with no mutant applied, the same
 #: `11 failed, 173 passed` either way.)
 #: SO: no static assertion can pin this constant. The `death_after_streak` ROW pins the ORDERING
