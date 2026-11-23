@@ -29,6 +29,7 @@ than report agreement.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import os
 import re
@@ -1799,9 +1800,32 @@ def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
     # reading of the file's content: the decorator is applied at 7 arms + 1
     # parametrized one (7 cases), and an arm leaving this module is a diff a
     # reviewer sees — what is invisible is the ENV disappearing, which is above.
-    assert Path(__file__).read_text(encoding="utf-8").count("@requires_doc_pin") >= 8, (
-        "the `@requires_doc_pin` arms this pin exists for are gone — delete this "
-        "pin with them, or restore them")
+    #
+    # ⛔ COUNTED AS DECORATORS, never as the raw token: `str.count("@requires_doc_pin")`
+    # is 15 at this head — the 8 decorator lines PLUS 7 prose/format mentions (the
+    # module docstring, the block comment above the imports, two arm docstrings, one
+    # f-string and the two literals of this very assertion). Measured, not assumed:
+    # under the previous `>= 8` form, deleting SEVEN of the eight gated arms left the
+    # count at `1 decorator + 7 prose = 8` and this row stayed GREEN, so the arm it
+    # claims to protect ("the arms this pin exists for are gone") did not fire until
+    # seven eighths of them were gone. The AST cannot see prose; `== 8` rather than
+    # `>= 8` means a NINTH gated arm is a red a reviewer reads instead of slack that
+    # a silently-deleted arm can absorb.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    decorated = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and any(
+            isinstance(dec.func if isinstance(dec, ast.Call) else dec, ast.Name)
+            and (dec.func if isinstance(dec, ast.Call) else dec).id == "requires_doc_pin"
+            for dec in node.decorator_list
+        )
+    ]
+    assert len(decorated) == 8, (
+        "expected EXACTLY 8 `@requires_doc_pin` arms (7 single + 1 parametrized); got "
+        f"{len(decorated)}: {decorated} — the arms this pin exists for are gone; "
+        "delete this pin with them, or restore them")
 
 
 def _psql_install_run() -> str:
