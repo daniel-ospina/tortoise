@@ -12578,6 +12578,24 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
             f"[{label}] is now REFUSED — this row pins it GREEN as the DECLARED callee-"
             "composition residual, so closing it must edit this table rather than leave the "
             "note in `_indirect_reads` contradicting the code")
+        # ⛔ AND EVERY ROW MUST STILL APPLY THE READ, NOT MERELY NAME IT (#14395 review P3,
+        # MEASURED: a row's `not refused` verdict is the SAME for one statement and for several,
+        # so a row split back over its `lines` — the read then sitting in a bare string
+        # expression, produced and DISCARDED — still passes. The stricter call-of-call arm below
+        # only covers the composition row, because a row whose callee is a Subscript
+        # (`_d["exec"](<read>)`) legitimately has no call-of-call; this one is shape-agnostic:
+        # the read literal must be the ARGUMENT of some call, in EVERY row of the table.
+        # MEASURED both ways: 44 passed unmutated, and splitting any row into two statements reds
+        # this arm naming the row.
+        assert [
+            n for n in ast.walk(_pin_source(body(*lines)))
+            if isinstance(n, ast.Call)
+            and any(isinstance(a, ast.Constant) and read in str(a.value) for a in n.args)
+        ], (
+            f"[{label}] no longer APPLIES the read — it must end in a CALL that is passed the "
+            "read literal, not in a bare string expression that produces the read and throws "
+            "it away. `body()` joins the row's `lines` with a newline, so a row split over "
+            "several entries is several STATEMENTS (#14395)")
 
     # ⛔ AND THE CALLEE-COMPOSITION ROW MUST PIN THE SHAPE IT DECLARES (#14395 review P2).
     # Its verdict (`not refused`) is the SAME for one statement and for three, so no mutant over
