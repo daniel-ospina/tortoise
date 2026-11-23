@@ -3094,8 +3094,9 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
     # tuple but IS a refusal a consumer must branch on.
     returned.append("write_failed")
     # ⛔ #9318: `journal_collision` is the POST-WRITE arm — the record was
-    # reached and refused to index it under a position holding content this
-    # write would not produce — so it is not in the pre-socket tuple either, and it is a
+    # reached and refused to index it under a position whose content, capture
+    # time or NAMED IDENTITIES this write does not produce — so it is not in the
+    # pre-socket tuple either, and it is a
     # refusal a consumer must branch on for exactly the reason `write_failed`
     # is. Naming it here is what keeps this pin's SET equal to what the door
     # returns: leave it out and the vocabulary map may spell a size one short

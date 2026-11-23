@@ -1608,6 +1608,11 @@ def test_liveness_start_and_stop_share_one_task_attribute_tuple():
         # retries an idle tenant's failed delivery, so an orphaned copy silently
         # stops every retry (or a duplicated one double-delivers).
         "_webhook_sweep_task",
+        # #13998: the scheduled capacity-notice pass. A threshold is crossed
+        # BETWEEN writes, so these notices have no request-triggered path at
+        # all — an orphaned copy means no customer is ever told, and nothing
+        # else in the system notices.
+        "_capacity_notice_task",
     }
     attr_tuple: tuple[str, ...] | None = None
     for node in ast.walk(tree):
