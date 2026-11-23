@@ -5394,10 +5394,24 @@ def test_child_exited_skips_when_the_row_could_not_be_read(monkeypatch) -> None:
     other row green (the sentinel is still returned; only this reader drops it), so the arm needs
     its own pin.
 
-    Driven the way the census arms drive their subject: call the real test body with the three
-    things it consults stubbed — the gate answered, `ps` "present", and the witness returning
-    `None` — so the arm is exercised hermetically, on a box with no `ps` and under no load. The
-    real child and the real `_child_exited` still run, which is what makes the site reachable.
+    Driven the way the census arms drive their subject: call the real test body with the FOUR
+    things it consults stubbed — the gate answered, `ps` "present", the child's exit answered, and
+    the witness returning `None` — so the arm is exercised hermetically, on a box with no `ps` and
+    under no load. The real child is still spawned (the body does that itself); everything that
+    decides WHICH arm it reaches is stubbed, which is what makes the site reachable.
+
+    ⛔ THE CHILD-EXIT ARM MUST BE STUBBED TOO, AND THAT IS THIS TEST'S OWN RULE-1 GUARD (#14394
+    cycle 16, B1). The body has a SECOND legitimate skip exit above this one — the 10 s wall-clock
+    loop that `inconclusive()`s with "a short-lived child's exit observed by `_child_exited` …".
+    That message carries `INCONCLUSIVE_PREFIX` but never the word `READ`, so on a box where a
+    `python -c pass` child has not exited within 10 s (measured: it HAS happened, which is why that
+    arm exists at all) the run reached the arm below and the assertion at the end redded a REQUIRED
+    shard with "the skip must say the row was not READ" — a load-caused FAIL manufactured by this
+    test, the exact #5049 rule-1 inversion it exists to pin. Answering the child-exit question
+    removes that arm from the path instead of tolerating it: with it stubbed, the ONLY reachable
+    skip is the graded one, so the assertions below can stay strict. ⛔ If an arm is ever added
+    ABOVE the graded one, discriminate the arms here (re-raise a skip that is not this one) rather
+    than loosening the text assertion — a foreign rule-1 skip must never be graded as a FAIL.
     """
     import shutil
 
@@ -5407,6 +5421,10 @@ def test_child_exited_skips_when_the_row_could_not_be_read(monkeypatch) -> None:
         # whole point of this arm is the window where the control ANSWERS and the witness does not.
         patch.setattr(module, "_ps_answers", lambda: True)
         patch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+        # "the child exited", so the loop does not spin for its 10 s and the load-dependent arm
+        # above cannot pre-empt the graded one (see this test's docstring). Deterministic, and it
+        # is what the exit below means anyway: a child that exited and left no readable row.
+        patch.setattr(module, "_child_exited", lambda proc: True)
         patch.setattr(module, "_row_for_pid", lambda pid: None)
         with pytest.raises(pytest.skip.Exception) as expiry:
             test_child_exited_reads_the_status_without_reaping_the_row()
