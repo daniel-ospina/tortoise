@@ -14184,6 +14184,102 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
             "the `id:` — an unused id reads as a gate that is not there.")
 
 
+def test_the_cache_key_scan_reads_restore_keys_and_not_key_alone():
+    """#11065 cycle 8 (P2): a cache guard is only as wide as the fields it reads.
+
+    The retirement scan and the reader arms above claim "no reader, no writer" of
+    the retired `uv-pip-` key. Read through `with.key` alone, that claim is false
+    for exactly the shape that matters: `actions/cache` walks `restore-keys` as
+    PREFIX matches on a primary miss (`docs.github.com` -> "Dependency caching
+    reference"; `actions/cache` README — a prefix match restores the newest entry
+    that starts with it and reports `cache-hit == 'false'`). A step can therefore
+    keep a neutral `uv-cache-…` primary key, carry `restore-keys: uv-pip-…`, pass
+    the old key-only scan, and still restore the combined 3.88 GB archive that
+    #11063 split.
+
+    Non-vacuous in both directions, on synthetic steps so the assertion is the
+    predicate itself and not the live file: the neutral-key/legacy-restore-key
+    step IS reported (the pre-fix scan, `"uv-pip-" in _key_of(s)`, reports
+    nothing here), a fully migrated step is NOT reported (the scan cannot pass by
+    reporting everything), and a `restore-keys` root that stays in its own family
+    — equal or narrower — is accepted by the crossing predicate.
+
+    Kept by #14419: the pin it proves (``(d2)``'s retirement scan and
+    `_cache_refs_of`'s two-field read) still ships, so the proof that a one-word
+    narrowing of that helper cannot go green must ship with it.
+    """
+    # 1. `_cache_refs_of` reads BOTH fields — the primitive the rest rests on.
+    both = {"with": {"key": "uv-cache-${{ runner.os }}-",
+                      "restore-keys": "uv-pip-${{ runner.os }}-\n"}}
+    assert "uv-cache-" in _cache_refs_of(both)
+    assert "uv-pip-" in _cache_refs_of(both), (
+        "`_cache_refs_of` does not read `restore-keys:` — a reader with a neutral "
+        "primary key and the retired key as a restore key then reads as retired")
+    assert _cache_refs_of({"with": {"key": "uv-cache-"}}).strip() == "uv-cache-"
+
+    # 2. The gap itself: a neutral `key:` plus a legacy `restore-keys:` is a
+    #    READER of `uv-pip-`, and the whole-workflow scan must say so.
+    smuggled = {"test": {"steps": [
+        {"name": "Restore uv dependency cache",
+         "uses": "actions/cache/restore@v4",
+         "with": {"path": "~/.cache/uv",
+                  "key": "uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}",
+                  "restore-keys": "uv-pip-${{ runner.os }}-\n"}},
+    ]}}
+    assert _steps_naming_key(smuggled, "uv-pip-") == [
+        ("test", "Restore uv dependency cache")], (
+        "the retirement scan missed a step that REACHES the retired `uv-pip-` key "
+        "through `restore-keys:` — a prefix match restores a cache written under "
+        "that key, which is the 3.88 GB combined pip+uv archive (#11063)")
+
+    # 3. …and it cannot pass by reporting everything: the migrated shape is clean.
+    migrated = {"test": {"steps": [
+        {"name": "Restore uv dependency cache",
+         "uses": "actions/cache/restore@v4",
+         "with": {"path": "~/.cache/uv",
+                  "key": "uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}",
+                  "restore-keys": "uv-cache-${{ runner.os }}-\n"}},
+    ]}}
+    assert _steps_naming_key(migrated, "uv-pip-") == []
+
+    # 4. The read-side crossing predicate: a foreign (or broader) restore-key
+    #    root is reported, an equal-or-narrower one is not.
+    assert _cross_family_restore_keys(smuggled["test"]["steps"][0]) == [
+        "uv-pip-"], (
+        "a `restore-keys` root outside the primary key's family was accepted — a "
+        "prefix match then restores another cache's archive into this root while "
+        "`key:` still reads correct")
+    assert _cross_family_restore_keys(migrated["test"]["steps"][0]) == []
+    narrower = {"with": {"key": "pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}",
+                         "restore-keys": "pip-Linux-\n"}}
+    assert _cross_family_restore_keys(narrower) == [], (
+        "a NARROWER restore-key root is legitimate (it can only reach this "
+        "family's entries) and must not red — a false block here would push the "
+        "next lane to delete the prefix recovery path")
+    broader = {"with": {"key": "uv-cache-${{ runner.os }}-",
+                        "restore-keys": "uv-\n"}}
+    assert _cross_family_restore_keys(broader) == ["uv-"], (
+        "a BROADER restore-key root (`uv-`) matches `uv-pip-…` too, so it must be "
+        "rejected like a foreign one")
+
+    # 5. And the live file: every cache step's `restore-keys:` stay in its own
+    #    key family, so the arm above is asserting something true of the tree it
+    #    guards and not only of the fixtures (#11065 cycle 8's own check: all
+    #    twelve live `restore-keys:` fields are `pip-`, `uv-cache-`, `hf-` or
+    #    `pytest-lastfailed-`, none crossing).
+    wf = _load_python_ci()
+    crossing = [(jid, s.get("name"), _cross_family_restore_keys(s))
+                for jid, jd in wf["jobs"].items()
+                for s in (jd.get("steps") or [])
+                if (s.get("with") or {}).get("restore-keys")
+                and _cross_family_restore_keys(s)]
+    assert not crossing, (
+        f"cache step(s) restore through `restore-keys:` roots outside their own "
+        f"key family: {crossing}. A prefix match on a foreign root restores "
+        "another cache's archive into this step's path — the payload mixing "
+        "#11063 split, from the read side (#11065 cycle 8, P2)")
+
+
 def test_every_required_merge_check_carries_an_outer_cap():
     """A job EMITTING a required merge context must carry a literal cap.
 
