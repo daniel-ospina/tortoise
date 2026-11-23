@@ -1425,7 +1425,8 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
                 and node.args[1].value == "__dict__")
 
 
-def _is_module_registry(node: ast.AST | None, sys_names: frozenset[str]) -> bool:
+def _is_module_registry(node: ast.AST | None, sys_names: frozenset[str],
+                        sys_dict_names: frozenset[str]) -> bool:
     """`sys.modules` — the IMPORT REGISTRY a deferred `from … import …` resolves THROUGH.
 
     ⛔ THE STORE THE PIN WAS BLIND TO (#14326 review P1, MEASURED GREEN): `run()` imports
@@ -1460,22 +1461,42 @@ def _is_module_registry(node: ast.AST | None, sys_names: frozenset[str]) -> bool
     if isinstance(node, ast.Subscript):
         if not (isinstance(node.slice, ast.Constant) and node.slice.value == "modules"):
             return False
-        return _is_sys_dict_mapping(node.value, sys_names)
+        return _is_sys_dict_mapping(node.value, sys_names, sys_dict_names)
     # ⛔ `sys.__dict__.get("modules")` IS THE SAME READ (#14326 round 22, MEASURED GREEN at
     # `f6214869`: both `.get(…)` spellings below inserted the entry with the pin GREEN while
     # the `[…]` subscript of the identical mapping was RED). A `.get("modules")` on the
     # module's OWN namespace is a read of the registry in the same sense `getattr(sys,
     # "modules")` already is — the forms are distinguished by spelling, not by object.
+    # ⛔ AND A `.get` DEFAULT DOES NOT SAVE IT (#14326 round 23, MEASURED GREEN:
+    # `sys.__dict__.get("modules", {})[…]` and `vars(sys).get("modules", {})[…]` both
+    # inserted the entry). The default never fires when the key EXISTS, so the arity is `>= 1`
+    # — the same `>= 2` the `getattr` arm above takes its optional default into account with.
+    if (isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and len(node.args) >= 1
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "modules"
+            and _is_sys_dict_mapping(node.func.value, sys_names, sys_dict_names)):
+        return True
+    # ⛔ THE UNBOUND READ SPELLINGS (#14326 round 23, MEASURED GREEN: `dict.get(sys.__dict__,
+    # "modules")[…] = …` and `dict.__getitem__(sys.__dict__, "modules")[…] = …` each inserted
+    # the entry while the bound spelling was RED). The store axis already resolves its own
+    # unbound twins (`_REGISTRY_MUTATORS` with `offset=1`); the READ axis is the surviving
+    # asymmetry, and both are `dict.get(sys.__dict__, "modules") is sys.modules` at runtime.
     return bool(isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "get"
-                and len(node.args) == 1
-                and isinstance(node.args[0], ast.Constant)
-                and node.args[0].value == "modules"
-                and _is_sys_dict_mapping(node.func.value, sys_names))
+                and node.func.attr in {"get", "__getitem__"}
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "dict"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "modules"
+                and _is_sys_dict_mapping(node.args[0], sys_names, sys_dict_names))
 
 
-def _is_sys_dict_mapping(node: ast.AST, sys_names: frozenset[str]) -> bool:
+def _is_sys_dict_mapping(node: ast.AST, sys_names: frozenset[str],
+                         sys_dict_names: frozenset[str]) -> bool:
     """`sys`'s OWN namespace mapping — `sys.__dict__`, `getattr(sys, "__dict__")`, `vars(sys)`.
 
     ⛔ THE COMPOSITION IS THE SAME MAPPING (#14326 round 22, MEASURED GREEN at `f6214869`:
@@ -1485,9 +1506,19 @@ def _is_sys_dict_mapping(node: ast.AST, sys_names: frozenset[str]) -> bool:
     on the sibling mapping ("`getattr(x, "__dict__")` IS THE MAPPING", #14326 review F1a).
     Narrowed to `sys` by name, as every form of `_is_module_registry` is: an unrelated
     module's own `__dict__["modules"]` is not the import registry and must stay GREEN.
+
+    ⛔ AND AN ALIAS OF THE MAPPING IS THE MAPPING (#14326 round 23, MEASURED GREEN:
+    `__d = sys.__dict__; __d["modules"]["tortoise.sdk"] = _Mirror` and the `.get` spelling of
+    it each inserted the entry). `_aliases_of` already resolves `_ns = _bi.__dict__` for the
+    NAMESPACE axis, so the datum existed and was never consulted. `sys_dict_names` is that
+    set, and it is restricted to aliases of **`sys`'s** dict: accepting any name that is a
+    namespace would red `_ns = globals(); _ns["modules"]`, which is a false red (measured
+    GREEN before and after this change).
     """
     if isinstance(node, ast.Attribute) and node.attr == "__dict__":
         return _is_sys_ref(node.value, sys_names)
+    if isinstance(node, ast.Name):
+        return node.id in sys_dict_names
     if not isinstance(node, ast.Call):
         return False
     if (_callee_names_of(node.func) == {"vars"} and len(node.args) == 1
@@ -7450,18 +7481,25 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     #: aliases. Threaded into `_is_module_registry` so the RESOLVED registry forms follow an
     #: alias instead of the literal spelling (#14326 round 21).
     sys_names = _sys_names_of(tree)
+    #: Every name in this tree bound to `sys`'s OWN `__dict__` (`_d = sys.__dict__`), so the
+    #: mapping alias is the mapping — the same one-hop rule the registry and namespace axes
+    #: already apply (#14326 round 23).
+    #: One call, not a loop: `_aliases_of` is a fixpoint internally, so an outer round is
+    #: unreachable (measured `41 passed` with the loop collapsed — #14326 round 23).
+    sys_dict_names = frozenset(_aliases_of(
+        tree, lambda _n: _is_sys_dict_mapping(_n, sys_names, frozenset()), loops=True))
     # The namespace MAPPINGS, plus the IMPORT REGISTRY `from tortoise.sdk import …`
     # resolves THROUGH (`sys.modules`), each with its one-bind aliases resolved.
     namespaces = frozenset(
         _aliases_of(tree, lambda _n: _is_namespace_expr(_n)
-                    or _is_module_registry(_n, sys_names), loops=True)
+                    or _is_module_registry(_n, sys_names, sys_dict_names), loops=True)
     )
     launderers = frozenset(_aliases_of(tree, _is_setattr_like, loops=True))
     # ⛔ A NAME ALIAS OF THE REGISTRY IS THE REGISTRY (#14326 review P1, measured:
     # `_sm = sys.modules; _sm |= {"tortoise.sdk": _Mirror}` was GREEN while the direct
     # spelling red — the alias axis, not a new spelling).
     registry_aliases = frozenset(_aliases_of(
-        tree, lambda _n: _is_module_registry(_n, sys_names), loops=True))
+        tree, lambda _n: _is_module_registry(_n, sys_names, sys_dict_names), loops=True))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
@@ -7509,7 +7547,7 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             # deferred import resolves and was GREEN while the constructor-keyed spelling was
             # red. One receiver, two key vocabularies; the filter follows the receiver.
             keys = set(_mapping_keys_of(node.value, consts))
-            registry = _is_module_registry(target, sys_names) or (
+            registry = _is_module_registry(target, sys_names, sys_dict_names) or (
                 isinstance(target, ast.Name) and target.id in registry_aliases)
             receiver = registry or (isinstance(target, ast.Attribute)
                                     and target.attr == "__dict__") or \
@@ -7559,7 +7597,7 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             #: `sys.modules` itself, or a NAME ALIAS of it (`_sm = sys.modules`) — the same
             #: union the `AugAssign` arm above already accepts (#14326 round 21).
             def _is_registry_receiver(expr: ast.AST | None) -> bool:
-                return _is_module_registry(expr, sys_names) or bool(
+                return _is_module_registry(expr, sys_names, sys_dict_names) or bool(
                     isinstance(expr, ast.Name) and expr.id in registry_aliases)
 
             if (
@@ -7590,7 +7628,7 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             if (
                 isinstance(node, ast.Subscript)
                 and isinstance(node.ctx, ast.Store)
-                and _is_module_registry(node.value, sys_names)
+                and _is_module_registry(node.value, sys_names, sys_dict_names)
             ):
                 # ⛔ THE REGISTRY IS THE OTHER SIDE OF THE SAME STORE (#14326 review P1,
                 # MEASURED GREEN): `run()`'s deferred `from tortoise.sdk import …` resolves
@@ -8134,6 +8172,52 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'sys.__dict__.get("modules")["tortoise.sdk"] = _Mirror\n',
         "`getattr(sys, \"__dict__\").get(\"modules\")`":
             'getattr(sys, "__dict__").get("modules")["tortoise.sdk"] = _Mirror\n',
+        # ⛔ A `.get` DEFAULT DOES NOT SAVE IT (#14326 round 23, MEASURED GREEN at `35bd48ec`:
+        # both rows below inserted the entry while the no-default spelling was RED). The
+        # default never fires because the key EXISTS, so the arity is `>= 1`.
+        "`sys.__dict__.get(\"modules\", {})`":
+            'sys.__dict__.get("modules", {})["tortoise.sdk"] = _Mirror\n',
+        "`vars(sys).get(\"modules\", {})`":
+            'vars(sys).get("modules", {})["tortoise.sdk"] = _Mirror\n',
+        # ⛔ AND EVERY OTHER BIND FORM THE SIBLING AXES ALREADY RESOLVE (#14326 round 23, EACH
+        # MEASURED GREEN at `35bd48ec`): a `match` CAPTURE, a parameter DEFAULT, a TUPLE
+        # UNPACK, a `with` TARGET, a TUPLE loop target and an ALIAS OF A `sys` ATTRIBUTE.
+        # `_sys_names_of` goes through `_aliases_of` (`loops=True`), which is where those
+        # arms live, so these six are the rows that make that reuse load-bearing rather than
+        # an implementation detail a later rewrite could quietly narrow again.
+        "`match sys: case _s:` CAPTURE":
+            'match sys:\n    case _s:\n        _s.modules["tortoise.sdk"] = _Mirror\n',
+        "parameter DEFAULT `_r=sys`":
+            'def _g(_r=sys):\n    _r.modules["tortoise.sdk"] = _Mirror\n',
+        "TUPLE UNPACK `(_s,) = (sys,)`":
+            '(_s,) = (sys,)\n_s.modules["tortoise.sdk"] = _Mirror\n',
+        "`with sys as _s` TARGET":
+            'with sys as _s:\n    _s.modules["tortoise.sdk"] = _Mirror\n',
+        "TUPLE loop target `for _s, _m in ((sys, 1),)`":
+            'for _s, _m in ((sys, 1),):\n    _s.modules["tortoise.sdk"] = _Mirror\n',
+        "`_s = os.sys` ATTRIBUTE alias":
+            'import os\n_s = os.sys\n_s.modules["tortoise.sdk"] = _Mirror\n',
+        # ⛔ AN ALIAS OF THE `__dict__` MAPPING IS THE MAPPING (#14326 round 23, MEASURED GREEN:
+        # the datum was already in `namespaces` — `_ns = _bi.__dict__` is resolved on the
+        # namespace axis — and was never consulted for the registry read).
+        "`__d = sys.__dict__` SUBSCRIPT":
+            '__d = sys.__dict__\n__d["modules"]["tortoise.sdk"] = _Mirror\n',
+        "`__d = sys.__dict__` `.get`":
+            '__d = sys.__dict__\n__d.get("modules")["tortoise.sdk"] = _Mirror\n',
+        "`__d` from a LOOP over `(sys.__dict__,)`":
+            'for __d in (sys.__dict__,):\n    __d["modules"]["tortoise.sdk"] = _Mirror\n',
+        # ⛔ THE UNBOUND READ TWINS (#14326 round 23, MEASURED GREEN while the bound spelling
+        # was RED) — the store axis already pins its own unbound twins, `offset=1`.
+        "UNBOUND `dict.get(sys.__dict__, …)`":
+            'dict.get(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
+        "UNBOUND `dict.__getitem__(sys.__dict__, …)`":
+            'dict.__getitem__(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
+        # ⛔ AND A BACK-ORDERED CHAIN, which is what makes `_aliases_of`'s fixpoint load-bearing
+        # (#14326 round 23: the FORWARD chain resolves in one pass, so a single-pass walk
+        # satisfied every earlier row — measured: `range(2)` → `range(1)` left the whole file
+        # at 41 passed. This row reds under a one-pass walk and passes at the fixpoint).
+        "BACK-ORDERED chain `_b = _a` before `_a = sys`":
+            '_b = _a\n_a = sys\n_b.modules["tortoise.sdk"] = _Mirror\n',
     }
     for name, lever in registry_spellings.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
@@ -8155,7 +8239,15 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   # one, must all stay GREEN or the narrowing has been lost.
                   '_o = other\n_o.modules["tortoise.sdk"] = _Mirror\n',
                   'getattr(other, "__dict__")["modules"]["tortoise.sdk"] = _Mirror\n',
-                  'other.__dict__.get("modules")["tortoise.sdk"] = _Mirror\n'):
+                  'other.__dict__.get("modules")["tortoise.sdk"] = _Mirror\n',
+                  # ⛔ AND THE ROUND-23 CONTROLS. The `sys`-dict alias arm accepts a name bound
+                  # to `sys.__dict__` ONLY: an ordinary NAMESPACE name is not that mapping, and a
+                  # `with` target whose context expression is an unknown call binds an unknown
+                  # value. Both must stay GREEN, as must the unbound `.get` on an unrelated dict.
+                  '_ns = globals()\n_ns["modules"]["tortoise.sdk"] = _Mirror\n',
+                  '_od = other.__dict__\n_od["modules"]["tortoise.sdk"] = _Mirror\n',
+                  'dict.get(_cfg, "modules")["tortoise.sdk"] = _Mirror\n',
+                  'with _cm(sys) as _s:\n    _s.modules["tortoise.sdk"] = _Mirror\n'):
         assert ctor_findings(shipped + "class _Mirror:\n    pass\n" + inert) == [], inert
 
     # …and the false-red control: `|=` on an ORDINARY container stores a label, not a
