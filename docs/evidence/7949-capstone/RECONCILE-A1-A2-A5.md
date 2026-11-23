@@ -853,7 +853,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
 #     DERIVE the cite — a citation pin, not a consumer.
 # So: 1 file reads the channel through the literal name (`test_10999`), 1 reads it through a rebind
 # (`write_path_relation_lane`), and 1 does not read it at all (the pin). `"relations"` is a
-# RESULT-level key (`extractor_v2.py:12739`, `"relations": payload_relations`), which is why both
+# RESULT-level key (`extractor_v2.py:12749`, `"relations": payload_relations`), which is why both
 # readers can see it at all.
 # ⚠️ The third file was added after this record was written, so the earlier "TWO files … 59"
 # was true of the head this block was first measured on (`e49788706a`, which reads 2 files /

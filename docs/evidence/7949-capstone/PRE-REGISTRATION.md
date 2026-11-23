@@ -3285,7 +3285,17 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   `tortoise/extractor_v2.py` was turned into a line map and every cite was re-resolved through it;
   `19,383` of `19,396` base lines map to a byte-identical head line, and the 13 that do not are
   the edited hunk boundaries themselves — so a cite that lands on edited code was caught rather
-  than silently moved. The bundle's documents (`README.md`, `E1-E5-PROOFS.md`,
+  than silently moved. **Counting convention**, stated so a re-measurer reproduces the pair rather
+  than a near neighbour: for EVERY base line `n`, compare `base[n]` with `head[shift(n)]`; on that
+  convention 13 lines differ, and they are exactly `:2435`, `:16092`–`:16097`, `:16157`, `:16158`,
+  `:16184`, `:16200`, `:16233` and `:17092` — the hunk edges.
+- **⛔ The bundle's frozen cites stayed frozen, and NOT because the map spares them.** `:8278-8285`,
+  `:8288-8292` and `:8534-8538` sit ABOVE the first hunk (which inserts after `:2435`), so the line
+  map DOES move them `+10`. They are left alone because they live inside a `_BUNDLE_HISTORICAL`
+  paragraph (`"no longer\s+resolve"`) — numbers deliberately frozen at the head they name — and
+  `tests/test_7949_capstone_measure.py` pins that exclusion set, so shifting them would red its
+  `skipped` arm instead of passing silently. An earlier revision of this lane's commit message gave
+  the opposite (false) reason; the mechanism above is the measured one. The bundle's documents (`README.md`, `E1-E5-PROOFS.md`,
   `A4-PER-LAYER.md`, both probes, `docs/00_index.md`, the S2.1 row in
   `EXTRACTOR-V4-ARCHITECTURE.md`) and the hand-typed pin tables in
   `tests/test_7949_capstone_measure.py` were re-cut together, because the pin and the document are
