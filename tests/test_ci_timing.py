@@ -3891,8 +3891,14 @@ def test_a_flake_id_with_a_pipe_or_control_byte_cannot_break_the_table_row() -> 
     assert _code_spans(rendered_cell) == [
         "tests/test_attest_census.py::test_hostile[a\\nb\\|c]"], (
         f"the cell renders as {rendered_cell!r}, not as the escape-only form")
-    # The published VALUE keeps the id verbatim: it is the lookup key, so neither the
-    # display escaping nor a decode may have leaked into it.
+    # `render_md` must only READ the flake record: the id is the lookup key, so the
+    # display escaping must not be written back into it, nor may a decode leak into it
+    # in place. This asserts the SOURCE RECORD is untouched after a render — it reddens
+    # if a future edit makes `_md_display_text`/`_md_code_span` mutate `f["test"]`.
+    # ⛔ It does NOT reach the publisher (`render_md` only reads `f['test']`,
+    # `f['passed_at']`, `f['run_id']`), and `main()` re-publishes this same list
+    # object as `candidate_flakes`, so there is no separately-published value to pin;
+    # an earlier label here claimed otherwise (#14366 review P2).
     assert flakes[0]["test"] == nodeid
 
     # #14366 review P3-1: `_CONTROL_DISPLAY`'s `\t`/`\r` entries were UNPINNED — dropping
