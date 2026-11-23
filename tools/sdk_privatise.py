@@ -1875,7 +1875,16 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
 #: legitimised by the re-cut; the pair below is `--repin`'s own output on THIS tree, never arithmetic
 #: on the last pin, and `--check` exits 0 on it.
-SWEEP_RESIDUE = (11898, "8cf59d52af09e536")
+#: ⛔ RE-DERIVED ON THIS PR'S MERGE TREE (#14395 fix lane). The paste above is 11898 and the tree
+#: reads **11901** (`953c70c05b55923b`) - MEASURED, and NOT this PR's doing: `--repin` reads the
+#: identical pair on the merge tree with this PR's files reverted, so the three rows are already on
+#: `main` and the `python-ci.yml` step that runs exactly `--check` is RED there. This PR's only
+#: tracked shape contribution is `tests/test_14192_read_wave_tool.py`, whose added shapes are
+#: STRING literals - `edits_for` charges it **0** residue rows. ⛔ THE CHURN IS THE CLASS: this pin
+#: goes stale the moment any merge adds a mapped receiver (#14308; `#11081` owns the durable fix),
+#: so every paste here reads ONE tree. `--check` exits 0 on the pair below; the extent figure in
+#: `tests/test_sdk_privatise_sweep.py` was re-walked in the same pass, never adjusted.
+SWEEP_RESIDUE = (11901, "953c70c05b55923b")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
