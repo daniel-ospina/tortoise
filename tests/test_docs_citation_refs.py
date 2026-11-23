@@ -8556,10 +8556,13 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
 
 
 #: A `--numstat` figure is a head-bound number: `git diff --numstat origin/main...HEAD --
-#: docs/00_index.md` prints NOTHING at this head, so a document that types what it printed
-#: is refuted by the command it quotes beside the figure. The pre-fix document did exactly
-#: that at four clauses (#13802 review, finding 1 — the D5 row and the file-table section),
-#: so the pattern below is the armed detector for that defect class.
+#: docs/00_index.md` is its only source, and its reading belongs to the head you run it at —
+#: so state the command and type no pair. A document that types the pair it printed is
+#: quoting a figure the next merge can contradict (and #14038 measured exactly that: the
+#: clause here now says why a row COUNT is not a re-point count, and the command prints a
+#: non-empty pair at its head, so the refutation is the doctrine, not an emptiness premise).
+#: The pre-fix document typed such a pair at four clauses (#13802 review, finding 1 — the D5
+#: row and the file-table section), so the pattern below is the armed detector for that class.
 _TYPED_INDEX_NUMSTAT = re.compile(
     # ⛔ THE ALTERNATION IS GROUPED SO THE STAMP EXEMPTION GOVERNS ALL OF IT (#14269
     # review, P2 — MEASURED). The exemption is stated ONCE, after the group, because a
@@ -8572,7 +8575,11 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # lookahead covers them all.
     r"(?:"
     r"`git diff --numstat origin/main\.\.\.HEAD -- docs/00_index\.md`"
-    r"\s*(?:->|prints)\s*`\d+\s+\d+`"
+    # ⛔ THE UNICODE ARROW IS THE SPELLING THIS CLAUSE ACTUALLY USED (#14038 review, P2 —
+    # MEASURED: `… — \`git diff --numstat …\` → \`4\t4\`` left this arm GREEN at
+    # `73c2d6e1de1c`, while the same tail with `->` red; the two sibling alternatives below
+    # already carried `\u2192`, which is what made the omission a gap rather than a choice).
+    r"\s*(?:->|\u2192|prints)\s*`\d+\s+\d+`"
     # ⛔ THE SHORT FORM TOO (#13802 review, P2). The document's own spelling of this
     # clause is "…and its `--numstat` form both print NOTHING", and a regex that knows
     # only the long form walks straight past the figure that replaces `NOTHING` there —
@@ -8675,9 +8682,9 @@ def test_the_document_types_no_numstat_figure_for_the_index_residual():
     assert not typed, (
         "05-verify.md TYPES the figure that `git diff --numstat origin/main...HEAD -- "
         f"docs/00_index.md` printed ({typed[0]!r}). A numstat is a head-bound figure — "
-        "it is EMPTY at this head, so the clause is refuted by the very command quoted "
-        "beside it. State the command and let the reader re-derive the set "
-        "(#13802 review, finding 1)")
+        "state the command and let the reader re-derive it at the head being merged; a typed "
+        "pair is one the next merge can contradict (#13802 review, finding 1; the emptiness "
+        "premise this message used to state was itself head-bound — #14038 review, P2)")
 
 
 def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures():
@@ -8692,6 +8699,9 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
     for _typed in (
         "`git diff --numstat origin/main...HEAD -- docs/00_index.md` -> `1 1`",
         "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints `1 1`",
+        # the UNICODE-arrow spelling of the long form — measured GREEN before this case
+        # existed (#14038 review, P2): the clause this PR corrects typed exactly this tail.
+        "`git diff --numstat origin/main...HEAD -- docs/00_index.md` \u2192 `4\t4`",
         "…and its `--numstat` form both print `1 1`",
         "…and its `--numstat` form gives `1 1`",
         "both print `1 1`",

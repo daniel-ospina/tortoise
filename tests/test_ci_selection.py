@@ -10515,6 +10515,20 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(load_manifest()) == []
 
 
+# ⛔ THE GENERAL ENTRY RULE WAS RETIRED — READ THIS BEFORE CITING THE PARAGRAPH BELOW
+# AS CURRENT FACT (#2148/B9, PR #14416). `config/ci-surfaces.yml`'s contract block above
+# `durations:` now says the row is OPTIONAL: a fast-pool file with no row is NOT an
+# `--integrity` failure and not a coverage defect — it packs at the header's flat
+# `DEFAULT_FAST_WEIGHT` (2.0 s, the number a hand-written row carried) and
+# `tools/ci_timing.py --refresh-durations` writes the measured row from the next
+# push-to-main junit sweep. So NO NEW FILE OWES A ROW, and "the row must EXIST" is not
+# a rule an author joins. The pin is still here, and what it is NOW is FILE-SPECIFIC:
+# `ROWED_BY_THIS_FOLD` names the files whose row THESE TESTS require, and dropping a
+# row it names still reds required CI — the map block relaxes none of them, it retires
+# only the obligation on a file that is merely new. The `ENTRY-RULE pin` /
+# `entry-rule pin` phrasings further down this block are the historical name for the
+# same tuple, kept with the comments they annotate; read them as "file-specific pin".
+#
 # #2148 (the batch fold's PR #10726) review P3: the map's own ENTRY RULE is that a
 # fast file added by a PR must carry a `durations:` row at all — "a default is not a
 # reading" — and the coverage FLOOR cannot police it, because the floor is a RATIO
@@ -13688,6 +13702,230 @@ def test_the_head_total_guard_is_not_vacuous(tmp_path):
         "it is a no-op on the only row that states a prose total")
     assert _durations_rows_with_a_stale_head_total(fresh_period, tmp_path) == []
 
+
+#: The `fast_shards` header block is the ONE place in the manifest that restates
+#: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
+#: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at this head —
+#: re-derive them with that verb rather than trusting them", and the same block had
+#: already gone stale twice before that promise was written (#11298 review cycle 5,
+#: #14015). A promise in prose is not a guard, so the sentence is graded against the
+#: live emission here instead.
+#:
+#: Shard names are read in BOTH spellings this map uses — an explicit list (`f, h`)
+#: and a range (`a–e`) — and the count may be a word (`nine`) as the surrounding prose
+#: prefers. A guard that only reads one spelling turns the other into an unread claim,
+#: which is how the sibling head-total guard above became inert three times.
+_EMISSION_COUNT_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+_EMISSION_CLAUSE_RE = re.compile(
+    r"(?P<n>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"(?: shards?)? at (?P<est>\d+\.\d) s \((?P<names>[a-z][a-z,\s\u2013\u2014-]*)\)")
+_EMISSION_CEIL_RE = re.compile(r"`ceil\((?P<est>\d+\.\d)/60 x 2\)` = (?P<minutes>\d+) m")
+_EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
+
+
+def _emission_names(phrase: str) -> set[str]:
+    """Expand a shard-name phrase: `a–e, i, j` -> {a,b,c,d,e,i,j}."""
+    names: set[str] = set()
+    for part in phrase.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        span = _EMISSION_RANGE_RE.fullmatch(part)
+        if span:
+            names |= {chr(c) for c in range(
+                ord(span.group("lo")), ord(span.group("hi")) + 1)}
+        else:
+            names.add(part)
+    return names
+
+
+def _emission_block_claims(
+        manifest_text: str) -> tuple[dict[float, set[str]], float, int] | None:
+    """Read the `fast_shards` header block's stated emission.
+
+    Returns `{est_seconds -> shard names}`, the `ceil(...)` operand and the minutes it
+    states; `None` when the block (the text above the `fast_shards:` key) states none.
+    The subject is bounded to that header so a shard-count sentence elsewhere in the
+    1.18 MB map cannot be mistaken for this block's claim.
+    """
+    key = re.search(r"^fast_shards:", manifest_text, re.MULTILINE)
+    assert key is not None, (
+        "the manifest carries no `fast_shards:` key, so the bound below is the WHOLE 1.18 MB "
+        "file rather than the block this guard claims to read — fail closed here instead of "
+        "silently widening the subject a renamed key would hand it.")
+    header = manifest_text[:key.start()]
+    # Comment line breaks are PRESENTATION — a sentence wraps at will — so join the block
+    # into one string before reading it; otherwise a figure that happens to land on the
+    # next line makes a claim unread, which is the no-op-gate class this guard's own
+    # message names.
+    header = re.sub(r"\n\s*#\s?", " ", header)
+    groups: dict[float, set[str]] = {}
+    for m in _EMISSION_CLAUSE_RE.finditer(header):
+        names = _emission_names(m.group("names"))
+        raw_n = m.group("n")
+        stated_n = int(raw_n) if raw_n.isdigit() else _EMISSION_COUNT_WORDS[raw_n]
+        if stated_n != len(names):
+            # The COUNT and the SET are two statements of one fact. A sentence that
+            # disagrees with itself is graded as claiming a set it does not name, so
+            # the caller reds rather than silently believing one side.
+            names = names | {f"<count says {stated_n}>"}
+        est = float(m.group("est"))
+        if est in groups:
+            # A SECOND clause at the same `est` merges under `|` into a claim LARGER than
+            # either sentence makes, so a restatement of a subset (`two at 835.7 s (a, k)`
+            # beside the clause that already names five) would be invisible, and a
+            # duplicated one would grade as if it were a single statement. Mark the repeat
+            # so the caller reds rather than believing a claim the block does not make.
+            groups[est] = groups[est] | {f"<est {est} stated twice>"}
+        else:
+            groups[est] = set()
+        # `|` rather than `set.update`: a `.update(` on a receiver this sweep cannot
+        # type is one more member of the `tools/sdk_privatise.py` residue pin, and a
+        # test is not a reason to move a pinned count.
+        groups[est] = groups[est] | names
+    ceil_match = _EMISSION_CEIL_RE.search(header)
+    if not groups or ceil_match is None:
+        return None
+    return groups, float(ceil_match.group("est")), int(ceil_match.group("minutes"))
+
+
+def _live_fast_shard_emission() -> tuple[dict[float, set[str]], int]:
+    """The emission the block claims to quote: `{est_seconds -> names}` and the
+    watchdog the emitted shards carry."""
+    legs = cs.push_legs(cs.load_manifest())
+    groups: dict[float, set[str]] = {}
+    for shard in legs["shards"]:
+        groups.setdefault(float(shard["est_seconds"]), set()).add(shard["name"])
+    return groups, max(s["watchdog_minutes"] for s in legs["shards"])
+
+
+def test_the_fast_shards_header_block_states_the_measured_emission():
+    """#14296: the block restates the emission and must BE the emission.
+
+    Measured at the pre-fix head `2d57abb3e98c`: the block stated nine shards at 721.8 s (`a`–`e`,
+    `g`, `i`–`k`) and two at 721.7 s (`f`, `h`), while `push_legs` packed **seven** at
+    **722.0** (`a`–`e`, `i`, `j`) and **four** at **721.9** (`f`, `g`, `h`, `k`) — the
+    `origin/main` merge moved the pool and the sentence was carried instead of
+    re-emitted, which is the third time this block went stale. The watchdog is
+    unaffected (25 m either way), so arithmetic on the minute could not catch it: only
+    the `est_seconds` figures can.
+    """
+    claims = _emission_block_claims(cs.MANIFEST.read_text(encoding="utf-8"))
+    assert claims is not None, (
+        "the `fast_shards` header block states no emission the guard can read — this "
+        "is a no-op gate over an empty subject set, not a clean map. Re-point "
+        "`_EMISSION_CLAUSE_RE` / `_EMISSION_CEIL_RE` at the sentence the block "
+        "actually uses, or retire this guard rather than leaving it reading nothing.")
+    groups, ceil_est, ceil_minutes = claims
+    live_groups, live_minutes = _live_fast_shard_emission()
+    assert groups == live_groups, (
+        "the `fast_shards` header block quotes a `--emit-push-matrix` this tree does "
+        f"not emit — stated {groups}, emitted {live_groups}. Re-run the verb and paste "
+        "its figures; a carried emission is the class this block exists to warn "
+        "about (and that it has now gone stale on three times).")
+    assert (ceil_est, ceil_minutes) == (max(live_groups), live_minutes), (
+        "the block's watchdog derivation disagrees with the emission — stated "
+        f"`ceil({ceil_est}/60 x 2)` = {ceil_minutes} m, emitted worst "
+        f"{max(live_groups)} s at {live_minutes} m. The block claims the two agree "
+        "by construction rather than by a hand re-read; this is that check.")
+
+
+def test_the_emission_block_guard_is_not_vacuous():
+    """The guard must bite on a carried emission and stay quiet on this tree's.
+
+    The stale sentence is the block's own pre-fix text (721.8/721.7, nine/two), kept
+    here as the measured instrument: it must NOT read as this tree's emission. If a
+    future edit widens a pattern until it matches anything, this arm stops redding
+    and the sibling guard above becomes decoration.
+    """
+    stale = (
+        "# carried: `--emit-push-matrix` at THIS head packs 9 shards at 721.8 s "
+        "(a, b, c, d, e, g, i, j, k) and 2 shards at 721.7 s (f, h), so\n"
+        "# `ceil(721.8/60 x 2)` = 25 m governs\n"
+        "\nfast_shards: 11\n")
+    stale_claims = _emission_block_claims(stale)
+    live_groups, live_minutes = _live_fast_shard_emission()
+    assert stale_claims is not None
+    assert (stale_claims[0], stale_claims[1], stale_claims[2]) != (
+        live_groups, max(live_groups), live_minutes), (
+        "the pre-fix sentence reads as this tree's emission — the guard cannot "
+        "distinguish a carried figure from a re-measured one")
+    # A sentence is bounded to the header: a shard-count line BELOW `fast_shards:`
+    # (the carve-out / slow-leg comments quote their own shard counts) is not this
+    # block's claim and must not be joined into it. The `ceil(...)` clause is what makes
+    # this fixture a WITNESS for the bound rather than only a True/True: without it
+    # `None` arrives for two independent reasons (an EMPTY bounded header, or a missing
+    # ceil, which the unbounded read also lacks) and a revert of the truncation would
+    # pass. With it, the bounded read returns `None` and the unbounded one returns a
+    # claim — so the row reds on that revert and only that revert.
+    assert _emission_block_claims(
+        "fast_shards: 11\n# packs 2 shards at 700.0 s (a, b)\n"
+        "# `ceil(700.0/60 x 2)` = 24 m\n") is None, (
+        "a shard-count comment BELOW `fast_shards:` was read as this block's claim — the "
+        "subject is not truncated at the key")
+    # A RENAMED key must not silently widen the subject to the whole 1.18 MB file: the bound is
+    # `manifest_text[:key.start()]` for the `key` `re.search(r"^fast_shards:")` returned, and an
+    # absent key yields NO bound at all (the whole file) — so a renamed key used to hand the guard
+    # every shard-count sentence in the map and still return a readable claim. It fails closed on
+    # the bound itself now, before it reads a single clause.
+    with pytest.raises(AssertionError, match="carries no `fast_shards:` key"):
+        _emission_block_claims(
+            "fast_shards_x: 11\n# five shards at 835.7 s (a, c, d, e, k)\n")
+    # A COUNT that disagrees with the names beside it is graded as claiming a set it does not name
+    # (`<count says N>`), so the caller reds rather than believing one side of a sentence that
+    # disagrees with itself. Without this fixture the arm is live on the artifact but graded by
+    # nothing: measurably, with the arm disabled (`if False:`) BOTH rows above stay green and a
+    # count-word-only edit (`five` -> `four`, names intact) ships silently (agent-infra#3442 rule 3).
+    disagreed = _emission_block_claims(
+        "# four shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
+        "# `ceil(835.7/60 x 2)` = 28 m\n"
+        "\nfast_shards: 11\n")
+    assert disagreed is not None
+    assert disagreed[0][835.7] == {
+        "a", "c", "d", "e", "k", "<count says 4>"}, (
+        "a COUNT that disagrees with the names beside it was read as the names alone — the count arm "
+        f"is the only thing that reds a `five` -> `four` edit: {disagreed[0][835.7]}")
+    # A SECOND clause at the same `est` is a repeat, not a second statement of one fact:
+    # `|` would absorb a subset (`two at 835.7 s (a, k)` beside the clause naming five)
+    # into a claim the block does not make, invisibly. The repeat is marked instead.
+    repeated = _emission_block_claims(
+        "# five shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
+        "# and two at 835.7 s (a, k) — `ceil(835.7/60 x 2)` = 28 m\n"
+        "\nfast_shards: 11\n")
+    assert repeated is not None
+    assert repeated[0][835.7] == {
+        "a", "c", "d", "e", "k", "<est 835.7 stated twice>"}, (
+        "a subset restated at the same est was absorbed into the group beside it — the "
+        f"guard would grade a claim the block does not make: {repeated[0][835.7]}")
+    # A SUPERSET restatement reds by the same marker — it is not the subset case's leftover.
+    # Measured through the guard itself (2026-11-23): a stray clause naming all five PLUS two
+    # more at 835.7 leaves `{…, '<est 835.7 stated twice>'}` against a live group of five, so
+    # the partition comparison reds. Stated because the fix commit's own record claimed this
+    # shape was absorbed, which was wrong.
+    superset_repeat = _emission_block_claims(
+        "# five shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
+        "# and seven at 835.7 s (a, c, d, e, i, j, k) — `ceil(835.7/60 x 2)` = 28 m\n"
+        "\nfast_shards: 11\n")
+    assert superset_repeat is not None
+    assert "<est 835.7 stated twice>" in superset_repeat[0][835.7], (
+        "a SUPERSET restated at the same est was absorbed — the repeat marker must fire on "
+        f"ANY second clause at one est, not only on a subset: {superset_repeat[0][835.7]}")
+    # The RANGE spelling this block ITSELF used at `4ff7964acc` (`a–e, g, i–k`) and
+    # `29a2da4c9c` (`a–e, i, j`) — an arm no other fixture reaches, because every other
+    # sample spells its names out. Without this, `_EMISSION_RANGE_RE` and the `span`
+    # branch could be deleted with both rows still green, and the map's other spelling
+    # would silently become an unread claim (the no-op-gate class this file keeps
+    # re-learning). Measured: neutering the pattern reds this assertion and nothing else.
+    ranged = _emission_block_claims(
+        "# nine shards at 721.8 s (a–e, g, i–k) and two at 721.7 s (f, h)\n"
+        "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
+    assert ranged is not None and ranged[0][721.8] == set("abcdegijk"), (
+        "the RANGE spelling this block used at `4ff7964acc`/`29a2da4c9c` is unread — an arm "
+        "that only reads explicit lists turns the map's other spelling into an unread claim: "
+        f"{ranged}")
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
