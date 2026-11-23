@@ -977,6 +977,51 @@ def test_a_migration_that_fails_mid_flight_leaves_one_claimant():
         "issue_number") == 7
 
 
+def test_a_completed_migration_releases_its_claim_too():
+    """A claim that outlives a SUCCESSFUL migration blocks that issue for ever.
+
+    The claim object (`ops/alerts/.migrating/<kind>/<issue>.json`) has no expiry,
+    so releasing it only on the two FAILURE branches leaked one object per
+    migrated issue — and, worse, made that issue number unmigratable: a second
+    attempt finds its own stale claim and refuses, which strands the legacy
+    sentinel next to a duplicate filed for one condition (the permanent #2844
+    alias the sibling branches were fixed to avoid). Reachable the moment the
+    legacy object reappears, because an R2/DR restore brings back the
+    pre-migration `{org}.json` beside the scoped key.
+    """
+    storage = MemoryStorage()
+    store = AlertStore(
+        storage,
+        file_issue=lambda title, body: 7,
+        close_issue=lambda number, comment=None: None,
+        search_open=lambda kind, org: [],
+        push_telegram=lambda text: None,
+        issue_open=lambda number: True,
+        comment_issue=lambda number, body: None,
+        repo="daniel-ospina/tortoise",
+    )
+    store.open_incident_state("abuse_review_needed", "org-a", {"detail": "legacy"})
+
+    assert store.migrate_incident_subject(
+        "abuse_review_needed", "org-a:point_create", "org-a") is True
+    assert storage.list("ops/alerts/.migrating/") == [], (
+        "the claim object outlived its own COMPLETED migration — one leaked "
+        f"object per migrated issue: {storage.list('ops/alerts/.migrating/')}")
+
+    # A restore brings the legacy object back beside the scoped key. The
+    # migration must not be blocked by a claim nobody owns any more: it takes the
+    # "nothing of ours was created" branch and RELEASES its claim, so a later
+    # attempt is still possible.
+    storage.upload("ops/alerts/abuse_review_needed/org-a.json", b'{"issue_number": 7}')
+    assert store.migrate_incident_subject(
+        "abuse_review_needed", "org-a:point_create", "org-a") is False
+    assert storage.list("ops/alerts/.migrating/") == [], (
+        "a refused migration left a claim behind, so issue 7 can never be "
+        f"migrated again: {storage.list('ops/alerts/.migrating/')}")
+    assert store.incident_record("abuse_review_needed", "org-a:point_create").get(
+        "issue_number") == 7, "the scoped sentinel must still be the live one"
+
+
 def test_an_unreadable_issue_number_does_not_arm_a_silent_window(monkeypatch):
     """FILED + a failing read-back must DEFER, not spend the window in silence.
 
@@ -1287,6 +1332,50 @@ def test_a_clean_window_with_no_episode_does_no_store_work(monkeypatch):
     assert resolved == [], (
         "a clean window with no episode must not touch the incident store — "
         f"{len(resolved)} resolve call(s) on the request path ({resolved})")
+
+
+def test_an_out_of_band_clear_releases_the_alert_claim():
+    """An episode cleared OUT OF BAND must not mute a re-breach inside its window.
+
+    `abuse_unsuspend` (and a manual `flag_clear`) writes the clear with no
+    in-process caller, so the NEXT clean window reads `flagged=False`. Gating the
+    in-process claim release on `flagged` therefore kept the claim for the rest of
+    the original window — 86400 s for R2 — and a new detection inside it was
+    dropped at `_claim_notify`, never reaching `notify_abuse` at all: not a folded
+    digest, not even the one reminder the delivery ledger promises at the window's
+    end. `_release_notify` is a dict `pop` under a lock with no I/O, so the
+    R2-cost motive for the `flagged` gate never applied to it, and
+    `_release_notify`'s own docstring states the behaviour this restores.
+    """
+    from tortoise.abuse import EVENT_FLAG, EVENT_REVIEW
+
+    class _ClearedOutOfBand:
+        """Under threshold, and the flag is already gone (cleared elsewhere)."""
+
+        def window_sum(self, org_id, rule, window_s, now):
+            return 0
+
+        def latest_flag_at(self, org_id, rule):
+            return None
+
+        def flag_clear(self, org_id, rule, now=None):
+            raise AssertionError(
+                "no flag to clear — a clean window on a cleared rule must not "
+                "write one")
+
+    now = datetime.now(timezone.utc)  # noqa: UP017
+    engine = AbuseEngine(_ClearedOutOfBand())
+    # the earlier episode's claims are still armed (a 24 h R2 window)
+    engine._last_notified[("org-a", "point_create", EVENT_FLAG)] = now + timedelta(hours=24)
+    engine._last_notified[("org-a", "point_create", EVENT_REVIEW)] = now + timedelta(hours=24)
+
+    engine._evaluate("org-a", "point_create", 500, 3600, now)
+
+    assert ("org-a", "point_create", EVENT_FLAG) not in engine._last_notified, (
+        "the flag claim survived a clean window, so a re-breach inside the "
+        "original 24 h window is dropped at `_claim_notify` and never reaches "
+        "`notify_abuse` — a muted security class (#4872)")
+    assert ("org-a", "point_create", EVENT_REVIEW) not in engine._last_notified
 
 
 def test_an_incident_that_cannot_name_an_issue_still_reaches_the_human(
