@@ -700,3 +700,215 @@ def test_a_corrupt_meta_is_COUNTED_by_a_READ_ONLY_probe(tmp_path):
     assert spool_saturated(tmp_path, bounds, repair=False) is True
     assert meta.exists(), "a read-only probe must not touch the entry"
     assert list(_entries(tmp_path).glob("*.orphan*")) == []
+
+
+# ── cycle 3 — the floor's LOOP, the ledger's timing, and the meta-less log ──
+#
+# Three findings from the review at `9de49e36b801`, each a seam opened by the
+# FIX for the previous one: a floor check that the loop below it ignored, a
+# disposition record emitted before the decision that admits the write, and an
+# occupancy test that re-collapsed "no meta" into "nothing on disk".
+
+
+def _filed_entry(root: Path, session_id: str, stamp: str) -> Path:
+    """A FILED entry (its content is on the wire) with a deterministic age."""
+    meta = _write_meta(root, session_id, capture_key="K", filed_key="K",
+                       capture_lane="hook", filed_lane="hook",
+                       updated_at=stamp, created_at=stamp)
+    _write_turns(root, session_id, [{"role": "user", "content": "x"}])
+    return meta
+
+
+def test_prune_stops_at_the_COUNT_ceiling_when_the_byte_ceiling_is_unreachable(tmp_path):
+    """Over BOTH ceilings, prune spends only the evictions the COUNT needs.
+
+    ``bytes_reachable`` False means no eviction can bring the byte term under
+    ``max_total_bytes`` (the permanent classes alone are over it), so a loop
+    still testing ``total <= max_total_bytes`` never stops on that axis: it
+    evicted EVERY filed entry to relieve one count slot and was still over the
+    byte ceiling afterwards — #10175 ("refuse new work, never destroy the queue
+    to admit it") violated from inside the guard added to enforce it.
+
+    MUTATION THAT REDS THIS: restore the loop break
+    ``count <= max_entries and total <= max_total_bytes`` -> all five filed
+    entries are unlinked and only the undelivered one survives.
+    """
+    filed = [_filed_entry(tmp_path, f"sess-f{i}", f"2026-01-01T00:00:0{i}Z")
+             for i in range(5)]
+    _write_meta(tmp_path, "sess-undelivered", capture_key="U")
+    _write_turns(tmp_path, "sess-undelivered", [{"role": "user", "content": "y" * 2000}])
+    bounds = Bounds(max_entries=3, max_total_bytes=1000, max_entry_bytes=1 << 20)
+
+    discards = prune_spool(tmp_path, None, bounds)
+
+    assert len(discards) == 3, (
+        "counting six entries against max_entries=3 needs exactly three"
+        f" evictions; prune spent {len(discards)}"
+    )
+    assert {d["reason"] for d in discards} == {"spool_total_bytes_exceeded"}, (
+        "both ceilings are breached, so the record names the byte overage — the"
+        " point of the test is HOW MANY entries it spent, not the label")
+    assert _meta_path(tmp_path, "sess-undelivered").exists(), (
+        "an undelivered entry is never evicted to make room (capture-loss)")
+    assert [_meta_path(tmp_path, f"sess-f{i}").exists() for i in range(5)] == \
+        [False, False, False, True, True], "oldest-first, and only the count overage"
+    assert all(not p.exists() for p in filed[:3])
+    surviving = sum(_entry_bytes(tmp_path, sid) for sid in
+                    ("sess-f3", "sess-f4", "sess-undelivered"))
+    assert surviving > bounds.max_total_bytes, (
+        "the byte ceiling was NOT reached by any of those evictions — which is"
+        " exactly why spending the filed class for it buys nothing")
+
+
+def test_a_REFUSED_append_records_NOTHING_about_the_append_it_could_not_do(tmp_path):
+    """The ledger describes what the write DID, so a refusal carries no append.
+
+    Measured pre-fix: a saturated spool returned
+    ``[<"the write APPENDED 1 new turn(s)">, <spool_saturated refusal>]`` for a
+    write that never happened.
+
+    MUTATION THAT REDS THIS: emit the append record inside the ``unusable`` arm
+    (above the admission guard) -> the detail claims an append the write did not
+    perform.
+    """
+    locked = _write_meta(tmp_path, "sess-w")
+    stored = [{"role": "user", "content": f"turn-{i}"} for i in range(6)]
+    log = _write_turns(tmp_path, "sess-w", stored)
+    _lock(locked)
+    try:
+        bounds = Bounds(max_entries=1, max_total_bytes=1000, max_entry_bytes=1 << 20)
+        grown = [*stored, {"role": "assistant", "content": "new"}]
+        res = write_spool_entry(tmp_path, _snapshot("sess-w", turns=grown), bounds)
+    finally:
+        _unlock(locked)
+
+    assert res["written"] is False, "one unreadable entry at max_entries=1 is full"
+    assert res["discards"][-1]["reason"] == "spool_saturated"
+    details = [d.get("detail", "") for d in res["discards"]]
+    assert not any("APPENDED" in d for d in details), (
+        f"the ledger must not claim a write that was refused: {details}")
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 6, (
+        "and the log is byte-identical — which is what makes that claim false")
+
+
+def test_one_session_RECORDS_BOTH_its_append_and_its_later_quarantine(tmp_path):
+    """Two dispositions on one session get two stamps, so neither is suppressed.
+
+    The dedupe key is ``(session_id, reason)`` plus the stamp, and both
+    dispositions use ``DISCARD_META_UNREADABLE``: one shared stamp made the
+    second a "repeat" of the first. Measured: a session that appended on turn N
+    and diverged after a compaction had its QUARANTINE record swallowed and the
+    ledger returned the earlier "APPENDED … and overwrote nothing" about turns
+    that had just left the live queue for an ``.orphan``.
+
+    MUTATION THAT REDS THIS: give both records the same
+    ``unusable-meta:<session>`` stamp -> the second is suppressed and the ledger
+    holds no QUARANTINED line.
+    """
+    locked = _write_meta(tmp_path, "sess-w")
+    stored = [{"role": "user", "content": f"turn-{i}"} for i in range(6)]
+    _write_turns(tmp_path, "sess-w", stored)
+    _lock(locked)
+    try:
+        grown = [*stored, {"role": "assistant", "content": "new"}]
+        first = write_spool_entry(tmp_path, _snapshot("sess-w", turns=grown), ROOMY)
+        assert first["written"] is True
+        assert "APPENDED" in first["discards"][-1]["detail"]
+
+        # The repaired meta is corrupted again: the SAME live session, still
+        # unreadable, now DIVERGING (a compaction moved the window).
+        _lock(_meta_path(tmp_path, "sess-w"))
+        second = write_spool_entry(
+            tmp_path, _snapshot("sess-w", turns=[{"role": "user", "content": "compacted"}]),
+            ROOMY)
+    finally:
+        _unlock(_meta_path(tmp_path, "sess-w"))
+
+    assert second["written"] is True
+    assert "QUARANTINED" in second["discards"][-1]["detail"], (
+        "the quarantine is a DIFFERENT event from the append and must be recorded"
+        f" on its own: {second['discards']}")
+    details = [d.get("detail", "") for d in read_discards(tmp_path)]
+    assert any("APPENDED" in d for d in details), details
+    assert any("QUARANTINED" in d for d in details), details
+    orphans = sorted(_entries(tmp_path).glob("*.turns.jsonl.orphan*"))
+    assert len(orphans) == 1, orphans
+    assert len(orphans[0].read_text(encoding="utf-8").splitlines()) == 7, (
+        "the turns that left the live queue are ON DISK — six stored plus the"
+        " appended one; the live log was rewritten from the compacted snapshot")
+
+
+def test_a_META_LESS_turn_log_is_QUARANTINED_not_overwritten(tmp_path):
+    """An absent meta is not an empty entry.
+
+    The writer stores the log BEFORE the meta and ``_remove_entry_files`` unlinks
+    the meta FIRST, so an ENOSPC or a failed second unlink leaves a byte-bearing
+    ``.turns.jsonl`` with no meta. Read as a fresh session, its stored turns were
+    REPLACED with no record and no ``.orphan`` — #12487's destroy, one state over.
+
+    MUTATION THAT REDS THIS: ``entry_on_disk = prior_state != PRIOR_META_ABSENT``
+    (the pre-fix test) -> ``written: True``, one line in the log, no record, no
+    orphan.
+    """
+    stray = _write_turns(tmp_path, "sess-orphan",
+                         [{"role": "user", "content": f"orphan-{i}"} for i in range(3)])
+    assert not _meta_path(tmp_path, "sess-orphan").exists()
+
+    res = write_spool_entry(
+        tmp_path, _snapshot("sess-orphan", turns=[{"role": "user", "content": "fresh"}]),
+        ROOMY)
+
+    assert res["written"] is True
+    assert "QUARANTINED" in res["discards"][-1]["detail"]
+    assert "ABSENT" in res["discards"][-1]["detail"], (
+        "and the record says which state was found, not that a meta it never saw"
+        " 'could not be read'")
+    orphans = sorted(_entries(tmp_path).glob("*.turns.jsonl.orphan*"))
+    assert len(orphans) == 1, orphans
+    assert len(orphans[0].read_text(encoding="utf-8").splitlines()) == 3, (
+        "every stored turn survives — on disk, even though it left the queue")
+    assert len(stray.read_text(encoding="utf-8").splitlines()) == 1, (
+        "the live log now holds only this snapshot — the three stored turns left"
+        " the queue into the .orphan, they were not deleted")
+
+
+def test_the_writer_APPENDS_to_a_meta_less_log_it_could_reconcile(tmp_path):
+    """The append is PROVABLE here too: the log path comes from the caller's
+    session id, so a snapshot that extends the stored turns destroys nothing.
+
+    MUTATION THAT REDS THIS: the pre-fix ``entry_on_disk`` -> the log is
+    overwritten (3 lines -> 1) with no record.
+    """
+    stored = [{"role": "user", "content": f"orphan-{i}"} for i in range(2)]
+    log = _write_turns(tmp_path, "sess-orphan", stored)
+    grown = [*stored, {"role": "assistant", "content": "new"}]
+
+    res = write_spool_entry(tmp_path, _snapshot("sess-orphan", turns=grown), ROOMY)
+
+    assert res["written"] is True
+    assert "APPENDED" in res["discards"][-1]["detail"]
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 3
+    assert list(_entries(tmp_path).glob("*.orphan*")) == []
+
+
+def test_a_meta_less_turn_log_is_COUNTED_by_both_ceilings(tmp_path):
+    """…and its bytes are not invisible to the ceilings either.
+
+    Nothing counted a lone ``.turns.jsonl``: it is not in ``metas`` (no meta), not
+    in ``unreadable`` (built from ``*.meta.json`` names) and not in
+    ``_orphan_paths`` (matches only ``.orphan``). Measured pre-fix: 5,000 bytes on
+    disk with ``max_total_bytes=1000`` answering not-saturated, and a health line
+    reading ``draining``.
+
+    MUTATION THAT REDS THIS: drop the stray-log stems from ``_scan_spool``'s third
+    element -> both verdicts flip to not-saturated / draining.
+    """
+    _write_turns(tmp_path, "sess-orphan", [{"role": "user", "content": "y" * 5000}])
+
+    byte_bounds = Bounds(max_entries=1000, max_total_bytes=1000, max_entry_bytes=1 << 20)
+    assert spool_saturated(tmp_path, byte_bounds) is True
+    assert capture_health_line(tmp_path, bounds=byte_bounds).state == "saturated"
+
+    count_bounds = Bounds(max_entries=1, max_total_bytes=1 << 20, max_entry_bytes=1 << 20)
+    assert spool_saturated(tmp_path, count_bounds) is True, (
+        "a lone turn log is an entry the COUNT ceiling cannot see without this")

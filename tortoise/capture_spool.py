@@ -1683,7 +1683,11 @@ def _scan_spool(
     # call instead: ENOENT is a fresh install, any other OSError is recorded.
     try:
         with os.scandir(d) as entries:
-            names = sorted(e.name for e in entries if e.name.endswith(".meta.json"))
+            # ONE walk, both classes: the meta names this loop reads AND the turn
+            # logs a meta-less entry leaves behind (#14347 review, cycle 3,
+            # finding 3). A second `scandir` for the log names would undo the
+            # one-scan consolidation #10479 measured at 20 000 entries.
+            all_names = sorted(e.name for e in entries)
     except FileNotFoundError:
         # A fresh install: absent is not a failure.
         return metas, discards, []
@@ -1694,6 +1698,7 @@ def _scan_spool(
             "detail": f"cannot list {d}: {exc}",
         }))
         return metas, discards, []
+    names = [name for name in all_names if name.endswith(".meta.json")]
     for name in names:
         path = d / name
         # ⛔ READING and PARSING are two different diagnoses and must not share
@@ -1839,8 +1844,27 @@ def _scan_spool(
             },
             stamp=stamp,
         ))
+    # ── #14347 review, cycle 3, finding 3: a META-LESS turn log is an entry ──┐
+    # The writer stores the log BEFORE the meta (`write_spool_entry`) and
+    # `_remove_entry_files` unlinks the meta FIRST, so an ENOSPC or a failed
+    # second unlink leaves a byte-bearing `<key>.turns.jsonl` with no meta — and
+    # such a file is in neither `metas` (no meta), `unreadable` (built from
+    # `*.meta.json` names) nor `_orphan_paths` (matches only `.orphan`). Nothing
+    # counted it, so BOTH ceilings were blind to bytes demonstrably on disk:
+    # #12483's false PASS, one state over. It goes into the THIRD element with
+    # the unreadable stems, because that element is exactly "stems the ceilings
+    # must count but no parsed meta can" — and NOT into `unreadable`, which the
+    # ledger describes as "cannot read or decode N spool meta(s)" (it is absent,
+    # not unreadable, and the ledger may not lie in either direction).
+    meta_stems = {name[: -len(".meta.json")] for name in names}
+    stray_logs = [
+        name[: -len(".turns.jsonl")] for name in all_names
+        if name.endswith(".turns.jsonl")
+        and name[: -len(".turns.jsonl")] not in meta_stems
+        and _file_size(d / name) > 0
+    ]
     return metas, discards, sorted(
-        [stem for stem, _msg in unreadable] + corrupt)
+        [stem for stem, _msg in unreadable] + corrupt + stray_logs)
 
 
 # #3516 §B / #3515 piece 12: the closed set of clocks a leg may CLAIM. Pinned
@@ -2089,7 +2113,20 @@ def write_spool_entry(
     # addressable — its path comes from the CALLER's session id, not from the
     # meta — so the stored turns are read anyway and the decision below is made
     # on what is actually on disk.
-    unusable = prior_state == PRIOR_META_UNUSABLE
+    # ⛔ AN ABSENT META IS NOT AN EMPTY ENTRY (#14347 review, cycle 3, finding
+    # 3). This function writes the LOG first and the meta second, and
+    # `_remove_entry_files` unlinks the meta first — so an ENOSPC (the normal
+    # condition on the box this PR exists for) or a failed second unlink leaves a
+    # byte-bearing `.turns.jsonl` with no meta. Reading that as a fresh session
+    # REPLACED the log with no record and no `.orphan`, and its bytes are none of
+    # `metas`, `unreadable` or `orphans` — so BOTH ceilings were blind to them:
+    # exactly #12483's false PASS, one state over. The log path comes from the
+    # CALLER's session id, so the stored turns are as addressable here as they
+    # are in the UNUSABLE arm.
+    stray_log_bytes = _file_size(log_path)
+    meta_absent = prior_state == PRIOR_META_ABSENT
+    unusable = (prior_state == PRIOR_META_UNUSABLE
+                or (meta_absent and stray_log_bytes > 0))
     # ⛔ `prior is not None` IS NOT "THE ENTRY IS ON DISK" (#14347 review F2).
     # In the UNUSABLE arm `prior` is None BY DEFINITION while the entry — meta
     # AND turn log — is still occupying bytes. Every question that is really
@@ -2099,7 +2136,15 @@ def write_spool_entry(
     # (once through `unreadable_bytes`, once through the un-replaced projection),
     # so the writer refused at ~half the byte ceiling while the health line —
     # which does not project — reported the same spool healthy.
-    entry_on_disk = prior_state != PRIOR_META_ABSENT
+    entry_on_disk = prior_state != PRIOR_META_ABSENT or stray_log_bytes > 0
+    # ONE spelling of "why this prior cannot be used": every record below names
+    # what is actually on disk, so no arm can describe an ABSENT meta as one it
+    # "could not read" (the ledger may not lie in either direction).
+    prior_desc = (
+        f"the stored meta ({meta_path.name}) is ABSENT and a"
+        f" {stray_log_bytes}-byte turn log ({log_path.name}) is the only record"
+        " of this entry" if meta_absent else
+        f"the stored meta ({meta_path.name}) could not be read or used")
     stored, stored_state = (_read_turns_state(root, snapshot.session_id)
                             if entry_on_disk else ([], TURNS_ABSENT))
     new_digest = content_digest(snapshot.turns)
@@ -2158,6 +2203,15 @@ def write_spool_entry(
     # APPLIED after them (#14347 review F3).
     divergent_turns = 0
     divergent_bytes = 0
+    # ⛔ NOTHING ABOUT THE DISPOSITION IS RECORDED YET (#14347 review, cycle 3,
+    # finding 2). The admission guard ~250 lines below can still REFUSE this
+    # write, and a record emitted here asserted what the write DID — "the write
+    # APPENDED N new turn(s)" — for a write that was refused and never happened
+    # (measured: `written: False` beside a record claiming the append). The
+    # disposition is CARRIED and recorded on the admitted path, once the write it
+    # describes has actually happened.
+    unusable_disposition: str | None = None
+    appended_turns = 0
     if unusable:
         # ⛔ THE WRITE PATH MUST NOT OVERWRITE WHAT IT COULD NOT USE AS A PRIOR
         # (#12487). Measured on this head, with an unreadable meta beside a
@@ -2198,29 +2252,19 @@ def write_spool_entry(
                 "reason": DISCARD_META_UNREADABLE,
                 "retained": True,
                 "detail": (
-                    f"neither the stored meta ({meta_path.name}) nor the turn"
-                    " log could be read, so this snapshot was REFUSED and the"
-                    " entry left byte-identical: nothing can be concluded about"
-                    " what is on disk, and a resync would hide a conversation"
-                    " that some other uid may still be able to deliver"
+                    f"{prior_desc} — and that turn log could not be read"
+                    " either, so this snapshot was REFUSED and the entry left"
+                    " byte-identical: nothing can be concluded about what is on"
+                    " disk, and a resync would hide a conversation that some"
+                    " other uid may still be able to deliver"
                 ),
             }, stamp=f"unusable-meta:{snapshot.session_id}"))
             return {"written": False,
                     "bytes": _entry_bytes(root, snapshot.session_id),
                     "discards": discards}
         if extends:
-            note = (f"the write APPENDED {len(snapshot.turns) - len(stored)} new"
-                    " turn(s) and overwrote nothing; the entry's retry/filing"
-                    " state could not be carried forward (it lived in the"
-                    " unreadable meta), so the entry may re-POST once")
-            discards.append(_record_refusal(root, {
-                "session_id": snapshot.session_id,
-                "capture_key": capture_key(snapshot.session_id, snapshot.turns),
-                "reason": DISCARD_META_UNREADABLE,
-                "retained": True,
-                "detail": f"the stored meta ({meta_path.name}) could not be read or"
-                          f" used; {note}",
-            }, stamp=f"unusable-meta:{snapshot.session_id}"))
+            unusable_disposition = "append"
+            appended_turns = len(snapshot.turns) - len(stored)
         else:
             # ⛔ NOTHING IS MOVED YET (#14347 review F3). The guards BELOW can
             # still REFUSE this write, and a refusal has to leave the entry
@@ -2553,6 +2597,7 @@ def write_spool_entry(
                           if entry_on_disk else 0),
                 "discards": discards}
 
+    quarantine_note: str | None = None
     if divergent_bytes:
         # ⛔ THE GATE IS THE BYTES ON DISK, NOT THE PARSED TURN COUNT — see the
         # diverge arm above (cycle-2 finding 1): a byte-bearing log that parses
@@ -2574,9 +2619,8 @@ def write_spool_entry(
                 "reason": DISCARD_META_UNREADABLE,
                 "retained": True,
                 "detail": (
-                    f"the stored meta ({meta_path.name}) could not be read or"
-                    " used, and its stored turn log could not be moved aside"
-                    f" ({divergent_turns} turn(s) still at"
+                    f"{prior_desc}, and its stored turn log could not be"
+                    f" moved aside ({divergent_turns} parsed turn(s) still at"
                     f" {log_path.name}) — so this snapshot was REFUSED and the"
                     " entry left byte-identical: writing it would overwrite the"
                     " very turns this path exists to preserve"
@@ -2585,21 +2629,27 @@ def write_spool_entry(
             return {"written": False,
                     "bytes": _entry_bytes(root, snapshot.session_id),
                     "discards": discards}
-        note = (
-            f"this snapshot diverges from the stored log, so the stored"
-            f" {divergent_turns} turn(s) were QUARANTINED to"
+        # ⛔ THE RECORD IS CARRIED, NOT EMITTED (#14347 review, cycle 3, finding
+        # 2): it says the entry WAS rewritten, and the write below can still
+        # fail — a write failure must not leave that claim on the ledger. It is
+        # emitted after the write, under its OWN stamp, because this disposition
+        # and the append one are two different EVENTS about one session and the
+        # shared stamp suppressed the second (a session that appends on turn N
+        # and diverges later had its quarantine record swallowed, leaving the
+        # earlier "APPENDED … and overwrote nothing" as the ledger's account of
+        # turns that had in fact left the queue).
+        #
+        # The stored log is described by BOTH its bytes and its parsed turns: the
+        # gate is the bytes, so a byte-bearing/zero-parse log must not report
+        # "the stored 0 turn(s) were quarantined" about 22 bytes of transcript.
+        quarantine_note = (
+            f"this snapshot diverges from the stored log, so the stored turn"
+            f" log ({divergent_bytes} byte(s), {divergent_turns} parsed turn(s))"
+            f" was QUARANTINED to"
             f" {quarantined.name if quarantined is not None else '(none)'}"
             " — preserved on disk for forensics and still counted against"
             " the byte ceiling — and the entry was rewritten from this"
             " snapshot; the retry/filing state could not be carried forward")
-        discards.append(_record_refusal(root, {
-            "session_id": snapshot.session_id,
-            "capture_key": meta["capture_key"],
-            "reason": DISCARD_META_UNREADABLE,
-            "retained": True,
-            "detail": f"the stored meta ({meta_path.name}) could not be read or"
-                      f" used; {note}",
-        }, stamp=f"unusable-meta:{snapshot.session_id}"))
 
     try:
         if extends:
@@ -2614,13 +2664,46 @@ def write_spool_entry(
     except OSError as exc:
         # A filesystem failure (full disk, read-only home) is a LOSS — record
         # it with a reason rather than returning an empty discard list.
+        # When the quarantine already ran, its bytes are STILL PRESERVED — that
+        # fact must survive into the ledger too, or the only visible record of a
+        # failed write is one that says nothing about the transcript that left
+        # the live queue moments earlier.
         discards.append(record_discard(root, {
             "session_id": snapshot.session_id,
             "capture_key": meta["capture_key"],
             "reason": DISCARD_WRITE_FAILED,
-            "detail": str(exc),
+            "detail": (f"{exc}; {quarantine_note}" if quarantine_note is not None
+                       else str(exc)),
         }))
         return {"written": False, "bytes": 0, "discards": discards}
+
+    # ⛔ THE DISPOSITION RECORD IS EMITTED HERE — AFTER THE WRITE IT DESCRIBES
+    # (#14347 review, cycle 3, finding 2). Emitted above the admission guard, a
+    # saturated spool returned `[<"the write APPENDED N new turn(s)">,
+    # <spool_saturated refusal>]` for a write that never happened; emitted before
+    # `_atomic_write`, a failed write left "the entry was rewritten" standing.
+    # Each disposition carries its OWN stamp: they share `(session_id, reason)`,
+    # and the dedupe key is that pair plus the stamp, so one stamp made the
+    # second disposition's record a suppressed repeat of the first.
+    if unusable_disposition == "append":
+        discards.append(_record_refusal(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": meta["capture_key"],
+            "reason": DISCARD_META_UNREADABLE,
+            "retained": True,
+            "detail": (f"{prior_desc}; the write APPENDED {appended_turns} new"
+                       " turn(s) and overwrote nothing; the entry's retry/filing"
+                       " state could not be carried forward (it lived in the"
+                       " unreadable meta), so the entry may re-POST once"),
+        }, stamp=f"unusable-meta-append:{snapshot.session_id}"))
+    elif quarantine_note is not None:
+        discards.append(_record_refusal(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": meta["capture_key"],
+            "reason": DISCARD_META_UNREADABLE,
+            "retained": True,
+            "detail": f"{prior_desc}; {quarantine_note}",
+        }, stamp=f"unusable-meta-diverge:{snapshot.session_id}"))
 
     discards.extend(prune_spool(root, snapshot.session_id, bounds))
     _sweep_stale_temp_files(root)
@@ -3047,6 +3130,16 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     # same bytes it removes from the evictable pool), so one check up front is
     # the whole test: below the floor, the loop reaches the ceiling; above it,
     # there is nothing to do and the spool reports SATURATED.
+    #
+    # ⛔ THE LOOP BELOW HONOURS THE SAME FLOOR (#14347 review, cycle 3, finding
+    # 1). The COUNT axis is rightly not folded into the early return — a count
+    # overage IS relievable by a filed entry even when the byte ceiling is not —
+    # but the loop's own break must then stop on the COUNT alone once the byte
+    # term is unreachable. Without that, a spool breaching BOTH ceilings evicted
+    # EVERY filed entry to relieve one count slot (measured: 5 filed 100-byte
+    # entries + one 2,000-byte undelivered entry at max_entries=3,
+    # max_total_bytes=1000 lost all 5) and was still over the byte ceiling
+    # afterwards — the same #10175 violation this floor exists to prevent.
     evictable_bytes = sum(_entry_bytes(root, m["session_id"]) for m in ranked
                           if _entry_is_filed(m))
     evictable_bytes += sum(_file_size(path) for path in orphans)
@@ -3067,7 +3160,13 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     # entry is never evicted at all (capture-loss). The record names the class in
     # the same `loss` vocabulary the live entries use (#6388).
     for meta in ranked:
-        if count <= bounds.max_entries and total <= bounds.max_total_bytes:
+        # #14347 review, cycle 3, finding 1: `bytes_reachable` False means no
+        # eviction can bring the byte term under the ceiling (the permanent
+        # classes alone are over it), so a loop still testing
+        # `total <= max_total_bytes` never stops on that axis and spends the
+        # whole filed class for a count overage that needed one eviction.
+        if count <= bounds.max_entries and (total <= bounds.max_total_bytes
+                                            or not bytes_reachable):
             break
         # ⛔ ONLY a FILED entry is evictable. Its content is already on the wire,
         # so dropping it costs nothing a reader cannot re-fetch; an UNDELIVERED
@@ -3308,6 +3407,10 @@ def _health_scan(root: Path) -> tuple[int, list[dict], int, int] | None:
     same SATURATED verdict the write path reaches, without a second walk. A meta
     it can read but not USE (invalid JSON, no ``session_id``) is not counted:
     the repairing scan quarantines it, and its log then counts as an orphan.
+
+    It also carries a byte-bearing turn log whose META is ABSENT (#14347 review,
+    cycle 3, finding 3): the writer stores the log first, so an ENOSPC leaves
+    exactly that shape, and its bytes belong to no other class.
 
     ⛔ THE FOURTH ELEMENT IS THE COUNT HALF OF THE SAME ARGUMENT (#12483 said
     "both ceilings"). `len(metas)` cannot see either unreadable class, so a health
