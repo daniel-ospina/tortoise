@@ -817,7 +817,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:16708`) that derives the doc's cite, two are the
+                                                          # (`:16716`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
@@ -827,7 +827,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # whatever the head you merge derives. ⛔ **The two figures this
                                                           # note once typed (`:15228`, then `:15391`) are both refuted by
                                                           # later commits on this branch (#13802 review, P2)**: the value the guard reads at THIS
-                                                          # head IS (`:16708`) — named by the value in BOTH places it is typed, never by its
+                                                          # head IS (`:16716`) — named by the value in BOTH places it is typed, never by its
                                                           # DISTANCE from this comment, which is the same rotted-positional class this file
                                                           # exists to catch (#13802 review, P2: this said "six lines up", measured 10).
                                                           # ⛔ IT IS PARENTHESISED IN BOTH PLACES ON PURPOSE (#14060 review, P3): the arm
