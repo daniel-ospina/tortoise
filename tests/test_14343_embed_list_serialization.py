@@ -69,7 +69,8 @@ _SAVING_SHARE_BAND = (29.0, 36.0)
 
 
 #: Padding for an ABSENT key. `None` cannot be used: it is a legitimate value in this
-#: schema (measured: 210 explicitly-`null` cells vs 55 absent ones), so `dict.get(k)` would
+#: schema (measured: 210 explicitly-`null` cells vs 55 absent ones), so a bare one-argument
+#: `dict.get(k)` would
 #: conflate "field not present" with "field present and null". `~` cannot either — it occurs
 #: inside real content. This sentinel is verified absent from the corpus below, which is the
 #: property a real renderer must check at render time rather than assume.
@@ -101,8 +102,7 @@ def _keys_once(embed: dict) -> dict:
         if isinstance(items, list) and items and all(isinstance(x, dict) for x in items):
             keys = list(dict.fromkeys(k for it in items for k in it))
             out[name] = {"cols": keys,
-                         "rows": [[it[k] if k in it else _ABSENT for k in keys]
-                                  for it in items]}
+                         "rows": [[it.get(k, _ABSENT) for k in keys] for it in items]}
         else:
             out[name] = items
     return out
@@ -161,7 +161,7 @@ def test_the_compact_layout_always_shrinks_and_the_share_is_a_property_of_the_la
             f"{session}/{arm}: compact separators must never be larger — the whole "
             f"point is the whitespace `indent=1` writes")
         shares.append(100.0 * (len(ind) - len(comp)) / len(ind))
-    assert 15.0 < min(shares) and max(shares) < 25.0, (
+    assert min(shares) > 15.0 and max(shares) < 25.0, (
         f"character-level share drifted outside its measured band: {min(shares):.1f}–"
         f"{max(shares):.1f}% (measured 17.11–21.68%); the TOKEN band this file pins is "
         f"{_SAVING_SHARE_BAND[0]}–{_SAVING_SHARE_BAND[1]}%")
