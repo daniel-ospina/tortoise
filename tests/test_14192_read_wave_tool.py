@@ -2255,8 +2255,20 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
     # and the same unbound position over the builtins mapping is already closed by
     # `_builtin_lookup_name`). The namespace moves to `args[0]` and the key to `args[1]`: the
     # `offset=1` rule `_namespace_rebind_names` already states.
-    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr in _BUILTINS_MAPPING_READS
+    # ⛔ AND THE SAME UNBOUND CALL WITH THE CALLEE FETCHED BY `getattr` (#14326 review cycle
+    # 28, EACH MEASURED GREEN **and LIVE**: `getattr(dict, "get")(globals(), "__builtins__")
+    # ["exec"](<read>)`, its `__getitem__` / `pop` / `setdefault` twins — while the DIRECT
+    # unbound spelling above is a REFUSED row). `_builtin_lookup_name` ALREADY resolves
+    # `getattr(dict, "get")` to `"get"` under this axis' own member set — the copy family in
+    # this very predicate uses exactly that call — so the callee test is the only thing that
+    # was spelled as an Attribute, and the shape rule this file states ("match the SHAPE, the
+    # callee never needed identifying") is what it now follows.
+    if (isinstance(node, ast.Call)
+            and ((isinstance(node.func, ast.Attribute)
+                  and node.func.attr in _BUILTINS_MAPPING_READS)
+                 or _builtin_lookup_name(node.func, names | {"dict", "copy"}, consts,
+                                         dict_names, launderers,
+                                         members=_BUILTINS_MAPPING_READS) is not None)
             and len(node.args) >= 2
             and "__builtins__" in _string_keys_of(node.args[1], consts)
             and _is_namespace_expr(node.args[0], frozenset())):
@@ -8231,6 +8243,9 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # KEPT (#14326 review cycle 25, MEASURED: it raises AttributeError — `getattr` reads an
         # ATTRIBUTE and a namespace mapping has no `__builtins__` attribute). Its row claimed
         # "MEASURED GREEN **and LIVE**" for a shape that cannot execute the read.
+        "a KEYED READ out of the UNBOUND fetch, `getattr` callee": (
+            '    getattr(dict, "get")(globals(), "__builtins__")["exec"]'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a KEYED READ out of the UNBOUND fetch": (
             '    dict.get(globals(), "__builtins__")["exec"]'
             '("results = sdk._tortoise_fts_query(query=q)")\n'),
