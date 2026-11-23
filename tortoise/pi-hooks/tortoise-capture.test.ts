@@ -7375,6 +7375,97 @@ test("prune does NOT count a corrupt stem its own scan just unlinked (#14347 cyc
   assert.notEqual(readSpoolEntry(spool, "sess-f1"), undefined);
 });
 
+test("the PREDICATE does not count a corrupt stem its own scan just unlinked (#14347 cyc11 P2)", () => {
+  // The OTHER reader of the third element — and the one that disagreed.
+  // `spoolSaturated`'s default scan REPAIRS, so by the time it computed
+  // `unreadableCount` the corrupt meta it was about to report had already been
+  // unlinked by that same call. It counted the stem anyway, so the public
+  // predicate answered true for a spool its own repair had just left able to
+  // admit a capture — and answered false one call later. `pruneSpool` has
+  // excluded exactly these stems since cycle 6 ("a count overage that ceased to
+  // exist inside the same call"); this is the same rule one reader over. Both
+  // now share ONE definition (`liveUnreadableStems`).
+  //
+  // `repair: false` is the opposite arm and stays TRUE: that scan unlinks
+  // nothing, so the corrupt meta is still an entry it can see (the health line
+  // describes the spool it reads), and the filter must not silently drop it.
+  //
+  // MUTATION THAT REDS THIS: pass `unreadable.length` as `unreadableCount` (the
+  // pre-fix wiring) -> the repair-on assertion below sees saturated.
+  const spool = tmpSpool();
+  for (let i = 0; i < 2; i += 1) {
+    seedSpoolEntry(spool, `sess-u${i}`, { readable: true, stamp: `2026-01-01T00:00:0${i}Z` });
+  }
+  const dir = join(spool, "entries");
+  const corrupt = join(dir, `${entryKey("sess-corrupt")}.meta.json`);
+  writeFileSync(corrupt, "{ this is not json");
+  writeFileSync(
+    join(dir, `${entryKey("sess-corrupt")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "x" })}\n`,
+  );
+  const bounds = { maxEntries: 3, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+
+  assert.equal(
+    spoolSaturated(spool, bounds, {}, { repair: false }),
+    true,
+    "a read-only scan still SEES the corrupt meta, so it is an entry",
+  );
+  assert.ok(existsSync(corrupt), "the premise: the read-only scan moved nothing");
+
+  assert.equal(
+    spoolSaturated(spool, bounds),
+    false,
+    "the repairing scan unlinked the corrupt meta in this call, so the count it reports" +
+      " must be the count it leaves behind — 2 entries under a ceiling of 3",
+  );
+  assert.equal(existsSync(corrupt), false, "the premise: the repairing scan removed it");
+  assert.equal(
+    spoolSaturated(spool, bounds),
+    false,
+    "the two consecutive calls must agree: the pre-fix predicate said true then false," +
+      " which no caller can act on",
+  );
+});
+
+test("the writer RECORDS a fresh entry it could not use as a prior (#14347 cyc11 P2)", () => {
+  // The fourth disposition: an unusable meta with NO stored turn log at all.
+  // Nothing diverges (there is no log) and nothing extends (there is nothing to
+  // append to), so neither the append nor the diverge arm fires — and the write
+  // proceeded with NO record at all, silently dropping the filing state that
+  // lived in the unreadable meta, while both sibling arms record that exact loss.
+  // The write itself is RIGHT (there are no bytes to preserve); the silence is
+  // the defect — #4714's amplification class.
+  //
+  // MUTATION THAT REDS THIS: drop the `unusableDisposition === "fresh"` record
+  // arm -> no `meta_unreadable` row is emitted for a loss the writer just took.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-fresh";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid, capture_key: "K", filed_key: "K" }));
+  assert.equal(existsSync(logPath), false, "the premise: this entry has no stored turn log at all");
+  chmodSync(metaPath, 0o000);
+  try {
+    const res = writeSpoolEntry(spool, snapshot(sid, [{ role: "user", content: "hi" }]));
+    assert.equal(res.written, true);
+    const ledger = res.discards.filter((d) => d.reason === DISCARD_META_UNREADABLE);
+    assert.ok(
+      ledger.length > 0,
+      `an unusable prior whose filing state is dropped must leave a record — the sibling arms do: ${JSON.stringify(res.discards)}`,
+    );
+    assert.match(ledger.at(-1)?.detail ?? "", /NO stored turn log/);
+    assert.equal(ledger.at(-1)?.retained, true);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  // The record documents the loss; it does not prevent it. Pinned so nobody reads
+  // the record as a restore.
+  const repaired = readSpoolEntry(spool, sid);
+  assert.notEqual(repaired, undefined);
+  assert.equal(repaired?.filed_key, undefined);
+});
+
 test("the over-bound refusal does not call an ABSENT meta unreadable (#14347 cyc6 P3)", () => {
   // The ledger may not lie in either direction. The over-bound refusal arm is
   // gated on `prior === undefined`, which is also true for an entry with NO meta

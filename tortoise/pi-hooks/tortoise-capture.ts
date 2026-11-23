@@ -1,4 +1,4 @@
-// tortoise-hook-version: 31
+// tortoise-hook-version: 32
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -2530,7 +2530,7 @@ export function writeSpoolEntry(
   // APPENDED N new turn(s)" — for a write that was refused and never happened.
   // The disposition is CARRIED and recorded on the admitted path, once the write
   // it describes has actually happened. Mirrors `capture_spool.write_spool_entry`.
-  let unusableDisposition: "append" | undefined;
+  let unusableDisposition: "append" | "fresh" | undefined;
   let appendedTurns = 0;
   if (unusablePrior) {
     // ⛔ THE WRITE PATH MUST NOT OVERWRITE WHAT IT COULD NOT USE AS A PRIOR
@@ -2585,6 +2585,20 @@ export function writeSpoolEntry(
       divergentBytes = fileSize(logPath);
       stored = [];
       extendsLog = false;
+      if (divergentBytes === 0) {
+        // ⛔ THE FOURTH STATE — and it is NOT disposition 3 (#14347 review,
+        // cycle 11, finding 2). The meta is unusable and there is NO stored turn
+        // log at all, so nothing diverges and nothing can be quarantined: the
+        // `divergentBytes > 0` quarantine below is skipped, `quarantineNote`
+        // stays undefined, and the write proceeded with NO record — while both
+        // sibling arms RECORD that the entry's retry/filing state could not be
+        // carried ("it lived in the unreadable meta"). Measured on the Python
+        // twin: `written: true, discards: []` and the meta's `filed_key` gone.
+        // No transcript bytes are at risk here (there are none), so the write is
+        // right and the SILENCE is the defect — #4714's amplification class.
+        // Mirrors `capture_spool.write_spool_entry`.
+        unusableDisposition = "fresh";
+      }
     }
   }
 
@@ -2963,6 +2977,25 @@ export function writeSpoolEntry(
         { stamp: `unusable-meta-append:${snapshot.sessionId}` },
       ),
     );
+  } else if (unusableDisposition === "fresh") {
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          session_id: snapshot.sessionId,
+          capture_key: meta.capture_key,
+          reason: DISCARD_META_UNREADABLE,
+          retained: true,
+          detail:
+            `${priorDesc}; the entry had NO stored turn log, so there was` +
+            " nothing to append to or quarantine; the meta was rewritten from the" +
+            " snapshot and the entry's retry/filing state could not be carried" +
+            " forward (it lived in the unreadable meta), so the entry may re-POST" +
+            " once",
+        },
+        { stamp: `unusable-meta-fresh:${snapshot.sessionId}` },
+      ),
+    );
   } else if (quarantineNote !== undefined) {
     discards.push(
       recordRefusal(
@@ -3071,14 +3104,9 @@ export function pruneSpool(
   // (`unreadableEntryBytes` reads 0 for it) and its log is credited as an orphan;
   // only the COUNT was stale. A stem that still has its meta OR its live turn log
   // is still an entry.
-  const entriesPath = entriesDir(dir);
-  let count =
-    metas.length +
-    unreadable.filter(
-      (stem) =>
-        existsSync(join(entriesPath, `${stem}.meta.json`)) ||
-        existsSync(join(entriesPath, `${stem}.turns.jsonl`)),
-    ).length;
+  // A stem that still has its meta OR its live turn log is still an entry —
+  // one definition, shared with `spoolSaturated` (`liveUnreadableStems`).
+  let count = metas.length + liveUnreadableStems(dir, unreadable).length;
   let total =
     metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
     // #12483: the retained-unreadable class is on disk and can never be evicted
@@ -3182,6 +3210,32 @@ export function pruneSpool(
   return discards;
 }
 
+/** The unreadable stems that are STILL ENTRIES after the scan that found them.
+ *
+ * `listSpoolEntries(repair: true)` unlinks a corrupt meta and renames its turn log
+ * to `.orphan` INSIDE the scan, yet still reports the stem. A COUNT taken from
+ * that list therefore counts an entry the same call deleted, and the two readers
+ * disagreed: `pruneSpool` has excluded those stems since #14347 review cycle 6
+ * ("a count overage that ceased to exist inside the same call"), while
+ * `spoolSaturated` passed the raw length as `unreadableCount` — so the public
+ * predicate answered true for a spool its own repair had just left able to admit
+ * a capture, and answered false on the next call (#14347 review, cycle 11,
+ * finding 1). Measured on the Python twin at `0bd9cec63fb2`: 2 readable
+ * undelivered + 1 corrupt meta at `maxEntries: 3` → `true`, then `false`.
+ *
+ * One definition, both readers. With `repair: false` nothing is unlinked, so
+ * every stem still has its meta and this is a no-op — the health line must keep
+ * counting the corrupt entry it can still SEE (it describes the spool it reads).
+ */
+function liveUnreadableStems(dir: string, stems: string[]): string[] {
+  const entriesPath = entriesDir(dir);
+  return stems.filter(
+    (stem) =>
+      existsSync(join(entriesPath, `${stem}.meta.json`)) ||
+      existsSync(join(entriesPath, `${stem}.turns.jsonl`)),
+  );
+}
+
 /**
  * Is the spool at a ceiling with NOTHING evictable?
  *
@@ -3247,7 +3301,11 @@ export function spoolSaturated(
     bounds,
     projection,
     unreadableEntryBytes(dir, unreadable),
-    unreadable.length,
+    // The COUNT population is filtered by what the scan left on disk; the BYTES
+    // are not, because a stem whose meta is still present must still weigh. Both
+    // readers share ONE definition (see `liveUnreadableStems`; #14347 review,
+    // cycle 11, finding 1).
+    liveUnreadableStems(dir, unreadable).length,
   );
 }
 

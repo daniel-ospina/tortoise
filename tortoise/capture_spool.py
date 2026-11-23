@@ -2341,6 +2341,21 @@ def write_spool_entry(
             divergent_bytes = _file_size(log_path)
             stored = []
             extends = False
+            if divergent_bytes == 0:
+                # ⛔ THE FOURTH STATE — and it is NOT disposition 3 (#14347
+                # review, cycle 11, finding 2). The meta is unusable and there is
+                # NO stored turn log at all, so nothing diverges and nothing can
+                # be quarantined: the `if divergent_bytes:` quarantine below is
+                # skipped, `quarantine_note` stays None, and the write proceeded
+                # with NO record — while both sibling arms RECORD that the entry's
+                # retry/filing state could not be carried ("it lived in the
+                # unreadable meta"). Measured on both legs at `0bd9cec63fb2`
+                # (unreadable meta carrying `filed_key: "K"`, no log):
+                # `written: True, discards: []` and the meta's `filed_key` gone.
+                # No transcript bytes are at risk here (there are none), so the
+                # write is right and the SILENCE is the defect — this is #4714's
+                # amplification class: a loss nobody can see.
+                unusable_disposition = "fresh"
 
     if extends:
         log_text = "".join(_serialise_turn(t) for t in snapshot.turns[len(stored):])
@@ -2759,6 +2774,18 @@ def write_spool_entry(
                        " state could not be carried forward (it lived in the"
                        " unreadable meta), so the entry may re-POST once"),
         }, stamp=f"unusable-meta-append:{snapshot.session_id}"))
+    elif unusable_disposition == "fresh":
+        discards.append(_record_refusal(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": meta["capture_key"],
+            "reason": DISCARD_META_UNREADABLE,
+            "retained": True,
+            "detail": (f"{prior_desc}; the entry had NO stored turn log, so there"
+                       " was nothing to append to or quarantine; the meta was"
+                       " rewritten from the snapshot and the entry's retry/filing"
+                       " state could not be carried forward (it lived in the"
+                       " unreadable meta), so the entry may re-POST once"),
+        }, stamp=f"unusable-meta-fresh:{snapshot.session_id}"))
     elif quarantine_note is not None:
         discards.append(_record_refusal(root, {
             "session_id": snapshot.session_id,
@@ -2879,6 +2906,33 @@ def _attempts(meta: dict) -> int:
     return min(max(0, int(as_float)), _MAX_ATTEMPTS)
 
 
+def _live_unreadable_stems(root: Path, stems: list[str]) -> list[str]:
+    """The unreadable stems that are STILL ENTRIES after the scan that found them.
+
+    ``_scan_spool(repair=True)`` unlinks a corrupt meta and renames its turn log
+    to ``.orphan`` INSIDE the scan, yet still reports the stem. A COUNT taken from
+    that third element therefore counts an entry the same call deleted, and the
+    two readers of the element disagreed: ``prune_spool`` has excluded those stems
+    since #14347 review cycle 6 ("a count overage that ceased to exist inside the
+    same call"), while ``spool_saturated`` wired the raw list straight into
+    ``unreadable_count`` — so the public predicate answered SATURATED for a spool
+    its own repair had just left able to admit a capture, and answered the
+    opposite on the next call (#14347 review, cycle 11, finding 1). Measured at
+    ``0bd9cec63fb2``: 2 readable undelivered + 1 corrupt meta at
+    ``max_entries=3`` → ``True``, then ``False``.
+
+    One definition, both readers. With ``repair=False`` nothing is unlinked, so
+    every stem still has its meta and this is a no-op — the health line must keep
+    counting the corrupt entry it can still SEE (it describes the spool it reads).
+    """
+    entries_dir = _entries_dir(root)
+    return [
+        stem for stem in stems
+        if (entries_dir / f"{stem}.meta.json").exists()
+        or (entries_dir / f"{stem}.turns.jsonl").exists()
+    ]
+
+
 def spool_saturated(
     root: Path,
     bounds: Bounds = DEFAULT_BOUNDS,
@@ -2948,7 +3002,11 @@ def spool_saturated(
         adds_entry=adds_entry,
         pending_orphan_bytes=pending_orphan_bytes,
         unreadable_bytes=_unreadable_entry_bytes(root, unreadable),
-        unreadable_count=len(unreadable))
+        # The COUNT population is filtered by what the scan left on disk; the BYTES
+        # are not, because a stem whose meta is still present must still weigh.
+        # Both readers of the third element share ONE definition (see
+        # `_live_unreadable_stems`; #14347 review, cycle 11, finding 1).
+        unreadable_count=len(_live_unreadable_stems(root, unreadable)))
 
 
 def _saturated_for_metas(
@@ -3205,12 +3263,9 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     # corrupt → one filed evicted, post-count 1; the readable-undelivered control
     # landed at 2). Its bytes are already correct (`_unreadable_entry_bytes` reads
     # 0 for it) and its log is credited as an orphan; only the COUNT was stale.
-    # A stem that still has its meta OR its live turn log is still an entry.
-    entries_dir = _entries_dir(root)
-    count = len(metas) + sum(
-        1 for stem in unreadable
-        if (entries_dir / f"{stem}.meta.json").exists()
-        or (entries_dir / f"{stem}.turns.jsonl").exists())
+    # A stem that still has its meta OR its live turn log is still an entry —
+    # one definition, shared with `spool_saturated` (`_live_unreadable_stems`).
+    count = len(metas) + len(_live_unreadable_stems(root, unreadable))
     total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
     # #12483: the retained-unreadable class is on disk and can never be evicted
     # (see `_unreadable_entry_bytes`), so it counts here too — otherwise the

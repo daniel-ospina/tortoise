@@ -4711,7 +4711,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 31}
+                             "pi": 32}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4824,7 +4824,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     artifact, move the generation, update this pair — all three in one commit").
     What is never rewritten is a SHIPPED entry in ``_GENERATION_DIGESTS``.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 31
+    assert hook_install.read_hook_version(_PI_SRC) == 32
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4915,7 +4915,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: behaviour is untouched) because `contract_version_for('pi')` grades the pair
 #: as ONE contract.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    31, "461c210f8daf22f170dabe3989985d41d594f8908eb398e7c143d8720dcc79db")
+    32, "3660e09dd73a13251c9cb87587ba7e4d00c52503a50aa6e22c1424154009779c")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5067,6 +5067,18 @@ _GENERATION_DIGESTS = {
     # no behaviour change — but a comment IS bytes here, so the generation-31
     # digest moved with it (the same never-shipped re-cut that 29 and 30 carry).
     31: "461c210f8daf22f170dabe3989985d41d594f8908eb398e7c143d8720dcc79db",
+    # Generation 32 (#14347 review, cycle 11, findings 1+2). (1) `spoolSaturated`
+    # counted the corrupt stems its own repairing scan had just unlinked, so the
+    # predicate answered SATURATED for a spool its repair left able to admit a
+    # capture — and answered the opposite one call later; `pruneSpool` excluded
+    # those stems since cycle 6, so both readers of the third element now share
+    # ONE definition (`liveUnreadableStems`). (2) An unusable meta with NO stored
+    # turn log fell through both record arms, so the write dropped the entry's
+    # filing state with no ledger line; it now carries its own
+    # `unusable-meta-fresh:` stamp. BEHAVIOUR moved on shipped bytes, so a
+    # generation-31 copy must read STALE ("reinstall"), never
+    # `modified-artifact` ("local edit").
+    32: "3660e09dd73a13251c9cb87587ba7e4d00c52503a50aa6e22c1424154009779c",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -5291,13 +5303,18 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # seam, one contract number. The capture half's strict-arm floor and its
     # prune count moved; the read half's behaviour is untouched.
     31: "700ea54f4e4a67977d59ea883efe0187241602ebb6113e1a24b52c3efc24c042",
+    # Generation 32 (#14347 review, cycle 11): header only, same reason — one
+    # seam, one contract number. The capture half's `spoolSaturated` count
+    # population and its fourth writer disposition moved; the read half's
+    # behaviour is untouched.
+    32: "708b6a21854982d607610e15da4e7de2c3ff6071102ba0c05726817c8d2493b5",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    31, "700ea54f4e4a67977d59ea883efe0187241602ebb6113e1a24b52c3efc24c042")
+    32, "708b6a21854982d607610e15da4e7de2c3ff6071102ba0c05726817c8d2493b5")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

@@ -832,6 +832,83 @@ def test_prune_does_NOT_count_a_corrupt_stem_its_own_scan_just_unlinked(tmp_path
     assert read_spool_meta(tmp_path, "sess-f1") is not None
 
 
+def test_the_predicate_does_NOT_count_a_corrupt_stem_its_own_scan_just_unlinked(tmp_path):
+    """The OTHER reader of the third element — and the one that disagreed.
+
+    ``spool_saturated``'s default scan REPAIRS, so by the time it computed
+    ``unreadable_count`` the corrupt meta it was about to report had already been
+    unlinked by that same call. It counted the stem anyway, so the public predicate
+    answered SATURATED for a spool its own repair had just left able to admit a
+    capture — and answered the opposite one call later. ``prune_spool`` had
+excluded exactly these stems since cycle 6, with the comment "a count overage
+    that ceased to exist inside the same call"; this is the same rule, one reader
+    over (#14347 review, cycle 11, finding 1). The two now share ONE definition
+    (``_live_unreadable_stems``).
+
+    ``repair=False`` is the opposite arm and stays TRUE: that scan unlinks nothing,
+    so the corrupt meta is still an entry it can see (the health line describes the
+    spool it reads), and the filter must not silently drop it.
+
+    MUTATION THAT REDS THIS: pass ``unreadable_count=len(unreadable)`` (the
+    pre-fix wiring) -> the repair-on assertion below sees SATURATED.
+    """
+    for i in range(2):
+        _write_meta(tmp_path, f"sess-u{i}", capture_key=f"K{i}")
+        _write_turns(tmp_path, f"sess-u{i}", TURNS[:1])
+    corrupt = _meta_path(tmp_path, "sess-corrupt")
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_text("{ this is not json", encoding="utf-8")
+    _write_turns(tmp_path, "sess-corrupt", TURNS)
+    bounds = Bounds(max_entries=3)
+
+    assert spool_saturated(tmp_path, bounds, repair=False) is True, (
+        "a read-only scan still SEES the corrupt meta, so it is an entry")
+    assert corrupt.exists(), "the premise: the read-only scan moved nothing"
+
+    assert spool_saturated(tmp_path, bounds) is False, (
+        "the repairing scan unlinked the corrupt meta in this call, so the count it"
+        " reports must be the count it leaves behind — 2 entries under a ceiling of 3")
+    assert not corrupt.exists(), "the premise: the repairing scan removed it"
+    assert spool_saturated(tmp_path, bounds) is False, (
+        "the two consecutive calls must agree: the pre-fix predicate said True then"
+        " False, which no caller can act on")
+
+
+def test_the_writer_RECORDS_a_fresh_entry_it_could_not_use_as_a_prior(tmp_path):
+    """The fourth disposition: an unusable meta with NO stored turn log at all.
+
+    Nothing diverges (there is no log) and nothing extends (there is nothing to
+    append to), so neither the append nor the diverge arm fires — and the write
+    proceeded with **no record at all**, silently dropping the filing state that
+    lived in the unreadable meta, while both sibling arms record that exact loss.
+    Measured pre-fix on this head: `written: True`, `discards: []`, `filed_key`
+    gone. The write itself is RIGHT (there are no bytes to preserve); the silence
+    is the defect — #4714's amplification class, a loss nobody can see.
+
+    MUTATION THAT REDS THIS: drop the ``_disposition == "fresh"`` record arm ->
+    no ``meta_unreadable`` row is emitted for a loss the writer just took.
+    """
+    locked = _write_meta(tmp_path, "sess-fresh", capture_key="K", filed_key="K")
+    assert not _log_path(tmp_path, "sess-fresh").exists(), (
+        "the premise: this entry has no stored turn log at all")
+    _lock(locked)
+    try:
+        res = write_spool_entry(tmp_path, _snapshot("sess-fresh", turns=TURNS), ROOMY)
+        assert res["written"] is True
+        ledger = [d for d in res["discards"] if d["reason"] == "meta_unreadable"]
+        assert ledger, (
+            "an unusable prior whose filing state is dropped must leave a record —"
+            f" the sibling arms do: {res['discards']}")
+        assert "NO stored turn log" in ledger[-1]["detail"], ledger[-1]["detail"]
+        assert ledger[-1]["retained"] is True
+    finally:
+        _unlock(locked)
+    # The record documents the loss; it does not prevent it (the state lived in the
+    # meta that could not be read). Pinned so nobody reads the record as a restore.
+    repaired = read_spool_meta(tmp_path, "sess-fresh")
+    assert repaired is not None and not repaired.get("filed_key")
+
+
 def test_an_over_bound_META_LESS_entry_is_not_reported_as_UNREADABLE(tmp_path):
     """The ledger may not lie in either direction.
 
