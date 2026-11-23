@@ -223,8 +223,15 @@ So S1's per-document input is `1.68 × (1,630 static + T)` and the mechanism tha
 embed-list serialization from `indent=1` to compact separators — the one change whose *content*
 is provably identical. It is measured exactly below, and it ships **off**, because a prompt
 whose bytes changed is a prompt whose effect on extraction is unmeasured, and `#7949` is the
-arbiter of that. Arming it is one environment variable, on a box with a key, in the same session
-as the capstone re-run.
+arbiter of that. ⛔ **Arming it is one environment variable PLUS a pin withdrawal, not one
+variable:** the capstone door lists this key in `DOOR_PINNED_OFF`
+(`docs/evidence/7949-capstone/probes/capstone_measure.py`) and POPS every member for the whole
+run, so a capstone scored while the variable is exported measures the **`indent`** render and
+reports it as a validation of `compact` — a fabricated green, the one thing this bundle must
+not produce. Validating `compact` on the bars therefore needs the pin withdrawn in the same
+change (that is `#14371`'s work); until then the only render any capstone scores is `indent`,
+and the cost side of this bundle (`§2`–`§4a`) is unaffected because it re-serializes the
+receipts rather than rendering a prompt.
 
 Everything else was **not shipped**. Every lever above changes either the vocabulary the model sees or
 the bytes of a prompt, and the capstone bar (`#7949` E1 volume / E2 correctness / E3
@@ -264,6 +271,12 @@ uv run python tools/extractor_cost_measure.py decompose \
     --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
     --out docs/evidence/14343-amplify/decomposition-after.md
 ```
+
+⛔ **The two commands above do NOT validate the lever.** They size it. The second undelivered
+item — “which capstone bar was preserved” — needs the `#7949` re-run **on the armed build**, and
+that run cannot score `compact` while the door pins it off: arming takes the variable AND the pin
+withdrawal in the same change (`#14371`). Until then a capstone run is an `indent` result, which
+is what `§5`'s “neither is quotable as a plan” means.
 
 `compose` is in the tree and works offline (`--offline`, a canned emission: a **shape**
 check, never a measurement — S4's `embed_list_json` region is a stub in that arm, and the
