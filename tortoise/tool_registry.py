@@ -1565,7 +1565,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Relation: performs, produces, uses, memberOf, ownedBy, managedBy, "
                     "about*, related, dependsOn, etc. Operator-less per the reification "
                     "rule (v3.5 §8) — lazy promotion via operator_action when mitigation "
-                    "is needed. Returns {edge, created, nudges}.",
+                    "is needed. Returns {edge, created, nudges}, plus "
+                    "relation_declaration and warnings[] when the packs declare no "
+                    "relation FOR THAT PREDICATE between the two kinds (or only "
+                    "the reverse one) — the edge still lands (#1934, "
+                    "warn-not-block). Read it per PREDICATE, never per pair: a "
+                    "predicate the packs do not declare for those kinds is "
+                    "reported even when OTHER predicates are declared between "
+                    "them.",
         risk="write",
         http_policy=True,
         sdk_method="_create_edge",

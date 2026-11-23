@@ -36,8 +36,10 @@ import {
   CAPTURE_REFUSAL_STAMP_MAX,
   COHORT_COST_CAP_CODE,
   DISCARD_COUNT_EXCEEDED,
+  DISCARD_ENTRY_TOO_LARGE,
   DISCARD_HTTP_REJECTED,
   DISCARD_META_UNREADABLE,
+  DISCARD_SPOOL_SATURATED,
   HARNESS,
   MAX_ATTEMPTS,
   MAX_TURNS,
@@ -6253,4 +6255,1249 @@ test("#9599: a not-yet-created transcript under a symlink still keys like Python
     "the not-yet-existent leaf was anchored differently from its real path");
   // A wholly non-existent path is still anchored (lexically) rather than throwing.
   assert.match(localSessionId(join(root, "a", "b", "c.jsonl"))!, /^c-[0-9a-f]{12}$/);
+});
+
+// ── #14342 D2 (#12483 / #12487) — the spool cannot lie ─────────────────────────
+// The Python twin is `tests/test_12483_12487_spool_integrity.py`; both legs drain
+// ONE `entries/` directory, so a rule stated on only one of them is a rule the
+// other can defeat.
+
+test("a retained UNREADABLE entry counts against the byte ceiling (#12483)", () => {
+  // The measured defect: both ceilings computed the spool's size from PARSED
+  // metas, and an unreadable entry's turn log keeps its live `.turns.jsonl` name
+  // so `orphanPaths` does not see it either. Nothing counted it — `entries/` held
+  // 5,228 bytes and `spoolSaturated(maxTotalBytes: 1000)` returned FALSE, so
+  // writes were admitted past the ceiling with no refusal and no SATURATED.
+  //
+  // MUTATION THAT REDS THIS: drop `unreadableEntryBytes` from
+  // `saturatedForMetas`'s total (the pre-fix arithmetic) -> false.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const filed = join(spool, "entries", `${entryKey("sess-filed")}.meta.json`);
+  writeFileSync(
+    filed,
+    JSON.stringify({
+      version: 1,
+      session_id: "sess-filed",
+      capture_key: "K",
+      filed_key: "K",
+      capture_lane: "hook",
+      filed_lane: "hook",
+    }),
+  );
+  writeFileSync(join(spool, "entries", `${entryKey("sess-filed")}.turns.jsonl`),
+    '{"role":"user","content":"x"}\n');
+  const locked = join(spool, "entries", `${entryKey("sess-locked")}.meta.json`);
+  writeFileSync(locked, JSON.stringify({ version: 1, session_id: "sess-locked" }));
+  writeFileSync(join(spool, "entries", `${entryKey("sess-locked")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y".repeat(5000) })}\n`);
+  chmodSync(locked, 0o000);
+  try {
+    const bounds = { maxEntries: 1000, maxTotalBytes: 1000, maxEntryBytes: 1 << 20 };
+    assert.equal(spoolSaturated(spool, bounds), true,
+      "the byte ceiling must ENFORCE against a retained-unreadable entry");
+    assert.deepEqual(pruneSpool(spool, undefined, bounds), [],
+      "and nothing evictable may be spent for room that cannot be made");
+    assert.equal(existsSync(filed), true, "the filed entry is not destroyed for nothing");
+  } finally {
+    if (existsSync(locked)) chmodSync(locked, 0o600);
+  }
+});
+
+test("the health line reaches the same SATURATED verdict (#12483)", () => {
+  // The other ceiling READER: a box whose spool cannot grow must not print a
+  // healthy line. MUTATION THAT REDS THIS: drop `unreadableBytes` from
+  // `healthScan`'s return (or the pass-through in `spoolHealthLine`).
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const locked = join(spool, "entries", `${entryKey("sess-locked")}.meta.json`);
+  writeFileSync(locked, JSON.stringify({ version: 1, session_id: "sess-locked" }));
+  writeFileSync(join(spool, "entries", `${entryKey("sess-locked")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y".repeat(5000) })}\n`);
+  chmodSync(locked, 0o000);
+  try {
+    const health = captureHealthLine(spool, {
+      bounds: { maxEntries: 1000, maxTotalBytes: 1000, maxEntryBytes: 1 << 20 },
+    });
+    assert.equal(health.state, "saturated", health.line);
+  } finally {
+    if (existsSync(locked)) chmodSync(locked, 0o600);
+  }
+});
+
+test("an ordinary spool is unaffected by the retained-bytes term (#12483)", () => {
+  // The other direction: the counted term is zero when nothing is unreadable.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-a"));
+  assert.equal(
+    spoolSaturated(spool, { maxEntries: 10, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 }),
+    false,
+  );
+});
+
+test("the writer QUARANTINES a diverged snapshot instead of overwriting (#12487)", () => {
+  // Measured on the Python twin (the same code): with an unreadable meta beside a
+  // six-turn log, one snapshot carrying a single turn returned `written: true`,
+  // the log fell from 6 lines to 1, and the filing stamp was wiped. The stored
+  // turns are now QUARANTINED (bytes preserved, still counted) and the entry is
+  // resynced — never overwritten.
+  //
+  // MUTATION THAT REDS THIS: restore
+  // `prior = JSON.parse(readFileSync(metaPath, "utf8"))` (the pre-fix read).
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-w";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(
+    metaPath,
+    JSON.stringify({
+      version: 1,
+      session_id: sid,
+      capture_key: "OLDKEY",
+      filed_key: "OLDKEY",
+      capture_lane: "hook",
+      filed_lane: "hook",
+    }),
+  );
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  chmodSync(metaPath, 0o000);
+  try {
+    const res = writeSpoolEntry(spool, snapshot(sid, stored.slice(0, 1)));
+    assert.equal(res.written, true, "the entry must be able to RESYNC");
+    assert.equal(res.discards.at(-1)?.reason, DISCARD_META_UNREADABLE);
+    assert.equal(res.discards.at(-1)?.retained, true);
+    assert.match(res.discards.at(-1)?.detail ?? "", /QUARANTINED/);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  const orphans = readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan"));
+  assert.equal(orphans.length, 1, "every stored turn survives — on disk, off the queue");
+  assert.equal(readFileSync(join(spool, "entries", orphans[0]!), "utf8").split("\n").filter(Boolean).length, 6);
+  assert.equal(readSpoolEntry(spool, sid)?.turns_count, 1, "and the entry is repaired");
+});
+
+test("the writer APPENDS to a live session it could not read (#12487)", () => {
+  // A live session grows every turn. When the snapshot provably EXTENDS the
+  // stored log an append destroys nothing, so it is admitted — refusing here
+  // would turn one corrupt byte into an ongoing silent loss.
+  //
+  // MUTATION THAT REDS THIS: refuse every unusable-prior write (the naive
+  // reading of #12487) -> `written` is false and the new turn is lost.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-live";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid, filed_key: "K" }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  chmodSync(metaPath, 0o000);
+  try {
+    const grown = [...stored, { role: "assistant" as const, content: "new" }];
+    const res = writeSpoolEntry(spool, snapshot(sid, grown));
+    assert.equal(res.written, true);
+    assert.equal(res.discards.at(-1)?.retained, true);
+    assert.match(res.discards.at(-1)?.detail ?? "", /APPENDED/);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(readFileSync(logPath, "utf8").split("\n").filter(Boolean).length, 7);
+  assert.notEqual(readSpoolEntry(spool, sid), undefined, "the entry is repaired");
+});
+
+test("the writer REFUSES when it cannot read the LOG either (#12487)", () => {
+  // Nothing about the entry is knowable, and a resync would MOVE a conversation
+  // no surface could then deliver. Refuse; leave it byte-identical.
+  //
+  // MUTATION THAT REDS THIS: drop the `TURNS_UNREADABLE` arm -> the writer
+  // quarantines (moves) a log it never read.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-hidden";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid }));
+  const stored = [{ role: "user" as const, content: "hi" }];
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  chmodSync(metaPath, 0o000);
+  chmodSync(logPath, 0o000);
+  try {
+    const res = writeSpoolEntry(spool, snapshot(sid, [...stored, { role: "assistant" as const, content: "new" }]));
+    assert.equal(res.written, false);
+    assert.equal(res.discards.at(-1)?.reason, DISCARD_META_UNREADABLE);
+    assert.equal(res.discards.at(-1)?.retained, true);
+    assert.match(res.discards.at(-1)?.detail ?? "", /REFUSED/);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+    if (existsSync(logPath)) chmodSync(logPath, 0o600);
+  }
+  assert.equal(
+    readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan")).length,
+    0,
+    "a log this process could not read must never be moved aside",
+  );
+  assert.equal(readFileSync(logPath, "utf8").split("\n").filter(Boolean).length, 1);
+});
+
+test("the writer REFUSES when ONLY the LOG cannot be read (#14347 cycle-3 F1)", () => {
+  // The LOG axis is an axis, not a sub-case of the META one. A READABLE meta
+  // beside an UNREADABLE turn log used to skip the `TURNS_UNREADABLE` guard —
+  // its only reader sat inside `if (unusablePrior)` — so `stored` was `[]`,
+  // `extendsStored` was false, and the write reached `atomicWrite(logPath,
+  // logText)`: a rename inside a writable directory needs no read permission on
+  // the target, so the log was REPLACED by the snapshot with `written: true` and
+  // no record at all. Mirrors
+  // `test_the_writer_refuses_when_ONLY_the_LOG_cannot_be_read`.
+  //
+  // MUTATION THAT REDS THIS: re-nest the guard inside `if (unusablePrior)` (or
+  // drop it) -> `written` is true and the log falls from 2 lines to 1.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-log-only";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(
+    metaPath,
+    JSON.stringify({ version: 1, session_id: sid, content_digest: "stale-digest" }),
+  );
+  const stored = [
+    { role: "user" as const, content: "one" },
+    { role: "assistant" as const, content: "two" },
+  ];
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  const metaBefore = readFileSync(metaPath, "utf8");
+  chmodSync(logPath, 0o000);
+  try {
+    const res = writeSpoolEntry(
+      spool,
+      snapshot(sid, [{ role: "assistant" as const, content: "only this one" }]),
+    );
+    assert.equal(res.written, false, "a log it could not read is never overwritten");
+    assert.ok(res.discards.length > 0, "a refusal must be recorded, not silent");
+    assert.equal(res.discards.at(-1)?.reason, DISCARD_META_UNREADABLE);
+    assert.equal(res.discards.at(-1)?.retained, true);
+    assert.match(res.discards.at(-1)?.detail ?? "", /REFUSED/);
+    assert.match(res.discards.at(-1)?.detail ?? "", /turn log could not be read/);
+  } finally {
+    if (existsSync(logPath)) chmodSync(logPath, 0o600);
+  }
+  assert.equal(
+    readFileSync(logPath, "utf8").split("\n").filter(Boolean).length,
+    stored.length,
+    "the stored turns are byte-identical after the refusal",
+  );
+  assert.equal(readFileSync(metaPath, "utf8"), metaBefore, "the readable meta is not rewritten either");
+  assert.equal(
+    readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan")).length,
+    0,
+    "a log this process could not read must never be moved aside",
+  );
+});
+
+test("a growth of an unreadable entry is counted ONCE (#14347 F2)", () => {
+  // `prior === undefined` is not "nothing is on disk": in the UNUSABLE arm the
+  // entry occupies bytes while its meta cannot be read. Passing
+  // `replacesSessionId: undefined` counted it twice — retained bytes PLUS a
+  // full-entry projection never subtracted — so a growth under the ceiling was
+  // REFUSED while the health line called the same spool healthy. Mirrors
+  // `test_a_growth_of_an_unreadable_entry_is_counted_ONCE`.
+  //
+  // MUTATION THAT REDS THIS: `replacesSessionId: prior ? snapshot.sessionId :
+  // undefined` (the pre-fix line) -> `written` is false.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-growth";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid, filed_key: "OLDKEY" }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  const grown = [...stored, { role: "assistant" as const, content: "turn-6" }];
+
+  // The size this write really lands, measured on a twin spool.
+  const probe = tmpSpool();
+  writeSpoolEntry(probe, snapshot(sid, grown), { maxEntries: 100, maxTotalBytes: 10_000_000, maxEntryBytes: 100_000 });
+  const projected = spoolEntryBytes(probe, sid);
+  const bounds = { maxEntries: 100, maxTotalBytes: projected + 8, maxEntryBytes: 100_000 };
+
+  chmodSync(metaPath, 0o000);
+  let written = false;
+  try {
+    written = writeSpoolEntry(spool, snapshot(sid, grown), bounds).written;
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(written, true, "the replaced entry must be subtracted from the projection");
+  // The admitted entry is now READABLE (the write repaired it), so the health
+  // line must reach the same "room" verdict rather than contradicting the write.
+  assert.equal(
+    spoolSaturated(spool, bounds),
+    false,
+    "the writer admitted the write, so the health line must not read SATURATED",
+  );
+});
+
+test("a REFUSED write does not quarantine the log it refuses to replace (#14347 F3)", () => {
+  // On the diverging disposition the writer used to move the stored log aside
+  // BEFORE the guards decided, so a REFUSED write had already renamed the only
+  // addressable copy of the transcript its own refusal text promised was kept.
+  //
+  // MUTATION THAT REDS THIS: call `quarantineLog(logPath)` inside the
+  // `unusablePrior` block, above the guards.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-refused";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  chmodSync(metaPath, 0o000);
+  try {
+    const res = writeSpoolEntry(spool, snapshot(sid, stored.slice(0, 1)), {
+      maxEntries: 100,
+      maxTotalBytes: 1,
+      maxEntryBytes: 100_000,
+    });
+    assert.equal(res.written, false);
+    assert.equal(res.discards.at(-1)?.reason, DISCARD_SPOOL_SATURATED);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(
+    readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan")).length,
+    0,
+    "a refused write must leave the entry byte-identical",
+  );
+  assert.equal(readFileSync(logPath, "utf8").split("\n").filter(Boolean).length, 6);
+});
+
+// ── cycle 2 — the seams the THIRD state opens (#14347 review) ─────────────────
+// The three-state prior read (OK / ABSENT / UNUSABLE) is right; these pin the
+// places where the NEW state still met arithmetic and control flow written for
+// the old two. The Python twins are in `tests/test_12483_12487_spool_integrity.py`.
+
+test("a byte-bearing log that parses to ZERO turns is QUARANTINED, not overwritten (#14347 cyc2)", () => {
+  // The gate on the diverging disposition is BYTES, not PARSED TURNS. `stored` is
+  // the parsed list, so a log that has bytes but yields zero turns — a torn first
+  // append, a foreign format — left `divergentTurns === 0`, skipped the
+  // quarantine and was OVERWRITTEN: `written: true`, no record, no `.orphan`.
+  // That is #12487's own signature.
+  //
+  // MUTATION THAT REDS THIS: gate the quarantine on `divergentTurns > 0` ->
+  // `written` is true with no record and the stored bytes are replaced.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-zero";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid }));
+  const foreign = '{"note":"half-written"}\n[1,2,3]\n';
+  writeFileSync(logPath, foreign);
+  chmodSync(metaPath, 0o000);
+  let res: ReturnType<typeof writeSpoolEntry>;
+  try {
+    res = writeSpoolEntry(spool, snapshot(sid));
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  const orphans = readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan"));
+  assert.equal(res.written, true);
+  assert.equal(orphans.length, 1, "the stored bytes must be PRESERVED, not overwritten");
+  assert.equal(readFileSync(join(spool, "entries", orphans[0]!), "utf8"), foreign);
+  const detail = res.discards.at(-1)?.detail ?? "";
+  assert.match(detail, /QUARANTINED/);
+  assert.doesNotMatch(detail, /\(none\)/, "the record must name the file it preserved");
+});
+
+test("a FAILED quarantine refuses instead of overwriting the log (#14347 F4 twin)", () => {
+  // `quarantineLog` returns `undefined` for TWO outcomes — "nothing to keep" and
+  // "the rename FAILED" — and the writer used to accept `undefined` and fall
+  // through to `atomicWrite` over the still-present log: a DESTRUCTION disclosed
+  // as `retained: true`. A log that still has bytes after a failed quarantine is
+  // the third disposition: REFUSE, entry byte-identical.
+  //
+  // The failure is produced the way a real one happens: `entries/` is read-only,
+  // so the rename gets EACCES while every read still works.
+  //
+  // MUTATION THAT REDS THIS: accept `undefined` from `quarantineLog` without
+  // checking that the log is gone -> `written` is true and the six stored turns
+  // are replaced by one.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-unmovable";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  chmodSync(metaPath, 0o000);
+  chmodSync(join(spool, "entries"), 0o500);
+  let res: ReturnType<typeof writeSpoolEntry>;
+  try {
+    res = writeSpoolEntry(spool, snapshot(sid, stored.slice(0, 1)));
+  } finally {
+    chmodSync(join(spool, "entries"), 0o700);
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(res.written, false);
+  assert.equal(res.discards.at(-1)?.retained, true);
+  assert.match(res.discards.at(-1)?.detail ?? "", /could not be moved aside/);
+  assert.equal(
+    readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan")).length,
+    0,
+  );
+  assert.equal(
+    readFileSync(logPath, "utf8").split("\n").filter(Boolean).length,
+    stored.length,
+    "a quarantine that failed must never be followed by an overwrite of the log",
+  );
+});
+
+test("the COUNT ceiling counts retained-unreadable entries (#12483, both ceilings)", () => {
+  // #12483 says the entry was invisible to BOTH ceilings; only the byte axis was
+  // fixed first. `metas.length` cannot see an unreadable meta, so six unreadable
+  // entries against `maxEntries: 3` read as no entries at all.
+  //
+  // MUTATION THAT REDS THIS: drop `unreadableCount` from `parsedCount` -> false
+  // with six entries on disk and a ceiling of three.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const locked: string[] = [];
+  for (let i = 0; i < 6; i += 1) {
+    const sid = `sess-u${i}`;
+    const path = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+    writeFileSync(path, JSON.stringify({ version: 1, session_id: sid }));
+    writeFileSync(join(spool, "entries", `${entryKey(sid)}.turns.jsonl`),
+      '{"role":"user","content":"x"}\n');
+    locked.push(path);
+  }
+  try {
+    for (const path of locked) chmodSync(path, 0o000);
+    assert.equal(
+      spoolSaturated(spool, { maxEntries: 3, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 }),
+      true,
+    );
+  } finally {
+    for (const path of locked) if (existsSync(path)) chmodSync(path, 0o600);
+  }
+});
+
+test("a replacement OVER the count ceiling is REFUSED (#14347 cyc2)", () => {
+  // `entryOnDisk` is the BYTE answer; the COUNT answer is the POST-WRITE entry
+  // count. ⛔ This row originally asserted a refusal AT the ceiling, and that
+  // assertion encoded a defect: `addsEntry: prior === undefined` was written
+  // when `parsedCount` was `metas.length` alone, and `parsedCount` later became
+  // `metas.length + unreadableCount`, so an unreadable entry was counted by BOTH
+  // operands and a replacement that adds no entry was refused on a spool the
+  // health line called relievable — permanently, because the refusal stamp
+  // replays. At `maxEntries: 2` on two stems the replacement is correctly
+  // ADMITTED (the sibling row above pins that); what is refused is one entry
+  // OVER, which is what this row now pins.
+  //
+  // MUTATION THAT REDS THIS: drop `unreadableCount` from `parsedCount`
+  // (`parsedCount = metas.length`) -> `metas.length = 2` with `addsEntry` 0 makes
+  // `2 <= 2` and the write is ADMITTED at `parsedCount = 3 > 2`.
+  //
+  // ⛔ NOT `addsEntry: false`: with `parsedCount = 3` and NO filed entry the floor
+  // refuses independently of that operand, so no value of it can admit here —
+  // naming it was an attribution defect (cycle-6 finding 4, measured GREEN). The
+  // operand is guarded by the AT-the-ceiling row above and by
+  // `an orphan cannot relieve a COUNT ceiling`.
+  //
+  // ⛔ THREE STEMS ON PURPOSE. At `maxEntries: 1` with a single readable plus a
+  // single unreadable stem, `parsedCount` (2) is over the ceiling with or
+  // without the count term, so the row could not discriminate the operand at
+  // all (measured — #14347 review P3).
+  const spool = tmpSpool();
+  for (const sid of ["sess-a", "sess-b"]) writeSpoolEntry(spool, snapshot(sid));
+  const locked = join(spool, "entries", `${entryKey("sess-locked")}.meta.json`);
+  writeFileSync(locked, JSON.stringify({ version: 1, session_id: "sess-locked" }));
+  writeFileSync(join(spool, "entries", `${entryKey("sess-locked")}.turns.jsonl`),
+    '{"role":"user","content":"x"}\n');
+  const bounds = { maxEntries: 2, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+  chmodSync(locked, 0o000);
+  try {
+    const res = writeSpoolEntry(spool, snapshot("sess-locked"), bounds);
+    assert.equal(
+      res.written,
+      false,
+      "with no filed entry to evict, a replacement over the ceiling is refused",
+    );
+    assert.equal(res.discards.at(-1)?.reason, DISCARD_SPOOL_SATURATED);
+  } finally {
+    if (existsSync(locked)) chmodSync(locked, 0o600);
+  }
+});
+
+test("a resync that could not KEEP its orphan is refused BEFORE the rename (#14347 cyc2)", () => {
+  // The quarantine happens after the admission decision, so the bytes that become
+  // the `.orphan` were in neither `entryBytes` nor the replaced entry's size — an
+  // admitted resync could land the spool over the ceiling and the `pruneSpool` on
+  // the SAME call would evict the orphan it had just promised to keep.
+  //
+  // MUTATION THAT REDS THIS: drop `pendingOrphanBytes` from the admission call ->
+  // the write is admitted and the stored six turns are reaped by the prune that
+  // follows it.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-o";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: "z".repeat(100) }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  const before = readFileSync(logPath, "utf8");
+  const bounds = {
+    maxEntries: 1000,
+    maxTotalBytes: Buffer.byteLength(before) + 50,
+    maxEntryBytes: 1 << 20,
+  };
+  chmodSync(metaPath, 0o000);
+  let res: ReturnType<typeof writeSpoolEntry>;
+  try {
+    assert.equal(spoolSaturated(spool, bounds), false,
+      "the premise: today's bytes alone are under the ceiling");
+    res = writeSpoolEntry(spool, snapshot(sid, stored.slice(0, 1)), bounds);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(res.written, false);
+  assert.equal(readFileSync(logPath, "utf8"), before);
+  assert.equal(readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan")).length, 0);
+});
+
+test("a CORRUPT meta is counted by a READ-ONLY probe (#14347 cyc2)", () => {
+  // The admission probe must not repair, so it scans with `repair: false` — and
+  // the corrupt arm used to `continue` before collecting anything, which would
+  // have made a stop-repairing fix silently stop COUNTING.
+  //
+  // MUTATION THAT REDS THIS: collect corrupt stems only under `repair` -> false,
+  // with 5,000 bytes on disk and nothing counted.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const metaPath = join(spool, "entries", `${entryKey("sess-corrupt")}.meta.json`);
+  writeFileSync(metaPath, "{ this is not json");
+  writeFileSync(join(spool, "entries", `${entryKey("sess-corrupt")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y".repeat(5000) })}\n`);
+  const bounds = { maxEntries: 1000, maxTotalBytes: 1000, maxEntryBytes: 1 << 20 };
+  assert.equal(spoolSaturated(spool, bounds, {}, { repair: false }), true);
+  assert.equal(existsSync(metaPath), true, "a read-only probe must not touch the entry");
+  assert.equal(readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan")).length, 0);
+});
+
+// ── cycle 3 — the floor's LOOP, the ledger's timing, and the meta-less log ──
+//
+// Three findings from the review at `9de49e36b801`, each a seam opened by the
+// FIX for the previous one. Mirrors `tests/test_12483_12487_spool_integrity.py`.
+
+test("prune stops at the COUNT ceiling when the byte ceiling is unreachable (#14347 cyc3)", () => {
+  // `bytesReachable` false means no eviction can bring the byte term under
+  // `maxTotalBytes` (the permanent classes alone are over it), so a loop still
+  // testing `total <= maxTotalBytes` never stops on that axis: it evicted EVERY
+  // filed entry to relieve one count slot and was still over the byte ceiling
+  // afterwards — #10175 ("refuse new work, never destroy the queue to admit it")
+  // violated from inside the guard added to enforce it.
+  //
+  // MUTATION THAT REDS THIS: restore the loop break
+  // `count <= bounds.maxEntries && total <= bounds.maxTotalBytes` -> all five
+  // filed entries are unlinked and only the undelivered one survives.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  const seed = (sid: string, stamp: string, filed: boolean, payload: string) => {
+    const markers = filed
+      ? { capture_key: "K", filed_key: "K", capture_lane: "hook", filed_lane: "hook" }
+      : { capture_key: "U" };
+    writeFileSync(
+      join(dir, `${entryKey(sid)}.meta.json`),
+      JSON.stringify({
+        version: 1,
+        session_id: sid,
+        ...markers,
+        updated_at: stamp,
+        created_at: stamp,
+      }),
+    );
+    writeFileSync(
+      join(dir, `${entryKey(sid)}.turns.jsonl`),
+      `${JSON.stringify({ role: "user", content: payload })}\n`,
+    );
+  };
+  for (let i = 0; i < 5; i += 1) seed(`sess-f${i}`, `2026-01-01T00:00:0${i}Z`, true, "x");
+  seed("sess-undelivered", "2026-01-01T00:00:09Z", false, "y".repeat(2000));
+
+  const bounds = { maxEntries: 3, maxTotalBytes: 1000, maxEntryBytes: 1 << 20 };
+  const discards = pruneSpool(spool, undefined, bounds);
+
+  assert.equal(
+    discards.length,
+    3,
+    `counting six entries against maxEntries=3 needs exactly three evictions; prune spent ${discards.length}`,
+  );
+  assert.equal(
+    existsSync(join(dir, `${entryKey("sess-undelivered")}.meta.json`)),
+    true,
+    "an undelivered entry is never evicted to make room (capture-loss)",
+  );
+  assert.deepEqual(
+    [0, 1, 2, 3, 4].map((i) => existsSync(join(dir, `${entryKey(`sess-f${i}`)}.meta.json`))),
+    [false, false, false, true, true],
+    "oldest-first, and only the count overage",
+  );
+  const surviving = ["sess-f3", "sess-f4", "sess-undelivered"].reduce(
+    (sum, sid) => sum + spoolEntryBytes(spool, sid),
+    0,
+  );
+  assert.ok(
+    surviving > bounds.maxTotalBytes,
+    `the byte ceiling was NOT reached by any of those evictions: ${surviving}`,
+  );
+});
+
+test("a REFUSED append records NOTHING about the append it could not do (#14347 cyc3)", () => {
+  // Measured on the Python twin (the same code): a saturated spool returned
+  // `[<"the write APPENDED 1 new turn(s)">, <spool_saturated refusal>]` for a
+  // write that never happened.
+  //
+  // ⛔ The fixture is genuinely OVER the ceiling. With one `chmod(0o000)` entry
+  // alone at `maxEntries: 1` the spool is exactly AT it, and a REPLACEMENT adds
+  // no entry — so after the cycle-5 finding-1 fix that write is correctly
+  // ADMITTED and this row could no longer reach the refusal whose ledger it is
+  // about. The readable entry beside it is what puts the count over.
+  //
+  // MUTATION THAT REDS THIS: emit the append record inside the `unusablePrior`
+  // arm (above the admission guard) -> the detail claims an append the write did
+  // not perform.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const other = "sess-other";
+  writeFileSync(
+    join(spool, "entries", `${entryKey(other)}.meta.json`),
+    JSON.stringify({ version: 1, session_id: other }),
+  );
+  writeFileSync(
+    join(spool, "entries", `${entryKey(other)}.turns.jsonl`),
+    [{ role: "user" as const, content: "x" }].map((t) => `${JSON.stringify(t)}\n`).join(""),
+  );
+  const sid = "sess-w";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  chmodSync(metaPath, 0o000);
+  let res;
+  try {
+    const bounds = { maxEntries: 1, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+    res = writeSpoolEntry(spool, snapshot(sid, [...stored, { role: "assistant", content: "new" }]), bounds);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(
+    res.written,
+    false,
+    "one readable + one unreadable entry at maxEntries=1 is over the ceiling",
+  );
+  assert.equal(res.discards.at(-1)?.reason, DISCARD_SPOOL_SATURATED);
+  assert.equal(
+    res.discards.some((d) => (d.detail ?? "").includes("APPENDED")),
+    false,
+    `the ledger must not claim a write that was refused: ${JSON.stringify(res.discards)}`,
+  );
+  assert.equal(
+    readFileSync(logPath, "utf8").split("\n").filter(Boolean).length,
+    6,
+    "and the log is byte-identical — which is what makes that claim false",
+  );
+});
+
+test("one session RECORDS BOTH its append and its later quarantine (#14347 cyc3)", () => {
+  // The dedupe key is `(session_id, reason)` plus the stamp, and both
+  // dispositions use `DISCARD_META_UNREADABLE`: one shared stamp made the second a
+  // "repeat" of the first. Measured on the Python twin: a session that appended
+  // on turn N and diverged after a compaction had its QUARANTINE record
+  // swallowed, leaving the earlier "APPENDED … and overwrote nothing" as the
+  // ledger's account of turns that had just left the live queue for an `.orphan`.
+  //
+  // MUTATION THAT REDS THIS: give both records the same `unusable-meta:<sid>`
+  // stamp -> the second is suppressed and the ledger holds no QUARANTINED line.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-w";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  chmodSync(metaPath, 0o000);
+  let second;
+  try {
+    const first = writeSpoolEntry(spool, snapshot(sid, [...stored, { role: "assistant", content: "new" }]));
+    assert.equal(first.written, true);
+    assert.match(first.discards.at(-1)?.detail ?? "", /APPENDED/);
+    // The repaired meta is corrupted again: the SAME live session, still
+    // unreadable, now DIVERGING (a compaction moved the window).
+    chmodSync(metaPath, 0o000);
+    second = writeSpoolEntry(spool, snapshot(sid, [{ role: "user", content: "compacted" }]));
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(second.written, true);
+  assert.match(
+    second.discards.at(-1)?.detail ?? "",
+    /QUARANTINED/,
+    `the quarantine is a DIFFERENT event and must be recorded: ${JSON.stringify(second.discards)}`,
+  );
+  const details = readDiscards(spool).map((d) => d.detail ?? "");
+  assert.ok(details.some((d) => d.includes("APPENDED")), JSON.stringify(details));
+  assert.ok(details.some((d) => d.includes("QUARANTINED")), JSON.stringify(details));
+  const orphans = readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan"));
+  assert.equal(orphans.length, 1, JSON.stringify(orphans));
+  assert.equal(
+    readFileSync(join(spool, "entries", orphans[0]!), "utf8").split("\n").filter(Boolean).length,
+    7,
+    "the turns that left the live queue are ON DISK — six stored plus the appended one",
+  );
+});
+
+test("a META-LESS turn log is QUARANTINED, not overwritten (#14347 cyc3)", () => {
+  // The writer stores the log BEFORE the meta, and `discardEntry` unlinks the meta
+  // FIRST — so an ENOSPC or a failed second unlink leaves a byte-bearing
+  // `.turns.jsonl` with no meta. Read as a fresh session it was REPLACED with no
+  // record and no `.orphan`: #12487's destroy, one state over.
+  //
+  // MUTATION THAT REDS THIS: `priorRead.state !== PRIOR_META_ABSENT` (the pre-fix
+  // occupancy test) -> written true, one line in the log, no record, no orphan.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  const sid = "sess-orphan";
+  const logPath = join(dir, `${entryKey(sid)}.turns.jsonl`);
+  const stray = Array.from({ length: 3 }, (_, i) => ({ role: "user" as const, content: `orphan-${i}` }));
+  writeFileSync(logPath, stray.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  assert.equal(existsSync(join(dir, `${entryKey(sid)}.meta.json`)), false);
+
+  const res = writeSpoolEntry(spool, snapshot(sid, [{ role: "user", content: "fresh" }]));
+  assert.equal(res.written, true);
+  assert.match(res.discards.at(-1)?.detail ?? "", /QUARANTINED/);
+  assert.match(
+    res.discards.at(-1)?.detail ?? "",
+    /ABSENT/,
+    "the record says which state was found, not that a meta it never saw 'could not be read'",
+  );
+  const orphans = readdirSync(dir).filter((n) => n.includes(".orphan"));
+  assert.equal(orphans.length, 1, JSON.stringify(orphans));
+  assert.equal(
+    readFileSync(join(dir, orphans[0]!), "utf8").split("\n").filter(Boolean).length,
+    3,
+    "every stored turn survives — on disk, even though it left the queue",
+  );
+  assert.equal(
+    readFileSync(logPath, "utf8").split("\n").filter(Boolean).length,
+    1,
+    "the live log now holds only this snapshot",
+  );
+});
+
+test("the writer APPENDS to a meta-less log it could reconcile (#14347 cyc3)", () => {
+  // The append is PROVABLE here too: the log path comes from the caller's session
+  // id, so a snapshot that extends the stored turns destroys nothing.
+  //
+  // MUTATION THAT REDS THIS: the pre-fix occupancy test -> the log is overwritten
+  // (3 lines -> 1) with no record.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  const sid = "sess-orphan";
+  const logPath = join(dir, `${entryKey(sid)}.turns.jsonl`);
+  const stored = Array.from({ length: 2 }, (_, i) => ({ role: "user" as const, content: `orphan-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+
+  const res = writeSpoolEntry(
+    spool,
+    snapshot(sid, [...stored, { role: "assistant", content: "new" }]),
+  );
+  assert.equal(res.written, true);
+  assert.match(res.discards.at(-1)?.detail ?? "", /APPENDED/);
+  assert.equal(readFileSync(logPath, "utf8").split("\n").filter(Boolean).length, 3);
+  assert.equal(readdirSync(dir).filter((n) => n.includes(".orphan")).length, 0);
+});
+
+test("a meta-less turn log is COUNTED by both ceilings (#14347 cyc3)", () => {
+  // Nothing counted a lone `.turns.jsonl`: not in `metas` (no meta), not in
+  // `unreadable` (built from `.meta.json` names), not in `orphanPaths` (matches
+  // only `.orphan`). Measured on the Python twin: 5,000 bytes on disk with
+  // `maxTotalBytes=1000` answering not-saturated and a health line reading
+  // `draining`.
+  //
+  // MUTATION THAT REDS THIS: drop the stray-log stems from `listSpoolEntries`'s
+  // third element -> both verdicts flip back.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  writeFileSync(
+    join(spool, "entries", `${entryKey("sess-orphan")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y".repeat(5000) })}\n`,
+  );
+
+  const byteBounds = { maxEntries: 1000, maxTotalBytes: 1000, maxEntryBytes: 1 << 20 };
+  assert.equal(spoolSaturated(spool, byteBounds), true);
+  assert.equal(captureHealthLine(spool, { bounds: byteBounds }).state, "saturated");
+
+  const countBounds = { maxEntries: 1, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+  assert.equal(
+    spoolSaturated(spool, countBounds),
+    true,
+    "a lone turn log is an entry the COUNT ceiling cannot see without this",
+  );
+});
+
+test("the WRITER and the health line AGREE on a meta-less turn log (#14347 cyc4 P1)", () => {
+  // `listSpoolEntries` counts a byte-bearing `.turns.jsonl` with no meta, so a
+  // lone log IS in the real count. The cheap admission listing read its count
+  // from `*.meta.json` NAMES only, so it could not see that class — and its own
+  // docstring's guarantee ("both numbers here are UPPER bounds … which makes
+  // 'under both ceilings here' a proof of 'not saturated there'") was false for
+  // the count term once cycle 3 introduced the class. Measured at the cycle-4
+  // head: one meta-less log with `maxEntries: 1` gives `spoolSaturated === true`
+  // and health `saturated`, while `writeSpoolEntry` returned `written: true` with
+  // `discards: []`.
+  //
+  // That is the same two-reader disagreement cycle-2 finding 4 fixed on the BYTE
+  // axis, reopened on the COUNT axis by the shape an ENOSPC actually produces —
+  // the writer stores the log BEFORE the meta.
+  //
+  // MUTATION THAT REDS THIS: drop the `logStems`/`metaStems` exit from
+  // `cheapSpoolScan` (count `*.meta.json` names only) -> the cheap exit answers
+  // "under both ceilings" and the write is ADMITTED while the health line says
+  // SATURATED.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  writeFileSync(
+    join(spool, "entries", `${entryKey("sess-stray")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y".repeat(10) })}\n`,
+  );
+  const bounds = { maxEntries: 1, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+
+  assert.equal(spoolSaturated(spool, bounds), true, "the premise: the FULL scan counts the lone log");
+  assert.equal(
+    captureHealthLine(spool, { bounds }).state,
+    "saturated",
+    "the premise: so the health line says so too",
+  );
+
+  const res = writeSpoolEntry(
+    spool,
+    { ...snapshot("sess-fresh"), turns: [{ role: "user", content: "n" }] },
+    bounds,
+  );
+
+  assert.equal(res.written, false, "the writer must not admit what the health line calls saturated");
+  assert.equal(res.discards[res.discards.length - 1].reason, "spool_saturated");
+});
+
+test("the cheap listing COUNTS a meta-less log (#14347 cyc4 P1, cyc5 P2)", () => {
+  // The fast exit's COUNT is the real count, not the meta-name count:
+  // `listSpoolEntries` counts `metas + unreadable + corrupt + strayLogs`, and
+  // every `.meta.json` NAME falls in exactly one of the first three — so the
+  // fourth needs the LOG names, which the same listing already has. A number
+  // that omits it is an UNDER-count, the direction that admits a write the real
+  // predicate refuses.
+  //
+  // ⛔ COUNTED, NOT DECLINED (#14347 review, cycle 5, P2): declining the whole
+  // directory also fixed the under-count, but nothing reaps a meta-less log, so
+  // one abandoned session turned the fast path off for every later turn.
+  //
+  // MUTATION THAT REDS THIS: count `*.meta.json` names only -> `{ names: 0, … }`,
+  // an under-count of a spool holding one byte-bearing log.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  writeFileSync(
+    join(spool, "entries", `${entryKey("sess-stray")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y" })}\n`,
+  );
+
+  assert.equal(cheapSpoolScan(spool)!.names, 1, "one byte-bearing log, one entry");
+
+  // …and a ZERO-byte lone log is not an entry for the real count either.
+  writeFileSync(join(spool, "entries", `${entryKey("sess-empty")}.turns.jsonl`), "");
+  assert.equal(cheapSpoolScan(spool)!.names, 1, "no bytes, no entry");
+
+  // The ordinary shape counts ONE entry, not the two files it is made of.
+  const ordinary = tmpSpool();
+  writeSpoolEntry(
+    ordinary,
+    { ...snapshot("sess-ok"), turns: [{ role: "user", content: "n" }] },
+    { maxEntries: 100, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 },
+  );
+  const listing = cheapSpoolScan(ordinary)!;
+  assert.equal(listing.names, 1, "one meta, one name");
+});
+
+/** Seed one spool entry directly on disk (`readable: false` chmods the meta). */
+function seedSpoolEntry(
+  spool: string,
+  sid: string,
+  opts: { readable: boolean; filed?: boolean; stamp?: string; payload?: string },
+): { metaPath: string; logPath: string } {
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  const metaPath = join(dir, `${entryKey(sid)}.meta.json`);
+  const logPath = join(dir, `${entryKey(sid)}.turns.jsonl`);
+  const markers = opts.filed
+    ? { capture_key: "K", filed_key: "K", capture_lane: "hook", filed_lane: "hook" }
+    : { capture_key: "U" };
+  writeFileSync(
+    metaPath,
+    JSON.stringify({
+      version: 1,
+      session_id: sid,
+      ...markers,
+      created_at: opts.stamp ?? "2026-01-01T00:00:00Z",
+      updated_at: opts.stamp ?? "2026-01-01T00:00:00Z",
+    }),
+  );
+  writeFileSync(logPath, `${JSON.stringify({ role: "user", content: opts.payload ?? "x" })}\n`);
+  if (!opts.readable) {
+    chmodSync(metaPath, 0o000);
+    try {
+      readFileSync(metaPath);
+      chmodSync(metaPath, 0o600);
+      assert.fail("chmod(0o000) does not deny this runner's user (root): the premise cannot be built");
+    } catch (err) {
+      if (err instanceof assert.AssertionError) throw err;
+    }
+  }
+  return { metaPath, logPath };
+}
+
+test("a replacement AT the count ceiling is ADMITTED (#14347 cyc5 P1)", () => {
+  // The count answer is the POST-WRITE entry count, in both directions. At
+  // `maxEntries: 2` with one readable and one `chmod(0o000)`-unreadable entry,
+  // `parsedCount` is already 2 — so a GROWTH of the unreadable entry adds no
+  // entry and must be admitted. It was refused, permanently, by an
+  // `addsEntry: prior === undefined` operand written when `parsedCount` was
+  // `metas.length` alone: the count term started carrying the unreadable class
+  // in the same commit, so the same entry was counted by both operands and the
+  // write path over-counted by one. Measured on the Python twin (same code):
+  // same spool, same snapshot, only the meta's readability differing —
+  // unreadable ⇒ `written: false ['spool_saturated']`; readable ⇒
+  // `written: true ['spool_count_exceeded']`. The asymmetry IS the defect.
+  //
+  // ⚠️ The health line is deliberately NOT the oracle: with no write in hand it
+  // has no projection, so it takes the STRICT arm and answers "would a NEW
+  // capture be refused?" — a different question from "does THIS replacement
+  // cross the ceiling?".
+  //
+  // MUTATION THAT REDS THIS: pass `addsEntry: prior === undefined` ->
+  // `parsedCount + 1 = 3 > maxEntries = 2` -> the growth is REFUSED.
+  const spool = tmpSpool();
+  seedSpoolEntry(spool, "sess-ok", { readable: true });
+  const { metaPath: lockedMeta } = seedSpoolEntry(spool, "sess-locked", { readable: false });
+
+  const bounds = { maxEntries: 2, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+  let res;
+  try {
+    res = writeSpoolEntry(spool, snapshot("sess-locked"), bounds);
+  } finally {
+    if (existsSync(lockedMeta)) chmodSync(lockedMeta, 0o600);
+  }
+
+  assert.equal(
+    res.written,
+    true,
+    `a replacement at the ceiling crosses nothing and must be admitted: ${JSON.stringify(res.discards)}`,
+  );
+});
+
+test("prune SPENDS a filed entry for a count overage it can see (#14347 cyc5 P2)", () => {
+  // `saturatedForMetas` counts `metas.length + unreadableCount`, but the
+  // eviction loop counted `metas.length` alone, so with K retained-unreadable
+  // entries the spool settled at `maxEntries + K`: every admitted write spent
+  // one filed entry and the predicate's own ceiling was never reached.
+  // Measured on the Python twin (same code), pre-fix (3 filed + 1
+  // `chmod(0o000)`, `maxEntries: 3`): `pruneSpool → []`, and the write admitted
+  // with `spool_count_exceeded` while the post-write count was STILL 4.
+  //
+  // `spoolSaturated` is correctly false here — it answers "nothing EVICTABLE",
+  // and there are three filed entries — so prune is the only surface that can
+  // relieve it, which is exactly why its count term has to see the class.
+  //
+  // MUTATION THAT REDS THIS: `let count = metas.length` -> prune returns `[]`
+  // and nothing is reclaimed.
+  const spool = tmpSpool();
+  for (let i = 0; i < 3; i += 1) {
+    seedSpoolEntry(spool, `sess-f${i}`, {
+      readable: true,
+      filed: true,
+      stamp: `2026-01-01T00:00:0${i}Z`,
+    });
+  }
+  const { metaPath: lockedMeta } = seedSpoolEntry(spool, "sess-u", { readable: false });
+
+  const bounds = { maxEntries: 3, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+  let discards;
+  try {
+    assert.equal(
+      spoolSaturated(spool, bounds),
+      false,
+      "the premise: 3 filed entries ARE evictable, so this is not 'saturated', it is prune's job",
+    );
+    discards = pruneSpool(spool, "sess-new", bounds);
+  } finally {
+    if (existsSync(lockedMeta)) chmodSync(lockedMeta, 0o600);
+  }
+
+  assert.deepEqual(
+    discards.map((d) => d.reason),
+    [DISCARD_COUNT_EXCEEDED],
+    `one filed entry must be spent to reach the ceiling: ${JSON.stringify(discards)}`,
+  );
+  assert.equal(existsSync(lockedMeta), true, "the unreadable entry is never the thing evicted");
+});
+
+test("a REFUSED write mutates NOTHING, even beside a CORRUPT meta (#14347 cyc5 P3)", () => {
+  // The admission probe must not repair — the TS twin of cycle-2 finding 2, and
+  // of the Python pin fixed in cycle 4. A fixture with only a `chmod(0o000)`
+  // read-refused meta cannot see it: a REPAIRING scan RETAINS that class exactly
+  // as a read-only one does, so `{ repair: true }` in `admissionSaturated`
+  // measured GREEN. The class a repairing probe actually mutates is the CORRUPT
+  // (readable, unusable) one, which it unlinks and whose log it quarantines.
+  //
+  // MUTATION THAT REDS THIS: `{ repair: true }` in `admissionSaturated` -> the
+  // corrupt meta is unlinked and its log becomes an `.orphan`, on a write that
+  // was then REFUSED.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  const roomy = { maxEntries: 100, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+  for (const sid of ["sess-a", "sess-b"]) {
+    writeSpoolEntry(spool, { ...snapshot(sid), turns: [{ role: "user", content: sid }] }, roomy);
+  }
+  const corruptPath = join(dir, `${entryKey("sess-c")}.meta.json`);
+  const corruptLog = join(dir, `${entryKey("sess-c")}.turns.jsonl`);
+  writeFileSync(corruptPath, "{ this is not json");
+  writeFileSync(corruptLog, `${JSON.stringify({ role: "user", content: "kept" })}\n`);
+  const before = readFileSync(corruptLog, "utf8");
+
+  const refused = writeSpoolEntry(spool, snapshot("sess-r", [{ role: "user", content: "n" }]), {
+    maxEntries: 2,
+    maxTotalBytes: 1 << 20,
+    maxEntryBytes: 1 << 20,
+  });
+
+  assert.equal(refused.written, false, "three counted entries on a ceiling of two");
+  assert.equal(refused.discards.at(-1)?.reason, DISCARD_SPOOL_SATURATED);
+  assert.equal(existsSync(corruptPath), true, "the probe must not unlink a corrupt meta it only counts");
+  assert.equal(
+    readFileSync(corruptLog, "utf8"),
+    before,
+    "…and must not quarantine the log of an entry it did not repair",
+  );
+  assert.equal(
+    readdirSync(dir).filter((n) => n.includes(".orphan")).length,
+    0,
+    "a REFUSED write is not a mutation: nothing may be moved aside",
+  );});
+
+test("the HEALTH LINE is saturated when the writer refuses new work (#14347 cyc6 P2)", () => {
+  // The strict arm's floor must carry the `+1` the writer will add. `strict`
+  // means "no projection was offered", and every caller of that arm asks about a
+  // NEW capture — `captureHealthLine` above all — so the post-write count is
+  // `parsedCount + 1`. Without the `+1` the floor was one short of the writer's,
+  // and the two disagreed whenever `parsedCount - filed.length === maxEntries`
+  // with at least one filed entry: measured, three readable undelivered + one
+  // FILED at `maxEntries: 3` gave health `DRAINING (3 queued)` — paging nobody —
+  // while the writer refused every NEW capture with `spool_saturated`. The writer
+  // is right (after prune evicts the one filed entry the count is 4, still over
+  // 3, so room cannot be made and #10175 requires the refusal); the health line
+  // was the false PASS, the agent-infra#2100 class it exists to prevent.
+  //
+  // MUTATION THAT REDS THIS: drop the `+1` from `floorCount`
+  // (`const floorCount = count - filed.length`) -> health reads `DRAINING` while
+  // the write is refused.
+  const spool = tmpSpool();
+  for (const sid of ["sess-u0", "sess-u1", "sess-u2"]) seedSpoolEntry(spool, sid, { readable: true });
+  seedSpoolEntry(spool, "sess-filed", { readable: true, filed: true });
+  const bounds = { maxEntries: 3, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+
+  assert.equal(
+    captureHealthLine(spool, { bounds }).state,
+    "saturated",
+    "the health line must not report a spool healthy while every new capture is refused",
+  );
+  const res = writeSpoolEntry(spool, snapshot("sess-new"), bounds);
+  assert.equal(res.written, false, "the premise: the writer refuses new work on this spool");
+  assert.equal(res.discards.at(-1)?.reason, DISCARD_SPOOL_SATURATED);
+});
+
+test("prune does NOT count a corrupt stem its own scan just unlinked (#14347 cyc6 P3)", () => {
+  // `listSpoolEntries` REPAIRS: it unlinks a corrupt meta and renames its log to
+  // `.orphan` inside the same call, so that stem no longer occupies an entry slot
+  // (its bytes are correctly 0, and its log is credited as an evictable orphan).
+  // Counting it made prune evict one filed entry per corrupt meta for a count
+  // overage that had ceased to exist: measured pre-fix, ceiling 2 with two filed
+  // + one corrupt → one filed destroyed and the spool settled one BELOW its
+  // ceiling.
+  //
+  // MUTATION THAT REDS THIS: count the third element as-is
+  // (`metas.length + unreadable.length`) -> one filed entry is evicted.
+  const spool = tmpSpool();
+  for (let i = 0; i < 2; i += 1) {
+    seedSpoolEntry(spool, `sess-f${i}`, {
+      readable: true,
+      filed: true,
+      stamp: `2026-01-01T00:00:0${i}Z`,
+    });
+  }
+  const dir = join(spool, "entries");
+  writeFileSync(join(dir, `${entryKey("sess-corrupt")}.meta.json`), "{ this is not json");
+  writeFileSync(
+    join(dir, `${entryKey("sess-corrupt")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "x" })}\n`,
+  );
+  const bounds = { maxEntries: 2, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+
+  const discards = pruneSpool(spool, "sess-new", bounds);
+
+  assert.deepEqual(
+    discards,
+    [],
+    `the repairing scan already removed the only over-count; nothing to evict: ${JSON.stringify(discards)}`,
+  );
+  assert.notEqual(
+    readSpoolEntry(spool, "sess-f0"),
+    undefined,
+    "a filed entry is not spent for a count overage that no longer exists",
+  );
+  assert.notEqual(readSpoolEntry(spool, "sess-f1"), undefined);
+});
+
+test("the PREDICATE does not count a corrupt stem its own scan just unlinked (#14347 cyc11 P2)", () => {
+  // The OTHER reader of the third element — and the one that disagreed.
+  // `spoolSaturated`'s default scan REPAIRS, so by the time it computed
+  // `unreadableCount` the corrupt meta it was about to report had already been
+  // unlinked by that same call. It counted the stem anyway, so the public
+  // predicate answered true for a spool its own repair had just left able to
+  // admit a capture — and answered false one call later. `pruneSpool` has
+  // excluded exactly these stems since cycle 6 ("a count overage that ceased to
+  // exist inside the same call"); this is the same rule one reader over. Both
+  // now share ONE definition (`liveUnreadableStems`).
+  //
+  // `repair: false` is the opposite arm and stays TRUE: that scan unlinks
+  // nothing, so the corrupt meta is still an entry it can see (the health line
+  // describes the spool it reads), and the filter must not silently drop it.
+  //
+  // MUTATION THAT REDS THIS: pass `unreadable.length` as `unreadableCount` (the
+  // pre-fix wiring) -> the repair-on assertion below sees saturated.
+  const spool = tmpSpool();
+  for (let i = 0; i < 2; i += 1) {
+    seedSpoolEntry(spool, `sess-u${i}`, { readable: true, stamp: `2026-01-01T00:00:0${i}Z` });
+  }
+  const dir = join(spool, "entries");
+  const corrupt = join(dir, `${entryKey("sess-corrupt")}.meta.json`);
+  writeFileSync(corrupt, "{ this is not json");
+  writeFileSync(
+    join(dir, `${entryKey("sess-corrupt")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "x" })}\n`,
+  );
+  const bounds = { maxEntries: 3, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+
+  assert.equal(
+    spoolSaturated(spool, bounds, {}, { repair: false }),
+    true,
+    "a read-only scan still SEES the corrupt meta, so it is an entry",
+  );
+  assert.ok(existsSync(corrupt), "the premise: the read-only scan moved nothing");
+
+  assert.equal(
+    spoolSaturated(spool, bounds),
+    false,
+    "the repairing scan unlinked the corrupt meta in this call, so the count it reports" +
+      " must be the count it leaves behind — 2 entries under a ceiling of 3",
+  );
+  assert.equal(existsSync(corrupt), false, "the premise: the repairing scan removed it");
+  assert.equal(
+    spoolSaturated(spool, bounds),
+    false,
+    "the two consecutive calls must agree: the pre-fix predicate said true then false," +
+      " which no caller can act on",
+  );
+});
+
+test("the writer RECORDS a fresh entry it could not use as a prior (#14347 cyc11 P2)", () => {
+  // The fourth disposition: an unusable meta with NO stored turn log at all.
+  // Nothing diverges (there is no log) and nothing extends (there is nothing to
+  // append to), so neither the append nor the diverge arm fires — and the write
+  // proceeded with NO record at all, silently dropping the filing state that
+  // lived in the unreadable meta, while both sibling arms record that exact loss.
+  // The write itself is RIGHT (there are no bytes to preserve); the silence is
+  // the defect — #4714's amplification class.
+  //
+  // MUTATION THAT REDS THIS: drop the `unusableDisposition === "fresh"` record
+  // arm -> no `meta_unreadable` row is emitted for a loss the writer just took.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-fresh";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid, capture_key: "K", filed_key: "K" }));
+  assert.equal(existsSync(logPath), false, "the premise: this entry has no stored turn log at all");
+  chmodSync(metaPath, 0o000);
+  try {
+    const res = writeSpoolEntry(spool, snapshot(sid, [{ role: "user", content: "hi" }]));
+    assert.equal(res.written, true);
+    const ledger = res.discards.filter((d) => d.reason === DISCARD_META_UNREADABLE);
+    assert.ok(
+      ledger.length > 0,
+      `an unusable prior whose filing state is dropped must leave a record — the sibling arms do: ${JSON.stringify(res.discards)}`,
+    );
+    assert.match(ledger.at(-1)?.detail ?? "", /NO stored turn log/);
+    assert.equal(ledger.at(-1)?.retained, true);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  // The record documents the loss; it does not prevent it. Pinned so nobody reads
+  // the record as a restore.
+  const repaired = readSpoolEntry(spool, sid);
+  assert.notEqual(repaired, undefined);
+  assert.equal(repaired?.filed_key, undefined);
+});
+
+test("the over-bound refusal does not call an ABSENT meta unreadable (#14347 cyc6 P3)", () => {
+  // The ledger may not lie in either direction. The over-bound refusal arm is
+  // gated on `prior === undefined`, which is also true for an entry with NO meta
+  // at all — the shape this PR is about, because the writer stores the log before
+  // the meta and an ENOSPC leaves a lone over-bound log. It said the entry's
+  // "meta cannot be read" when there is no meta to read; `priorDesc` exists
+  // precisely so no arm makes that claim.
+  //
+  // MUTATION THAT REDS THIS: use the fixed sentence ("but its meta cannot be
+  // read") instead of `priorDesc` -> the detail claims an unreadable meta.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${entryKey("sess-stray")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y".repeat(3032) })}\n`,
+  );
+  const bounds = { maxEntries: 1000, maxTotalBytes: 1 << 20, maxEntryBytes: 1000 };
+
+  const res = writeSpoolEntry(
+    spool,
+    { ...snapshot("sess-stray"), turns: [{ role: "user", content: "z".repeat(3032) }] },
+    bounds,
+  );
+
+  assert.equal(res.written, false);
+  assert.equal(res.discards.at(-1)?.reason, DISCARD_ENTRY_TOO_LARGE);
+  const detail = res.discards.at(-1)?.detail ?? "";
+  assert.ok(detail.includes("ABSENT"), `the record must name what is actually on disk: ${detail}`);
+  assert.equal(
+    detail.includes("meta cannot be read"),
+    false,
+    `there is no meta to read: ${detail}`,
+  );
 });

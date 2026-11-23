@@ -2807,7 +2807,7 @@ requires-dist = [
     { name = "scikit-learn", marker = "extra == 'embeddings'", specifier = ">=1.0" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=3,<6" },
-    { name = "sentry-sdk", specifier = ">=2.0" },
+    { name = "sentry-sdk", specifier = ">=2.0,<3" },
     { name = "tiktoken", marker = "extra == 'test'", specifier = ">=0.14.0" },
     { name = "uvicorn", specifier = ">=0.23.0" },
 ]
