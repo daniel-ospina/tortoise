@@ -1465,12 +1465,21 @@ def _output_structure(text: str) -> dict:
                 # ⛔ ADDITIVE, not a mean. `item_chars` was a per-call mean, and
                 # `_merge_sections` added it across a stage's calls — so the
                 # published JSON carried the SUM OF TWO MEANS as if it were a
-                # mean. A character total folds correctly and the mean is
-                # derived once, at publish time, where the denominator is known.
+                # mean. `chars_sum` and `items` are the two additive halves and
+                # both are published, so the mean is `chars_sum / items` at any
+                # moment without storing a derived third key that could drift
+                # from them (review cycle 6, P2: the previous wording promised
+                # a mean "derived at publish time" that nothing derived).
                 "chars_sum": sum(len(json.dumps(i)) for i in items),
                 "tokens": payload_tokens,
-                "kinds": dict(sorted(kinds.items(),
-                                     key=lambda kv: -kv[1])[:12]),
+                # ⛔ NOT truncated here. A per-call `[:12]` cap is invisible on
+                # one call and LOSSY on two: 13 kinds in one call plus 5 more in
+                # another published `distinct_kinds = 12` for a true union of
+                # 18 — fewer kinds than either call knew (measured, review
+                # cycle 6). Truncation belongs where a human reads the map, and
+                # nothing renders `kinds`, so the full histogram is kept and a
+                # merge is exact.
+                "kinds": dict(sorted(kinds.items(), key=lambda kv: -kv[1])),
                 "distinct_kinds": len(kinds),
             }
         elif isinstance(value, dict):
@@ -1727,7 +1736,14 @@ def _merge_sections(a: dict, b: dict) -> dict:
     previous revision did (review cycle 5, P3): `distinct_kinds` is a per-CALL
     count of a call-local histogram, so it is read off the UNION of the kind
     maps, and the per-item character figure is accumulated as `chars_sum`
-    (additive) with the mean derived at publish time.
+    (additive) with its denominator `items` alongside — `chars_sum / items` is
+    the mean, and no derived mean is stored to disagree with them.
+
+    The union is taken over the FULL histograms: truncating the merged map here
+    would make `distinct_kinds` report the display cap, not the count (measured:
+    13 kinds + 5 more published 12 for a union of 18 — FEWER than either call
+    knew). `_output_structure` therefore publishes the untruncated histogram
+    too, and nothing renders `kinds`.
     """
     merged = {k: dict(v) for k, v in a.items()}
     for section, val in b.items():
@@ -1738,7 +1754,7 @@ def _merge_sections(a: dict, b: dict) -> dict:
                 for kind, count in value.items():
                     kinds[kind] = kinds.get(kind, 0) + count
                 cur["kinds"] = dict(sorted(
-                    kinds.items(), key=lambda kv: -kv[1])[:12])
+                    kinds.items(), key=lambda kv: -kv[1]))
             elif isinstance(value, (int, float)) and isinstance(
                     cur.get(key), (int, float)):
                 cur[key] = cur[key] + value
@@ -1748,7 +1764,8 @@ def _merge_sections(a: dict, b: dict) -> dict:
             cur["distinct_kinds"] = len(cur["kinds"])
         # (no `item_chars` here: nothing renders it, and a derived key with no
         # reader is the dead field review cycle 5 caught as `contract_tokens`.
-        # `chars_sum / items` is the mean, both halves published.)
+        # `chars_sum` and `items` are both published, so the mean is theirs to
+        # divide — it is not stored, and cannot drift from them.)
     return merged
 
 
@@ -1761,7 +1778,14 @@ def render_compose(report: dict) -> str:
     # table is structurally identical to a measured one, and a bundle whose
     # whole purpose is that a stub must never read as a measurement would print
     # exactly that (review cycle 5, P3).
-    if not report.get("live", True):
+    # ⛔ FAIL-CLOSED: `report.get("live") is not True` — NOT `.get("live", True)`.
+    # A report that does not carry the key is a report whose provenance is
+    # unknown, and unknown must render as a stub, never as a measurement: the
+    # fail-open direction prints no marker and is byte-shape identical to a
+    # measured run, which is the false pass this whole block exists to prevent
+    # (review cycle 6, P2). `compose_report` already takes the fail-closed view
+    # (`all(a.get("live", False))`), so the two halves agree.
+    if report.get("live") is not True:
         lines.append(
             "⚠️ **OFFLINE / STUB TRANSPORT — NOT A MEASUREMENT.** The region map "
             "and the emission shapes below are real render output, but every "

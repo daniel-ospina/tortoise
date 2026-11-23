@@ -858,6 +858,16 @@ def test_the_documented_reproduce_command_regenerates_the_committed_bundle(
     monkeypatch.delenv("TORTOISE_EXTRACTOR_PROMPT", raising=False)
     monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
     monkeypatch.delenv("TORTOISE_REFERENTIALITY", raising=False)
+    # ⛔ The FIFTH is a PATH knob, not a posture flag, which is why the four
+    # above named only flags. `TORTOISE_PACKS_DIR` pointing at a valid
+    # alternative pack tree renders a different `master_list` (3,187 → 2,601)
+    # and `memory_granularity` (923 → 845), so a shell carrying it reds this pin
+    # with the same false-red "the artifact rotted" message the other four were
+    # pinned for (measured, review cycle 6: the set was instrumented and this
+    # was the one name of the nine it consults that still reached the pin).
+    # `packs/` must resolve from the in-tree tree — `tortoise/domain_loader.py`
+    # is where the env leg is read.
+    monkeypatch.delenv("TORTOISE_PACKS_DIR", raising=False)
     bundle = _REPO_ROOT / "docs" / "evidence" / "14343-amplify"
     committed = json.loads((bundle / "decomposition.json").read_text())
     regenerated = m.decompose(
@@ -1010,11 +1020,16 @@ def test_the_fitted_constant_is_derived_from_the_arm_not_hardcoded():
 def test_a_retried_stage_keeps_its_region_map(monkeypatch):
     """A stage RENDERS ONCE and may CALL TWICE — the retry must still be paired.
 
-    ⛔ `render_s2_prompt` / `render_s4_prompt` are called ONCE per stage
-    (`tortoise/extractor_v2.py:2662`, `:4132`) and their result is passed to
-    `_complete_parsed`, which re-sends the IDENTICAL `system` on the #2134
-    truncation escalation and on the #1746 parse re-prompt
-    (`tortoise/extractor_v2.py:2356`, `:2436`). A pairing that CONSUMES the
+    ⛔ `render_s2_prompt` / `render_s4_prompt` are called ONCE per stage, in
+    `run_s2` / `run_s4`, and the rendered system prompt is what they hand to
+    `_complete_parsed` — which re-sends the IDENTICAL `system` on the #2134
+    truncation escalation (the `#2134 one-shot escalation` banner in
+    `_complete_parsed`) and on the #1746 parse re-prompt
+    (`_error_informed_reprompt`). Cited by NAME, never by line: three of the
+    four line numbers this docstring used to carry had rotted onto
+    `from tortoise.config import is_db_uri`, a gap-fill comment, and a
+    `raise _ParseError(`, none of which a reader could check the claim against
+    (measured, review cycle 6). A pairing that CONSUMES the
     render therefore leaves the retry unmatched: `match` stays None,
     `regions == {}`, and `render_compose` prints that whole prompt as one
     `*template prose*` row — the table still sums, so nothing looks wrong.
@@ -1089,3 +1104,85 @@ def test_the_user_message_is_charged_as_its_own_region():
         f"S1's user message is the document and must dominate its prose "
         f"residual; got user_message={s1['regions']['user_message']} "
         f"vs prose={prose} — a missing user region hides the document here")
+
+
+# ── the stub marker, and the fold's arithmetic ──────────────────────────────
+# `7b2945619a1e` shipped four behaviour changes — `live` propagated into the
+# report, the OFFLINE banner, `chars_sum` folding instead of `item_chars`, and
+# the `distinct_kinds` union — with NO assertion on any of them: reverting all
+# four left the tree green (measured, review cycle 6). A bundle whose argument is
+# that a stub must never read as a measurement cannot pin that with prose.
+
+def _compose_artifact(*, live: bool, calls: list[dict]) -> dict:
+    """The minimal artifact `compose_report` folds (its own shape, no provider)."""
+    return {"doc": {"path": "synthetic", "item_tokens": 12, "tokens": 12},
+            "live": live, "calls": calls}
+
+
+def _call(*, sections: dict, regions: dict | None = None) -> dict:
+    return {"stage": "s2", "system_tokens": 3, "user_tokens": 4,
+            "completion_tokens": 5, "regions": regions or {"master_list": 3},
+            "output": {"tokens": 5, "sections": sections}}
+
+
+def test_a_stub_run_renders_the_marker_and_a_live_run_does_not():
+    """The one property the bundle exists to carry: a stub must SAY it is one.
+
+    Both arms, because an assertion on the stub arm alone would pass for a
+    renderer that always prints the banner — which would devalue every measured
+    table in the same file.
+    """
+    stub = m.compose_report([_compose_artifact(live=False, calls=[_call(sections={})])])
+    live = m.compose_report([_compose_artifact(live=True, calls=[_call(sections={})])])
+    assert stub["live"] is False, "a stub artifact must report live=False"
+    assert live["live"] is True, "a measured artifact must report live=True"
+    assert "NOT A MEASUREMENT" in m.render_compose(stub), (
+        "an --offline run rendered WITHOUT the stub marker — the table is then "
+        "byte-shape identical to a measured one, which is the false pass the "
+        "bundle exists to prevent")
+    assert "NOT A MEASUREMENT" not in m.render_compose(live), (
+        "a MEASURED run must not carry the stub marker")
+
+
+def test_a_report_without_a_live_key_renders_as_a_stub():
+    """⛔ FAIL-CLOSED on unknown provenance.
+
+    `report.get("live", True)` rendered a report that does not carry the key
+    with NO marker — the fail-open direction, where unknown provenance reads as
+    a measurement. Latent only because today's one caller always supplies it.
+    """
+    report = m.compose_report([_compose_artifact(live=False, calls=[_call(sections={})])])
+    del report["live"]
+    assert "NOT A MEASUREMENT" in m.render_compose(report), (
+        "a report with NO `live` key rendered without the stub marker — "
+        "unknown provenance must never read as a measurement")
+
+
+def test_merged_sections_add_the_halves_and_union_the_full_kind_histogram():
+    """Two calls fold additively, and `distinct_kinds` is the UNION's size.
+
+    `chars_sum`/`items` are the two additive halves of a per-item mean; the
+    previous revision folded a per-call `item_chars` MEAN and published the sum
+    of two means. And `distinct_kinds` was read off the top-12 display slice, so
+    13 kinds in one call plus 5 more in another published **12** — fewer kinds
+    than EITHER call knew. Both mutations leave the rest of the suite green.
+    """
+    first = _call(sections={"points": {
+        "items": 2, "chars_sum": 100, "tokens": 7,
+        "kinds": {f"k{i}": 1 for i in range(13)}, "distinct_kinds": 13}})
+    second = _call(sections={"points": {
+        "items": 1, "chars_sum": 50, "tokens": 3,
+        "kinds": {f"k{i}": 1 for i in range(13, 18)}, "distinct_kinds": 5}})
+    report = m.compose_report([_compose_artifact(live=True, calls=[first, second])])
+    points = report["rows"][0]["stages"]["s2"]["output"]["sections"]["points"]
+    assert (points["chars_sum"], points["items"]) == (150, 3), (
+        f"chars_sum/items must fold additively, got "
+        f"chars_sum={points['chars_sum']} items={points['items']}")
+    assert len(points["kinds"]) == 18, (
+        f"the merged histogram must carry the full union, got "
+        f"{len(points['kinds'])} kinds — a 12-cap hides kinds a call knew")
+    assert points["distinct_kinds"] == 18, (
+        f"distinct_kinds must be the union's size (18), got "
+        f"{points['distinct_kinds']} — read off the display slice it reports 12")
+    assert points["distinct_kinds"] == len(points["kinds"]), (
+        "the published count and the published histogram must agree")
