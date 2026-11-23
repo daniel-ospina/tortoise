@@ -1487,6 +1487,13 @@ def _is_dunder_dict_key(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
 # static enumeration of "how could this mapping be written" does not terminate, which 26
 # review rounds on this axis have now demonstrated.
 #
+# ⛔ AND A CALLEE OBTAINED BY A NON-ENUMERATED ROUTE (#14326 round 28 P3, MEASURED GREEN:
+# `_g = builtins.__dict__["getattr"]`, `_g = __builtins__["getattr"]`, a lambda, and
+# `operator.attrgetter("modules")` all reach `getattr(sys, "modules")`). The bound
+# `getattr(sys, "modules")` read still identifies its callee by an enumerated NAME, so any
+# route outside that set escapes. This is the same unbounded class as (a) and (b) — the list
+# of ways to name a callable does not terminate either.
+#
 # ⛔ AND THE SAME FOR `sys` OBTAINED BY A CALL: `importlib.import_module("sys").modules[…]`
 # and `__import__("sys").modules[…]` are GREEN. Contrived (a harness author spells
 # `sys.modules`), and the same argument applies — enumerating the ways to NAME `sys` does not
@@ -2900,12 +2907,18 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
         # restricted to `sys`/`modules` so no other import can be mistaken for the registry.
         elif isinstance(node, ast.ImportFrom) and node.module == "sys":
             for alias in node.names:
-                if alias.name != "modules":
+                # ⛔ `__dict__` IS BOUND THE SAME WAY (#14326 round 28 P2, MEASURED GREEN:
+                # `from sys import __dict__ as _d; _d["modules"] = {…}` and
+                # `_d |= {"modules": …}` both replaced the registry while the ASSIGNMENT bind
+                # `_d = sys.__dict__` was RED). `from sys import __dict__` binds the LIVE dict
+                # (`_d is sys.__dict__`), so it is the same one-clause rule the `modules`
+                # import already carried, not a new axis.
+                if alias.name not in {"modules", "__dict__"}:
                     continue
                 binds.append((
                     ast.Name(id=alias.asname or alias.name, ctx=ast.Store()),
                     ast.Attribute(value=ast.Name(id="sys", ctx=ast.Load()),
-                                  attr="modules", ctx=ast.Load())))
+                                  attr=alias.name, ctx=ast.Load())))
             continue
         else:
             continue
@@ -7716,13 +7729,22 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             # is `"modules"`, which is neither the class key nor the module key, so the
             # receiver-keyed vocabulary below could not see it — the third vocabulary is a
             # WHOLE-REGISTRY REPLACEMENT, and it only exists on `sys`'s own mapping.
-            # ⛔ ONLY THE NAME FORM (#14326 round 27): `_d = sys.__dict__; _d |= {…}` calls
-            # `dict.__ior__` and replaces the key IN PLACE, whereas the DIRECT
-            # `sys.__dict__ |= {…}` is an attribute augmented assignment that raises
-            # `AttributeError: readonly attribute` — it cannot be a lever, and red-ing it
-            # would be a false red on code that cannot run.
-            if ("modules" in keys and isinstance(target, ast.Name)
-                    and target.id in sys_dict_names):
+            # ⛔ AND THE DIRECT FORM IS A LEVER TOO — MY ROUND-27 CLAIM WAS FALSE (#14326
+            # round 28 P1, MEASURED). Round 27 left `sys.__dict__ |= {…}` GREEN on the theory
+            # that it "raises `AttributeError: readonly attribute` and cannot be a lever". It
+            # raises — AFTER `dict.__ior__` has already mutated the dict in place:
+            #
+            #     sys.__dict__ |= {"modules": {…}}   ->  AttributeError: readonly attribute
+            #     "modules" in sys.__dict__          ->  True
+            #
+            # so the one-line `try/except AttributeError: pass` (or `contextlib.suppress`)
+            # keeps the mutation and drops the error, and `run()`'s deferred import constructs
+            # the mirror. Both were MEASURED GREEN end-to-end. The over-red now lands on code
+            # that CANNOT COMPLETE SUCCESSFULLY anyway, so it is the safe direction, and the
+            # false-red control that pinned the GREEN is replaced by a fail-open row.
+            if ("modules" in keys
+                    and ((isinstance(target, ast.Name) and target.id in sys_dict_names)
+                         or _is_sys_dict_mapping(target, ctx))):
                 out.append(
                     f"line {node.lineno} REPLACES `modules` on `{ast.unparse(target)}` — "
                     "`|=` here stores the key `modules` on `sys`'s own namespace, so "
@@ -8462,6 +8484,15 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "`from builtins import getattr as _g`":
             'from builtins import getattr as _g\n'
             '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
+        # ⛔ AND THE MODULE ALIAS BY ASSIGNMENT, which is what the `builtins_names` fixpoint is
+        # for (#14326 round 28 P3, MEASURED: reverting the fixpoint to the import aliases alone
+        # left `41 passed` — these two rows are what red it).
+        "`_bm = builtins` then `_bm.getattr`":
+            '_bm = builtins\n_g = _bm.getattr\n'
+            '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`_bb = _b` CHAIN then `_bb.getattr`":
+            'import builtins as _b\n_bb = _b\n_g = _bb.getattr\n'
+            '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
         "`import builtins as _b` then `_b.getattr`":
             'import builtins as _b\n_g = _b.getattr\n'
             '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
@@ -8639,6 +8670,22 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         # GREEN at `2b17619cd9` while `_d["modules"] = {…}` and `_d["modules"] |= {…}` were
         # both RED). The key is `"modules"` — neither the class key nor the module key — so the
         # receiver-keyed vocabulary below could not see it.
+        # ⛔ AND THE DIRECT FORM, WHOSE ROUND-27 EXEMPTION WAS FALSE (#14326 round 28 P1):
+        # `dict.__ior__` mutates `sys.__dict__` in place and only the trailing `STORE_ATTR`
+        # raises, so `try/except AttributeError: pass` — or `contextlib.suppress` — keeps the
+        # mutation. Both were measured installing the mirror end-to-end.
+        "`sys.__dict__ |= {\"modules\": {…}}` (swallowed AttributeError)":
+            'try:\n    sys.__dict__ |= {"modules": {"tortoise.sdk": _Mirror}}\n'
+            'except AttributeError:\n    pass\n',
+        # ⛔ `from sys import __dict__` BINDS THE LIVE MAPPING (#14326 round 28 P2, MEASURED
+        # GREEN while the `_d = sys.__dict__` ASSIGNMENT bind was RED — the same one-clause
+        # rule the `from sys import modules as _m` row already carried).
+        "`from sys import __dict__ as _d` then SUBSCRIPT store":
+            'from sys import __dict__ as _d\n'
+            '_d["modules"] = {"tortoise.sdk": _Mirror}\n',
+        "`from sys import __dict__ as _d` then `|=`":
+            'from sys import __dict__ as _d\n'
+            '_d |= {"modules": {"tortoise.sdk": _Mirror}}\n',
         "`_d = sys.__dict__` then `_d |= {\"modules\": {…}}`":
             '_d = sys.__dict__\n'
             '_d |= {"modules": {"tortoise.sdk": _Mirror}}\n',
@@ -8712,14 +8759,14 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   # what pins the read arm's `_is_modules_key(node.args[1])` clause (#14326
                   # round 26, MEASURED: dropping that clause left the file at `41 passed`).
                   # ⛔ AND THE ALIAS CONTROLS FOR ROUND 27: an aliased module that is NOT
-                  # `builtins`, an unrelated `__dict__` ending in `|=`, and the DIRECT
-                  # `sys.__dict__ |= {…}` — which cannot be a lever at all (it raises
-                  # `AttributeError: readonly attribute`), so red-ing it would be a false red
-                  # on code that cannot run.
+                  # `builtins`, and an unrelated `__dict__` ending in `|=`.
+                  # ⛔ THE DIRECT `sys.__dict__ |= {…}` IS NOT HERE ANY MORE — round 27 put it
+                  # in this list on a FALSE premise (round 28 P1: `dict.__ior__` mutates
+                  # before the `STORE_ATTR` raises, so a swallowed error keeps the mutation).
+                  # It is a fail-open row now.
                   'from mypkg import getattr as _g\n_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
                   '_d = other.__dict__\n'
                   '_d |= {"modules": {"tortoise.sdk": _Mirror}}\n',
-                  'sys.__dict__ |= {"modules": {"tortoise.sdk": _Mirror}}\n',
                   'dict.get(sys.__dict__, "os")["tortoise.sdk"] = _Mirror\n',
                   'sys.__dict__.get("path")["tortoise.sdk"] = _Mirror\n',
                   # ⛔ AND THE ALIAS/COMPOSITION CONTROLS FOR ROUND 22, for the same reason: an
