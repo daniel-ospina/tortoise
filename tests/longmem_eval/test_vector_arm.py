@@ -1353,37 +1353,51 @@ def test_model_id_wrapper_path_stable_no_address(monkeypatch):
     detail, so the joined literal is exact-pinnable), plus tuned wrappers
     (max_tokens, temperature) proving the member tuning suffix rides the
     wrapper composition. Constructing adapters is offline
-    (requests.Session only)."""
+    (requests.Session only).
+
+    #14357: every non-deepseek-direct member now carries
+    ``|disable_reasoning=True`` — the flash family's thinking suppression is
+    a real serving-config difference, so it rides the member fingerprint. The
+    literals below are the fix made OBSERVABLE in the eval's own records: a
+    run captured before #14357 fingerprints without the suffix and therefore
+    refuses to resume against this config (it was thinking-ON on that lane).
+    """
     shapes = [
         dict(keys=(), max_tokens=None, temperature=0.0,
              cls=RoutingModel,
-             expected="deepseek/deepseek-v4-flash"),
+             expected="deepseek/deepseek-v4-flash|disable_reasoning=True"),
         dict(keys=("deepseek", "openrouter"), max_tokens=None,
              temperature=0.0, cls=RoutingModel,
              expected=("routing:deepseek-direct:deepseek-v4-flash"
-                       "+openrouter:deepseek/deepseek-v4-flash")),
+                       "+openrouter:deepseek/deepseek-v4-flash"
+                       "|disable_reasoning=True")),
         dict(provider="openrouter", keys=("deepseek", "openrouter"),
              max_tokens=None, temperature=0.0, cls=RoutingModel,
              # non-alphabetical primary: a sorted-join regression would flip
              # the members (deepseek-direct < openrouter), changing this
              # literal — order IS effective config for RoutingModel
              expected=("routing:openrouter:deepseek/deepseek-v4-flash"
+                       "|disable_reasoning=True"
                        "+deepseek-direct:deepseek-v4-flash")),
         dict(keys=("deepseek", "openrouter", "venice"), max_tokens=None,
              temperature=0.0, cls=RotatingModel,
              expected=("rotating:deepseek-direct:deepseek-v4-flash"
                        "+openrouter:deepseek/deepseek-v4-flash"
-                       "+venice:deepseek-v4-flash")),
+                       "|disable_reasoning=True"
+                       "+venice:deepseek-v4-flash"
+                       "|disable_reasoning=True")),
         # tuning rides the wrapper composition too (member suffixes) — a
         # tuned run-level build (any non-default max_tokens/temperature)
         # must fingerprint differently from the uncapped one (the ingest_v2
         # session-worker factory forwards the resolved max_tokens/
         # temperature; the unset path is UNCAPPED — see _build_cli_extractor_model)
         dict(keys=(), max_tokens=500, temperature=0.0, cls=RoutingModel,
-             expected="deepseek/deepseek-v4-flash|max_tokens=500"),
+             expected=("deepseek/deepseek-v4-flash|max_tokens=500"
+                       "|disable_reasoning=True")),
         dict(keys=(), max_tokens=500, temperature=0.5, cls=RoutingModel,
              expected=("deepseek/deepseek-v4-flash"
-                       "|max_tokens=500|temperature=0.5")),
+                       "|max_tokens=500|temperature=0.5"
+                       "|disable_reasoning=True")),
     ]
     for shape in shapes:
         _pin_extractor_env(monkeypatch, keys=shape["keys"],
@@ -1435,7 +1449,15 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
         # session_workers=1 + unset → uncapped router wrapper (1-lane bare)
         adapters.append(runner._build_cli_extractor_model(
             spec=None, session_workers=1))
-        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
+        # #14357: the flash family is fingerprinted WITH its thinking
+        # suppression. `_build_single` now sets `disable_reasoning=True` on
+        # the openrouter/venice members, so `_adapter_fingerprint` (which rides
+        # every non-default tuning knob) appends it — the fingerprint states the
+        # config the CLI actually SERVES. Consequence, intended: a checkpoint
+        # captured before #14357 refuses to resume against this config
+        # (CheckpointStaleError) — those runs were thinking-ON on this lane.
+        _FLASH_FP = "deepseek/deepseek-v4-flash|disable_reasoning=True"
+        assert runner._model_id(adapters[-1]) == _FLASH_FP
         # session_workers>1 + spec: expressible tuning is served THROUGH the
         # factory — identical fingerprint to session_workers=1 (the same
         # effective config, so a sw toggle resumes cleanly)
@@ -1449,7 +1471,7 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
         # fingerprint (an unset sw toggle keeps the same effective config)
         adapters.append(runner._build_cli_extractor_model(
             spec=None, session_workers=4))
-        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
+        assert runner._model_id(adapters[-1]) == _FLASH_FP
         assert runner._model_id(adapters[-1]) == runner._model_id(adapters[1])
         # session_workers>1 + direct spec: the RESOLVED wire id is used — the
         # registry key is never a valid wire id; the _REGISTRY_KEY_TO_ID remap
@@ -1461,7 +1483,11 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
         # fingerprints legitimately DIFFER — a toggle is REFUSED (safe).
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=4))
-        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
+        # #14357: the RESOLVED route carries the suppression too — this is the
+        # same production router as session_workers=1, only on the resolved
+        # wire id, so the sw>1 path suppresses identically (the pre-#14357
+        # divergence between the two paths is gone).
+        assert runner._model_id(adapters[-1]) == _FLASH_FP
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=1))
         assert runner._model_id(adapters[-1]) == "deepseek-v4-flash"
