@@ -7517,6 +7517,13 @@ def test_the_ASYNC_for_arms_that_CARRY_the_class_are_pinned_and_the_redundant_on
         `_per_query_element_mutations`: deriv. 41 passed  redundant (re-measured below)
         `_rebound_after`                       41 passed  redundant (re-measured below)
 
+    ⛔ RE-CENSUSED AT `4473c96648ca`, the peer commit that lands ON TOP of this row: still TEN,
+    the same ten arms, every verdict below unchanged. That commit rebuilt
+    `_rebound_callee_names` (+56 lines of registry mutator/receiver spellings), so the census
+    and all ten mutants were re-run rather than assumed — the arm that grew is still
+    `41 passed`, i.e. still redundant. Only the line numbers moved (again), which is why the
+    arms are named by symbol and none is cited by `:NNNN`.
+
     ⛔ THIS HEADER SAID "EIGHT code arms" AND "the four that are not" AND WAS FALSE (#14326
     round 19 P2). The census behind it missed `_rebound_callee_names` and `_rebound_after`, so
     the sole completeness claim in the one row whose purpose is "so the next round does not
