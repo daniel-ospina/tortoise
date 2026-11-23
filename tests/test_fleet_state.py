@@ -5385,6 +5385,34 @@ def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
         proc.wait(timeout=10)
 
 
+def _grade_row_arm_expiry(message: str, *, row_reads: int) -> None:
+    """Grade a skip that escaped the `WNOWAIT` body's driver — and only the row arm's (#14394 B1).
+
+    `pytest.raises(pytest.skip.Exception)` catches EVERY skip the driven body raises, not only the
+    `row is None` arm this pin is about. That body has a SECOND #5049 rule-1 exit above it: on a
+    loaded box the `python -c pass` child has not exited within the 10 s poll and the body takes its
+    own `inconclusive` exit — the arm this file converted from a FAIL to a skip in cycle 5 precisely
+    because it redded a REQUIRED shard. Grading that skip on its wording turned machine load into a
+    required-shard FAIL whose diagnosis blamed the row read for a child that never exited — the
+    same inversion, one level up (measured at `9a3802925d`: the child arm's skip redded `:5418`).
+
+    So the arm is identified STRUCTURALLY, by whether the body got as far as reading the row — not
+    by prose. A skip that escaped before the read came from a different arm: it is re-raised as a
+    skip, so the reader skips (evidence about the machine) and never fails. A skip raised AFTER the
+    read is the arm under test, and it must carry the family prefix and the "never READ" diagnosis.
+    """
+    if not row_reads:
+        pytest.skip(message)
+    assert INCONCLUSIVE_PREFIX in message, (
+        "a row that could not be READ is a #5049 rule-1 expiry, so it must exit through "
+        "`inconclusive` and carry the declared family prefix; without this arm `assert row` "
+        "reports 'its status was COLLECTED rather than observed' about a read that never "
+        f"happened. The exit was: {message}")
+    assert "never READ" in message, (
+        "the skip must say the row was not READ — the diagnosis the ambiguous `\"\"` used to give "
+        f"asserted the opposite of the fact. The exit was: {message}")
+
+
 def test_child_exited_skips_when_the_row_could_not_be_read(monkeypatch) -> None:
     """The `None` arm at the `WNOWAIT` test's assertion site (#14394 Issue 1) — pinned, not implied.
 
@@ -5400,39 +5428,87 @@ def test_child_exited_skips_when_the_row_could_not_be_read(monkeypatch) -> None:
     under no load. The real child is still spawned (the body does that itself); everything that
     decides WHICH arm it reaches is stubbed, which is what makes the site reachable.
 
-    ⛔ THE CHILD-EXIT ARM MUST BE STUBBED TOO, AND THAT IS THIS TEST'S OWN RULE-1 GUARD (#14394
-    cycle 16, B1). The body has a SECOND legitimate skip exit above this one — the 10 s wall-clock
-    loop that `inconclusive()`s with "a short-lived child's exit observed by `_child_exited` …".
-    That message carries `INCONCLUSIVE_PREFIX` but never the word `READ`, so on a box where a
-    `python -c pass` child has not exited within 10 s (measured: it HAS happened, which is why that
-    arm exists at all) the run reached the arm below and the assertion at the end redded a REQUIRED
-    shard with "the skip must say the row was not READ" — a load-caused FAIL manufactured by this
-    test, the exact #5049 rule-1 inversion it exists to pin. Answering the child-exit question
-    removes that arm from the path instead of tolerating it: with it stubbed, the ONLY reachable
-    skip is the graded one, so the assertions below can stay strict. ⛔ If an arm is ever added
-    ABOVE the graded one, discriminate the arms here (re-raise a skip that is not this one) rather
-    than loosening the text assertion — a foreign rule-1 skip must never be graded as a FAIL.
+    ⛔ THE CHILD-EXIT ARM IS STUBBED, AND THAT IS HALF THIS TEST'S OWN RULE-1 GUARD (#14394
+    cycle 16, B1, review 2026-11-23). The body has a SECOND legitimate skip exit above this one —
+    the 10 s wall-clock loop that `inconclusive()`s with "a short-lived child's exit observed by
+    `_child_exited` …". That message carries `INCONCLUSIVE_PREFIX` but never the word `READ`, so on
+    a box where a `python -c pass` child has not exited within 10 s (measured: it HAS happened,
+    which is why that arm exists at all) the run reached the graded skip below and the assertion at
+    the end redded a REQUIRED shard with "the skip must say the row was not READ" — a load-caused
+    FAIL manufactured by this test, the exact #5049 rule-1 inversion it exists to pin. (Measured at
+    `9a3802925d`: forcing that arm reds the `never READ` assertion.) Answering the child-exit
+    question removes that arm from the path instead of tolerating it.
+
+    ⛔ AND THE OTHER HALF IS THE GRADER, so the same hazard cannot return with the next arm added
+    above this one: `_grade_row_arm_expiry` below identifies the arm STRUCTURALLY — by whether the
+    body got as far as reading the row — and re-raises a skip that came from anywhere else instead
+    of grading it. A foreign rule-1 skip is then a skip (evidence about the machine), never a FAIL
+    and never a pass, while the row arm's own skip stays graded on the family prefix and the
+    "never READ" diagnosis. Loosening those text assertions is not the alternative: discriminate.
     """
     import shutil
 
     module = sys.modules[__name__]
+    #: Did the driven body get as far as READING the row? Nothing before
+    #: `row = _row_for_pid(proc.pid)` can set this (the capability gate above it short-circuits on
+    #: the stubbed `_ps_answers`), so a skip that escapes with this empty came from a DIFFERENT arm.
+    row_reads: list[int] = []
+
+    def _unreadable(pid: int) -> None:
+        row_reads.append(pid)
+
     with monkeypatch.context() as patch:
         # The gate must not pre-empt the body: `_ps_answers()` is the control's own budget, and the
         # whole point of this arm is the window where the control ANSWERS and the witness does not.
         patch.setattr(module, "_ps_answers", lambda: True)
         patch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+        patch.setattr(module, "_row_for_pid", _unreadable)
         # "the child exited", so the loop does not spin for its 10 s and the load-dependent arm
         # above cannot pre-empt the graded one (see this test's docstring). Deterministic, and it
         # is what the exit below means anyway: a child that exited and left no readable row.
         patch.setattr(module, "_child_exited", lambda proc: True)
-        patch.setattr(module, "_row_for_pid", lambda pid: None)
         with pytest.raises(pytest.skip.Exception) as expiry:
             test_child_exited_reads_the_status_without_reaping_the_row()
-    assert INCONCLUSIVE_PREFIX in str(expiry.value), (
-        "a row that could not be READ is a #5049 rule-1 expiry, so it must exit through "
-        "`inconclusive` and carry the declared family prefix; without this arm `assert row` "
-        "reports 'its status was COLLECTED rather than observed' about a read that never "
-        f"happened. The exit was: {expiry.value}")
-    assert "never READ" in str(expiry.value), (
-        "the skip must say the row was not READ — the diagnosis the ambiguous `\"\"` used to give "
-        f"asserted the opposite of the fact. The exit was: {expiry.value}")
+    _grade_row_arm_expiry(str(expiry.value), row_reads=len(row_reads))
+
+
+def test_foreign_rule_one_expiry_is_never_graded_as_a_fail() -> None:
+    """A #5049 rule-1 skip from ANOTHER arm of the `WNOWAIT` body must stay a skip (#14394 B1).
+
+    `test_child_exited_skips_when_the_row_could_not_be_read` grades whatever skip escaped
+    `test_child_exited_reads_the_status_without_reaping_the_row`, and that body can exit through
+    MORE than the arm under test: on a loaded box the `python -c pass` child has not exited within
+    the 10 s poll and the body takes its own `inconclusive` exit — the arm this file converted from
+    a FAIL to a skip in cycle 5 precisely because it redded a REQUIRED shard. `pytest.raises`
+    catches that skip as readily as the graded one, so a reader that asserts on the message alone
+    re-grades machine load as a FAIL, with a diagnosis blaming the row read for a child that never
+    exited.
+
+    Driven here for real on the grader the reader uses, and from the message the body actually
+    raises: `inconclusive` is called with the child arm's own `what` text, so the skip this test
+    hands `_grade_row_arm_expiry` is the one a loaded box produces. With no row read the grader
+    must SKIP with it (the pre-fix reader raised `AssertionError` on the same message — measured at
+    `9a3802925d`), and with the row read it must still FAIL, which is what keeps this from being a
+    blanket excuse for any skip.
+    """
+    with pytest.raises(pytest.skip.Exception) as from_child_arm:
+        inconclusive(
+            "a short-lived child's exit observed by `_child_exited` without reaping it",
+            deadline_s=10.0,
+            diagnosis="The child was still running when the budget expired.")
+    message = str(from_child_arm.value)
+    # The child arm fires BEFORE the row is read, so `row_reads=0` is where it lands. It is
+    # evidence about the machine: it must not be graded, so the grader skips with it.
+    with pytest.raises(pytest.skip.Exception):
+        _grade_row_arm_expiry(message, row_reads=0)
+    # …and the same message AFTER a row read is NOT excused: a row arm that stops naming the
+    # un-read row is a FAIL, which is the assertion this pairing exists to keep discriminating.
+    with pytest.raises(AssertionError):
+        _grade_row_arm_expiry(message, row_reads=1)
+    # …and neither is the other half of the contract: a ROW-arm skip that drops the declared
+    # `inconclusive` family ("the fix" replaced the rule-1 helper with a bare `pytest.skip`) is the
+    # mutant this keeps red — the diagnosis is right, the exit is not.
+    with pytest.raises(AssertionError):
+        _grade_row_arm_expiry(
+            "the exited child's `ps` row read within the witness budget — never READ it",
+            row_reads=1)
