@@ -3823,10 +3823,15 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: `11`: the peer's `blip` row joins the failure set (it jumps the simulated clock by the bound +
 #: 1 s). ⛔ It does NOT red through the `calls["n"] > burst_state["started_at"] + burst` assertion —
 #: at `K = 20` EVERY one of the 12 params, `blip` included, reds at the GLOBAL premise (b) above
-#: ("the death sample must arrive BEFORE the poll's deadline"), which runs BEFORE the poll at
-#: `:4835` (`assert (20 * 0.5) < 10.0`), so no arm-specific assertion is reached at all.
-#: Attributed after review, P3: an earlier cut of this note named that later assertion as the
-#: mechanism.
+#: ("the death sample must arrive BEFORE the poll's deadline"), which runs BEFORE the poll, so no
+#: arm-specific assertion is reached at all (measured with `--tb=line` at `K = 20`: `12 failed, 174
+#: passed`, every failure on the premise-(b) `assert _LONG_PATH_ERROR_SAMPLE_TIME_CALLS *
+#: death_step_s < _LONG_PATH_POLL_BUDGET_S`). ⚠️ That assert is cited by SYMBOL, not by line: an
+#: earlier cut of this note printed a line number, and it was false on the tree that shipped it
+#: (`4811` was the line two commits BEFORE the tree that printed it; a later cut printed `4835`,
+#: which was not the line on ANY tree — it was `4822` on the head that printed it). The assert's
+#: own edits move it, so the symbol is the durable address.
+#: Attributed after review: an earlier cut named that later assertion as the mechanism.
 _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 
 #: How many `time()` reads span the STREAK at the sample where the count+span conjunction fires
