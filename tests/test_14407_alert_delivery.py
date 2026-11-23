@@ -407,16 +407,17 @@ def test_a_failed_re_alarm_does_not_consume_the_reminder_window(monkeypatch):
     notify.reset_abuse_delivery_for_tests()
 
 
-def test_an_unrecognised_outcome_releases_the_window_instead_of_spending_it(
-        monkeypatch):
-    """A FOURTH ``OpenOutcome`` fact must not spend the delivery window.
+def test_an_unrecognised_outcome_still_reaches_the_human(monkeypatch):
+    """A FOURTH ``OpenOutcome`` fact must not become a MUTE (#14407 review P2).
 
     The decision chain names two facts by identity (``is DEDUP`` / ``is FILED``),
-    so a fact added to the enum later matches neither. The window is ALREADY ARMED
-    at that point: left that way, an outcome this path cannot interpret silently
-    consumes the whole window, and whatever produced it stays quiet for the rest of
-    it — the direction #4872 forbids. The window is released instead, so the next
-    recognised detection delivers.
+    so a fact added to the enum later matches neither. Releasing the window alone
+    does NOT close that hole: while the store keeps answering with the
+    unclassified fact, every detection takes the same arm and releases again, so
+    nothing is ever delivered — a total mute of a security class for as long as
+    the fact lasts, which is the direction #4872 forbids. The fall-through must be
+    the labelled delivery (the reviewer's prescription), bounded by the same
+    window, and it must say the state is UNKNOWN rather than assert an absence.
     """
     import tortoise.notify as notify
     from tortoise.alert_store import OpenOutcome
@@ -443,19 +444,76 @@ def test_an_unrecognised_outcome_releases_the_window_instead_of_spending_it(
     for _ in range(5):
         _flag(notify)
 
-    assert sent == [], (
-        "an outcome this path cannot interpret was delivered as though it were "
-        f"known ({sent})")
-    assert ("abuse_flag", "org-a:point_create") not in notify._delivery, (
-        "the unrecognised outcome SPENT the window — whatever produced it stays "
-        "silent for the rest of the window (#4872)")
-
-    # …and the release is what makes recovery deliver: a recognised DEDUP
-    # detection is not swallowed by the unknown outcome's window.
-    store.fact = OpenOutcome.DEDUP
-    _flag(notify)
+    # ONE message for the window, not five: the bound still applies.
     assert len(sent) == 1, sent
+    assert "not classify" in sent[0], sent[0]
+    # UNKNOWN, never asserted as absent or as filed.
+    assert "UNKNOWN" in sent[0], sent[0]
+    assert "no incident was filed" not in sent[0], sent[0]
+
+    # …and a recognised fact still delivers its own way afterwards.
+    store.fact = OpenOutcome.DEDUP
     notify.reset_abuse_delivery_for_tests()
+    _flag(notify)
+    assert len(sent) == 2, sent
+    assert "Still open" in sent[1], sent[1]
+    notify.reset_abuse_delivery_for_tests()
+
+
+def test_a_suppressed_outcome_stays_silent_and_releases_its_window(
+        monkeypatch):
+    """``SUPPRESSED`` is an OPERATOR decision, so it is the one silent fact.
+
+    Pinned alongside the arm above because the fix there must not sweep this one
+    up: ``ops/suppression.json`` pausing a kind is an explicit human choice, and
+    delivering anyway would override it. The window is released rather than spent
+    so that LIFTING the pause of a still-live condition pages at once.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    sent: list[str] = []
+
+    class _SuppressingStore:
+        def open_incident_state(self, *a, **kw):
+            return OpenOutcome.SUPPRESSED
+
+        def incident_record(self, *a, **kw):
+            return {}
+
+    monkeypatch.setattr(notify, "_abuse_alert_store",
+                        lambda: (_SuppressingStore(), ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+    _flag(notify)
+
+    assert sent == [], sent
+    assert ("abuse_flag", "org-a:point_create") not in notify._delivery, (
+        "a suppressed kind SPENT the window — lifting the pause would be silent "
+        "for the rest of it (#4872)")
+    notify.reset_abuse_delivery_for_tests()
+
+
+def test_the_incident_subject_strips_the_rule_it_concatenates():
+    """The emptiness check strips; the CONCATENATION must strip too (#14407 P3).
+
+    ``"point_create "`` passes ``rule.strip()`` truthiness, so an unstripped
+    concatenation spells ``{org}:point_create `` — a SECOND subject for one rule,
+    i.e. two create-once points, one condition, and a resolve that strands the
+    other (the #2844 alias class). ``_abuse_context`` already strips.
+    """
+    import tortoise.notify as notify
+
+    assert (notify._abuse_subject("org-a", "point_create ")
+            == notify._abuse_subject("org-a", "point_create")
+            == "org-a:point_create")
+    # Whitespace-only is still "no rule": the org alone (operator path).
+    assert notify._abuse_subject("org-a", "   ") == "org-a"
+    assert notify._abuse_subject("org-a", None) == "org-a"
 
 
 def test_a_retry_never_resolves_on_an_unreadable_window(monkeypatch):
@@ -889,8 +947,14 @@ def test_a_suppressed_outcome_does_not_spend_the_delivery_window(monkeypatch):
     The delivery window is armed BEFORE the outcome is classified, and
     `SUPPRESSED` sends nothing — so leaving the window armed means the first
     detection after the suppression is lifted is swallowed for the rest of the
-    window (up to 24h): the "#4872: never a mute" direction. The same arm covers a
-    future `OpenOutcome` member, which would otherwise be a total mute with no log.
+    window (up to 24h): the "#4872: never a mute" direction.
+
+    A future `OpenOutcome` member is a DIFFERENT case, asserted separately in part
+    3: treating it like `SUPPRESSED` would be a total mute — while the store keeps
+    answering with the unclassified fact, every detection takes the same arm and
+    nothing is ever delivered, which is the outcome the review's fall-through rule
+    exists to forbid. `SUPPRESSED` is silent because a HUMAN paused the kind; an
+    unknown fact carries no such decision, so it pages (bounded, labelled UNCERTAIN).
     """
     import tortoise.notify as notify
     from tortoise.alert_store import OpenOutcome
@@ -933,7 +997,10 @@ def test_a_suppressed_outcome_does_not_spend_the_delivery_window(monkeypatch):
                         {"rule": "point_create", "count": 900})
     assert len(sent) == 1, f"the first post-suppression detection was swallowed ({sent})"
 
-    # 3. a future outcome member that is neither DEDUP nor FILED behaves the same
+    # 3. a future outcome member that is neither DEDUP nor FILED is NOT a pause:
+    # it carries no human decision, so it must PAGE (bounded), labelled UNCERTAIN
+    # — silence here is the mute #4872 forbids, and releasing the window does not
+    # help because the next detection takes the same arm.
     notify.reset_abuse_delivery_for_tests()
     sent.clear()
 
@@ -941,10 +1008,14 @@ def test_a_suppressed_outcome_does_not_spend_the_delivery_window(monkeypatch):
     # store double that returns something unexpected, looks like here)
     monkeypatch.setattr(notify, "_abuse_alert_store",
                         lambda: (_Store("deferred-not-yet-classified"), ""))
-    notify.notify_abuse("abuse_flag", {"org_id": "org-a"},
-                        {"rule": "point_create", "count": 900})
-    assert sent == []
-    assert notify._delivery == {}, "an unclassified outcome must not spend the window"
+    for _ in range(3):
+        notify.notify_abuse("abuse_flag", {"org_id": "org-a"},
+                            {"rule": "point_create", "count": 900})
+    # ONE message for the window — bounded exactly like every other incident
+    # delivery — and it names the uncertainty instead of asserting an absence.
+    assert len(sent) == 1, sent
+    assert "not classify" in sent[0], sent[0]
+    assert "UNKNOWN" in sent[0], sent[0]
     notify.reset_abuse_delivery_for_tests()
 
 
