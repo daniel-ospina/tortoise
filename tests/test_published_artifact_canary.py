@@ -37,7 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # block takes its argv from here, so the flags cannot drift apart again. (A harness that
 # runs a SYNTHETIC script of its own, not a workflow block, is free to choose its own shell.)
 # ⛔ ONE STATED EXCEPTION (fresh-context review, P3):
-# `test_the_wheel_arity_guard_REFUSES_zero_and_two_wheels_by_RUNNING_it` (`:1990`) lifts a
+# `test_the_wheel_arity_guard_REFUSES_zero_and_two_wheels_by_RUNNING_it` (`:1995`) lifts a
 # workflow block VERBATIM and runs it as `bash -e <script-path>` — a PATH, not `-c` — so its
 # argv cannot come from this constant. It spells the runner's flags itself, and nothing reds
 # if they drift. Named here rather than left as an unstated hole in the sentence above.
@@ -2906,6 +2906,23 @@ def _strip_shell_comments(script: str) -> str:
     brace_quotes: list[str | None] = []  # one entry per open `${ … }`: its inner quote state
     cmd_arith = 0  # >0 while inside an unquoted `(( … ))` arithmetic COMMAND
     depr_arith = 0  # >0 while inside a deprecated `$[ … ]`; an integer count of the `[` depth
+    # ⛔ ONE QUOTE-STATE PER ARITHMETIC CONTEXT, and it is load-bearing (review cycle 21, P2,
+    # MEASURED). These three branches kept a BARE depth counter, so a `)`/`]` INSIDE A QUOTED
+    # SPAN inside the expansion decremented it, the context ended early, the `#` that followed
+    # was at word start, and everything after it was stripped as a comment while bash was still
+    # inside the expansion and expanding it:
+    #
+    #   $ bash -e -c '(( x = " ) ) # $(touch /tmp/F1) " ))'        → rc 1, F1 CREATED
+    #   $ bash -e -c 'echo $[ " ] # $(touch /tmp/F1) " ]'          → rc 1, F1 CREATED
+    #
+    # …`_executable_prose_lines` returned `[]` over an executing line in BOTH — the silent pass
+    # this pin calls worse than no pin, in the exact class the `${` branch closed in cycle 18
+    # with per-level quote state. The three are separate variables rather than one shared byte
+    # because the opener detection can nest a `$[` inside an open `$((`; the escape pair is
+    # consumed by the branch above, so an escaped closer cannot pop a level either.
+    arith_quote: list[str | None] = [None]  # `$(( … ))`'s inner quote state
+    cmd_arith_quote: list[str | None] = [None]  # `(( … ))`'s inner quote state
+    depr_arith_quote: list[str | None] = [None]  # `$[ … ]`'s inner quote state
     heredocs: list[tuple[str, bool]] = []  # (delimiter, terminator ignores leading tabs)
     i = 0
     while i < len(script):
@@ -3034,7 +3051,12 @@ def _strip_shell_comments(script: str) -> str:
             continue
         if depr_arith:
             out.append(ch)
-            if ch == "[":
+            if depr_arith_quote[0]:
+                if ch == depr_arith_quote[0]:
+                    depr_arith_quote[0] = None
+            elif ch in ("'", '"'):
+                depr_arith_quote[0] = ch
+            elif ch == "[":
                 depr_arith += 1
             elif ch == "]":
                 depr_arith -= 1
@@ -3050,7 +3072,12 @@ def _strip_shell_comments(script: str) -> str:
             continue
         if cmd_arith:
             out.append(ch)
-            if ch == "(":
+            if cmd_arith_quote[0]:
+                if ch == cmd_arith_quote[0]:
+                    cmd_arith_quote[0] = None
+            elif ch in ("'", '"'):
+                cmd_arith_quote[0] = ch
+            elif ch == "(":
                 cmd_arith += 1
             elif ch == ")":
                 cmd_arith -= 1
@@ -3078,7 +3105,12 @@ def _strip_shell_comments(script: str) -> str:
             continue
         if arith:
             out.append(ch)
-            if ch == "(":
+            if arith_quote[0]:
+                if ch == arith_quote[0]:
+                    arith_quote[0] = None
+            elif ch in ("'", '"'):
+                arith_quote[0] = ch
+            elif ch == "(":
                 arith += 1
             elif ch == ")":
                 arith -= 1
@@ -3253,16 +3285,29 @@ HIDDEN continues                       rc 0
         # same silent pass closed for `$(` and the backtick was still open through `<(` and
         # `>(` — a token this scan simply did not look for. It is flagged on the same footing
         # as the other two, because the obligation this detector serves is "this block
-        # executes no prose", not "this block uses these two spellings". `<<(` and `>>(` are
-        # excluded (a `<`/`>` directly before the operator means it is part of a redirection
-        # or a here-doc operator, not a process substitution), and a `<(` inside a quoted
+        # executes no prose", not "this block uses these two spellings". A `<(` inside a quoted
         # span is flagged anyway — the same DELIBERATE CONSERVATIVE EDGE the docstring states
         # for single quotes: an over-block a human can reword, never a silent pass.
+        #
+        # ⛔ THE EXCLUSION IS DOUBLED OPERATORS ONLY, NOT "ANY `<`/`>` BEFORE IT" (review cycle
+        # 21, P3, MEASURED — this comment said the wider thing and the wider thing is FALSE).
+        # The original guard skipped `<(`/`>(` whenever ANY `<`/`>` preceded it, on the stated
+        # theory that the preceding byte meant "redirection, not a process substitution". A
+        # redirection is COMPLETE at its own operator, though, so in `x><(cmd)` the `>` has
+        # already consumed itself and the `<(` is a FRESH token that bash runs:
+        #
+        #   $ bash -e -c 'echo x><(touch /tmp/F2)'                   → rc 0, stderr '', F2 CREATED
+        #   $ _executable_prose_lines('echo x><(touch /tmp/F2)')    → []      (silent pass)
+        #
+        # Of the four `<`/`>` pairs only the DOUBLED spelling is a genuine non-substitution:
+        # `<<(`/`>>(` are bash syntax errors that execute nothing (rc 2, no marker), while
+        # `<>(` is also an error and is therefore now reported — an over-block, the safe
+        # direction, over a spelling no real workflow line contains.
         if (
             not width
             and text[i] in "<>"
             and text.startswith("(", i + 1)
-            and not (i > 0 and text[i - 1] in "<>")
+            and not (i > 0 and text[i - 1] == text[i])
         ):
             width = 2
         if not width:
@@ -3804,13 +3849,102 @@ def test_the_prose_pin_sees_the_DEPRECATED_arithmetic_and_PROCESS_substitutions(
         with pytest.raises(AssertionError, match="command substitution"):
             _assert_no_executable_prose(script)
 
+    # ⛔ A PRECEDING REDIRECTION OPERATOR IS NOT AN EXCLUSION — only a DOUBLED one is (review
+    # cycle 21, P3, MEASURED). The guard used to skip `<(`/`>(` whenever ANY `<`/`>` preceded it,
+    # which is wider than the shell: a redirection is COMPLETE at its own operator, so in
+    # `x><(cmd)` the `>` has already consumed itself and the `<(` is a fresh token bash runs.
+    gt_ps = tmp_path / "gt-ps-marker"
+    gt_script = f"echo x><(touch {gt_ps})\n"
+    gt_ran = subprocess.run([*_RUNNER_SHELL, gt_script], capture_output=True, text=True)
+    assert gt_ran.returncode == 0, (gt_ran.returncode, gt_ran.stderr)
+    assert gt_ran.stderr == "", (
+        "the `x><( … )` spelling was supposed to run SILENTLY — if bash now complains, this "
+        f"premise is not the hole being closed: stderr={gt_ran.stderr!r}"
+    )
+    assert gt_ps.exists(), (
+        "`echo x><(touch …)` did not create its marker, so this premise is gone — bash would "
+        "have to be treating the `<(` as something other than a process substitution"
+    )
+    assert _executable_prose_lines(gt_script), (
+        "a `>(`-prefixed process substitution EXECUTES a command and the pin reported nothing: "
+        f"{gt_script!r} → {_executable_prose_lines(gt_script)!r}"
+    )
+
     # ⛔ AND ORDINARY REDIRECTIONS ARE NOT PROCESS SUBSTITUTIONS — the over-block guard that keeps
-    # this fix from redding the five real blocks: a `<`/`>` preceded by another one is not `<(`.
+    # this fix from redding the five real blocks: a DOUBLED `<`/`>` is not `<(`.
     for benign in ("echo hi >> out.txt\n", "echo hi 2>&1\n", "cat <<EOF\nbody\nEOF\n"):
         assert _executable_prose_lines(benign) == [], (
             f"a plain redirection or here-doc was read as a process substitution: {benign!r} → "
             f"{_executable_prose_lines(benign)!r}"
         )
+
+
+def test_a_QUOTED_closer_does_not_close_an_ARITHMETIC_context(tmp_path):
+    """A `)`/`]` INSIDE A QUOTED SPAN inside arithmetic is literal — the context stays OPEN.
+
+    Review cycle 21, P2, MEASURED. `_strip_shell_comments` learned per-level quote state for
+    `${ … }` in cycle 18 and closed a silent pass there. The three ARITHMETIC branches
+    (`$(( … ))`, `(( … ))`, `$[ … ]`) kept a BARE depth counter, so a closer between quotes
+    decremented it, the context ended early, the `#` that followed sat at word start, and the
+    rest of the line was stripped as a comment while bash was still inside the expansion and
+    EXPANDING it:
+
+        $ bash -e -c '(( x = " ) ) # $(touch /tmp/F1) " ))'      → rc 1, F1 CREATED
+        $ _executable_prose_lines(…)                            → []
+
+    Both spellings below are EXECUTED first — a marker file the substitution creates, and the
+    `rc` recorded — because a substitution that never ran is indistinguishable from a quiet one.
+    The control at the end keeps the fix honest in the other direction: quoting arithmetic that
+    executes nothing must stay green, so "track the quote" cannot become "red every quote".
+    """
+    cases = {
+        # `(( … ))` — the closer is `)`, and the depth used to pop on the QUOTED one.
+        "arithmetic command": '(( x = " ) ) # $(touch %s) " ))',
+        # `$[ … ]` — the deprecated expansion, closer `]`, same shape.
+        "deprecated arithmetic": 'echo $[ " ] # $(touch %s) " ]',
+        # and the backtick travels through the same early-closed context.
+        "backtick in deprecated arithmetic": 'echo $[ " ] # `touch %s` " ]',
+    }
+    for label, template in cases.items():
+        marker = tmp_path / f"arithq-{label.replace(' ', '-')}"
+        script = template % marker + "\n"
+        ran = subprocess.run([*_RUNNER_SHELL, script], capture_output=True, text=True)
+        assert marker.exists(), (
+            f"the quoted-closer {label} did not execute its substitution, so this premise is "
+            f"gone (rc={ran.returncode}, stderr={ran.stderr!r}) — the hole reproduced here is "
+            "not the one being closed"
+        )
+        assert _executable_prose_lines(script), (
+            f"the {label} EXECUTES a command after a quoted closer and the pin reported "
+            f"nothing — the silent pass this pin exists to close: {script!r}"
+        )
+        with pytest.raises(AssertionError, match="command substitution"):
+            _assert_no_executable_prose(script)
+
+    # ⛔ THE OTHER DIRECTION: quoting arithmetic that executes NOTHING is not an offence. Both
+    # rows are EXECUTED, so the clean assertion is not a vacuous `[]`.
+    for plain, want in (
+        ('echo $[ "1 + 2" ]\n', "3\n"),
+        ('(( x = "7" )); echo $x\n', "7\n"),
+    ):
+        ran = subprocess.run([*_RUNNER_SHELL, plain], capture_output=True, text=True)
+        assert ran.stdout == want, (plain, ran.returncode, ran.stdout, ran.stderr)
+        assert _executable_prose_lines(plain) == [], (
+            f"quoted arithmetic that executes no command was reported as executable prose: "
+            f"{plain!r} → {_executable_prose_lines(plain)!r}"
+        )
+
+    # ⛔ `$(( … ))` IS DELIBERATELY REPORTED FOR ITS OPENING TOKEN, and that is not this fix's
+    # class: arithmetic expansion IS execution — `$(( $(cmd) ))` runs a command — so the
+    # detector names the `$((` itself wherever it appears. Asserted here so a later reader does
+    # not read that row as a regression of the quote-state fix, and so the distinction is
+    # pinned rather than described.
+    dollar_arith = 'echo $(( "6" ))\n'
+    assert _executable_prose_lines(dollar_arith) == ['echo $(( "6" ))'], (
+        "`$((` is an execution token by design (`$(( $(cmd) ))` runs a command) — if this row "
+        "went quiet, the over-block was silently dropped: "
+        f"{_executable_prose_lines(dollar_arith)!r}"
+    )
 
 
 def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
