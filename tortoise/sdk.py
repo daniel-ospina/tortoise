@@ -49664,9 +49664,22 @@ class TortoiseSDK:
         Fail-open contract (mirrors A4 #2070): any fetch/query failure or an
         empty expansion returns ``None`` and the caller keeps the ORIGINAL fts
         leg — byte-identical behavior; the expansion can never turn a working
-        lane into a broken one. Returns the MERGED fts leg (expanded run
-        first, first-pass-only ids appended in their original order) when the
-        expansion ran and returned hits; ``None`` otherwise.
+        lane into a broken one. Returns the MERGED fts leg when the expansion
+        ran and returned hits; ``None`` otherwise.
+
+        ⛔ THE MERGE IS THIS MODULE'S FUSION (#14344), not a rank
+        concatenation: ``search_engine.fuse_expansion_pass`` runs
+        ``rrf_fusion`` over the two passes, so an id BOTH passes carry earns
+        both terms and outranks either pass alone, and a pass-1 id can only be
+        passed by a candidate that out-ranks it in the expanded run — never by
+        the expansion run's LENGTH. The candidate SET is still the union.
+        Before #14344 this method built the merged leg as ``expanded +
+        pass-1-only``, which placed **every** expansion id above **every**
+        pass-1 id the expansion did not repeat: "additive" was true of the set
+        and false of the order, so at a fixed page cut the expansion spent
+        evidence the first pass had already reached. Scores are carried from
+        the pass that produced the id (the single-strategy ``threshold`` path
+        consumes them — see the helper).
         """
         if not fts_hits or not query or not query.strip() or not aliases:
             return None
@@ -49691,10 +49704,12 @@ class TortoiseSDK:
             return None
         if leg_trace is not None:
             leg_trace.extend(_exp_trace)
-        seen = {pid for pid, _score in expanded}
-        merged = list(expanded)
-        merged.extend((pid, s) for pid, s in fts_hits if pid not in seen)
-        return merged
+        # #14344: merged through the product's OWN fusion, not a second one —
+        # see ``search_engine.fuse_expansion_pass`` for what the previous
+        # rank-concatenation cost (pass-1 evidence displaced by the
+        # expansion's LENGTH, not by anything out-ranking it).
+        from .search_engine import fuse_expansion_pass
+        return fuse_expansion_pass(fts_hits, expanded)
 
     def _entity_key_dense_pass(
         self,
@@ -49729,18 +49744,23 @@ class TortoiseSDK:
         DROPPED (that is what "additive" means here, exactly as in A4), and the
         candidate SET only grows.
 
-        ⛔ State the second half of that contract plainly, because it is real
-        behaviour and not a footnote: the merged leg's ORDER is the composed
-        query's, so an id already in pass 1 can move up **or down**, and in the
-        degenerate case where the expansion finds nothing new the leg is still
-        re-ranked. That is inherent, not a bug — ``rrf_fusion`` is rank-based, so
-        a merge IS an ordering, and the composed query is the same question with
-        entity context attached (no original token is removed), so its ranking is
-        the mechanism rather than a side effect. It is also exactly what the
-        sparse half does. What a caller must NOT read into "additive" is
-        "order-preserving": on a lever that ships OFF and unmeasured, a state
-        that re-orders a dense leg is a decision to be measured, not a promise
-        the code can keep.
+        Merge rule — identical to the sparse half's, through the same helper:
+        ``search_engine.fuse_expansion_pass`` runs ``rrf_fusion`` over the two
+        passes (#14344). The candidate SET only grows (no id is ever DROPPED —
+        that is what "additive" means here, exactly as in A4); the ORDER is
+        the fusion's, so an id both passes carry outranks either pass alone, and
+        an id already in pass 1 can move up, or down when a candidate out-ranks
+        it in the composed run — never because the expansion run had more rows.
+
+        ⛔ What the merge USED to be, stated because the change is behavioural
+        and was not free: ``merged = expanded + pass-1-only`` in rank order — a
+        SECOND fusion that placed every expansion id above every pass-1 id the
+        expansion did not repeat. The paragraph that used to live here called
+        the resulting order "the composed query's", which was true; what it
+        left out is that the composed query's order was then allowed to displace
+        evidence the ORIGINAL query had already reached, at a fixed page cut.
+        ``rrf_fusion`` is the product's own answer to that question, and this
+        change adds no constant of its own.
 
         Fail-open (mirrors A4 #2070 / the sparse half): no embedder, an encode
         failure, a query failure or an empty result returns ``None`` and the
@@ -49840,10 +49860,10 @@ class TortoiseSDK:
             return None
         if leg_trace is not None:
             leg_trace.extend(_exp_trace)
-        seen = {pid for pid, _score in expanded}
-        merged = list(expanded)
-        merged.extend((pid, s) for pid, s in vector_hits if pid not in seen)
-        return merged
+        # #14344: same merge rule as the sparse half (one rule, this module's
+        # fusion) — the two halves cannot disagree about what "additive" means.
+        from .search_engine import fuse_expansion_pass
+        return fuse_expansion_pass(vector_hits, expanded)
 
     def _expand_relationships(self, point_id: str) -> list[dict]:
         """Full relationship payload for a single Point, incl. related_content (#1353 D14).

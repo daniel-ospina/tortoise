@@ -705,6 +705,17 @@ def test_dense_pass_merges_additively_and_never_drops_a_pass1_id(
         assert ids.index(sentinel) > 0, (
             "pass-1-only ids are APPENDED after the expanded run, never "
             "promoted over it")
+    # ── #14344: the merge is a FUSION now (the pure rule is pinned in
+    # ``tests/test_expansion_fusion_14344.py``; this fixture's distances cannot
+    # express every discriminator, so assert only what it CAN show). The seed is
+    # carried by BOTH passes, so it earns both reciprocal-rank terms and leads
+    # the leg — no expansion-only row is placed above it by membership. Session B
+    # (expansion-only) still joins: the fusion adds, it does not filter.
+    assert ids[0] == DENSE_SEED_ID, (
+        "the id BOTH passes carry earns two fusion terms and leads the leg")
+    pass1_only = [p for p, _s in pass1 if p != DENSE_SEED_ID]
+    assert [p for p in ids if p in set(pass1_only)] == pass1_only, (
+        "pass-1-only ids keep their ORIGINAL relative order through the fusion")
 
 
 def test_dense_pass_is_fail_open_on_encode_failure(
