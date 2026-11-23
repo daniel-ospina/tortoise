@@ -3728,6 +3728,27 @@ def _row_for_pid(pid: int) -> str:
 _OUTSIDE_SIGNALS = frozenset({signal.SIGKILL, signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
 
 
+def _signal_name(num: int) -> str:
+    """`SIGNAME (n)` for a signal number — TOTAL over the numbers, unlike `signal.Signals`.
+
+    ⛔ `signal.Signals` is NOT total, so a message may not format a name unguarded. On Linux the
+    realtime band is enumerated at its two ENDS only (`SIGRTMIN` = 34, `SIGRTMAX` = 64), so every
+    number in between — 35..63 — raises `ValueError`, measured on the shipped enum:
+
+        signal.Signals(9).name  -> 'SIGKILL'          signal.Signals(35) -> ValueError
+        signal.Signals(11).name -> 'SIGSEGV'          signal.Signals(40) -> ValueError
+
+    The CRASH arm below interpolates a name into the `HarnessDefect` it raises, so an unguarded
+    `signal.Signals(-rc).name` replaces that verdict with a `ValueError` traceback about the
+    FIXTURE's death — which reads as a bug in this file, not as "the substrate aborted". The
+    number is the one fact the diagnosis always has, so the fallback keeps it.
+    """
+    try:
+        return f"{signal.Signals(num).name} ({num})"
+    except ValueError:  # unnamed on this platform: e.g. SIGRTMIN < n < SIGRTMAX
+        return f"signal {num}"
+
+
 def _child_exited(proc) -> bool:
     """Has the child EXITED? Never collects its status, so `ps` still renders the zombie row.
 
@@ -3743,6 +3764,31 @@ def _child_exited(proc) -> bool:
         return proc.poll() is not None
     except (ChildProcessError, OSError):  # pragma: no cover — not our child / already reaped
         return proc.poll() is not None
+
+
+def test_signal_name_is_total_over_every_signal_number() -> None:
+    """The CRASH arm's message must never *be* the exception it reports (#5049 rule 4).
+
+    `signal.Signals(n)` is not total — the realtime band is enumerated at `SIGRTMIN`/`SIGRTMAX`
+    only — so `signal.Signals(35).name` raises. Formatting a name unguarded inside the
+    `HarnessDefect(...)` message would lose the verdict the message exists to deliver and leave
+    a `ValueError` traceback pointing at this file instead of at the aborted fixture. The gap is
+    MEASURED here rather than assumed: if `Signals` ever becomes total the fallback is dead code
+    and this test says so, instead of quietly passing over it.
+    """
+    assert _signal_name(signal.SIGKILL).startswith("SIGKILL")
+    assert _signal_name(signal.SIGSEGV).startswith("SIGSEGV")
+    unnamed: list[int] = []
+    for num in range(1, 128):
+        try:
+            signal.Signals(num)
+        except ValueError:
+            unnamed.append(num)
+        # NO number may cost the verdict, whether or not `Signals` can name it.
+        assert _signal_name(num)
+    assert unnamed, "signal.Signals names 1..127 here, so this fallback is dead code"
+    for num in unnamed:
+        assert _signal_name(num) == f"signal {num}"
 
 
 def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
@@ -3944,7 +3990,8 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                         "a long-path `pi` lane visible to the census",
                         deadline_s=10.0,
                         diagnosis=(
-                            f"The fixture process {proc.pid} was killed by signal {-rc} before "
+                            f"The fixture process {proc.pid} was killed by "
+                            f"{_signal_name(-rc)} before "
                             f"the census could observe it; the table's row read {row!r} and the "
                             f"census matched {pids!r}. A killed child has no argv[0] left to "
                             f"match, so the property was never observable and this expiry is "
@@ -3959,8 +4006,8 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     # deliberately trips no skip-guard). Only signals the box sends are the
                     # machine's; an abort belongs to the substrate.
                     raise HarnessDefect(
-                        f"{_HARNESS_PREFIX}: the fixture child CRASHED on signal {-rc} "
-                        f"({signal.Signals(-rc).name}) before the {10.0:.0f}s deadline "
+                        f"{_HARNESS_PREFIX}: the fixture child CRASHED on "
+                        f"{_signal_name(-rc)} before the {10.0:.0f}s deadline "
                         f"(table row read {row!r}) — an abort is the TEST SUBSTRATE at fault, "
                         f"neither the box nor the census.")
                 # ⛔ rc >= 0 is NOT the box and NOT the census: the child exited ON ITS OWN.
