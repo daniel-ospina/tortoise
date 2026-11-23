@@ -3809,6 +3809,17 @@ def _media_applies_at_desktop(condition: str) -> bool:
 
 def _media_query_applies_at_desktop(component: str) -> bool:
     """Could ONE component query (one comma-free condition) apply at desktop."""
+    # `not` NEGATES the whole component query, so a narrow threshold under it
+    # applies exactly where a narrow viewport does NOT — at desktop size.
+    # `@media not print and (max-width: 760px) { .pricing-card .btn {
+    # margin-top: 0 } }` is TRUE at 1440x900 (`print` is false, so its negation
+    # is true) and every threshold comparison below reads it as a 760px hatch.
+    # Measured (#14406 review round 8): all four rows of
+    # `TestProductTeamsPricingCardCtaBaseline` stayed GREEN over that mutant.
+    # The reader does not model `not`'s De Morgan expansion, so it fails CLOSED:
+    # a negated query may apply at desktop, and the rule inside it is reached.
+    if re.search(r"(?<![\w-])not(?![\w-])", component):
+        return True
     constrained = False
     for axis, raw in MAX_SIDE_MEDIA_RE.findall(component):
         floor = DESKTOP_MIN_WIDTH if axis == "width" else DESKTOP_MIN_HEIGHT
@@ -3855,6 +3866,102 @@ def _css_desktop_rules(css: str) -> list[tuple[str, str, str | None]]:
             continue
         out.append((prelude, _brace_block(blanked, m.end() - 1), condition))
     return out
+
+
+def _css_rightmost_compound(part: str) -> str:
+    """The RIGHTMOST compound of one comma part of a selector list.
+
+    Combinators are ` `, `>`, `+` and `~` — but only at the TOP level of the
+    selector. Splitting on a flat `[\\s>+~]+` is wrong for the very selectors
+    this reader has to model: `~` is also the attribute operator in
+    `[class~="pricing-card"]`, and `+`/`~` can sit inside a functional
+    pseudo-class or a quoted value. The scan below tracks bracket, parenthesis
+    and quote depth, so `[class~="pricing-card"]` stays ONE compound and
+    `.grid ~ [class^='pricing']` still splits into two.
+
+    Measured (#14406 review round 8): with the flat split, the compound of
+    `[class~="pricing-card"]` came out as `="pricing-card"]`, so the class
+    attribute form was invisible to every reach reader.
+    """
+    depth = 0
+    quote = ""
+    current: list[str] = []
+    compounds: list[str] = []
+    for char in part:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+            current.append(char)
+            continue
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        if depth == 0 and (char.isspace() or char in ">+~"):
+            if current:
+                compounds.append("".join(current))
+                current = []
+            continue
+        current.append(char)
+    if current:
+        compounds.append("".join(current))
+    return compounds[-1] if compounds else ""
+
+
+def _css_rightmost_selects(rightmost: str, compound: str) -> bool:
+    """Does this RIGHTMOST compound select elements matching `compound`?
+
+    `compound` is written the way the callers write it: a class (`.pricing-card`,
+    `.btn`). The literal class text is matched, and so are the CLASS-ATTRIBUTE
+    selectors that select the same elements — for `class`, `[class~="x"]` IS
+    the `.x` shorthand (`~=` is the whitespace-separated-word match, and a class
+    is one word of the `class` attribute).
+
+    Measured (#14406 review round 8): `[class~="pricing-card"] { display: block }`
+    appended to the sheet left every row of
+    `TestProductTeamsPricingCardCtaBaseline` GREEN, because the readers matched
+    the literal `.pricing-card` text and this selector names its own class
+    without the dot. That is the same false PASS the attribute form of the
+    selector exists to produce, so the reader models it rather than trusting
+    one spelling.
+
+    The prefix/suffix/substring forms are matched on the operator's own
+    semantics rather than by guessing, and an attribute VALUE this reader cannot
+    read (a bare identifier, `var(…)`, an unquoted word) fails CLOSED — it counts
+    as selecting. Over-reaching reds a correct page, which a maintainer can see;
+    the other direction hides an override, which is the defect class every round
+    of this review has found.
+    """
+    if compound in rightmost:
+        return True
+    if not compound.startswith("."):
+        return False
+    name = compound[1:]
+    if not name:
+        return False
+    for m in re.finditer(r"\[\s*class\s*([~|^$*]?=)\s*([^\]]*)\]", rightmost):
+        op, raw = m.group(1), m.group(2).strip()
+        quoted = re.fullmatch(r"[\"'](.*)[\"']", raw, re.S)
+        if not quoted:
+            # A value this reader cannot read (a variable, an unquoted word)
+            # may match the class, so it counts — fail closed.
+            return True
+        value = quoted.group(1)
+        if op == "~=" and value == name:
+            return True
+        if op == "|=" and (value == name or name.startswith(value + "-")):
+            return True
+        if op == "^=" and name.startswith(value):
+            return True
+        if op == "$=" and name.endswith(value):
+            return True
+        if op == "*=" and value in name:
+            return True
+    return False
 
 
 def _css_reaching_decls(css: str, prop: str, compound: str,
@@ -3905,8 +4012,9 @@ def _css_reaching_decls(css: str, prop: str, compound: str,
         if value is None:
             continue
         for part in (p.strip() for p in prelude.split(",")):
-            rightmost = re.split(r"[\s>+~]+", part)[-1]
-            if compound in rightmost and all(t in rightmost for t in tokens):
+            rightmost = _css_rightmost_compound(part)
+            if _css_rightmost_selects(rightmost, compound) and all(
+                    t in rightmost for t in tokens):
                 out.append((part, value))
                 break
     return out
@@ -3967,6 +4075,43 @@ def _css_block_end(prop: str, value: str) -> str:
     if prop == "padding-block":
         return tokens[-1] if len(tokens) > 1 else tokens[0]
     return tokens[2] if len(tokens) >= 3 else tokens[0]
+
+
+#: Every property that can SET `flex-direction` on one element. `flex-flow` is
+#: the shorthand for `flex-direction` + `flex-wrap`, and its two components are
+#: ORDER-INSENSITIVE (`<'flex-direction'> || <'flex-wrap'>` — W3C CSS Flexible
+#: Box Layout 1 §5.1; MDN, "flex-flow": *"the components can appear in either
+#: order"*), so the direction is whichever token is a direction keyword — and an
+#: OMITTED direction takes its INITIAL value `row`, which is itself an override
+#: of the pinned `column` (MDN, "flex-flow": *"defaults are row and nowrap"*).
+#: Measured (#14406 review round 8): both `flex-flow: row` and the
+#: direction-free `flex-flow: nowrap` appended to `.pricing-card` left every row
+#: of `TestProductTeamsPricingCardCtaBaseline` GREEN while a browser applied the
+#: row layout and the CTA left the shared baseline — the same shorthand hole
+#: `SLACK_PROPS` closes for `margin` and `PADDING_END_PROPS` for `padding`.
+FLEX_DIRECTION_PROPS = ("flex-direction", "flex-flow")
+FLEX_DIRECTION_VALUES = frozenset(
+    ("row", "row-reverse", "column", "column-reverse"))
+
+
+def _css_flex_direction(prop: str, value: str) -> str:
+    """The `flex-direction` value `prop` gives the box — `row` when omitted.
+
+    For `flex-direction` itself this is the value unchanged. For `flex-flow` it
+    is the direction keyword if the shorthand carries one, in either position,
+    and otherwise the property's INITIAL value `row` — because the shorthand
+    RESETS the component it omits, which is the half a token-presence check
+    cannot see (`flex-flow: nowrap` reads as "no direction here" and is in fact
+    "direction: row").
+    """
+    if prop not in FLEX_DIRECTION_PROPS:
+        return value
+    if prop == "flex-direction":
+        return value.strip().lower()
+    for token in _css_tokens(value):
+        if token.strip().lower() in FLEX_DIRECTION_VALUES:
+            return token.strip().lower()
+    return "row"
 
 
 def _css_specificity(selector: str) -> tuple[int, int, int] | None:
@@ -4049,8 +4194,9 @@ def _css_block_end_cascade(css: str, compound: str,
             # the first draft of this helper).
             if "<" in part or "\n" in part:
                 continue
-            rightmost = re.split(r"[\s>+~]+", part)[-1].strip()
-            if compound not in rightmost and not rightmost.startswith("*"):
+            rightmost = _css_rightmost_compound(part)
+            if not _css_rightmost_selects(rightmost, compound) and not (
+                    rightmost.startswith("*")):
                 continue
             specificity = _css_specificity(part) or (9, 9, 9)
             for decl_index, decl in enumerate(_css_blanked(body).split(";")):
@@ -11410,9 +11556,18 @@ class TestProductTeamsPricingCardCtaBaseline:
         # can SELECT the subject must AGREE with the pinned value.
         for compound, prop, expected in (
                 (".pricing-card", "display", "flex"),
-                (".pricing-card", "flex-direction", "column")):
+                (".pricing-card", "flex-direction", "column"),
+                # `flex-flow` is the shorthand for `flex-direction` + `flex-wrap`
+                # and RESETS the component it omits, so `flex-flow: row` and
+                # even the direction-free `flex-flow: nowrap` both override the
+                # pinned `column` (initial value `row`). Measured (#14406 review
+                # round 8): both left every row of this class GREEN while the
+                # rendered CTA left the shared baseline. `_css_flex_direction`
+                # reads the direction out of either the longhand or the shorthand.
+                (".pricing-card", "flex-flow", "column")):
             disagreeing = [(p, v) for p, v in _css_reaching_decls(
-                css, prop, compound) if v != expected]
+                css, prop, compound)
+                if _css_flex_direction(prop, v) != expected]
             assert disagreeing == [], (
                 f"a rule that can select `{compound}` declares "
                 f"`{prop}: {disagreeing[0][1]}` ({disagreeing[0][0]!r}), "
@@ -11537,6 +11692,96 @@ class TestProductTeamsPricingCardCtaBaseline:
             "CTA sits 1px above the other three (measured 744.78 vs 745.78 at "
             "1440x900 — #13645 item 6). The losing declarations, weakest first: "
             f"{cascade[:-1]!r}")
+
+    def test_no_rule_resets_the_cards_declarations_with_all(self):
+        """`all` is the shorthand for EVERY property, so no value of it agrees.
+
+        `all: revert` on `.pricing-card` (or `all: unset`, or `all: initial`)
+        resets `display` to the browser default `block` and `flex-direction` to
+        `row`, and on `.btn` it resets `margin-top: auto` to `0` — the exact
+        3-baseline split of #13645 item 6, from ONE declaration. It is not a
+        property the flex row or the slack row queries, so neither could see it:
+        measured (#14406 review round 8), `all: revert` appended to the
+        `.pricing-card` rule left all four rows of this class GREEN.
+
+        There is no value to agree with, which is why this is a NEGATIVE row
+        rather than another entry in the families above: ANY declaration of
+        `all` that reaches either subject displaces whatever the pinned
+        declarations say.
+        """
+        css = _product_teams_html()
+        for compound in (".pricing-card", ".btn"):
+            resets = _css_reaching_decls(css, "all", compound)
+            assert resets == [], (
+                f"a rule that can select `{compound}` declares the `all` "
+                f"shorthand (`{resets[0][0]!r}` → `all: {resets[0][1]}`), which "
+                "resets every property in the pinned CSS — `all: revert` on "
+                "the card drops `display: flex`/`flex-direction: column`, and "
+                "on the CTA it drops `margin-top: auto` — with every other row "
+                "in this class GREEN (#14406 review round 8, measured)")
+
+    def test_no_rule_reorders_the_cta_inside_its_card(self):
+        """`order` moves the CTA without moving the markup the row above reads.
+
+        `test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render`
+        asserts the CTA is the last child in the DOM of both render paths —
+        which is the invariant `margin-top: auto` depends on, since auto margins
+        align the LAST item. `order: -1` on `.pricing-card .btn` makes the
+        anchor the FIRST flex item while the markup still ends on it, so the
+        last-child row stays green and the rendered CTA sits above `.features`. 
+        Measured (#14406 review round 8): `order: -1` appended to the CTA rule
+        left all four rows of this class GREEN.
+
+        `order`'s initial value is `0`, so the invariant is "every reaching rule
+        either does not declare it or declares `0`" — the same AGREEMENT shape
+        the slack row uses.
+        """
+        css = _product_teams_html()
+        reordering = [(p, v) for p, v in _css_reaching_decls(css, "order", ".btn")
+                      if v.strip() not in ("0", "")]
+        assert reordering == [], (
+            f"a rule that can select the CTA declares `order: "
+            f"{reordering[0][1]}` ({reordering[0][0]!r}), which moves the button "
+            "inside its card without changing the markup — the last-child row "
+            "reads the DOM and stays GREEN while the rendered CTA is no longer "
+            "the item `margin-top: auto` aligns (#14406 review round 8, "
+            "measured: `order: -1` passed every row)")
+
+    def test_no_card_carries_an_inline_style(self):
+        """An inline `style` out-ranks every rule in the sheet, and no reader sees it.
+
+        A declaration in a `style="…"` attribute wins over ANY selector — it
+        sits above the author-origin cascade that every row in this class
+        resolves — and it is not in the `<style>` block the readers parse, so
+        `<div class="pricing-card" style="display:block">` splits the CTAs back
+        to three baselines with every row here GREEN. Measured (#14406 review
+        round 8): that one attribute left all four rows of this class passing.
+
+        The row is scoped to the pricing grid and the `renderPricing()` template
+        (the two places a card or its CTA is authored), so the page's unrelated
+        inline styles stay legal — there are two of them today, both outside the
+        grid, and a whole-page version of this row would red them.
+        """
+        served = _served(_product_teams_html())
+        grid = _static_pricing_grid(served)
+        assert grid, "the pricing grid slice is empty — this row would pass vacuously"
+        inline = re.findall(r'style="[^"]*"', grid)
+        assert inline == [], (
+            f"a pricing card or its CTA carries an inline `style` attribute "
+            f"({inline[0]!r}). An inline declaration out-ranks every rule in "
+            "the sheet, so the pinned `display: flex` / `flex-direction: "
+            "column` / `margin-top: auto` no longer apply and the four "
+            "baselines split — while this file's CSS rows, which parse the "
+            "`<style>` block, cannot see it at all (#14406 review round 8, "
+            "measured)")
+        template = re.search(r"return `<div class=\"pricing-card[^`]*`",
+                             _product_teams_html(), re.S)
+        assert template, "renderPricing()'s card template changed shape — re-point this gate"
+        assert 'style="' not in template.group(0), (
+            "renderPricing()'s template builds a card or CTA with an inline "
+            "`style` attribute, which out-ranks the pinned card CSS on the "
+            "path a real visitor sees while the static cards stay aligned "
+            "(#14406 review round 8)")
 
     def test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render(self):
         """`margin-top: auto` aligns the LAST item — so nothing may follow the CTA.
@@ -11769,3 +12014,120 @@ class TestCssDesktopReachAndSpecificity:
             "1440x900 (`min-width: 900px` is true there) but the reach reader "
             "did not see it, so `test_no_other_rule_takes_the_ctas_slack` "
             f"stays GREEN over a 3-baseline split. Reached: {reached!r}")
+
+    def test_a_flex_flow_override_is_read_as_a_direction(self):
+        """`flex-flow` IS `flex-direction` + `flex-wrap`, and it resets both.
+
+        The shorthand's components are ORDER-INSENSITIVE
+        (`<'flex-direction'> || <'flex-wrap'>`: W3C CSS Flexible Box Layout 1
+        §5.1; MDN, "flex-flow" — *"the components can appear in either order"*),
+        and the direction it omits takes its INITIAL value `row` (same page:
+        *"its defaults are row and nowrap"*). So all four of `flex-flow: row`,
+        `flex-flow: column`, `flex-flow: wrap column` and `flex-flow: nowrap`
+        set a direction, and only `column`/`column-reverse` agrees with the pin.
+
+        Measured (#14406 review round 8): `flex-flow: row` and
+        `flex-flow: nowrap` appended to the card rule left ALL FOUR rows of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN while a browser laid the
+        card out as a row and the CTA left the shared baseline.
+        """
+        assert _css_flex_direction("flex-flow", "row") == "row"
+        assert _css_flex_direction("flex-flow", "column") == "column"
+        assert _css_flex_direction("flex-flow", "wrap column") == "column", (
+            "`flex-flow` is order-insensitive, so the direction keyword is not "
+            "necessarily the first token")
+        assert _css_flex_direction("flex-flow", "nowrap") == "row", (
+            "an OMITTED direction in `flex-flow` is reset to its initial value "
+            "`row` — reading the shorthand as 'no direction here' is the hole "
+            "this row closes")
+        assert _css_flex_direction("flex-direction", "column") == "column"
+
+        for mutant in (".pricing-card { flex-flow: row }",
+                       ".pricing-card { flex-flow: nowrap }"):
+            reached = [(p, v) for p, v in _css_reaching_decls(
+                self._page_with(mutant), "flex-flow", ".pricing-card")
+                if _css_flex_direction("flex-flow", v) != "column"]
+            assert reached, (
+                f"appending `{mutant}` overrides the card's `flex-direction: "
+                "column` in a browser, but the flex row's agreement sweep "
+                "found no disagreement — the rendered CTA leaves the shared "
+                "baseline with every row GREEN (#14406 review round 8)")
+
+    def test_a_negated_media_query_cannot_be_read_as_a_narrow_hatch(self):
+        """`not` NEGATES the query, so its threshold runs the other way.
+
+        `@media not print and (max-width: 760px)` is TRUE at 1440x900: `print`
+        is false, and the negation of (print AND width<=760) is therefore true.
+        A reader that compares the `max-width` threshold sees a 760px hatch and
+        skips the block — the exact inverse of what a browser does.
+
+        Measured (#14406 review round 8): that block with
+        `.pricing-card .btn { margin-top: 0 }` inside left all four rows of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN.
+        """
+        for negated in ("not print and (max-width: 760px)",
+                        "not all and (max-width: 600px)",
+                        "not (min-width: 1440px)"):
+            assert _media_applies_at_desktop(negated), (
+                f"`@media {negated}` is not decidable by a threshold "
+                "comparison — `not` inverts it — so it must fail CLOSED and "
+                "count as reaching a desktop viewport (#14406 review round 8)")
+
+        # ...and the page's own un-negated hatches stay excluded, or this fix
+        # would turn every narrow-viewport rule into a false RED.
+        assert not _media_applies_at_desktop("(max-width: 760px)")
+        assert not _media_applies_at_desktop("(max-height: 820px)")
+
+        mutant = ("@media not print and (max-width: 760px) { "
+                  ".pricing-card .btn { margin-top: 0 } }")
+        reached = [(p, v) for p, v in
+                   _css_reaching_decls(self._page_with(mutant), "margin-top", ".btn")]
+        assert any(v.strip() == "0" for _p, v in reached), (
+            "`.pricing-card .btn { margin-top: 0 }` inside "
+            "`@media not print and (max-width: 760px)` applies at 1440x900 "
+            "(`print` false ⇒ its negation true) but the reach reader skipped "
+            f"it as a narrow hatch. Reached: {reached!r}")
+
+    def test_a_class_attribute_selector_reaches_the_class_it_names(self):
+        """`[class~="x"]` IS the `.x` shorthand, so it must be reached.
+
+        `~=` is the whitespace-separated-word match and a class is one word of
+        the `class` attribute, which is exactly what the `.x` shorthand denotes
+        — so a rule whose rightmost compound names its own class without the dot
+        selects the same elements. The readers matched the literal `.pricing-card`
+        text only.
+
+        Measured (#14406 review round 8): `[class~="pricing-card"] {
+        display: block }` appended to the sheet left all four rows of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN.
+        """
+        assert _css_rightmost_selects('[class~="pricing-card"]', ".pricing-card")
+        assert _css_rightmost_selects(".grid > [class*='pricing']", ".pricing-card")
+        assert _css_rightmost_selects("[class^='pricing']", ".pricing-card")
+        # Fail-closed: an attribute value this reader cannot read may match.
+        assert _css_rightmost_selects("[class=var(--c)]", ".pricing-card")
+        # ...and a genuinely different class does NOT reach, or the readers
+        # would red every unrelated card rule on a correct page.
+        assert not _css_rightmost_selects('[class~="card"]', ".pricing-card")
+        assert not _css_rightmost_selects(".feature", ".pricing-card")
+
+        mutant = '[class~="pricing-card"] { display: block }'
+        reached = [(p, v) for p, v in _css_reaching_decls(
+            self._page_with(mutant), "display", ".pricing-card")]
+        assert any(v.strip() == "block" for _p, v in reached), (
+            "`[class~=\"pricing-card\"] { display: block }` selects the same "
+            "elements as `.pricing-card` (a class IS a word of the `class` "
+            "attribute) and overrides the pinned `display: flex`, but the "
+            f"reach reader did not see it. Reached: {reached!r}")
+
+        # `all` is the shorthand for every property, so it must be reachable
+        # through the SAME predicate the family sweeps use — on both subjects.
+        for compound, subject in ((".pricing-card", '[class~="pricing-card"]'),
+                                  (".btn", '[class~="btn"]')):
+            reached = [(p, v) for p, v in _css_reaching_decls(
+                self._page_with(f"{subject} {{ all: revert }}"), "all", compound)]
+            assert any(v.strip() == "revert" for _p, v in reached), (
+                f"`{subject} {{ all: revert }}` resets every property on "
+                f"`{compound}`, but the `all` reach found nothing — the "
+                "negative row would stay GREEN over a one-declaration revert "
+                "of the pinned CSS (#14406 review round 8)")
