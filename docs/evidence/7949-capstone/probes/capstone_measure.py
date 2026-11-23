@@ -643,7 +643,7 @@ def measured_arm():
             # switch is the ON arm, so a pop would be a lie in the header below.
             os.environ[key] = "0"
         for key in door_off:
-            os.environ.pop(key, None)
+            _pin_off_the_door(key)
         for key, value in DOOR_PINNED_ON:
             os.environ[key] = value
         observed = {key: os.environ.get(key)
@@ -5511,6 +5511,33 @@ def main(argv: list[str] | None = None) -> int:
     print(f"capstone-measure: sessions failed: {failed or 'none'}",
           file=sys.stderr)
     return 0
+
+
+def _pin_off_the_door(key: str) -> None:
+    """Pin one ``DOOR_PINNED_OFF`` switch OFF — and SAY SO when it was armed.
+
+    ⛔ `TORTOISE_S4_EMBED_JSON` (#14343) is on this list, and four documents used
+    to tell an operator to arm it and "re-run the capstone in the same session to
+    prove the bars hold". This function pops it, so that run scored the DEFAULT
+    render while the log's `pinned_off` read-back said `None` and nothing said
+    the flag the operator exported had been discarded — a fabricated green for
+    anyone who believed the armed layout had been validated (review cycle 10,
+    P1).
+
+    The pin is a REGISTERED decision (`preregistration.json`: UNSET is the only
+    state the corpus was scored under), so it stays. What changes is the silence:
+    an armed value is now announced on stderr, with what the run measures
+    instead and where the real path is. Documents must not promise what this
+    function discards.
+    """
+    armed = os.environ.get(key)
+    if armed not in (None, ""):
+        print(f"capstone-measure: ⛔ PINNED-OFF OVERRIDE — {key} was armed as "
+              f"{armed!r} in the shell and is pinned UNSET for this door, so "
+              f"this run measures the pinned value, NOT {armed!r}. Scoring an "
+              f"alternative arm is a change-control edit to DOOR_PINNED_OFF "
+              f"(#14371), not an environment variable.", file=sys.stderr)
+    os.environ.pop(key, None)
 
 
 if __name__ == "__main__":
