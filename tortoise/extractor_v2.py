@@ -1563,9 +1563,9 @@ def run_s1(model, transcript: str, *,
         model, system, user_msg, base, stats, True)
     finish = stats.get("finish_reason") if stats is not None else (
         getattr(model, "last_finish_reason", None))
-    # ``_collapse`` is AUTHORITATIVE — True only for a base that came back empty
-    # at finish_reason="length"; ``finish`` above is a post-hoc read of a race-prone
-    # shared attr (#1780 F4) and S1 has no parse ladder, so "" is a valid return.
+    # ``_collapse`` is AUTHORITATIVE — True only for a base that came back empty at finish_reason="length".
+    # ``finish`` above is _complete's IN-thread capture whenever ``stats`` is passed (extract_session_v2 always does);
+    # ONLY the stats=None form re-reads a race-prone shared attr (#1780 F4) — and S1 has no parse ladder, so a held "" would ship.
     truncated = finish == "length" or bool(_collapse)
     if not truncated:
         return response
