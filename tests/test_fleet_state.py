@@ -3823,10 +3823,11 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: with a STUB and never constructs a child, a census or these constants, and adds the `blip` census
 #: ROW (a prior error, a recovery, then a derived late burst — #14287 review P3). So `184 passed` ->
 #: `186 passed` (verified at `_LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6` — this block's constant, which
-#: every bare `K` in THIS note means), and the ONE site that is not this constant —
+#: every bare `K` in THIS note means), and the OTHER site measured in this sentence —
 #: `_LONG_PATH_STREAK_TIME_CALLS = 1`, which records `11 failed, 173 passed` at `a7baa98d05` — reads
-#: `12 failed, 174 passed` here (verified) — the passed delta is ONE there, not two, because that
-#: site's run already fails the peer's row as well. The FAILING count at
+#: `12 failed, 174 passed` here (verified); its passed delta is ONE, not two, because that site's run
+#: already fails the peer's row as well — whereas the streak `K = 8` sites below move by TWO
+#: (`184` -> `186 passed`), because that run fails nothing. The FAILING count at
 #: `_LONG_PATH_ERROR_SAMPLE_TIME_CALLS >= 20` is `12`, not `11`: the peer's `blip` row joins the
 #: failure set (it jumps the simulated clock by the bound + 1 s). ⛔ It does NOT red through the
 #: `calls["n"] > burst_state["started_at"] + burst` assertion —
