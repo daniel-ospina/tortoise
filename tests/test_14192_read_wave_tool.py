@@ -7545,6 +7545,16 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'for _x in {sys.modules}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
         "import registry via a `for` target over a DICT literal (keys)":
             'for _x in {sys.modules: 1}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        # ⛔ `async for` IS THE SAME ARM ONE NODE TYPE OVER, AND IT WAS AN UNPINNED CLAUSE
+        # (#14326 round 17, MEASURED: deleting `ast.AsyncFor` from the arm left the whole
+        # file at **1 passed** for this test — i.e. no row red — which is the defect this
+        # table deletes clauses for). It cannot ride the rows above: an `async for` at
+        # module level is a SyntaxError, so the lever supplies its own `async def`. A
+        # SIBLING lane pinned the same member in `_str_constants`' bind tuple in the same
+        # round; the two arms are independent, so each needs its own row.
+        "import registry via an `async for` target over a TUPLE literal":
+            'async def _a():\n    async for _x in (sys.modules,):\n'
+            '        _x |= {"tortoise.sdk": _Mirror}\n',
     }
     for name, lever in aug_levers.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
