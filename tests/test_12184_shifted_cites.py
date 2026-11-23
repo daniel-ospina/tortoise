@@ -2863,3 +2863,81 @@ def test_a_def_range_pin_ends_on_the_function_its_prose_names() -> None:
         "no `def`-anchored range pin was graded — the arm is vacuous, which is how the END of "
         "`:7582-7621` stayed unread."
     )
+
+
+def test_an_ambiguous_fragment_pin_names_the_leg_its_sentence_claims() -> None:
+    """A fragment on SEVERAL lines must not be the only thing a row resolves — and `COUNT` must count.
+
+    ⛔ WHY (review at `e587f2c8100d`, P2). `_PINS` grades a row's fragment AT the row's line, so a
+    fragment that is byte-identical at two sites cannot tell them apart: re-point the row at the
+    OTHER one and the file stays green. §2.1's operator-`COUNT` row is exactly that case — the
+    fragment `MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)` is identical at `:7090` and at
+    `:7201`, 111 lines apart. MEASURED pre-fix: re-pointing the document plus `_PINS`,
+    `_MAIN_SET_MISSED`, `_TOKEN_OCCURRENCES` and `_PIN_EOF_PAIRS` from `:7201` to `:7090` — every row
+    moved consistently, so nothing disagreed with anything, and the sibling arm that compares a token
+    to the line it grades was satisfied — left **34 passed**. The R1 risk this PR states ("a
+    first-match re-derivation would grade the wrong query and look right") had no arm.
+
+    ⛔ THE DISCRIMINATOR IS DERIVED, AND IT IS THE SENTENCE'S OWN WORD. The document's row calls this
+    line the operator-expansion leg's **`COUNT`**, so among the lines carrying the fragment the
+    pinned one must be the leg whose own `RETURN` aggregates — `:7203`'s `count(other)` — and the
+    other candidate's must not (`:7125`'s `r2.idx AS other_idx`). Nothing here is typed: the
+    candidates come from the fragment, the `RETURN` comes from each candidate's own leg, and a
+    re-point to the non-counting leg reds on the aggregate rather than on the text both share.
+
+    ⛔ SCOPE, stated honestly: this arm grades the ambiguous rows whose legs separate by whether their
+    `RETURN` aggregates — the class §2.1's row belongs to. A fragment made ambiguous some other way
+    is NOT covered and would need its own derived discriminator. The arm asserts it graded at least
+    one row, so it cannot go vacuous the way a silently-empty loop would.
+    """
+
+    def _leg_return(src: list[str], line: int) -> str:
+        """The first `RETURN …` after `line`, while still inside `line`'s own query leg."""
+        for forward in range(line - 1, len(src)):
+            text = src[forward]
+            if "RETURN " in text:
+                return text
+            if ".result_set)" in text or "timeout=" in text:
+                break
+        return ""
+
+    checked = 0
+    for _doc, token, src_path, line, fragment in _PINS:
+        path = REPO / src_path
+        if not path.exists():
+            continue
+        src = path.read_text(encoding="utf-8").splitlines()
+        hits = [n for n, text in enumerate(src, 1) if fragment in text]
+        if len(hits) < 2:
+            continue
+        # ⛔ THE CLAIM IS THE DOCUMENT'S WORD, not this arm's guess: an aggregating sibling leg is
+        # common (`audit.py:817` has one at `:2452` and its row claims no COUNT at all), so the
+        # sentence that carries the token has to say COUNT before the aggregate means anything.
+        # MEASURED without this scoping: the arm fired on `audit.py:817`, a row whose claim is a
+        # property-equality scan — a false finding in the file whose job is giving true ones.
+        doc_path = REPO / _doc
+        if not doc_path.exists():
+            continue
+        claims = [ln for ln in doc_path.read_text(encoding="utf-8").splitlines() if token in ln]
+        if not any("COUNT" in ln for ln in claims):
+            continue
+        counting = [n for n in hits if "count(" in _leg_return(src, n)]
+        if not counting:
+            continue
+        assert len(counting) == 1, (
+            f"{token!r} pins {src_path}:{line} by the fragment {fragment!r}, which occurs at {hits} "
+            f"and MORE THAN ONE of those legs returns a `count(` ({counting}) — so the fragment plus "
+            "the count does not identify a single line. Discriminate the row by something no sibling "
+            "leg shares."
+        )
+        assert line == counting[0], (
+            f"{token!r} pins {src_path}:{line}, but that leg's `RETURN` is {_leg_return(src, line).strip()[:70]!r} "
+            f"— it does NOT aggregate. The same fragment sits at {counting[0]} in the leg whose "
+            f"`RETURN` is {_leg_return(src, counting[0]).strip()[:70]!r}, and the document's row calls "
+            "this line the COUNT leg. Re-point the row to the address the counting leg sits on."
+        )
+        checked += 1
+    assert checked, (
+        "no ambiguous-fragment pin was graded — the arm is vacuous, which is how the `:7201`/`:7090` "
+        "pair stayed interchangeable."
+    )

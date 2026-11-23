@@ -6837,6 +6837,20 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("17970", "if vet_enabled and embed_list:"),
             ("15372", "if vet_enabled and complete_list:"),
         )),
+        # ⛔ THE THIRD COPY OF THE SAME CLAIM (review at `e587f2c8100d`, P2). The row above guards
+        # the `_pass_ran` docstring's copy; `_IDLE_CITES["vet"]` carries the same `(:17970)` in a
+        # sentence a future run PRINTS to a reader, and nothing read it: MEASURED, mutating that
+        # `:17970` -> `:17967` leaves `2 passed` on `-k 'bare_continuation or epic_bundle'`.
+        # ⛔ The phrase carries the cite's own `(:17970)` token because the sentence around it does
+        # NOT scope: `"pass is gated on the LIST"` occurs on TWO lines of this file (the
+        # `classify_later` value at `:1860` reads `classify pass is gated on the LIST`), and an
+        # ambiguous phrase is a FAILURE in `_pin_row_failures`, not a silent bind to one of them.
+        # Only `:17970` is pinned here — `:15372` sits on the NEXT line of that string, and a row
+        # scopes to exactly one.
+        ("probes/capstone_measure.py",
+         "pass is gated on the LIST — `if vet_enabled and embed_list:` (:17970)", (
+             ("17970", "if vet_enabled and embed_list:"),
+         )),
         ("probes/capstone_measure.py", "follows at", (
             ("14791", "edus = _edus_from_conversation(conversation)"),
         )),
