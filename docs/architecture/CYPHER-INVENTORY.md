@@ -92,35 +92,35 @@ two reasons given below the block, so the block does not pretend it does:
 
 ```text
 population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
-            (the 308 files the tool reports as `py_files`), scanned as WHOLE TEXT
+            (the 309 files the tool reports as `py_files`), scanned as WHOLE TEXT
 
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,644 occurrences of the door predicate across 112 files
-2,377 occurrences of the verb predicate across 149 files   (upper-bound shape, see below)
+1,645 occurrences of the door predicate across 112 files
+2,379 occurrences of the verb predicate across 149 files   (upper-bound shape, see below)
 
-1,644  regex door-pattern occurrences
+1,645  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,590  occurrences on a line carrying a door CALL          [measured]
+= 1,591  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,590  AST door calls
+= 1,591  AST door calls
 = 1325  classified Cypher statements + 266 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (308 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (309 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 308 files>` → **1,644** across **112** files: exactly the
-tool's number. A bare `rg … tortoise/` gives **1,650 / 113**, the 6 extra occurrences living in
-the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,644 / 112 on
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 309 files>` → **1,645** across **112** files: exactly the
+tool's number. A bare `rg … tortoise/` gives **1,651 / 113**, the 6 extra occurrences living in
+the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,645 / 112 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 308 files>` → **2,364** across **148** files, while the tool
-reports 2,377 / 149. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 309 files>` → **2,366** across **148** files, while the tool
+reports 2,379 / 149. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — **ten** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
@@ -132,7 +132,7 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 308 files finds exactly 13 — the verb-at-end-of-line scan alone finds **182**,
+predicate over the same 309 files finds exactly 13 — the verb-at-end-of-line scan alone finds **182**,
 and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
 enumerated, and the other **169** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
@@ -144,8 +144,8 @@ concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is pro
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,094, and `-i` without the exclusion 2,436 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
-number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 308
-`.py` files the same two predicates read **2,091** and **2,364**; with `-t py` and the test-module
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 309
+`.py` files the same two predicates read **2,093** and **2,366**; with `-t py` and the test-module
 exclusion dropped they read **2,093** and **2,367**. The 69-occurrence 2,367→2,436 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
 `tortoise/pi-hooks/tortoise-capture.test.ts` 14, `tortoise/pi-hooks/store-sync.test.mjs` 3,
@@ -153,7 +153,7 @@ exclusion dropped they read **2,093** and **2,367**. The 69-occurrence 2,367→2
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** and
-the **= 1,590 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+the **= 1,591 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
@@ -236,7 +236,7 @@ migration candidates: `tortoise/projection/__init__.py` loops over `("db.idx.ful
 as a `plain` READ — the one direction a verdict flips. Both of its un-folded spellings classify
 `ddl`, which is what showed the loss was in the folding and not in the DDL arm. They are not
 "probably fine" — they are exactly the sites a flip would have to re-derive by
-hand, so they are counted and named rather than classified by guesswork. 320 further sites
+hand, so they are counted and named rather than classified by guesswork. 321 further sites
 are **partial**: the literal half carries the shape (e.g.
 `"MATCH (op:Point)-[:" + safe_rel + "]->(t)"` is an adjacency read) and the digest shows `{}`/`???`
 where the folded part was.
@@ -971,22 +971,20 @@ for a FEATURE, not for a cleanup**: this PR adds reads that are SQL-shaped by co
 count and list one tenant's cache keys), and the honest census counts them rather than exempting
 them.
 
-**The cut the capacity-notice merge (#14038, `feat/13998-threshold-emails`) makes — TWO new scanned
-files that carry NO statement, FOUR non-Cypher door calls, and ONE `plain` READ the fold brought in.**
-Re-cut by RUNNING the tool on the merged tree, never by arithmetic on the markers.
-`tortoise/capacity_notice.py` (#13998's copy, thresholds, render and decision) opens **two**
-non-Cypher doors and `tortoise/supabase_control.py` gains **two** more (its durable-mark read and its
-compare-and-swap write), so `non_cypher_door_calls` 262→**266**; the merge also folds `main`'s
-`tortoise/relation_guards.py`, which carries no statement either, so `files_scanned` 307→**309** and
-`files` **102** is unchanged (neither file holds a site). `main`'s `#14381` then lands
-`TortoiseSDK._endpoint_kind_map` in `tortoise/sdk.py` — one `plain` READ
-(`MATCH (n:{}) WHERE n.id IN $ids RETURN n.id, coalesce(n.pointKind, n…)`) — so `sites` 1324→**1325**,
-`plain` 872→**873** (read 588→**589**), `candidates` 588→**589** and `partial` 320→**321**;
-`ast_door_calls` 1586→**1591** (= 1325 + 266). `unresolved` **105**, `adjacency` **293**, `ep` **32**,
-`ddl` **17**, `traversal` **3** and `fulltext` **2** are unchanged. §1's `rg` reconciliation is
-re-measured at this tree (door **1,644 / 112** whole-text, verb **2,377 / 149**, bare **1,650 / 113**),
-and Appendix A is regenerated with `--markdown` at this head — the two new files' six rows are in it,
-so a reader can resolve every one.
+**The cut the capacity-notice merge (#14038, `feat/13998-threshold-emails`) makes — ONE new scanned
+file that carries NO statement, and FOUR non-Cypher door calls.** Re-cut by RUNNING the tool on the
+merged tree, never by arithmetic on the markers. `tortoise/capacity_notice.py` (#13998's copy,
+thresholds, render and decision) opens **two** non-Cypher doors and `tortoise/supabase_control.py`
+gains **two** more (its durable-mark read and its compare-and-swap write), so
+`non_cypher_door_calls` 262→**266**, `files_scanned` 307→**309** (this lane's one new module plus
+`#14263`'s `tortoise/relation_guards.py`, the cut recorded in §6 below) and `ast_door_calls`
+1586→**1591** (= 1325 + 266). `sites` **1325** — `#14263`'s one `plain` read, this merge adding none
+— `files` **102**, `unresolved` **105**, `candidates` **589**, `partial` **321** and every shape are
+as the merged tree measures them; nothing THIS merge adds is a Cypher statement, so the migration
+metric §0 is about does not move for it. §1's `rg` reconciliation is re-measured at this tree (door
+**1,645 / 112** whole-text, verb **2,379 / 149**, bare **1,651 / 113**), and Appendix A is regenerated
+with `--markdown` at this head — the two new files' six rows are in it, so a reader can resolve every
+one.
 
 <!-- cypher-inventory:sites = 1325 -->
 <!-- cypher-inventory:files = 102 -->

@@ -314,10 +314,10 @@ is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
 reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
 DELETED, re-measured at this head: `mcp_server.py:4448` is the `# prop named "error"
 must not suppress the onboarding observation.` comment and the
-`:Document` retirement prose is at `:4543`; `sdk.py:37335` is a
-``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37157`
+`:Document` retirement prose is at `:4543`; `sdk.py:37126` is a
+``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37366`
 is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
-`:Document` docstring lines are `:37547` in `record_decision` (opening `:37815`;
+`:Document` docstring lines are `:37835` in `record_decision` (opening `:37815`;
 `:37834` is the `:Source` line immediately above it) and `:37877` in `_file_human_approval`
 (opening `:37855`)**), whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document

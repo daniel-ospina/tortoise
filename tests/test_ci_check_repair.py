@@ -1891,7 +1891,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
     this floor defers to is `tools/ci_queue_health.py:395`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 lines 534-536 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 546-548 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
     population rather than on it"). This docstring carries the SECOND citation of that same
     span, and the mechanical pin below holds it EQUAL to the one in
@@ -4463,9 +4463,11 @@ def test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit():
 # `tests/test_ci_check_repair.py::test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit`
 # can only SKIP the resolve arm in the `test` job — it checks out at `fetch-depth: 1`, where an
 # absent ancestor and a bogus sha are both missing objects. The claim therefore also lives in
-# `tools/ci_check_repair.py --check-doc-citations`, which the depth-0 `docs` job runs. These five
-# cases pin that tool's own verdicts, because a guard whose exit codes nobody asserts is a guard
-# nobody runs. The `rc==2` arm of the first case below records the clone shape each is valid in.
+# `tools/ci_check_repair.py --check-doc-citations`, which the depth-0 `docs` job runs. The
+# cases below pin that tool's own verdicts, because a guard whose exit codes nobody asserts
+# is a guard nobody runs. (No count in this sentence on purpose: the number drifted twice
+# here — "four", then "five", while the list kept growing.)
+# The `rc==2` arm of the first case below records the clone shape each is valid in.
 
 def _citation_tree(tmp_path, cited: str):
     """A throwaway git checkout holding only the document, citing `cited`.
@@ -4968,3 +4970,67 @@ def test_a_directory_that_is_not_a_checkout_is_UNVERIFIED(tmp_path):
         "… `git show --stat 8abf4844 -- docs/ops/ci-wall-clock.md` …\n")
     rc, findings = R.doc_citation_defects(tmp_path)
     assert rc == 2, f"a non-checkout must be UNVERIFIED (exit 2), got rc={rc}: {findings}"
+
+
+def test_a_document_that_runs_no_matching_citation_is_UNVERIFIED(tmp_path):
+    """The `cites == 0` arm: a reworded citation must not read as a verified one.
+
+    ⛔ NOTHING ELSE PINS THIS RETURN. Measured with the `if cites == 0: return 2` block
+    deleted: every other case in this section stayed green while a document that names
+    NO `git show --stat … -- docs/ops/ci-wall-clock.md` answered **0**. So a later lane
+    could reword the paragraph's command, the document would then be checking nothing,
+    and the required `docs` job would report success. Absence of a citation is not a
+    pass — this is the case that says so.
+    """
+    from tools import ci_check_repair as R
+    root = _citation_tree(tmp_path, "placeholder")
+    # A document with no citation at all, but a resolvable base ref — so the ONLY reason
+    # to answer 2 is `cites == 0`, not the durability or graft arms.
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        "… the follow-up carried no edit to this file (the command was reworded) …\n")
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 2, (
+        "a document that runs no matching `git show --stat` must be UNVERIFIED (exit 2), "
+        f"never a pass — got rc={rc}: {findings}")
+    assert "runs no `git show --stat" in findings[0], (
+        f"the finding must name the missing citation, got: {findings}")
+
+
+def test_the_CLI_exit_code_is_the_one_the_docs_job_consumes(monkeypatch):
+    """`main(["--check-doc-citations"])` must RETURN the verdict, not merely compute it.
+
+    ⛔ THE DOCS JOB CONSUMES THE PROCESS EXIT CODE, NOT THE FUNCTION'S RETURN VALUE, AND
+    NOTHING ELSE PINNED THAT TRANSLATION. Every other case in this section calls
+    `doc_citation_defects()` directly, so deleting the `if args.check_doc_citations:`
+    block in `main()` leaves all of them green — measured — while the command takes the
+    REPAIR path and exits **0** (`ci-check-repair [DRY-RUN] …`): the citation check
+    vanishes and the required `docs` job stays green. This is the case that makes every
+    other one load-bearing.
+    """
+    from tools import ci_check_repair as R
+    for verdict, expected in ((0, 0), (1, 1), (2, 2)):
+        seen = []
+
+        def fake(root, _v=verdict, _seen=seen):
+            _seen.append(root)
+            return _v, ([] if _v == 0 else [f"finding-{_v}"])
+
+        monkeypatch.setattr(R, "doc_citation_defects", fake)
+        got = R.main(["--check-doc-citations"])
+        assert got == expected, (
+            f"`main([\"--check-doc-citations\"])` returned {got} for a {verdict} verdict "
+            f"— the `docs` job's step status is this return value (via `sys.exit`), so a "
+            "dropped translation reports a defective document as green")
+        assert seen, (
+            "`main` answered without calling `doc_citation_defects` at all — it took "
+            "another code path and the citation check did not run")
+
+
+def test_the_CLI_reports_the_verdict_in_json_too(monkeypatch, capsys):
+    """`--json` must carry the rc, so a machine consumer cannot read a 2 as a pass."""
+    from tools import ci_check_repair as R
+    monkeypatch.setattr(R, "doc_citation_defects", lambda root: (2, ["unverified thing"]))
+    assert R.main(["--check-doc-citations", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rc"] == 2 and payload["findings"] == ["unverified thing"], (
+        f"`--json` must publish the rc and the findings, got {payload!r}")

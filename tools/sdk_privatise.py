@@ -1717,14 +1717,76 @@ SWEEP_NAMES = 66
 #: trees, never as arithmetic across the parents. A later merge re-measures this pin rather than
 #: deleting a previous reading; if a block above contradicts the live pin, that block is HISTORY and
 #: the last one is the PIN.
-#: ⛔ MERGED `origin/main` `7244b4d1a9` INTO THIS BRANCH (the PR was `CONFLICTING`: seven files) — the
-#: pair is RE-MEASURED ON THE RESOLVED TREE, never inherited from either parent: a merge tree is a THIRD
-#: tree, and each parent's numeral is a true reading of the tree it NAMES only. `--repin` here prints
-#: **(11881, '090b6d0e3ad7d520')** and `--check` exits 0 on it with `typed references still pointing at a
-#: public name: 0`. The 8-row rise over this branch's pre-merge `11873` is `main`'s own work
-#: (`#14263`'s relation-pair readers in `tortoise/sdk.py`, `#14347`'s spool, `#14372`'s census); it is
-#: RECORDED rather than attributed by arithmetic — `--report --base <sha> --top 5000` on each tree is
-#: what attributes it, and this block does not claim it.
+#: ⛔ SUPERSEDED BY THE RE-CUT BELOW — this block is `#14263`'s own reading of ITS tree, kept
+#: rather than dropped because merging two CORRECT records by deleting one is how a measured fact
+#: becomes folklore. ⛔ RE-CUT → (11870, "fccc31bf7f22f941") by the `#14263` relation-pair lane, and BOTH SIDES of
+#: the move are MEASURED on their OWN tree — `--repin` in a detached worktree at `origin/main`
+#: `70fbd1a27dd5` prints `(11861, "f0647020531c078c")`, and `--repin` on THIS tree prints
+#: `(11870, "fccc31bf7f22f941")`, so the base's contribution is read rather than inferred from a
+#: difference. `main`'s own +3 over the 11858 this block used to pin is `main`'s business and is
+#: tracked there (`#14294` measures that same `(11861, "f0647020531c078c")` on that same tree), so
+#: this block declares ONLY the 9 rows this PR owns — and it declares them because `--check` reds
+#: by 12 on this tree, i.e. the base's 3 plus these 9.
+#: THE +9 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by arithmetic: `--report --base 28ca66878d7c
+#: --top 200` was run on THIS tree AND in a detached worktree at `origin/main` `70fbd1a27dd5`, both
+#: row sets sorted and diffed, and EXACTLY THREE rows differ — `proj.g.query` 3646 → 3647 (+1),
+#: `sdk._get_proj().g.query` 1431 → 1438 (+7) and `s._get_proj().g.query` 29 → 30 (+1), i.e. 1+7+1
+#: = 9 = 11870 − 11861. Every one is this PR's own new code: the pair-leg readers in
+#: `tortoise/sdk.py` (`_endpoint_kind_map`, `_relation_pair_notes`, `_carry_relation_declaration`)
+#: and the one test-side `s._get_proj().g.query(…)` in `tests/test_relation_guards_14263.py`.
+#: All three rows are `Graph.query` calls on a FalkorDB `Graph` — the documented edge this counter
+#: reports and deliberately leaves alone, never an SDK handle — so no new shape was absorbed and
+#: no defect is hidden: the row SHAPE set is unchanged, and `typed references still pointing at a
+#: public name` is **0** on this tree (measured, `--check`). ⛔ NEITHER SIDE'S FIGURE WAS CARRIED BY
+#: ARITHMETIC on the previous pin: both pairs above are `--repin` output on the tree they name.
+#: ⛔ THE +9 IS THE READING TAKEN BEFORE `dcf5e3621c` — that commit removed the third row, so the
+#: live delta on that branch's own tree was +8, re-measured there rather than adjusted by arithmetic.
+#: ⛔ THIS RE-CUT MERGED `origin/main` `0467ba32` (base `70fbd1a2`) AND KEPT BOTH BLOCKS ABOVE —
+#: the branch's `(11864, "2a6400518a87775c")` resolution of `10e51693` and `main`'s
+#: `(11861, "f0647020531c078c")` re-pin, each a true measurement of the tree it NAMES — so no
+#: side's reading is dropped to make the conflict go away, and the pair below is a THIRD
+#: measurement: `--repin` run on the resolved tree, never an inheritance of either parent's line
+#: (the parents DISAGREE, 11864 against 11861, and arithmetic across them is a cross-check at
+#: most). `--check` exits 0 on the resolution with
+#: `typed references still pointing at a public name: 0`.
+#: ⛔ RE-MEASURED ON THIS MERGE RESOLUTION, and the peer's reading of the SAME resolution is
+#: kept here because it measures a different failure: `--repin` on the FULLY RESOLVED tree prints
+#: `(11864, "2a6400518a87775c")` — this branch's parent pair, and three above `origin/main`'s
+#: (`(11861, …)`). ⛔ AND AN EARLIER READING OF THIS SAME RESOLUTION PRINTED 11854, which is
+#: TEN LOW: it was taken while two conflicting test files still carried conflict markers, so
+#: they did not PARSE and their residue shapes were silently uncounted. A census of a tree
+#: that does not parse is a reading of a DIFFERENT tree — the same class this block keeps
+#: naming, one layer out. Re-pin only from a tree whose covering suites are green.
+#: ⛔ THIS PR'S OWN CONTRIBUTION IS ZERO ROWS, and that is measured rather than asserted:
+#: `edits_for` run over BOTH files whose CENSUS text this change touches yields zero typed
+#: references and ZERO residue rows (`tools/sdk_privatise.py` contributes only the two
+#: `residue_all.update`/`after_residue.update` accumulators already inside the pinned set, and
+#: `tests/test_sdk_privatise_sweep.py` contributes nothing), so the pair this file pins is the
+#: base's and not the branch's — the attribution above is `main`'s drift, re-measured on the
+#: MERGED tree, never carried from either side's figure by arithmetic. `--check` prints
+#: `typed references still pointing at a public name: 0`, so no public name was legitimised in
+#: either direction and no new SHAPE was absorbed: both rows are DECLARED here rather than
+#: rewritten away — re-pointing an ordinary-word receiver on a `Graph` would be sabotage, which is
+#: the `declared_markers.update` precedent, and a plain `set[str]` in a test helper is the
+#: `terms.update` precedent.
+#: ⛔ THIS MERGE (`origin/main` `38f2ab7fc594` into `chore/14263-pack-business-logic`) KEEPS BOTH
+#: SIDES' BLOCKS ABOVE, which is this chain's ground rule: the branch measured its own pair-leg
+#: readers and then re-cut its own tree when a dead test-side teardown was deleted, and `main`
+#: independently re-pinned for ITS tree — each is a true reading of the tree it NAMES, so neither is
+#: dropped to make the conflict go away. The pair below is a THIRD measurement: `--repin` RUN on the
+#: fully resolved merge tree, never an inheritance of either parent's line and never arithmetic
+#: across them (the parents disagree). It reads **11872**, three above the branch's own re-cut and
+#: eight above `main`'s; that difference is RECORDED, not attributed — resolving which rows came
+#: from where is `--report --base`'s work, and this block does not claim it. ⛔ Re-pin only from a
+#: tree whose covering suites are green: a tree that does not PARSE reads a different tree, which is
+#: the class this block already records one layer out. `--check` exits 0 on the pair below with
+#: `typed references still pointing at a public name: 0`.
+#: ⛔ MERGED `origin/main` `d2cd8ab06e2` INTO THIS BRANCH (the PR was `CONFLICTING`: eight files)
+#: — BOTH SIDES' BLOCKS ABOVE ARE KEPT, which is this file's standing ground rule: each block is a
+#: true measurement of the tree it NAMES, so neither is dropped to make a conflict go away. The pair
+#: below is a THIRD measurement: `--repin` RUN on the fully resolved merge tree, never an inheritance
+#: of either parent's line and never arithmetic across them (the parents disagree).
+#: PROVISIONAL until the fold is green — re-pinned below by `--repin` on the resolved tree.
 SWEEP_RESIDUE = (11881, "090b6d0e3ad7d520")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
