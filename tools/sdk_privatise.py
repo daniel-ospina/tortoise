@@ -1847,15 +1847,11 @@ SWEEP_NAMES = 66
 #: block above attributes row-by-row on ITS base (11861 → 11875), which is the cross-check that the
 #: branch's contribution survived the merge unchanged; ⛔ the sum is a CHECK, never the source: the
 #: pair below is `--repin`'s own output at the resolved tree.
+#: ⛔ MERGED `origin/main` `9aaaff10acd` (× `f5fc7ca52c`) INTO THIS BRANCH — BOTH SIDES' BLOCKS
+#: ABOVE ARE KEPT, this file's standing ground rule. The pair below is `--repin`'s own output on
+#: the RESOLVED merge tree, never inherited from either parent (they disagree: this branch's
+#: provisional `11881` against `main`'s `11886`) and never arithmetic across them.
 SWEEP_RESIDUE = (11896, "ea44c5f732d2a97d")
-#: ⛔ THIS FOLD (`origin/main` `9aaaff10acd9`, merged here) KEEPS BOTH RECORDS ABOVE, the same
-#: ground rule applied once more — and it SUPERSEDES the pair our own `d2cd8ab06e2` note above called
-#: PROVISIONAL: that number was read before `#14232`'s rows reached this branch through `main`, so it
-#: is history, not the pin. The pair below is a THIRD measurement — `--repin` RUN on this fully
-#: resolved tree — never inherited from either record above and never arithmetic across them.
-#: ⛔ Re-pin only from a tree whose covering suites are green: a tree that does not PARSE reads a
-#: DIFFERENT tree. `--check` exits 0 on the pair below with `typed references still pointing at a
-#: public name: 0`, and `--repin` printed **11896** on it.
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
