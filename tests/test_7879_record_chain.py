@@ -530,17 +530,36 @@ def test_the_record_still_answers_with_the_graphs_copy_deleted(schema, armed, te
 
     projection = sdk._get_proj()
 
-    def _graph_points() -> int:
-        result = projection.g.query("MATCH (n:Point) RETURN count(n) AS c", {})
-        rows = getattr(result, "result_set", result)
-        return int(rows[0][0]) if rows else 0
+    # ⛔ THE COUNT IS A TYPED, PRIVATE MEASUREMENT, NOT RAW CYPHER. Two reasons, and
+    # the second is not stylistic: `_label_vector_count` is the ONE aggregate that
+    # answers "how many nodes of this label can the cache serve densely" (#13610),
+    # so it is exactly this leg's premise; and `surface-guard`'s privatisation
+    # sweep counts every untyped `.query` receiver as residue it must re-pin, so a
+    # test adding raw Cypher for a question the package already answers in a typed
+    # method is a cost the gate pays. (The gate is red on `origin/main` already —
+    # it was 11901 observed against a 11896 pin before this file existed — so the
+    # point is not to turn someone else's red green, it is to not add to it.)
+    def _graph_vectors() -> int | None:
+        return projection._label_vector_count("point")
 
-    assert _graph_points() == 1, "the premise: the graph holds the point before the delete"
-    projection.g.query("MATCH (n:Point) DETACH DELETE n", {})
-    assert _graph_points() == 0, (
-        "the graph still holds the point after DETACH DELETE — the rest of this "
-        "test would then be proving the graph answered, which is the opposite "
-        "of its subject")
+    assert _graph_vectors() == 1, (
+        "the premise: the cache holds one vector-bearing :Point before the delete, "
+        f"measured {_graph_vectors()!r}")
+    # ⛔ AND THE DELETE IS TYPED TOO — `_delete_entity_by_id` is the projection's
+    # own hard-delete of ONE canonical entity by id (the replay counterpart of the
+    # SDK's live `_delete_entity`, #3299). It touches the cache and nothing else,
+    # which is what this leg needs: the record row must survive the cache losing
+    # its copy. Reaching for `MATCH (n:Point) DETACH DELETE n` would delete the
+    # WHOLE label — a blunter instrument than the subject — and would add another
+    # untyped `.query` receiver to the privatisation sweep's residue count.
+    deleted = projection._delete_entity_by_id(point_id, "Point")
+    assert deleted == 1, (
+        f"the cache delete removed {deleted!r} node(s), not 1 — the premise of "
+        "this leg is that exactly this point's cache copy went away")
+    assert _graph_vectors() == 0, (
+        "the cache still holds a vector-bearing :Point after DETACH DELETE "
+        f"({_graph_vectors()!r}) — the rest of this test would then be proving the "
+        "cache answered, which is the opposite of its subject")
 
     assert _count(schema, "point", tenant)[0] == 1, (
         "the record lost the row when the graph's copy went — this is the "
