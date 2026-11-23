@@ -3819,8 +3819,12 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: ROW (a prior error, a recovery, then a derived late burst — #14287 review P3). So `184 passed` ->
 #: `186 passed` (verified at `K = 6`), `173 passed` -> `175 passed`, and the FAILING count at
 #: `K >= 20` is `12`, not `11`: unlike the stub row, `blip` DOES read this constant (it jumps the
-#: simulated clock by the bound + 1 s), so a raise past the poll's budget reds it through the
-#: `calls["n"] > started_at + burst` premise assertion, legibly, instead of retiring it.
+#: simulated clock by the bound + 1 s), so it joins the failure. ⛔ It does NOT red through the
+#: `calls["n"] > burst_state["started_at"] + burst` assertion — at `K = 20` EVERY one of the 12
+#: params, `blip` included, reds at the GLOBAL premise (b) above ("the death sample must arrive
+#: BEFORE the poll's deadline"), which runs before the poll, so the blip-specific assertion is
+#: never reached (`12 test_fleet_state.py:4811: AssertionError` under `--tb=line`). Attributed
+#: after review, P3: an earlier cut of this note named that later assertion as the mechanism).
 _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 
 #: How many `time()` reads span the STREAK at the sample where the count+span conjunction fires
@@ -4491,9 +4495,11 @@ def test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail() -> None:
     — so nothing stubs a skip into it, and a simplification of the helper back to a bare
     `pytest.raises(...)` would restore the hole with nothing red. (⛔ NOT `grep -c 'SKIPPED
     where'` -> 0, which an earlier cut of this paragraph printed: that string lives INSIDE the
-    helper, so its count is 1 on ANY tree carrying `_verdict_or_fail`, witness row or not — it
-    cannot support this inference, and the `-> 0` was a reading of the pre-`10d54ad03d8a` tree.
-    Corrected after review.)
+    helper, so the count is AT LEAST 1 on any tree carrying `_verdict_or_fail` — 1 on
+    `origin/main`, and 2 on this tree, where this row's own assertion is the second — so it
+    cannot support the inference either way, and the `-> 0` was a reading of the
+    pre-`10d54ad03d8a` tree. Corrected after review, twice: the first correction said `1`
+    unconditionally, which is false HERE for exactly that reason.)
 
     ⛔ AND THE WITNESS ITSELF MUST NOT BE ABLE TO PASS BY SKIPPING (the finding that produced the
     form below). Delegating to the helper inside `pytest.raises` measures `passed, 1 skipped`
@@ -4502,8 +4508,8 @@ def test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail() -> None:
 
     What this grades: replacing the helper's `pytest.fail(...)` body with `pass`, or deleting
     its skip-`except`, reds this row. It does NOT grade the helper's `expect == "skip"` re-raise
-    branch — that branch is graded by the four `expect="skip"` parametrizations below, which red
-    when it is neutered.
+    branch — that branch is graded by the NINE `expect="skip"` parametrizations below (two
+    expiry arms and seven census arms), which red when it is neutered (measured: `9 failed`).
     """
 
     def _skipping():
