@@ -126,6 +126,47 @@ sees instead.
 - `doctor`'s local rows on a hosted box (`Session extraction: no LLM provider key`, `Harnesses: none`) each name the environment variable or command that clears them.
 - `tortoise signup` is idempotent and says so (`Already have a Tortoise Cloud key … reusing it`), and prints its own next step.
 
+### 2.1 · The fixes, verified against the live 504 (not just unit tests)
+
+Run through the real CLI, in a clean `HOME` holding only the fresh credential, against
+prod `e74cf1d13da7`:
+
+```
+$ tortoise create-point "The onboarding probe marker is ZQ-14424-ORCHID (hint verification)."
+API error (504): {"detail":"The server's wait budget … retry only if repeating the operation is safe."}
+The server advertised Retry-After: 10 s — wait that long before re-sending.
+This failure does NOT mean nothing was written: the work may have completed on the server.
+Re-running WITHOUT --dedup can create a duplicate Point for content that already landed
+(measured: 4 attempts, 4 Points). Re-run with --dedup to make the retry safe.
+        wall 11.5 s
+
+$ tortoise create-point "…same content…" --dedup
+API error (504): {"detail":"The server's wait budget … retry only if repeating the operation is safe."}
+The server advertised Retry-After: 10 s — wait that long before re-sending.
+This failure does NOT mean nothing was written: the work may have completed on the server.
+Re-running is safe with this attempt's --dedup: the server folds identical content onto the
+ existing Point instead of adding another.
+        wall 10.9 s
+```
+
+**One of those two attempts landed; the other did not.** The org read back 7 Points at
+22:02 UTC — the original 4, the 2 from the hosted probe, and exactly **one** of the two
+above (created 22:02:05). So the `504` → committed relationship is **nondeterministic**,
+which is precisely why the refusal is unactionable without a reconciliation path: the
+caller cannot infer from the status whether the write landed. (The `--dedup` fold itself
+stays **code-verified only** — the second attempt had nothing to fold onto.)
+
+```
+$ tortoise doctor --offline      # clean HOME holding ONLY a credential, no local graph
+  ⚠️ Graph: health: not used by this setup — you have a hosted credential (credentials.json,
+     https://api.premiselabs.co), so your memory lives there and a local graph is not required.
+     Your next step is `tortoise create-point "…"` — the `Hosted` row below says whether that
+     will work. Override: run `tortoise init` only if you ALSO want a local graph.
+  ✅ Credentials: …/.tortoise/credentials.json — tt_…436f (fingerprint fa5dbb0654f2), …
+  ⚠️ Hosted: … not probed (`--offline`); hosted reachability and key validity were NOT tested
+5 pass, 7 warn, 0 fail
+```
+
 ---
 
 ## 3 · Could a new user reproduce this from this evidence alone?

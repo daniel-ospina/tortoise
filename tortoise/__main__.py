@@ -6128,7 +6128,7 @@ def _create_point_retry_hint(exc, *, dedup_used: bool) -> str:
     if headers is not None:
         try:
             retry_after = headers.get("Retry-After")
-        except Exception:  # noqa: BLE001 - a header object we cannot read
+        except Exception:  # a header object we cannot read
             retry_after = None
     lines: list[str] = []
     if retry_after:
@@ -16194,9 +16194,9 @@ def _cmd_doctor(args):
                 _h_path, _h_cfg, _h_key, _h_url = _resolve_config_path()
                 if _h_key and _is_default_target:
                     _hosted_identity = (_h_path.name if _h_path else "env", _h_url)
-            except (MemoryError,):
+            except MemoryError:
                 raise
-            except Exception:  # noqa: BLE001 - a refused store is §8's finding
+            except Exception:  # a refused store is §8's finding
                 _hosted_identity = None
             if _hosted_identity is not None:
                 _src, _h_url = _hosted_identity
