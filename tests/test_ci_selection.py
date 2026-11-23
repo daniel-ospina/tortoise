@@ -13806,14 +13806,14 @@ def _emission_block_header(manifest_text: str) -> str:
     """The `fast_shards` block, bounded at the key and joined into one string.
 
     The subject is bounded to the header so a shard-count sentence elsewhere in the
-    1.18 MB map cannot be mistaken for this block's claim, and comment line breaks are
+    map cannot be mistaken for this block's claim, and comment line breaks are
     PRESENTATION — a sentence wraps at will — so the block is joined before reading it;
     otherwise a figure that happens to land on the next line makes a claim unread,
     which is the no-op-gate class this guard's own message names.
     """
     key = re.search(r"^fast_shards:", manifest_text, re.MULTILINE)
     assert key is not None, (
-        "the manifest carries no `fast_shards:` key, so the bound below is the WHOLE 1.18 MB "
+        "the manifest carries no `fast_shards:` key, so the bound below is the WHOLE "
         "file rather than the block this guard claims to read — fail closed here instead of "
         "silently widening the subject a renamed key would hand it.")
     header = manifest_text[:key.start()]
@@ -13830,8 +13830,8 @@ def _emission_block_claims(
 
     ⛔ It RAISES rather than returning `None` on two conditions, so the caller reds with the
     real reason instead of the generic "states no emission" message: an `AssertionError` if
-    the manifest carries no `fast_shards:` key (the bound would otherwise be the whole 1.18
-    MB file), and one if any `ceil(...)` multiplier is not
+    the manifest carries no `fast_shards:` key (the bound would otherwise be the whole map),
+    and one if any `ceil(...)` multiplier is not
     `ci_selection.WATCHDOG_HEADROOM` — the block would then state an arithmetic the code does
     not perform. The headroom check runs BEFORE the empty-partition return on purpose, so a
     wrong multiplier is never reported as an absent sentence.
@@ -13993,7 +13993,7 @@ def test_the_emission_block_guard_is_not_vacuous():
         "# `ceil(700.0/60 x 2)` = 24 m\n") is None, (
         "a shard-count comment BELOW `fast_shards:` was read as this block's claim — the "
         "subject is not truncated at the key")
-    # A RENAMED key must not silently widen the subject to the whole 1.18 MB file: the bound is
+    # A RENAMED key must not silently widen the subject to the whole file: the bound is
     # `manifest_text[:key.start()]` for the `key` `re.search(r"^fast_shards:")` returned, and an
     # absent key yields NO bound at all (the whole file) — so a renamed key used to hand the guard
     # every shard-count sentence in the map and still return a readable claim. It fails closed on
@@ -14107,9 +14107,13 @@ def test_the_emission_block_guard_is_not_vacuous():
         "a clause wrapped across two comment lines was not joined into one sentence — a figure that "
         f"happens to land on the next line then makes a claim unread: {wrapped}")
     # ⛔ ROUND 5 SPLIT THE GUARD, so BOTH halves of the split need a witness or the split is
-    # reversible with everything green (measured: restoring the pre-round-5 order leaves this suite
-    # at 2 passed, and deleting the `not groups` return does too). These two fixtures carry a
-    # `ceil(...)` clause and NO partition clause — the shape that makes the two branches disagree.
+    # reversible with everything green. The measurement was taken BEFORE these two fixtures
+    # existed (restoring the pre-round-5 order left this suite at 2 passed, and deleting the
+    # `not groups` return did too); with them present BOTH mutants now red — which is the whole
+    # point, so the numbers are stated with the state they belong to rather than in the present
+    # tense, where a reader re-measuring here would get the opposite answer. These two fixtures
+    # carry a `ceil(...)` clause and NO partition clause — the shape that makes the two branches
+    # disagree.
     #   1. wrong multiplier → MUST raise for the headroom, not fall down the generic `None` path
     #      this check exists to avoid (that is the whole reason the assert now precedes the
     #      empty-`groups` return);
@@ -14125,9 +14129,10 @@ def test_the_emission_block_guard_is_not_vacuous():
     # mix, so this fixture deliberately uses the OTHER historical spelling — otherwise the two
     # would be the same test twice, and the claim that it pins `29a2da4c9c`'s spelling would be
     # prose about a string the file never contains (which is what an earlier cut of this comment
-    # did). Without it, `_EMISSION_RANGE_RE` and the `span` branch could be deleted and the map's
-    # other spelling would silently become an unread claim. Measured: neutering the pattern reds
-    # this assertion and `wrapped`.
+    # did). ⛔ `ranged` is NOT the sole witness for the range arm: `wrapped` above reds on the same
+    # mutation (measured — deleting this fixture and neutering `_EMISSION_RANGE_RE` leaves one
+    # failure, at `wrapped`). It is kept as the single-line control that pins `29a2da4c9c`'s
+    # spelling specifically, and both assertions red when the pattern is neutered.
     ranged = _emission_block_claims(
         "# seven shards at 721.8 s (a–e, i, j) and two at 721.7 s (f, h)\n"
         "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
