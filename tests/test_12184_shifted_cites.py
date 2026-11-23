@@ -87,7 +87,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # COMPLETENESS pins: they catch the re-point/double-shift that DID happen in this class (`:4549`
     # re-pointed to `:4552`), which is the failure the whole file exists for.
     (_AUDIT, "`:7576-7579`", _SE, 7576, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
-    (_AUDIT, "`:7582-7596`", _SE, 7582, "def subject_binding_available"),
+    (_AUDIT, "`:7582-7621`", _SE, 7582, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3157", _SE, 3157, "CALL db.idx.fulltext.queryNodes"),
     (_AUDIT, "| `tortoise/search_engine.py:4878-4880` |", _SE, 4878, "MATCH (n:{label_str})"),
     # ⚠️ The token above carries its TABLE context on purpose. A bare `search_engine.py:4878-4880` is a
@@ -147,9 +147,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
-    # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
-    # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:58099`, `search_engine.py:7577`, `:7579`) = 122 of the 214. ⛔ The
+    # so the header counts it as drifted rather than compared, and it is one of the ELEVEN that are
+    # incomparable at the pin — the header enumerates them, and `_PIN_EOF_PAIRS` below is that
+    # split's per-pair form. ⛔ NO COUNT IS TYPED HERE (#14282 review, P3): the earlier form carried
+    # a figure that matched no published edition once the doc's split was re-derived, so the
+    # population is named by TEXT and its size comes from the graded source. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
@@ -413,7 +415,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7577'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7579'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7576-7579`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7582-7596`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7582-7621`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3157'): 5,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/search_engine.py:4878-4880` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4293'): 1,
