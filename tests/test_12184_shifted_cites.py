@@ -45,6 +45,7 @@ document.
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -439,12 +440,6 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4950-4954'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7193'): 1,
-    # ⛔ `search_engine.py:7226` is NOT declared here. `#14249`'s squash merge unioned its own row
-    # (count `1` — a count matching NO tree: the token is written 0x before `#14278` and 2x after, and
-    # `#14249` adds none of them) into a tree where `#14278` had already declared the SAME key with
-    # count `2`. Two keys for one address is F601, and the survivor silently becomes the verdict, so
-    # the row is declared ONCE, below, at the measurement — `2`: the header sentence (:191) and the
-    # §2.1 `:Point` reader row (:436).
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7600'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7602'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7599-7602`'): 1,
@@ -3172,3 +3167,152 @@ def test_the_13854_range_anchors_are_inside_the_range_the_token_names() -> None:
             f"{path}:{line} is the anchor pinned for {token!r}, which covers {start}-{end} — a range row "
             "whose anchor sits outside its own range resolves nothing the row quotes."
         )
+
+
+def test_a_def_range_pin_ends_on_the_docstring_its_prose_names() -> None:
+    """A `def …` span pins BOTH ends, not only its start.
+
+    ⛔ WHY. `_PINS` grades the fragment at a range token's START line, and the sibling range arm above
+    only asks that an anchor sit INSIDE the span — so the PUBLISHED END of a `def` span is read by no
+    row in `_PINS` at all. The END is therefore DERIVED from the source, so an insert that moves the
+    docstring's closing quote reds this arm instead of leaving the published `:N` stating a line nothing
+    reads.
+
+    ⛔ THE END IS THE DOCSTRING'S LAST LINE, because that is the span the document publishes. The row
+    reads "consumed only by `subject_binding_available()` at `:7605-7619`", and measured on this tree
+    `subject_binding_available` has its `def` at 7605, its docstring's closing quote at 7619 and its
+    function body's last line at 7644 (AST: `FunctionDef.lineno` 7605, first body statement's
+    `end_lineno` 7619, `FunctionDef.end_lineno` 7644). Deriving the FUNCTION's end instead would grade
+    7644 and so red the range main publishes deliberately; the derivation follows the published span.
+
+    The START is graded against the same AST rather than against the pin's own claim, so a row that
+    names the wrong definition reds here instead of resolving some other `def`'s fragment.
+
+    ⛔ THIS ARM IS *NOT* THE FILE'S ONLY END READER — that claim was FALSE and is corrected here
+    (measured at review of `#14269`). `main` DOES carry a `def`-span END arm,
+    `test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter` (line 2230, landed by
+    `ff2218b6` / `#14249`), which grades the DOCUMENT's cited end against the source. The two arms
+    cover DIFFERENT mutations, and which one sees which is MEASURED rather than assumed — mutate only
+    the `_PINS` row (`:7605-7619` -> `:7605-7618`) and leave the document alone:
+
+        test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter  PASSED
+        test_a_def_range_pin_ends_on_the_docstring_its_prose_names              FAILED
+
+    So `main`'s arm reads the document and this one reads the PIN TABLE; a doc-side re-point is caught
+    there, and a pin-table-only re-point is caught ONLY here. Neither is redundant and neither may be
+    dropped during a resolution on the strength of the other existing.
+    """
+    checked = 0
+    for _doc, token, src_path, _line, fragment in _PINS:
+        span = re.search(r":(\d+)-(\d+)$", token.rstrip("`"))
+        if span is None or not fragment.startswith("def "):
+            continue
+        start, end = int(span.group(1)), int(span.group(2))
+        src_text = (REPO / src_path).read_text(encoding="utf-8")
+        name = fragment[len("def "):].split("(")[0].strip()
+        definitions = [
+            node
+            for node in ast.walk(ast.parse(src_text))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+        ]
+        assert definitions, (
+            f"{src_path}:{start} is pinned as {token!r} ('{fragment}') but that file defines no "
+            f"{name!r} — the row states a `def …` span, so the span must start at a definition that is "
+            "there."
+        )
+        derived_start = min(node.lineno for node in definitions)
+        assert derived_start == start, (
+            f"{token!r} names {name!r}'s first definition line as {start}, but {src_path}'s AST puts it "
+            f"at {derived_start} — so the START of the span is not the line the document says it is."
+        )
+        docstring_ends = [
+            node.body[0].end_lineno
+            for node in definitions
+            if node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        ]
+        assert docstring_ends, (
+            f"{src_path}:{start} is pinned as {token!r} ('{fragment}') but {name!r} opens with no "
+            "docstring — the row's span ends on the docstring's closing quote, so there has to be one."
+        )
+        derived_end = max(docstring_ends)
+        assert derived_end == end, (
+            f"{token!r} names {name!r}'s docstring's closing quote as {end}, but {src_path}'s AST ends "
+            f"that docstring at {derived_end} — so the END of the span is not the line the document says "
+            "it is, and a line inserted inside the docstring moves it. Re-derive the range from the "
+            "source, do not adjust the sentence to the number."
+        )
+        checked += 1
+    assert checked, (
+        "no `def`-anchored range pin was graded — the arm is vacuous, which is how the END of "
+        "`:7605-7619` stayed unread."
+    )
+
+
+def test_a_row_that_claims_the_COUNT_leg_pins_a_line_that_aggregates() -> None:
+    """A row whose sentence says `COUNT` must pin the line that COUNTS — not the fragment both legs share.
+
+    ⛔ WHY (`#14269` review at `e587f2c8100d`, P2-1). `_PINS` grades a row's fragment AT the row's line,
+    so a fragment that is byte-identical at two sites cannot tell them apart: re-point the row at the
+    OTHER one and the file stays green. §2.1's operator-`COUNT` row was exactly that case at the
+    reviewed head — `MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)` sat at the `crit` leg and at the
+    `family` leg, and re-pointing the document plus every companion table from one to the other, all
+    consistently as a first-match re-derivation does, left `34 passed`. The R1 risk this PR states ("a
+    first-match re-derivation would grade the wrong query and look right") had no arm.
+
+    ⛔ THE DISCRIMINATOR IS DERIVED FROM THE DOCUMENT'S OWN WORD. The row calls this line the
+    operator-expansion leg's **`COUNT`**, so the line it pins has to be the one whose own text
+    aggregates — the `RETURN op.id, type(r2) AS et, count(other)` line on this tree (which is how
+    `main`'s `#14278` fixed the row: by pinning the unique `RETURN` instead of the shared `MATCH`).
+    Nothing is typed here: the population comes from `_PINS` rows whose document sentence says
+    `COUNT`, and the aggregate comes from the pinned line itself.
+
+    ⛔ AND WHERE THE FRAGMENT IS STILL AMBIGUOUS, the pinned leg must be the ONLY aggregating one —
+    the sibling-leg check below. That is the general form of the defect; it simply does not fire on
+    this head, because the row no longer pins a shared fragment.
+
+    ⛔ SCOPE, stated because it is load-bearing (and MEASURED): the population is the `_PINS` rows
+    whose document sentence names `path:line` as the FIRST cell of a table row AND says `COUNT`.
+    Matching on the token alone is not enough — `search_engine.py:7226` and `` `expand_ops` preview
+    at `:7190` `` are both spelled on the SAME sentence, so the preview row would be graded as if it
+    claimed the count; and one other document uses the word `COUNT` in prose on a row that has no
+    cell for its line at all. The cell form is the document's own way of saying "this row is about
+    this line".
+
+    NOT VACUOUS, measured on this tree: re-pointing the row AND its pin to the sibling leg whose text
+    is the shared `MATCH` (`:7224`, keeping the document's `COUNT` sentence) reds this arm on the
+    aggregate, and deleting the document's `COUNT` word instead makes the population empty and reds
+    the closure assertion — so neither half of the arm is unreachable.
+    """
+    graded = 0
+    for doc, token, src_path, line, fragment in _PINS:
+        doc_path = REPO / doc
+        src_file = REPO / src_path
+        if not doc_path.exists() or not src_file.exists():
+            continue
+        cell = f"| `{src_path}:{line}` |"
+        claims = [ln for ln in doc_path.read_text(encoding="utf-8").splitlines() if token in ln]
+        if not any(cell in ln and "COUNT" in ln for ln in claims):
+            continue
+        graded += 1
+        src = src_file.read_text(encoding="utf-8").splitlines()
+        pinned = src[line - 1] if 0 < line <= len(src) else ""
+        assert "count(" in pinned, (
+            f"{token!r} pins {src_path}:{line}, and the document's row calls that line the operator "
+            f"leg's `COUNT` — but the pinned line is {pinned.strip()[:90]!r}, which aggregates nothing. "
+            "A fragment shared by two legs cannot identify one of them; pin the line whose own text "
+            "counts (the `RETURN … count(other)` leg), not the `MATCH` both legs share."
+        )
+        hits = [n for n, text in enumerate(src, 1) if fragment in text]
+        counting = [n for n in hits if "count(" in src[n - 1]]
+        assert counting == [line], (
+            f"{token!r} pins {src_path}:{line} by the fragment {fragment!r}, which occurs at {hits} and "
+            f"whose aggregating legs are {counting}. When a row claims the COUNT leg, exactly one of "
+            "the fragment's sites may aggregate and it must be the pinned one."
+        )
+    assert graded, (
+        "no `COUNT`-claiming row was graded — the arm is vacuous, which is how the "
+        "`:7113`/`:7224` pair became interchangeable with nothing red."
+    )
