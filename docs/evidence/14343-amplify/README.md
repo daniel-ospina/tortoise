@@ -229,12 +229,13 @@ whose bytes changed is a prompt whose effect on extraction is unmeasured, and `#
 arbiter of that. ⛔ **Arming it is one environment variable PLUS a pin withdrawal, not one
 variable:** the capstone door lists this key in `DOOR_PINNED_OFF`
 (`docs/evidence/7949-capstone/probes/capstone_measure.py`) and POPS every member for the whole
-run, so a capstone scored while the variable is exported measures the **`indent`** render and
-reports it as a validation of `compact` — a fabricated green, the one thing this bundle must
-not produce. Validating `compact` on the bars therefore needs the pin withdrawn in the same
-change (that is `#14371`'s work); until then the only render any capstone scores is `indent`,
-and the cost side of this bundle (`§2`–`§4a`) is unaffected because it re-serializes the
-receipts rather than rendering a prompt.
+run, so a capstone scored while the variable is exported measures the **`indent`** render.
+(`d7152c5` makes that loud rather than silent — the run now prints a `PINNED-OFF OVERRIDE`
+line on stderr naming the value it discarded — but an announcement is not a measurement:
+the bars are still scored over `indent`.) Validating `compact` on the bars therefore needs the
+pin withdrawn in the same change (that is `#14371`'s work); until then the only render any
+capstone scores is `indent`, and the cost side of this bundle (`§2`–`§4a`) is unaffected
+because it re-serializes the receipts rather than rendering a prompt.
 
 Everything else was **not shipped**. Every lever above changes either the vocabulary the model sees or
 the bytes of a prompt, and the capstone bar (`#7949` E1 volume / E2 correctness / E3

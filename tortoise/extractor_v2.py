@@ -19434,11 +19434,12 @@ def _embed_json_kwargs() -> dict:
     lists this key in `DOOR_PINNED_OFF`
     (`docs/evidence/7949-capstone/probes/capstone_measure.py`) and pops every
     member for the whole run, so a capstone scored while this variable is
-    exported measures the ``indent`` render and reports it as a validation of
-    ``compact`` — a fabricated green. Proving the bars on the armed render
-    therefore takes the variable AND the pin withdrawal in the same change
-    (`#14371`); until then the only render a capstone scores is ``indent``,
-    which is why this default is not flipped.
+    exported measures the ``indent`` render — and since `#14343` review cycle 10
+    it SAYS so on stderr (``PINNED-OFF OVERRIDE``) instead of discarding the
+    value silently. Proving the bars on the armed render still takes the
+    variable AND the pin withdrawal in the same change (`#14371`); until then
+    the only render a capstone scores is ``indent``, which is why this default
+    is not flipped.
 
     Returns the ``json.dumps`` keywords — ``{"indent": 1}`` is the pre-#14343
     call, byte-for-byte, so an unset flag renders identically.
