@@ -4166,6 +4166,84 @@ class TestDoctorPreInit:
         assert "Run `tortoise init` to create it" in line
         assert "create-point" not in line
 
+    def test_an_env_only_static_secret_is_not_read_as_a_hosted_identity(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """#11912 round 15 governs THIS row too: `TORTOISE_API_KEY` is also the
+        documented shared key for a self-hosted `serve --http --auth static`
+        (`.env.example:149-150`, `tortoise/auth.py` `require_auth`,
+        `docs/quickstart-selfhosted.md:65`), so an env-only, non-hosted-shaped
+        key on the default target must NOT be narrated as "a hosted credential".
+
+        ⛔ Why it is more than wording: the row's named next action is
+        `tortoise create-point`, which resolves that SAME env key against
+        `TORTOISE_API_URL` or the production default — so a false claim here
+        walks a self-host user into sending a LOCAL SECRET to
+        api.premiselabs.co. That is the #1708 §D1b silent backend switch, and
+        `_doctor_hosted_rows` (round 15) already refuses it for the /health
+        probe; this row had no such predicate, so the two rows CONTRADICTED each
+        other in one report.
+
+        Mutation: drop the `_h_path is not None or _h_env_url_explicit or
+        _h_hosted_shaped` gate and this REDs — the row flips to "you have a
+        hosted credential" (observed).
+        """
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY",
+                           "local-static-key-for-my-own-serve")
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "not set up yet" in line
+        assert "Run `tortoise init` to create it" in line
+        assert "hosted credential" not in line
+        assert "create-point" not in line
+
+    def test_a_hosted_shaped_env_key_still_counts_as_hosted(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The other direction, so the round-15 gate cannot over-block: a
+        `tt_` key (the prefix `signup`/`key create` mint) exported in the
+        environment IS a hosted identity, and the row must name the hosted next
+        action even with no credential FILE present."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_hostedkey0123456789")
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "not used by this setup" in line
+        assert "create-point" in line
+
+    def test_an_explicit_api_url_still_counts_as_hosted(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The second escape, for a self-host user who named their OWN endpoint:
+        an explicit `TORTOISE_API_URL` makes the identity hosted (their memory
+        really does live at that URL), so the row must fire. This is what keeps
+        the gate narrow — it refuses only the env-only, unnamed-endpoint,
+        non-hosted-shaped shape."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "local-static-key")
+        monkeypatch.setenv("TORTOISE_API_URL", "https://tortoise.example.com")
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "create-point" in line
+
 
 class TestDoctorImportHygiene:
     """#2204 O/I/T (3) regression: importing tortoise modules on a clean env

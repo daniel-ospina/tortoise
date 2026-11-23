@@ -370,6 +370,30 @@ class TestCreatePointRetrySafety:
         assert "duplicate" not in err
         assert "may have" not in err
 
+    def test_a_read_timeout_is_a_hint_not_a_traceback(self, tmp_path, capsys):
+        """The write landed and the RESPONSE stalled.
+
+        `do_open` wraps only the SEND in `except OSError -> raise URLError`, so
+        a `resp.read()` stall raises `TimeoutError` straight through — past the
+        `HTTPError` and `URLError` arms above it. Without its own arm the D2
+        contract this PR exists to close degrades into a bare traceback for a
+        write that was already on the wire, which is the dead-end, not the fix.
+
+        Mutation: delete the `except (TimeoutError, OSError)` arm and this REDs
+        (the exception escapes `main`).
+        """
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=TimeoutError("timed out")):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        # what changed: the request had left the box before the stall
+        assert "MAY have landed" in err
+        # and the reconciliation path, not a raw stack trace
+        assert "/v1/points" in err or "--dedup" in err
+        assert "Traceback" not in err
+
 
 class TestConfigErrorCommandHandling:
     """D6 per-site _ConfigError handling: a corrupt/unreadable global config

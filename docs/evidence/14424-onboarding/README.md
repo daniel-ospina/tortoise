@@ -222,7 +222,7 @@ Re-running is safe with this attempt's --dedup: the server folds identical conte
 above (created 22:02:05). So the `504` → committed relationship is **nondeterministic**,
 which is precisely why the refusal is unactionable without a reconciliation path: the
 caller cannot infer from the status whether the write landed. (The `--dedup` fold itself
-stays **code-verified only** — the second attempt had nothing to fold onto.)
+is host-verified separately in §1.2, by the `createdAt`/`updatedAt` differential.)
 
 ```console
 $ tortoise doctor --offline      # clean HOME holding ONLY a credential, no local graph
