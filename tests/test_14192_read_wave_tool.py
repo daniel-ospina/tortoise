@@ -12261,11 +12261,16 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     callee through `_aliases_of` and `_builtin_lookup_name`, and three review cycles found one
     more launder each time: the bare name, then `_run = exec`, then `_d = builtins.__dict__` /
     `from builtins import exec as _e` / `_g = getattr`. Those are closed. What is NOT closed is
-    a callee obtained by a route that is not statically enumerable at all — the same class this
-    file already states for the registry axis (#14326 round 28/33: "the list of ways to name a
-    callable does not terminate"). Leaving that unnamed is the defect the round-33 review found
-    in the import-path axis: a sentence excusing a lever while naming a declaration that did not
-    exist.
+    a callee obtained by a route these predicates do not RESOLVE — ⛔ which is NOT the same
+    thing as "a route that is not statically enumerable at all", the wording this sentence
+    carried until #14395 and which its OWN rows falsify: `getattr(sys.modules["builtins"],
+    "exec")`, `__import__("builtins").__dict__["exec"]` and `[builtins.__dict__][0]["exec"]`
+    are plain literal keys any reader can enumerate — the census just does not resolve them.
+    "Not statically enumerable at all" survives only for the genuinely open family, the same
+    class this file already states for the registry axis (#14326 round 28/33: "the list of ways
+    to name a callable does not terminate"). Leaving EITHER family unnamed is the defect the
+    round-33 review found in the import-path axis: a sentence excusing a lever while naming a
+    declaration that did not exist.
 
     ⛔ AND THE SENTENCE ABOVE WAS TOO BROAD (#14393, MEASURED GREEN **and LIVE** on `23c8b57adb`,
     ONE node of composition past the arms that ARE closed):
@@ -12416,6 +12421,28 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`vars(_dc).get(\"get\")(m, \"exec\")` — via the module's ALIAS (`_dc = dict`)": (
             'import builtins', '_dc = dict',
             'vars(_dc).get("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        # ⛔ AND THE ALIAS SPELLINGS OF THE OTHER TWO RECEIVERS — the gap the paragraph above
+        # USED TO CLAIM AWAY (#14395 round-2 review P2, EACH MEASURED GREEN — `refused=False`
+        # — and LIVE at this head): it said the class was pinned by EVERY receiver spelling it
+        # declares, and it was not. `vars(<alias>)` got a row while `_dc.__dict__.get("get")`
+        # and `getattr(_dc, "__dict__").get("get")` did not — the SAME bind-one-over
+        # asymmetry (`_dc = dict` against `dict`) the closure rows above exist to delete, and
+        # exactly the half-closed class that paragraph says nothing could red. The closure rows
+        # already distinguish the alias for the REFUSED spellings ("subscripted out of a
+        # NAMESPACE ALIAS's `__dict__`, INLINE", `vars(<namespace alias>)`, `getattr(<namespace
+        # alias>, …)`), so the declared residual carries the same three. ⛔ BOUNDARY: an alias
+        # of an ALIAS (`_d2 = _dc`, then `_d2.__dict__.get("get")(…)`) is this same class one
+        # bind further and is deliberately NOT rowed — the table pins the two levels the
+        # closure rows themselves distinguish, and a row per depth is the spelling list this
+        # file refuses to grow.
+        "`_dc.__dict__.get(\"get\")(m, \"exec\")` — via the module's ALIAS (`_dc = dict`)": (
+            'import builtins', '_dc = dict',
+            '_dc.__dict__.get("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
+        "`getattr(_dc, \"__dict__\").get(\"get\")(m, \"exec\")` — alias, via `getattr`": (
+            'import builtins', '_dc = dict',
+            'getattr(_dc, "__dict__").get("get")(builtins.__dict__, "exec")'
             f'("results = {read}")'),
         # ⛔ AND THE COMPOSITION THAT RETURNS A COPY CALLEE, DECLARED RATHER THAN CLOSED (#14395
         # review P2's literal-`.get` half — MEASURED GREEN **for the literal receiver and the
