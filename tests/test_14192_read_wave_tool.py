@@ -6080,6 +6080,33 @@ def test_a_FALLBACK_expression_alias_still_reaches_the_sort() -> None:
         "false reds #14281 review F5 measured")
 
 
+def test_the_ROW_and_SLOT_arms_bless_a_PURE_READ_and_still_catch_a_MUTATOR() -> None:
+    """`row_handed` / `slot_handed` are pinned in BOTH polarities (#14326 review cycle 8).
+
+    ⛔ THE ARM WAS UNFALSIFIABLE (#14326 round 35 review cycle 8, MEASURED: reverting
+    `row_handed`/`slot_handed` to `_PURE_READS` left the file at `43 passed`, and neutering
+    `row_handed` outright left `43 passed` too, while the three shapes `_row_ref`'s docstring
+    names all went GREEN). The exemption those arms take was justified in a commit message and
+    a docstring — and this file's own rule is that a clause no mutant can red is not
+    coverage. The GREEN half is the fix (a pure id mapper reached through a RECORDED row or a
+    holder slot must not be called a mutation); the RED half is what the arm EXISTS for (an
+    unknown callee handed a recorded row can write it, and `compare()` would then read a page
+    the pin never inspected — the #14192 false PASS the `intentional_keep` grant rests on).
+    """
+    assert not _mutations_of("    _rid = _result_id(per_query[-1])\n"), (
+        "a PURE id mapper handed a RECORDED row is not a mutation — `_ID_MAPPERS` is in "
+        "`_PURE_CALLEES` and the element spelling of the same read is already blessed")
+    assert not _mutations_of(
+        "    _box = [None]\n    _box[0] = results[0]\n    _x = _result_id(_box[0])\n"), (
+        "a PURE id mapper handed a HOLDER SLOT is not a mutation — same exemption, other "
+        "taint set (`slot_handed`)")
+    assert _mutations_of(
+        "    def _scrub(row):\n        row[\"order\"].sort()\n"
+        "    _scrub(per_query[-1])\n"), (
+        "an UNKNOWN callee handed a recorded row is exactly what `row_handed` exists to red — "
+        "it can write the row, and the artifact then disagrees with the measured page")
+
+
 def test_a_PURE_READ_in_a_log_line_is_NOT_a_handed_mutation() -> None:
     """`print(f"nhits={len(results)}")` mutates nothing and must stay GREEN.
 
