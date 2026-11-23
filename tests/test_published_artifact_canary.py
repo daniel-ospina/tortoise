@@ -3096,8 +3096,8 @@ def _strip_shell_comments(script: str) -> str:
         # code was then stripped as a comment: `[]` over an executing line, again. Measured,
         # marker created by the substitution:
         #
-        #   $ bash -e -c 'echo ${x:-"} # $(touch /tmp/M1)"}'   → '} #', M1 CREATED
-        #   $ bash -e -c 'echo ${x:-"} # `touch /tmp/M2`"}'    → '} #', M2 CREATED
+        #   $ bash -e -c 'echo ${x:-"} # $(touch /tmp/M1)"}'   → '} # ', M1 CREATED
+        #   $ bash -e -c 'echo ${x:-"} # `touch /tmp/M2`"}'    → '} # ', M2 CREATED
         #
         # …both `[]` before this branch learned the level's quote state. The state is pushed on
         # `${` and popped only on an UNQUOTED `}`; a backslash pair is consumed by the escape
