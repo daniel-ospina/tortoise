@@ -733,18 +733,28 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
 #                             filed under a guessed tenant (#9192);
 #   ``write_failed``          the record was unreachable or the projection
 #                             refused the record;
-#   ``journal_collision``     the position row holds a record this write does
-#                             NOT continue — a different record, or (when this
-#                             write carries no `ts` to compare) a payload whose
+#   ``journal_collision``     the position row cannot be indexed by this write —
+#                             a different record type, a different capture time,
+#                             an identity the surviving row contradicts, or (for
+#                             a write with no `ts` to compare) a payload whose
 #                             derivation moved (#9318). ⛔ Unlike ``write_failed``
 #                             a REPLAY CANNOT heal it — the replay re-raises —
 #                             so the remedy is journal identity in the key
 #                             (#12894), not a replay. A same-capture payload
-#                             re-derivation is DRIFT and never reaches this
-#                             counter (#12904) — and neither does a DIFFERENT
-#                             record captured at the same instant, which that
-#                             same split admits silently (the mirror residual in
-#                             `record_projection.JournalPositionCollision`);
+#                             re-derivation whose identities do NOT contradict is
+#                             DRIFT and never reaches this counter (#12904), and
+#                             neither does a DIFFERENT
+#                             record captured at the same instant whose payloads
+#                             do NOT contradict — `agrees` (a shared node
+#                             coordinate), `one_sided` (one side names no
+#                             identity) or `none` (no COMMON comparable
+#                             identity) — which that same split reads as drift.
+#                             ⛔ A same-instant pair whose payloads name
+#                             CONTRADICTING identities DOES reach this counter
+#                             (#9318): a coordinate match is not identity, so
+#                             that pair is refused rather than absorbed — it is
+#                             a second record at the position, OR this record
+#                             re-keyed since, and the message still names both;
 #   ``circuit_open``          a connect to the record FAILED moments ago, so the
 #                             live door refused this write locally instead of
 #                             paying the connect timeout once per record
@@ -2746,9 +2756,10 @@ def record_record_write_failure(reason: str) -> None:
     * ``write_failed`` — the record was unreachable or the projection refused
       the record; ``replay`` heals it from the journal;
     * ``journal_collision`` — the record WAS reached and refused to file this
-      record under a journal position it does not CONTINUE (#9318): a different
-      record, or — when this write carries no ``ts`` for the capture time to be
-      compared — a payload whose DERIVATION moved. Neither unreachable nor
+      record under a journal position it cannot index (#9318): a different
+      record TYPE, a different CAPTURE TIME, an identity the surviving row
+      CONTRADICTS, or — when this write carries no ``ts`` for the capture time
+      to be compared — a payload whose DERIVATION moved. Neither unreachable nor
       misconfigured: the journal holds the
       record, and what the record cannot do is file it under that position — so
       the fix is not on this deployment at all. The population is any journal
@@ -2756,15 +2767,22 @@ def record_record_write_failure(reason: str) -> None:
       mark — a second durable journal under one tenant (two corpus roots, two
       SDKs with different ``event_log_path``), a journal RESTORE, a rotation, a
       truncation — plus any POSITION TWO RECORDS REACHED at different capture
-      times. ⛔ A payload re-derivation alone is NOT in this population (#12904
+      times, or at the SAME capture time with payloads whose identities
+      CONTRADICT (#9318: an equal instant is a coordinate, not identity).
+      ⛔ A payload re-derivation ALONE is NOT in this population (#12904
       P0-1): `recorded_at` is stamped at capture and survives a re-derivation,
-      so the same record re-derived at the same capture is DRIFT and replays
-      SILENTLY. ``replay`` heals every other failure; it cannot heal this
+      so the same record re-derived at the same capture whose identities do NOT
+      contradict — `agrees`, `one_sided` or `none` — is DRIFT and replays
+      SILENTLY. "Alone" is load-bearing: a re-derivation whose identities DID
+      move IS counted (every state OUTSIDE `_SILENT_IDENTITY_STATES` — `disagrees`,
+      plus anything a later edit leaves unenumerated, #9318), and so is
+      a `ts`-less one, where there is no capture time to compare. ``replay`` heals every other failure; it cannot heal this
       one, because the append-only row that owns the position carries that
       other content, and the key carries no journal identity — that is ``#12894``'s
-      schema decision. A genuine REPLAY (same position, same content AND the
-      same ``recorded_at``) never reaches this counter: it compares the surviving
-      row's content and its capture time and stays silent;
+      schema decision. A genuine REPLAY (same position, same content — and, when
+      this write carries a ``ts``, the same ``recorded_at``; a ``ts``-less replay
+      compares no instant at all) never reaches this counter: the conflict query
+      selects no row and it stays silent;
     * ``circuit_open`` — a connect to the record failed within
       ``record_writer.LIVE_WRITE_BREAKER_SECONDS``, so the live door refused this
       write locally: no socket, no timeout. The record is DEGRADED, not
