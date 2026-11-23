@@ -2962,6 +2962,7 @@ surfaces:
   # (DUAL-registered: matrix + job). ONE row only: this file is `merge=union` in `.gitattributes`,
   # so a second `core` row on the merge result is a `duplicate_entries()` gate failure.
   - test_14002_record_only_journal.py
+  - test_expansion_fusion_14344.py
   - test_extractor_cost_measure.py
   # #13034's `test_13034_currency_rule_reads_position.py` is registered on `core`
   # FURTHER DOWN this file, in the block the main-red repair (#13139 / #13144)
