@@ -985,6 +985,42 @@ def test_decompose_refuses_an_arm_the_evidence_does_not_carry():
         m.decompose(_evidence_rows(), arm="tepid")
 
 
+def test_decompose_refuses_a_corpus_that_lost_a_stage():
+    """A PARTIAL corpus is refused, not decomposed into a complete-looking table.
+
+    ⛔ WITHOUT THIS GATE the medians for a stage are taken over the rows that
+    carried it (`_per_call` skips a row with no calls) while `documents`
+    publishes `len(docs)` — so a corpus that lost S4 on a few documents prints
+    `documents: 50`, and the residual COLLAPSES toward zero, which flatters the
+    very claim the bundle makes ("fit and composition agree to 6.6%"). Measured
+    by dropping S4 from 10 of the committed rows: embed region 14,149 → 16,695,
+    residual 2,994 → 71.5, exit 0, both files written.
+
+    ⛔ NON-VACUOUS BY CONSTRUCTION — the mutation is in the DATA (three real rows
+    lose their S4 measurements), not in a literal the test also asserts, so the
+    pin cannot be satisfied by relabelling. The committed corpus is complete
+    (all 50 rows carry s1/s2/s4 with calls), which is why the unmutated call in
+    the tests above still succeeds.
+    """
+    rows = _evidence_rows()
+    dropped = 0
+    for row in rows:
+        stages = row.get("stages") or {}
+        if (row.get("arm") == "cold" and row.get("kind") == "doc"
+                and not row.get("failed") and stages.get("s4")):
+            del stages["s4"]
+            dropped += 1
+            if dropped == 3:
+                break
+    assert dropped == 3, "the committed corpus no longer carries three S4 rows"
+    with pytest.raises(SystemExit) as exc:
+        m.decompose(rows)
+    message = str(exc.value)
+    assert "PARTIAL" in message, message
+    assert "3 of 50" in message, message
+    assert "s4" in message, message
+
+
 def test_the_documented_reproduce_command_regenerates_the_committed_bundle(
         monkeypatch):
     """The bundle's README says these two files are reproducible; pin it.

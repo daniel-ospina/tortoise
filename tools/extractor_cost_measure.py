@@ -1959,6 +1959,20 @@ _LOST_CALL_MARKERS = ("chunk failed",)
 _REQUIRED_STAGES = ("s1", "s2", "s4")
 
 
+def _stages_without_a_measured_call(row: dict) -> list[str]:
+    """Which `_REQUIRED_STAGES` a MEASURED row has no recorded call for.
+
+    The measurement-row half of `_row_complete`'s missing-stage test. The two
+    row shapes are not the same: a `compose` row also carries `pipeline`
+    (`errors`, attempt counts), while a row that has been through
+    `measurements.jsonl` carries only `stages` — so the PRESENCE test is shared
+    here and the error/attempt reads stay in `_row_complete`.
+    """
+    stages = row.get("stages") or {}
+    return [s for s in _REQUIRED_STAGES
+            if not (stages.get(s) or {}).get("calls")]
+
+
 def _row_complete(row: dict) -> bool:
     """Whether a `compose` row is a measurement rather than a partial run.
 
@@ -2293,6 +2307,32 @@ def decompose(rows: list[dict], *, arm: str = "cold",
             and not r.get("failed") and r.get("stages")]
     if not docs:
         raise SystemExit(f"no usable `{arm}` document rows in the evidence")
+    #: ⛔ A PARTIAL CORPUS IS NOT A DECOMPOSITION (review, P1). `compose` refuses
+    #: an incomplete RUN through `_row_complete` + `_REQUIRED_STAGES`; this half
+    #: had no such gate, and a corpus where only SOME documents measured a stage
+    #: still published `documents: len(docs)` while every median for that stage
+    #: was taken over the subset that carried it. The residual then COLLAPSED
+    #: toward zero and the bundle's headline ("fit and composition agree to
+    #: 6.6%") flattered itself — no marker, exit 0, both files written. Measured
+    #: by dropping S4 from 10 of the 50 committed rows: the embed region moved
+    #: 14,149 → 16,695 and the residual 2,994 → 71.5. The committed corpus is
+    #: complete (all 50 rows carry s1/s2/s4 with calls), so this refuses a state
+    #: the tool can be handed, not the one it is handed today — the shape a
+    #: per-document `S4 failed` on a call that never recorded leaves behind.
+    partial = {str(r.get("id") or f"row{i}"): missing
+               for i, r in enumerate(docs)
+               if (missing := _stages_without_a_measured_call(r))}
+    if partial:
+        per_stage = {s: sum(1 for r in docs
+                            if (r["stages"].get(s) or {}).get("calls"))
+                     for s in _REQUIRED_STAGES}
+        raise SystemExit(
+            f"refusing to decompose a PARTIAL corpus: {len(partial)} of "
+            f"{len(docs)} `{arm}` document row(s) have no measured call for a "
+            f"required stage ({partial}) — the medians would be taken over a "
+            f"subset while `documents` counted the whole corpus, and the "
+            f"residual would collapse toward zero. Per-stage document counts: "
+            f"{per_stage}.")
     statics = _render_regions()
     #: ⛔ THE SOURCE-TRANSCRIPT TAIL IS SUBTRACTED, NOT IGNORED. `render_s2_prompt`
     #: / `render_s4_prompt` append `_render_source_transcript(edus)` OUTSIDE
