@@ -6286,18 +6286,131 @@ test("#14359: a failed rewrite restores unusable transcript bytes and refuses fa
 });
 
 test("#14359: duplicate metadata counts one physical entry in saturation and pruning", () => {
+  // ⛔ EACH HALF MUST BE ABLE TO GO RED ON ITS OWN, and the first version of this
+  // test could not: it asserted saturation on a FILED entry, and the predicate
+  // ends in `!metas.some(entryFiled)` — false whatever the byte total is — and it
+  // pruned with `maxEntries: 1`, so the COUNT axis decided and the sum was never
+  // read. MEASURED: restoring per-meta arithmetic in `saturatedForMetas` or in
+  // `pruneSpool` left this test green (200 pass / 0 fail, both mutations). The
+  // two shapes below are the ones that discriminate:
+  //   * saturation needs an UNFILED entry, so the byte test is what answers, and
+  //     a ceiling between one entry's bytes and two (per-meta doubles it);
+  //   * pruning needs a FILED entry (only filed entries are evictable at all —
+  //     capture-loss), a LOOSE count (so the count axis cannot answer), and the
+  //     same binding byte ceiling.
+  const saturatedSpool = tmpSpool();
+  const unfiled = "sess-duplicate-meta";
+  writeSpoolEntry(saturatedSpool, snapshot(unfiled));
+  const unfiledMeta = join(saturatedSpool, "entries", `${entryKey(unfiled)}.meta.json`);
+  const unfiledJson = readFileSync(unfiledMeta, "utf8");
+  writeFileSync(
+    join(saturatedSpool, "entries", `${entryKey(unfiled)}-duplicate.meta.json`),
+    unfiledJson,
+  );
+  const unfiledSize = spoolEntryBytes(saturatedSpool, unfiled);
+  assert.equal(
+    spoolSaturated(saturatedSpool, { maxEntries: 10, maxTotalBytes: unfiledSize + 1 }),
+    false,
+    "a duplicate meta must not make an UNFILED spool read as saturated (per-meta arithmetic doubles it)",
+  );
+
+  const prunedSpool = tmpSpool();
+  const filed = "sess-duplicate-meta-filed";
+  writeSpoolEntry(prunedSpool, snapshot(filed));
+  const filedMeta = join(prunedSpool, "entries", `${entryKey(filed)}.meta.json`);
+  const filedJson = JSON.parse(readFileSync(filedMeta, "utf8"));
+  filedJson.filed_key = filedJson.capture_key;
+  writeFileSync(filedMeta, JSON.stringify(filedJson));
+  writeFileSync(
+    join(prunedSpool, "entries", `${entryKey(filed)}-duplicate.meta.json`),
+    JSON.stringify(filedJson),
+  );
+  const filedSize = spoolEntryBytes(prunedSpool, filed);
+  const pruned = pruneSpool(prunedSpool, null, {
+    maxEntries: 10,
+    maxTotalBytes: filedSize + 1,
+  });
+  assert.deepEqual(
+    pruned,
+    [],
+    "the spool holds ONE session's bytes under its ceiling — a duplicate meta must not make prune evict",
+  );
+  assert.ok(readSpoolEntry(prunedSpool, filed), "the filed entry was evicted for a copy that is not on disk");
+});
+
+test("#14359: a REFUSED write must not have moved the transcript aside", () => {
+  // ⛔ THE ORDER OF THE QUARANTINE IS THE BUG (#14359 review P1). It sat above the
+  // entry-bound and saturation refusals, which `return` without running the
+  // `catch` restore — so a REFUSED write left `<key>.meta.json` beside
+  // `<key>.turns.jsonl.orphan` and NO turn log. The next `flushSpool` read that
+  // absent log as its *provably empty* arm, UNLINKED the entry and recorded
+  // `transcript_empty` two milliseconds after our own writer moved the bytes
+  // aside: a retained torn capture became a deleted one. Python's leg never had
+  // this window (its bound and admission checks precede the quarantine), which is
+  // why the divergence was invisible to a per-leg test.
+  //
+  // MUTATION THAT REDS THIS: move the `unusableBytes`/`quarantined` block back
+  // above the saturation branch — the log is gone and an orphan exists.
   const spool = tmpSpool();
-  const sid = "sess-duplicate-meta";
+  const sid = "sess-refused-keeps-log";
+  const bounds = { maxEntries: 2, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  writeSpoolEntry(spool, { ...snapshot(sid), turns: [{ role: "user", content: "1" }] }, bounds);
+  writeSpoolEntry(spool, { ...snapshot("filler"), turns: [{ role: "user", content: "2" }] }, bounds);
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const unusable = "torn transcript bytes that cannot be parsed\n";
+  writeFileSync(log, unusable);
+
+  // The per-entry bound refuses THIS write — the refusal whose `return` used to
+  // skip the restore.
+  const refused = writeSpoolEntry(
+    spool,
+    { ...snapshot(sid), turns: [{ role: "user", content: "3".repeat(50_000) }] },
+    bounds,
+  );
+  assert.equal(refused.written, false, "fixture must actually hit the refusal");
+  assert.equal(
+    readFileSync(log, "utf8"),
+    unusable,
+    "a REFUSED write moved the bytes it could not use aside — the poison the ordering closes",
+  );
+  assert.equal(
+    readdirSync(join(spool, "entries")).some((name) => name.includes(".orphan")),
+    false,
+    "no orphan may exist for a write that never wrote",
+  );
+});
+
+test("#14359: a kill between the quarantine and the write keeps the entry (orphan witness)", async () => {
+  // The writer renames an unusable log ASIDE and then writes the replacement. A
+  // process killed in that window leaves a readable meta, no turn log, and the
+  // bytes in `<key>.turns.jsonl.orphan`. "Log absent" used to mean "provably
+  // empty" to the drain: it UNLINKED the entry and wrote `transcript_empty` —
+  // "there was nothing to keep" — about bytes this module itself had moved aside
+  // because they were worth keeping.
+  //
+  // A sibling orphan for the SAME key makes that arm unprovable, so it is read as
+  // torn: recorded, terminal, KEPT (`--retry-terminal` reverses it). Mirrors
+  // `capture_spool._sibling_orphan_exists`; the asymmetry is the point — a stale
+  // orphan can only make an entry retained, never destroyed.
+  //
+  // MUTATION THAT REDS THIS: drop `|| siblingOrphanExists(...)` from the drain's
+  // empty arm → the entry is unlinked and the ledger says `transcript_empty`.
+  const spool = tmpSpool();
+  const sid = "killed-mid-rewrite";
   writeSpoolEntry(spool, snapshot(sid));
-  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
-  const meta = JSON.parse(readFileSync(metaPath, "utf8"));
-  meta.filed_key = meta.capture_key;
-  writeFileSync(metaPath, JSON.stringify(meta));
-  writeFileSync(join(spool, "entries", `${entryKey(sid)}-duplicate.meta.json`), JSON.stringify(meta));
-  const size = spoolEntryBytes(spool, sid);
-  assert.equal(spoolSaturated(spool, { maxEntries: 10, maxTotalBytes: size + 1 }), false,
-    "duplicate metadata must not double-count bytes");
-  const pruned = pruneSpool(spool, null, { maxEntries: 1, maxTotalBytes: size + 1 });
-  assert.ok(pruned.length <= 1, "one physical entry must not be evicted twice");
-  assert.ok(!readSpoolEntry(spool, sid), "the count bound reclaims the filed physical entry");
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const orphan = `${log}.orphan`;
+  renameSync(log, orphan);
+  const kept = readFileSync(orphan);
+
+  const { fetchImpl, calls } = mockFetch([{ ok: true }]);
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 });
+
+  assert.deepEqual(calls.map((c) => c.body.session_id), [],
+    "an entry whose bytes are in an orphan cannot be posted");
+  assert.deepEqual(summary.discarded.map((d) => d.reason), ["transcript_torn"],
+    "an orphan beside the meta must not read as provably empty");
+  assert.ok(readSpoolEntry(spool, sid), "the entry was deleted although its bytes are on disk");
+  assert.equal(readDiscards(spool).at(-1)?.reason, "transcript_torn");
+  assert.deepEqual(readFileSync(orphan), kept, "the drain reads an orphan, it never deletes one");
 });

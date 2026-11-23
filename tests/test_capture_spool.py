@@ -5516,3 +5516,101 @@ def test_a_duplicate_meta_cannot_make_PRUNE_evict_a_filed_entry(tmp_path):
         "the spool holds one session's bytes under the ceiling — a duplicate "
         f"meta must not make prune evict, got {discards}")
     assert read_spool_meta(root, sid) is not None
+
+
+def test_a_quarantine_that_cannot_complete_REFUSES_the_write(tmp_path, monkeypatch):
+    """#14359 review P2 — the refusal arm was UNPINNED.
+
+    MEASURED: deleting the whole ``if unusable_bytes and quarantined is None:``
+    block left the suite green (155 passed), so nothing held the write path to
+    its own promise. The arm is reachable only when the rename genuinely failed
+    (`_quarantine_log`'s only ``None`` with bytes present is an ``os.replace``
+    ``OSError``), and then the write must NOT proceed: writing over bytes it
+    could not preserve would destroy exactly the log this PR exists to keep.
+
+    MUTATION THAT REDS THIS: delete the refusal block (the write proceeds and
+    the garbage is overwritten), or return ``written: True`` from it.
+    """
+    import tortoise.capture_spool as capture_spool
+    from tortoise.capture_spool import (
+        _entries_dir,
+        _log_path,
+        _meta_path,
+        read_spool_meta,
+    )
+
+    root = tmp_path / "refuse"
+    sid = "14359-unpreservable"
+    write_spool_entry(root, _snapshot(sid))
+    garbage = b'{"note": "half-written"}\n[1, 2, 3]\n'
+    _log_path(root, sid).write_bytes(garbage)
+    before_meta = _meta_path(root, sid).read_text(encoding="utf-8")
+
+    # The rename fails: the OS will not move the file aside (EXDEV, EACCES, a
+    # read-only entries dir). `_quarantine_log` reports that as None.
+    monkeypatch.setattr(capture_spool, "_quarantine_log", lambda _log: None)
+    result = write_spool_entry(root, _snapshot(sid, turns=[
+        {"role": "user", "content": "a fresh turn"}]))
+
+    assert result["written"] is False, "a rewrite over unpreservable bytes must be refused"
+    assert [d["reason"] for d in result["discards"]] == ["spool_write_failed"]
+    assert "could not preserve" in result["discards"][0]["detail"]
+    assert _log_path(root, sid).read_bytes() == garbage, (
+        "the bytes that could not be preserved must still be on disk")
+    assert [p.name for p in _entries_dir(root).iterdir()
+            if ".turns.jsonl.orphan" in p.name] == []
+    # The entry keeps its OLD meta (the write returned before the meta write), so
+    # it is not left describing turns that are not on disk.
+    assert _meta_path(root, sid).read_text(encoding="utf-8") == before_meta
+    assert read_spool_meta(root, sid).get("filed_key") is None
+
+
+def test_a_kill_between_the_quarantine_and_the_write_keeps_the_entry(tmp_path):
+    """#14359 review P2 — the residual kill window, closed rather than documented.
+
+    `write_spool_entry` renames the unusable log aside and THEN writes the
+    replacement. A process killed in that window leaves a readable meta, no
+    turn log, and the bytes in ``<key>.turns.jsonl.orphan``. The drain's absent
+    log was the *provably empty* arm: it unlinked the entry and recorded
+    ``transcript_empty`` — "there was nothing to keep" — about bytes this module
+    itself had just moved aside because they were worth keeping.
+
+    An orphan for the SAME key makes that arm unprovable, so it is read as torn:
+    recorded, marked terminal and KEPT (reversible with `--retry-terminal`). The
+    asymmetry is the point — a stale orphan can only make an entry retained,
+    never destroyed.
+
+    MUTATION THAT REDS THIS: drop the ``elif _sibling_orphan_exists(...)`` arm —
+    the entry is unlinked and the ledger says ``transcript_empty``.
+    """
+    from tortoise.capture_spool import (
+        DISCARD_TRANSCRIPT_TORN,
+        _log_path,
+        _orphan_paths,
+        read_discards,
+        read_spool_meta,
+    )
+
+    root = tmp_path / "kill-window"
+    sid = "14359-killed-mid-rewrite"
+    write_spool_entry(root, _snapshot(sid))
+    # Exactly the state the kill leaves: the rename happened, the write did not.
+    _log_path(root, sid).rename(_log_path(root, sid).with_name(
+        _log_path(root, sid).name + ".orphan"))
+    assert not _log_path(root, sid).exists()
+    assert [p.name for p in _orphan_paths(root)] == [f"{_log_path(root, sid).name}.orphan"]
+    orphan_bytes = _orphan_paths(root)[0].read_bytes()
+    assert orphan_bytes, "fixture must carry the mover's bytes"
+
+    flush_spool(root, _Server().post, now=1000.0)
+
+    reasons = [d["reason"] for d in read_discards(root)]
+    assert DISCARD_TRANSCRIPT_TORN in reasons, (
+        f"an orphan beside the meta means the bytes may be the only copy, got {reasons}")
+    assert "transcript_empty" not in reasons, (
+        "the drain called a moved-aside capture 'empty' and unlinked it")
+    meta = read_spool_meta(root, sid)
+    assert meta is not None, "the entry was deleted although its bytes are on disk"
+    assert meta["terminal_failure"]["reason"] == DISCARD_TRANSCRIPT_TORN
+    # The bytes are untouched — the drain reads an orphan, it never deletes one.
+    assert _orphan_paths(root)[0].read_bytes() == orphan_bytes
