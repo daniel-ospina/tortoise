@@ -45,6 +45,7 @@ document.
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -2720,3 +2721,68 @@ def test_the_13854_range_anchors_are_inside_the_range_the_token_names() -> None:
             f"{path}:{line} is the anchor pinned for {token!r}, which covers {start}-{end} — a range row "
             "whose anchor sits outside its own range resolves nothing the row quotes."
         )
+
+
+def test_a_def_range_pin_ends_on_the_function_its_prose_names() -> None:
+    """A `def …` span pins BOTH ends, not only its start (review at `bda80ef812`).
+
+    ⛔ WHY. `_PINS` grades the fragment at a range token's START line, and the sibling arm above only asks
+    that an anchor sit INSIDE the span — so `:7605-7644` could be re-pointed to `:7605-7643` with the whole
+    file green (MEASURED on `#14269`: that mutation, applied consistently to the document and both pin
+    tables, left the file green). The end is therefore DERIVED here from the source itself rather than
+    re-typed, so an insert that moves the definition's last line reds this arm instead of silently leaving
+    the published `:N` stating a line nothing reads.
+
+    ⛔ THE END IS THE FUNCTION'S OWN LAST LINE — NOT ITS DOCSTRING'S CLOSER. `#14269` first published
+    `:7582-7596`, the `def` through the docstring's closing quote, and derived the END from the docstring
+    delimiters. The function's only consumption site,
+    `rows = graph.query(_SUBJECT_SOURCE_SCOPED_PROBE, …)` at `:7621`, sits OUTSIDE that span — so the
+    published range did not bracket the consumption the row's own prose describes ("consumed only by
+    `subject_binding_available()`"). `ast` answers the question the row actually asks:
+    `FunctionDef.end_lineno` is the line the function ends on, and the span `:7605-7644` contains the call.
+
+    The START is graded too, against the same AST rather than against the pin's own claim, so a row that
+    names the wrong definition reds here instead of resolving some other `def`'s fragment.
+
+    ⛔ RE-ADDED AFTER A BASE MERGE. This arm existed at `48f16600` and was DROPPED when that merge adopted
+    `origin/main`'s copy of this file whole: main's independently-landed split work makes the branch's
+    OTHER new arm redundant (`test_the_split_membership_is_derived_from_the_pins_own_line_counts` becomes
+    `test_the_non_comparable_set_is_derived_from_the_pins_file_lengths`), but main carries NO equivalent
+    for this one — it pins `:7605-7644` in `_PINS` (line 90) and grades only that range's START. So this is
+    re-added and re-pointed to main's published span.
+    """
+    checked = 0
+    for _doc, token, src_path, _line, fragment in _PINS:
+        span = re.search(r":(\d+)-(\d+)$", token.rstrip("`"))
+        if span is None or not fragment.startswith("def "):
+            continue
+        start, end = int(span.group(1)), int(span.group(2))
+        src_text = (REPO / src_path).read_text(encoding="utf-8")
+        name = fragment[len("def "):].split("(")[0].strip()
+        definitions = [
+            node
+            for node in ast.walk(ast.parse(src_text))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+        ]
+        assert definitions, (
+            f"{src_path}:{start} is pinned as {token!r} ('{fragment}') but that file defines no "
+            f"{name!r} — the row states a `def …` span, so the span must start at a definition that is "
+            "there."
+        )
+        derived_start = min(node.lineno for node in definitions)
+        assert derived_start == start, (
+            f"{token!r} names {name!r}'s first definition line as {start}, but {src_path}'s AST puts it "
+            f"at {derived_start} — so the START of the span is not the line the document says it is."
+        )
+        derived_end = max(node.end_lineno for node in definitions)
+        assert derived_end == end, (
+            f"{token!r} names {name!r}'s last line as {end}, but {src_path}'s AST ends that definition "
+            f"at {derived_end} — so the END of the span is not the line the document says it is, and a "
+            "body line inserted inside the function moves it. Re-derive the range from the source, do "
+            "not adjust the sentence to the number."
+        )
+        checked += 1
+    assert checked, (
+        "no `def`-anchored range pin was graded — the arm is vacuous, which is how the END of "
+        "`:7605-7644` stayed unread."
+    )
