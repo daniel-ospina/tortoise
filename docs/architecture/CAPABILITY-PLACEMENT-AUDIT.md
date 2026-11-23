@@ -179,7 +179,7 @@ that nothing else is at `main`** — and a range entry spans every line it cover
 `:6974-6990` (the block), `:6984` (`Event`), `:6985` (`Subject`), `:6989` (`Object`), `:6990` (`Source`);
 `record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37883`/`:37906` (the whole-node pair, still 23 apart);
 `audit.py:817`; `mcp_server.py:5250`/`:8515`/`:11590`; `goal_judgement.py:1128`; and §2.1's own table, which carries
-two of this class as well — `sdk.py:24626` and `search_engine.py:7224`, both open at this revision and neither
+two of this class as well — `sdk.py:24626` and `search_engine.py:7226`, both open at this revision and neither
 open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at **this head** (⚠️ NOT at
 `main` `ae54df166d`, where `hosted_api.py`'s `:23046` is `for ev in (payload.events or []):` and the commit
 door's `MERGE (s:Source {url:$did})` is the integration head's line) but
@@ -415,7 +415,7 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/sdk.py:24626` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
 | `tortoise/search_engine.py:4950-4954` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
 | `tortoise/search_engine.py:7193` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg's subquery PREVIEW (the `expand_ops` branch at `:7190`) | **adjacency** |
-| `tortoise/search_engine.py:7224` | `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)` — the operator-expansion leg's family-size COUNT (`Q2f`, the branch that follows the `expand_ops` preview at `:7190`) | **adjacency** |
+| `tortoise/search_engine.py:7226` | `RETURN op.id, type(r2) AS et, count(other)` — the operator-expansion leg's family-size COUNT (`Q2f`, the branch that follows the `expand_ops` preview at `:7190`). ⛔ The row cited `:7224` until review measured that its old fragment, `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)`, is byte-identical to the `Q2-crit` line at `:7113`, so the pin could not tell the two branches apart and a co-mutated re-point to `:7113` stayed green; the `RETURN` line above is unique to `Q2f` | **adjacency** |
 | `tortoise/search_engine.py:7600` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:7599-7602`, consumed only by `subject_binding_available()` at `:7605-7644`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
 | `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
 | `tortoise/search_engine.py:4878-4880` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
