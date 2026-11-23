@@ -6,7 +6,7 @@
   "s4": 1.14,
   "total": 3.98
  },
- "composition_total": 43567.4,
+ "composition_total": 43675.2,
  "document_term": {
   "documents": 50,
   "documents_taking_two_s1_calls": 34,
@@ -71,8 +71,8 @@
   }
  },
  "regions": {
-  "**S1's story, re-sent to S2 and S4**": 6108.8,
-  "**S2's embed list, re-sent to S4**": 14164.5,
+  "**S1's story, re-sent to S2 and S4**": 6322.7,
+  "**S2's embed list, re-sent to S4**": 14058.5,
   "chains": 547.4,
   "date anchor": 653.1,
   "graph search results (S4)": 128.8,
@@ -222,7 +222,7 @@
   "tokens_per_item": 100.9
  },
  "solved": {
-  "embed_list_tokens": 12425.0,
+  "embed_list_tokens": 12332.0,
   "embed_over_emission": 1.23,
   "story_tokens": 2656.0
  },
@@ -256,5 +256,5 @@
    "template_prose": 1903
   }
  },
- "unattributed": 1935.6
+ "unattributed": 1827.8
 }

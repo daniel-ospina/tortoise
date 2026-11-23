@@ -1113,16 +1113,26 @@ def test_the_user_message_is_charged_as_its_own_region():
 # four left the tree green (measured, review cycle 6). A bundle whose argument is
 # that a stub must never read as a measurement cannot pin that with prose.
 
-def _compose_artifact(*, live: bool, calls: list[dict]) -> dict:
+def _compose_artifact(*, live: bool, calls: list[dict],
+                     errors: list[str] | None = None) -> dict:
     """The minimal artifact `compose_report` folds (its own shape, no provider)."""
     return {"doc": {"path": "synthetic", "item_tokens": 12, "tokens": 12},
-            "live": live, "calls": calls}
+            "live": live, "calls": calls,
+            "pipeline": {"calls": len(calls), "errors": list(errors or [])}}
 
 
-def _call(*, sections: dict, regions: dict | None = None) -> dict:
-    return {"stage": "s2", "system_tokens": 3, "user_tokens": 4,
+def _call(*, sections: dict, regions: dict | None = None,
+          stage: str = "s2") -> dict:
+    return {"stage": stage, "system_tokens": 3, "user_tokens": 4,
             "completion_tokens": 5, "regions": regions or {"master_list": 3},
             "output": {"tokens": 5, "sections": sections}}
+
+
+def _complete_artifact(*, live: bool = True) -> dict:
+    """All three stages observed and no pipeline error — a real measurement."""
+    return _compose_artifact(live=live,
+                             calls=[_call(stage=s, sections={})
+                                    for s in ("s1", "s2", "s4")])
 
 
 def test_a_stub_run_renders_the_marker_and_a_live_run_does_not():
@@ -1133,7 +1143,7 @@ def test_a_stub_run_renders_the_marker_and_a_live_run_does_not():
     table in the same file.
     """
     stub = m.compose_report([_compose_artifact(live=False, calls=[_call(sections={})])])
-    live = m.compose_report([_compose_artifact(live=True, calls=[_call(sections={})])])
+    live = m.compose_report([_complete_artifact()])
     assert stub["live"] is False, "a stub artifact must report live=False"
     assert live["live"] is True, "a measured artifact must report live=True"
     assert "NOT A MEASUREMENT" in m.render_compose(stub), (
@@ -1211,3 +1221,67 @@ def test_the_rendered_table_reads_the_published_chars_and_kind_keys():
         f"reader is the shape the module criticises. Table:\n{table}")
     assert "2 items" in table and "7 tok" in table, (
         f"the pre-existing columns must survive the new ones. Table:\n{table}")
+# ── a LIVE run is not automatically a MEASUREMENT ───────────────────────────
+# The provenance gate above tells a STUB transport from a live one and says
+# nothing about a live run whose stages RAISED. `_Recording.complete` appends to
+# `calls` only after the adapter RETURNS, so a failing stage contributes no call
+# — and the rendered table then shows the survivors as the whole run (review
+# cycle 7, P1). Measured on a box with no provider key: three empty tables, no
+# marker, exit 0.
+
+def test_a_live_run_that_lost_a_stage_renders_the_incomplete_marker():
+    """A partial live run must SAY it is partial — the whole point of the bundle.
+
+    Both arms, because a renderer that always prints the banner would devalue
+    every complete table in the same file.
+    """
+    complete = _complete_artifact()
+    assert "INCOMPLETE" not in m.render_compose(m.compose_report([complete])), (
+        "a complete live run must not carry the INCOMPLETE marker")
+
+    # S4 raised: it emitted no call, and the pipeline recorded the error.
+    partial = _complete_artifact()
+    partial["calls"] = [c for c in partial["calls"] if c["stage"] != "s4"]
+    partial["pipeline"] = {"calls": 2, "errors": ["s4: 429 Too Many Requests"]}
+    rendered = m.render_compose(m.compose_report([partial]))
+    assert "INCOMPLETE LIVE RUN" in rendered, (
+        "a live run missing a stage rendered with no marker — the surviving "
+        "rows then read as a smaller, complete measurement")
+    assert "NOT A MEASUREMENT" in rendered, (
+        "the incomplete banner must carry the same refusal as the stub one")
+    assert "`s4`" in rendered, (
+        "the banner must NAME the missing stage, or a reader cannot tell what "
+        "the table omits")
+
+
+def test_a_missing_stage_is_incomplete_even_with_no_pipeline_error():
+    """⛔ FAIL-CLOSED on the call/error bookkeeping, not just on a recorded error.
+
+    A stage can be absent while `errors` is empty (a swallowed exception, or a
+    pipeline that stopped early). An `errors`-only rule would render that run as
+    a measurement, so completeness is its own predicate.
+    """
+    partial = _complete_artifact()
+    partial["calls"] = [c for c in partial["calls"] if c["stage"] != "s1"]
+    partial["pipeline"] = {"calls": 2, "errors": []}
+    report = m.compose_report([partial])
+    assert report["complete"] is False, (
+        "a run missing `s1` with no recorded error must still be incomplete")
+    assert "INCOMPLETE LIVE RUN" in m.render_compose(report)
+
+
+def test_a_report_whose_calls_were_lost_is_incomplete():
+    """The pipeline counted more LLM calls than the instrument recorded."""
+    lost = _complete_artifact()
+    lost["pipeline"] = {"calls": 7, "errors": []}
+    assert m.compose_report([lost])["complete"] is False, (
+        "more pipeline calls than recorded calls means calls were lost")
+
+
+def test_a_stub_run_is_exempt_from_the_incomplete_marker():
+    """`--offline` is a documented SHAPE check: it has its own banner and must
+    not be double-flagged, or the two markers become indistinguishable."""
+    stub = _compose_artifact(live=False, calls=[_call(sections={})])
+    rendered = m.render_compose(m.compose_report([stub]))
+    assert "OFFLINE / STUB TRANSPORT" in rendered
+    assert "INCOMPLETE LIVE RUN" not in rendered

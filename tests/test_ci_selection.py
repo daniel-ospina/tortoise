@@ -10671,19 +10671,18 @@ ROWED_BY_THIS_FOLD = (
     # reading: the `durations` refresher samples push-to-main runs, so a file a PR ADDS
     # cannot have a junit figure yet (#3400/#4348).
     "test_14185_projection_worker.py",
-    # #14343 (PR #14365) — the S4 embed-serialization lever's own pins. A file this
-    # fold ADDED and registered on `core` because the toggle lives in
-    # `tortoise/extractor_v2.py`, a `core` SOURCE_PATTERN, so a diff touching only the
-    # lever selects `core` alone and without the registration that diff grades
-    # nothing. It shipped the SURFACE row and neither the `durations:` row nor this
-    # entry, so BOTH guards were blind to it: `--integrity` is a 0.90 RATIO (1,399
-    # rows of headroom) and the entry-rule pin iterates this EXPLICIT tuple, so
-    # nothing redded while the file packed at the flat `DEFAULT_FAST_WEIGHT` — the
-    # exact regression #3400 says silently degenerated the duration-aware pack into
-    # a count-based one. Listed here for the reason every row above states, which is
-    # now a THREE-fold recurrence (`test_13422…` and `test_usage_signal.py` are the
-    # others): the row is what makes the defect visible, the tuple entry is what
-    # makes the pin able to see it at all (#14365 review, P2).
+    # #14343 (this PR) — the S4 embed-serialization lever's own pins (`_embed_json_kwargs`
+    # in `tortoise/extractor_v2.py`: the default is the pre-change bytes, garbage cannot
+    # coerce, compact changes only the layout, the read is per CALL). A file this fold
+    # ADDED and registered on `core`, which is what puts it in `fast_pool()`, and it
+    # shipped WITHOUT a `durations:` row — `--integrity` stays green over the absence (a
+    # 0.90 RATIO check with ~70 files of headroom), so nothing reddened and the file packed
+    # at `DEFAULT_FAST_WEIGHT` as an unread default, the #3400 regression this ENTRY RULE
+    # exists for. Found by the review that rebuilt `integrity()`'s predicate from the head
+    # manifest instead of reading the diff; the same defect its two sibling rows above
+    # record surviving a round each. ⛔ The row is the flat `DEFAULT_FAST_WEIGHT`, not a
+    # local reading — the refresher samples push-to-main runs, so a file a PR ADDS cannot
+    # have a junit figure yet (#3400/#4348).
     "test_extractor_embed_json_14343.py",
 )
 
