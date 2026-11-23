@@ -890,20 +890,25 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         reason=reason, known_number=known)
                 return
             if read_failed or record:
-                # Whether an incident is on record is UNKNOWN: the write raised (and
-                # may have filed + pushed first — see above) and either the read-back
-                # raised, or the record exists without an issue number (deferred
-                # filing). Deliver the labelled message bounded by the same window,
-                # and never claim the absence.
+                # Whether an incident is on record is UNKNOWN when the READ raised:
+                # the write may have filed + pushed first (see above), so the absence
+                # cannot be established. When the read SUCCEEDED and returned a
+                # record, the opposite is the fact — a placeholder record (no
+                # `issue_number`, filing deferred) IS "on record" (`incident_open`
+                # says so) — so that shape must not be described as unknown either.
                 deliver, folded, _ids, _over = _claim_delivery(
                     kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
                 if deliver:
+                    tail = (
+                        " and the read-back raised too — whether an incident is on "
+                        "record is UNKNOWN"
+                        if read_failed else
+                        " and the record carries no issue number (filing was "
+                        "deferred) — an incident record EXISTS but cannot be named"
+                    )
                     _deliver_unattributed(
                         kind, org_id, subject, details, folded,
-                        reason=(f"{reason}"
-                                + (" and the read-back raised too" if read_failed
-                                   else " and the record carries no issue number")
-                                + " — whether an incident is on record is UNKNOWN"))
+                        reason=f"{reason}{tail}")
                 return
         else:
             # The bound is the EPISODE, with a bounded RE-ALARM, and both are the

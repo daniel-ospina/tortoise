@@ -1647,6 +1647,43 @@ def test_a_read_back_that_also_fails_is_not_called_absent(monkeypatch):
     notify.reset_abuse_delivery_for_tests()
 
 
+def test_an_established_empty_record_still_says_nothing_was_filed(monkeypatch):
+    """The boundary the UNKNOWN framing must not swallow (#14407 review cycle 3).
+
+    "cannot establish" and "nothing was filed" are two different facts, and the
+    whole point of the `read_failed`/`record` split is to keep them apart. A
+    SUCCESSFUL read that returns an empty record IS evidence of absence, and the
+    message must still say `no incident was filed` — otherwise a future widening of
+    the uncertain arm turns every unclassifiable failure into permanent
+    "UNKNOWN" framing and the reassuring case is lost its voice.
+    """
+    import tortoise.notify as notify
+
+    class _Store:
+        def open_incident_state(self, kind, subject="", detail=None, writer=None):
+            raise RuntimeError("filing raised before anything was written")
+
+        def incident_record(self, kind, subject=""):
+            return {}                       # a SUCCESSFUL read of an empty record
+
+    sent: list[str] = []
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    notify.notify_abuse("abuse_review_needed", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 900})
+
+    assert len(sent) == 1, sent
+    assert "no incident was filed" in sent[0], sent[0]
+    assert "UNKNOWN" not in sent[0], sent[0]
+    notify.reset_abuse_delivery_for_tests()
+
+
 def test_the_absent_channel_reason_names_the_leg_that_is_missing(monkeypatch):
     """`DR_ISSUES_PAT` unset and an unusable `R2_*` set are different fixes.
 
