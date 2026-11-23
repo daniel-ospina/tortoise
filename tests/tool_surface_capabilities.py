@@ -423,6 +423,13 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # `update_knowledge` above.
 
     "_create_edge": "tortoise_create_edge",
+    # ⛔ #14169 (#11609 P7) added the second `_quota_gated(sdk.link_entities, …)` wrap
+    # site — the relation-decided arm of `tortoise_link_entities` — and did NOT re-key
+    # this map, so the forward arm ("unmapped _quota_gated wrap sites") redded `main`
+    # while the door's own write classification stayed green: exactly the drift this
+    # map exists to catch, caught. The key is the WRAP SITE's method; the label is the
+    # live door, which `_ms.WRITE_TOOL_NAMES` already classifies as a write.
+    "link_entities": "tortoise_link_entities",
     "_ingest": "tortoise_ingest",
     "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
     # #11609 lane C's containers: each wraps its own SDK operation, so each is a

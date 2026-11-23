@@ -616,8 +616,79 @@ def main(argv: list[str]) -> int:
     try:
         import yaml
 
+        class _NoDuplicateKeyLoader(yaml.SafeLoader):  # type: ignore[misc]
+            """A SafeLoader that REFUSES a duplicate mapping key instead of last-winsing it.
+
+            #14033 review P2, measured: `yaml.safe_load` keeps the LAST of two identical
+            keys, so a forward merge that leaves a top-level key twice makes this file
+            grade a value the artifact's own text contradicts — here the guard read
+            whichever `approval_status:` line came last and printed a CLAIM the file has
+            already overwritten. That is the false-PASS shape every gate in this repo
+            refuses (a gate reporting OK on evidence it never actually read), and it is
+            why `tools/surface_manifest.py::_read_manifest` refuses the same file.
+
+            ⛔ NOT imported from `tools/surface_manifest.py` on purpose: this gate is
+            PINNED TO THE BASE REF (CI overwrites this one file in the PR's tree), so a
+            module it imported would be PR-authored — see the `#4828` note above and
+            `tests/test_surface_manifest.py::test_the_pinned_gate_imports_only_its_allow_
+            listed_modules`. The net that keeps the two copies in step is behavioural:
+            `test_the_check_REFUSES_a_baseline_that_carries_a_key_TWICE` and
+            `test_the_duplicate_key_loader_DOES_still_accept_a_merge_key` drive BOTH
+            drivers against the same artifacts and require BOTH to agree — the first
+            version of this copy omitted the merge-tag skip the sibling already had, and
+            the two gates disagreed on a file with no duplicate at all.
+            """
+
+            def construct_mapping(self, node, deep=False):
+                # ⛔ SKIP THE MERGE TAG, DO NOT FLATTEN BEFORE THE SCAN — the same rule,
+                # and the same two measured reasons, as
+                # `tools/surface_manifest.py::_NoDuplicateKeyLoader`: handing this
+                # pre-scan the raw `<<:` tag makes `construct_object` die with "could not
+                # determine a constructor for the tag 'tag:yaml.org,2002:merge'" on a
+                # file that has no duplicate at all, and flattening FIRST would read the
+                # ordinary `<<: *base` plus an explicit override as a duplicate, which
+                # YAML says it is not. The parent constructor flattens for itself.
+                seen: set = set()
+                merge_seen = False
+                for key_node, _value_node in node.value:
+                    if key_node.tag == "tag:yaml.org,2002:merge":
+                        # ⛔ SKIPPED FROM THE SCAN, NOT FROM THE COUNT (round-28 review,
+                        # P2, measured) — the same rule as the sibling copy: a mapping may
+                        # carry at most ONE merge key, and a second `<<:` is silently
+                        # overwritten by whatever it merges, so skipping it entirely would
+                        # leave this gate grading a value the file contradicts (the very
+                        # false PASS the loader exists to refuse).
+                        if merge_seen:
+                            raise yaml.constructor.ConstructorError(
+                                None, None,
+                                f"duplicate merge key '<<' (line "
+                                f"{key_node.start_mark.line + 1}): a mapping may carry at "
+                                f"most ONE merge key, and a second one is silently "
+                                f"overwritten by whatever it merges — delete one of them",
+                                key_node.start_mark,
+                            )
+                        merge_seen = True
+                        continue
+                    try:
+                        key = self.construct_object(key_node, deep=deep)
+                        hash(key)
+                    except TypeError:      # an unhashable key is PyYAML's to refuse
+                        continue
+                    if key in seen:
+                        raise yaml.constructor.ConstructorError(
+                            None, None,
+                            f"duplicate key {key!r} (line {key_node.start_mark.line + 1}): "
+                            f"a forward merge can leave a top-level key TWICE and a YAML "
+                            f"loader silently last-winses it, so this gate would grade a "
+                            f"value the artifact's text contradicts — delete one of them",
+                            key_node.start_mark,
+                        )
+                    seen.add(key)
+                return super().construct_mapping(node, deep=deep)
+
         with manifest_path.open() as fh:
-            doc = yaml.safe_load(fh)
+            # a SafeLoader SUBCLASS, never `unsafe` — the duplicate refusal rides on it
+            doc = yaml.load(fh, Loader=_NoDuplicateKeyLoader)
     except Exception as exc:
         return die(f"could not read the frozen surface baseline {manifest_path}: {exc}")
 

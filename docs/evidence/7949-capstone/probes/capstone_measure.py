@@ -70,7 +70,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:15706-15712`` and
 ``result["vet"]`` at ``:15716-15720``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:22073``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:22094``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -278,7 +278,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:3058-3083``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:22471`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:22492`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -1885,8 +1885,8 @@ def _pass_ran(block: dict) -> bool | None:
     ``if not edus:`` early return (``:14792``) emits literally ``"vet": {"enabled":
     vet_enabled, "s2": {}, "union": {}}`` (``:14823``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:17970``) and ``if vet_enabled and complete_list:`` (``:15372``).
-    So a session whose conversation produced no list emits
+    embed_list:`` (``:17970``) and ``if vet_enabled and complete_list:``
+    (``:15372``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
     exception path (``extractor_v2.py:14512-14515``). ``enabled: true`` therefore

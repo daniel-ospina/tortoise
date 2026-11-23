@@ -5665,17 +5665,24 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     `min_confidence`, `order_by`, …) and this stays the relevance read it always
     was.
 
-    ⛔ AND THE BOUNDARY IS THE WHOLE QUESTION, inclusive of what it must give up:
-    the sentence is matched as a SHAPE, so an ending question with a trailing
-    adverb or an added constraint keeps the relevance read instead of routing —
-    `what has ended recently`, `have any claims been retracted in Q3` and
-    `which claims were retracted by legal` are all RELEVANCE reads. That is
-    deliberate, not an oversight: the population read cannot apply a narrowing,
-    so routing would serve the whole ended set as if the caller's `in Q3` had
-    been honoured. If you want the population, ask the question in its
-    unqualified form (`what ended`, `have any claims been retracted`); if you want
-    the narrowing applied, keep the qualified wording and this is the relevance
-    read you asked for.
+    ⛔ THE PHRASE TABLE — which phrasings route, which do not — IS NOT WRITTEN HERE
+    (#14033), and neither is the qualifier rule that draws the boundary. Both are
+    SERVED text, each from its own single home: the routing table is
+    `state_intent.ROUTING_NOTE` and the qualifier rule is
+    `state_intent.MISSED_ROUTE_HINT`, the remedy that rides every notice. A second
+    copy here would be the silent kind of drift — developer prose that reads like
+    the contract, reaches no caller, and lets a test that pins it pass while the
+    served text says something else. This docstring states the caller OBLIGATIONS
+    (arguments and families), never a phrasing list or a qualifier rule;
+    `tests/test_13557_13558_reachable_reads.py` pins the two headings, the rows this
+    docstring used to restate and the qualifier rule, so a copy cannot come back —
+    scoped to those, because two phrasings ARE named above as illustrations of the
+    ending question.
+
+    ⛔ AND THE SERVED TEXT IS NOT THIS DOCSTRING (#14033). FastMCP never serves it
+    when the registry supplies an explicit `description=`; the caller-facing text is
+    `state_intent.ROUTING_NOTE`, served as this tool's `ToolDefinition.description`
+    in `tool_registry.TOOL_REGISTRY`.
 
     Point results annotated with EP breakdown. confidence_mean is THE point's
     confidence (belief mean α/(α+β): persisted posterior when EP has run,
