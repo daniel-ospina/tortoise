@@ -3742,32 +3742,64 @@ DESKTOP_MIN_HEIGHT = 900
 #: `max-<axis>: <value>` inside a media CONDITION — the value may carry any unit.
 MAX_SIDE_MEDIA_RE = re.compile(r"max-(width|height)\s*:\s*([^)\s]+)")
 
+#: A top-level logical OR — the `or` KEYWORD of a media condition (Media Queries
+#: 4 §3: `<media-condition> or <media-condition>`). The look-ahead refuses
+#: `orange`/`order`, and the caller's look-behind refuses `color`.
+OR_KEYWORD_RE = re.compile(r"or(?![\w-])", re.IGNORECASE)
+
+#: A NEGATED media query or condition (`not all and (max-width: 760px)`).
+NOT_KEYWORD_RE = re.compile(r"(?<![\w-])not(?![\w-])", re.IGNORECASE)
+
 
 def _media_query_components(condition: str) -> list[str]:
-    """The component queries of a comma-separated media query LIST.
+    """The alternative queries of a media query LIST **or** an `or` condition.
 
-    A list is a logical OR: *"a media query list is true if any component query
-    is true and false only when all component queries are false"* (W3C Media
-    Queries Level 4 §3; MDN, "Using media queries": *"comma-separated media
-    queries act as a logical OR"*). Splitting is what lets
-    `_media_applies_at_desktop` decide by the list's BEST query instead of by a
-    single threshold drawn from the whole string (#14406 review round 7).
+    Both spellings are the same logical OR, and both are split so that
+    `_media_applies_at_desktop` decides by the BEST alternative instead of by a
+    single threshold drawn from the whole string:
 
-    A comma inside `var(--narrow, 760px)` / `calc(…)` is NOT a list separator,
-    so the split tracks parenthesis depth.
+    * a query LIST — *"a media query list is true if any component query is true
+      and false only when all component queries are false"* (W3C Media Queries
+      Level 4 §3; MDN, "Using media queries": *"comma-separated media queries
+      act as a logical OR"*), fixed in #14406 review round 7;
+    * an `or` CONDITION — `<media-condition> or <media-condition>` is the same
+      OR one level in. `and` binds tighter than `or`, so the top-level split is
+      on `or`, exactly as it is on a comma. Measured while closing the round-7
+      class: `@media (max-width: 760px) or (min-width: 900px)` applies at
+      1440x900 through its SECOND operand, and the round-7 splitter (commas
+      only) returned it whole, read `max-width: 760px` out of it, and called it
+      a narrow hatch — `_css_reaching_decls` did NOT see
+      `.pricing-card .btn { margin-top: 0 }` inside it, so every row of
+      `TestProductTeamsPricingCardCtaBaseline` stayed GREEN over the 3-baseline
+      split this class exists to catch.
+
+    A comma inside `var(--narrow, 760px)` / `calc(…)` is NOT a separator, so the
+    split tracks parenthesis depth; an `or` inside the parens is left alone for
+    the same reason.
     """
     parts: list[str] = []
-    depth, current = 0, []
-    for char in condition:
+    depth = 0
+    current: list[str] = []
+    index = 0
+    while index < len(condition):
+        char = condition[index]
         if char == "(":
             depth += 1
         elif char == ")":
             depth -= 1
-        if char == "," and depth == 0:
+        if depth == 0 and char == ",":
             parts.append("".join(current))
             current = []
-        else:
-            current.append(char)
+            index += 1
+            continue
+        if (depth == 0 and OR_KEYWORD_RE.match(condition, index)
+                and not (index and re.match(r"[\w-]", condition[index - 1]))):
+            parts.append("".join(current))
+            current = []
+            index += 2
+            continue
+        current.append(char)
+        index += 1
     parts.append("".join(current))
     return [part.strip() for part in parts if part.strip()]
 
@@ -3794,10 +3826,10 @@ def _media_applies_at_desktop(condition: str) -> bool:
     REACHING a desktop viewport, because guessing "narrow" is the direction that
     hides an override.
 
-    The CONDITION may be a comma-separated query LIST, which is a logical OR —
-    so the answer is `any()` over the components, never a verdict from one
-    threshold picked out of the whole string. Measured (#14406 review round 7):
-    `@media (max-width: 760px), (min-width: 900px) { .pricing-card .btn {
+    The CONDITION may be a query LIST or an `or` condition — both are a logical
+    OR — so the answer is `any()` over the alternatives, never a verdict from
+    one threshold picked out of the whole string. Measured (#14406 review round
+    7): `@media (max-width: 760px), (min-width: 900px) { .pricing-card .btn {
     margin-top: 0 } }` applies at 1440x900 through its SECOND query, and the
     single-threshold form read it as a narrow hatch — all four rows of
     `TestProductTeamsPricingCardCtaBaseline` stayed GREEN while the rendered
@@ -3808,7 +3840,20 @@ def _media_applies_at_desktop(condition: str) -> bool:
 
 
 def _media_query_applies_at_desktop(component: str) -> bool:
-    """Could ONE component query (one comma-free condition) apply at desktop."""
+    """Could ONE alternative query (one comma- and `or`-free condition) apply at desktop."""
+    # `not` inverts the whole query, so the `max-` threshold no longer says what
+    # this reader thinks it says: `not all and (max-width: 760px)` is TRUE at
+    # 1440x900 (the inner query is false there, and `not` flips it), while the
+    # un-negated reading calls it a narrow hatch and hides the rule. Measured
+    # while closing the round-7 class: the mutant
+    # `@media not all and (max-width: 760px) { .pricing-card .btn {
+    # margin-top: 0 } }` was invisible to `_css_reaching_decls`, so all four
+    # rows of `TestProductTeamsPricingCardCtaBaseline` stayed GREEN over a
+    # rendered 3-baseline split. Negation is not modelled, so this fails CLOSED
+    # (treats the query as reaching a desktop viewport) — the same direction
+    # every other unmodellable input takes here.
+    if NOT_KEYWORD_RE.search(component):
+        return True
     constrained = False
     for axis, raw in MAX_SIDE_MEDIA_RE.findall(component):
         floor = DESKTOP_MIN_WIDTH if axis == "width" else DESKTOP_MIN_HEIGHT
@@ -11769,3 +11814,104 @@ class TestCssDesktopReachAndSpecificity:
             "1440x900 (`min-width: 900px` is true there) but the reach reader "
             "did not see it, so `test_no_other_rule_takes_the_ctas_slack` "
             f"stays GREEN over a 3-baseline split. Reached: {reached!r}")
+
+    def test_an_or_condition_is_the_same_logical_or_as_a_query_list(self):
+        """`or` is a top-level OR too — the round-7 splitter only knew commas.
+
+        Media Queries 4 §3 spells the OR twice: a comma-separated query LIST,
+        and `<media-condition> or <media-condition>` inside a condition. `and`
+        binds tighter than `or`, so the split belongs on `or` exactly as it
+        belongs on a comma — and the round-7 fix split only on commas, which
+        left the same fail-open one spelling over: the whole
+        `(max-width: 760px) or (min-width: 900px)` came back as ONE component,
+        the reader took `max-width: 760px` out of it and called the block a
+        narrow hatch. Measured on this tree before the split was widened:
+        `_css_reaching_decls` did not see `.pricing-card .btn { margin-top: 0 }`
+        inside it (`reached=False`), while a browser applies the rule at
+        1440x900 through the second operand.
+        """
+        for applying in (
+                "(max-width: 760px) or (min-width: 900px)",
+                "(min-width: 900px) or (max-width: 760px)",
+                "(max-width: 760px) or (max-width: 1440px)",
+                "(max-width: 760px) or (min-width: 900px) or print",
+                "(max-width: 760px) OR (min-width: 900px)",
+        ):
+            assert _media_applies_at_desktop(applying), (
+                f"`@media {applying}` is true at 1440x900 through one of its "
+                "`or` operands, but the reach predicate says it does not — the "
+                "rule inside it is invisible to every cascade row (#14406 "
+                "round-7 class, the `or` spelling)")
+
+        # ...and an `or` whose operands are ALL narrow is still a hatch.
+        for excluded in (
+                "(max-width: 760px) or (max-width: 480px)",
+                "(max-width: 760px) and (min-height: 400px)",
+        ):
+            assert not _media_applies_at_desktop(excluded), (
+                f"`@media {excluded}` cannot apply at 1440x900, but the reach "
+                "predicate says it does — the cards stack at those widths by "
+                "design, so this is a false RED on a correct page")
+
+        assert _media_query_components(
+            "(max-width: 760px) or (min-width: 900px)") == [
+            "(max-width: 760px)", "(min-width: 900px)"], (
+            "the `or` split did not split a real `or` condition")
+        # `or` as a SUBSTRING of a word is not an operator, and neither is an
+        # `or` inside the parens of a function value.
+        assert _media_query_components("(color: orange)") == ["(color: orange)"], (
+            "`orange` was split as `or` + `ange`")
+        assert _media_query_components("(max-width: var(--or, 760px))") == [
+            "(max-width: var(--or, 760px))"], (
+            "an `or` INSIDE the parens of `var(--or, 760px)` was treated as an "
+            "operator, inventing two conditions that do not exist")
+
+    def test_a_negated_media_query_is_reachable_not_a_hatch(self):
+        """`not` inverts the query, so a `max-width` inside it can be DESKTOP.
+
+        `@media not all and (max-width: 760px)` is TRUE at 1440x900: the inner
+        `(max-width: 760px)` is false there, and `not` flips it. The reader
+        modelled only the threshold, so it called the block a narrow hatch and
+        hid the rule. Measured on this tree before the fix: the mutant
+        `@media not all and (max-width: 760px) { .pricing-card .btn {
+        margin-top: 0 } }` returned `reached=False`, so all four rows of
+        `TestProductTeamsPricingCardCtaBaseline` stayed GREEN while a browser
+        applied it and split the rendered CTAs back to three baselines.
+
+        Negation is NOT modelled here, so the predicate fails CLOSED — any
+        `not` query is treated as reaching a desktop viewport. That is
+        deliberately conservative in the over-block direction: it can red a
+        page that hides a rule behind `not (min-width: …)`, but it cannot hide
+        an override, which is the direction that ships a defect.
+        """
+        for reached in (
+                "not all and (max-width: 760px)",
+                "not (min-width: 900px)",
+                "NOT all and (max-width: 760px)",
+        ):
+            assert _media_applies_at_desktop(reached), (
+                f"`@media {reached}` carries a `not`, so its `max-` threshold "
+                "does not mean what this reader reads it as — an unmodelled "
+                "negation must fail CLOSED (reaching), never be treated as a "
+                "narrow hatch (#14406 round-7 class, the `not` spelling)")
+
+    def test_an_or_and_a_negated_media_override_are_reached(self):
+        """The page-level mutants the comma-only splitter left GREEN.
+
+        Both rules apply at 1440x900 in a browser and both restore the
+        #13645 item 6 signature — three CTA baselines, 70.2px apart — while
+        `test_no_other_rule_takes_the_ctas_slack` and the flex-column row stayed
+        GREEN, because the reach reader never yielded the declaration at all.
+        """
+        for mutant in (
+                "@media (max-width: 760px) or (min-width: 900px) { "
+                ".pricing-card .btn { margin-top: 0 } }",
+                "@media not all and (max-width: 760px) { "
+                ".pricing-card .btn { margin-top: 0 } }",
+        ):
+            reached = [(p, v) for p, v in
+                       _css_reaching_decls(self._page_with(mutant), "margin-top", ".btn")]
+            assert any(v.strip() == "0" for _p, v in reached), (
+                f"`{mutant}` applies at 1440x900 but the reach reader did not "
+                "see `.pricing-card .btn { margin-top: 0 }`, so the CTA rows "
+                f"stay GREEN over a 3-baseline split. Reached: {reached!r}")
