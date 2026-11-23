@@ -246,7 +246,6 @@ the window.
    forecast for a real drain: an extracting session is slower per POST, and that
    slowness is what keeps it under the limiter.
 
-
 ### Reading "deferred" correctly
 
 `deferred N` means **retryable, still on disk, will be attempted again**. There
