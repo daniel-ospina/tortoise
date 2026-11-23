@@ -3713,7 +3713,7 @@ def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
 
 
 def _row_for_pid(pid: int) -> str | None:
-    """The `command=` text a census would read for ONE pid — see the four callers for its role.
+    """The `command=` text a census would read for ONE pid — see the four callers below.
 
     ⚠️ IT IS NOT ONE THING. In caller 1 it is a DIAGNOSTIC interpolated into a failure message;
     at caller 2 it is GRADED — but no longer by a bare `assert row` (#14394 P3): a `None`
@@ -3721,8 +3721,13 @@ def _row_for_pid(pid: int) -> str | None:
     only the fact it really grades — a table that WAS read with zero rows for the pid. Calling it
     "never an oracle" was true of caller 1 only, and contradicts caller 2 below.
 
-    FOUR call sites (#12039), and they do NOT play one role. `poll()` collects the status and a
-    collected child has no row left to quote, so every call site reads the row FIRST.
+    FOUR call sites IN THE CENSUS ARMS (#12039), and they do NOT play one role. `poll()` collects
+    the status and a collected child has no row left to quote, so every call site reads the row
+    FIRST.
+    ⚠️ The count is those four, NOT every `_row_for_pid(` in this file: the hermetic pin below
+    (`test_row_for_pid_budgets_the_read_and_separates_the_two_empty_facts`) drives it three more
+    times against a stubbed `subprocess.run`, and those calls role-play the gates rather than
+    being call sites of the census.
 
       1. the fixture test's FAILURE path — when the poll ends without the census seeing the
          fixture's pid (the deadline expiring, or the child dying early), what settles the cause
@@ -5431,10 +5436,21 @@ def test_row_for_pid_budgets_the_read_and_separates_the_two_empty_facts(monkeypa
         "is unbounded: a hanging `ps` holds the shard open indefinitely and a loaded one answers "
         "HERE while the probe says it cannot — the #5049 rule-1 inversion this line exists to "
         f"remove. The call's kwargs were {seen[-1]!r}")
-    assert seen[-1]["timeout"] >= _PS_ANSWERS_TIMEOUT_S, (
-        "the witness's budget is TIGHTER than the control's, so a `ps` the control can still read "
-        "inside `_PS_ANSWERS_TIMEOUT_S` is already unreadable to the witness — a window in which "
-        "`_ps_answers()` answers (gate does not fire) and the row cannot be read (#14394 Issue 1)")
+    # ⛔ THE RELATION IS EQUALITY, BOTH WAYS (#14394 P3, review cycle 19). A `>=` grades only the
+    # TIGHTER side and leaves the LOOSER one — this PR's own primary direction — unguarded: with
+    # `_WITNESS_TIMEOUT_S` set to 7200.0 the witness answers where the probe reports "cannot
+    # answer", which is exactly the required-shard FAIL produced by load that this change exists
+    # to remove, and `>=` certifies it. The design holds ONE number for the pair (see
+    # `_WITNESS_TIMEOUT_S = _PS_ANSWERS_TIMEOUT_S`), so "in step" is `==` and a legitimate
+    # in-step lowering of both (`test_a_budget_lowered_in_step_is_not_a_false_block`) stays green.
+    assert seen[-1]["timeout"] == _PS_ANSWERS_TIMEOUT_S, (
+        "the witness's budget must be the CONTROL's budget, in both directions: TIGHTER and a `ps` "
+        "the control can still read inside `_PS_ANSWERS_TIMEOUT_S` is already unreadable to the "
+        "witness — a window in which `_ps_answers()` answers (gate does not fire) and the row "
+        "cannot be read; LOOSER and the witness answers where `_ps_answers()` reports it cannot, "
+        "so a loaded box turns a `ps` slower than the probe into a FAIL of the shard this test "
+        "protects (#14394 Issue 1). Got "
+        f"{seen[-1]['timeout']!r} against a probe budget of {_PS_ANSWERS_TIMEOUT_S!r}")
     # ⛔ AND NOT `_CENSUS_SAMPLE_TIMEOUT_S` (#14394 P3). That constant's own comment scopes it to
     # `pi_processes`'s `ps -ww -axo` sample and says it is explicitly NOT the witness's basis, so
     # comparing the two false-blocks a legitimate change: lowering `_PS_ANSWERS_TIMEOUT_S` to 20.0
@@ -5451,6 +5467,18 @@ def test_row_for_pid_budgets_the_read_and_separates_the_two_empty_facts(monkeypa
         "witness's budget from the probe's, and both directions are silent: TIGHTER re-opens the "
         "#14394 Issue 1 window, LOOSER lets the witness answer where the probe says it cannot — "
         "a required-shard FAIL produced by load")
+
+    # ⛔ AND THE OTHER HALF OF THE PAIR IS PINNED THE SAME WAY (#14394 P3, review cycle 19). The
+    # relation above compares two RECORDED values, so it certifies "in step" even when the probe
+    # has STOPPED reading its constant: `_ps_answers`'s call reverted to a bare `timeout=60` while
+    # both module constants are lowered to 20.0 leaves a witness of 20 s against a probe of 60 s —
+    # the Issue-1 asymmetry — and every assertion above still passes. A literal at the probe is
+    # exactly as silent as a literal at the witness, so it gets the same source pin.
+    assert "timeout=_PS_ANSWERS_TIMEOUT_S" in inspect.getsource(_ps_answers), (
+        "`_ps_answers` no longer takes its budget from `_PS_ANSWERS_TIMEOUT_S`, so the two "
+        "budgets are only NUMERICALLY in step while the constant is in force: a literal at the "
+        "probe (`timeout=60`) survives every lowering of the constant and re-creates the window "
+        "where the control answers and the witness cannot read (#14394 Issue 1)")
 
     def _times_out(*_a, **_k):
         raise subprocess.TimeoutExpired(cmd="ps", timeout=_WITNESS_TIMEOUT_S)
@@ -5486,8 +5514,8 @@ def test_row_for_pid_budgets_the_read_and_separates_the_two_empty_facts(monkeypa
 def test_a_budget_lowered_in_step_is_not_a_false_block(monkeypatch) -> None:
     """The witness budget is pinned to the PROBE's, never to the census's (#14394 P3).
 
-    The property the design rests on is that the witness gives up no earlier than the probe it
-    witnesses, so a change that lowers `_PS_ANSWERS_TIMEOUT_S` — and `_WITNESS_TIMEOUT_S` with it,
+    The property the design rests on is that the witness and the probe it witnesses share ONE
+    budget, so a change that lowers `_PS_ANSWERS_TIMEOUT_S` — and `_WITNESS_TIMEOUT_S` with it,
     since it is defined by that constant — keeps the two exactly in step. Driving the budget arm
     under such a pair is the whole assertion: the census's own sample budget
     (`_CENSUS_SAMPLE_TIMEOUT_S`, 30 s) is explicitly NOT the witness's basis (its comment says so),
