@@ -339,6 +339,64 @@ def test_summary_verb_refuses_when_the_recorded_cost_is_absent(
     assert not (out / "corpus-cost.json").exists()
 
 
+def test_summary_renders_without_a_spool_on_disk(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`summary` needs the ARTEFACTS, never the live spool (a fresh clone has none).
+
+    `args.spool_src` is dead on the `summary` path — the verb reads `--out` and the
+    `corpus-cost.json` beside it. The pre-fix `is_dir()` guard sat OUTSIDE the
+    `summary` branch, so on any box that has never captured (fresh clone, CI
+    runner, reviewer's laptop, container) the verb refused with `no spool at …`:
+    the very command the failing committed-artefact pin tells the maintainer to
+    run, dying on a condition the verb does not depend on. The three `summary`
+    tests above all pass an existing `--spool-src`, so nothing distinguished
+    "requires a spool" from "does not".
+    """
+    out = tmp_path / "evidence"
+    _artefacts(out)
+    absent = tmp_path / "definitely-no-such-spool"
+    assert not absent.exists()
+
+    assert rehearsal._run(["summary", "--out", str(out),
+                           "--spool-src", str(absent)]) == 0
+
+    assert "sessions: 265" in capsys.readouterr().out
+    assert "sessions: 265" in (out / "SUMMARY.md").read_text(encoding="utf-8")
+
+
+def test_serve_verb_gates_the_database_target_before_it_touches_anything(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_serve` is a CLI subcommand, so recorded decision 2 must hold on THAT reach.
+
+    Every `_gate_uri` test calls the helper directly; nothing drove
+    `_run(["_serve", …])`, which is how this gap survived four review rounds.
+    `_run` dispatches to `_serve` BEFORE its own `_gate_uri` call, so invoking the
+    subcommand directly started the real app against whatever `TORTOISE_DB_URI`
+    the shell exported — the loopback/production refusal never evaluated.
+
+    `_mode_knobs` is replaced with a sentinel so the PRE-FIX run stops there (and
+    reds this pin) without importing the app or binding a port, which keeps the
+    assertion hermetic.
+    """
+    def _reached(mode: str) -> dict[str, str]:
+        raise AssertionError("`_serve` applied mode knobs before gating the target")
+
+    monkeypatch.setattr(rehearsal, "_mode_knobs", _reached)
+    argv = ["_serve", "--mode", "head-mock", "--port", "1",
+            "--log", str(tmp_path / "observed.jsonl")]
+
+    # A production target is refused ...
+    monkeypatch.setenv("TORTOISE_DB_URI", "bolt://api.premiselabs.co:6379/live-v5")
+    with pytest.raises(SystemExit) as exc:
+        rehearsal._run(argv)
+    assert "refusing a production target" in str(exc.value)
+
+    # ... and a loopback lane is NOT (non-vacuity: the gate is not "refuse all").
+    monkeypatch.setenv("TORTOISE_DB_URI", "bolt://localhost:16379/tortoise")
+    with pytest.raises(AssertionError, match="before gating"):
+        rehearsal._run(argv)
+
+
 # ── the CI-selection half: a tool-only diff must RUN these pins ──────────────
 
 

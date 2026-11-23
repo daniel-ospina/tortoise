@@ -270,6 +270,15 @@ def _serve(argv: list[str] | None = None) -> int:
     ap.add_argument("--log", required=True, help="JSONL of observed requests")
     args = ap.parse_args(argv)
 
+    # ⛔ `_serve` is a REACHABLE entry point of the shipped CLI (an argparse
+    # subcommand), not only an internal helper: reached directly it starts the REAL
+    # app — writing real `Session`/turn rows — against whatever `TORTOISE_DB_URI`
+    # the shell exports. The parent gates first, so on the documented path this is
+    # idempotent defence in depth; but recorded decision 2 is stated as a property
+    # of this FILE, and `_run` dispatches here BEFORE its own gate, so this reach
+    # was the one it did not cover.
+    _gate_uri(os.environ.get("TORTOISE_DB_URI"))
+
     # ⛔ THE ENVIRONMENT MUST BE SET BEFORE THE APP IS IMPORTED. Several of these
     # knobs are read at MODULE IMPORT into constants —
     # `hosted_api._CAPTURE_MAX_IN_FLIGHT = max(1, min(_int_env(
@@ -1041,9 +1050,19 @@ def _run(argv: list[str] | None = None) -> int:
         return _serve(["--mode", args.mode, "--port", str(args.port),
                        "--log", args.log])
 
-    _gate_uri(os.environ.get("TORTOISE_DB_URI")) if args.cmd != "summary" else None
-    if not (args.spool_src / "entries").is_dir():
-        raise SystemExit(f"no spool at {args.spool_src}")
+    # ⛔ BOTH of these preconditions belong to the verbs that DRAIN. `summary` is
+    # the verb whose whole contract is "re-render the prose from the artefacts on
+    # disk and never touch the live spool" — `args.spool_src` is unread on that
+    # path. A `is_dir()` guard placed OUTSIDE the branch made the verb refuse for
+    # want of a spool it never reads, on exactly the box the failing
+    # committed-artefact pin sends the maintainer to (fresh clone, CI runner,
+    # reviewer's laptop, container — none has ever captured), and it named a
+    # condition the verb does not depend on. Same defect class as the `all` path's
+    # "the remedy it prints is the command that just failed".
+    if args.cmd != "summary":
+        _gate_uri(os.environ.get("TORTOISE_DB_URI"))
+        if not (args.spool_src / "entries").is_dir():
+            raise SystemExit(f"no spool at {args.spool_src}")
     args.out.mkdir(parents=True, exist_ok=True)
 
     if args.cmd == "summary":
