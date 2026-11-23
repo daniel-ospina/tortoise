@@ -1642,13 +1642,14 @@ rows:
     rather than asking for a filtered read, because the POPULATION applies them — `kind`, `entity_type`, `limit`
     — so none silences the notice. ⛔ AND ONE ARGUMENT SITS OUTSIDE THE LIST AND DOES SILENCE IT — ⚠️ ON THE PRIVATE
     `TortoiseSDK._tortoise_fts_query` ONLY, because THIS tool takes neither of the two names below, so passing one
-    here is a TypeError and not a choice you have: `include_terminal=True` picks a scope the caller has already
-    chosen, so the cue is not seen-and-unapplied and no notice is owed. ⛔ `ended_scope=` IS NOT A SECOND ONE: beside
-    a question it is REFUSED with a ValueError (#13558), so it cannot suppress the report — it declines the call.
-    The filter and the population are different answers: send the question ALONE to get the population or the report.
-    (The hosted `GET /v1/search` route below takes only the question and `limit`, neither of which is a routing
-    argument, so it is not silenced.) ⛔ THIS TOOL CANNOT REPORT the cue it saw and could not apply — its reply is
-    the row list and it takes no sink — so an MCP caller who needs that report must use the HOSTED deployment''s
+    here is a TypeError and not a choice you have: `include_terminal=True`, the currency toggle: it asks for the
+    same read without the currency filter, so the cue is not applied beside it and no notice is emitted — the read
+    goes to relevance, which is the same silence a filtered read produces. ⛔ `ended_scope=` IS NOT A SECOND ONE:
+    beside a question it is REFUSED with a ValueError (#13558), so it cannot suppress the report — it declines the
+    call. The filter and the population are different answers: send the question ALONE to get the population or
+    the report. (The hosted `GET /v1/search` route below takes only the question and `limit`, neither of which is
+    a routing argument, so it is not silenced.) ⛔ THIS TOOL CANNOT REPORT the cue it saw and could not apply — its
+    reply is the row list and it takes no sink — so an MCP caller who needs that report must use the HOSTED deployment''s
     `GET /v1/search` route, whose response body carries `state_question` (`{routed: false, population, reason, cue,
     hint}`), which is the only CUSTOMER-facing channel: no PUBLIC SDK method exposes it either — the same payload
     rides the PRIVATE `TortoiseSDK._tortoise_fts_query(..., read_status_out=...)` sink (under `read_status_out["state_question"]`),
