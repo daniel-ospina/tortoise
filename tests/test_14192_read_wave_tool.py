@@ -1583,7 +1583,15 @@ _SETATTR_SPELLINGS = frozenset({"setattr"})
 #: defect, and `_aliases_of`' fill set carries it too — so the vocabulary was the only gap. The
 #: reason the two sets are kept apart (above) is `__setitem__`'s SINGLE-KEY vocabulary;
 #: `__ior__` takes a mapping operand once, like `update`, so it belongs in both.
-_MAPPING_MUTATORS = frozenset({"update", "setdefault", "__ior__"})
+#: ⛔ AND `__init__`, BY THE SAME RULE (#14326 review cycle 21, EACH MEASURED GREEN **and
+#: LIVE**: `__builtins__.__init__({"print": getattr})`, its `globals()` twin, its alias and the
+#: unbound `dict.__init__(__builtins__, {...})` every one executed the read, while
+#: `__builtins__.update({...})` and `__builtins__.__ior__({...})` are REFUSED). `dict.__init__`
+#: MERGES (`{"a":1}.__init__({"b":2})` → both keys), which is `update`'s operation — and
+#: `_REGISTRY_MUTATORS` has carried this token since round 32 ("`__init__` MERGES, SO IT IS A
+#: STORE"). Cycle 20's note called the vocabulary "the only gap" while leaving this member out;
+#: the rule it states is what makes `__init__` a member, so the sentence is corrected with it.
+_MAPPING_MUTATORS = frozenset({"update", "setdefault", "__ior__", "__init__"})
 #: The registry's OWN mutator vocabulary (#14326 round 20, MEASURED GREEN: `sys.modules
 #: .__setitem__("tortoise.sdk", …)` and `sys.modules.__ior__({…})` left the pin green while the
 #: subscript store was red — and this file ALREADY reds `_t.__dict__.__setitem__("TortoiseSDK", …)`,
@@ -8047,6 +8055,10 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # and the OPERATOR form reached no arm at all.
         "a STORE into a namespace by `__ior__`": (
             '    __builtins__.__ior__({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
+        "a STORE into a namespace by `__init__`": (
+            '    __builtins__.__init__({"print": getattr})\n'
             '    print(sdk, "_tortoise_fts_query")'
             '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
         "a STORE into a namespace by the `|=` operator": (
