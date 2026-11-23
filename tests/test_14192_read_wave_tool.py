@@ -934,8 +934,11 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     if isinstance(node, ast.Set):
         return frozenset().union(*(_possible_strings(elt, consts) for elt in node.elts))
     if isinstance(node, ast.Dict):
-        return frozenset().union(*(_possible_strings(key, consts)
-                                   for key in node.keys if key is not None))
+        # ⛔ NO `key is not None` FILTER (#14326 review P3, measured: deleting it left the
+        # whole pin GREEN). A `**` spread's key IS `None`, and `_possible_strings(None)`
+        # already falls through every arm to `frozenset()` — so the filter restated the
+        # fall-through and no mutant could red it. This file deletes clauses like that.
+        return frozenset().union(*(_possible_strings(key, consts) for key in node.keys))
     # ⛔ THE `NamedExpr` ARM MATCHES `_values` (#14326 round 8): an inline walrus operand,
     # `getattr(sdk, (_x := "_tortoise_fts_query"))`, is a static literal reached without any
     # bind node — the inline path must resolve it too, or the `indirect` arm cannot fire.
@@ -5431,6 +5434,24 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "INLINE repetition by 1 in the fetch": (
             '    getattr(sdk, "_tortoise_fts_query" * 1)'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE SEQUENCE CAN BE THE **RIGHT** OPERAND (#14326 review P2, MEASURED: deleting
+        # the `right * left` disjunct left the whole pin GREEN). `_possible_strings`' `Mult`
+        # arm says "either operand can be the sequence" in its own comment, but every row
+        # put the literal on the LEFT — a mirrored arm with no row is an unpinned half.
+        "INLINE repetition with the SEQUENCE ON THE RIGHT": (
+            '    getattr(sdk, 1 * "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "BIND-path repetition with the SEQUENCE ON THE RIGHT": (
+            '    _N = 1 * "_tortoise_fts_query"\n'
+            f'    {reach.format(name="_N")}\n'),
+        # ⛔ A `match` MAPPING PATTERN's `**rest` BINDS A NAME (#14326 review P3, MEASURED:
+        # dropping the `rest` fallback at `_rebound_callee_names` left the pin GREEN, so the
+        # row that claimed to pin it only red the `_str_constants` copy of the enumeration).
+        "`match` `**rest` capture rebinding a PURE callee": (
+            '    match _obj:\n'
+            '        case {"a": 1, **print}:\n'
+            '            print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "PARAMETER named as a pure callee": (
             '    def _f(print=getattr):\n'
             '        print(sdk, "_tortoise_fts_query")'
@@ -5632,6 +5653,16 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a subscript STORE whose key is the read literal is a FALSE RED — it records under "
         "the name and executes nothing; the Constant arm's Load guard is what keeps the "
         "census counting CALLABLE spellings")
+    # ⛔ THE NAME-CARRIED TWIN OF THAT CONTROL (#14326 review P1, MEASURED: deleting the
+    # NAME arm's `ctx is Load` guard left the whole pin GREEN). The Constant arm had a row in
+    # both directions and the Name arm had none, so a recording store that carries the
+    # literal through a NAME could start REDDING with no test noticing.
+    name_carried_store = ('    _N = "_tortoise_fts_query"\n'
+                          '    _d = {}\n'
+                          '    _d[_N] = 0\n')
+    assert not _pin_refuses(_pin_source(name_carried_store)), (
+        "a subscript STORE whose key is a NAME bound to the read literal is the same false "
+        "RED as the literal spelling — the Name arm's Load guard is its twin")
 
     # ⛔ THE RECORDING DIRECTION, IN THE CALL SPELLINGS (#14326 round 6, all four MEASURED
     # REFUSED at `81973329`): the Constant arm treated every callee outside `_PURE_READS` as
