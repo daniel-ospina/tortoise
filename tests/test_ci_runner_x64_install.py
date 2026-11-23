@@ -4540,18 +4540,34 @@ def _de_numbered_cite_problems(
                 "line number was criticised for"
             )
             continue
-        # ⛔ Scoped to the POINTER'S OWN comment block, never the file: `ci.yml` spells
-        # `fetch-depth: 0` seven times elsewhere, so a file-wide `declaration in text` test stays
-        # green over the sentence rewritten to the OPPOSITE claim.
+        # ⛔ Scoped to the POINTER'S OWN SENTENCE, never the file and never the whole comment block.
+        # The file is too wide (`ci.yml` spells `fetch-depth: 0` seven times elsewhere) AND so is the
+        # block: this pointer's paragraph also says "… This job checks out at `fetch-depth: 0`", the
+        # same VALUE for a DIFFERENT subject, 20 lines of one `#` run. A block test therefore stays
+        # green over an opposite-claim rewrite of the cited clause — measured. So the block is split
+        # into sentences and ONE piece must carry the pointer, the marker AND the declaration.
         lo, hi = _comment_block(lines, pointers[0])
         block = "\n".join(lines[lo:hi])
-        if marker not in block:
+        if len(re.findall(_DE_NUMBERED_POINTER_RE, block)) > 1:
+            problems.append(
+                f"the pointer's own comment block at {rel}:{lo + 1}-{hi} carries more than one "
+                "de-numbered pointer — the register's marker cannot say which one this entry "
+                "covers, so a second pointer is registered nothing"
+            )
+            continue
+        sentences = [
+            piece
+            for piece in re.split(r"(?<=[.;])\s+", block)
+            if re.search(_DE_NUMBERED_POINTER_RE, piece)
+        ]
+        sentence = sentences[0] if sentences else ""
+        if marker not in sentence:
             problems.append(
                 f"the pointer at {rel}:{pointers[0] + 1} no longer names the {marker!r} marker in "
                 "its own sentence — the citation then resolves to no note at all"
             )
             continue
-        if declaration not in block:
+        if declaration not in sentence:
             problems.append(
                 f"the pointer at {rel}:{pointers[0] + 1} no longer states the `{declaration}` claim "
                 "in its own sentence — this pin would then grade a claim the sentence does not make"
@@ -4613,19 +4629,23 @@ def _unregistered_de_numbered_pointers(
     `_unregistered_wall_clock_citations` closes in the other direction, and the reason is the same:
     the PR whose whole purpose was correcting citations added three outside the register.
 
-    ⛔ An entry covers a pointer only when its marker sits on the pointer's OWN line or one beside it
-    — the width of a wrapped sentence, nothing more. A wider window is the hole it replaces: the same
-    PARAGRAPH is where a second pointer is most likely to be added, and a five-line window silently
-    excused one written two lines below the registered pointer.
+    ⛔ Coverage is STRUCTURAL — the pointer's own `#` comment block must name a registered marker —
+    and not a proximity window: the arm and the register must agree on ONE definition of coverage.
+    A ±N-line window (this arm used ±5, then ±1) disagrees with the register the moment the paragraph
+    is rewrapped, and it then demands a register entry that already exists. The window also excused a
+    new pointer written in the SAME paragraph, which is the likeliest place one appears.
     """
     covered = {marker for _rel, marker, _decl in markers}
     lines = text.splitlines()
     out: list[tuple[int, str]] = []
     for i, line in enumerate(lines):
-        for m in re.finditer(_DE_NUMBERED_POINTER_RE, line):
-            window = "\n".join(lines[max(0, i - 1): i + 2])
-            if not any(marker in window for marker in covered):
-                out.append((i + 1, m.group(0)))
+        m = re.search(_DE_NUMBERED_POINTER_RE, line)
+        if m is None:
+            continue
+        lo, hi = _comment_block(lines, i)
+        block = "\n".join(lines[lo:hi])
+        if not any(marker in block for marker in covered):
+            out.append((i + 1, m.group(0)))
     return out
 
 
@@ -4879,17 +4899,24 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         assert _de_numbered_cite_problems(
             _citing.replace(_marker, "_11057 review P2_"), workflow_lines, _entry
         ), "the de-numbered pin no longer sees a citing file that stopped naming the marker"
-        # The SENTENCE's own block, not the file: `ci.yml` spells `fetch-depth: 0` seven times
-        # elsewhere, so rewriting the pointer's sentence to the OPPOSITE claim used to stay green.
+        # The POINTER'S OWN SENTENCE, not the file and not its 20-line comment block: the block also
+        # says "… This job checks out at `fetch-depth: 0`", the same VALUE for a DIFFERENT subject,
+        # so a block-wide replace reds for the wrong reason and a block-wide CHECK stays green over
+        # the clause rewritten to the opposite claim (which is how this control was cycle-3 wrong).
+        _lines = _citing.splitlines()
         _pointer_at = next(
-            i for i, line in enumerate(_citing.splitlines()) if re.search(_DE_NUMBERED_POINTER_RE, line)
+            i for i, line in enumerate(_lines) if re.search(_DE_NUMBERED_POINTER_RE, line)
         )
-        _lo, _hi = _comment_block(_citing.splitlines(), _pointer_at)
-        _sentence = _citing.splitlines()
-        _mutated = [
-            line.replace(_declaration, "fetch-depth: 1") if _lo <= k < _hi else line
-            for k, line in enumerate(_sentence)
-        ]
+        _lo, _hi = _comment_block(_lines, _pointer_at)
+        _block = "\n".join(_lines[_lo:_hi])
+        _piece_at = next(
+            k
+            for k, piece in enumerate(re.split(r"(?<=[.;])\s+", _block))
+            if re.search(_DE_NUMBERED_POINTER_RE, piece)
+        )
+        _pieces = re.split(r"(?<=[.;])\s+", _block)
+        _pieces[_piece_at] = _pieces[_piece_at].replace(_declaration, "fetch-depth: 1")
+        _mutated = _lines[:_lo] + "\n".join(_pieces).splitlines() + _lines[_hi:]
         assert _de_numbered_cite_problems("\n".join(_mutated), workflow_lines, _entry), (
             "the de-numbered pin no longer sees its OWN sentence rewritten to make the OPPOSITE "
             "claim — it would grade a claim the sentence no longer makes"
@@ -4917,6 +4944,36 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         assert _de_numbered_cite_problems(_citing, _duplicated, _entry), (
             "the de-numbered pin no longer refuses an AMBIGUOUS marker — with two occurrences it "
             "could excuse the one that rotted"
+        )
+        # ── The two shapes cycle 3 fixed WITHOUT a control: reverting either left the suite green.
+        # (a) `_declaration_re` must accept the values this repo actually writes — a trailing comment
+        # (`ci.yml:89` is `fetch-depth: 0   # PR base SHA …`) and a quoted `'0'`. A stricter match
+        # reds a correct depth-0 checkout.
+        _decl_indent = " " * (len(workflow_lines[_decl_at]) - len(workflow_lines[_decl_at].lstrip()))
+        for _decorated in (
+            f"{_declaration}   # PR base SHA must be present for the diff",
+            _declaration.replace("0", "'0'"),
+        ):
+            _accepting = list(workflow_lines)
+            _accepting[_decl_at] = f"{_decl_indent}{_decorated}"
+            assert not _de_numbered_cite_problems(_citing, _accepting, _entry), (
+                f"a correctly-declared depth-0 checkout written as `{_decorated}` now REDS — the "
+                "declaration match is stricter than the values this repo writes"
+            )
+        # (b) The declaration search must be bounded to the `with:` MAPPING. Unbounded, a sibling
+        # `env:` child satisfies it and the checkout it names can be shallow — the exact false PASS
+        # cycle 3 closed.
+        _sibling_env = [
+            "      - uses: actions/checkout@v4",
+            "        with:",
+            "          path: checkout-dir",
+            "        env:",
+            f"          {_declaration}",
+            f"        # {_marker}",
+        ]
+        assert _de_numbered_cite_problems(_citing, _sibling_env, _entry), (
+            "the declaration search is no longer bounded to the `with:` mapping — a sibling `env:` "
+            "key satisfies it, so a checkout cited for depth 0 can be shallow"
         )
     # …and the completeness arm's own non-vacuity: emptied of its register it must SEE the pointer
     # (so a green is not it matching nothing), and with the register restored it must see NONE.
