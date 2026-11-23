@@ -1544,11 +1544,11 @@ def run_s1(model, transcript: str, *,
     (not list-bearing): a residual returns the ESCALATED response when one
     exists; an abort keeps attempt-1's retained truncated summary — UNLESS
     attempt-1 was the collapse itself, whose retained summary is empty, so
-    the chunk is deliberately dropped as ``reasoning_collapse`` rather than
-    shipped as an empty narrative (#14357's fail-open). A non-collapsed base
-    is never dropped by a raise (a benign tail-drop must not become a chunk
-    failure — P2-14a/P1-21). An un-escalatable truncation (esc <= base,
-    P2-15) records the per-seam keys only, NO escalation episode."""
+    the chunk is deliberately dropped as ``reasoning_collapse``, never shipped
+    as an empty narrative (#14357's fail-open). A non-collapsed base is never
+    dropped by a raise (a benign tail-drop must not become a chunk failure
+    — P2-14a/P1-21). An un-escalatable truncation (esc <= base, P2-15)
+    records per-seam keys only, NO episode; a COLLAPSED base raised above."""
     granularity = _granularity_text(master)
     if emphasis:
         # The emphasis rides the SAME slot as the granularity declaration it
