@@ -6050,6 +6050,12 @@ def _cmd_create_point(args) -> int:
     if api_key is None:
         print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=_sys.stderr)
         return 1
+    # #14424: `_resolve_config_path` returns `TORTOISE_API_URL` VERBATIM (no `rstrip`), so a
+    # user-set value ending in `/` produced `https://…//v1/points` (and a `//v1/search` in the
+    # success hint) -> 404. Normalize once, here, so both the request and the hint agree — the
+    # same `rstrip("/")` the rest of this module applies (e.g. `endpoint` above,
+    # `_doctor_hosted_rows`).
+    api_url = (api_url or "https://api.premiselabs.co").rstrip("/")
 
     payload = {
         "content": args.content,

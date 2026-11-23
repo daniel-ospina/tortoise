@@ -5,7 +5,7 @@ domain: platform
 doc_status: final
 created: 2026-11-23
 subjects.team: epistemic-team
-aboutSubjects: Tortoise first-run onboarding, create-point CLI retry safety, doctor Graph: health row
+aboutSubjects: "Tortoise first-run onboarding, create-point CLI retry safety, doctor Graph: health row"
 aboutObjects: "#14424, #1643, #3834, #10183, #10656, #11609, #14086, #10893, tortoise/__main__.py, tortoise/hosted_api.py, docs/quickstart-cloud.md"
 ---
 
@@ -253,9 +253,16 @@ leaves the box.
 
 ```bash
 export HOME=$(mktemp -d)      # ONE home for BOTH lines — a second `mktemp -d` would be a different DB
-uv run python -m tortoise init
+printf 'n\n' | uv run python -m tortoise init   # 'n' answers the "index this repo?" prompt
 uv run python docs/evidence/14424-onboarding/probe_sdk_local.py   # exit 0 == the pair held
 ```
+
+⚠️ **`init` prompts.** Run from a repo root it asks
+`Found N markdown files in this repo. Index them into Tortoise? [Y/n]:`. On a non-TTY reproducer
+(piped, CI, `</dev/null`) an unanswered prompt raises `EOFError` and the command exits 1 after
+creating the graph — the pair above still holds, but the first documented command prints a
+stack trace unless the prompt is answered. Bare Enter accepts and starts a background indexer;
+`n` keeps the run to the two commands shown.
 
 **The hosted walk: yes, given a signup budget** (2 anonymous teams/IP/24 h):
 
@@ -280,8 +287,8 @@ on **how many times the refusal was obeyed** — that is the defect, not a varia
   and `updatedAt` bumped. The field is `CreatePointRequest.dedup` (`hosted_api.py`), default
   `False`, forwarded to `sdk._create_point(dedup=…)` — the same content-hash fold the SDK door
   applies. ⛔ **Name the method: the fold is NOT a default on every SDK door.** `create_entity`'s
-  point/diary path sets `dedup=True` (`sdk.py:58154`), which is the door §2 walks — but
-  `_create_point` pops `dedup` with a **False** default (`sdk.py:17617`), and that divergence is
+  point/diary path sets `dedup=True` (`sdk.py:58271`), which is the door §2 walks — but
+  `_create_point` pops `dedup` with a **False** default (`sdk.py:17670`), and that divergence is
   `#11609`. Measured on `create_entity`: re-creating identical content returned the **same**
   node id.
 - **`#10656`** (relocate `init --api-key`'s working-tree key) and **`#13224`** (subject-create

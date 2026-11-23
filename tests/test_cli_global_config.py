@@ -218,9 +218,9 @@ class TestCreatePointRetrySafety:
         assert "/v1/search?q=" in out
         assert "tortoise_search" in out
         # ⛔ THE NAMED DOOR MUST BE RUNNABLE, or it is the same dead end it exists
-        # to close. `/v1/search` is gated (`hosted_api.py:15653`
+        # to close. `/v1/search` is gated (`hosted_api.py:15765`
         # `Depends(get_current_org_gated)` -> 401 "Missing Authorization header"
-        # at `hosted_api.py:9747`), so a hint that omits the header sends a
+        # at `hosted_api.py:9859`), so a hint that omits the header sends a
         # first-run user straight into a refusal. Mutation: drop the header
         # clause and this REDs.
         assert "Authorization: Bearer" in out
@@ -235,6 +235,32 @@ class TestCreatePointRetrySafety:
         # REDIRECT, so a `<a word from it>` placeholder fails before any request
         # is made. Mutation: restore an angle-bracket placeholder and this REDs.
         assert "<" not in out
+
+    def test_a_trailing_slash_api_url_does_not_produce_a_double_slash(
+            self, tmp_path, capsys):
+        """D5: `_resolve_config_path` returns `TORTOISE_API_URL` VERBATIM, so a
+        user-set value ending in `/` used to yield `…//v1/points` and a
+        `…//v1/search` in the success hint -> 404 from a message the verb
+        promises is runnable.
+
+        Mutation: drop the `rstrip("/")` in `_cmd_create_point` and both
+        assertions RED."""
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o700)
+        f = d / "credentials.json"
+        f.write_text(json.dumps({**GLOBAL_CFG, "api_url": "https://api.premiselabs.co/"}))
+        f.chmod(0o600)
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok({"id": "p1"})) as _url:
+            assert main(["create-point", "hello world"]) == 0
+        # the REQUEST went to the normalized base, not `…//v1/points`
+        sent = _url.call_args[0][0].full_url
+        assert "//v1/" not in sent.replace("https://", "")
+        assert sent.rstrip().endswith("/v1/points")
+        # and the hint a user copies did not inherit the extra slash either
+        out = capsys.readouterr().out
+        assert "//v1/search" not in out
 
     def test_wait_bound_refusal_names_the_delay_and_the_safe_retry(
             self, tmp_path, capsys):

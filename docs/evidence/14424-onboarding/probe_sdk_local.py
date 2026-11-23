@@ -39,7 +39,7 @@ def main() -> int:
     })
 
     point_id = node.get("id")
-    if not point_id:  # the shape a verifier must not trust alone — sdk.py:27220
+    if not point_id:  # the shape a verifier must not trust alone — sdk.py:57866
         print(json.dumps({"error": "create returned no node.id", "steps": steps}, indent=1))
         return 1
 
