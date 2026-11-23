@@ -651,16 +651,16 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
             # open incident has earned its next reminder.
             deliver, folded = _claim_delivery(
                 kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
+            try:
+                number = store.incident_record(incident_kind, subject).get(
+                    "issue_number")
+            except Exception:  # noqa: BLE001 — NEVER raise from the alert path
+                number = None
             if outcome is OpenOutcome.DEDUP and deliver:
                 # A persistent breach must not go silent: an episode that stays
                 # open re-alarms at most once per window, and the message NAMES
                 # the incident so the human can see it is the same one — the
                 # pre-fix code pushed every window with no reference at all.
-                try:
-                    number = store.incident_record(incident_kind, subject).get(
-                        "issue_number")
-                except Exception:  # noqa: BLE001 — NEVER raise from the alert path
-                    number = None
                 ref = (f"issue #{number}" if number
                        else "an open incident with no issue number on record")
                 bot_token = _env("TELEGRAM_BOT_TOKEN")
@@ -675,23 +675,57 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                                      "inside that window are folded (the issue "
                                      "comment trail is the recurrence record)."),
                         folded=folded))
+            elif outcome is OpenOutcome.FILED and not number and deliver:
+                # FILED with NO issue number is NOT a delivered alert. The store
+                # pushes only when it holds a number (`alert_store` guards its own
+                # push on it), and `_become_filer` returns exactly this way when
+                # the open-issue SEARCH raises (filing DEFERRED) or when `_file`
+                # raises — and then this branch used to fall straight out of the
+                # `return` with nothing sent and the window already armed.
+                #
+                # That is a REGRESSION against the pre-fix code, which pushed the
+                # Telegram leg independently of the store, and it lands precisely
+                # when filing is failing hardest (a search rate limit exhausted by
+                # the very alert burst this change exists to bound): a total, silent
+                # mute of a security class — the direction #4872 forbids.
+                #
+                # Deliver the labelled message instead, bounded by the same
+                # window: unattributable is allowed, SILENT is not.
+                _deliver_unattributed(
+                    kind, org_id, subject, details, folded,
+                    reason=("no incident could be attributed — an incident exists "
+                            "but carries no issue number (filing was deferred or "
+                            "failed)"))
             return
 
     deliver, folded = _claim_delivery(kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
     if not deliver:
         return
-    logger.warning(
-        "abuse notify: delivered %s (%s) with NO incident — %s. The message says "
-        "so; the class is bounded to one such message per %dh per subject until "
-        "the channel is repaired (#14407).",
-        kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600))
+    _deliver_unattributed(kind, org_id, subject, details, folded,
+                          reason=f"no incident was filed — {reason}")
+
+
+def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
+                          folded: int, *, reason: str) -> None:
+    """Send the BOUNDED message for a class whose incident cannot be named.
+
+    #14407: the invariant is "every abuse message is attributable — or it SAYS
+    it is not". Silence is the one outcome that is never allowed: an
+    unattributable message a human can act on beats a mute (#4872), and the
+    delivery ledger has already bounded the rate before this is called.
+    """
     bot_token = _env("TELEGRAM_BOT_TOKEN")
     chat_id = _env("TELEGRAM_CHAT_ID")
     if _skip_channel("telegram", bot_token) or _skip_channel("telegram-chat", chat_id):
         return
+    logger.warning(
+        "abuse notify: delivered %s (%s) with NO attributable incident — %s. "
+        "The message says so; the class is bounded to one such message per %dh "
+        "per subject until the incident channel is repaired (#14407).",
+        kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600))
     _send_abuse(bot_token, chat_id, _abuse_message(
         kind, org_id, details,
-        attribution=f"Not attributable: no incident was filed — {reason}.",
+        attribution=f"Not attributable: {reason}.",
         folded=folded))
 
 
