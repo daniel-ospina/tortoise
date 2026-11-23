@@ -4485,7 +4485,16 @@ export async function flushSpool(
     return flushSpoolPass(cfg, opts, undefined);
   }
   const dir = opts.dir ?? SPOOL_DIR;
-  const claim = acquireDrainClaim(dir, { leg: "pi" });
+  // ⛔ `raced` is the third state `undefined` cannot carry (#14423 review, P2).
+  // `acquireDrainClaim` answers `undefined` for TWO different situations: the
+  // environment cannot hold a claim at all (`mkdir`/write failed — run UNCLAIMED
+  // and say so) and "both takeover attempts lost a race, the path is momentarily
+  // EMPTY" — which this function used to read, via `existsSync`, as the first one
+  // and therefore run the pass UNCLAIMED beside a peer that is mid-install, i.e.
+  // the two-drainer defect R1 states cannot happen. The Python twin fails closed
+  // here: ANY `None` from `acquire` becomes `held_by_claim` (`capture_spool.py`).
+  const race: { raced: boolean } = { raced: false };
+  const claim = acquireDrainClaim(dir, { leg: "pi", state: race });
   if (!claim) {
     const record = readDrainClaim(dir);
     if (record) {
@@ -4508,6 +4517,17 @@ export async function flushSpool(
       summary.claimHolder =
         "a claim file exists at this spool but could not be read " +
         "(pid unknown) — nothing attempted";
+      return summary;
+    }
+    // A lost takeover race with an EMPTY path is NOT "the claim cannot be created":
+    // the peer that won is installing. Fail CLOSED exactly as the unreadable case
+    // above does, and let the next pass try again.
+    if (race.raced) {
+      const summary = emptyFlushSummary();
+      summary.heldByClaim = true;
+      summary.claimHolder =
+        "another drainer won the claim while this pass was acquiring it " +
+        "(holder unknown) — nothing attempted";
       return summary;
     }
     // No claim AND nothing at the path: the claim file could not be CREATED (an
@@ -5378,6 +5398,13 @@ export function acquireDrainClaim(
     host?: string;
     bootId?: string;
     alive?: (pid: unknown) => boolean;
+    /** ⛔ Set to `{ raced: true }` when the two attempts were lost to a PEER's
+     *  takeover rather than to an environment that cannot hold a claim. The
+     *  caller must then fail CLOSED (treat it as held): the path is momentarily
+     *  empty because the winner is installing, not because nothing can be written
+     *  (#14423 review, P2). Mirrors the Python leg, where any `None` from
+     *  `acquire` is `held_by_claim`. */
+    state?: { raced: boolean };
   },
 ): DrainClaim | undefined {
   const ttlMs = opts.ttlMs ?? DRAIN_CLAIM_TTL_MS;
@@ -5385,6 +5412,9 @@ export function acquireDrainClaim(
   const bootId = opts.bootId ?? readBootId();
   const alive = opts.alive ?? pidAlive;
   const path = drainClaimPathFor(dir);
+  const markRaced = (): void => {
+    if (opts.state) opts.state.raced = true;
+  };
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   } catch {
@@ -5446,7 +5476,7 @@ export function acquireDrainClaim(
         } catch {
           mode = undefined;  // it vanished (a peer released); retry the link
         }
-        if (!mode) continue;
+        if (!mode) { markRaced(); continue; }
         if (mode.isFile()) return undefined;
         // A directory, symlink, FIFO/socket or device: corruption, not a holder.
         // Leaving it would `EEXIST` every future attempt — a permanent block.
@@ -5455,10 +5485,12 @@ export function acquireDrainClaim(
       }
       // ATOMIC TAKEDOWN, then verify in quarantine — see `takedownClaim`.
       const moved = takedownClaim(path, token);
-      if (!moved) continue;  // a peer moved it first; the next attempt decides
+      if (!moved) { markRaced(); continue; }  // a peer moved it first; the next attempt decides
       if (!disposeQuarantine(moved.quarantine, moved.raw, path, raw)) {
         // We displaced a NEWER claim than the one we judged stale. It is
-        // restored; give up this tick.
+        // restored; give up this tick — and this is a LOST RACE, so the path may
+        // be momentarily empty while the winner installs (see `state.raced`).
+        markRaced();
         return undefined;
       }
       continue;

@@ -233,23 +233,26 @@ def claim_is_stale(
     if recorded_boot and boot_id and recorded_boot != boot_id:
         return True  # rule 3, rebooted: the recorded pid is not the holder
     pid = record.get("pid")
-    # rule 3: the holder is gone. `isinstance(pid, bool)` is excluded explicitly —
-    # `True` is an `int` to Python, and a pid of 1 would read as "the holder is alive".
-    return isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and not alive(pid)
+    # rule 3: the holder is gone (an unusable `pid` is not a holder fact — fall through)
+    return (
+        isinstance(pid, int)
+        and not isinstance(pid, bool)
+        and pid > 0
+        and not alive(pid)
+    )
 
 
 def read_claim(root: Path) -> dict | None:
     """The parsed claim, or ``None``. The SURFACE (`session drain`, health, tests).
 
-    ⛔ THROUGH :func:`_read_raw`, NEVER ``Path.read_text`` — that gate is the whole
-    reason this function exists in two halves. ``read_text`` on a FIFO or a socket
-    BLOCKS until a writer appears, and THIS reader is the one ``renew``,
-    ``_claim_still_ours`` and ``holder`` call, so a corrupt object at the claim path
-    hung the drain's own refresh forever (measured: ``renew`` never returned, killed
-    at 15 s) — the permanent block #14350 forbids, in the exact corruption class the
-    gate below documents covering. It was also a leg divergence over a file both legs
-    share (R6): the Pi twin's ``readDrainClaim`` gates with ``lstatSync``, so renew
-    and the holder line were safe there and not here (review finding).
+    ⛔ READS GO THROUGH :func:`_read_raw`, which is ``lstat``-gated, and that is the
+    same gate the Pi leg's ``readDrainClaim`` carries. This function used to call
+    ``Path.read_text()`` directly — so it BLOCKED FOREVER on a FIFO or a socket at
+    the claim path (measured: killed at 8 s, no return) while the TypeScript twin
+    answered in ~0 s, and it is what ``renew``, :func:`_claim_still_ours` and
+    :func:`holder` actually call, i.e. the drain, the health line and every
+    ``session drain`` on the box (#14423 review, P1: the earlier FIFO fix landed
+    only on `acquire`'s path).
     """
     raw = _read_raw(claim_path(root))
     if raw is None:
@@ -501,22 +504,36 @@ class DrainClaim:
         The takedown is atomic (see :func:`_takedown`): this used to read the
         record, compare and then `unlink` — a sequence in which a successor
         installed between the compare and the unlink was deleted by the previous
-        holder. Now the file is MOVED aside first and the bytes are compared in
-        quarantine, so a release can only ever dispose of a claim it actually
-        owned.
+        holder.
+
+        ⛔ AND A RELEASE FIRST CHECKS THAT THE CLAIM IS OURS, WITHOUT MOVING IT.
+        The takedown-then-compare version made the docstring's promise ("a release
+        can only ever dispose of a claim it actually owned") false in a THREE-process
+        interleaving: the not-ours release still `rename`d the successor's claim
+        aside, and if a third process installed into the now-empty path the restore
+        `link` failed `EEXIST` and the successor's bytes were unlinked — reproduced,
+        `release()` returned ``False`` and the successor's claim was GONE
+        (#14423 review, P2). Reading our token first has no window at all in the
+        not-ours direction, which is the direction that destroyed a live claim; the
+        ours direction keeps the takedown, whose quarantine compare is what makes
+        the disposal safe against a peer that replaces it mid-release.
         """
+        current = _read_raw(self.path)
+        if current is None:
+            return False
+        try:
+            held = json.loads(current.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(held, dict) or held.get("token") != self.token:
+            return False  # not ours: leave it exactly where it is
         moved = _takedown(self.path, self.token)
         if moved is None:
             return False
         quarantine, data = moved
-        try:
-            record = json.loads(data.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            record = None
-        if not isinstance(record, dict) or record.get("token") != self.token:
-            # Not ours any more (a successor holds it): put its bytes back exactly
-            # as we took them. The sentinel can never equal `data`, so this always
-            # takes the restore branch of `_dispose_quarantine`.
+        if data != current:
+            # A peer replaced the record between our read and our rename. Its bytes
+            # are restored by the sentinel arm and our release declines.
             _dispose_quarantine(quarantine, data, self.path, b"<not-ours>")
             return False
         with contextlib.suppress(OSError):
@@ -646,9 +663,9 @@ def acquire(
                 # holder. Rule 1 already says stale, and leaving it would `EEXIST`
                 # every future attempt — a permanent block, which #14350 forbids.
                 if not _clear_unusable_claim_path(path):
-                    # `from None`: the EEXIST that brought us here is the SYMPTOM, and
-                    # the sentence below is the diagnosis. Chaining it would bury the
-                    # one line an operator needs under a traceback about a mkdir race.
+                    # `from None`: the `FileExistsError` we are handling is the
+                    # EXPECTED contention signal, not this condition's cause —
+                    # chaining it would point a reader at the wrong file (B904).
                     raise DrainClaimUnavailable(
                         f"{path} exists and is not a claim, and cannot be cleared — "
                         "the spool root is not writable by this process") from None
@@ -709,8 +726,19 @@ class DrainClaimHeld:
         who = f"pid {self.pid}" if self.pid is not None else "an unnamed process"
         leg = f" ({self.leg} leg)" if self.leg else ""
         expires = self.expires_at
-        until = (f", lease to {time.strftime('%H:%M:%SZ', time.gmtime(expires))}"
-                 if expires is not None else "")
+        until = ""
+        if expires is not None:
+            # ⛔ GUARDED: `time.gmtime` raises on an out-of-range instant, and this
+            # line is the OPERATOR surface for a face we could not judge. A record
+            # with a finite but absurd `expires_at` (1e30) is honoured by rule 2
+            # (it is never expired), so `flush_spool` called this on EVERY pass and
+            # `OverflowError` escaped OUTSIDE its try/finally — one corrupt claim
+            # file blocked the spool permanently, the outcome #14350 forbids
+            # (#14423 review, P2, reproduced end-to-end).
+            try:
+                until = f", lease to {time.strftime('%H:%M:%SZ', time.gmtime(expires))}"
+            except (OverflowError, OSError, ValueError):
+                until = ""
         return (f"another drainer holds this spool{leg}: {who}{until} — "
                 f"nothing attempted ({claim_path(root)})")
 
