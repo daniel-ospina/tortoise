@@ -509,10 +509,13 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> None:
     """
     subject = _abuse_subject(org_id, rule)
     kinds = _EPISODE_INCIDENT_KINDS
-    # BOTH spellings: a rule-less subject is what pre-#14407 code wrote (and
-    # #10576 still carries), so a clean window must clear it too or the old
-    # incident outlives the condition it records (the #2844 stale-sentinel class).
-    subjects = (subject,) if subject == org_id else (subject, org_id)
+    # ONE subject: the rule-scoped one. A legacy rule-less incident has been
+    # MIGRATED onto its scoped key by `notify._adopt_legacy_subject`, so the bare
+    # `{org}` spelling no longer names any rule's episode — resolving it here
+    # would let ANY rule's clean window close the shared object (a false
+    # all-clear, then a re-file). The bare spelling is resolved only by a
+    # rule-less caller, whose `subject` IS `org_id`.
+    subjects = (subject,)
     # ...and BOTH KIND spellings: the delivery ledger is armed by the event kind,
     # so releasing only the incident kind left `abuse_flag`'s window armed across
     # episodes (see `_episode_delivery_kinds`).
@@ -579,10 +582,21 @@ def _adopt_legacy_subject(store, incident_kind: str, subject: str,
     strands one). One such incident is MEASURED on record (#10576), so this is a
     migration step, not a hypothetical.
 
+    The migration moves the SENTINEL (``AlertStore.migrate_incident_subject``),
+    never the deduped thing: the scoped key takes over the legacy issue number
+    and the legacy object is released with its issue left OPEN. Returning the
+    bare ``org_id`` instead — what this did before — re-collapsed the subject and
+    re-created the cross-rule coupling the scoped key exists to remove: every
+    filing and dedup for that kind/org then used the shared spelling, so one
+    rule's clean window resolved the OTHER rule's incident (a false all-clear to
+    the human, the sentinel deleted, and the next detection re-filing: the
+    #3029/#3031 flip).
+
     Cost is one R2 GET, on the notification path the engine already throttles to
-    one attempt per (org, rule, window). A store read that fails returns the
-    scoped subject: filing under the new key is the pre-#14407-compatible
-    fallback, and a duplicate issue is cheaper than a swallowed recurrence.
+    one attempt per (org, rule, window). A store read that fails, or a store that
+    cannot move the object, returns the scoped subject: filing under the new key
+    is the pre-#14407-compatible fallback, and a duplicate issue is visible while
+    a stranded sentinel is not.
     """
     if subject == org_id:
         return subject
@@ -590,12 +604,21 @@ def _adopt_legacy_subject(store, incident_kind: str, subject: str,
         legacy = store.incident_record(incident_kind, org_id)
     except Exception:  # noqa: BLE001, RUF100
         return subject
-    if legacy.get("issue_number"):
+    number = legacy.get("issue_number")
+    if not number:
+        return subject
+    migrate = getattr(store, "migrate_incident_subject", None)
+    if callable(migrate) and migrate(incident_kind, subject, org_id):
         logger.info(
-            "abuse notify: adopting the pre-#14407 rule-less incident for %s "
-            "(issue #%s) instead of filing a second one under %s",
-            org_id, legacy.get("issue_number"), subject)
-        return org_id
+            "abuse notify: adopted the pre-#14407 rule-less incident for %s "
+            "(issue #%s) under %s — one issue, one scoped linearisation point",
+            org_id, number, subject)
+    else:
+        logger.warning(
+            "abuse notify: the pre-#14407 rule-less incident for %s (issue #%s) "
+            "could not be moved under %s — filing under the scoped key; close "
+            "the legacy issue by hand if this recurs",
+            org_id, number, subject)
     return subject
 
 

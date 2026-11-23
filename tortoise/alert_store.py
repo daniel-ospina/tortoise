@@ -496,6 +496,64 @@ class AlertStore:
         """
         return bool(self._alias_states(kind, org_id))
 
+    def migrate_incident_subject(self, kind: str, new_subject: str,
+                                 legacy_subject: str) -> bool:
+        """Re-key a LIVE incident's dedup sentinel to a new subject (#14407).
+
+        Abuse subjects became rule-scoped in #14407, so a pre-#14407 sentinel
+        filed under the bare ``{org}`` spelling is invisible to the new
+        ``{org}:{rule}`` key and the first recurrence would file a SECOND issue
+        for one condition — the #2844 alias defect (two spellings, two
+        create-once points, a resolve that strands one). One such incident is
+        MEASURED on record (#10576), so this is a migration step.
+
+        Adoption MOVES THE KEY, not the deduped thing: the scoped sentinel takes
+        over the legacy incident's ``issue_number`` — so the scoped key becomes
+        the one dedup linearisation point that every later
+        ``open_incident_state`` and ``resolve_incident_state`` uses — and the
+        legacy object is released WITHOUT closing its issue, which is live and
+        continues under the new key. Moving the SUBJECT instead (what this call
+        replaces) re-created the cross-rule coupling the scoped key exists to
+        remove: a shared subject lets the first rule to fire own the record for
+        the other rule's whole lifecycle, so one rule's clean window could close
+        the other's incident.
+
+        Never raises and never blocks the caller: returns ``False`` when there
+        is nothing to move (no legacy object, no issue number, or the scoped key
+        already holds one). The caller's fallback is to file under the scoped key
+        — a duplicate issue is visible, a silently stranded sentinel is not.
+        """
+        try:
+            legacy_key = self._key(kind, legacy_subject)
+            new_key = self._key(kind, new_subject)
+            if new_key == legacy_key:
+                return False
+            legacy = _read_json(self._storage, legacy_key)
+            if not legacy.get("issue_number"):
+                return False
+            if _read_json(self._storage, new_key):
+                return False
+            state = dict(legacy)
+            # The subject this sentinel serves is now the scoped one. Both spellings
+            # are written because a sentinel from either writer version must stay
+            # recognisable (see the platform-scoping guard in `_alias_states`).
+            state["org_id"] = new_subject
+            state["team_id"] = new_subject
+            _write_json(self._storage, new_key, state)
+            try:
+                self._storage.delete(legacy_key)
+            except Exception as e:  # noqa: BLE001 — the move itself succeeded
+                logger.warning(
+                    "dedup: %s/%s was migrated to %s but the legacy object could "
+                    "not be released (%s) — it is inert once the scoped key holds "
+                    "the issue", kind, legacy_subject, new_subject, e)
+            return True
+        except Exception as e:  # noqa: BLE001 — adoption is best-effort
+            logger.warning(
+                "dedup: %s/%s could not be migrated to %s (%s) — the caller files "
+                "under the new subject", kind, legacy_subject, new_subject, e)
+            return False
+
     def incident_record(self, kind: str, org_id: str = "") -> dict[str, Any]:
         """The sentinel this store tracks for ``(kind, org_id)``, or ``{}`` (#14407).
 

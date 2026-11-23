@@ -90,6 +90,9 @@ class _RecordingStore:
     def incident_record(self, kind, org_id=""):
         return self.store.incident_record(kind, org_id)
 
+    def migrate_incident_subject(self, kind, new_subject, legacy_subject):
+        return self.store.migrate_incident_subject(kind, new_subject, legacy_subject)
+
 
 @pytest.fixture
 def delivered(monkeypatch):
@@ -195,6 +198,43 @@ def test_a_pre_14407_rule_less_incident_is_adopted_not_duplicated(delivered):
     assert len(delivered.filed) == 1, "a live legacy incident must be adopted"
     assert len(delivered.pushes) == 2, delivered.pushes  # legacy alert + reminder
     assert "issue #1" in delivered.pushes[-1]
+
+
+def test_an_adopted_legacy_incident_is_not_closed_by_the_other_rules_window(
+        delivered):
+    """Adoption must MOVE the sentinel, not collapse the subject.
+
+    The pre-fix adoption returned the bare ``{org}`` subject whenever a
+    pre-#14407 object existed, so every later filing/dedup for that kind/org used
+    the SHARED spelling while the resolver released it for whichever rule ended:
+    rule B going clean closed rule A's incident and pushed a false all-clear, then
+    rule A's next detection re-filed — the #3029/#3031 flip, on the exact org
+    (#10576) this migration exists for.
+    """
+    import tortoise.notify as notify
+
+    # The pre-#14407 sentinel, exactly as the old code wrote it (subject = org),
+    # for rule A.
+    delivered.store.open_incident_state(
+        "abuse_review_needed", "org-a", {"detail": "legacy rule-less incident"})
+    assert len(delivered.filed) == 1
+    notify.reset_abuse_delivery_for_tests()
+
+    # rule A's detection adopts it (moves the sentinel onto A's scoped key).
+    notify.notify_abuse("abuse_review_needed", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 1338})
+    assert len(delivered.filed) == 1, "adoption must not file a second issue"
+    assert delivered.closed == []
+
+    # rule B has its own (absent) episode ending clean — it must touch nothing.
+    notify.resolve_abuse_episode("org-a", "key_create")
+    assert delivered.closed == [], (
+        "another rule's clean window closed this incident (false all-clear): "
+        f"{delivered.closed} — and the next detection would re-file it")
+
+    # rule A's own episode end still resolves it (the recovery path works).
+    notify.resolve_abuse_episode("org-a", "point_create")
+    assert delivered.closed == [1], delivered.closed
 
 
 def test_a_new_episode_re_fires_exactly_once(delivered):
