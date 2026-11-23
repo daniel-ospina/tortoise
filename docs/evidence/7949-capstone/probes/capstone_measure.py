@@ -533,28 +533,6 @@ DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
 #: about keys nobody read (#10983 review round 11).
 DOOR_KEYS = frozenset(DOOR_PINNED_OFF) | frozenset(k for k, _ in DOOR_PINNED_ON)
 
-#: Seams the door CARRIES and DECLARES instead of popping (#14343).
-#:
-#: The pin set exists so an inherited shell cannot move what a run measures under
-#: a header that claims the pin held. ``TORTOISE_S4_EMBED_JSON`` is the one seam
-#: where ``pop`` produced the exact fabricated green the pin set exists to
-#: prevent: it is the LEVER #14343 ships, and the documented way to validate it
-#: is "arm it, then re-run the capstone in the same session" — stated at
-#: ``extractor_v2._embed_json_kwargs``' docstring, in ``.env.example`` and twice in
-#: the #14343 evidence README. Pinned OFF, the door POPPED that value and then
-#: read the environment back as ``None``, so the ``pinned_off`` refusal below
-#: could never fire: the run scored the ``indent`` render while the operator
-#: believed E1/E2/E3/E4 had been validated over ``compact``.
-#:
-#: So this one is CARRIED (never popped, never forced — forcing a value would
-#: measure a render the operator did not choose) and DECLARED: it is read back
-#: with the rest of the set, printed as ``CARRIED`` on the ``arm:`` and ``door:``
-#: lines, and recorded under ``carried`` in the machine record — so a reader can
-#: tell WHICH render the numbers came from instead of inferring it. UNSET is
-#: still the shipped default and the only state the registered corpus was scored
-#: under, so an unarmed run is byte-for-byte what it was before this existed.
-DOOR_CARRIED = ("TORTOISE_S4_EMBED_JSON",)
-
 #: The v4 seam ledger AT THE HEAD THIS RUN MEASURED (#10983, C2's Target 3).
 #:
 #: ``(env var, module.resolver, default, is a behaviour seam)``. The DEFAULT
@@ -665,11 +643,6 @@ def measured_arm():
             # switch is the ON arm, so a pop would be a lie in the header below.
             os.environ[key] = "0"
         for key in door_off:
-            if key in DOOR_CARRIED:
-                # carried, not discarded — see DOOR_CARRIED: popping the lever
-                # under test is how the documented validation path came to
-                # score a prompt it had silently disarmed.
-                continue
             os.environ.pop(key, None)
         for key, value in DOOR_PINNED_ON:
             os.environ[key] = value
@@ -697,7 +670,7 @@ def measured_arm():
         # header's "read back" claim was one var wider than the code. A pin that
         # cannot fail is a declaration, not a control.
         for key in door_off:
-            if key == DOOR_LANE_ENV or key in DOOR_CARRIED:
+            if key == DOOR_LANE_ENV:
                 continue
             leaked = observed.get(key)
             if leaked not in (None, ""):
@@ -723,35 +696,21 @@ def measured_arm():
 
 
 def arm_header(observed: dict[str, str | None]) -> str:
-    """The ``arm:`` line, DERIVED from the read-back — never a typed literal.
-
-    ``DOOR_CARRIED`` seams are appended LAST and labelled ``CARRIED``: they are
-    the operator's declaration, not this pass's pin, and an arm line that folded
-    them into the forced set would say the run chose a render it merely inherited.
-    """
+    """The ``arm:`` line, DERIVED from the read-back — never a typed literal."""
     parts = []
     for key in (*ARM_ON, *ARM_OFF):
         value = observed.get(key)
         parts.append(f"{key}={value if value not in (None, '') else '<unset>'}")
-    carried = " ".join(
-        f"{key}={observed.get(key) or '<unset>'} (CARRIED)"
-        for key in DOOR_CARRIED)
-    return (" ".join(parts) + (f" | {carried}" if carried else "") +
-            " (set/pinned IN-PROCESS for this pass and read "
+    return (" ".join(parts) + " (set/pinned IN-PROCESS for this pass and read "
             "back from os.environ after setting; the deployed config sets none "
             "of them — since #10996 the value gate defaults ON, so the pinned 0 "
-            "is what makes this arm OFF. A CARRIED seam is not a pin: it is the "
-            "value this session declared and the run measured, read back so the "
-            "log states which render the numbers came from)")
+            "is what makes this arm OFF)")
 
 
 def arm_record(observed: dict[str, str | None]) -> dict:
     """The machine half of the arm: the SAME read-back the header prints."""
     record: dict[str, str | None] = {key: observed.get(key)
                                      for key in (*ARM_ON, *ARM_OFF)}
-    for key in DOOR_CARRIED:
-        record[key] = observed.get(key) or None
-    record["carried"] = {key: observed.get(key) or None for key in DOOR_CARRIED}
     record["source"] = "os.environ read-back after measured_arm() forced it"
     return record
 
@@ -788,9 +747,7 @@ def door_header(observed: dict[str, str | None]) -> str:
     lane_word = DOOR_LANE if lane_pinned else lane
     pins = [f"{key}=<unset>" if observed.get(key) in (None, "")
             else f"{key}={observed.get(key)}"
-            for key in DOOR_PINNED_OFF if key not in DOOR_CARRIED]
-    pins += [f"{key}={(observed.get(key) or '<unset>')} CARRIED"
-             for key in DOOR_CARRIED]
+            for key in DOOR_PINNED_OFF]
     pins += [("<unset>" if observed.get(key) in (None, "")
               else f"{observed.get(key)}") .join([f"{key}=", ""])
              for key, _ in DOOR_PINNED_ON]
@@ -845,9 +802,7 @@ def door_record(observed: dict[str, str | None]) -> dict:
         "entry_point": ("sdk.capture_session -> sdk._extract_session_v2 -> "
                         "extractor_v2.extract_session_v2"),
         "hosted_selector": "hosted_api._capture_lane",
-        "pinned_off": {key: observed.get(key) for key in DOOR_PINNED_OFF
-                       if key not in DOOR_CARRIED},
-        "carried": {key: observed.get(key) for key in DOOR_CARRIED},
+        "pinned_off": {key: observed.get(key) for key in DOOR_PINNED_OFF},
         "pinned_on": {key: observed.get(key) for key, _ in DOOR_PINNED_ON},
         "seams": [{"env": env, "resolver": where, "default": default,
                    "behaviour_seam": seam}

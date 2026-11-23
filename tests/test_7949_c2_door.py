@@ -1131,12 +1131,8 @@ def test_the_probe_pins_the_lane_and_reads_it_back():
     # it is asserted rather than left to the census. `TORTOISE_S4_EMBED_JSON` is
     # a RENDER toggle (unset = `{"indent": 1}` = today's bytes; `compact`
     # re-serialises S4's embed list with `(",", ":")` separators), so it moves
-    # bytes the door's captures are scored over and `acknowledged_not_a_
-    # measurement_seam` would be the wrong call. It stays in the PINNED-OFF set
-    # (the default arm's contract) but is CARRIED rather than popped — see
-    # `probe.DOOR_CARRIED`: popping the one lever a capstone re-run exists to
-    # validate is how the documented arming path scored a prompt it had silently
-    # disarmed.
+    # bytes the door's captures are scored over — a PIN is right and
+    # `acknowledged_not_a_measurement_seam` would be the wrong call.
     assert "TORTOISE_S4_EMBED_JSON" in probe.DOOR_PINNED_OFF, (
         "TORTOISE_S4_EMBED_JSON is #14343's S4 embed-list layout toggle "
         "(`extractor_v2._embed_json_kwargs`, read PER CALL). UNSET is the "
@@ -1195,18 +1191,10 @@ def test_the_probe_refuses_a_LEAKED_PINNED_OFF_switch(monkeypatch):
     one is written in-process, read back, and a run whose read-back disagrees is
     refused". A pin that cannot fail is a declaration, not a control, so each
     non-lane member is exercised here.
-
-    ⛔ ``DOOR_CARRIED`` is the ONE exception and it is excluded deliberately: a
-    carried seam is not pinned, so a value in it must NOT refuse — it must be
-    kept and declared (``test_a_CARRIED_seam_is_kept_and_declared_instead_of_
-    popped`` is the other half). Excluding it here without that test would be the
-    same hole in the other direction, which is why the assertion below names the
-    non-carried members explicitly rather than trusting the tuple's shape.
     """
     probe = _load_probe()
 
-    others = [k for k in probe.DOOR_PINNED_OFF
-              if k != probe.DOOR_LANE_ENV and k not in probe.DOOR_CARRIED]
+    others = [k for k in probe.DOOR_PINNED_OFF if k != probe.DOOR_LANE_ENV]
     assert others, (
         "DOOR_PINNED_OFF pins only the lane — the other switches are back to "
         "being declarations (see the #10983 review)")
@@ -1220,64 +1208,6 @@ def test_the_probe_refuses_a_LEAKED_PINNED_OFF_switch(monkeypatch):
         assert "REFUSED" in str(exc.value) and key in str(exc.value), (
             f"a leaked {key} was accepted: the run would declare a pinned-off "
             f"seam it did not actually run (got {exc.value})")
-
-
-def test_a_CARRIED_seam_is_kept_and_declared_instead_of_popped(monkeypatch):
-    """#14343's lever must SURVIVE ``measured_arm()`` and be printed back.
-
-    The pre-#14343 shape (this probe's own, for one review cycle) put
-    ``TORTOISE_S4_EMBED_JSON`` in ``DOOR_PINNED_OFF``, so the door POPPED the
-    value an operator armed and then read it back as ``None``: the ``pinned_off``
-    refusal could never fire, and the run scored the ``indent`` render while the
-    #14343 README, ``.env.example`` and ``extractor_v2._embed_json_kwargs``' own
-    docstring all told the operator the capstone had measured ``compact``. That
-    is the fabricated green this test exists to keep out: the value must be
-    carried, the ``arm:`` and ``door:`` lines must SAY so, and the machine record
-    must carry it under ``carried`` rather than as a pin.
-
-    Non-vacuous by construction: re-adding the key to the pop loop (or deleting
-    the ``DOOR_CARRIED`` skip) makes ``observed`` read ``None`` and both the
-    header and the record lose the value, so every assertion below reds.
-    """
-    probe = _load_probe()
-    assert probe.DOOR_CARRIED, "no carried seam is declared at all"
-    for key in probe.DOOR_CARRIED:
-        assert key in probe.DOOR_PINNED_OFF, (
-            f"{key} is carried but is no longer in the pinned-off set, so its "
-            f"read-back would stop being REQUIRED by `_door_measured()` — a "
-            f"carried seam that nobody must read back is a declaration")
-
-    key = "TORTOISE_S4_EMBED_JSON"
-    assert key in probe.DOOR_CARRIED, (
-        "#14343's S4 embed-list layout toggle is the lever the capstone re-run "
-        "exists to validate; it must be CARRIED, not popped")
-    env = _scrubbed_env(tuple(probe.DOOR_KEYS))
-    env[key] = "compact"
-    monkeypatch.setattr(probe, "os", type(
-        "os", (), {"environ": env})())
-    with probe.measured_arm() as observed:
-        assert observed.get(key) == "compact", (
-            f"the door discarded the armed {key}: a run under this shape scores "
-            f"the indent render while its documentation says compact (#14343)")
-    assert "TORTOISE_S4_EMBED_JSON=compact (CARRIED)" in probe.arm_header(observed), (
-        f"the arm line does not say which render ran: {probe.arm_header(observed)}")
-    assert "TORTOISE_S4_EMBED_JSON=compact CARRIED" in probe.door_header(observed), (
-        f"the door line does not say which render ran: {probe.door_header(observed)}")
-    record = probe.arm_record(observed)
-    assert record["carried"] == {key: "compact"}, record
-    door = probe.door_record(observed)
-    assert door["carried"] == {key: "compact"}, door
-    assert key not in door["pinned_off"], (
-        f"a carried seam is recorded as a PIN holding an armed value — the two "
-        f"words cannot both be true: {door['pinned_off']}")
-    # …and UNSET still reads as unset, so an unarmed run is unchanged.
-    # ⛔ `del`, not `pop`: ``_scrubbed_env`` returns an ``_Unpoppable``, whose
-    # ``pop`` is a deliberate no-op (that is what makes the leak tests leak).
-    del env[key]
-    with probe.measured_arm() as unarmed:
-        assert unarmed.get(key) in (None, ""), unarmed
-    assert "TORTOISE_S4_EMBED_JSON=<unset> (CARRIED)" in probe.arm_header(unarmed), (
-        probe.arm_header(unarmed))
 
 
 def test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run():
