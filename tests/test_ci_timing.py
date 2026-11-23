@@ -3816,10 +3816,11 @@ def test_the_flake_table_fences_a_nodeid_that_contains_backticks() -> None:
             f"{rendered_cell!r}, which CommonMark parses as {spans!r} rather than one "
             "code span holding the nodeid. A parametrize id is user-controlled and may "
             "contain backticks, which a single-backtick span cannot hold (#1477).")
-        assert not any(s and s != s.strip() for s in spans), (
-            f"{rendered_cell!r} parses to a code span with an edge space, which is "
-            "MD038 (`no-space-in-code`) — the exact finding class that redded the "
-            "required `docs` check on the 2026-11-23 render.")
+        # ⛔ NO EDGE-SPACE ASSERTION HERE: `spans == [flake["test"]]` above already pins
+        # the exact span text, and both fixture ids are whitespace-free at their edges, so
+        # an `s != s.strip()` check in this loop is a CONSTANT and can never fire (#14366
+        # review P2). The predicate itself is exercised where it CAN fire — against the
+        # pre-fix wrap below, which must reproduce the MD038 shape.
 
     # NON-VACUITY, in the direction that failed: the pre-fix wrap (one backtick
     # either side, no padding) must be REJECTED by the same scanner it is judged by.
