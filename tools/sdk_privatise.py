@@ -1251,10 +1251,12 @@ SWEEP_NAMES = 66
 #: at `0467ba329d` and again at `47e28b549e76` (measured: `git show <rev>:tools/sdk_privatise.py`),
 #: and it is the pair THIS BRANCH pinned BEFORE the rebase recorded below (`561a53ec04a7` and the
 #: pre-rebase tip `f800a528acb9` both carry it) — so integrating `main` at those two commits
-#: re-measured the SAME pair and added no untyped receiver. The rebase onto `main` `588cf7aeb61f`
-#: is a THIRD integration and it DID move the pin: `--repin` on the rebased tree prints
-#: `(11864, "2a6400518a87775c")` — the SAME pair `588cf7aeb61f` commits — so those three arrived
-#: with `main`'s commits, and `--check` exits 0 on the rebased tree. ⛔ "NO INTEGRATION ADDED A
+#: re-measured the SAME pair and added no untyped receiver. The REBASE onto `main` is a THIRD
+#: integration and it DID move the pin: `--repin` on the rebased tree prints
+#: `(11864, "2a6400518a87775c")` — the SAME pair `main` commits at each base this branch has been
+#: rebased onto (`588cf7aeb61f`, and again `cc936d47dba1` after `main` moved under it; `--repin`
+#: re-run on each) — so those three arrived with `main`'s commits, and `--check` exits 0 on the
+#: rebased tree. ⛔ "NO INTEGRATION ADDED A
 #: ROW" IS FALSE AS A GENERAL CLAIM: an integration CAN add untyped receivers, and re-cutting the
 #: pin is exactly how that gets recorded — the block BELOW is one, where merging `10e51693` moved
 #: the pair to `(11864, …)`, "FOUR MORE than this branch's parent". ⛔ AND THE EVIDENCE IS
