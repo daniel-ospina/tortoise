@@ -130,18 +130,22 @@ done. Batch document processing is **off-peak only** (owner, 2026-11-23): the la
 publishes the estimate; the scheduler is F4's remaining half.
 
 **Landed:** the layer and the routes (`tortoise/batch_ingest.py`, PR #14415) with the per-item indexer door,
-content-hash dedup, resume, cancel and the proactive estimate against the ONE `capture_extraction` budget (#14275).
-**Not yet:** the LLM-extraction half of a batched item, the off-peak tick, and a 20/500-document scale measurement
-on the production shape. ⛔ **A batched document is registered, embedded and searchable — and it is NOT picked up by
-the pending-document sweep, which an earlier cut of this sentence claimed.** Measured at PR #14415's head:
-`tortoise/sdk.py` never writes `needs_extraction` (`grep -c needs_extraction tortoise/sdk.py` → 0), the fold stamps an
-explicit `s.needs_extraction = coalesce($nx, s.needs_extraction, false)`
-(`tortoise/projection/entities.py:5827`), and `_discover_pending_documents`'s CASE
-(`tortoise/ingest.py:721-735`) reads a STORED `false` as already-extracted — so the document is excluded by both the
-default arm and `include_unstamped`, and `ingest --upgrade-all` reports nothing pending over it. The extraction half is
-therefore an OPEN gap with no route at all until it is wired (follow-up #14431), not a
-quietly-covered half: the honest statement is that a batched document reaches the graph as a searchable Source and
-does not yet reach its semantics.
+content-hash dedup, resume (claim-staleness bounded, so a poll on one instance cannot take another's live claim),
+cancel (compare-and-set, so an in-flight item keeps its result), the proactive estimate against the ONE
+`capture_extraction` budget (#14275), and a **retry tick** — a deferred batch, or one whose drain leaves a retryable
+item `queued`, is re-swept instead of sitting `running` until the process restarts
+(`TORTOISE_BATCH_OFF_PEAK_UTC` gates the window; `TORTOISE_BATCH_RETRY_S` sets the interval).
+**Not yet:** the LLM-extraction half of a batched item — and ⛔ **that is a GAP, not a quietly-covered half: a
+batch-ingested document is registered, embedded and searchable, and NOTHING routes it to extraction.** An earlier
+cut of this paragraph claimed `needs_extraction` carries it through the pending-document sweep; measured at this PR's
+head, that is false. `tortoise/sdk.py` never writes the flag (`grep -c needs_extraction tortoise/sdk.py` → 0), the fold
+stamps an explicit `false` (`tortoise/projection/entities.py:5827`), and `_discover_pending_documents`'s CASE
+(`tortoise/ingest.py:721-735`) reads a stored `false` as already-extracted — so the document is excluded by both the
+default arm and `include_unstamped`, and `ingest --upgrade-all` reports nothing pending over it. Filing the gap is
+tracked as #14431; `record_item_spend` therefore makes no ledger call today, because the indexer spends no model
+tokens. Also not yet: the scheduler itself (the tick is an interval re-sweep, not an off-peak planner); a
+20/500-document scale measurement on the production shape; an ack-latency instrument for a 1000-item acceptance; and a
+cross-process drain lease (the claim is process-local).
 
 ### Track S — build the destination *(starts now; spend only when a gate says so; S = scale)*
 

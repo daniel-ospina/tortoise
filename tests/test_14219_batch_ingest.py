@@ -263,7 +263,10 @@ def test_restart_requeues_in_flight_items_and_says_it_is_resuming():
     coord.advance(ORG, items[1], BatchItemState.INDEXED)
 
     # Simulate a restart: a NEW coordinator over the same durable store.
-    resumed = BatchCoordinator(store, blocking).recover(ORG)
+    # stale_after_s=0 says "treat any claim as void" — the restart case the test
+    # is about. The DEFAULT window is exercised by the test below, and is what
+    # stops a poll on one instance stealing another instance's live claim.
+    resumed = BatchCoordinator(store, blocking).recover(ORG, stale_after_s=0)
 
     assert resumed == [batch.batch_id]
     fresh_batch, after = BatchCoordinator(store).status(ORG, batch.batch_id)
@@ -863,7 +866,11 @@ def test_recover_does_not_requeue_a_batch_a_live_drain_owns():
     coord.advance(ORG, live_items[0], BatchItemState.EXTRACTING, attempt=True)
     coord.advance(ORG, dead_items[0], BatchItemState.EXTRACTING, attempt=True)
 
-    resumed = coord.recover(ORG, live_batches={live_batch.batch_id})
+    # `stale_after_s=0`: the dead batch's claim is void *now* — the window only
+    # matters cross-process, where a fresh claim may belong to a live peer (see
+    # `test_recover_does_not_steal_a_live_claim`).
+    resumed = coord.recover(ORG, live_batches={live_batch.batch_id},
+                           stale_after_s=0)
 
     assert resumed == [dead_batch.batch_id], (
         "only the batch whose claim belongs to a process that is gone")
@@ -1027,7 +1034,7 @@ def test_the_live_drain_test_is_asked_per_batch_not_snapshotted():
         # the reads would have answered "not live" for both batches.
         return batch_id == second.batch_id and len(probed) >= 1
 
-    resumed = coord.recover(ORG, live_batches=is_live)
+    resumed = coord.recover(ORG, live_batches=is_live, stale_after_s=0)
 
     assert set(probed) == {first.batch_id, second.batch_id}, (
         f"the predicate must be asked per candidate batch, got {probed}")
@@ -1173,3 +1180,95 @@ def test_graph_cas_is_a_match_on_the_expected_state_not_a_merge():
     assert GraphBatchStore(won).put_item_if_state(
         ORG, item, BatchItemState.QUEUED) is True
     assert won.params[-1]["state"] == "extracting"
+
+
+# ── round 2: the layer's own compare-and-set, claims and bounds ─────────────
+def test_cancel_cannot_move_a_row_a_runner_already_claimed():
+    """BLOCKING 4: `advance` is a compare-and-set on the row's STATE.
+
+    `cancel()` decides from a snapshot. A drain that claims the row in that window
+    (`queued → extracting`) used to be overwritten by the stale `queued` copy
+    walking the legal `queued → cancelled` edge — cancelling an item whose model
+    call had ALREADY spent its tokens and then discarding the result, which the
+    cancel docstring explicitly rejects.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md"])
+
+    stale = store.items(ORG, batch.batch_id)[0]      # what cancel() snapshotted
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+
+    moved = coord.advance(ORG, stale, BatchItemState.CANCELLED, reason="customer")
+    assert moved.state is BatchItemState.EXTRACTING, (
+        "a stale copy cancelled an in-flight item")
+    row = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    assert row.state is BatchItemState.EXTRACTING
+    assert row.attempts == 1, "the attempt counter must not be reset by a stale write"
+
+    # …and the runner's result still lands, because the row was never cancelled.
+    coord.advance(ORG, store.get_item(ORG, batch.batch_id, items[0].item_id),
+                  BatchItemState.INDEXED, tokens_in=100)
+    assert store.items(ORG, batch.batch_id)[0].state is BatchItemState.INDEXED
+
+
+def test_recover_does_not_steal_a_live_claim():
+    """BLOCKING 5: a poll on one instance must not requeue another's live work."""
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+
+    # The claim was just taken: it looks LIVE, which is the whole point.
+    assert BatchCoordinator(store).recover(ORG) == []
+    assert store.items(ORG, batch.batch_id)[0].state is BatchItemState.EXTRACTING
+
+    # …and once it is older than the window it IS void and gets taken back.
+    assert BatchCoordinator(store).recover(ORG, stale_after_s=0) == [batch.batch_id]
+    assert store.items(ORG, batch.batch_id)[0].state is BatchItemState.QUEUED
+
+
+def test_a_stale_copy_of_a_terminal_item_never_runs_the_runner():
+    """NB2: only the FRESH row may decide that an item is terminal."""
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG, items[0], BatchItemState.INDEXED)
+
+    stale = BatchItem(batch_id=batch.batch_id, item_id=items[0].item_id,
+                      ref="/a.md", state=BatchItemState.QUEUED)
+    calls: list[int] = []
+    out = coord.run_item(ORG, stale,
+                         lambda i: calls.append(1) or ItemOutcome(BatchItemState.INDEXED))
+    assert calls == [], "a completed document was extracted a second time"
+    assert out.state is BatchItemState.INDEXED
+
+
+def test_a_rejected_acceptance_discards_its_own_rows_and_staged_files(tmp_path):
+    """BLOCKING 2: the rollback, at the layer's own seam."""
+    store = InMemoryBatchStore()
+    real_put = store.put_item
+    seen = {"n": 0}
+
+    def _flaky(org_id, item):
+        seen["n"] += 1
+        if seen["n"] == 2:
+            raise TimeoutError("graph timeout")
+        return real_put(org_id, item)
+
+    store.put_item = _flaky  # type: ignore[method-assign]
+    coord = BatchCoordinator(store)
+    base = tmp_path / "ingest"
+    base.mkdir()
+
+    with pytest.raises(TimeoutError):
+        coord.submit(ORG, ["/a.md", "b.md"], contents=[None, "# B"],
+                     stage_base=str(base))
+
+    assert store.pending_batches(ORG) == [], (
+        "item rows from a rejected acceptance survive — the resume scan would "
+        "adopt and work documents the caller was told were refused")
+    staged = base / "_batches"
+    assert not staged.exists() or not any(staged.iterdir()), (
+        "the rejected batch's staged files were left on disk")

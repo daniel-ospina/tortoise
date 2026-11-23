@@ -4075,15 +4075,16 @@ app.add_middleware(
             _body_limits.CAPTURE_SESSION_413_DETAIL,
         ),
         # #14219: a batch carries DOCUMENT text, which the 256 KiB default
-        # cannot hold. The handler's own `_BATCH_MAX_INLINE_BYTES` check then
-        # applies the batch-specific guidance — which is why the two numbers are
-        # the same constant, not two. ⛔ The env-derived value is computed HERE
-        # too (#14415 review round 4, P3): registering the STATIC constant made
-        # `TORTOISE_BATCH_MAX_INLINE_BYTES` a no-op, because this middleware
-        # refused at 4 MiB before the handler ever saw the raised bound — an
-        # advertised limit nobody could reach. `_BATCH_MAX_INLINE_BYTES` is
-        # defined far below this registration (which runs at import time), so
-        # the same expression is spelled once here rather than referenced.
+        # cannot hold. This entry is the ONLY owner of that bound — the handler
+        # has no second check (#14219 review round 2, NB1), because a duplicate
+        # at the same number is unreachable and reads as configurable.
+        # ⛔ AND IT MUST READ THE ENV-DERIVED VALUE (#14415 review round 4, P3):
+        # registering the STATIC constant made `TORTOISE_BATCH_MAX_INLINE_BYTES`
+        # a no-op — the middleware refused at 4 MiB before the handler (which
+        # had the env-aware bound) ever saw the raised limit, an advertised
+        # setting nobody could reach. `_BATCH_MAX_INLINE_BYTES` is defined far
+        # below this registration, which runs at import time, so the same
+        # expression is spelled once here rather than referenced.
         "/v1/batches": (
             max(1024, _int_env("TORTOISE_BATCH_MAX_INLINE_BYTES",
                                _batch_ingest.BATCH_MAX_INLINE_BYTES)),
@@ -16561,11 +16562,13 @@ _BATCH_ALLOWANCE_RESOURCE = "sessions"
 
 #: Inline item text bound (bytes) — the same body-size reality as the count
 #: above. Path/URL items carry no inline bytes and are unaffected.
-#: The handler's own bound, from the SAME constant the body-cap middleware
-#: registers for this route — two numbers for one limit is how an advertised
-#: bound becomes unreachable (review, BLOCKING 6).
-_BATCH_MAX_INLINE_BYTES = max(1024, _int_env("TORTOISE_BATCH_MAX_INLINE_BYTES",
-                                             _batch_ingest.BATCH_MAX_INLINE_BYTES))
+#: ⛔ REMOVED: there is no handler-side inline bound. `path_caps["/v1/batches"]`
+#: above (the middleware's entry, `_batch_ingest.BATCH_MAX_INLINE_BYTES`) is the
+#: single owner of that number. A second check here could never fire — the summed
+#: UTF-8 length of the `text` fields cannot exceed the body the middleware has
+#: already refused at the same constant — and a `TORTOISE_BATCH_MAX_INLINE_BYTES`
+#: knob on top of it was silently ignored by the middleware, so it advertised a
+#: limit change it could not deliver (#14219 review round 2, NB1).
 
 #: The batch worker's OWN pool (see `batch_ingest.BATCH_ITEMS_IN_FLIGHT` for why
 #: the bound is 2 and why it must not be the capture pool). Created at import so
@@ -16817,8 +16820,14 @@ def _batch_retry_enqueue(org: dict, batch_id: str) -> None:
         if any(bid == batch_id for _o, bid in _BATCH_RETRY):
             return
         # Bound the queue: an org cannot accumulate unbounded deferred batches in
-        # memory. Overflow is not lost — `recover()` re-derives the pending
-        # batches from the graph, which is the record.
+        # memory.
+        # ⚠️ DECLARED RESIDUAL (#14219 review round 2, NB5): overflow past this
+        # bound is NOT re-derived in this process — `_BATCH_RECOVERED` is
+        # once-per-tenant-per-boot, so nothing here re-scans. The rows survive and
+        # are resumed by the next process; the drain-time retry path above is what
+        # keeps this queue from being the only safety-net. 1000 deferred batches
+        # for ONE process is well outside the measured shape (a batch is deferred
+        # for seconds, and the tick re-submits every one it can).
         if len(_BATCH_RETRY) < 1000:
             _BATCH_RETRY.append((org, batch_id))
 
@@ -16992,7 +17001,15 @@ def _drain_batch(org: dict, batch_id: str) -> None:
             if item.terminal:
                 continue
             try:
-                coord.run_item(org["org_id"], item, runner)
+                done = coord.run_item(org["org_id"], item, runner)
+                # ⛔ ONE BUDGET, ONE METER (`#14275`): an item that spent tokens
+                # moves the SAME `capture_extraction` dimension a session does.
+                # Without this call the overage a customer acknowledged is never
+                # realised on the bill, and the NEXT batch's estimate is computed
+                # against headroom no batch can consume (#14219 review round 2,
+                # BLOCKING 1). Zero-token items (everything the current per-file
+                # indexer produces) make no ledger call — see `record_item_spend`.
+                _batch_ingest.record_item_spend(org["org_id"], done)
             except Exception:
                 # ⛔ ONE ITEM'S FAILURE MUST NOT ABANDON THE REST (#14219
                 # review, NB1). A graph-timeout on a bookkeeping statement used
@@ -17003,6 +17020,9 @@ def _drain_batch(org: dict, batch_id: str) -> None:
                 _logger.exception("batch %s: item %s failed", batch_id,
                                   getattr(item, "item_id", "?"))
         coord.settle(org["org_id"], batch_id)
+        # The re-drive for anything this pass left non-terminal — and for a pass
+        # that fails before it can look — is in the `finally` below, so a single
+        # transient failure cannot skip it (#14415 review round 2, BLOCKING 1).
     except Exception:
         # The rows are durable; an escaped failure leaves items `extracting`,
         # which `recover()` requeues — on the next boot, or (for a leftover this
@@ -17097,18 +17117,17 @@ async def create_batch(body: BatchRequest,
     _reject_graph_bound_org_surface(org, "batch ingest")
     org_id = org["org_id"]
 
-    inline_bytes = sum(len(it.text.encode()) for it in body.items if it.text)
-    if inline_bytes > _BATCH_MAX_INLINE_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail={"error_code": "BATCH_TOO_LARGE",
-                    "message": "This batch carries more inline text than one "
-                               "request can accept — send it as several "
-                               "batches; nothing is dropped."})
-
+    # ⛔ The inline bound is enforced ONCE, by the body-cap middleware's
+    # `path_caps["/v1/batches"]` entry (#14219 review round 2, NB1). A second
+    # check here was unreachable — the summed UTF-8 length of the `text` fields
+    # can never exceed the JSON body the middleware already refused at the same
+    # number — which is a dead 413 whose only effect was to make the advertised
+    # bound look configurable when `TORTOISE_BATCH_MAX_INLINE_BYTES` was ignored
+    # above it. One number, one message.
     # ── the proactive estimate (owner §4), on the lanes each read belongs to ──
     included_tokens: int | None = None
     used_tokens = 0
+    usage_measured = True
     try:
         from tortoise.allowance_gate import ALLOWANCE_KEYS as _AK
 
@@ -17129,47 +17148,65 @@ async def create_batch(body: BatchRequest,
         # paying org over our own bookkeeping fault). The estimate is then
         # reported without an included amount, which is honest.
         _logger.warning("batch estimate: allowance could not be read", exc_info=True)
-    if included_tokens is not None:
-        try:
-            from tortoise.metering import get_capture_usage as _usage_reader
+    # The spend figure is the customer's own number, so it is read even when no
+    # allowance is configured (no tier carries `max_extraction_tokens` yet,
+    # #14275) — otherwise the receipt says "0 used" to a team that has spent.
+    try:
+        from tortoise.metering import get_capture_usage as _usage_reader
 
-            usage = await _cp_offload(lambda: _usage_reader(org_id),
-                                      op="batch_usage")
-            used_tokens = int(usage.get("capture_tokens_total") or 0)
-            # ⛔ A ZERO IS A READING ONLY WHEN THE LEDGER WAS READ (#14415 review
-            # round 4, P2). `get_capture_usage` NEVER raises (#923/#4051) — it
-            # degrades to a zero view and NAMES the fault in
-            # `unmeasured_reason`, whose own contract says `read_error` and
-            # `period_error` must REFUSE while `absent` is a real zero. Reading
-            # `capture_tokens_total or 0` therefore turned an unreadable ledger
-            # into "nothing spent", which UNDERSTATES the overage — the one
-            # outcome owner §4 exists to prevent ("so the overage is never
-            # discovered on the bill"). So refuse the estimate read instead, and
-            # say it is retryable rather than pretending to a number.
-            reason = usage.get("unmeasured_reason")
-            if usage.get("measured") is False and reason in (
-                    "read_error", "period_error"):
-                _logger.warning(
-                    "batch estimate: usage ledger unreadable (%s)", reason)
-                raise HTTPException(
-                    status_code=503,
-                    headers={"Retry-After": "30"},
-                    detail={
-                        "error_code": "BATCH_ESTIMATE_UNAVAILABLE",
-                        "message": "we could not read this team's extraction "
-                                   "usage just now, so the batch's allowance "
-                                   "impact cannot be priced honestly. Nothing "
-                                   "was accepted and nothing was charged — "
-                                   "re-send in a few seconds.",
-                    })
-        except HTTPException:
-            raise
-        except Exception:
-            # A reader that RAISED is a different fault class from one that
-            # reported an unreadable window, and it also leaves the figure
-            # unknown — so it takes the same refusal rather than a zero.
-            _logger.warning("batch estimate: usage could not be read",
-                            exc_info=True)
+        usage = await _cp_offload(lambda: _usage_reader(org_id),
+                                  op="batch_usage")
+        used_tokens = int(usage.get("capture_tokens_total") or 0)
+        # ⛔ A ZERO IS A READING ONLY WHEN THE LEDGER WAS READ (#14415 review
+        # round 4, P2). `get_capture_usage` NEVER raises (#923/#4051) — it
+        # degrades to a zero view and NAMES the fault in `unmeasured_reason`
+        # (metering.py:1295-1303), whose own contract says the caller "must
+        # REFUSE". Reading `capture_tokens_total or 0` therefore turned an
+        # unreadable ledger into "nothing spent", which UNDERSTATES the overage
+        # — the one outcome owner #14275 §4 exists to prevent ("so the overage
+        # is never discovered on the bill").
+        #
+        # Two cases, two answers, because they are not the same fact:
+        #   · UNKNOWN (a read/period fault, or a reader that raised) — no honest
+        #     number exists, and when an included amount IS published that
+        #     unknown figure is LOAD-BEARING: it is what the overage is computed
+        #     from, so the acknowledgement would be priced against a number we
+        #     could not read. Refuse retryably.
+        #   · ABSENT (no usage recorded for the window) — a legitimate zero, so
+        #     price it, and carry `usage_measured: false` in the receipt so the
+        #     figure is disclosed as unmeasured rather than confident
+        #     (#14219 review, NB3).
+        # ⛔ And with NO published allowance the spend figure cannot change the
+        # answer at all — `overage_tokens`/`overage_usd` are 0 by construction —
+        # so refusing there would block a customer's bulk upload over a metering
+        # blip in exchange for nothing. That case proceeds, honestly flagged.
+        reason = usage.get("unmeasured_reason")
+        unknown = usage.get("measured") is False and reason in (
+            "read_error", "period_error")
+        usage_measured = bool(usage.get("measured", True))
+        if unknown and included_tokens is not None:
+            _logger.warning("batch estimate: usage ledger unreadable (%s)",
+                            reason)
+            raise HTTPException(
+                status_code=503,
+                headers={"Retry-After": "30"},
+                detail={
+                    "error_code": "BATCH_ESTIMATE_UNAVAILABLE",
+                    "message": "we could not read this team's extraction usage "
+                               "just now, so the batch's allowance impact "
+                               "cannot be priced honestly. Nothing was accepted "
+                               "and nothing was charged — re-send in a few "
+                               "seconds.",
+                })
+    except HTTPException:
+        raise
+    except Exception:
+        # A reader that RAISED is the same unknown as a reported fault, and it
+        # takes the same asymmetry: refuse where the figure is load-bearing,
+        # flag it where it is not.
+        _logger.warning("batch estimate: usage could not be read", exc_info=True)
+        usage_measured = False
+        if included_tokens is not None:
             raise HTTPException(
                 status_code=503,
                 headers={"Retry-After": "30"},
@@ -17185,6 +17222,8 @@ async def create_batch(body: BatchRequest,
     est = _batch_ingest.estimate_batch(len(body.items),
                                        included_tokens=included_tokens,
                                        tokens_already_used=used_tokens)
+    est_dict = est.as_dict()
+    est_dict["usage_measured"] = usage_measured
 
     if est.acknowledgement_required and not body.acknowledge_overage:
         # The refusal the owner asked for: the number, up front, with the exact
@@ -17202,8 +17241,8 @@ async def create_batch(body: BatchRequest,
             overage_copy = (
                 " This batch is large enough that it may exceed your plan's "
                 "included extraction allowance, and that allowance is not "
-                "priced against your plan yet — so we cannot show an expected "
-                "overage amount.")
+                "priced against your plan yet — so the figure to confirm is "
+                "the expected spend on this work, not a measured amount.")
         else:
             overage_copy = (
                 f" Expected overage: about {est.overage_tokens:,} tokens "
@@ -17212,10 +17251,16 @@ async def create_batch(body: BatchRequest,
             status_code=402,
             detail={
                 "error_code": "BATCH_ACKNOWLEDGEMENT_REQUIRED",
+                # ⛔ The sentence must match the NUMBERS beside it (#14219
+                # review round 2, NB9). With no `max_extraction_tokens`
+                # configured (no tier carries one yet, #14275) there IS no
+                # included amount, so the overage is 0 and "confirm the expected
+                # overage" would be false — the thing to confirm is the expected
+                # SPEND.
                 "message": _batch_ingest.customer_copy(est.estimated_hours)
                            + "." + overage_copy + " Re-send with "
                              "acknowledge_overage=true to confirm.",
-                "estimate": est.as_dict(),
+                "estimate": est_dict,
             })
 
     refs = [it.ref for it in body.items]
@@ -17234,7 +17279,7 @@ async def create_batch(body: BatchRequest,
         return _batch_ingest.BatchCoordinator(store).submit(
             org_id, refs, names=names, contents=contents,
             stage_base=stage_base, corpus_name=body.corpus_name or "",
-            estimate=est.as_dict())
+            estimate=est_dict)
 
     try:
         batch, items = await _run_off_loop(_BATCH_DB_EXECUTOR, _accept)
@@ -17275,7 +17320,7 @@ async def list_batches(org: dict = Depends(get_current_org_gated)):  # noqa: B00
         # caller in production and not only in a test.
         _recover_org_batches(org)
         store = _batch_store_for(org)
-        rows = store.list_batches(org["org_id"], limit=20)
+        rows = store.list_recent_batches(org["org_id"], limit=20)
         counts = store.batch_counts(org["org_id"], [b.batch_id for b in rows])
         return rows, counts
 
@@ -53234,7 +53279,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 205 tracked files (754 distinct
+# ABSOLUTE line number from 205 tracked files (755 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
