@@ -6842,7 +6842,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # Non-vacuity, MEASURED at this head: mutating `:17970` -> `:17967` in that probe reds
         # `test_the_bare_continuation_cites_name_what_they_say`; the row's scope is what makes
         # that number observable at all, since no other row reads the pair. The `_locate_hint`
-        # leg names the live line (`if vet_enabled and embed_list:` at `:17970`).
+        # leg names the live line (`if vet_enabled and embed_list:` at `:18055`).
         ("probes/capstone_measure.py", "and ``if vet_enabled and complete_list:``", (
             ("18055", "if vet_enabled and embed_list:"),
             ("15382", "if vet_enabled and complete_list:"),
@@ -6852,11 +6852,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # carries the same `(:17970)` in a sentence a future run PRINTS to a reader, and nothing
         # read it: MEASURED on this head, mutating that `:17970` -> `:17967` in the probe leaves
         # `2 passed, 442 deselected` (`-k 'bare_continuation or epic_bundle'`) — green.
-        # ⛔ The phrase carries the cite's own `(:17970)` token because the sentence around it does
+        # ⛔ The phrase carries the cite's own `(:18055)` token because the sentence around it does
         # NOT scope: `"pass is gated on the LIST"` occurs on TWO lines of the probe (the
         # `classify_later` value's `classify pass is gated on the LIST` is the other), and an
         # ambiguous phrase is a FAILURE in this table, not a silent bind to the easier match.
-        # Only `:17970` is pinned here — `:15372` sits on the NEXT line of that same string, and a
+        # Only `:18055` is pinned here — `:15382` sits on the NEXT line of that same string, and a
         # row scopes to exactly one.
         ("probes/capstone_measure.py",
          "pass is gated on the LIST — `if vet_enabled and embed_list:` (:18055)", (
@@ -7365,11 +7365,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("22031", "relation_write = apply_relation_edges("),        ), "sdk"),
+            ("22032", "relation_write = apply_relation_edges("),        ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("22030", "from tortoise.relation_write import apply_relation_edges"),        ), "sdk"),
+            ("22031", "from tortoise.relation_write import apply_relation_edges"),        ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("22018", "# `#10999` made the channel TRANSPORT ONLY"),        ), "sdk"),
+            ("22019", "# `#10999` made the channel TRANSPORT ONLY"),        ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to one
         # FILE and the consume pair was re-pointed in one document while the definition
@@ -7561,11 +7561,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # on the other extractor and concludes the opposite of what §0 records, which is
         # why it is pinned by its ANCHOR and not merely by a number.
         ("RECONCILE-A1-A2-A5.md", "reaches it at", (
-            ("19897", "extracted, meta = self._extract_session_v2("),            # …and the CALL on the same line, so the appendix's second half of the
+            ("19898", "extracted, meta = self._extract_session_v2("),            # …and the CALL on the same line, so the appendix's second half of the
             # sentence has a reader too (#12462 review round 3: `:19012` was corrected
             # here and left unpinned, so it could re-stale silently while §0 stayed
             # right — the round-2 shape, one number short).
-            ("22031", "relation_write = apply_relation_edges("),        ), "sdk"),
+            ("22032", "relation_write = apply_relation_edges("),        ), "sdk"),
         # ⛔ THIS HIT IS STATED **THREE** TIMES IN THE DOCUMENT, and the row that reads
         # §0 (`:104`) embeds its number in its own PHRASE — `relation_write.py:7,
         # sdk.py:` — so it binds §0's `sdk.py` half only *incidentally*, and NOTHING read
@@ -7575,7 +7575,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("7", "extractor_v2._assemble_relations"),
         ), "relation_write"),
         ("RECONCILE-A1-A2-A5.md", "relation_write.py:7, sdk.py:", (
-            ("22018", "# `#10999` made the channel TRANSPORT ONLY"),        ), "sdk"),
+            ("22019", "# `#10999` made the channel TRANSPORT ONLY"),        ), "sdk"),
         # ⛔ THE SAME HIT, IN THE REPRODUCTION BLOCK TWO SCREENS DOWN (#12462 review
         # round 4). The row above binds the appendix's SUMMARY line; the block that
         # prints the `git grep` output states the identical cite again, and it was the
@@ -7583,7 +7583,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # reverting every changed block individually. Two statements of one hit, one
         # reader, is how "one document asserts two numbers" comes back.
         ("RECONCILE-A1-A2-A5.md", "CONSUMER's docstring) and sdk.py:", (
-            ("22018", "# `#10999` made the channel TRANSPORT ONLY"),            # …and that block's `relation_write.py:7` half, keyed on ITS OWN source (#12569
+            ("22019", "# `#10999` made the channel TRANSPORT ONLY"),            # …and that block's `relation_write.py:7` half, keyed on ITS OWN source (#12569
             # review round 6: `:7` → `:9` here stayed GREEN — the two rows for this block
             # are both `sdk`-keyed, because a row carries ONE source key).
         ), "sdk"),
