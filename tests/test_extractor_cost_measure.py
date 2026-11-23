@@ -1652,7 +1652,16 @@ def test_the_real_install_arm_actually_arms_the_after_batch(monkeypatch, tmp_pat
         return {"prompt_tokens": 100, "completion_tokens": 10}
 
     docs = [{"path": "README.md", "tokens": 10 + i} for i in range(2)]
-    monkeypatch.delenv(m._TOGGLE, raising=False)
+    # ⛔ THE AMBIENT IS SET TO THE OPPOSITE VALUE, NOT DELETED. Deleting it makes
+    # this pin VACUOUS for the `before` half: with the toggle unset, `before`
+    # resolves to `indent` whether or not `_install_arm`'s `elif arm ==
+    # "before": os.environ.pop(...)` branch exists. Measured (review cycle 12,
+    # P2): deleting that branch left 74 passed. The branch only has an effect
+    # when the ambient is `compact` — which is exactly the posture `after`
+    # exists to move production TOWARD, so a box in that posture would spend a
+    # whole `before` column on FAILED rows and no test would have said the
+    # branch was gone. Starting from `compact` forces the real pop.
+    monkeypatch.setenv(m._TOGGLE, "compact")
     monkeypatch.setattr(m, "pick_corpus", lambda limit, seed: docs)
     monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
     monkeypatch.setattr(m, "_build_model", lambda: object())
@@ -1674,9 +1683,12 @@ def test_the_real_install_arm_actually_arms_the_after_batch(monkeypatch, tmp_pat
         f"{by_arm['after'].get('s4_embed_json')!r} — if this is 'indent', the "
         "arm is a label again and the before→after delta measures nothing")
     assert by_arm["before"]["s4_embed_json"] == "indent", (
-        "the `before` arm must pin the lever OFF, recording today's bytes")
-    # the ambient value is restored, so a later non-lever arm is not armed
-    assert m._TOGGLE not in os.environ
+        "the `before` arm must POP an ambient `compact` and render today's "
+        "bytes — starting from `compact` is what makes this assertion real")
+    # …and the ambient `compact` is RESTORED, not left armed or left unset
+    assert os.environ.get(m._TOGGLE) == "compact", (
+        f"the ambient value must come back as it was, got "
+        f"{os.environ.get(m._TOGGLE)!r}")
 
 
 def test_a_lever_that_moves_mid_measurement_is_refused(monkeypatch, tmp_path):
@@ -1773,7 +1785,7 @@ def test_a_content_level_error_is_a_note_not_an_incompleteness():
 
 
 def test_an_unknown_arm_is_refused_rather_than_measured(monkeypatch, tmp_path):
-    """A typo must cost an exit, not a 360-call provider run.
+    """A typo must cost an EXIT CODE, not a 360-call provider run.
 
     `_install_arm` acts only on `after`/`before`; `cold`/`warm` deliberately
     inherit the ambient value. Every OTHER token used to fall through with no arm
@@ -1781,15 +1793,51 @@ def test_an_unknown_arm_is_refused_rather_than_measured(monkeypatch, tmp_path):
     exactly the failure `_install_arm` exists to prevent: both batches render
     `indent`, the delta is 0, and `run` exits 0 having measured nothing but the
     before arm twice (review cycle 11, P3).
+
+    ⛔ TWO THINGS THIS PIN GOT WRONG AND NOW CHECKS (review cycle 12):
+    (a) it asserted only `pytest.raises(SystemExit)`, never `exc.value.code`, so
+        the code's claim of exit **2** was unverified — and `SystemExit("msg")`
+        actually exits **1**, the code this tool also uses for a real run
+        failure, so a caller could not tell a typo from a failed measurement;
+    (b) "proving the refusal is not too broad" asserted the CONSTANT's contents,
+        not that the guard accepts them — so a guard that refused `cold`/`warm`
+        (the tool's own DEFAULT `--arms cold,warm`) kept the suite green. The
+        positive leg below now goes THROUGH the guard.
     """
+    # stub the work so a regressed refusal cannot spend a real measurement —
+    # without this the mutant took 507 s and executed `measure_one` for real
+    monkeypatch.setattr(m, "pick_corpus", lambda limit, seed: [])
+    monkeypatch.setattr(m, "spool_sessions", lambda limit: [])
+    monkeypatch.setattr(m, "_build_model", lambda: object())
+    monkeypatch.setattr(m, "measure_one",
+                        lambda *a, **k: {"prompt_tokens": 1,
+                                         "completion_tokens": 1})
+
     for bad in ("before,After", "before,compact", "tepid"):
         with pytest.raises(SystemExit) as exc:
-            m.main(["run", "--docs", "1", "--arms", bad,
+            m.main(["run", "--docs", "0", "--arms", bad,
                     "--out", str(tmp_path / "m.jsonl")])
-        assert "unknown arm" in str(exc.value), (bad, str(exc.value))
-    # …and the closed set is accepted (proving the refusal is not too broad).
-    assert sorted(m._ARMS) == ["after", "before", "cold", "warm"], (
-        f"the accepted set must be exactly the four arms, got {sorted(m._ARMS)}")
+        assert exc.value.code == 2, (
+            f"{bad!r} must exit 2 (argparse's usage code), got "
+            f"{exc.value.code!r} — `SystemExit('msg')` exits 1, which is this "
+            f"tool's RUN-FAILURE code")
+    # ⛔ the empty selection is the same class, so it is the same code
+    with pytest.raises(SystemExit) as exc:
+        m.main(["run", "--docs", "0", "--arms", ",",
+                "--out", str(tmp_path / "m2.jsonl")])
+    assert exc.value.code == 2, exc.value.code
+
+    # POSITIVE LEG: the accepted set must pass THROUGH the guard. `cold,warm` is
+    # the argument DEFAULT, so a guard that refused them would break the
+    # documented bare invocation — and the constant-only assertion could not see
+    # that. `returncode 0` is the assertion; the stubs above made it cheap.
+    assert m.main(["run", "--docs", "0", "--arms", "cold,warm",
+                   "--out", str(tmp_path / "m3.jsonl")]) == 0, (
+        "the default `--arms cold,warm` must be ACCEPTED by the refusal — a "
+        "guard that refuses the tool's own default is too broad")
+    assert m.main(["run", "--docs", "0", "--arms", "before,after",
+                   "--out", str(tmp_path / "m4.jsonl")]) == 0, (
+        "the two lever arms must pass the guard")
 
 
 def test_the_printed_output_table_closes_arithmetically():
