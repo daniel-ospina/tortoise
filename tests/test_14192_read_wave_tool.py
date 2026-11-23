@@ -245,6 +245,41 @@ def _read_calls(tree: ast.AST) -> list[ast.Call]:
             and (getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in _READ_NAMES]
 
 
+class _ResolutionDidNotConverge(RuntimeError):
+    """The bind fixpoint hit its pass budget: the resolver REFUSES rather than spins.
+
+    ⛔ REFUSING IS THE FAIL-CLOSED DIRECTION (#14326 P1). A form whose statically possible
+    values grow on every pass (`_a = _b + "y"` beside `_b = _a + "z"` — a MUTUAL
+    accumulation, which the per-target self-reference staging below cannot see) has no
+    finite product at all. Spinning is not a verdict: the pin would burn the shard's whole
+    budget and time out, which reads to every consumer as neither green nor red. This error
+    is an ordinary test FAILURE naming the shape, so the answer is a red the next author
+    can act on.
+    """
+
+
+#: Passes the fixpoint may take before it refuses. A real file resolves a chain in one pass
+#: per link; 64 links is far past anything in `tools/`, and the budget is what makes a
+#: diverging shape a failed test instead of a hung one.
+_FIXPOINT_MAX_PASSES = 64
+
+# ⛔ THE BUDGET ITSELF IS GUARDED (#14326 review P1, measured: raising it to 10**9 makes
+# `test_a_BIND_CYCLE_REFUSES_instead_of_spinning` HANG — `rc=124` after 40 s — instead of
+# failing, so the row that exercises the budget reports neither green nor red, which is
+# verbatim the defect the budget was added to close). A hang is not a verdict, so the
+# constant is asserted to be BOUNDED and POSITIVE here, at its own definition.
+assert 0 < _FIXPOINT_MAX_PASSES <= 64, (
+    f"_FIXPOINT_MAX_PASSES={_FIXPOINT_MAX_PASSES} — the fixpoint budget must stay bounded "
+    "and positive: an unbounded one turns the bind-cycle row into a HANG (no verdict at "
+    "all), and a zero/negative one refuses every source at the first pass")
+
+#: Combinations the JOIN forms (an f-string's parts, a `%` template's operands, a
+#: `.format` call's arguments) may build before the resolver refuses. A real file joins a
+#: handful of literals — 4096 combinations is far past anything in `tools/` — and the same
+#: argument as `_FIXPOINT_MAX_PASSES` applies: an unbounded product is a timeout, not a red.
+_PRODUCT_MAX_COMBINATIONS = 4096
+
+
 def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     """Every statically POSSIBLE string literal each name may hold, anywhere in the file.
 
@@ -342,13 +377,33 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     a tuple, a list, a SET or a DICT resolves, because CPython's grammar gives `iter` as an
     arbitrary `expr` and iteration over a literal is statically visible (#14326 review F2).
     """
+    def _self_referential(target: ast.AST, value: ast.AST) -> bool:
+        """True when `value` LOADS the name `target` binds.
+
+        ⛔ THESE MUST BE STAGED, NOT FIXPOINTED (#14326 P1, MEASURED: the pin HUNG). With
+        `Add` on the bind path, `_s = "_tortoise"; _s = _s + "_fts_query"` fed the fixpoint
+        its own output — every pass appended one more `_fts_query` — so `changed` never went
+        False and `_str_constants` never returned (`rc=124` after 60 s; `origin/main`'s
+        version, which had no `Add` arm, returned `{'_s': '_tortoise'}`). The `+=` arm
+        directly below documents this exact hazard and stages for it; a plain `Assign` whose
+        value re-reads its own target is the same accumulation written the other way.
+        """
+        if not isinstance(target, ast.Name):
+            return False
+        return any(isinstance(node, ast.Name) and node.id == target.id
+                   and isinstance(node.ctx, ast.Load) for node in ast.walk(value))
+
     binds: list[tuple[ast.AST, ast.AST]] = []
     augments: list[tuple[ast.Name, ast.AST]] = []
+    staged: list[tuple[ast.Name, ast.AST]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
-            binds.extend((target, node.value) for target in node.targets)
+            for target in node.targets:
+                (staged if _self_referential(target, node.value) else binds).append(
+                    (target, node.value))
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-            binds.append((node.target, node.value))
+            (staged if _self_referential(node.target, node.value) else binds).append(
+                (node.target, node.value))
         # ⛔ AN AUGMENTED BIND IS A BIND (#14326 review at `a29f3cd8`, MEASURED GREEN at
         # `80d2ab52`): `_N = "_tortoise_"; _N += "fts_query"` then
         # `getattr(sdk, _N)(…, kind="statement")` left the pin GREEN (mentions 2, calls 2,
@@ -474,7 +529,34 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
             # which contradicted the code and the residual list — the over-approximation is
             # the fail-closed direction and is deliberate; narrowing it to `Constant`-only
             # would fail OPEN on a runtime-computed read name.
-            return set().union(*(_values(part) for part in value.values))
+            # ⛔ AND THE PARTS ARE JOINED AS WELL AS UNIONED (#14326 round 13, MEASURED GREEN
+            # at `b6be33738f` while every `+` spelling of the same string was refused) — see
+            # `_joined_strings`; the union is kept beside it for the placeholder case.
+            _parts = [_values(part) for part in value.values]
+            return set().union(*_parts) | _joined_strings(_parts)
+        # The expression an f-string part interpolates. `format_spec` is itself a `JoinedStr`
+        # of parts, so a `{x:>10}` spec can contribute only its own literal fragments.
+        if isinstance(value, ast.FormattedValue):
+            return (_values(value.value)
+                    | (_values(value.format_spec) if value.format_spec is not None else set()))
+        # ⛔ `%` FORMATTING AND `str.format` ARE THE SAME STATIC LITERAL (#14326 round 13,
+        # MEASURED GREEN at `b6be33738f`, each at `m=2 c=2 i=0` while the `+` spelling of the
+        # same string was refused):
+        #     _N = "%s_fts_query" % "_tortoise"                    # bound, then read
+        #     getattr(sdk, "%s_fts_query" % "_tortoise")(…)        # inline
+        #     _N = "_tortoise_fts_query".format()                   # bound, then read
+        # Semgrep's constant propagation folds Python f-strings, `%` formatting, `.format`
+        # and `+` over constants into a plain string, which is the convergent standard for a
+        # guard that must not fail open; and this is the argument this file already accepted
+        # for a literal-only `+` — nothing it cannot SEE statically is being computed. Only
+        # resolvable operands enter, so `_N + "_x"` (a parameter) stays the declared residual.
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Mod):
+            _operands = _mod_operands(value.right, _values)
+            return _percent_strings(_values(value.left), _operands) if _operands else set()
+        if (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "format"):
+            return _format_strings(_values(value.func.value),
+                                   _format_operands(value.args, value.keywords, _values))
         # ⛔ THE SAME `+` ARM, ON THE BIND PATH (#14326 round 12, MEASURED at `c380075b4`):
         # `_N = "_tortoise_" + "fts_query"; getattr(sdk, _N)(…, kind="statement")` left the pin
         # GREEN while the INLINE spelling of the same sum was refused — the verdict was decided
@@ -563,9 +645,22 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         return False
 
     def _fixpoint() -> None:
-        """Propagate every ordinary bind until nothing grows."""
+        """Propagate every ordinary bind until nothing grows, within a bounded budget.
+
+        ⛔ THE BUDGET IS THE VERDICT (#14326 P1): an unbounded `while changed` over a shape
+        whose product grows every pass never terminates, and a hung pin answers nothing.
+        """
         changed = True
+        passes = 0
         while changed:  # fixed point: a chain of any length resolves in one call
+            passes += 1
+            if passes > _FIXPOINT_MAX_PASSES:
+                raise _ResolutionDidNotConverge(
+                    f"the bind resolver did not converge in {_FIXPOINT_MAX_PASSES} passes: "
+                    "a statically possible value is growing every pass, which is a MUTUAL "
+                    "accumulation (`_a = _b + 'x'` beside `_b = _a + 'y'`) and has no finite "
+                    "product. The pin cannot certify this source, so it REFUSES rather than "
+                    "spin — an unbounded fixpoint is a timeout, not a red.")
             changed = False
             for target, value in binds:
                 if _bind(target, value):
@@ -578,6 +673,20 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     # accumulation its own output (`_a` + `x` + `x` + …) and would never converge — the growth
     # is why this is STAGED, not a precision choice. The propagation below is what lets
     # `_M = _N` (written after the `+=`) resolve to the augmented value.
+    # ⛔ A SELF-REFERENTIAL BIND IS APPLIED ONCE, EXACTLY LIKE `augments` (#14326 P1): the
+    # product is taken against the values the name held BEFORE this bind, so an accumulation
+    # is bounded instead of feeding the fixpoint its own output. `_values` already computes
+    # the product for this shape (`_s + "_x"` -> every value of `_s`, suffixed) — prefixing
+    # `acc` again here would DOUBLE-COUNT the left operand (measured while writing this:
+    # `{'_tortoise_tortoise_fts_query', '_tortoise'}` for `_s = "_tortoise"; _s = _s + …`).
+    # Over-approximate on purpose: the earlier values stay in the set, which is this map's
+    # declared fail-closed polarity (a later bind can only ADD candidates), and an INERT use
+    # of the name stays green because the `Name` arm still requires an executable position.
+    for target, value in staged:
+        acc = out.get(target.id)
+        if acc is None:
+            acc = out[target.id] = set()
+        acc |= _values(value)
     for target, value in augments:
         # ⛔ NOT `out.setdefault(...).update({...})` (#14326): that shape is one row of
         # `tools/sdk_privatise.py`'s untyped-receiver RESIDUE, and adding one moved the
@@ -634,6 +743,117 @@ def _repetitions(strings: frozenset[str], counts: frozenset[int]) -> frozenset[s
     return frozenset(s * n for s in strings for n in counts)
 
 
+def _string_products(option_sets) -> list[tuple[str, ...]]:
+    """Every ordered combination of the per-operand string sets.
+
+    The shared core of the three JOIN forms below (an f-string's parts, a ``%`` template's
+    operands, ``str.format``'s arguments). Returning ``[]`` when ONE operand is unresolvable
+    is what keeps the declared residual (``_N + "_x"`` with a parameter ``_N``) out of the
+    census without a guard clause restating it (#14326 round 11).
+
+    ⛔ THE PRODUCT IS BUDGETED, like the bind fixpoint (#14326 round 13): an unbounded
+    cartesian product over a pathological source is a HANG, and a hung pin answers nothing —
+    the same defect `_FIXPOINT_MAX_PASSES` refuses one function up. A source whose parts
+    multiply past the budget has no useful verdict to give here, so it REFUSES.
+    """
+    combos: list[tuple[str, ...]] = [()]
+    for options in option_sets:
+        if not options:
+            return []
+        if len(combos) * len(options) > _PRODUCT_MAX_COMBINATIONS:
+            raise _ResolutionDidNotConverge(
+                f"the string JOIN resolver would build more than "
+                f"{_PRODUCT_MAX_COMBINATIONS} combinations from {len(option_sets)} operands "
+                "(an f-string, a `%` template or a `.format` call whose parts are each a "
+                "selection of literals): no useful verdict comes from materialising it, so "
+                "the pin REFUSES rather than spin — an unbounded product is a timeout, not "
+                "a red.")
+        combos = [(*combo, option) for combo in combos for option in sorted(options)]
+    return combos
+
+
+def _joined_strings(part_sets) -> set[str]:
+    """Every string an f-string builds by JOINING its statically resolvable parts.
+
+    ⛔ THE PARTS ARE JOINED, NOT ONLY UNIONED (#14326 round 13, MEASURED GREEN at
+    `b6be33738f`: ``getattr(sdk, f"{'_tortoise_fts_query'}")(…, kind="statement")`` passed
+    the pin at ``m=2 c=2 i=0``, as did ``f"{'_tortoise_'}{'fts_query'}"``). A
+    ``FormattedValue`` part contributed nothing of its own, so the spelling that builds the
+    name ENTIRELY out of literals — nothing is computed at runtime, the same argument this
+    file accepted for a literal-only ``+`` — was invisible to both resolvers. The callers
+    keep the old UNION beside this join, because that over-approximation is what reds a
+    placeholder part (``f"{p}_tortoise_fts_query"``) and is deliberate.
+    """
+    return {"".join(combo) for combo in _string_products(part_sets)}
+
+
+def _mod_operands(node: ast.AST, resolve) -> list | None:
+    """Candidate right-hand operands of a ``%`` template, or ``None`` when unresolvable.
+
+    The three shapes CPython's ``%`` accepts from a statically visible operand: one value
+    (``"%s_fts_query" % p``), a literal sequence (``"%s_%s" % (a, b)``, PAIRED element-wise
+    like ``_bind``'s unpack arm — a union would format the wrong arity) and a literal mapping
+    (``"%(k)s" % {"k": v}``, which needs each value to be a singleton to name its key).
+    """
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return [tuple(combo) for combo in
+                _string_products([resolve(elt) for elt in node.elts])] or None
+    if isinstance(node, ast.Dict):
+        keys = [key.value if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                else None for key in node.keys]
+        values = [resolve(value) for value in node.values]
+        if any(key is None for key in keys) or any(len(value) != 1 for value in values):
+            return None
+        return [{key: next(iter(value)) for key, value in zip(keys, values, strict=True)}]
+    return sorted(resolve(node)) or None
+
+
+def _percent_strings(templates, operands) -> set[str]:
+    """Every string a literal-only ``%`` template builds from ``operands``."""
+    out: set[str] = set()
+    for template in templates:
+        for operand in operands:
+            try:
+                rendered = template % operand
+            except (TypeError, ValueError, KeyError, IndexError, AttributeError):
+                continue
+            if isinstance(rendered, str):
+                out.add(rendered)
+    return out
+
+
+def _format_operands(args, keywords, resolve) -> tuple[list, list] | None:
+    """The ``str.format`` call's (positional combinations, keyword mappings), or ``None``."""
+    if any(keyword.arg is None for keyword in keywords):
+        return None  # a `**mapping` spread — its keys are not statically visible here
+    positional = [tuple(combo) for combo in
+                  _string_products([resolve(arg) for arg in args])]
+    mappings = [dict(zip([keyword.arg for keyword in keywords], combo, strict=True))
+                for combo in _string_products([resolve(keyword.value)
+                                               for keyword in keywords])]
+    if (args and not positional) or (keywords and not mappings):
+        return None
+    return positional or [()], mappings or [{}]
+
+
+def _format_strings(templates, operands) -> set[str]:
+    """Every string a literal ``"…".format(…)`` builds from ``operands``."""
+    if not operands:
+        return set()
+    positional_options, mapping_options = operands
+    out: set[str] = set()
+    for template in templates:
+        for positional in positional_options:
+            for mapping in mapping_options:
+                try:
+                    rendered = template.format(*positional, **mapping)
+                except (IndexError, KeyError, ValueError, AttributeError, TypeError):
+                    continue
+                if isinstance(rendered, str):
+                    out.add(rendered)
+    return out
+
+
 def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> frozenset[str]:
     """Every string value `node` can statically hold, a literal container expanded."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -681,8 +901,29 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
         return frozenset().union(*(_possible_strings(operand, consts)
                                    for operand in node.values))
     if isinstance(node, ast.JoinedStr):
-        return frozenset().union(*(_possible_strings(part, consts)
-                                   for part in node.values))
+        # ⛔ JOINED AS WELL AS UNIONED — the same fix as `_values`' arm (#14326 round 13):
+        # `getattr(sdk, f"{'_tortoise_fts_query'}")(…)` reaches the read with the name inline
+        # and never touches `_values`, so both resolvers need the join.
+        _parts = [_possible_strings(part, consts) for part in node.values]
+        return frozenset(set().union(*_parts) | _joined_strings(_parts))
+    if isinstance(node, ast.FormattedValue):
+        return (_possible_strings(node.value, consts)
+                | (_possible_strings(node.format_spec, consts)
+                   if node.format_spec is not None else frozenset()))
+    # ⛔ `%` AND `.format` ON THE INLINE PATH, the mirror of `_values`' arms (#14326 round 13):
+    # `getattr(sdk, "%s_fts_query" % "_tortoise")(…)` was GREEN at `b6be33738f` at
+    # `m=2 c=2 i=0` while a `+` that builds the same string was refused.
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        _operands = _mod_operands(node.right,
+                                  lambda operand: _possible_strings(operand, consts))
+        return (frozenset(_percent_strings(_possible_strings(node.left, consts), _operands))
+                if _operands else frozenset())
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "format"):
+        return frozenset(_format_strings(
+            _possible_strings(node.func.value, consts),
+            _format_operands(node.args, node.keywords,
+                             lambda operand: _possible_strings(operand, consts))))
     # ⛔ A LITERAL-ONLY `+` IS A LITERAL (#14326 round 9, MEASURED GREEN at `d6ed6799`):
     # `getattr(sdk, "_tortoise_" + "fts_query")(…, kind="statement")` passed the pin at
     # `m=2 c=2 i=0`, while the IMPLICIT-CONCAT spelling of the same string (which `compile()`
@@ -4431,6 +4672,42 @@ def _mutations_of(body: str) -> list[int]:
     return _mutated_after(run_def, "results", read.lineno, artifact_append=None)
 
 
+def test_a_SELF_REFERENTIAL_bind_TERMINATES_and_still_reaches() -> None:
+    """`_s = _s + "…"` is an ACCUMULATION: bounded, over-approximate, and still a reach.
+
+    ⛔ MEASURED BEFORE THIS FIX (#14326 P1): `_str_constants` never returned on this source
+    — `rc=124` after 60 s — once `_values` grew the `Add` arm, because the fixpoint fed the
+    product its own output (one more `_fts_query` per pass, so `changed` never went False).
+    `origin/main`'s version returned `{'_s': '_tortoise'}`: it had no `Add` arm at all, so
+    this is a REGRESSION that arm introduced, not a pre-existing gap. The verdict stays
+    fail-CLOSED either way — the earlier value remains in the set, this map's declared
+    polarity (a later bind can only ADD candidates) — so the reach is refused and an inert
+    use of the same name is not.
+    """
+    consts = _str_constants(ast.parse(
+        'def f():\n    _s = "_tortoise"\n    _s = _s + "_fts_query"\n'))
+    assert "_tortoise_fts_query" in consts["_s"]
+
+    reach = ('    _s = "_tortoise"\n    _s = _s + "_fts_query"\n'
+             '    getattr(sdk, _s)(query=queries[0]["query"], limit=10, kind="statement")\n')
+    assert _pin_refuses(_pin_source(reach)) is True
+    inert = '    _s = "_tortoise"\n    _s = _s + "x"\n    print(f"note {_s}")\n'
+    assert _pin_refuses(_pin_source(inert)) is False
+
+
+def test_a_BIND_CYCLE_REFUSES_instead_of_spinning() -> None:
+    """Two names accumulating through each other have no finite product — refuse.
+
+    ⛔ A MUTUAL accumulation is NOT the per-target case above (neither bind loads its OWN
+    target), so staging cannot see it and the fixpoint budget is the only guard. The
+    `pytest.raises` is not decoration: without the budget this test HANGS rather than
+    failing, and a hung pin reports neither green nor red to the shard that runs it.
+    """
+    with pytest.raises(_ResolutionDidNotConverge):
+        _str_constants(ast.parse(
+            'def run():\n    _a = "x"\n    _b = _a + "y"\n    _a = _b + "z"\n'))
+
+
 def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     """Each way a name can hold the read's NAME must be a reach the pin refuses.
 
@@ -4565,6 +4842,13 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
                                      f'    for _N in _S:\n        {reach.format(name="_N")}\n'),
         "re-bind AFTER the reach": (f'    _N = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n'
                                     '    _N = "done"\n'),
+        # ⛔ A SELF-REFERENTIAL `+` BIND IS THE SAME REACH WRITTEN AS AN ACCUMULATION
+        # (#14326 P1). Measured at the head this was found on, this row did not pass and did
+        # not fail — `_str_constants` never returned, so the shard TIMED OUT. The resolver now
+        # stages it once against the pre-bind values (`_s` keeps both spellings, the
+        # fail-closed direction) and the reach is refused.
+        "self-referential `+` bind": ('    _s = "_tortoise"\n    _s = _s + "_fts_query"\n'
+                                      f'    {reach.format(name="_s")}\n'),
         "subscript STORE target": ('    _N = "_tortoise_fts_query"\n    _counts = {}\n'
                                    f'    _counts[_N] = "zero"\n    {reach.format(name="_N")}\n'),
         "name chained to name": ('    _N = "_tortoise_fts_query"\n    _A = _N\n'
@@ -5100,6 +5384,55 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "bare-name read call": (
             '    _tortoise_fts_query(query=queries[0]["query"], limit=10, '
             'kind="statement")\n'),
+        # ⛔ THE OTHER THREE PURE-STRING SPELLINGS (#14326 round 13, each MEASURED GREEN at
+        # `b6be33738f` — `m=2 c=2 i=0` — while every `+` spelling of the same string was
+        # refused): the verdict was being decided by WHICH OPERATOR built the name. An
+        # f-string whose parts are all literals computes nothing at runtime, `%` and
+        # `.format` are the two formatting forms of the same literal, and Semgrep's constant
+        # propagation folds all four (`+`, f-strings, `%`, `.format`) into a plain string.
+        # The BOUND rows red the `_values` half (`_N` resolved from the built string), the
+        # INLINE rows the `_possible_strings` half — the two resolvers are separate recursions
+        # and a fix to one alone leaves the other spelling open (that asymmetry is what the
+        # `+` arm cost in round 12).
+        "f-string of ONE literal part": (
+            '    getattr(sdk, f"{\'_tortoise_fts_query\'}")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "f-string JOINING two literal parts": (
+            '    getattr(sdk, f"{\'_tortoise_\'}{\'fts_query\'}")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "f-string part JOINED with a constant fragment": (
+            '    getattr(sdk, f"{\'_tortoise\'}_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "f-string joined parts BOUND to a name": (
+            '    _N = f"{\'_tortoise_\'}{\'fts_query\'}"\n'
+            f'    {reach.format(name="_N")}\n'),
+        "f-string part+constant BOUND to a name": (
+            '    _N = f"{\'_tortoise\'}_fts_query"\n'
+            f'    {reach.format(name="_N")}\n'),
+        "literal-only `%` template INLINE": (
+            '    getattr(sdk, "%s_fts_query" % "_tortoise")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "literal-only `%` template BOUND to a name": (
+            '    _N = "%s_fts_query" % "_tortoise"\n'
+            f'    {reach.format(name="_N")}\n'),
+        "`%` over a literal TUPLE": (
+            '    getattr(sdk, "%s_%s" % ("_tortoise", "fts_query"))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`%` over a literal MAPPING": (
+            '    getattr(sdk, "%(k)s" % {"k": "_tortoise_fts_query"})'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`.format()` on a literal": (
+            '    getattr(sdk, "_tortoise_fts_query".format())'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`.format(…)` over a literal argument": (
+            '    getattr(sdk, "{}".format("_tortoise_fts_query"))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`.format(…)` over a literal KEYWORD": (
+            '    getattr(sdk, "{k}".format(k="_tortoise_fts_query"))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`.format()` BOUND to a name": (
+            '    _N = "_tortoise_fts_query".format()\n'
+            f'    {reach.format(name="_N")}\n'),
     }
     for label, body in rows.items():
         assert _pin_refuses(_pin_source(body)), (
@@ -5269,6 +5602,23 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a literal unpack pairs ELEMENT-WISE — `_pair` is the FIRST element and can only "
         "hold `\"a\"`, so binding it the container's whole value set is a FALSE RED")
 
+
+def test_a_PRODUCT_that_outgrows_its_budget_REFUSES_instead_of_spinning() -> None:
+    """An unbounded JOIN product is a timeout, not a red — so the resolver REFUSES.
+
+    ⛔ THE BUDGET IS THE VERDICT (#14326 round 13, the rule `_FIXPOINT_MAX_PASSES` states for
+    the bind fixpoint): an f-string whose every part is a SELECTION of literals is a LINEAR
+    source that costs an EXPONENTIAL walk — 40 two-valued parts are 10^12 combinations and
+    never return — so a guard that materialises it HANGS instead of answering. Measured with
+    `_PRODUCT_MAX_COMBINATIONS` deleted: this 13-part source resolves its 8192 combinations
+    and the next part multiplies again; with it, the resolver raises the ordinary test
+    failure the pin already uses for a diverging bind.
+    """
+    many = "".join("{'a', 'b'}" for _ in range(13))
+    body = (f'    getattr(sdk, f"{many}")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n')
+    with pytest.raises(_ResolutionDidNotConverge):
+        _read_reach(_pin_source(body))
 
 
 def test_the_READ_side_of_str_is_NOT_a_MUTATION() -> None:
@@ -5489,9 +5839,15 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     ``vars(type(sdk))[...]``), a name BOUND to that literal, and a bare attribute
     mention with no call all left earlier shapes of this pin green while carrying a
     lever (each measured). Residual, stated rather than implied: a name COMPUTED at
-    runtime (``"".join(…)``, an f-string, a parameter) or READ OUT OF a container or an
+    runtime (``"".join(…)``, a method call other than ``str.format``, an f-string part
+    whose expression this file cannot resolve, a parameter) or READ OUT OF a container or an
     attribute (``_CFG["read"]``, ``self._read``) cannot be resolved statically, so this pin
-    bounds the static reaches. ⛔ REACHES THROUGH A CONTAINER ARE **COVERED**, not residual
+    bounds the static reaches. ⛔ AN f-STRING IS RESOLVED WHEN ITS PARTS ARE (#14326 round
+    13, measured: ``f"{'_tortoise_fts_query'}"`` and ``"%s_fts_query" % "_tortoise"`` and
+    ``"_tortoise_fts_query".format()`` each reached the read at ``m=2 c=2 i=0``), so the
+    residual is the UNRESOLVABLE part, not the spelling — the same narrowing the ``+`` arm
+    made and this sentence previously contradicted by naming "an f-string" wholesale.
+    ⛔ REACHES THROUGH A CONTAINER ARE **COVERED**, not residual
     (#14279 review F2/F3, both measured GREEN before the fix): a name bound to the literal
     and then carried through another name or a tuple into a ``getattr`` — ``_pair, = (_N,)``
     / ``_pair = (sdk, _N)`` / ``getattr(*[sdk, _N])`` — fires `_indirect_reads`, and the
@@ -6296,10 +6652,28 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             '_ns = _t.__dict__\n_ns.update(TortoiseSDK=_Mirror)\n',
         "registry MAPPING-MUTATOR store":
             'sys.modules.update({"tortoise.sdk": _Mirror})\n',
+        # ⛔ THE MODULE-DOTTED AND INDEXED RECEIVERS OF THE SAME `setattr` (independent
+        # round, MEASURED GREEN at `b6be3373`): requiring the receiver to be a bare `Name`
+        # exempted `setattr(tortoise.sdk, "TortoiseSDK", _Mirror)` — one line, the same
+        # rebind. There is no receiver test now, which is also why the artifact's own
+        # `setattr(os, …)` calls stay green (their key is a VARIABLE, not this name).
+        "setattr on a MODULE-DOTTED receiver":
+            'import tortoise.sdk\nsetattr(tortoise.sdk, "TortoiseSDK", _Mirror)\n',
+        "setattr on the sys.modules ENTRY":
+            'setattr(sys.modules["tortoise.sdk"], "TortoiseSDK", _Mirror)\n',
+        "`.update(**{…})` splat spelling":
+            '_t.__dict__.update(**{"TortoiseSDK": _Mirror})\n',
     }
     for name, lever in store_spellings.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
         assert got, f"the store `{name}` was not refused"
+
+    # ⛔ THE FALSE-RED CONTROL FOR THE MAPPING ARM (#14326 review P2, measured): a mapping
+    # that merely HOLDS the name stores nothing, so the `.update` arm must be scoped to a
+    # namespace RECEIVER — `_LABELS` is a plain dict, not a module's `__dict__`.
+    labels = (shipped + "_LABELS = {}\n"
+                       '_LABELS.update({"TortoiseSDK": "tortoise.sdk"})\n')
+    assert ctor_findings(labels) == []               # a label table stores nothing
 
     # ⛔ THE `asname` HALF IS ITS OWN CLAUSE (#14326 review P2, measured: deleting it left
     # 31 passed, because the `subclass` row above satisfies the arm's FIRST disjunct).
