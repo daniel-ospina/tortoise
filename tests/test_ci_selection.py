@@ -10371,32 +10371,8 @@ _FLAT_DEFAULT_CLAIM_RE = re.compile(
 _MEASURED_BASIS_RE = re.compile(
     r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2} [^—]*?"
     r"(?:;\s*was |;\s*kept |the reading \()")
-_UNMEASURED_ON_CI_RE = re.compile(
-    r"unmeasured\s+(?:on|in|by)\s+CI\b", re.IGNORECASE)
 
 
-# The FORWARD-LOOKING form of the same falsified claim: "so the flat 2.0
-# UNDERSTATES it until a sweep replaces this row" (and its `overstates` twin). It
-# names no claim verb and no `is`, so `_FLAT_DEFAULT_CLAIM_RE` cannot see it; and
-# it says `unmeasured` nowhere, so `_UNMEASURED_ON_CI_RE` cannot either. Once the
-# sweep HAS replaced the row, the tail carries its own `ci-timing …; was N` basis
-# and the sentence describes a state the row has left — 6 rows shipped that way in
-# the 2026-11-09 refresh (`test_9664_capstone_verdict_ledger.py` was the one the
-# review named; the guard found the other five). The PAST tense is a true history
-# and must stay silent: "the flat 2.0 UNDERSTATED it until this sweep replaced the
-# row" is what the fix says.
-#
-# ⛔ WIDENED at the 2026-11-16 refresh (#12962). The literal `flat 2.0 … UNDERSTATES`
-# spelling was the ONLY form the arm read, so ten rows that named the same claim in
-# another spelling shipped GREEN: an inserted adverb (`the flat 2.0 still UNDERSTATES`,
-# `the flat 2.0 may UNDERSTATE` — note the BARE `understate`, not the `-S` form) and
-# the three noun spellings the map also uses (`the flat default`, `the flat reading`,
-# `the flat weight`). A guard that reads one spelling of a claim cannot say the claim
-# is absent — `[]` from a spelling-bound arm is a false clean, and it is why the same
-# defect regenerated on two successive refreshes. The tense boundary is now explicit:
-# `UNDERSTATE(S)` / `OVERSTATE(S)` are present/future and bite; the PAST forms
-# (`UNDERSTATED`, `OVERSTATED`) end in a word character after `UNDERSTATE`, so they
-# cannot satisfy the closing `\b` and stay silent — that is the polarity the fix relies
 # on, not an incidental property.
 #
 # ⛔ A `.` TERMINATES THE CLAIM ONLY WHEN IT IS NOT PART OF A NUMBER (#12962 rebase
@@ -10409,153 +10385,10 @@ _UNMEASURED_ON_CI_RE = re.compile(
 # figure spelled out BIT. That is the same false clean this whole guard family exists
 # to close, one spelling over again. `_CLAUSE` is the window these arms now share:
 # `.` and `;` still bound it, and a `.` followed by a digit does not.
-# ⛔ The ONE negative lookahead left in this family — `_FLAT_DEFAULT_STILL_OWED_RE`'s
-# future-sweep `until …` arm — keeps the narrower `[^.;]` window ON PURPOSE: widening
-# a past-marker SCAN can only add silence, i.e. push that arm further toward
-# fail-open. Widening a window that CONSUMES between a noun and its verb can only add
-# bites, which is the safe direction. The two are not the same fix and must not be
-# "unified". (The past-copula arm that used to be the second member of this list is a
-# LOOKBEHIND on the predicate now — see `_WEIGHT_UNCHANGED_CLAIM_RE` — so there is no
-# window left to widen there at all.)
+# ⛔ The other arms that shared this window went with B7's note-guard cut
+# (`_FLAT_DEFAULT_STILL_OWED_RE`, `_WEIGHT_UNCHANGED_CLAIM_RE`), so `_WEIGHT_IS_CLAIM_RE`
+# below is now its only consumer — kept because that arm still needs it.
 _CLAUSE = r"(?:[^.;]|\.(?=\d))*?"
-_FLAT_DEFAULT_STILL_OWED_RE = re.compile(
-    r"\bflat\s+(?:2\.0s?(?:\s+default)?|default|reading|weight)\b" +
-    # ⛔ The verb WINDOW is the SENTENCE, not a character budget (#12962 cycle 5).
-    # It was `[^.;]{0,40}?` — an undocumented 40-character bound, which is the same
-    # false clean one spelling over: a row can name the noun and the present-tense
-    # verb with more than 40 characters between them, and the arm then returned `[]`
-    # while the claim was on the page (measured: "the flat weight a PR-added row
-    # takes is, in this shard, one that UNDERSTATES it" — 48 chars — did not match).
-    # `_CLAUSE` keeps the bound MEANINGFUL (the claim and its subject in ONE clause:
-    # `.` and `;` still terminate it, and a decimal point does NOT — see `_CLAUSE`)
-    # while removing a limit no reader of this file could have known about. Both the
-    # over-window shape and the decimal shape that caught this arm's own bound lost
-    # their non-vacuity arms with the durations-map arithmetic cut, so the map arm
-    # below is now the only reader of this bound.
-    _CLAUSE +
-    r"\b(?:UNDERSTATES|UNDERSTATE|OVERSTATES|OVERSTATE)\b"
-    # …and the FUTURE-SWEEP construction, which names the owed sweep without ever
-    # writing UNDER/OVERSTATE — so the tense arm above cannot see it. Four rows
-    # shipped this way at the 2026-11-16 refresh (`flat default until a CI sweep
-    # measures this file`, `KNOWN UNDER-ESTIMATE UNTIL THE REFRESHER`, `until the
-    # refresh lands`, `until the first post-merge sweep`), which is what made the
-    # widening's own `[]` a false clean (#12962 cycle 4). Scoped to the words that
-    # name a sweep still TO COME: the healed wording names the LANDED sweep
-    # (`until the 2026-11-16 sweep replaced the row`) and matches none of these.
-    #
-    # ⛔ AND THE NOUN ARMS NEED A TENSE BOUNDARY TOO (#12962 cycle 6). `until the
-    # refresher` / `until the first post-merge` were bare, so they matched a TRUE
-    # past-tense history — "the flat 2.0 UNDERSTATED it until the refresher replaced
-    # the row", "it was the flat default until the first post-merge sweep gave it a
-    # reading" — i.e. the blessed healed form redded `test-slow` on the next
-    # refresh, the opposite polarity to every other arm here. `UNTIL THE REFRESHER.`
-    # (nothing after) still bites, which is the shipped shape the bare arm was added
-    # for.
-    #
-    # ⛔ THE TENSE BOUNDARY IS A SHORT PAST-VERB LIST, AND THAT IS ITS ACTUAL
-    # BOUNDARY — NOT "the past tense" (#12962 cycle 10, review P1 + three VGATE
-    # passes). The list was `replaced|re-bas\w*|gave|lifted|landed|resolved`, so a
-    # healed note that past-tenses the sweep with any OTHER verb still bites:
-    # measured, "It was the flat default until the refresher **corrected** the row"
-    # / **re-measured** / **fixed** all red, while `replaced` / `re-based` / `gave`
-    # stay silent. That over-block is REAL and is NOT fixed here.
-    #
-    # ⛔ FOUR DESIGNS WERE BUILT AND EACH WAS REFUTED BY MEASUREMENT. Recorded so the
-    # next lane does not re-derive this as an easy win:
-    #   (a) require a PRESENT/FUTURE predicate → FAILS OPEN. A bounded list of
-    #       present forms goes silent on the next synonym and on every modal, and it
-    #       silently DROPPED four genuine catches on `origin/main`'s map
-    #       (`test_rail_detach.py`, `test_measure_ask_distilled.py`,
-    #       `eval/ask/test_ask_corpus.py`, `test_code_freshness_9494.py`) — those
-    #       name the owed sweep and then a CITATION or a COMMA, not a verb.
-    #   (b) no past marker anywhere (`[a-z]+ed`) → FAILS OPEN. `[a-z]+ed` matches
-    #       `red`, `need`, `embed`, so a provenance word anywhere later in the
-    #       clause silenced a live claim.
-    #   (c) a `[^.;]*?` window over present forms → OVER-BLOCKS: the window crosses
-    #       commas and re-bites a healed sentence on a later present word.
-    #   (d) extend the past list to ~32 verbs → FAILS OPEN against THIS arm. The
-    #       extra verbs are the map's general prose vocabulary — `set` appears in 25
-    #       tails, `moved` in 20, `taken` in 19, `introduced`, `superseded`,
-    #       `corrected`, `adopted`, … — so any of them anywhere before the next
-    #       `.`/`;` silences a LIVE claim that the shipped six caught (measured: 13
-    #       of 14 probes regressed). A short list over-blocks healed notes; a long
-    #       list silences live ones. THERE IS NO LIST LENGTH THAT IS CORRECT.
-    #
-    # So the shipped boundary is left EXACTLY as it was, and this comment is the fix:
-    # it previously claimed "fires only when NO past-tense `landed`-marker follows",
-    # i.e. it described a general tense test the code does not implement. The honest
-    # consequences, both live and both accepted for this PR:
-    #   • OVER-BLOCK (the live bug): a healed note with an unlisted past verb reds
-    #     `test-slow`. Loud, and one word fixes the list — deliberately preferred
-    #     over a silent miss, because a silent miss ships an unread claim.
-    #   • FAIL-OPEN (unavoidable here): a future claim whose sweep action is spelled
-    #     with a LISTED past form after a modal reads as healed — measured
-    #     `until the refresher will have replaced …`, `… has landed a reading`,
-    #     `… will be resolved` are all silent. (A modal in front of an UNLISTED verb
-    #     like `will set` still bites, which is why the example has to name a listed
-    #     form; the original draft of this sentence cited `will set` and was wrong
-    #     about its own code — #12962 review cycle 11.)
-    # ⛔ THE ROOT IS FILED, NOT WORKED AROUND: regex tense detection over free prose
-    # cannot be made complete in both directions, which is the same structural reason
-    # these row guards cannot reach block comments. Recorded on **#9442** (the home
-    # for ungated provenance prose) with the four refuted designs and their
-    # measurements, rather than a fifth regex.
-    r"|\buntil\s+(?:the\s+)?(?:refresher|first\s+post-merge)"
-    r"(?![^.;]*?\b(?:replaced|re-bas\w*|gave|lifted|landed|resolved)\b)"
-    r"|\buntil\s+the\s+refresh\s+lands"
-    r"|\buntil\s+a\s+(?:push-to-main\s+|CI\s+)?sweep\s+"
-    r"(?:includes|measures|covers|collects)"
-    # …and the construction that names the sweep by its INSTRUMENT or its VERB
-    # rather than the word "sweep" (#12962 cycle 6). Rows shipped `entered at the
-    # flat default … until a CI junit artifact carries the weight` and `stays at the
-    # default until \`tools/ci_timing.py --refresh-durations\` replaces it from
-    # junit`, each beside a tail citing the ALREADY-LANDED sweep — the same
-    # contradiction the two cycles above chased, and `[]` from the arms above.
-    #
-    # ⛔ The INSTRUMENT arm carries a VERB LIST, not just `until <instrument>`
-    # (#12962 cycle 7). Keying on the instrument alone made the arm TENSE-BLIND, so
-    # it red the minimal legal repair of the owed sentence — past-tense the verb and
-    # keep the tool name (`until \`tools/ci_timing.py --refresh-durations\` REPLACED
-    # it`). That is the same trap the UNDER/OVERSTATE arm is built to avoid: the fix
-    # IS the past tense, so an arm that bites it leaves no legal way to write the
-    # note. Only the present/future verbs bite.
-    #
-    # ⚠️ SCOPE, stated so this is not read as total: these arms read the `until …`
-    # form ONLY. The map's more common forward-looking PROVENANCE boilerplate drops
-    # `until` entirely (`… \`tools/ci_timing.py --refresh-durations\` replaces this
-    # value from the first push-to-main junit sweep that includes the file`), which
-    # these arms cannot see. That is the ungated-provenance-prose class, recorded on
-    # #9442 rather than claimed closed here. Its size is COUNTED, not asserted — at
-    # 3d74516 the rows whose tail names `--refresh-durations` and carries no `until`
-    # (case-insensitive, as this regex compiles) numbered 112, of which 110 carry a
-    # landed `; was N` tail; at `b7cd203` the same count is 114 / 111. The count is
-    # pinned to a DEFINITION so the next reader can reproduce it rather than trust it
-    # (`rows = [l for l in text.splitlines() if _DURATIONS_ROW_RE.match(l)]`;
-    # `tail_names = [l for l in rows if "--refresh-durations" in m.group("tail")]`;
-    # `no_until = [l for l in tail_names if not re.search(r"\buntil\b", l, re.I)]`;
-    # `landed = [l for l in no_until if _MEASURED_BASIS_RE.search(l)]`), because three
-    # earlier revisions of this sentence asserted 121/112, 112/106 and then 111/105 and
-    # NONE reproduces — 111/105 matches no natural variant of the definition at all
-    # (measured 2026-11-16, #12962 cycle 10 review P2). A figure that cannot be
-    # re-derived is exactly the stale-prose rot the surrounding arms exist to stop.
-    # ⛔ The WINDOW is `[^.;\n]` — `.`, `;` and the newline, NOT "the sentence" — and
-    # the anchor eats its OWN period (#12962 cycles 7-8). Two revisions each inverted a
-    # different polarity: `[^.;]` cannot span `tools/ci_timing.py`, so the arm was
-    # silent on the very row it was written for; `[^;\n]{0,80}` let the window cross
-    # a `.` into the NEXT sentence, where `What the weight covers:` — the map's
-    # dominant opener, 104 occurrences at aff53070 — supplied a present-tense verb and
-    # falsely red a correctly past-tensed row. That is the over-block this arm's own
-    # contract forbids, so it is not a nit: `tools/ci_timing(?:\.py)?` consumes the
-    # anchor's period, restoring that bound with no character budget. ⚠️ Residual, so
-    # the wording does not overclaim again: `…`, `!` and `?` are NOT in the class, so a
-    # healed row whose boundary is one of those can still reach the next sentence's
-    # verb. No shipped row is reachable that way (the opener's preceding character is
-    # `.` x89, `;` x11, line-start x4 — zero ellipsis/bang/question).
-    r"|\buntil\s+(?:a\s+)?(?:CI\s+)?junit[^.;\n]*?"
-    r"\b(?:carries|lands|collects|measures|covers|exists|arrives)\b"
-    r"|\buntil\s+`?tools/ci_timing(?:\.py)?[^.;\n]*?"
-    r"\b(?:replaces|re-derives|measures|collects|covers)\b",
-    re.IGNORECASE)
 
 
 _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
@@ -10704,8 +10537,8 @@ def _durations_rows_with_a_stale_case_count(text: str, tests_dir: Path):
 # below asserts the offender list is EMPTY, which is the state a future fold has
 # to keep true.
 #
-# ⛔ The vocabulary is exactly two nouns (`0 tests` / `0 cases`, see
-# `_ZERO_CASE_CLAIM_RE` below) — it is NOT any `0 <noun>`; a `0 points` beside a
+# ⛔ The vocabulary is exactly two nouns (`0 tests` / `0 cases`) — it is NOT any
+# `0 <noun>`; a `0 points` beside a
 # passing reading is invisible to this pin too (#10726 review round 3, P3). This
 # pin is NARROWER in scope (one sentence, so the map's legitimate history —
 # `"33 passed" … (31 tests / 2.77 s BEFORE this review)`, and `at 35 tests on an
@@ -10886,85 +10719,14 @@ def _durations_row_tail(key: str) -> str:
     return ""
 
 
-_ZERO_CASE_CLAIM_RE = re.compile(r"\b0\s+(?:tests|cases)\b")
-
-
-#: A row asserting that its OWN committed weight stands at N — "The 3.7 weight sits
-#: inside that range and is deliberately unchanged". The number is a claim about the
-#: row it sits in, so it can be falsified by that row's value.
-#: A note that quotes a PREVIOUS weight ("was 3.7", the sweep's provenance) must not
-#: be read as a claim — the sweep suffix never puts a present-tense predicate after
-#: the number, which is what this anchors on.
-#:
-#: ⛔ WIDENED at the 2026-11-16 refresh (#12962 cycle 6). The arm read exactly ONE
-#: predicate (`deliberately unchanged`), so nine rows asserted a superseded weight
-#: in another spelling and the pin returned `[]` while they contradicted their own
-#: value: `the 8.8 WEIGHT is deliberately left alone`, `The 18.0 WEIGHT … is
-#: deliberately NOT re-derived`, `the 10.0 weight is NOT moved`, `Declared at 5.0,
-#: above the highest observed wall`, `the 6.8 weight … left alone`, `WEIGHT raised
-#: 3.6 -> 6.2 … never corrected downward`, `The 5.0 WEIGHT is kept`, `the 2.0 weight
-#: is unchanged`. That is the same false-clean class this PR closes one function
-#: above — a guard that reads one spelling of a claim cannot say the claim is
-#: absent — so the predicate set is now the family the map actually uses. The PAST
-#: tense stays silent by construction: every alternative below is present-tense, and
-#: `was`/`held`/`had` are not among them.
-_WEIGHT_UNCHANGED_CLAIM_RE = re.compile(
-    r"\bthe\s+(?P<w>\d+(?:\.\d+)?)\s*weight\b" +
-    # ⛔ the tense boundary: a PAST copula governing the predicate means the clause is
-    # history ("The 8.8 WEIGHT WAS deliberately left alone"), which is what every
-    # repaired row says after a sweep re-bases it. Without this the widening bit the
-    # healed form and left no legal way to write the note.
-    #
-    # ⛔ AND THE BOUNDARY IS THE PREDICATE'S OWN COPULA, NOT A SENTENCE-WIDE SCAN
-    # (#12962 rebase review, P2). It shipped as a negative LOOKAHEAD over the whole
-    # window — `(?![^.;]*?\b(?:was|were|had|held|became)\b)` — so ANY past verb
-    # anywhere later in the clause silenced a LIVE claim: measured on a row holding
-    # `1.5`, "The 5.0 WEIGHT is kept, because the earlier reading had been 3.6"
-    # returned `[]`, while the same sentence with the reason dropped BIT. A lookahead
-    # cannot be scoped to "the gap I am about to match", so the scan had to become a
-    # lookbehind ON THE PREDICATE — which is the shape `_WEIGHT_DECLARED_CLAIM_RE`
-    # below already used, and the two arms now agree about the rule they document.
-    #   • The over-block this trades for is real and narrow: a past copula that does
-    #     NOT sit immediately before the predicate still bites — "The 8.8 WEIGHT
-    #     WAS, per the census, deliberately left alone", "… had all been deliberately
-    #     left alone". Loud, one word away from a legal form, and deliberately
-    #     preferred over a silent miss — the polarity this file's future-sweep arm
-    #     sets out at length further down.
-    #
-    # ⛔ AND A SINGLE TOKEN IS NOT ENOUGH (#12962 rebase review cycle 2, P1). The
-    # first cut of this lookbehind listed five ONE-WORD copulas, so every multi-token
-    # past auxiliary put `been`/`being` immediately before the predicate and fell
-    # straight through it: measured end-to-end, a correctly-healed row reading "The
-    # 8.8 WEIGHT had been deliberately left alone until the 2026-11-16 census
-    # replaced it" reported `[('test_a.py', 8.8, 1.4)]` — a FALSE RED on a
-    # `slow_files` row, i.e. on `test-slow`, which is the very failure this commit's
-    # own sibling fix set out to remove. The auxiliary chains are named explicitly.
-    # ⚠️ `has been` is NOT in the list and must not be: present perfect is a claim
-    # about the CURRENT state ("the 8.8 WEIGHT has been deliberately left alone" says
-    # it is left alone now), so it has to bite. `had been` / `was being` are history.
-    _CLAUSE +
-    r"(?<!\bwas )(?<!\bwere )(?<!\bhad )(?<!\bheld )(?<!\bbecame )"
-    r"(?<!\bhad been )(?<!\bwas being )(?<!\bwere being )"
-    r"\b(?:deliberately\s+(?:unchanged|left\s+alone|not\s+re-derived)"
-    r"|(?:is|stays|remains)\s+(?:kept|unchanged|not\s+moved|an\s+upper\s+bound)"
-    r"|never\s+corrected\s+downward)",
-    re.IGNORECASE)
-#: The same claim in its `declared at N` spelling: "Declared at 5.0, above the
-#: highest observed wall, so a loaded leg cannot under-pack" while the row holds 1.5.
-#: Kept as its own arm because it names no `weight` noun at all.
-_WEIGHT_DECLARED_CLAIM_RE = re.compile(
-    # the same tense boundary, on the other side of the verb: "It WAS declared at 5.0"
-    # is history, "Declared at 5.0" is a claim.
-    r"(?<!\bwas )(?<!\bwere )(?<!\bhad )\bdeclared\s+at\s+(?P<w>\d+(?:\.\d+)?)\b" + _CLAUSE +
-    r"\b(?:above\s+the\s+highest|so\s+a\s+loaded\s+leg\s+cannot\s+under-pack"
-    r"|so\s+a\s+cold\s+leg\s+cannot\s+under-pack)",
-    re.IGNORECASE)
 
 
 #: A row asserting that its OWN committed weight IS a number the row no longer
-#: holds — "The weight is 0.9", "Declared 14.0s". The same falsification as
-#: `_WEIGHT_UNCHANGED_CLAIM_RE` above, in the DECLARATIVE spelling that guard cannot
-#: see: at the 2026-11-16 refresh four rows shipped this way after the sweep moved
+#: holds — "The weight is 0.9", "Declared 14.0s". This is the DECLARATIVE arm; the
+#: sibling non-declarative spelling it was originally paired with
+#: (`_WEIGHT_UNCHANGED_CLAIM_RE`) went with B7's note-guard cut, so this is now the
+#: only weight-note arm left. At the 2026-11-16 refresh four rows shipped this way
+#: after the sweep moved
 #: their values (`test_substrate_map.py` 0.9 -> 1.4, `test_10017_turn_parity_census`
 #: 25.0 -> 15.2, `test_embed_decision_step_11086` 7.0 -> 0.9,
 #: `test_demo_session_read_exclusion_8290` 14.0 -> 12.3) — the third re-ship of
@@ -10990,7 +10752,7 @@ _WEIGHT_DECLARED_CLAIM_RE = re.compile(
 #: 3.0` is history and stays silent.
 _WEIGHT_IS_CLAIM_RE = re.compile(
     r"\bthe\s+weight\s+is\s+(?P<w1>\d+(?:\.\d+)?)"
-    # the same tense boundary its sibling `_WEIGHT_DECLARED_CLAIM_RE` already carried:
+    # the same tense boundary the deleted `_WEIGHT_DECLARED_CLAIM_RE` arm carried:
     # "It WAS declared 7.0s" is history, "Declared 7.0s" is a claim. Measured before
     # this fix, BOTH past forms bit — and the past form is exactly how every repaired
     # row writes it, so the healed note was unwritable in this spelling (#12962
@@ -11075,8 +10837,8 @@ def test_the_declared_weight_claim_check_is_not_vacuous():
         # is the exact form every repaired row takes, so it must stay silent.
         "  test_e.py: 0.2  # The WEIGHT WAS rounded UP to 3.0 until the 2026-11-16"
         " census read 0.2.\n"
-        # ⛔ `Declared N s` needed the SAME tense boundary its sibling
-        # `_WEIGHT_DECLARED_CLAIM_RE` already carried (#12962 rebase review, P2).
+        # ⛔ `Declared N s` needed the SAME tense boundary the deleted
+        # `_WEIGHT_DECLARED_CLAIM_RE` arm carried (#12962 rebase review, P2).
         # Both past forms BIT before the fix — and they are the form every repaired
         # row takes, so the healed note was unwritable in this spelling.
         "  test_g.py: 0.9  # It was declared 7.0s on the old map; the census has"
@@ -11125,9 +10887,6 @@ def test_the_declared_weight_claim_check_is_not_vacuous():
 #: total (`230 at this head.` is a claim, and it is the claim the arm beside it makes).
 #: A period cannot re-admit the `--collect-only` form the separator excludes — that
 #: one carries no `(` immediately before its number (`… 35 executions at this head)`).
-_HEAD_TOTAL_CLAIM_RE = re.compile(r"\(`?(?P<n>\d+)`? at this head[,:.]")
-
-
 #: The `fast_shards` header block is the ONE place in the manifest that restates
 #: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
 #: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at this head —
@@ -11353,76 +11112,10 @@ def test_the_emission_block_guard_is_not_vacuous():
         f"{ranged}")
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
-_WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
-
-
-def test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it():
-    """#9003 review (P2): a NEW file's first weight is the flat default, not a local timing.
-
-    The `durations` header above `durations:` prescribes `DEFAULT_FAST_WEIGHT` for a file
-    no sweep has collected yet (the #3419 `test_venture_pack.py` precedent) because a
-    weight is a SHARD-LAYOUT input: a locally-measured number decides which files share
-    a shard, so it must not be hand-picked. The #2818 row shipped a measured-on-this-box
-    4.9 first, under a comment that CLAIMED the flat-default convention it violated — and
-    the guard above could not see it, because the claim sat on the comment lines PRECEDING
-    the row rather than on its tail. Pinned by name here: the row is MARGIN on the
-    coverage floor, not the floor itself (`duration_coverage_issues()` is count-based and
-    passes either way — 90.01% without the row, 90.12% with it), so its MAGNITUDE must be
-    the flat default while its absence is a derivation to re-run, not an automatic red.
-    """
-    from tools.ci_selection import DEFAULT_FAST_WEIGHT, load_manifest
-    row = "test_pack_value_declarations_2818.py"
-    durations = load_manifest()["durations"]
-    assert row in durations, (
-        "the #2818 row is missing from `durations` — its presence is the margin the "
-        "#3400 coverage floor has (90.01% without it, still above the 0.90 floor, so "
-        "treat its absence as a finding to re-derive, not an automatic red)")
-    # Scoped to the UNMEASURED state on purpose: once a sweep collects the file,
-    # `tools/ci_timing.py::render_refreshed_manifest` rewrites the value and CLEARS a
-    # tail that LEADS with the `# unmeasured` marker (that is how the #3419/#2788
-    # precedent rows work), and this pin must not then fail on a legitimate CI
-    # measurement. The marker is read exactly the way the refresher reads it — by its
-    # leading token — so the two cannot disagree: any OTHER trailing comment is
-    # preserved verbatim by the refresh, including one that mentions the word later.
-    if not _ROW_LEADS_WITH_UNMEASURED.match(
-            _durations_row_tail("test_pack_value_declarations_2818.py")):
-        assert durations[row] > 0, (
-            f"{row} carries a non-positive weight {durations[row]}s — a sweep has "
-            "collected the file, so its value must be a real measurement")
-        return
-    assert durations[row] == DEFAULT_FAST_WEIGHT, (
-        f"{row} carries {durations[row]}s, but a NEW file's first weight is the flat "
-        f"{DEFAULT_FAST_WEIGHT}s default until a CI sweep collects it. Do not substitute "
-        "a local timing: a weight is a shard-layout input, so a number that does not "
-        "model CI decides which files run together (#3419, #9003 review).")
-
-
 # The refresher clears a `# unmeasured` marker by its LEADING TOKEN (see
 # `tools/ci_timing.py::render_refreshed_manifest`), so the pin below reads it the
 # same way rather than by substring.
 _ROW_LEADS_WITH_UNMEASURED = re.compile(r"[ \t]*#\s*unmeasured\b")
-
-
-def _durations_row_tail(key: str) -> str:
-    """The tail comment of a `durations:` row, or "" when the row is absent.
-
-    Scoped to the `durations:` block, NOT the whole file: a floored/capped key is
-    also declared in `durations_floors` ABOVE the block, and a whole-file scan takes
-    that declaration for the row — returning its (empty) tail while the real row
-    carries the note the caller is asking about (#10575 delta review, P3).
-    """
-    lines = cs.MANIFEST.read_text(encoding="utf-8").splitlines()
-    try:
-        start = next(i for i, ln in enumerate(lines) if ln.strip() == "durations:")
-    except StopIteration:  # pragma: no cover — the map always declares the block
-        return ""
-    end = next((i for i in range(start + 1, len(lines))
-                if _DURATIONS_TOP_KEY_RE.match(lines[i])), len(lines))
-    for line in lines[start + 1:end]:
-        m = _DURATIONS_ROW_RE.match(line)
-        if m is not None and m.group("key") == key:
-            return m.group("tail")
-    return ""
 
 
 # ── #1668: the P2 flip's workflow-wiring pins (epic #1647 Task 6) ─────────
@@ -12592,6 +12285,122 @@ def test_every_bounded_pytest_job_caps_above_its_watchdog():
         f"watchdog may legitimately reach it (#6135/#3239)")
 
 
+def test_slow_leg_bounds_clear_the_committed_work():
+    """#6137/#3239: each committed `test-slow` leg must run under a watchdog
+    that clears THAT leg's committed work by the house headroom.
+
+    The slow legs are the only bounded pytest job whose budget is a LITERAL
+    while its work moves with `slow_files`, so a changed leg set can outgrow
+    the budget silently. #6137 moved 43 files in — the legs' committed
+    `durations` weight went from 2.84m to 16.21m each — and left the #3239
+    literal at 10m, so BOTH legs were killed by the 10m WATCHDOG banner on a
+    full-selection run and took the required `python-ci-gate` red with them
+    (PR #6234 run 37229875496; 739 and 1257 tests had passed before the kill).
+    `test_every_bounded_pytest_job_caps_above_its_watchdog` could not see it:
+    a 10m watchdog under a 20m cap is a consistent PAIR whatever the work.
+
+    The floor is re-derived from the committed `durations` map, so the budget
+    cannot rot past its work again without reddening here. A leg file with no
+    `durations` row FAILS this test rather than weighing 0.0 — see the guard
+    below for why the default would re-open the very hole."""
+    from tools.ci_selection import WATCHDOG_HEADROOM, _duration_weight
+    job = _load_python_ci()["jobs"]["test-slow"]
+    durations = load_manifest()["durations"]
+    watchdog = _literal_pytest_watchdog(job)
+    assert watchdog is not None, (
+        "test-slow's pytest step must carry a LITERAL watchdog — the per-leg "
+        "budget is what this test derives a floor for")
+    cap = job["timeout-minutes"]
+    assert watchdog < cap, (
+        f"the in-step watchdog ({watchdog}m) must stay BELOW the outer cap "
+        f"({cap}m) so a killed leg still prints its counts (#798)")
+    # #9539: the legs are DERIVED (slow_shard_entries) — there are no committed
+    # rows left to iterate. This keeps the same floor assertion, applied to each
+    # leg the selector actually emits at the committed leg count.
+    for row in slow_shard_entries(load_manifest()):
+        files = row["files"]
+        assert files, f"test-slow leg {row['name']!r} is empty"
+        # FAIL CLOSED on an unmeasured leg file. `durations.get(f, 0.0)` would
+        # weigh it ZERO, so the estimate this guard asserts against could sit
+        # arbitrarily below the leg's real work and the budget could rot past
+        # it exactly as it did in #6137 — and no other gate closes the gap:
+        # `duration_coverage_issues` covers `fast_pool()` only (these files have
+        # left it), `duration_issues` validates keys that EXIST, and the
+        # in-workflow drift guard pins the union of the two rows without
+        # reading the map at all.
+        unmeasured = [f for f in files if f + ".py" not in durations]
+        assert not unmeasured, (
+            f"test-slow leg {row['name']!r} has {len(unmeasured)} file(s) with "
+            f"no `durations` row: {unmeasured[:5]} — an unmeasured file weighs "
+            f"0.0 here, so the leg's estimate is not a lower bound on its work "
+            f"and this guard cannot see the budget rot it exists to catch. "
+            f"Register it in config/ci-surfaces.yml `durations`.")
+        committed = sum(_duration_weight(durations[f + ".py"]) for f in files) / 60.0
+        assert watchdog >= WATCHDOG_HEADROOM * committed, (
+            f"test-slow leg {row['name']!r}: the in-step watchdog "
+            f"({watchdog}m) no longer clears its committed estimate "
+            f"({committed:.2f}m) by WATCHDOG_HEADROOM ({WATCHDOG_HEADROOM}x) — "
+            f"the leg is killed mid-suite and the gate reds before pytest can "
+            f"report. Re-derive the budget (and the outer cap above it) from "
+            f"the committed `durations` map.")
+
+
+def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
+    """#3239: each shard's watchdog must clear THAT SHARD's committed work with
+    the house headroom, and the job's cap must not dwarf the work it backstops.
+
+    The watchdog's floor is the committed `durations` map for the shard (a lower
+    bound that moves with the code — so a carve-out set that grows past the
+    budget reds here instead of surfacing as a 90-minute hang). The frozen API
+    measurement is a WHOLE-SET quantity: after W37 it bounds the cap from above
+    (the cap may not dwarf the measured step) rather than flooring a watchdog,
+    because one shard carries only a fraction of that work.
+
+    W37: with the carve-out SHARDED the watchdog floor and the cap proportion
+    are PER SHARD. The invariant that matters is no longer "the one job's
+    watchdog clears the whole set" (that is the sum, and the sum is precisely
+    the 16.9m wall this change removes) but "EVERY shard's watchdog clears THAT
+    SHARD's committed work by the house headroom" — checked for every shard,
+    because one under-budgeted shard is a guaranteed red and averaging would
+    hide it."""
+    job = _load_python_ci()["jobs"]["test-carve-out"]
+    cap = job["timeout-minutes"]
+    measured = _MEASURED_PYTEST_MAX_MIN["test-carve-out"]
+    from tools.ci_selection import _duration_weight
+    manifest = load_manifest()
+    idx = _carve_matrix()
+    durations = manifest["durations"]
+    for entry in idx["include"]:
+        files = entry["files"].split()
+        assert files, f"carve shard {entry['suffix']!r} is empty — a dropped leg"
+        # An absent row is weighed at the PACK's default (DEFAULT_FAST_WEIGHT),
+        # never 0.0: 0.0 would understate the shard's committed work against the
+        # very watchdog that has to clear it. Three carve-out files carry no row
+        # today, so the default — not a hard failure — is the honest bound here;
+        # the slow legs above fail closed because every one of their files is
+        # measured.
+        committed = sum(_duration_weight(durations.get(f + ".py"))
+                        for f in files) / 60.0
+        wd = entry["watchdog_minutes"]
+        assert wd >= WATCHDOG_HEADROOM * committed, (
+            f"carve shard {entry['suffix']!r} watchdog ({wd}m) no longer clears "
+            f"its committed estimate ({committed:.2f}m) by WATCHDOG_HEADROOM "
+            f"({WATCHDOG_HEADROOM}x) — re-derive it from a fresh measurement "
+            f"rather than widening the hang window (#3239)")
+        # PROPORTION, per shard: the cap backs a SHARD now, so the bound it must
+        # not dwarf is the shard's own watchdog, not the whole set's work.
+        assert cap <= _CAP_CEILING_FACTOR * wd, (
+            f"the carve-out cap ({cap}m) dwarfs the per-shard watchdog it "
+            f"backstops ({wd}m) by more than {_CAP_CEILING_FACTOR}x — the cap "
+            f"IS the stale-head exposure (#3239)")
+    # And the whole-set measurement stays an upper bound on the cap, so a
+    # future shard count cannot quietly multiply the exposure past the work.
+    assert cap <= _CAP_CEILING_FACTOR * measured, (
+        f"the carve-out cap ({cap}m) dwarfs the measured pytest step "
+        f"({measured}m) — the cap IS the stale-head exposure, and 90m against "
+        f"this work is exactly the defect #3239 reports")
+
+
 def test_every_required_merge_check_carries_an_outer_cap():
     """A job EMITTING a required merge context must carry a literal cap.
 
@@ -13253,6 +13062,107 @@ _SAVE_ARM_IN_STEP_FLOORS: dict[str, int] = {
     "test-d14-hosted-api": 20,
     "test-track-b": 5,
 }
+
+
+def _save_arm_cap(in_step: int, setup: int = 1, cold_save: int = 9) -> int:
+    """`docs/ops/ci-wall-clock.md` §2's save arm: SUM x 1.5, rounded UP to the
+    next 10 m. Kept as an executable derivation so a measured re-tune of either
+    term moves the assertion with it instead of needing a new magic number."""
+    total = in_step + setup + cold_save
+    # ceil(total x 1.5 / 10) x 10, in integers. ⛔ The earlier form
+    # `-(-(total * 3 // 2) // 10) * 10` FLOORED before it ceiled: `total * 3 //
+    # 2` drops the half-minute first, so total=27 gave 40 where the rule needs
+    # 40.5 -> 50 — the helper emitting a cap BELOW 1.5 x SUM, i.e. the exact
+    # under-sizing this arm exists to prevent, silently, on the first re-tune
+    # whose total is odd (#6744 review). Both shipped values are unaffected
+    # (15 -> 30, 30 -> 50), so this is a latent bug fixed while it is cheap.
+    return -(-(total * 3) // 20) * 10
+
+
+def test_the_save_arm_caps_clear_the_post_step_that_reddened_them():
+    """#10182/#10212: a job that SAVES the shared 3.6 GB pip archive must carry a
+    cap sized from its SUM, not from its measured job time.
+
+    MEASURED on run 42154769896 (head `8f32c5255`): this workflow reddened TWO
+    required checks that had **no failing test in either artifact**, on exactly
+    the two terms `docs/ops/ci-wall-clock.md` §2 names.
+
+    * `test-d14-hosted-api` (job 127701854811) — COLLECTION alone took 11 m 10 s
+      of the then-15 m in-step cap (04:23:22 -> 04:34:32 over `collected 47070
+      items`, against 4 m 59 s for the 46,906-item tree on run 42135045069).
+      The run then finished CLEAN
+      (`256 passed, 39 skipped, 46812 deselected ... in 855.20s`) and the
+      watchdog SIGINT-killed the process at 900 s while it unwound — which
+      `pytest-attribution` reads as `INCOMPLETE`, so the leg certified nothing
+      (#5219). #10212 predicted this exact shape; it is what sizes the in-step
+      cap (15 -> 20 m), and the save arm then sizes the job cap (30 m x 1.5 =
+      45 -> 50 m).
+    * `test-track-b` (job 127701854910) — `4 passed, 9 deselected in 44.96s`,
+      then `setup-python cache: pip` tarred the SAME shared archive in its POST
+      step and GitHub cancelled the job at 10 m 15 s against a 10 m cap. Its
+      save surface comes from a THIRD-PARTY action, not from an `actions/cache`
+      step of its own, which is why no `actions/cache`-shaped audit saw it: a
+      1.18 m max looked like a comfortable 10 m. Its SUM is 5 m in-step + ~1 m + ~9 m = 15 m,
+      and 15 m x 1.5 = 22.5 m, rounded UP to the next 10 m -> 30 m.
+
+    Pinned as the RELATIONSHIP, so a measured re-tune passes and a silent revert
+    to either pre-fix number reds: the 15 m watchdog fails the in-step floor, the
+    10 m track-b cap fails the SUM, and neither is reachable by deleting the save
+    surface (asserted present below), which would make the cases vacuous.
+    """
+    jobs = _load_python_ci()["jobs"]
+
+    # The save surface must still be there, or these caps guard nothing.
+    d14_caches = [s for s in jobs["test-d14-hosted-api"]["steps"]
+                  if (s.get("with") or {}).get("path") == "~/.cache/pip"]
+    assert d14_caches, (
+        "test-d14-hosted-api no longer mounts ~/.cache/pip — the 3.6 GB save this "
+        "cap is sized for is gone, so re-scope this pin rather than leaving a "
+        "cap asserted against a save that no longer happens")
+    track_b_setup_python = [s for s in jobs["test-track-b"]["steps"]
+                            if str(s.get("uses") or "").startswith(
+                                "actions/setup-python")]
+    assert any((s.get("with") or {}).get("cache") == "pip"
+               for s in track_b_setup_python), (
+        "test-track-b no longer sets `setup-python cache: pip` — its save surface "
+        "is what reddened it at 10 m 15 s (run 42154769896); if it was moved to a "
+        "restore-only shape, assert THAT here instead")
+
+    for job_name, in_step_floor in _SAVE_ARM_IN_STEP_FLOORS.items():
+        job = jobs[job_name]
+        runs = [s.get("run") or "" for s in job["steps"]]
+        watchdogs = [int(m.group(1))
+                     for run in runs
+                     for m in re.finditer(r"timeout -s INT -k 10 (\d+)m", run)]
+        assert len(watchdogs) == 1, (
+            f"{job_name}: expected exactly ONE in-step watchdog "
+            f"(`timeout -s INT -k 10 <N>m`), found {watchdogs} — this pin reads "
+            "that number as the job's in-step cap")
+        in_step = watchdogs[0]
+        assert in_step >= in_step_floor, (
+            f"{job_name}: the in-step watchdog is {in_step}m, below the "
+            f"{in_step_floor}m the COLLECT+run measurement requires (14 m 30 s "
+            "observed on run 42154769896, job 127701854811). At 15 m the leg "
+            "SIGINT-kills after a complete green summary, pytest-attribution "
+            "emits INCOMPLETE, and a REQUIRED check reds with no failing test.")
+        cap = job.get("timeout-minutes")
+        required = _save_arm_cap(in_step=in_step)
+        assert cap is not None, (
+            f"{job_name}: no `timeout-minutes` at all — GitHub's 360m default then "
+            "applies to a job that saves the shared archive (#3239)")
+        assert cap >= required, (
+            f"{job_name}: `timeout-minutes: {cap}` cannot hold its own SUM — "
+            f"{in_step}m in-step + ~1m setup + ~9m cold save = {in_step + 10}m, "
+            # The round-up is not elided here: `x 1.5 = 30` for a 15m SUM is
+            # false arithmetic (15 x 1.5 = 22.5), and the fixer reading this red
+            # is reading it to learn what the rule IS (#6744 review P2).
+            f"x 1.5 = {1.5 * (in_step + 10):.1f}m, rounded UP to the next 10 m "
+            f"= {required}m (docs/ops/ci-wall-clock.md §2, save arm). "
+            "Below that the ~3.6 GB pip-cache SAVE POST-step runs out of budget "
+            "and GitHub reports `cancelled` — which python-ci-gate reads as red "
+            "BY DESIGN (#5219), reddening a REQUIRED check on a green leg "
+            "(run 42154769896: 4 passed in 44.96s, cancelled at 10m15s).")
+
 
 
 def _carve_matrix() -> dict:
