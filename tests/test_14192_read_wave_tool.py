@@ -537,6 +537,17 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
                     if name is None:
                         continue  # `case 1:` / `case _:` bind nothing
                     binds.append((ast.Name(id=name, ctx=ast.Store()), node.subject))
+        # ⛔ A `with` TARGET IS A BIND TOO (#14326 round 20, MEASURED at `57735ab47`: `_r =
+        # "_tortoise_fts_query"` then `with _r as _N: getattr(sdk, _N)(…, kind="statement")`
+        # left `_N` UNRESOLVED — mentions 0 / calls 0 / indirect 0, i.e. a lever reached the
+        # read — while the `for`/`match`/parameter-default spellings of the same bind all
+        # landed on `indirect=1`. The target binds what `__enter__` RETURNS, which is not
+        # statically knowable, so the CONTEXT EXPRESSION is the over-approximation: the same
+        # rule `_aliases_of` applies to this node.
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    binds.append((item.optional_vars, item.context_expr))
     out: dict[str, set[str]] = {}
 
     def _values(value: ast.AST) -> set[str]:
@@ -1337,6 +1348,13 @@ def _bind_target_names(target: ast.AST) -> set[str]:
 _NAMESPACE_CALLS = frozenset({"globals", "locals", "vars"})
 _SETATTR_SPELLINGS = frozenset({"setattr"})
 _MAPPING_MUTATORS = frozenset({"update", "setdefault"})
+#: The registry's OWN mutator vocabulary (#14326 round 20, MEASURED GREEN: `sys.modules
+#: .__setitem__("tortoise.sdk", …)` and `sys.modules.__ior__({…})` left the pin green while the
+#: subscript store was red — and this file ALREADY reds `_t.__dict__.__setitem__("TortoiseSDK", …)`,
+#: the same operation on the other namespace mapping). Kept SEPARATE from `_MAPPING_MUTATORS`
+#: because that set is also consulted with `_is_namespace_expr`, where a `__setitem__` receiver is
+#: a dict-like namespace and the key vocabulary differs; widening the shared set would move both.
+_REGISTRY_MUTATORS = frozenset({"update", "setdefault", "__setitem__", "__ior__"})
 #: `setdefault(key, default)` takes ONE key positionally; `update(mapping, …)` takes every
 #: positional as a mapping. The split is what keeps a setdefault DEFAULT (a value) out of the
 #: key census — `_COUNTS.setdefault(literal, 0)` is the accepted false red this file states.
@@ -1408,7 +1426,45 @@ def _is_module_registry(node: ast.AST | None) -> bool:
     """
     if isinstance(node, ast.Attribute):
         return node.attr == "modules"
+    # ⛔ SPELLING IS NOT IDENTITY (#14326 round 20, MEASURED GREEN at `57735ab47` for every
+    # form below while `import sys as _s; _s.modules[…]` was RED): the registry was recognised
+    # only as an `x.modules` ATTRIBUTE, so the SAME OBJECT reached by an import, a `getattr`
+    # or a `__dict__` index walked past — each verified `is sys.modules` at runtime, and each
+    # the identical store. In-file asymmetry, not a boundary: `_environ_mutations` already
+    # resolves BOTH `from os import environ` and `getattr(os, "environ")`.
+    # ⛔ EVERY FORM IS PINNED TO `sys` BY NAME, deliberately. A general
+    # `getattr(<anything>, "modules")` or `x.__dict__["modules"]` rule would red an unrelated
+    # module's `modules` attribute — a false red is the expensive direction in this file.
+    if (isinstance(node, ast.Call)
+            and _callee_names_of(node.func) == {"getattr"}
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "modules"
+            and isinstance(node.args[0], ast.Name) and node.args[0].id == "sys"):
+        return True
+    if isinstance(node, ast.Subscript):
+        if not (isinstance(node.slice, ast.Constant) and node.slice.value == "modules"):
+            return False
+        inner = node.value
+        if (isinstance(inner, ast.Attribute) and inner.attr == "__dict__"
+                and _is_sys_ref(inner.value)):
+            return True
+        return bool(isinstance(inner, ast.Call)
+                    and _callee_names_of(inner.func) == {"vars"}
+                    and len(inner.args) == 1
+                    and _is_sys_ref(inner.args[0]))
     return False
+
+
+def _is_sys_ref(node: ast.AST) -> bool:
+    """`sys`, seen through an import alias this file can name statically.
+
+    ⛔ NARROWER THAN `_aliases_of` ON PURPOSE (#14326 round 20): this decides "the registry"
+    and a false positive reds an unrelated module, so it accepts only the bare `sys` name and
+    the `import sys as _s` spelling resolved by the same attribute rule, never an arbitrary
+    expression.
+    """
+    return isinstance(node, ast.Name) and node.id == "sys"
 
 
 def _is_setattr_like(value: ast.AST) -> bool:
@@ -2588,8 +2644,7 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
                         continue
                     binds.append((ast.Name(id=name, ctx=ast.Store()), node.subject))
             continue
-        # ⛔ …AND A `with` TARGET (#14326 round 19): `with sys.modules as _x:` binds `_x`
-        # with no `Assign` node, the third spelling of the same bind. The target binds what
+        # ⛔ …AND A `with` TARGET (#14326 round 19): `with sys.modules as _x:` binds `_x`        # with no `Assign` node, the third spelling of the same bind. The target binds what
         # `__enter__` RETURNS, which is not statically knowable in general, so binding it to
         # the CONTEXT EXPRESSION is the over-approximation — and it is the only one that
         # closes the shape, because a call there (`with _cm(sys.modules) as _x:`) binds an
@@ -2598,6 +2653,21 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
             for item in node.items:
                 if item.optional_vars is not None:
                     binds.append((item.optional_vars, item.context_expr))
+            continue
+        # ⛔ AN IMPORT ALIAS OF THE REGISTRY IS THE REGISTRY (#14326 round 20, MEASURED GREEN:
+        # `from sys import modules as _m; _m["tortoise.sdk"] = _Mirror` left the pin green
+        # while `import sys as _s; _s.modules[…]` was RED). `_aliases_of` walks assignment
+        # nodes only, so an `ImportFrom` bound nothing. The synthesized `sys.modules`
+        # Attribute is exactly what the runtime binds and exactly what the predicate reads;
+        # restricted to `sys`/`modules` so no other import can be mistaken for the registry.
+        elif isinstance(node, ast.ImportFrom) and node.module == "sys":
+            for alias in node.names:
+                if alias.name != "modules":
+                    continue
+                binds.append((
+                    ast.Name(id=alias.asname or alias.name, ctx=ast.Store()),
+                    ast.Attribute(value=ast.Name(id="sys", ctx=ast.Load()),
+                                  attr="modules", ctx=ast.Load())))
             continue
         else:
             continue
@@ -5434,6 +5504,14 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "AnnAssign": f'    _N: str = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n',
         "unpack target": f'    (_N,) = ("_tortoise_fts_query",)\n    {reach.format(name="_N")}\n',
         "chained assign": f'    _N = _M = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n',
+        # ⛔ A `with` TARGET (#14326 round 20, MEASURED at `57735ab47`: `_N` stayed
+        # UNRESOLVED — mentions 0 / calls 0 / indirect 0, so a lever reached the read — while
+        # the `for`/`match`/parameter-default spellings of the same bind all gave
+        # `indirect=1`). The target binds what `__enter__` returns, so the CONTEXT EXPRESSION
+        # is the over-approximation: the rule `_aliases_of` already applied to this node.
+        "`with` target": (f'    _r = "_tortoise_fts_query"\n'
+                          f'    with _r as _N:\n'
+                          f'        {reach.format(name="_N")}\n'),
         "walrus": f'    (_N := "_tortoise_fts_query")\n    {reach.format(name="_N")}\n',
         # ⛔ A WALRUS ON THE RIGHT-HAND SIDE OF A BIND (#14326 round 8, MEASURED GREEN at
         # `9762589e`): `_str_constants` already treats `NamedExpr` as a bind, so `_values`
@@ -7360,7 +7438,7 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             keys = set(_namespace_rebind_names(node, consts, namespaces, launderers))
             if (
                 isinstance(node, ast.Call)
-                and _callee_names_of(node.func) & _MAPPING_MUTATORS
+                and _callee_names_of(node.func) & _REGISTRY_MUTATORS
                 and _is_module_registry(getattr(node.func, "value", None))
             ):
                 # The DIRECT registry receiver — `_is_namespace_expr` deliberately does not
@@ -7814,6 +7892,38 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     for name, lever in aug_levers.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
         assert got and any("AUGMENTS" in g for g in got), (name, lever, got)
+
+    # ⛔ THE REGISTRY'S OWN MUTATOR AND RECEIVER SPELLINGS (#14326 round 20, MEASURED GREEN at
+    # `57735ab47` for every row below while the plain subscript store above was RED). Two
+    # asymptries, one root: the store was matched as a SPELLING — a `{update, setdefault}`
+    # mutator vocabulary and an `x.modules` ATTRIBUTE receiver — so the same object reached by
+    # a dunder mutator, an import alias, a `getattr` or a `__dict__` index walked past. Each
+    # spelling below is verified `is sys.modules` at runtime and writes the identical entry.
+    registry_spellings = {
+        "`__setitem__` on the registry":
+            'sys.modules.__setitem__("tortoise.sdk", _Mirror)\n',
+        "`__ior__` on the registry":
+            'sys.modules.__ior__({"tortoise.sdk": _Mirror})\n',
+        "`from sys import modules` alias":
+            'from sys import modules as _m\n_m["tortoise.sdk"] = _Mirror\n',
+        "`getattr(sys, \"modules\")`":
+            'getattr(sys, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`sys.__dict__[\"modules\"]`":
+            'sys.__dict__["modules"]["tortoise.sdk"] = _Mirror\n',
+        "`vars(sys)[\"modules\"]`":
+            'vars(sys)["modules"]["tortoise.sdk"] = _Mirror\n',
+    }
+    for name, lever in registry_spellings.items():
+        got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
+        assert got and any("under a string key" in g for g in got), (name, lever, got)
+    # ⛔ AND THE NARROWING CONTROLS, in the false-red direction: every resolved form above is
+    # pinned to `sys` BY NAME on purpose, so the SAME SPELLING on another module must stay
+    # GREEN — a general `getattr(<anything>, "modules")` rule would red ordinary code, which
+    # is the expensive direction here.
+    for inert in ('from mypkg import modules as _m\n_m["tortoise.sdk"] = _Mirror\n',
+                  'getattr(other, "modules")["tortoise.sdk"] = _Mirror\n',
+                  'vars(other)["modules"]["tortoise.sdk"] = _Mirror\n'):
+        assert ctor_findings(shipped + "class _Mirror:\n    pass\n" + inert) == [], inert
 
     # …and the false-red control: `|=` on an ORDINARY container stores a label, not a
     # binding, so the receiver scope is what keeps this green (measured `35 passed`).
