@@ -747,17 +747,24 @@ def test_the_refusal_stamp_is_READ_CROSS_LEG(tmp_path):
 
 
 def _counting_scans(monkeypatch):
-    """Count every full meta scan the spool module performs (parses every meta)."""
+    """Count every full meta scan the spool module performs (parses every meta).
+
+    The scan is ``_scan_spool``: #12483 made it return the stems of the entries
+    it could not READ as well as the parsed metas (the ceilings must count their
+    bytes), so ``list_spool_metas`` is a thin projection of it — instrumenting
+    that name would count nothing on the ceiling paths, which are exactly the
+    paths this measures.
+    """
     from tortoise import capture_spool as sp
 
     calls: list[bool] = []
-    real = sp.list_spool_metas
+    real = sp._scan_spool
 
     def counting(root, *, repair=True):
         calls.append(repair)
         return real(root, repair=repair)
 
-    monkeypatch.setattr(sp, "list_spool_metas", counting)
+    monkeypatch.setattr(sp, "_scan_spool", counting)
     return calls
 
 
@@ -1024,18 +1031,23 @@ def test_the_ONE_health_scan_answers_both_questions_the_same_way(tmp_path):
 
     This pin is the equivalence proof: for a spool holding one of EVERY shape the
     two walks treat differently — a plain undelivered entry, a FILED entry, a
-    TERMINAL entry, and a corrupt meta (which counts as PENDING but is excluded
-    from the saturation metas) — the combined scan must reproduce
-    `count_pending_captures` and `spool_saturated(repair=False)` exactly.
+    TERMINAL entry, a corrupt meta (which counts as PENDING but is excluded from
+    the saturation metas), a meta with no usable session id, and a READ-REFUSED
+    meta whose bytes are counted by the third element — the combined scan must
+    reproduce `count_pending_captures` and `spool_saturated(repair=False)`
+    exactly.
 
     MUTATION THAT REDS THIS: drop the `on_disk - len(metas)` term -> the corrupt
-    meta stops counting as pending (2 -> 1) and the box reads healthier than it
+    meta stops counting as pending (3 -> 2) and the box reads healthier than it
     is; or call `spool_saturated` again instead of reusing the metas -> the count
-    term below still matches, so the red is the corrupt-meta one.
+    term below still matches, so the red is the corrupt-meta one; or return a
+    constant `0` as `_health_scan`'s third element -> the read-refused entry's
+    bytes leave the byte-ceiling verdict the health line reaches.
     """
     from tortoise.capture_spool import (
         Bounds,
         _health_scan,
+        _log_path,
         _meta_path,
         _saturated_for_metas,
         _write_meta,
@@ -1056,27 +1068,55 @@ def test_the_ONE_health_scan_answers_both_questions_the_same_way(tmp_path):
     _meta_path(tmp_path, "corrupt").write_text("{not json", encoding="utf-8")
     (tmp_path / "entries" / "nometa.meta.json").write_text(
         json.dumps({"version": 1}), encoding="utf-8")
+    # ⛔ AND a READ-REFUSED entry (#14347 review F6). Without it the third element
+    # of `_health_scan` is structurally 0 here (`_unreadable_entry_bytes(root, [])`
+    # = the parameter default), so forwarding it proves nothing: the mutant
+    # `_health_scan` -> `return pending, metas, 0` left this test GREEN. An
+    # unreadable meta is now one of the shapes the two walks treat differently, so
+    # it belongs in this fixture and the operand must be able to VARY.
+    unreadable_meta = _meta_path(tmp_path, "locked")
+    unreadable_meta.write_text(
+        json.dumps({"version": 1, "session_id": "locked"}), encoding="utf-8")
+    _log_path(tmp_path, "locked").write_text(
+        "".join(json.dumps(t) + "\n" for t in ({"role": "user", "content": "z" * 64},)),
+        encoding="utf-8")
+    unreadable_meta.chmod(0o000)
+    try:
+        scanned = _health_scan(tmp_path)
+        assert scanned is not None
+        pending, metas, unreadable_bytes, unreadable_count = scanned
 
-    scanned = _health_scan(tmp_path)
-    assert scanned is not None
-    pending, metas = scanned
+        assert unreadable_bytes > 0, (
+            "the forwarded operand must be able to VARY, or the equivalence below "
+            "is a tautology and a mutant returning a constant 0 stays green")
+        # The COUNT half of the same operand (#12483's "both ceilings"): the
+        # read-refused entry is absent from `len(metas)`, so a caller that counts
+        # only parsed metas reaches a DIFFERENT verdict than the write path.
+        assert unreadable_count == 3, (
+            "a constant 0 for the fourth element is the same tautology one "
+            "ceiling over; the three entries `len(metas)` cannot see are the "
+            "READ-REFUSED one, the corrupt meta and the one with no session id")
 
-    assert pending == count_pending_captures(tmp_path) == 3, (
-        "pending must mean the same thing on both walks: `undelivered`, plus the "
-        "two metas neither walk can read (they may be waiting, so folding them "
-        "into 'nothing to do' is the false pass this health state exists to "
-        "remove) — and NOT `delivered` or `terminal`, which a drain skips")
+        assert pending == count_pending_captures(tmp_path) == 4, (
+            "pending must mean the same thing on both walks: `undelivered`, plus "
+            "the three metas neither walk can read (they may be waiting, so folding "
+            "them into 'nothing to do' is the false pass this health state exists "
+            "to remove) — and NOT `delivered` or `terminal`, which a drain skips")
 
-    for bounds in (roomy,
-                   # The count ceiling binds (two live metas, nothing filed).
-                   Bounds(max_entries=1, max_total_bytes=1 << 30,
-                          max_entry_bytes=1 << 20),
-                   # The byte ceiling binds.
-                   Bounds(max_entries=1000, max_total_bytes=1,
-                          max_entry_bytes=1 << 20)):
-        assert _saturated_for_metas(tmp_path, metas, bounds) is \
-            spool_saturated(tmp_path, bounds, repair=False), (
-                f"the reused metas must reach the SAME verdict: {bounds}")
+        for bounds in (roomy,
+                       # The count ceiling binds (two live metas, nothing filed).
+                       Bounds(max_entries=1, max_total_bytes=1 << 30,
+                              max_entry_bytes=1 << 20),
+                       # The byte ceiling binds.
+                       Bounds(max_entries=1000, max_total_bytes=1,
+                              max_entry_bytes=1 << 20)):
+            assert _saturated_for_metas(tmp_path, metas, bounds,
+                                        unreadable_bytes=unreadable_bytes,
+                                        unreadable_count=unreadable_count) is \
+                spool_saturated(tmp_path, bounds, repair=False), (
+                    f"the reused metas must reach the SAME verdict: {bounds}")
+    finally:
+        unreadable_meta.chmod(0o600)
 
 
 def test_a_HEALTH_read_never_repairs_the_spool_it_describes(tmp_path):
@@ -2317,23 +2357,48 @@ def test_a_corrupt_meta_still_quarantines_after_the_read_parse_split(tmp_path):
         "the intact transcript is still QUARANTINED, never deleted"
 
 
-def test_a_non_utf8_meta_is_corrupt_not_unreadable(tmp_path):
-    """Non-UTF-8 bytes were READ IN FULL — they are a property of the CONTENT,
-    so they keep the corrupt path. Only a refusal to hand over the bytes is
-    `meta_unreadable` (#11802)."""
+def test_a_non_utf8_meta_is_unreadable_and_retained(tmp_path):
+    """A meta whose bytes are not UTF-8 is a READ-class refusal, RETAINED (#12484).
+
+    Non-UTF-8 bytes WERE read in full, and #11802 put them on the corrupt path
+    on that ground — record it, QUARANTINE the turn log, UNLINK the meta. The
+    two legs share one ``entries/`` directory and the Pi leg's reader
+    (``readFileSync(path, "utf8")``) NEVER throws: Node substitutes U+FFFD,
+    `JSON.parse` succeeds and the entry is FILED. So whichever leg touched the
+    file first decided whether the session was delivered or DESTROYED, on the
+    same bytes — a content classification deciding a DELIVERY.
+
+    THIS SUPERSEDES ``test_a_non_utf8_meta_is_corrupt_not_unreadable``, which
+    pinned the destroying behaviour. What remains true is the second-order half:
+    the reason must name the real failure.
+
+    MUTATION THAT REDS THIS: put the UnicodeDecodeError arm back on the corrupt
+    path (build `raw=None` and fall through) -> the meta disappears and the turn
+    log is quarantined.
+    """
     entries = tmp_path / "entries"
     entries.mkdir(parents=True)
     (entries / "latin.meta.json").write_bytes(b'{"session_id":"caf\xe9"}')
-    from tortoise.capture_spool import list_spool_metas
+    (entries / "latin.turns.jsonl").write_text(
+        '{"role":"user","content":"keep me"}\n', encoding="utf-8")
+    from tortoise.capture_spool import is_lost_discard, list_spool_metas
+
     metas, discards = list_spool_metas(tmp_path)
     assert metas == []
-    assert discards[0]["reason"] == "corrupt_entry"
+    assert discards[0]["reason"] == "meta_unreadable"
+    assert discards[0]["retained"] is True
+    assert is_lost_discard(discards[0]) is False
     # …and the REASON must name the real failure. Claiming "not valid JSON" for
     # bytes `json.loads` never saw is the same false-reason class #11802 is
     # about, one arm over.
     assert "not valid UTF-8" in discards[0]["detail"]
     assert "not valid JSON" not in discards[0]["detail"]
-    assert not (entries / "latin.meta.json").exists()
+
+    # NOTHING was destroyed: both files are byte-identical and nothing was
+    # quarantined.
+    assert (entries / "latin.meta.json").read_bytes() == b'{"session_id":"caf\xe9"}'
+    assert (entries / "latin.turns.jsonl").exists()
+    assert not (entries / "latin.turns.jsonl.orphan").exists()
 
 
 def test_a_repeatedly_unreadable_meta_records_ONCE_not_once_per_turn(tmp_path):
@@ -2365,7 +2430,7 @@ def test_a_repeatedly_unreadable_meta_records_ONCE_not_once_per_turn(tmp_path):
         lines = [line for line in read_discards(tmp_path) if line.get("reason") == "meta_unreadable"]
         assert len(lines) == 1, f"one event, not one per scan — got {len(lines)}"
         assert lines[0]["retained"] is True
-        assert "cannot read 1 spool meta" in lines[0]["detail"]
+        assert "cannot read or decode 1 spool meta" in lines[0]["detail"]
     finally:
         if meta_path.exists():
             meta_path.chmod(0o600)
@@ -4060,20 +4125,28 @@ def test_the_session_end_hook_records_an_unreadable_transcript(tmp_path):
     assert "transcript_unreadable" in reasons
 
 
-def test_a_non_utf8_meta_is_a_recorded_corrupt_entry(tmp_path):
+def test_a_non_utf8_meta_is_a_recorded_retained_entry(tmp_path):
     """`UnicodeDecodeError` is a `ValueError`, so a non-UTF-8 meta escaped the
-    meta-scan guard and crashed the drain instead of being classified.
+    meta-scan guard and crashed the drain instead of being classified. It is
+    classified now — and, since #12484, in the RETAINED class: the drain reports
+    it and keeps both files, because the Pi leg would have FILED this entry.
+
+    (This supersedes the `corrupt_entry` + unlink pin, which is the destructive
+    half of the two-leg divergence #12484 is about.)
 
     MUTATION THAT REDS THIS: drop `UnicodeDecodeError` from
-    `list_spool_metas`'s except clause.
+    `_scan_spool`'s handlers -> the drain raises.
     """
     from tortoise.capture_spool import _meta_path
 
     write_spool_entry(tmp_path, _snapshot("sess-badmeta"))
     _meta_path(tmp_path, "sess-badmeta").write_bytes(b"\xff\xfe not utf-8")
     summary = flush_spool(tmp_path, _Server().post, now=1000.0)
-    assert [d["reason"] for d in summary.discarded] == ["corrupt_entry"]
-    assert read_discards(tmp_path)[-1]["reason"] == "corrupt_entry"
+    assert [d["reason"] for d in summary.discarded] == ["meta_unreadable"]
+    assert read_discards(tmp_path)[-1]["reason"] == "meta_unreadable"
+    assert read_discards(tmp_path)[-1]["retained"] is True
+    assert _meta_path(tmp_path, "sess-badmeta").exists(), \
+        "nothing may be destroyed for bytes the other leg would have filed"
 
 
 def test_per_turn_spool_repairs_a_non_utf8_meta_instead_of_crashing(tmp_path,
