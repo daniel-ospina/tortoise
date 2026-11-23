@@ -246,15 +246,18 @@ SUM. `test` cleared it with room to spare until the 2026-11-09 refresh — the r
 map took it over, and #11602 bought the room back by raising `fast_shards` 9 → 10; #11576 then
 raised it 10 → 11 for the same reason one merge later (the history is at the end of this
 parenthetical). At **`fast_shards: 11`** — the shipped shape — the row reads: 10 m
-last-failed pre-phase + the emitted **25 m** per-shard
+last-failed pre-phase + the emitted **28 m** per-shard
 watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier revision restated**
 (`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
-plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **56.6 m against
-90, x 1.5 = 85.0** — 5.0 m of headroom, where the refreshed map at 9 shards stood at
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **59.6 m against
+90, x 1.5 = 89.5** — 0.5 m of headroom, where the refreshed map at 9 shards stood at
 **63.6 m, x 1.5 = 95.5** and reded
-`test_the_test_job_carries_no_unbounded_cache_post_step`. The term that moved is
+`test_the_test_job_carries_no_unbounded_cache_post_step`. ⛔ The emission quoted above is **28 m** at
+the 2026-11-23 head (`--emit-push-matrix` reads 28 m on all eleven shards); the last re-cut recorded
+further down read 25 m, and the pack moves with every registration, so the CURRENT figure is the
+emission and the history below is history. The term that moved is
 the watchdog: it read **26 m** until #10999 registered its own fast suite
 (`tests/test_10999_batch_story_relations.py`), **27 m** until the 2026-11-09 sweep re-weighted the fast
 pool, and **32 m** at 9 shards on that refreshed map — re-packing into 10 shards took it to
@@ -711,18 +714,19 @@ mirror case: `4 / 4 / 3` and `5 / 3 / 3` each hold 11 matrix slots, past `12 - 3
 invariant 2.
 
 **The accepted regression has two components, and only the run-level number judges it.** The slow
-matrix gains its second wave (`ceil(5/3)` = 2): one wave of the slow-leg wall is ~8.2 m on the
-committed map's PROJECTION (`slow_wall_projection()`'s 8.18 m per leg, recomputed below — ⛔ not the
+matrix gains its second wave (`ceil(5/3)` = 2): one wave of the slow-leg wall is ~8.6 m on the
+committed map's PROJECTION (`slow_wall_projection()`'s 8.59 m per leg, recomputed below — ⛔ not the
 measured p50, which the row above puts at 8.9 m; a projection is not a measurement and this file does
-not conflate them), so its band goes ~8.2 m → ~16.4 m (1 wave → 2), still narrower than
+not conflate them), so its band goes ~8.6 m → ~17.2 m (1 wave → 2), still narrower than
 the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. **The wall
 guard measures that band, not the per-leg share**: `slow_wall_projection()` takes the job's
-`max-parallel` and reports `waves x (max leg + setup)` — `8.18 m` per leg → **`16.36 m`** from the
+`max-parallel` and reports `waves x (max leg + setup)` — `8.59 m` per leg → **`17.19 m`** from the
 committed `durations` map (re-derived from the map, not restated: registering
 `test_10371_nonpoint_lifecycle_guard.py` in `slow_files` moved this projection from the `8.64 m` →
 `17.28 m` it read before that entry — the `slow_files` membership takes the file out of the fast pool
 and onto the slow pool, which is the whole of the change: the `durations` weight it was given was the
-flat `DEFAULT_FAST_WEIGHT`, so the row then packed identically to no row at all (measured; the 2026-11-16 sweep has since given it a real reading). The
+flat `DEFAULT_FAST_WEIGHT`, so the row then packed identically to no row at all (measured; the 2026-11-16 sweep has since given it a real reading). Since then the 2026-11-23 sweep re-packed the
+slow pool down to `8.59 m` → `17.19 m`, which is what the pin now recomputes. The
 `test_the_documented_slow_wall_restates_the_committed_maps_own_projection` pin recomputes it) — and
 `test_slow_shards_are_duration_packed_and_meet_the_wall_target` holds it to
 `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m
@@ -816,9 +820,10 @@ If the pool grows, invariant 2 permits a larger cap — and that move is not fre
 `measured_pool` literal in the test is the one input that must be edited with the caps (below). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
 shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `3 × 10.5 m ≈ 31.5 m`,
-slow `2 × 8.18 m ≈ 16.36 m` (the `8.18` above is that per-leg figure rounded; `#13685`'s
-`slow_files` entry moved the job wall `8.1767 × 2 ≈ 16.35 m` → `16.36 m` by adding one 2.0-weight
-file to the pool, and the pin recomputes both halves), carve-out `1 × 8.8 m ≈ 8.8 m`) and compare each against that same
+slow `2 × 8.59 m ≈ 17.19 m` (the `8.59` above is that per-leg figure rounded up from `6.5933 m`
++ the `2.0 m` setup allowance; the pin recomputes both halves from the map, and both moved on the
+2026-11-23 sweep, which re-packed the slow pool — they read `8.18 m`/`16.36 m` at the 2026-11-16
+head), carve-out `1 × 9.54 m ≈ 9.54 m`) and compare each against that same
 matrix's uncapped band before trusting the +17.9 m figure above.
 
 ⛔ **Re-measuring the pool is not only a reason to move a cap — it is an edit to the pin.**
