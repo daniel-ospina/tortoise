@@ -34,6 +34,13 @@ def _clean_env(monkeypatch):
               "TORTOISE_EXTRACT_MODEL", "TORTOISE_JSON_MODE",
               "TORTOISE_EXTRACTOR_MAX_TOKENS",
               "TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN",
+              # ``test_reader_lane_wire_body_is_not_suppressed`` is the one test
+              # here that goes through ``resolve_reader_provider``, which reads
+              # TORTOISE_ASK_PROVIDER and RAISES on a value outside
+              # ``_ASK_PROVIDERS`` — an ambient value would red this file for a
+              # reason that is not the diff (``tests/conftest.py``
+              # ``_PROVIDER_ROUTING_ENVS`` declares the same hazard).
+              "TORTOISE_ASK_MODEL", "TORTOISE_ASK_PROVIDER",
               "TORTOISE_DB_URI", "TORTOISE_API_URL"):
         monkeypatch.delenv(k, raising=False)
     yield

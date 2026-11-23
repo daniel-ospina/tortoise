@@ -16089,12 +16089,21 @@ def _cap_kwargs(model, max_tokens: int | None, stats: dict | None) -> dict:
     return {}
 
 
-#: The fixed 9-class ``_classify_error`` vocabulary (#1524). Declared as code
-#: (the #1787 ``llm_error_census`` emission contract that also names it has no
-#: code presence — #5526) so a future add/rename is detectable; #4959 reroutes
-#: a 403 WITHIN this set rather than adding a 10th class. This is the
-#: CLASSIFIER's vocabulary ONLY — the census also carries stage-producer
-#: classes outside this set, so never treat it as the census's full vocabulary.
+#: The fixed 9-class **status-mapped** vocabulary (#1524): the ``fatal_*`` /
+#: ``transient_*`` classes ``_classify_error`` derives from an HTTP status (or a
+#: status-less transport error). Declared as code (the #1787
+#: ``llm_error_census`` emission contract that also names it has no code
+#: presence — #5526) so a future add/rename is detectable; #4959 reroutes a 403
+#: WITHIN this set rather than adding a 10th class.
+#:
+#: ⛔ NOT the whole of ``_classify_error``'s return set — do NOT shrink the
+#: function to fit this set. It also returns the ONE class it decides by TYPE,
+#: ``reasoning_collapse`` (#14357, ``_ReasoningCollapse``), which has no status
+#: to map. Normalising that back into these nine (e.g. ``transient_unknown``)
+#: would silently delete the census signal for a collapsed extraction — the
+#: fail-open #14357 exists to close. Also not the census's full vocabulary: the
+#: census carries stage-producer classes (``parse_error``,
+#: ``truncated_parse_error``, ``empty_embed_list``, …) outside it too.
 _LLM_ERROR_CENSUS_CLASSES = frozenset({
     "fatal_401_auth",
     "fatal_402_billing",
