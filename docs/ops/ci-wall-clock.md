@@ -310,8 +310,9 @@ all three `durations:` rows still emitted **721.3** on THAT resolution
 those rows moved NOTHING **at that head**, which is the point of the sentence). ⛔ The premise is
 scoped to that head ON PURPOSE: the 2026-11-23 sweep has since lowered two of the three to `0.1`
 (`test_14012_resident_pin.py`, `test_14012_outside_view.py`; only `test_14012_resident_cli.py`
-is still `2.0`), so at this head dropping all three DOES move the worst — `835.2 s → 835.5 s`,
-the 28 m minute unchanged — what moves the term is three more
+is still `2.0`), so at this head dropping all three DOES move the worst — `835.5 s → 835.9 s`,
+the 28 m minute unchanged (both re-emitted at the head this line is read at: the forward merge
+of `origin/main` is what carried these from the 835.2 / 835.5 the pre-merge sweep measured) — what moves the term is three more
 files in the pack, +6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is
 applied at the earlier heads. ⛔ **EACH RE-CUT MERGES A DIFFERENT PAIR, SO THE TERM IS READ OFF THE
 RESULTING TREE RATHER THAN INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on the tree that
@@ -350,8 +351,8 @@ same shape as every earlier one: NO ARITHMETIC ON THE TWO PARENTS' FIGURES WOULD
 ARE THE TERMS IT QUOTES**: at `f56aac204ca6` the minute was
 unchanged — `ceil(721.3/60 x 2)` = 25 — so the hand-added trio stood at 56.6 m / 85.0 m / 5.0 m. The
 **2026-11-23 sweep** then re-packed this pool, so that trio is history too: the committed map now
-emits **28 m** on all eleven shards at a worst `est_seconds` of **835.2**
-(`ceil(835.2/60 x 2)` = 28), and the trio is **59.6 m / 89.5 m / 0.5 m**. The three
+emits **28 m** on all eleven shards at a worst `est_seconds` of **835.5**
+(`ceil(835.5/60 x 2)` = 28), and the trio is **59.6 m / 89.5 m / 0.5 m**. The three
 hand-added figures are re-added from the emitted 28 m: 59.6 m / **89.5 m** / **0.5 m** (the row
 above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 59.64 m,
 x 1.5 = 89.5 m, 0.5 m of headroom**, and the `test_demo_session_read_exclusion_8290.py`
