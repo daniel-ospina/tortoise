@@ -1649,3 +1649,44 @@ def test_the_mode_is_productions_own_resolution_not_a_second_parser(monkeypatch)
     assert m._embed_mode() == "indent", (
         "the recorded mode must follow the serialization the render passes to "
         "json.dumps, not a re-parse of the environment")
+
+
+def test_a_stage_failure_error_is_incomplete_even_when_calls_line_up():
+    """A stage that RAISED is a lost call, whatever the counters say."""
+    failed = _complete_artifact()
+    failed["pipeline"] = {"calls": 3, "retries": 0,
+                          "errors": ["S4 failed: TimeoutError: read timeout"]}
+    report = m.compose_report([failed])
+    assert report["complete"] is False, (
+        "a recorded stage FAILURE must make the run incomplete even when the "
+        "call counts happen to agree")
+    assert "INCOMPLETE LIVE RUN" in m.render_compose(report)
+
+
+def test_a_content_level_error_is_a_note_not_an_incompleteness():
+    """⛔ THE OVER-BLOCK two independent reviewers found (review cycle 9, P1).
+
+    `extractor_v2` records errors on calls that RETURNED and were measured: the
+    rung-4 partial accept appends "S4 output partial — truncated tail dropped"
+    (`tortoise/extractor_v2.py:15337`), a malformed section appends
+    "S4 output malformed section … kept S2 output" (`:15292`), as do S2's twin
+    and the post-extraction S5/chain/entity-resolution/classify steps. Treating
+    ANY error as "did not measure" refused a COMPLETE composition and exited 1 —
+    and not clearably by re-running, because README §2's 13 of 50 documents
+    emitting >6,000 S4 completion tokens (max 24,000) is exactly what rung 4 is
+    for, so the documented `compose --out …` exited 1 deterministically on such
+    a `--doc`.
+    """
+    noted = _complete_artifact()
+    noted["pipeline"] = {"calls": 3, "retries": 0, "errors": [
+        "S4 output partial — truncated tail dropped (embed list incomplete)"]}
+    report = m.compose_report([noted])
+    assert report["complete"] is True, (
+        "a content-level error on a call that RETURNED must not refuse the "
+        "composition — the prompt was measured")
+    rendered = m.render_compose(report)
+    assert "INCOMPLETE LIVE RUN" not in rendered, (
+        "a content-level error must not print the incompleteness banner")
+    assert "content-level notes" in rendered, (
+        "…but it must still be DISCLOSED, or the reader is told the emission "
+        "was clean when it was not")
