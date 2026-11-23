@@ -221,10 +221,8 @@ Re-running is safe with this attempt's --dedup: the server folds identical conte
 22:02 UTC — the original 4, the 2 from the hosted probe, and exactly **one** of the two
 above (created 22:02:05). So the `504` → committed relationship is **nondeterministic**,
 which is precisely why the refusal is unactionable without a reconciliation path: the
-caller cannot infer from the status whether the write landed. (In *this* window the
-`--dedup` fold had nothing to fold onto — the second attempt's content was never
-re-sent against a landed copy. §1.2 is the experiment that verified the fold
-host-side; this line is not a claim that the fold is unproven.)
+caller cannot infer from the status whether the write landed. (The `--dedup` fold itself
+is host-verified separately in §1.2, by the `createdAt`/`updatedAt` differential.)
 
 ```console
 $ tortoise doctor --offline      # clean HOME holding ONLY a credential, no local graph

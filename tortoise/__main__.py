@@ -6107,6 +6107,23 @@ def _cmd_create_point(args) -> int:
               "land. Re-run with --dedup (or read back first) so a retry "
               "cannot duplicate the write.", file=_sys.stderr)
         return 1
+    except (TimeoutError, OSError) as e:
+        # ⛔ A stall while READING the response — after the request was fully
+        # sent — never reaches the `URLError` arm above: `do_open` wraps only
+        # the SEND (`h.request(...)` sits inside `except OSError: raise
+        # URLError(err)`), so the `resp.read()` in this verb raises
+        # `TimeoutError`/`OSError` straight through and the user gets a bare
+        # traceback for a write that was already on the wire. That is the same
+        # dead-end the arms above exist to close, one layer down, and the same
+        # class and treatment are already recorded one command up
+        # (`_cmd_signup`: "without it the D2 contract degrades into a
+        # traceback") and at `:5188`.
+        print(f"Cannot complete the request ({e}).", file=_sys.stderr)
+        print("The request was sent before the connection failed, so the write "
+              "MAY have landed. Reconcile with `GET /v1/points` before "
+              "re-sending, or re-run with `--dedup` to make the retry safe.",
+              file=_sys.stderr)
+        return 1
 
     point_id = result.get("id", result.get("point_id", "unknown"))
     print(f"Created point: {point_id}")
@@ -16242,7 +16259,34 @@ def _cmd_doctor(args):
             _hosted_identity: tuple[str, str | None] | None = None
             try:
                 _h_path, _h_cfg, _h_key, _h_url = _resolve_config_path()
-                if _h_key and _is_default_target:
+                # ⛔ AN ENV-ONLY `TORTOISE_API_KEY` IS NOT A HOSTED IDENTITY (#11912
+                # review round 15, the predicate `_doctor_hosted_rows` applies
+                # ~1,300 lines below). That variable is ALSO the documented shared
+                # key for a self-hosted `serve --http --auth static`
+                # (`.env.example:149-150`, `tortoise/auth.py` `require_auth`,
+                # `docs/quickstart-selfhosted.md:65`), so without this gate a
+                # healthy self-host box that exports it — exactly what that
+                # quickstart instructs — reads "you have a hosted credential" and
+                # is told its next step is `tortoise create-point`, which resolves
+                # that SAME env key against `TORTOISE_API_URL` or the production
+                # default. Following the advice therefore sends the user's LOCAL
+                # STATIC SECRET to api.premiselabs.co: the #1708 §D1b silent
+                # backend switch, in prose form, and the same shape round 15
+                # refused for the /health probe — which is why the two rows
+                # CONTRADICTED each other in one report.
+                #
+                # Deliberately the SAME three escapes as that predicate: a FILE
+                # store always counts (the whole point of #11912 — a revoked
+                # stored key must never read green), and so does an explicitly
+                # named `TORTOISE_API_URL` or a hosted-shaped `tt_`/`tk_` key (the
+                # prefixes `signup` and `key create` mint).
+                import os as _hos
+                _h_env_url_explicit = bool(
+                    (_hos.environ.get("TORTOISE_API_URL") or "").strip())
+                _h_hosted_shaped = (_h_key or "").startswith(_HOSTED_KEY_PREFIXES)
+                if _h_key and _is_default_target and (
+                        _h_path is not None or _h_env_url_explicit
+                        or _h_hosted_shaped):
                     _hosted_identity = (_h_path.name if _h_path else "env", _h_url)
             except MemoryError:
                 raise
