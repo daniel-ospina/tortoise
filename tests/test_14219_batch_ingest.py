@@ -130,7 +130,7 @@ def test_content_key_matches_the_repo_precedent():
 
 
 # ── duplicate-submit spends zero tokens ────────────────────────────────────
-def test_a_settled_duplicate_never_calls_the_runner():
+def test_a_settled_duplicate_never_calls_the_runner(tmp_path):
     """ACCEPTANCE: duplicate-submit spends ZERO tokens.
 
     The runner IS the spend (it is the extraction), so "the runner was not
@@ -155,7 +155,8 @@ def test_a_settled_duplicate_never_calls_the_runner():
     # so the identity is known at acceptance and no read is needed to see it).
     _, second = coord.submit(
         ORG, ["/other/path/to/the-same-contract.md"],
-        contents=["# Contract\n\nterms\n"])
+        contents=["# Contract\n\nterms\n"],
+        stage_base=str(tmp_path))
     dup = coord.status(ORG, second[0].batch_id)[1][0]
     assert dup.content_key == content_key("# Contract\n\nterms\n")
     settled = coord.run_item(ORG, dup)
@@ -167,7 +168,7 @@ def test_a_settled_duplicate_never_calls_the_runner():
         "the runner must not have been called for the duplicate")
 
 
-def test_the_dedup_check_precedes_the_runner_structurally():
+def test_the_dedup_check_precedes_the_runner_structurally(tmp_path):
     """Not a rule the runner remembers — an ordering the coordinator enforces.
 
     Pinned by a runner that FAILS the test if it is ever reached for a
@@ -185,7 +186,8 @@ def test_the_dedup_check_precedes_the_runner_structurally():
     coord.advance(ORG, it, BatchItemState.EXTRACTING)
     coord.advance(ORG, it, BatchItemState.INDEXED,
                   content_key=content_key("same"))
-    _, items2 = coord.submit(ORG, ["/b.md"], contents=["same"])
+    _, items2 = coord.submit(ORG, ["/b.md"], contents=["same"],
+        stage_base=str(tmp_path))
     dup = coord.status(ORG, items2[0].batch_id)[1][0]
     assert coord.run_item(ORG, dup, runner).state is (
         BatchItemState.SKIPPED_DUPLICATE)
@@ -674,13 +676,14 @@ def test_an_unknown_stored_state_reads_as_queued_not_as_terminal():
 
 
 # ── in-batch repeats: marked at acceptance, settled when the twin lands ────
-def test_an_in_batch_repeat_settles_only_after_its_twin_is_indexed():
+def test_an_in_batch_repeat_settles_only_after_its_twin_is_indexed(tmp_path):
     """The same bytes twice in one upload is one document — but a SKIP is only
     safe once the first copy actually landed (otherwise the document is lost)."""
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
     _batch, items = coord.submit(ORG, ["/a.md", "/a-copy.md"],
-                                 contents=["same text", "same text"])
+                                 contents=["same text", "same text"],
+        stage_base=str(tmp_path))
     assert items[1].duplicate_of == items[0].item_id
 
     # While the twin is still queued, the copy PROCEEDS (not a duplicate of an
@@ -690,11 +693,12 @@ def test_an_in_batch_repeat_settles_only_after_its_twin_is_indexed():
     ).state is BatchItemState.INDEXED
 
 
-def test_an_in_batch_repeat_is_skipped_when_the_twin_indexed():
+def test_an_in_batch_repeat_is_skipped_when_the_twin_indexed(tmp_path):
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
     _batch, items = coord.submit(ORG, ["/a.md", "/a-copy.md"],
-                                 contents=["same text", "same text"])
+                                 contents=["same text", "same text"],
+        stage_base=str(tmp_path))
     coord.run_item(ORG, items[0], lambda i: ItemOutcome(
         BatchItemState.INDEXED, content_key=content_key("same text")))
     calls: list[str] = []
@@ -705,14 +709,53 @@ def test_an_in_batch_repeat_is_skipped_when_the_twin_indexed():
     assert out.tokens_in == 0
 
 
-def test_a_copy_is_not_skipped_when_its_twin_failed():
+def test_a_copy_is_not_skipped_when_its_twin_failed(tmp_path):
     """Never lose a document to a dedup rule: a failed twin makes the copy live."""
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
     _batch, items = coord.submit(ORG, ["/a.md", "/a-copy.md"],
-                                 contents=["same text", "same text"])
+                                 contents=["same text", "same text"],
+        stage_base=str(tmp_path))
     coord.run_item(ORG, items[0], lambda i: ItemOutcome(
         BatchItemState.FAILED, reason="decode failure"))
     out = coord.run_item(ORG, items[1], lambda i: ItemOutcome(
         BatchItemState.INDEXED))
     assert out.state is BatchItemState.INDEXED
+
+
+# ── inline (uploaded) text is staged before the row ────────────────────────
+def test_inline_text_is_written_before_the_row_exists(tmp_path):
+    """An ACK must never name a document we cannot read back.
+
+    Acceptance stages the bytes under the ingest base FIRST and then writes the
+    row, so a crash between the two leaves an orphan file (harmless) rather than
+    a row pointing at nothing.
+    """
+    from pathlib import Path
+
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["upload-1.md"], contents=["# Doc\n\nhi\n"],
+                                stage_base=str(tmp_path))
+    staged = Path(items[0].staged_path)
+    assert staged.is_file()
+    assert staged.read_text(encoding="utf-8") == "# Doc\n\nhi\n"
+    assert str(tmp_path) in str(staged)
+    # …and the path is derived from OUR ids, never from caller input: a hostile
+    # item_id/name cannot escape the base.
+    assert staged.parent.name == batch.batch_id
+
+
+def test_a_path_item_is_not_staged(tmp_path):
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    _batch, items = coord.submit(ORG, ["/corpus/a.md"], stage_base=str(tmp_path))
+    assert items[0].staged_path == ""
+    assert list(tmp_path.rglob("*.md")) == []
+
+
+def test_inline_text_without_storage_is_refused_rather_than_acked(tmp_path):
+    """No base = nowhere durable to put the text = refuse, never accept."""
+    coord = BatchCoordinator(InMemoryBatchStore())
+    with pytest.raises(ValueError, match="TORTOISE_INGEST_BASE_DIR"):
+        coord.submit(ORG, ["a.md"], contents=["text"], stage_base=None)

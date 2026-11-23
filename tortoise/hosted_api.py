@@ -16719,14 +16719,20 @@ async def create_batch(body: BatchRequest,
     contents = [it.text for it in body.items]
     names = [it.name or "" for it in body.items]
 
+    stage_base = os.environ.get("TORTOISE_INGEST_BASE_DIR") or None
+
     def _accept():
         store = _batch_store_for(org)
         return _batch_ingest.BatchCoordinator(store).submit(
             org_id, refs, names=names, contents=contents,
-            estimate=est.as_dict())
+            stage_base=stage_base, estimate=est.as_dict())
 
     try:
         batch, items = await _run_off_loop(_BATCH_EXECUTOR, _accept)
+    except ValueError as exc:
+        # The one refusal raised by the layer at acceptance: inline text with
+        # nowhere durable to put it. 400 (the caller's body), not 503.
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     except Exception:
         _logger.exception("batch acceptance failed for team %s", org_id)
         raise HTTPException(status_code=503,

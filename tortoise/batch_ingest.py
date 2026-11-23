@@ -78,6 +78,7 @@ path that wrote raw points would produce exactly the bloat the capability audit
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import threading
@@ -269,6 +270,38 @@ def content_key(text: str) -> str:
     return hashlib.sha256(normalise_text(text).encode("utf-8")).hexdigest()
 
 
+def stage_text(base: str, batch_id: str, item_id: str, text: str) -> str:
+    """Write an uploaded item's text under ``base`` and return its path.
+
+    ``base`` is the tenant's document storage root (``TORTOISE_INGEST_BASE_DIR``)
+    — the only place the ingest doors are allowed to read from (#329), so an
+    uploaded document becomes an ordinary document on disk rather than a second
+    storage mechanism. Written atomically (tmp + ``os.replace``) into a
+    per-batch directory, so a crash mid-accept leaves either no file or a whole
+    one, and two batches can never collide.
+
+    ⛔ Everything here is derived from ids this layer minted (``batch_…`` /
+    ``batch_…-00001``), never from caller input, so no customer-supplied path
+    component can reach the filesystem.
+    """
+    import os
+    import tempfile
+
+    directory = os.path.join(os.path.realpath(base), "_batches", batch_id)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    target = os.path.join(directory, f"{item_id}.md")
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".stage-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return target
+
+
 # ── the estimate (owner requirement, #14275 §4 / brief item 6) ──────────────
 @dataclass(frozen=True)
 class BatchEstimate:
@@ -400,6 +433,12 @@ class BatchItem:
     ref: str
     #: Optional display name (a filename, a title).
     name: str = ""
+    #: Where this item's text was STAGED when the caller uploaded it inline
+    #: (``text`` on the request). Acceptance writes the bytes under the ingest
+    #: base BEFORE the row exists, so the document is durable the moment the ACK
+    #: is returned — an ACK over text that lived only in the request would be a
+    #: receipt for something we did not record (§2.0). Empty for a path item.
+    staged_path: str = ""
     state: BatchItemState = BatchItemState.QUEUED
     #: Present iff ``state`` is not a success state (AX: a non-success always
     #: carries a reason string, never a bare state).
@@ -432,6 +471,7 @@ class BatchItem:
             "item_id": self.item_id,
             "ref": self.ref,
             "name": self.name,
+            "staged_path": self.staged_path,
             "status": str(self.state),
             "reason": self.reason,
             "tokens_in": self.tokens_in,
@@ -708,12 +748,14 @@ class GraphBatchStore:
     def put_item(self, org_id: str, item: BatchItem) -> None:
         self._q(
             f"MERGE (i:{ITEM_LABEL} {{id:$iid, batch_id:$bid, org_id:$org}}) "
-            "SET i.ref=$ref, i.name=$name, i.state=$state, i.reason=$reason, "
+            "SET i.ref=$ref, i.name=$name, i.staged_path=$staged, "
+            "    i.state=$state, i.reason=$reason, "
             "    i.content_key=$key, i.tokens_in=$tin, i.tokens_out=$tout, "
             "    i.attempts=$attempts, i.content_changed=$changed, "
             "    i.updated_at=$updated",
             {"iid": item.item_id, "bid": item.batch_id, "org": org_id,
-             "ref": item.ref, "name": item.name, "state": str(item.state),
+             "ref": item.ref, "name": item.name, "staged": item.staged_path,
+             "state": str(item.state),
              "reason": item.reason, "key": item.content_key,
              "tin": int(item.tokens_in), "tout": int(item.tokens_out),
              "attempts": int(item.attempts),
@@ -726,7 +768,7 @@ class GraphBatchStore:
             f"MATCH (i:{ITEM_LABEL} {{batch_id:$bid, org_id:$org}}) "
             "RETURN i.id, i.ref, i.name, i.state, i.reason, i.content_key, "
             "       i.tokens_in, i.tokens_out, i.attempts, i.content_changed, "
-            "       i.updated_at ORDER BY i.id",
+            "       i.updated_at, i.staged_path ORDER BY i.id",
             {"bid": batch_id, "org": org_id},
         )
         return [BatchItem(
@@ -735,7 +777,8 @@ class GraphBatchStore:
             reason=r[4] or "", content_key=r[5] or "",
             tokens_in=int(r[6] or 0), tokens_out=int(r[7] or 0),
             attempts=int(r[8] or 0), content_changed=bool(r[9]),
-            updated_at=r[10] or "") for r in rows]
+            updated_at=r[10] or "",
+            staged_path=(r[11] or "") if len(r) > 11 else "") for r in rows]
 
     def pending_batches(self, org_id: str) -> list[str]:
         rows = self._q(
@@ -972,6 +1015,7 @@ class BatchCoordinator:
     def submit(self, org_id: str, refs: Sequence[str], *,
                names: Sequence[str] | None = None,
                contents: Sequence[str | None] | None = None,
+               stage_base: str | None = None,
                estimate: dict[str, Any] | None = None,
                batch_id: str | None = None) -> tuple[Batch, list[BatchItem]]:
         """Write ONE durable batch row and one durable row per item, then return.
@@ -993,10 +1037,20 @@ class BatchCoordinator:
             name = (names[idx] if names and idx < len(names) else "") or ""
             text = contents[idx] if contents and idx < len(contents) else None
             key = content_key(text) if text is not None else ""
+            staged = ""
+            if text is not None:
+                # ⛔ The bytes are written BEFORE the row (the order is the
+                # promise): an ACK must never name a document we cannot read back.
+                if stage_base is None:
+                    raise ValueError(
+                        "this item carries inline text but the server has no "
+                        "document storage configured (TORTOISE_INGEST_BASE_DIR) "
+                        "— send it as a path under that base instead")
+                staged = stage_text(stage_base, bid, f"{bid}-{idx:05d}", text)
             item = BatchItem(batch_id=bid, item_id=f"{bid}-{idx:05d}",
                              ref=str(ref), name=str(name),
                              state=BatchItemState.QUEUED, updated_at=stamp,
-                             content_key=key,
+                             staged_path=staged, content_key=key,
                              duplicate_of=first_by_key.get(key, "") if key else "")
             if key and key not in first_by_key:
                 first_by_key[key] = item.item_id

@@ -491,3 +491,33 @@ def test_a_graph_bound_key_is_refused_on_every_batch_surface(client, store,
             if path == "/v1/batches" else call(path))
         assert r.status_code == 403, f"{method} {path} -> {r.status_code}"
         assert r.json()["detail"]["error_code"] == "GRAPH_SCOPED_TEAM_SURFACE"
+
+
+def test_inline_text_is_accepted_and_staged_under_the_ingest_base(client, store,
+                                                                 tmp_path,
+                                                                 monkeypatch):
+    base = tmp_path / "corpus"
+    base.mkdir()
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
+    r = client.post("/v1/batches", json={"items": [
+        {"ref": "contract.md", "text": "# Contract\n\nterms\n"}]})
+    assert r.status_code == 201, r.text
+    batch_id = r.json()["batch_id"]
+    row = store.items(ORG_ID, batch_id)[0]
+    assert row.staged_path.startswith(str(base))
+    from pathlib import Path
+
+    assert Path(row.staged_path).read_text(encoding="utf-8") == (
+        "# Contract\n\nterms\n")
+    # …and the identity was derived from the text at acceptance, so a duplicate
+    # is visible before any read (no tokens spent on it later).
+    assert row.content_key == bi.content_key("# Contract\n\nterms\n")
+
+
+def test_inline_text_without_configured_storage_is_a_400_not_a_fake_ack(
+        client, monkeypatch):
+    monkeypatch.delenv("TORTOISE_INGEST_BASE_DIR", raising=False)
+    r = client.post("/v1/batches", json={"items": [
+        {"ref": "contract.md", "text": "# Contract\n\nterms\n"}]})
+    assert r.status_code == 400, r.text
+    assert "TORTOISE_INGEST_BASE_DIR" in r.json()["detail"]
