@@ -233,15 +233,32 @@ is `#14275`'s decision. No change to it is proposed here.
 correctness / E3 provenance / E4 operator edges**, and they are the arbiter. **They were not
 run, so the lever was not armed.**
 
-### 5.1 No provider key on this box
+### 5.1 A key is NOT the blocker — corrected on re-measurement
 
-`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `VENICE_API_KEY`, `OPENAI_API_KEY` and
-`TORTOISE_API_KEY` are all unset; there is no repo-root `.env`, no `~/pi-keys.env`, and
-`tools/run-with-eval-keys.sh` therefore has nothing to load. `build_extractor_model()`
-degrades to its "no key at all" default and every call returns `401`. This is the same
-environmental block the increment-1 bundle recorded in its §0 — **not** a shortcut, and the
-cost side of this file is unaffected by it because every figure above is computed from
-committed receipts and committed measurements.
+⛔ **This section previously claimed that all five key variables are unset, that
+`tools/run-with-eval-keys.sh` has nothing to load, and that `build_extractor_model()`
+degrades to its "no key at all" default and returns `401`. Re-measured on the box this
+file was written on (2026-11-23, from a lane there), that is false. The claim is removed,
+not softened, because it is the reason a future lane would defer on a false premise.**
+
+Measured:
+
+- `printenv DEEPSEEK_API_KEY` → **set**; `printenv TORTOISE_API_KEY` → **set**.
+  `OPENROUTER_API_KEY`, `VENICE_API_KEY` and `OPENAI_API_KEY` → unset.
+- the fleet's credential file is **`~/keys.env`** (present, mode `600`), which
+  `orchestrator/lane-env.sh` sources for every lane. The name this section used to cite,
+  `~/pi-keys.env`, is not the file the fleet loads — and it does not exist.
+- `build_extractor_model()` returns a `RoutingModel` whose primary is a
+  `DeepSeekDirectModel` pointed at `https://api.deepseek.com/v1/chat/completions`. It does
+  **not** fall back to the no-key default, so "every call returns `401`" was not a
+  measurement either.
+
+**So the environmental block is not established, and no figure above depends on it:** every
+cell in this file is computed from committed receipts and committed measurements, with no
+provider call. What actually keeps the armed arm unscored is §5.2 — a **registered** pin,
+i.e. a preregistration amendment (`#14371`) rather than an environmental accident — plus
+the cost of two scored corpus runs over the whole corpus, which is outside this lane's
+scope.
 
 ### 5.2 Even with a key, the compact render cannot be scored — the pin is *registered*
 
@@ -265,8 +282,14 @@ The frozen corpus is **7 sessions** (`preregistration.json` → `corpus.sessions
 **two** scored runs over it (the `indent` arm and the `compact` arm), because the layout is a
 **process-global environment variable**: the harness installs it once per **sequential
 batch** (never interleaved, or a `before` thread trips over an `after` thread — see the
-bundle's §4 recipe), and every row records `s4_embed_json` — the layout its render **resolved**
-— so a mislabelled arm is refused rather than averaged in.
+bundle's §4 recipe). ⚠️ **Which instrument records that is worth being precise about:**
+`tools/extractor_cost_measure.py` writes `s4_embed_json` per row and refuses a mislabelled
+arm (`_assert_the_arm_is_what_rendered`, `:446`/`:591`); the **scored** capstone
+(`docs/evidence/7949-capstone/probes/capstone_measure.py`) carries no `s4_embed_json` at
+all — it records the flag only through its `pinned_off` read-back, and §5.2 says it pops
+that flag for the whole run. So the per-row safeguard exists for the **cost** harness
+today, and `#14371` must add a resolved-layout field to the **scored** rows before a
+mislabelled arm could be refused there rather than averaged in.
 
 ---
 

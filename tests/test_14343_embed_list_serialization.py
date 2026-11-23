@@ -70,12 +70,13 @@ _MEASURED_TOKENS = {
 #: The LIVE tripwire: characters, not tokens. A receipts change moves these first.
 _MEASURED_CHARS = {"indent": 278_874, "compact": 224_109}
 #: The per-emission saving share, measured in TOKENS (14 emissions span 29.6 %–35.0 %);
-#: the aggregate cell §1 publishes (32.51 %) sits inside it. Read by
-#: `test_the_recorded_token_cells_encode_the_doc_s_own_deltas` — a band, not a point,
-#: because it is a property of the serialization, so drifting outside it means the
-#: receipts changed shape, not that the tokenizer moved. Enforcing a band rather than a
-#: point is deliberate: a token cell cannot be re-measured without a tokenizer, and §1
-#: correctly refuses to fetch one at test time.
+#: the aggregate cell §1 publishes (32.51 %) sits inside it. This is QUOTED from the
+#: measurement, not enforced: the aggregate ratio is already pinned exactly by the `32.51`
+#: assertion in `test_the_recorded_token_cells_encode_the_doc_s_own_deltas`, so a band test
+#: around it could never be the assertion that fails (verified: widening this to
+#: `(0.0, 100.0)` leaves the suite green). Receipts drift is caught by the CHARACTER
+#: tripwire in `test_the_pinned_cells_are_the_measured_corpus`, which is the live half. The
+#: band survives as the number the character-band test quotes in its failure message.
 _SAVING_SHARE_BAND = (29.0, 36.0)
 
 
@@ -209,12 +210,10 @@ def test_the_recorded_token_cells_encode_the_doc_s_own_deltas():
     assert t["compact"] - t["keys_once"] == 6_318, "§3b's −6,318 (−12.07 %) off compact"
     assert t["keys_once"] - t["keys_once_naive"] == 1_035, (
         "§3b's 'understates the render by 1,035 tokens while losing data' cell")
-    # The band the failure message below quotes: measured in TOKENS per emission
-    # (29.6 %–35.0 %), and the aggregate cell must sit inside it.
-    token_share = 100.0 * (t["indent"] - t["compact"]) / t["indent"]
-    assert _SAVING_SHARE_BAND[0] < token_share < _SAVING_SHARE_BAND[1], (
-        f"the recorded token share {token_share:.2f}% left the band this file pins, "
-        f"{_SAVING_SHARE_BAND[0]}–{_SAVING_SHARE_BAND[1]}% — re-measure §1")
+    assert t["keys_once"] - t["keys_once_null_padded"] == 123, (
+        "§3b's null-padded cell (46,028 − 45,905 = 123) — without this delta that cell "
+        "was reachable only through the ordering assert above, so a token-only edit to "
+        "it shipped green (verified: 45,905 → 45,904 passed before this line existed)")
 
 
 def test_the_compact_layout_always_shrinks_and_the_share_is_a_property_of_the_layout(emissions):
@@ -242,8 +241,8 @@ def test_the_compact_layout_always_shrinks_and_the_share_is_a_property_of_the_la
     assert min(shares) > 15.0 and max(shares) < 25.0, (
         f"character-level share drifted outside its measured band: {min(shares):.1f}–"
         f"{max(shares):.1f}% (measured 17.11–21.68%); the TOKEN band this file pins is "
-        f"{_SAVING_SHARE_BAND[0]}–{_SAVING_SHARE_BAND[1]}% and is asserted against the "
-        f"recorded cells, not against these characters")
+        f"{_SAVING_SHARE_BAND[0]}–{_SAVING_SHARE_BAND[1]}% and is recorded as the "
+        f"per-emission spread, not re-measured against these characters")
 
 
 # ── the round-trip: same object, key order included ───────────────────────────
