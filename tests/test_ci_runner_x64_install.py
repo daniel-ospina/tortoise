@@ -4474,6 +4474,23 @@ def _comment_block(lines: list[str], index: int) -> tuple[int, int]:
     return start, end
 
 
+def _comment_prose(block: list[str]) -> str:
+    """A `#` comment block as ONE line of prose: `#` markers dropped, line wraps collapsed.
+
+    ⛔ WHY THIS EXISTS. Every pointer in this register is matched with `_DE_NUMBERED_POINTER_RE`,
+    whose `\\s+` happily spans a line break — but a PER-LINE scan can never see that, and a wrapped
+    pointer is how prose wraps the moment the paragraph is reflowed. Measured before this helper
+    existed: a NEWLY written pointer wrapped after `python-ci.yml`'s own` was invisible to BOTH arms
+    (the register arm found no pointer at all and the completeness arm scanned line-by-line), so an
+    unregistered prose claim was added with every gate green. The same shape is why #10275's check
+    normalises whitespace before concluding a surface is clean.
+
+    The `#` marker must go with the wrap: a reflow puts `# ` BETWEEN the words, and leaving it in
+    turns `own` / `checkout step` into `own # checkout step`, which the regex still cannot join.
+    """
+    return " ".join(line.strip().lstrip("#").strip() for line in block).strip()
+
+
 def _declaration_re(indent: int, declaration: str) -> re.Pattern[str]:
     """The regex for `declaration` as a key at the given indent, whose line may carry a comment.
 
@@ -4560,7 +4577,11 @@ def _de_numbered_cite_problems(
         # into sentences and ONE piece must carry the pointer, the marker AND the declaration.
         lo, hi = _comment_block(lines, pointers[0])
         block = "\n".join(lines[lo:hi])
-        if len(re.findall(_DE_NUMBERED_POINTER_RE, block)) > 1:
+        # ⛔ COUNTED ON WRAP-NORMALISED PROSE, like the completeness arm: a second pointer that is
+        # WRAPPED is still a second pointer, and a line-wise count does not see it — so the duplicate
+        # this branch exists to refuse would be excused, which is the fail-open shape cycle 3 closed
+        # for the UNWRAPPED case. ONE definition of "a pointer", shared by both arms.
+        if len(re.findall(_DE_NUMBERED_POINTER_RE, _comment_prose(lines[lo:hi]))) > 1:
             problems.append(
                 f"the pointer's own comment block at {rel}:{lo + 1}-{hi} carries more than one "
                 "de-numbered pointer — the register's marker cannot say which one this entry "
@@ -4663,18 +4684,31 @@ def _unregistered_de_numbered_pointers(
     A ±N-line window (this arm used ±5, then ±1) disagrees with the register the moment the paragraph
     is rewrapped, and it then demands a register entry that already exists. The window also excused a
     new pointer written in the SAME paragraph, which is the likeliest place one appears.
+
+    ⛔ SCANNED PER BLOCK, ON WRAP-NORMALISED PROSE (`_comment_prose`), not per line. A pointer
+    WRAPPED across two `#` lines is still a pointer — and the per-line scan this replaced missed a
+    newly written one entirely, which is a silent gap in the direction this arm exists to cover: the
+    register arm reds a rewrap of the KNOWN pointer (its line-wise pointer list empties), but a NEW
+    wrapped pointer beside it was graded by nothing (measured, then closed here).
     """
     covered = {marker for _rel, marker, _decl in markers}
     lines = text.splitlines()
     out: list[tuple[int, str]] = []
+    seen_blocks: set[tuple[int, int]] = set()
     for i, line in enumerate(lines):
-        m = re.search(_DE_NUMBERED_POINTER_RE, line)
-        if m is None:
+        if not re.match(r"\s*#", line):
             continue
         lo, hi = _comment_block(lines, i)
-        block = "\n".join(lines[lo:hi])
-        if not any(marker in block for marker in covered):
-            out.append((i + 1, m.group(0)))
+        if (lo, hi) in seen_blocks:
+            continue
+        seen_blocks.add((lo, hi))
+        prose = _comment_prose(lines[lo:hi])
+        m = re.search(_DE_NUMBERED_POINTER_RE, prose)
+        if m is None or any(marker in prose for marker in covered):
+            continue
+        # Report the line the pointer STARTS on, so the message points at the sentence to fix and
+        # not merely at the paragraph it lives in.
+        out.append((lo + 1, " ".join(m.group(0).split())))
     return out
 
 
@@ -5066,6 +5100,51 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         assert _unregistered_de_numbered_pointers("\n".join(_rewrapped), _entry) == [], (
             "a rewrap between the marker and the pointer makes the completeness arm call the "
             "REGISTERED pointer unregistered — a false RED with no correct operator action"
+        )
+        # (g) A NEWLY written pointer WRAPPED across two `#` lines is still a pointer. This arm used
+        # to scan LINE-BY-LINE, and a per-line scan cannot join `own` / `checkout step` — MEASURED on
+        # that arm: `[]`, so an unregistered prose claim was added with every gate green (the
+        # cycle-6 residuals named it; `_comment_prose` closes it). The first assertion is what makes
+        # this control DISCRIMINATE: no single line carries the pointer, so a revert to the per-line
+        # scan cannot leave this green.
+        _wrapped_pointer = [
+            "# The required legs CANNOT be routed here: `python-ci.yml:2151` — refused.",
+            "# See `python-ci.yml`'s own",
+            "# checkout step for the same rule.",
+        ]
+        assert not any(
+            re.search(_DE_NUMBERED_POINTER_RE, wrapped_line) for wrapped_line in _wrapped_pointer
+        ), "control (g) is vacuous — one line carries the whole pointer, so a per-line scan sees it"
+        assert _unregistered_de_numbered_pointers("\n".join(_wrapped_pointer), _entry), (
+            "a pointer WRAPPED across two comment lines is invisible to the completeness arm — "
+            "a NEWLY written unregistered prose claim would then pass with every gate green"
+        )
+        # (h) …and the REGISTER arm's ambiguity branch has the same blind spot, one block over: a
+        # WRAPPED second pointer inside a block that already names the marker is silent to the
+        # completeness arm BY DESIGN (coverage is per block), so a line-wise count would excuse the
+        # duplicate entirely — the fail-open shape cycle 3 closed for the unwrapped case.
+        _wrapped_duplicate = _lines[:]
+        _wrapped_duplicate[_pointer_at] = (
+            _wrapped_duplicate[_pointer_at] + " See `python-ci.yml`'s own"
+        )
+        _wrapped_duplicate.insert(_pointer_at + 1, " " * 10 + "# note for the same rule.")
+        # The mutant is vacuous unless the SECOND pointer is itself invisible line-by-line: the
+        # line-wise total must still be ONE (the registered one), while the prose total is two.
+        assert sum(
+            len(re.findall(_DE_NUMBERED_POINTER_RE, wrapped_line))
+            for wrapped_line in _wrapped_duplicate
+        ) == 1, (
+            "control (h) is vacuous — the second pointer is not wrapped, so a line-wise count sees "
+            "both and the ambiguity branch is not the one under test"
+        )
+        assert any(
+            "more than one de-numbered pointer" in problem
+            for problem in _de_numbered_cite_problems(
+                "\n".join(_wrapped_duplicate), workflow_lines, _entry
+            )
+        ), (
+            "a WRAPPED second pointer in a covered block is excused — the register's marker cannot "
+            "say which pointer it covers when only a line-wise count is taken"
         )
         # (e) The abbreviation list in `_SENTENCE_SPLIT_RE`: `e.g.` inside the cited clause must not
         # cut the sentence before the depth it states. Remove the lookbehinds and this REDS with a
