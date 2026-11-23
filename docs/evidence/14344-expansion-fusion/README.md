@@ -13,8 +13,10 @@ aboutObjects: "#14344, #2513, #2518, #12186, SEARCH-ARCHITECTURE.md"
 
 **Instrument:** [`tools/measure_expansion_merge_14344.py`](../../../tools/measure_expansion_merge_14344.py)
 **Artifact:** [`merge-rule-measurement.json`](./merge-rule-measurement.json) ·
-**Rule under test:** `tortoise/search_engine.py::fuse_expansion_pass` (replacing the
-rank concatenation that sat in three additive passes).
+**Rule under test:** `tortoise/expansion_merge.py::fuse_expansion_pass` (replacing the rank
+concatenation that sat in the entity/fact expansion's two passes — A4's
+`_search_keys_prf_expansion` still concatenates, deliberately: it is a different lever with its own
+measured arm, and this change did not touch it).
 
 ⛔ **This is not a recall@k figure on a query set, and it is not comparable to
 `docs/evidence/12186-capstone/measurement.json`.** It measures the MERGE RULE's effect on
@@ -32,7 +34,7 @@ ORDER, and order is what a page cut consumes.
 | rule | how it orders |
 |---|---|
 | **old — rank concatenation** | `expanded + pass-1-only`. Every id the expanded run returned sits above **every** pass-1 id the expanded run did not repeat, whatever the two runs' relative ranks were. |
-| **new — `fuse_expansion_pass`** | `rrf_fusion([pass1, expanded])` — the module's own fusion, the same function the strategy-level legs go through. A document earns a reciprocal-rank term per list, so an id **both** passes carry outranks either pass alone, and a pass-1 id can only be passed by a candidate that out-ranks it in the expanded run. |
+| **new — `fuse_expansion_pass`** | `rrf_fusion([pass1, expanded])` — the module's own fusion (`search_engine.rrf_fusion`), the same function the strategy-level legs go through. A document earns a reciprocal-rank term per list, so an id **both** passes carry outranks either pass alone, and a pass-1 id can only be passed by a candidate that out-ranks it in the expanded run — or ties it and wins `rrf_fusion`'s `(-score, id)` tiebreak (#2952), which at equal rank is the id's order, not its evidence. |
 
 The old rule was not merely inelegant: the sparse pass's own docstring sold the lever as additive
 ("the expansion can never turn a working lane into a broken one"), which is true of the SET and was
@@ -42,10 +44,17 @@ false of the ORDER. At a fixed `limit`, the tail of the merged leg is exactly wh
 
 500 seeded trials per shape, `k ∈ {5, 10}`, mean rows per leg's first-k positions:
 
-| k | pass-1 evidence retained | expansion-only evidence admitted |
-|---|---|---|
-| 5 | **1.14 → 3.66** | **3.86 → 1.34** |
-| 10 | **2.30 → 6.19** | **7.70 → 3.81** |
+| k | pass-1 evidence retained | expansion-only evidence admitted | position of pass-1's own rank-0 row |
+|---|---|---|---|
+| 5 | **1.14 → 3.66** | **3.86 → 1.34** | **12.21 → 2.06** |
+| 10 | **2.30 → 6.19** | **7.70 → 3.81** | **12.21 → 2.06** |
+
+The third column is the displacement made visible, and it is measured over the whole merged leg so it
+cannot saturate: under the concatenation pass 1's **own top row** sat at position ~12 — every row the
+expansion returned was above it — and under the fusion it sits at ~2. (An earlier revision of this
+doc reported a "did pass-1's top row fall out of the head" boolean instead; that reads `0.0` for
+BOTH arms by construction, because each rule's merged head is dominated by whatever that rule puts
+first, so it measured nothing and was replaced.)
 
 **Read the second column before claiming a win.** Fusing the merge roughly triples how much of the
 first pass's evidence survives the page, and roughly halves how many *new* candidates reach the same

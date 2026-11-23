@@ -13,9 +13,12 @@ consumes. The measurement therefore reports, over seeded randomised pools:
                               leg (the leg's own page);
   * ``new_admitted@k``      — how many ids ONLY the expansion found reach the
                               first ``k`` (does the lever still ADD?);
-  * ``pass1_top_displaced`` — whether pass 1's own rank-0 row fell out of the
-                              first ``k`` … and, when it did, whether the
-                              concatenation was the reason (it always can be).
+  * ``pass1_rank0_position`` — where pass 1's own rank-0 row lands in the
+                              merged leg. This is the displacement made visible:
+                              under the concatenation it is pushed to
+                              ``len(expanded)`` (everything the expansion
+                              returned sits above it); under the fusion it is
+                              bounded by how many candidates out-rank it.
 
 **Why this and not the capstone set.** `docs/evidence/12186-capstone/queries.json`
 is a single-hop NAME set: 300 harvested object names, one canonical `:Object`
@@ -55,7 +58,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — deliberate RUNTIME guard
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.search_engine import fuse_expansion_pass  # noqa: E402
+from tortoise.expansion_merge import fuse_expansion_pass  # noqa: E402
 
 DEFAULT_OUT = Path("docs/evidence/14344-expansion-fusion/merge-rule-measurement.json")
 SEED = 14344
@@ -112,14 +115,20 @@ def _pools(rng: random.Random, n_pass1: int, n_expanded: int,
 
 
 def _score_rule(merged: list[tuple[str, float]], pass1_ids: set[str],
-                expanded_ids: set[str], k: int) -> dict:
+                expanded_ids: set[str], k: int,
+                pass1_rank0: str) -> dict:
+    """Per-trial counters. ``pass1_rank0_position`` is the discriminating one:
+    it is measured over the WHOLE merged leg, so it cannot saturate the way a
+    "did the top row move" boolean does (under both rules the merged head is
+    dominated by whatever that rule puts first, which is why a boolean there
+    would read 0.0 for both arms and measure nothing)."""
     head = [pid for pid, _s in merged[:k]]
+    positions = [pid for pid, _s in merged]
     return {
         "pass1_retained": sum(1 for pid in head if pid in pass1_ids),
         "new_admitted": sum(1 for pid in head if pid in expanded_ids
                             and pid not in pass1_ids),
-        "pass1_top_in_head": bool(merged and merged[0][0] in pass1_ids
-                                  and merged[0][0] not in expanded_ids),
+        "pass1_rank0_position": positions.index(pass1_rank0),
         "pass1_only_rows_in_head": sum(1 for pid in head
                                        if pid in pass1_ids
                                        and pid not in expanded_ids),
@@ -136,14 +145,14 @@ def measure(trials_per_shape: int = TRIALS_PER_SHAPE,
     shapes: dict[str, dict] = {}
     totals = {
         "old": {k: {"pass1_retained": 0, "new_admitted": 0,
-                    "pass1_top_in_head": 0, "n": 0} for k in KS},
+                    "pass1_rank0_position": 0, "n": 0} for k in KS},
         "new": {k: {"pass1_retained": 0, "new_admitted": 0,
-                    "pass1_top_in_head": 0, "n": 0} for k in KS},
+                    "pass1_rank0_position": 0, "n": 0} for k in KS},
     }
     for n_pass1, n_expanded, shared in SHAPES:
         key = f"pass1={n_pass1},expanded={n_expanded},shared={shared}"
         per_shape = {arm: {k: {"pass1_retained": 0, "new_admitted": 0,
-                               "pass1_top_in_head": 0, "n": 0} for k in KS}
+                               "pass1_rank0_position": 0, "n": 0} for k in KS}
                      for arm in ("old", "new")}
         for _ in range(trials_per_shape):
             pass1, expanded = _pools(rng, n_pass1, n_expanded, shared)
@@ -158,9 +167,10 @@ def measure(trials_per_shape: int = TRIALS_PER_SHAPE,
                 assert len([1 for pid, _s in merged]) == len(
                     {pid for pid, _s in merged})
                 for k in KS:
-                    row = _score_rule(merged, pass1_ids, expanded_ids, k)
+                    row = _score_rule(merged, pass1_ids, expanded_ids, k,
+                                      pass1[0][0])
                     for field in ("pass1_retained", "new_admitted",
-                                  "pass1_top_in_head"):
+                                  "pass1_rank0_position"):
                         per_shape[arm][k][field] += row[field]
                         totals[arm][k][field] += row[field]
                     per_shape[arm][k]["n"] += 1
@@ -177,9 +187,9 @@ def measure(trials_per_shape: int = TRIALS_PER_SHAPE,
                                     "new": _rate("new", k, "pass1_retained")},
             "new_admitted_mean": {"old": _rate("old", k, "new_admitted"),
                                   "new": _rate("new", k, "new_admitted")},
-            "pass1_top_only_displaced_rate": {
-                "old": _rate("old", k, "pass1_top_in_head"),
-                "new": _rate("new", k, "pass1_top_in_head")},
+            "pass1_rank0_position_mean": {
+                "old": _rate("old", k, "pass1_rank0_position"),
+                "new": _rate("new", k, "pass1_rank0_position")},
         }
         for k in KS
     }
@@ -194,8 +204,14 @@ def measure(trials_per_shape: int = TRIALS_PER_SHAPE,
         "trials_per_shape": trials_per_shape,
         "shapes": [f"pass1={a},expanded={b},shared={c}" for a, b, c in SHAPES],
         "ks": list(KS),
-        "old_rule": "expanded + pass-1-only (rank concatenation)",
-        "new_rule": "search_engine.fuse_expansion_pass -> rrf_fusion([pass1, expanded])",
+        "old_rule": ("expanded + pass-1-only (rank concatenation), as "
+                     "sdk._entity_key_expansion_pass / _entity_key_dense_pass "
+                     "built it before #14344"),
+        "new_rule": ("tortoise/expansion_merge.fuse_expansion_pass -> "
+                     "search_engine.rrf_fusion([pass1, expanded])"),
+        "note_old_rule_survives": ("A4's sdk._search_keys_prf_expansion still "
+                                   "concatenates — a different lever with its "
+                                   "own measured arm, deliberately untouched"),
         "summary": summary,
         "per_shape": shapes,
     }

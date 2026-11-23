@@ -35,7 +35,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.search_engine import fuse_expansion_pass, rrf_fusion
+from tortoise.expansion_merge import fuse_expansion_pass
+from tortoise.search_engine import rrf_fusion
 
 
 # ── The concatenation this replaced, kept ONLY as the counterfactual the
@@ -123,18 +124,28 @@ def test_the_merge_is_a_union_never_a_drop():
 
 def test_repeated_id_within_one_pass_cannot_earn_two_terms():
     """``rrf_fusion`` consumes POSITION, so a duplicated row would otherwise
-    earn two terms and outrank its own rank."""
+    earn two terms and outrank its own rank.
+
+    ⛔ THE FIXTURE IS THE DISCRIMINATOR (review round 1, P2): an earlier version
+    used a newcomer whose id sorts AFTER the duplicate, so the doubled terms
+    could not change the order and the test passed with the dedupe deleted. The
+    newcomer here sorts BEFORE it (``aaa`` < ``dup``), so the tie is the only
+    thing that can put the newcomer first — delete the dedupe and the OLD order
+    returns, with ``dup`` leading on two terms."""
     pass1 = [("dup", 0.9), ("dup", 0.9), ("other", 0.1)]
-    expanded = [("new", 1.0)]
+    expanded = [("aaa", 1.0), ("bbb", 0.9)]
     merged = fuse_expansion_pass(pass1, expanded)
     assert dict(merged)["dup"] == 0.9
     deduped = [("dup", 0.9), ("other", 0.1)]
     assert _ids(merged) == _ids(fuse_expansion_pass(deduped, expanded)), (
         "a repeated row must not earn a second fusion term: the order must be "
         "the one the collapsed list produces")
-    # and the position it occupies is the one a single occurrence earns
-    assert list(rrf_fusion([deduped, expanded])) == [
-        pid for pid, _s in merged]
+    # …and the collapsed position is what puts the newcomer level with it:
+    # without the dedupe ``dup`` scores two terms (0.0323) and leads outright.
+    undeduped = list(rrf_fusion([pass1, expanded]))
+    assert _ids(merged)[0] == "aaa" and undeduped[0] == "dup", (
+        "the fixture must be able to distinguish a doubled term, or this test "
+        f"proves nothing (merged={_ids(merged)}, undeduped={undeduped})")
 
 
 def test_one_empty_side_returns_the_other_unchanged():

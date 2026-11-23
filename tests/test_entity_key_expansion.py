@@ -677,10 +677,12 @@ def test_dense_composer_bounds_and_no_op_guard():
 
 def test_dense_pass_merges_additively_and_never_drops_a_pass1_id(
         dense_seeded_sdk, _dense_encoder):
-    """The merge contract, at the pass boundary: expanded results first, then
-    every pass-1-only id in its ORIGINAL order, no duplicates. A pass-1 id that
-    is not in the graph at all must survive at the tail — that is the additive
-    guarantee, stated so that a future 'just replace the leg' refactor reds."""
+    """The merge contract, at the pass boundary: the two passes are FUSED
+    (`expansion_merge.fuse_expansion_pass`, #14344), so the union is kept, no
+    id is duplicated, a pass-1 id that is not in the graph at all still
+    survives, and the id BOTH passes carry leads — the old rule put the
+    expansion's first row there unconditionally. Stated so that a future
+    'just replace the leg' or 'go back to appending' refactor reds."""
     enc = _dense_encoder()
     sdk = dense_seeded_sdk
     pass1 = [("pass1-only-sentinel", 0.42),
@@ -702,9 +704,9 @@ def test_dense_pass_merges_additively_and_never_drops_a_pass1_id(
     # both pass-1-only sentinels survive, in their original relative order
     assert ids.index("pass1-only-sentinel") < ids.index("pass1-second-sentinel")
     for sentinel in ("pass1-only-sentinel", "pass1-second-sentinel"):
-        assert ids.index(sentinel) > 0, (
-            "pass-1-only ids are APPENDED after the expanded run, never "
-            "promoted over it")
+        assert sentinel in ids, (
+            "a pass-1 id the expansion did not repeat must SURVIVE the merge "
+            "— the candidate set is the union, whichever rule orders it")
     # ── #14344: the merge is a FUSION now (the pure rule is pinned in
     # ``tests/test_expansion_fusion_14344.py``; this fixture's distances cannot
     # express every discriminator, so assert only what it CAN show). The seed is
