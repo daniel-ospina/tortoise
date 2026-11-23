@@ -196,7 +196,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0` (grep the symbol if the line has moved —
 #: it is the identifier that is load-bearing, the number is only a shortcut); and
 #: `docs/ops/ci-wall-clock.md` §6
-#: (lines 531-533) records that derivation in its own words — *"The budget's default is
+#: (lines 534-536) records that derivation in its own words — *"The budget's default is
 #: derived from this document's own §1 measurement (max first-job wait 81.9 min →
 #: 90 min), so it fires past the measured-normal population rather than on it."* 5400 s
 #: sits on the same side of the same measurement: past the measured maximum, so a run
@@ -2842,9 +2842,12 @@ DOC_CITATION_BASE = "origin/main"
 # (#13998 review P3-1) — a citation the regex cannot see is a citation nothing checks.
 _CITE = re.compile(
     r"git\b[^`]*?\bshow\s+--stat\s+([^\s`]+)[^`]*?--\s+docs/ops/ci-wall-clock\.md")
-# git's own minimum is 4 hex (`git rev-parse --verify 6960^{commit}` answers), so a
-# {7,n} floor reported a legitimate 6-char abbreviation as "is not a commit" and redded
-# the required job — the same false-block family as the upper-case-hex P2 (P2-1).
+# git's own floor is 4 hex, so a {7,n} ceiling reported a legitimate 6-char abbreviation as
+# "is not a commit" and redded the required job — the same false-block family as the
+# upper-case-hex P2 (P2-1). The floor is git's, NOT a size guess: in THIS repo a 4-char
+# token is usually AMBIGUOUS (`6960` → "short object ID 6960 is ambiguous") while a
+# 6-char one resolves (`696038` → rc 0), so the arm must accept what git can resolve and
+# let the resolve probe report ambiguity as ambiguity rather than as absence.
 _HEX = re.compile(r"[0-9a-fA-F]{4,40}")
 
 
@@ -2915,9 +2918,11 @@ def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
                         "is UNVERIFIED, not disproved. Re-derive on a full clone: "
                         "`git fetch --unshallow origin`."]
                 findings.append(
-                    f"{rel}: `git show --stat {ref}` — {ref} does not resolve in this "
-                    "FULL checkout, so the command the paragraph invites cannot be "
-                    "run.")
+                    f"{rel}: `git show --stat {ref}` — {ref} does not resolve to a single "
+                    "commit in this FULL checkout (absent, or an ambiguous prefix), so "
+                    "the command the paragraph invites cannot be run."
+                    + (" git reports it as AMBIGUOUS — write more of the sha."
+                       if "ambiguous" in (probe.stderr or "").lower() else ""))
                 continue
             # DURABILITY. A cite that resolves TODAY can still expire: this repo
             # squash-merges with `delete_branch_on_merge`, so a sha that only a PR
@@ -2938,8 +2943,13 @@ def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
                     f"{rel}: `{DOC_CITATION_BASE}` does not resolve in this checkout, "
                     f"so whether `{ref}` SURVIVES a squash-merge cannot be answered "
                     "— the citation is UNVERIFIED, not disproved"]
+            # The RESOLVED sha, not the raw token: `merge-base --is-ancestor` does not
+            # peel `^{commit}` the way the probe above does, so a bare abbreviation that
+            # happens to be ambiguous would exit 128 and be reported as UNVERIFIED
+            # instead of the DEFECT it is (a cite whose own command cannot run).
+            resolved = probe.stdout.strip()
             anc = subprocess.run(
-                ["git", "-C", str(root), "merge-base", "--is-ancestor", ref,
+                ["git", "-C", str(root), "merge-base", "--is-ancestor", resolved,
                  DOC_CITATION_BASE],
                 capture_output=True, text=True)
             if anc.returncode == 1:
