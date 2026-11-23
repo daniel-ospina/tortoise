@@ -3253,8 +3253,10 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   the §10.38 precedent, not a new reading of it. ⛔ Re-cutting a digest is a mechanical consequence
   of an edit to a *cite*; it is not the owner's re-registration, which is what §10.5's "the owner's
   call" covers (a threshold or a control-arm definition changing).
-- **This entry is LIVE for this tree** — it has no successor, so it must not carry a supersede
-  marker.
+- **This entry was LIVE for the merged tree at the head it shipped at** — it now has a successor
+  (§10.41), which re-derives the same `extractor_v2.py` carriers onto the tree that merges
+  `#14357`. Its own numbers are untouched here, and the supersede marker above is the record of
+  what moved.
 
 ### 10.41 — `#14357`'s extractor yield guard moves every `extractor_v2.py` cite again, and no value moves with it (2026-11-23, `#14357`)
 
@@ -3304,3 +3306,9 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   the §10.40 and §10.38 precedent, not a new reading of it. Re-cutting a digest is a mechanical
   consequence of an edit to a *cite*; it is not the owner's re-registration, which is what §10.5's
   "the owner's call" covers (a threshold or a control-arm definition changing).
+- **This entry is LIVE for this tree** — it has no successor, so it must not carry a supersede
+  marker.
+- **§10.40's own status bullet is corrected in this same commit.** It was added reading
+  "*This entry is LIVE for this tree — it has no successor*" while the supersede marker above it
+  already named §10.41, so the entry stated two mutually exclusive things about itself. It now uses
+  the historical form §§10.36–10.38 already carry, so exactly one entry is designated live again.
