@@ -5359,9 +5359,15 @@ export function disposeQuarantine(
  *
  * A symlink is removed WITHOUT following it, so this cannot reach outside the
  * spool. A non-empty directory is left alone (`ENOTEMPTY`): deleting unknown
- * content is the worse error, and the caller's answer is to run unclaimed and SAY
- * so. Mirrors `drain_claim._clear_unusable_claim_path`, which discriminates on
- * `S_ISDIR` and `unlink`s EVERYTHING else.
+ * content is the worse error, and the caller's answer is to report the spool HELD
+ * with no holder named — `flushSpool`'s `existsSync` arm, not `claimUnavailable` —
+ * and retry on the next pass, so the corruption is surfaced once per pass rather
+ * than silently drained beside. (An earlier version of this comment said "run
+ * unclaimed and say so", which is the arm for a root that cannot hold a claim at
+ * all — the opposite direction; corrected in the #14423 cycle-7 review, and the
+ * Python twin `drain_claim._clear_unusable_claim_path` has the same polarity.)
+ * Mirrors that function, which discriminates on `S_ISDIR` and `unlink`s EVERYTHING
+ * else.
  *
  * ⛔ THE DISCRIMINATOR IS `isDirectory()`, NOT `isFile()` — the previous cut sent
  * every non-file, non-symlink object to `rmdirSync`, and for a FIFO, a socket or a

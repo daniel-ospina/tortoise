@@ -4928,27 +4928,31 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: head — updated in place during the PR rather than spending a generation 34 on
 #: a refinement of the same unreleased seam. From the moment 33 appears on main,
 #: the entries are frozen: the next byte change needs a NEW generation.
-#: ⚠️ 33's CAPTURE digest has been re-cut NINE times under that same never-shipped
+#: ⚠️ 33's CAPTURE digest has been re-cut ELEVEN times under that same never-shipped
 #: exception, and the count is stated because THIS note is what a later re-pinner
-#: reads to justify reusing 33: measured over `origin/main..HEAD`, the pinned value
-#: takes TEN distinct forms in this branch's commits —
-#: `3660e09d` → `2416b186` → `15393a96` → `a2314416` → `a97a8a0a` → `5a47bb65` →
-#: `d0e8e41d` → `35235567` → `2d011c33` → `442d76f5` → (this head) — because the PR
-#: has been through seven review cycles and every one of them moved shipped bytes.
-#: Several of those re-cuts are BEHAVIOUR, not comments, and the digest covers them
-#: because it is the `sha256` of the whole file (graded at
+#: reads to justify reusing 33: measured with
+#: `for c in $(git rev-list --reverse origin/main..HEAD); do git show "$c:tortoise/pi-hooks/tortoise-capture.ts" | sha256sum; done | sort -u`
+#: over this branch's 25 commits, the shipped file takes TWELVE distinct forms —
+#: `3660e09d`, `2416b186`, `15393a96`, `a2314416`, `a97a8a0a`, `5a47bb65`,
+#: `d0e8e41d`, `35235567`, `2d011c33`, `442d76f5`, `72d2cf62`, and this head's — because
+#: the PR has been through eight review cycles and every one of them moved shipped
+#: bytes. Several of those re-cuts are BEHAVIOUR, not comments, and the digest covers
+#: them because it is the `sha256` of the whole file (graded at
 #: `test_a_shipped_pi_seam_byte_change_moves_the_generation`):
 #:   * `c214f341` — the two legs' clock units unified (`CLAIM_VERSION` 1 → 2);
 #:   * `e3577f40` — a claim we cannot READ is honoured, never deleted;
 #:   * `7ed7ca32` — reads `lstat`-gated (the FIFO hang) and the lease format guarded;
 #:   * `9bc74585` — `release` reads the token BEFORE moving anything;
-#:   * this head — the `release`-ordering test seam.
+#:   * `9550ea60` — `clearUnusableClaimPath` discriminates `isDirectory()` (a FIFO
+#:     could never be removed: a permanent drain block) and the release order is
+#:     graded on the CALL;
+#:   * this head — the release-ordering test seam, and the Pi leg's symlink case.
 #: ⛔ Reusing an unreleased generation for a behaviour fix is the same exception, not
 #: a licence, and it does NOT generalise: from the moment 33 reaches `main` the
 #: entries are FROZEN and the next byte change needs a NEW generation. The READ half
 #: is untouched throughout (`904d2742…`), exactly as generation 31's re-cut did.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "2a907c37a7d15816f7fb258940f32604adc071cb94faf3bd728089b4df718636")
+    33, "a843e3a0e74c9e9edf70aa9b801421e3dc4b44701432bbd114c2a9eaf056f878")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5134,7 +5138,7 @@ _GENERATION_DIGESTS = {
     # byte-indistinguishability that made the first attempt vacuous (rename + link
     # preserves inode, mtime and content) is why the order has to be observed at the
     # call site rather than at the filesystem.
-    33: "2a907c37a7d15816f7fb258940f32604adc071cb94faf3bd728089b4df718636",
+    33: "a843e3a0e74c9e9edf70aa9b801421e3dc4b44701432bbd114c2a9eaf056f878",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
