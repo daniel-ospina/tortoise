@@ -424,6 +424,49 @@ def test_optional_fly_appends_are_n_guarded(workflow_text):
         )
 
 
+def test_the_capture_in_flight_tunable_is_staged_at_its_versioned_value():
+    """#12992: the hosted capture in-flight ceiling is VERSIONED at 16, not 8.
+
+    The undeclared Fly secret of this name blocked every `deploy-hosted` run from
+    2026-11-21 to 2026-11-23 (the #4126 defect class). Declaring it is only half
+    the fix — the deploy must also carry the LIVE value across. `8` is the code
+    default, and a deploy that silently reverted to it would re-open the 429 that
+    parked 500+ sessions. A REMOVAL of the append is caught by the provenance gate
+    (`STALE DECLARATION — declared workflow-set but deploy-hosted.yml never
+    assigns it`); a value EDIT is caught by nothing else, so this pin is the only
+    thing standing between a quiet `16 -> 8` and a production 429.
+
+    Pinned as an exact line because the assignment is a LITERAL (never an
+    env-bound `KEY="$VAR"`), which is also why it sits outside
+    `test_optional_fly_appends_are_n_guarded`'s scope: that guard exists to stop
+    an unset secret being staged as an EMPTY value, and a constant cannot be
+    empty. Being outside its regex must not mean being outside every check.
+    """
+    run = _steps()[_SET_STEP]["run"]
+    assert "ARGS+=(TORTOISE_CAPTURE_IN_FLIGHT=16)" in run, (
+        "the deploy no longer stages TORTOISE_CAPTURE_IN_FLIGHT at 16 — the hosted "
+        "capture gate falls back to the code default of 8 and re-opens the 429 this "
+        "value was raised for (#12992)"
+    )
+    # UNCONDITIONAL, on purpose: an `-n`-guarded append would stage nothing while
+    # the name is absent, so Fly's hand-set copy would survive every deploy and
+    # "the tunable is unset" would be indistinguishable from "deliberately using
+    # the live value" — the #4126 shape this declaration closes.
+    staging = [
+        line for line in run.splitlines() if "TORTOISE_CAPTURE_IN_FLIGHT=16" in line
+    ]
+    assert len(staging) == 1, f"expected exactly one staging site, found {staging}"
+    assert staging[0].strip().startswith("ARGS+=("), (
+        "the capture ceiling is no longer an unconditional `ARGS+=` append: "
+        f"{staging[0]!r}"
+    )
+    assert _manifest_declarations().get("TORTOISE_CAPTURE_IN_FLIGHT") == "workflow", (
+        "the manifest no longer declares TORTOISE_CAPTURE_IN_FLIGHT `workflow` — the "
+        "provenance gate then reports it UNDECLARED, or STALE once the assignment "
+        "stops matching the declaration"
+    )
+
+
 def test_flyctl_receives_the_quoted_array(workflow_text):
     """#4334 — the CALL SITE must expand the array, quoted.
 
