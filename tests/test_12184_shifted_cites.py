@@ -28,10 +28,12 @@ enumeration, its re-measured figures, its section-by-section cite families, its
 (`#11081`, comment 7107649723, row B2) is *"none — it is a census of where capabilities
 sit"*, i.e. a documentation defect and never a product break. Its cost is the pin loop itself:
 208 line-pinned cites meant every lane that inserted above one had to re-derive the table
-(the audit's own figure for that loop is ~45 runner-hours/day), and at this head three OPEN
-PRs still carry hunks into this document and this file (`#14296`, `#14140`, `#14038`, read
-with `gh pr list --json files`). It is deleted rather than re-cut, and the arms that existed
-only to grade it went with it.
+(the audit's own figure for that loop is ~45 runner-hours/day), and at this head two OPEN
+PRs still carry hunks into this document and this file (`#14296`, `#14140`, read with
+`gh pr list --json files`). `#14038` is the third, and it is MERGED — its merge
+resolution is what dropped the `sdk.py:22074` row this file now restores, so it is cited
+here as history rather than as a live conflict. It is deleted rather than re-cut, and the
+arms that existed only to grade it went with it.
 
 ⛔ Row B2 also names the arms grading SENTENCES in
 `docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`, so exactly one arm over a
@@ -243,12 +245,15 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # document's prose. Of the 18 rows that survive the cut, all 18 are for the six documents above
     # and are otherwise UNCHANGED: three of them were briefly dropped by this cut because a re-cut
     # keyed on the constants misses a row that spells its path literally, which is the anti-shrink
-    # arm doing its job (#14441 review round 1, P1). Three rows are ADOPTIONS, not survivors: the
-    # cut's own docstring rewrite moved the probe file's two cites by one line (`_CENSUS` +2), and the
-    # `origin/main` rebase adopted `SUBSTRATE-REBUILD-MAP.md`'s `:37834` row (`#14038` review cycle 2),
-    # which grades a SURVIVING document and so is not part of what B2 cuts. `sdk.py:22074` is also
-    # KEPT against `main`, where its row did not survive `#14038`'s merge resolution: an address a
-    # surviving document writes with no row is the uncovered-claim class this file exists to refuse.
+    # arm doing its job (#14441 review round 1, P1). The arithmetic, measured by AST against
+    # `origin/main:tests/test_12184_shifted_cites.py` rather than counted by hand: the base holds 18
+    # surviving rows and this head holds 21. The three that are not survivors are `_CENSUS`'s two
+    # probe re-points (the cut's own docstring rewrite moved them one line, and this file's rule is
+    # that every re-point carries a content pin) plus `_INDEX`'s `sdk.py:22074`, which the base
+    # WRITES but does not PIN — its row was lost as a casualty of `#14038`'s merge resolution, and an
+    # address a surviving document writes with no row is the uncovered-claim class this file refuses.
+    # Two of the eighteen are re-worded at the rebase (`(opening `:37815`` -> `opening `:37815``, and
+    # likewise `:37855`) with STRICTER fragments, so their coverage grew and none was dropped.
     # Add a row when a real correction touches an unpinned site, and update this count in the same commit.
     assert len(_PINS) == 21, (
         f"_PINS carries {len(_PINS)} rows, not 21 — a re-pointed cite was added or dropped without "
@@ -437,7 +442,8 @@ def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
     The synthetic rows name `_SUBSTRATE` rather than `_AUDIT` (the deleted document) because
     `_rows_outside_their_token` reads only the token, target and line; the doc field is carried for
     the error message. The `:37534` row below is the REAL shipped one, from the surviving
-    `SUBSTRATE-REBUILD-MAP.md`.
+    `SUBSTRATE-REBUILD-MAP.md`; the document has since re-pointed the address to `:37877`, which
+    is why the control's token is synthetic and reads no document.
     """
     stale = (_SUBSTRATE, "`:31496`", _SDK, 31551, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})")
     problems = _rows_outside_their_token((stale,))
