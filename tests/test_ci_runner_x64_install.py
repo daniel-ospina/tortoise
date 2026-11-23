@@ -4406,6 +4406,44 @@ _DE_NUMBERED_CITE_MARKERS: tuple[tuple[str, str, str], ...] = (
     (".github/workflows/ci.yml", "#11057 review P2", "fetch-depth: 0"),
 )
 
+#: A workflow STEP is a YAML LIST ITEM: it opens at a `- ` line and closes at the next `- ` line of
+#: equal or shallower indent. ⛔ Structural, NOT key-based: a step's first key may be `name:`, `id:`,
+#: `env:` or `if:` — all ordinary — and a `- uses: actions/checkout` spelled inside a `run: |` heredoc
+#: is NOT a step. A key-based scan gets both of those wrong in opposite directions (false PASS on the
+#: first, false RED on the second), which is why the resolver below reads indentation, never keys.
+_STEP_ITEM_RE = re.compile(r"^(\s*)-\s")
+_CHECKOUT_USES_RE = r"uses:\s*actions/checkout@"
+
+#: A de-numbered POINTER's shape: a backticked `python-ci.yml` whose possessive is followed by the
+#: construct a citation must resolve against (`'s own checkout step`, `'s note`). Scoped this tightly
+#: ON PURPOSE — `ci.yml` names `python-ci.yml` 17 times and only ONE of them is a pointer; the other
+#: sixteen are prose references (`carries the stack`, `scopes it`) and a `uses: …@v0.1.3` caller, so a
+#: completeness arm over every bare mention would red a correct record.
+_DE_NUMBERED_POINTER_RE = r"`python-ci\.yml`'s\s+(?:own\s+)?(?:checkout\s+)?(?:step|note)"
+
+
+def _enclosing_step(workflow: list[str], note: int) -> tuple[int, int] | None:
+    """The `(start, end)` of the workflow STEP that encloses line index `note`, or None.
+
+    `start` is the nearest preceding `- ` line indent-deeper than nothing — i.e. shallower than the
+    note itself — and `end` is the next `- ` line at or shallower than `start`'s indent.
+    """
+    note_indent = len(workflow[note]) - len(workflow[note].lstrip())
+    start = None
+    for j in range(note - 1, -1, -1):
+        m = _STEP_ITEM_RE.match(workflow[j])
+        if m and len(m.group(1)) < note_indent:
+            start = j
+            break
+    if start is None:
+        return None
+    step_indent = len(workflow[start]) - len(workflow[start].lstrip())
+    for j in range(start + 1, len(workflow)):
+        m = _STEP_ITEM_RE.match(workflow[j])
+        if m and len(m.group(1)) <= step_indent:
+            return start, j
+    return start, len(workflow)
+
 
 def _de_numbered_cite_problems(
     text: str,
@@ -4414,10 +4452,12 @@ def _de_numbered_cite_problems(
 ) -> list[str]:
     """Every de-numbered `python-ci.yml` pointer in `text` that does not resolve to what it names.
 
-    Two checks per entry, because a prose pointer carries two claims and either can rot silently:
-    the marker must still be NAMED by the citing file (else the sentence points at nothing), and it
-    must sit inside an `actions/checkout` step whose block declares the `fetch-depth` the sentence
-    attributes to it (else the citation resolves to a step that no longer does what it is cited for).
+    Three claims, because a prose pointer carries three and each can rot silently: the citing file
+    must still NAME the marker (else the sentence points at nothing), it must still STATE the
+    declaration it is graded against (else a rewrite to the opposite assertion reads green), and the
+    note must sit inside the `actions/checkout` step whose own `with:` block declares it — the step's
+    OWN, matched as a key at the step's key indent, so neither a heredoc's `uses:` line nor a deeper
+    nested step's `fetch-depth` can satisfy it from the wrong place.
     """
     problems: list[str] = []
     for _rel, marker, declaration in markers:
@@ -4427,43 +4467,89 @@ def _de_numbered_cite_problems(
                 "points at a note nothing resolves, which a line number at least made checkable"
             )
             continue
-        hits = [i for i, line in enumerate(workflow) if marker in line]
-        if not hits:
+        # The citing sentence must still make the claim this register grades. Without this the arm
+        # reports green over a pointer that was rewritten to say the OPPOSITE of what it checks.
+        if declaration not in text:
+            problems.append(
+                f"names the {marker!r} marker but no longer states the {declaration!r} claim — "
+                "this pin would then grade a claim the sentence does not make"
+            )
+            continue
+        notes = [i for i, line in enumerate(workflow) if marker in line]
+        if not notes:
             problems.append(
                 f"names the {marker!r} marker, and python-ci.yml no longer carries any line with it"
             )
             continue
-        for i in hits:
-            # Walk back to the enclosing `- uses: actions/checkout` step. A DIFFERENT step met first
-            # means the note is not inside one — the marker is cited for a checkout it does not sit in.
-            start: int | None = None
-            for j in range(i, -1, -1):
-                if re.match(r"\s*-\s+uses:\s*actions/checkout", workflow[j]):
-                    start = j
-                    break
-                if re.match(r"\s*-\s+(?:uses|name|run|with):", workflow[j]):
-                    break
-            if start is None:
-                problems.append(
-                    f"the {marker!r} note at python-ci.yml:{i + 1} is not inside an "
-                    "`actions/checkout` step, so the sentence cites it for a checkout it is not in"
+        reasons: list[str] = []
+        for note in notes:
+            span = _enclosing_step(workflow, note)
+            if span is None:
+                reasons.append(
+                    f"the {marker!r} note at python-ci.yml:{note + 1} is not inside any workflow step"
                 )
                 continue
-            indent = len(workflow[start]) - len(workflow[start].lstrip())
-            end = len(workflow)
-            for j in range(start + 1, len(workflow)):
-                line = workflow[j]
-                if line.strip() and (len(line) - len(line.lstrip())) <= indent and re.match(
-                    r"\s*-\s", line
-                ):
-                    end = j
-                    break
-            if not any(declaration in line for line in workflow[start:end]):
-                problems.append(
-                    f"the {marker!r} note at python-ci.yml:{i + 1} sits in a checkout step that "
-                    f"declares no {declaration!r} — that is the claim the sentence makes"
+            start, end = span
+            key_indent = len(workflow[start]) - len(workflow[start].lstrip()) + 2
+            if not (
+                re.match(rf"\s*-\s+{_CHECKOUT_USES_RE}", workflow[start])
+                or any(
+                    re.match(rf"\s{{{key_indent}}}{_CHECKOUT_USES_RE}", line)
+                    for line in workflow[start + 1: end]
                 )
+            ):
+                reasons.append(
+                    f"the {marker!r} note at python-ci.yml:{note + 1} is not inside an "
+                    f"`actions/checkout` step (the step opens at python-ci.yml:{start + 1})"
+                )
+                continue
+            # The declaration has to be the CITED step's own `with:` key, at the `with:` child
+            # indent — not a substring anywhere in the block, and not a deeper step's key.
+            with_at = next(
+                (
+                    k
+                    for k in range(start, end)
+                    if re.match(rf"\s{{{key_indent}}}with:\s*$", workflow[k])
+                ),
+                None,
+            )
+            if with_at is None or not any(
+                re.match(rf"\s{{{key_indent + 2}}}{re.escape(declaration)}\s*$", workflow[k])
+                for k in range(with_at + 1, end)
+            ):
+                reasons.append(
+                    f"the {marker!r} note at python-ci.yml:{note + 1} sits in a checkout step "
+                    f"whose own `with:` declares no `{declaration}` — that is the claim the "
+                    "sentence makes"
+                )
+        # ONE resolving occurrence is enough: a second, independent mention of the marker elsewhere
+        # in the workflow (a `run:` echo, a second note) must not red a correct citation.
+        if reasons and len(reasons) == len(notes):
+            problems.extend(reasons)
     return problems
+
+
+def _unregistered_de_numbered_pointers(
+    text: str, markers: tuple[tuple[str, str, str], ...] = _DE_NUMBERED_CITE_MARKERS
+) -> list[tuple[int, str]]:
+    """Every `python-ci.yml` prose POINTER in `text` that no register entry covers.
+
+    The register loop is one-directional — it resolves each REGISTERED pointer — so a pointer this
+    file GAINS is an unchecked claim that reds nothing. That is the hole the wall-clock doc's
+    `_unregistered_wall_clock_citations` closes in the other direction, and the reason is the same:
+    the PR whose whole purpose was correcting citations added three outside the register. An entry
+    covers a pointer when its marker appears within a handful of lines of it, which is the window a
+    wrapped citation is written in.
+    """
+    covered = {marker for _rel, marker, _decl in markers}
+    lines = text.splitlines()
+    out: list[tuple[int, str]] = []
+    for i, line in enumerate(lines):
+        for m in re.finditer(_DE_NUMBERED_POINTER_RE, line):
+            window = "\n".join(lines[max(0, i - 5): i + 6])
+            if not any(marker in window for marker in covered):
+                out.append((i + 1, m.group(0)))
+    return out
 
 
 def _refusal_citation_problems(text: str, workflow: list[str]) -> list[str]:
@@ -4686,7 +4772,7 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # GRADED pointer to that note (measured at `158ac4115e`: two graded cites in `ci.yml` -> one).
     # ⛔ The register below is what keeps a prose pointer from being the weaker option: it resolves
     # the marker and the construct the sentence attributes to it, so the claim is CHECKED instead of
-    # merely reworded. Mutation: reword the note in python-ci.yml, or flip its checkout back to
+    # merely reworded. Mutation: reword the note in python-ci.yml, or flip ITS OWN checkout back to
     # `fetch-depth: 1` -> RED naming the note's own line.
     for rel, marker, declaration in _DE_NUMBERED_CITE_MARKERS:
         text = (REPO_ROOT / rel).read_text()
@@ -4694,24 +4780,64 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         assert not problems, (
             f"{rel}'s de-numbered pointer to `python-ci.yml` does not resolve: " + "; ".join(problems)
         )
+        # ── COMPLETENESS, the reverse direction: a pointer this file GAINS must join the register ──
+        # Same hole the wall-clock doc's `_unregistered_wall_clock_citations` closes: the loop above
+        # only resolves REGISTERED pointers, so a new prose pointer is an unchecked claim. Scoped to
+        # the pointer SHAPE, not to every `python-ci.yml` mention — `ci.yml` names the file 17 times
+        # and fifteen of those are prose references or a `uses:` caller, not citations.
+        unregistered = _unregistered_de_numbered_pointers(text, ((rel, marker, declaration),))
+        assert not unregistered, (
+            f"{rel} carries a de-numbered pointer {unregistered} that no register entry covers. "
+            "Add it to `_DE_NUMBERED_CITE_MARKERS` — a prose pointer outside the register is an "
+            "unchecked claim, which is the state the deleted line number was criticised for."
+        )
 
-    # Non-vacuity, executable, BOTH halves — a green on the real files must not be this checker
-    # matching nothing. (a) the citing file stops naming the marker; (b) python-ci.yml rewords it;
-    # (c) the checkout it is cited for is no longer the depth-0 one the sentence claims.
+    # Non-vacuity, executable, every branch — a green on the real files must not be this checker
+    # matching nothing. Each mutant is applied to ONE variable (the citing text, or ONE line of the
+    # workflow), never to the whole workflow: a file-wide replace would prove "some declaration
+    # exists", never "the CITED step's", and would be blind to the exact false pass it must catch.
+    for _rel, _marker, _declaration in _DE_NUMBERED_CITE_MARKERS:
+        _citing = (REPO_ROOT / _rel).read_text()
+        _entry = ((_rel, _marker, _declaration),)
+        assert _de_numbered_cite_problems(
+            _citing.replace(_marker, "_11057 review P2_"), workflow_lines, _entry
+        ), "the de-numbered pin no longer sees a citing file that stopped naming the marker"
+        assert _de_numbered_cite_problems(
+            _citing.replace(_declaration, "fetch-depth: 1"), workflow_lines, _entry
+        ), (
+            "the de-numbered pin no longer sees a citing sentence rewritten to make the OPPOSITE "
+            "claim — it would grade a claim the sentence no longer makes"
+        )
+        assert _de_numbered_cite_problems(
+            _citing, [line.replace(_marker, "_11057 review P2_") for line in workflow_lines], _entry
+        ), "the de-numbered pin no longer sees a python-ci.yml that reworded the note"
+        _notes = [i for i, line in enumerate(workflow_lines) if _marker in line]
+        _span = _enclosing_step(workflow_lines, _notes[0])
+        assert _span is not None, "the note no longer sits inside any workflow step"
+        _key_indent = len(workflow_lines[_span[0]]) - len(workflow_lines[_span[0]].lstrip()) + 2
+        _decl_at = next(
+            k
+            for k in range(_span[0], _span[1])
+            if re.match(rf"\s{{{_key_indent + 2}}}{re.escape(_declaration)}\s*$", workflow_lines[k])
+        )
+        _shallow = list(workflow_lines)
+        _shallow[_decl_at] = _shallow[_decl_at].replace(_declaration, "fetch-depth: 1")
+        assert _de_numbered_cite_problems(_citing, _shallow, _entry), (
+            "the de-numbered pin no longer sees THE CITED checkout back on a shallow fetch — that "
+            "is the claim the sentence makes, and it would report green without measuring it"
+        )
+    # …and the completeness arm's own non-vacuity: emptied of its register it must SEE the pointer
+    # (so a green is not it matching nothing), and with the register restored it must see NONE.
     _rel, _marker, _declaration = _DE_NUMBERED_CITE_MARKERS[0]
-    _ci_text = (REPO_ROOT / _rel).read_text()
-    _entry = ((_rel, _marker, _declaration),)
-    assert _de_numbered_cite_problems(
-        _ci_text.replace(_marker, "_11057 review P2_"), workflow_lines, _entry
-    ), "the de-numbered pin no longer sees a citing file that stopped naming the marker"
-    assert _de_numbered_cite_problems(
-        _ci_text, [line.replace(_marker, "_11057 review P2_") for line in workflow_lines], _entry
-    ), "the de-numbered pin no longer sees a python-ci.yml that reworded the note"
-    assert _de_numbered_cite_problems(
-        _ci_text, [line.replace(_declaration, "fetch-depth: 1") for line in workflow_lines], _entry
-    ), (
-        "the de-numbered pin no longer sees the checkout step back on a shallow fetch — that is "
-        "the claim the sentence makes, and it would report green without measuring it"
+    _citing = (REPO_ROOT / _rel).read_text()
+    _seen = _unregistered_de_numbered_pointers(_citing, ())
+    assert len(_seen) == 1 and _seen[0][1].endswith("checkout step"), (
+        "the completeness arm does not see the registered pointer once the register is emptied — "
+        f"it would stay green over an unregistered one, which is the hole it exists to close ({_seen})"
+    )
+    assert _unregistered_de_numbered_pointers(_citing) == [], (
+        "the completeness arm still flags the REGISTERED pointer — its green on the real file would "
+        "then be a coincidence of the window size, not the register"
     )
 
     # ── `docs/ops/ci-wall-clock.md` — the SAME hole, in the file #6744 grew most ───────────────
