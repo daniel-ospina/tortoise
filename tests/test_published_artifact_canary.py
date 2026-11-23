@@ -2898,6 +2898,23 @@ def _strip_shell_comments(script: str) -> str:
     ⛔ AN ESCAPED TOKEN IS NOT AN EDGE — IT IS NOT REPORTED (review cycle 12, P2). The scan
     consumes escape PAIRS, so `\\`` and `\\$(` are inert and pass, in a single-quoted span or
     not: the conservatism above covers unescaped tokens only.
+
+    ⛔ AN UNMODELLED WORD CONTEXT IS A NAMED RESIDUAL, NOT AN ABSENCE (review cycle 22, P3,
+    MEASURED). `${ … }`, `(( … ))`, `$(( … ))` and `$[ … ]` were each taught that a `#` inside
+    them is a WORD character; an ARRAY SUBSCRIPT in assignment position was not, so the `#`
+    opened a comment, the rest of the line was stripped, and a substitution on it ran
+    unremarked:
+
+        $ bash -e -c 'a[1 # $(touch /tmp/F3)]=x'      → rc 1, F3 CREATED
+        $ _executable_prose_lines(…)                    → []
+
+    …and the same shape reproduces after `declare -A a;`. ⛔ THIS ONE IS NOT CLOSED. Tracking
+    `[` naively would treat `[ -f x ]`, `[[ … ]]` and `case` patterns as word contexts and red
+    real prose, i.e. it would trade a silent pass for the over-block direction this file refuses
+    to pay for free — so the honest state is that the enumeration above is NOT complete, and
+    this paragraph exists so a reader cannot infer completeness from it. The real fix is to
+    model `IDENT[ … ]` in ASSIGNMENT position only; until then, a `#` inside an array subscript
+    on an assignment line is a known blind spot.
     """
     out: list[str] = []
     quote: str | None = None  # None | "'" | '"'
@@ -3068,7 +3085,17 @@ def _strip_shell_comments(script: str) -> str:
             and not (i > 0 and script[i - 1] == "$")  # `$((` is handled below
         ):
             out.append("((")
-            cmd_arith, at_word_start, i = 2, False, i + 2
+            # ⛔ INCREMENTED, NOT RESET (review cycle 22, P2, MEASURED) — the same defect the
+            # `$[` opener was fixed for in cycle 20, still live in this branch. A literal `2`
+            # threw away the OUTER level, so a `((` nested inside an open `((` ran the count to
+            # zero at the INNER `))`, the `#` that followed was stripped as a comment, and the
+            # rest of the line was deleted while bash was still inside the outer arithmetic
+            # command and expanding it:
+            #
+            #   $ bash -e -c '(( x = ((1)) # $(touch /tmp/F1) ))'   → rc 1, F1 CREATED
+            #   $ _executable_prose_lines(…)                       → []
+            #
+            cmd_arith, at_word_start, i = cmd_arith + 2, False, i + 2
             continue
         if cmd_arith:
             out.append(ch)
@@ -3101,7 +3128,12 @@ def _strip_shell_comments(script: str) -> str:
         # IS execution (`$(( $(cmd) ))` runs a command) — only the phantom BODY is refused.
         if quote is None and script.startswith("$((", i):
             out.append("$((")
-            arith, at_word_start, i = 2, False, i + 3
+            # Incremented for symmetry with the `((` branch above (`cycle 22`). Measured NOT
+            # live today: a `#` inside `$(( … ))` is a fatal PARSE error (`bad substitution: no
+            # closing ')'`), so the marker is never created and there is no silent pass to
+            # close — but the same literal `2` would become a hole the day that changes, and the
+            # two openers must not disagree about what nesting means.
+            arith, at_word_start, i = arith + 2, False, i + 3
             continue
         if arith:
             out.append(ch)
@@ -3303,11 +3335,22 @@ HIDDEN continues                       rc 0
         # `<<(`/`>>(` are bash syntax errors that execute nothing (rc 2, no marker), while
         # `<>(` is also an error and is therefore now reported — an over-block, the safe
         # direction, over a spelling no real workflow line contains.
+        #
+        # ⛔ AND A TRIPLED RUN STILL HID ONE (review cycle 22, P3, MEASURED): keying on the
+        # single preceding byte made `>>>(cmd)` match `text[i-1] == text[i]` and get excluded,
+        # yet bash runs it — the same defect one byte wider, so the guard now requires the byte
+        # BEFORE that one to differ too:
+        #
+        #   $ bash -e -c 'echo hi >>>(touch /tmp/F2)'                → rc 0, F2 CREATED
+        #   $ _executable_prose_lines('echo hi >>>(touch /tmp/F2)') → []      (before the fix)
+        #
+        # `>>(`/`<<(`/`1>>(`/`2>>(` stay excluded (genuinely inert), and `>> out.txt` / `2>&1` /
+        # heredocs stay green.
         if (
             not width
             and text[i] in "<>"
             and text.startswith("(", i + 1)
-            and not (i > 0 and text[i - 1] == text[i])
+            and not (i > 0 and text[i - 1] == text[i] and (i < 2 or text[i - 2] != text[i]))
         ):
             width = 2
         if not width:
@@ -3870,6 +3913,22 @@ def test_the_prose_pin_sees_the_DEPRECATED_arithmetic_and_PROCESS_substitutions(
         f"{gt_script!r} → {_executable_prose_lines(gt_script)!r}"
     )
 
+    # ⛔ AND A TRIPLED RUN HID THE SAME EXECUTION ONE BYTE WIDER (review cycle 22, P3,
+    # MEASURED). `>>>(cmd)` matched the doubled-operator exclusion on its last two bytes, yet
+    # bash runs it — so the guard requires the byte BEFORE that pair to differ too.
+    triple_ps = tmp_path / "triple-ps-marker"
+    triple_script = f"echo hi >>>(touch {triple_ps})\nsleep 0.2\n"
+    triple_ran = subprocess.run([*_RUNNER_SHELL, triple_script], capture_output=True, text=True)
+    assert triple_ran.returncode == 0, (triple_ran.returncode, triple_ran.stderr)
+    assert triple_ps.exists(), (
+        "`echo hi >>>(touch …)` did not create its marker, so this premise is gone — bash would "
+        "have to be treating the `>(` as something other than a process substitution"
+    )
+    assert _executable_prose_lines(triple_script), (
+        "a TRIPLED `>(` run still EXECUTES a command and the pin reported nothing: "
+        f"{triple_script!r} → {_executable_prose_lines(triple_script)!r}"
+    )
+
     # ⛔ AND ORDINARY REDIRECTIONS ARE NOT PROCESS SUBSTITUTIONS — the over-block guard that keeps
     # this fix from redding the five real blocks: a DOUBLED `<`/`>` is not `<(`.
     for benign in ("echo hi >> out.txt\n", "echo hi 2>&1\n", "cat <<EOF\nbody\nEOF\n"):
@@ -3945,6 +4004,26 @@ def test_a_QUOTED_closer_does_not_close_an_ARITHMETIC_context(tmp_path):
         "went quiet, the over-block was silently dropped: "
         f"{_executable_prose_lines(dollar_arith)!r}"
     )
+
+    # ⛔ A NESTED `((` MUST NOT RESET THE DEPTH (review cycle 22, P2, MEASURED) — the identical
+    # defect to the `$[` one, still live in the `(( … ))` opener, which assigned a literal `2`
+    # and threw the OUTER level away. The inner `))` then closed the context and the `#` after
+    # it stripped a substitution that RAN. EXECUTED first, so the premise cannot go quiet.
+    nested_cmd = tmp_path / "nested-cmd"
+    nested_cmd_script = f"(( x = ((1)) # $(touch {nested_cmd}) ))\n"
+    nested_cmd_ran = subprocess.run(
+        [*_RUNNER_SHELL, nested_cmd_script], capture_output=True, text=True
+    )
+    assert nested_cmd.exists(), (
+        "the nested `(( x = ((1)) # $( ) ))` shape did not execute its substitution, so this "
+        f"premise is gone (rc={nested_cmd_ran.returncode}, stderr={nested_cmd_ran.stderr!r})"
+    )
+    assert _executable_prose_lines(nested_cmd_script), (
+        "a `((` nested in an open `((` reset the depth, the inner `))` closed the context and "
+        "the `$( )` after the `#` VANISHED from the report — a silent pass over an executing line"
+    )
+    with pytest.raises(AssertionError, match="command substitution"):
+        _assert_no_executable_prose(nested_cmd_script)
 
 
 def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
