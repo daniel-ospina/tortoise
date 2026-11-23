@@ -139,7 +139,11 @@ _INCIDENT_KIND_OF_EVENT: dict[str, str] = {
     KIND_ABUSE_REVIEW_NEEDED: KIND_ABUSE_REVIEW_NEEDED,
 }
 
-#: The incident kinds the episode-end resolver clears — one per filing class.
+#: The incident kinds the episode-end resolver clears — the two classes a RULE's
+#: flag episode can file. ``abuse_suspended`` is deliberately NOT here: it has no
+#: automatic writer (``#5425`` deleted the automatic suspension), so it records an
+#: operator action rather than an episode, and a clean window must not resolve a
+#: record of a decision a human made.
 _EPISODE_INCIDENT_KINDS: tuple[str, ...] = (
     KIND_ABUSE_FLAG_RAISED, KIND_ABUSE_REVIEW_NEEDED)
 
@@ -488,7 +492,7 @@ def reset_abuse_delivery_for_tests() -> None:
         _delivery.clear()
 
 
-def resolve_abuse_episode(org_id: str, rule: str | None) -> None:
+def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
     """Close + delete-to-resolve an abuse rule's incidents — EPISODE END (#14407).
 
     Called by ``AbuseEngine._evaluate`` when a rule's window came back clean and
@@ -500,6 +504,13 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> None:
 
     Releasing the DELIVERY window happens even when no incident channel can be
     built (the ledger is local), then the incident is resolved when there is one.
+
+    Returns True when every close that was attempted succeeded (or there was
+    nothing to close), False when any of them RAISED: a failed close re-raises by
+    design (``#5143`` — nothing is announced and nothing is deleted), and the
+    engine must know so it can RETRY. The episode end fires exactly once (the next
+    clean window reads ``flagged=False``), so a swallowed failure here would
+    strand the incident OPEN for the rest of time.
 
     NEVER raises and never blocks the request path on a failure: ``abuse.py``'s
     evaluation is best-effort by contract, and a failed close is already handled
@@ -515,6 +526,13 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> None:
     # would let ANY rule's clean window close the shared object (a false
     # all-clear, then a re-file). The bare spelling is resolved only by a
     # rule-less caller, whose `subject` IS `org_id`.
+    #
+    # DECLARED RESIDUAL: adoption runs on a DETECTION, so an org that recovers
+    # before it sends another one keeps its pre-#14407 `{org}` object and its
+    # issue OPEN. The trade is deliberate — the alternative (also resolving the
+    # bare spelling from a rule-scoped end) is the false all-clear this change
+    # removes, and a stale OPEN incident is visible while a wrong ✅ is not. The
+    # runbook row names the legacy path as the manual close.
     subjects = (subject,)
     # ...and BOTH KIND spellings: the delivery ledger is armed by the event kind,
     # so releasing only the incident kind left `abuse_flag`'s window armed across
@@ -526,15 +544,19 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> None:
     if store is None:
         logger.debug("abuse episode end: no incident channel (%s) — delivery "
                      "re-armed only (%s/%s)", reason, org_id, rule)
-        return
+        return True
+    ok = True
     for kind in kinds:
         for subj in subjects:
             try:
                 store.resolve_incident_state(kind, subj)
             except Exception as e:  # noqa: BLE001, RUF100
+                ok = False
                 logger.warning("abuse episode end: %s (%s) did not resolve (%s) — "
-                               "the incident stays OPEN", kind, subj,
+                               "the incident stays OPEN and the engine retries it "
+                               "on the next clean window", kind, subj,
                                redact_safe(e))
+    return ok
 
 
 def _abuse_message(kind: str, org_id: str, details: dict, *,
@@ -557,17 +579,35 @@ def _abuse_message(kind: str, org_id: str, details: dict, *,
         parts.append(f"IP: {details['ip']}")
     parts.append(attribution)
     if folded:
+        # The dashboard row is written by the CALLER, and only when the detection
+        # carried an org (`abuse.py`'s `if org_id` guards; `notify_abuse` maps a
+        # missing one to "_"). Telling an anonymous subject that its folded
+        # detections "are recorded on the dashboard" would assert an attribution
+        # that does not exist — the defect class this whole change removes.
+        recorded = (
+            "all of them are recorded on the dashboard alert list"
+            if org_id and org_id != "_"
+            else "they are NOT recorded on the dashboard (the detection carried "
+                 "no org scope, so there is no row to write)")
         parts.append(f"Digest: {folded} further {kind} detection(s) in the "
-                     "previous window were folded into this message; all of them "
-                     "are recorded on the dashboard alert list.")
+                     f"previous window were folded into this message; {recorded}.")
     return "\n".join(parts)
 
 
-def _send_abuse(bot_token: str, chat_id: str, text: str) -> None:
+def _send_abuse(bot_token: str, chat_id: str, text: str) -> bool:
+    """Send one abuse message. True when the channel accepted it.
+
+    The return value exists so a caller that has ALREADY ARMED the delivery
+    window can release it on a failure: otherwise one Telegram blip costs that
+    subject the whole window (24h for an incident class in the no-channel shape),
+    which is the same "bound becomes a mute" direction #4872 forbids.
+    """
     try:
         telegram_send(bot_token, chat_id, text)
     except Exception as e:  # noqa: BLE001, RUF100
         logger.warning("abuse notify: telegram failed (%s)", redact_safe(e))
+        return False
+    return True
 
 
 def _adopt_legacy_subject(store, incident_kind: str, subject: str,
@@ -690,14 +730,16 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                 chat_id = _env("TELEGRAM_CHAT_ID")
                 if not (_skip_channel("telegram", bot_token)
                         or _skip_channel("telegram-chat", chat_id)):
-                    _send_abuse(bot_token, chat_id, _abuse_message(
-                        kind, org_id, details,
-                        attribution=(f"Still open — {ref}. One reminder per "
-                                     f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
-                                     "while the episode stays open; repeats "
-                                     "inside that window are folded (the issue "
-                                     "comment trail is the recurrence record)."),
-                        folded=folded))
+                    if not _send_abuse(bot_token, chat_id, _abuse_message(
+                            kind, org_id, details,
+                            attribution=(f"Still open — {ref}. One reminder per "
+                                         f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
+                                         "while the episode stays open; repeats "
+                                         "inside that window are folded (the issue "
+                                         "comment trail is the recurrence record)."),
+                            folded=folded)):
+                        # A failed send must not consume the reminder window.
+                        release_abuse_delivery(kind, subject)
             elif outcome is OpenOutcome.FILED and not number and deliver:
                 # FILED with NO issue number is NOT a delivered alert. The store
                 # pushes only when it holds a number (`alert_store` guards its own
@@ -746,10 +788,13 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
         "The message says so; the class is bounded to one such message per %dh "
         "per subject until the incident channel is repaired (#14407).",
         kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600))
-    _send_abuse(bot_token, chat_id, _abuse_message(
-        kind, org_id, details,
-        attribution=f"Not attributable: {reason}.",
-        folded=folded))
+    if not _send_abuse(bot_token, chat_id, _abuse_message(
+            kind, org_id, details,
+            attribution=f"Not attributable: {reason}.",
+            folded=folded)):
+        # A failed send must not consume the window: an outage must not mute the
+        # class for the next window after it recovers.
+        release_abuse_delivery(kind, subject)
 
 
 def _abuse_context(details: dict) -> str:
@@ -791,13 +836,17 @@ def _notify_abuse_activity(kind: str, org_id: str, details: dict) -> None:
     chat_id = _env("TELEGRAM_CHAT_ID")
     if _skip_channel("telegram", bot_token) or _skip_channel("telegram-chat", chat_id):
         return
-    _send_abuse(bot_token, chat_id, _abuse_message(
-        kind, org_id, details,
-        attribution=("Activity, not an incident (#10156): a detector measured a "
-                     "rate. Nothing was disabled or restricted, and this class "
-                     "files no incident by design — the rows are on the "
-                     "dashboard's activity register."),
-        folded=folded))
+    if not _send_abuse(bot_token, chat_id, _abuse_message(
+            kind, org_id, details,
+            attribution=("Activity, not an incident (#10156): a detector measured a "
+                         "rate. Nothing was disabled or restricted, and this class "
+                         "files no incident by design — "
+                         + ("the rows are on the dashboard's activity register."
+                            if org_id and org_id != "_" else
+                            "the detection carried no org scope, so NO dashboard "
+                            "row was written for it.")),
+            folded=folded)):
+        release_abuse_delivery(kind, org_id)
 
 
 def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
@@ -830,9 +879,18 @@ def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
     org_id = org.get("org_id") or "_"
     if kind in ABUSE_INCIDENT_KINDS:
         _notify_abuse_incident(kind, org_id, details)
+    elif kind in ABUSE_ACTIVITY_KINDS:
+        _notify_abuse_activity(kind, org_id, details)
     else:
-        # Every remaining abuse kind is a measurement. The default is the DIGEST
-        # path on purpose: an unrecognised class must be bounded, never a storm.
+        # An ``abuse_*`` kind in NEITHER register: the DIGEST path is the default
+        # on purpose — an unrecognised class must be bounded, never a storm — but
+        # it is called out, because a new kind that should FILE must not be born
+        # asleep as a measurement (the #10156 register split is a decision, and a
+        # silent default would decide it by accident).
+        logger.warning(
+            "abuse notify: %r is in neither ABUSE_INCIDENT_KINDS nor "
+            "ABUSE_ACTIVITY_KINDS — delivering it as a bounded digest; declare "
+            "its register in notify.py", kind)
         _notify_abuse_activity(kind, org_id, details)
 
 
