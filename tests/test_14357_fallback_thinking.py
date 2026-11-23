@@ -43,6 +43,14 @@ def _clean_env(monkeypatch):
               "OPENROUTER_API_KEY", "VENICE_API_KEY",
               "TORTOISE_EXTRACT_MODEL", "TORTOISE_JSON_MODE",
               "TORTOISE_EXTRACTOR_MAX_TOKENS",
+              # The escalation RUNG budget, not just the base cap: the ``s1_*``
+              # tests below pin the literal 32000, and ``_extractor_escalation_
+              # tokens`` reads this knob from the environment at call time (any
+              # in-range 16000..64000 value used AS-IS) — an ambient value would
+              # red them for a reason that is not the diff. Precedent:
+              # ``tests/test_extractor_v2.py::test_extractor_escalation_tokens_
+              # env_semantics`` delenv's it around the same assertion.
+              "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
               "TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN",
               # ``test_reader_lane_wire_body_is_not_suppressed`` is the one test
               # here that goes through ``resolve_reader_provider``, which reads
@@ -612,7 +620,54 @@ def test_s1_collapsed_base_survives_a_failed_escalation():
     # constructed one: a bare ``_classify_error(_ReasoningCollapse("x"))`` is a
     # constant that no mutation of this diff can redden (agent-infra#3442
     # rule 3), so it would have pinned nothing.
-    assert v2._classify_error(ei.value) == "reasoning_collapse"
+    assert v2._classify_error(ei.value) == "reasoning_collapse", ei.value
+
+
+def test_s1_stats_less_form_cannot_ship_a_held_collapse():
+    """#14357 review round 2 (P2) — the drop decision must read ``_collapse``,
+    not the finish signal it just declined to trust.
+
+    ``run_s1(model, transcript)`` (no ``stats``) is a documented call form, and
+    without ``stats`` ``finish`` is re-derived from
+    ``getattr(model, "last_finish_reason")`` on the CALLER thread — the
+    cross-thread read ``_call_once``'s F4 comment (#1780) rules out, since a
+    shared adapter attr is overwritten by another worker under ``--workers>1``.
+    ``_collapse`` is already authoritative (``_complete`` raises only when the
+    base came back empty at ``finish_reason="length"``), so re-deriving from
+    the attribute shipped ``""``: no error, no census entry, no escalation
+    episode. S1 has no parse ladder, so an empty narrative IS a valid return —
+    nothing downstream catches it, which is exactly the fail-open #14357 closes.
+
+    The property makes the race deterministic: the FIRST read is ``_call_once``'s
+    in-thread capture (the one that raises the collapse), every later read is
+    the value a concurrent worker has already overwritten.
+    """
+    class _S1CollapseLosesTheRace:
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def __init__(self):
+            self.budgets: list[int] = []
+            self._finish_reads = 0
+
+        @property
+        def last_finish_reason(self):
+            self._finish_reads += 1
+            # read 1 == `_call_once`'s in-thread capture, right after the BASE
+            # call; every later read == the caller-thread re-derivation.
+            return "length" if self._finish_reads == 1 else "stop"
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.budgets.append(max_tokens)
+            if (max_tokens or 0) >= 32000:
+                self.last_completion_tokens = 20
+                return "a recovered narrative"
+            return ""  # the collapse: no content at all, finish=length
+
+    m = _S1CollapseLosesTheRace()
+    out = v2.run_s1(m, "user: we decided X")  # the stats-less form
+    assert m.budgets[:2] == [1500, 32000], m.budgets
+    assert out == "a recovered narrative", out
 
 
 def test_collapsed_extraction_yields_no_document_and_is_recorded(monkeypatch):

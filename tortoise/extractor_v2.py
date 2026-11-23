@@ -1563,15 +1563,15 @@ def run_s1(model, transcript: str, *,
         model, system, user_msg, base, stats, True)
     finish = stats.get("finish_reason") if stats is not None else (
         getattr(model, "last_finish_reason", None))
-    truncated = finish == "length"
+    # ``_collapse`` is AUTHORITATIVE — True only for a base that came back empty
+    # at finish_reason="length"; ``finish`` above is a post-hoc read of a race-prone
+    # shared attr (#1780 F4) and S1 has no parse ladder, so "" is a valid return.
+    truncated = finish == "length" or bool(_collapse)
     if not truncated:
         return response
     _rec = stats.setdefault("recovery", {}) if stats is not None else None
-    # The base call WAS length-truncated — record the per-seam s1
-    # truncation-token keys (Task 0 R3-6: the S1 overage stays separable
-    # from S2/S4's 16K-capped values). This is truncation accounting and is
-    # independent of the escalation episode below (an un-escalatable
-    # truncation is still a truncation).
+    # The base call WAS length-truncated — record the per-seam s1 truncation
+    # keys (Task 0 R3-6; independent of the escalation episode below).
     if _rec is not None:
         _rec["truncation_prompt_tokens_s1"] = (
             _rec.get("truncation_prompt_tokens_s1", 0)
