@@ -76,8 +76,13 @@ def _classify_later_off(monkeypatch):
     ``TORTOISE_S4_EMBED_JSON`` is the second ambient render switch this file is
     exposed to and is pinned here for the same reason: `#14343` ships it
     ARMED-ABLE (`compact` re-serialises S4's embed list with `(",", ":")`
-    separators) and `tortoise/extractor_v2.py` / `.env.example` both tell a lane
-    to arm it *in the same session as a capstone run*. A lane that does so then
+    separators) and `tortoise/extractor_v2.py` tells a lane to arm it *in the same session as a
+    capstone run* — while `.env.example` and the capstone door say the opposite, in
+    bold: the door pins this key OFF for the whole run (`DOOR_PINNED_OFF`), so
+    arming it does not reach a capstone at all and needs the pin withdrawn in the
+    same change (`#14371`). Do not "correct" `.env.example` back into promising
+    what the door silently discards — that is the fabricated-green shape this pin
+    exists for. A lane that does so then
     runs this file and got a red from the `embed_list_json` case — an indented
     `json.dumps` cannot be a substring of its compact form — which says nothing
     about the framing. Measured: `TORTOISE_S4_EMBED_JSON=compact pytest
