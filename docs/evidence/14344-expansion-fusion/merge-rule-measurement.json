@@ -13,12 +13,14 @@
         "5": {
           "n": 500,
           "new_admitted": 774,
+          "pass1_only_retained": 726,
           "pass1_rank0_position": 945,
           "pass1_retained": 1726
         },
         "10": {
           "n": 500,
           "new_admitted": 2021,
+          "pass1_only_retained": 1979,
           "pass1_rank0_position": 945,
           "pass1_retained": 2979
         }
@@ -27,12 +29,14 @@
         "5": {
           "n": 500,
           "new_admitted": 2016,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 4389,
           "pass1_retained": 484
         },
         "10": {
           "n": 500,
           "new_admitted": 4000,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 4389,
           "pass1_retained": 1000
         }
@@ -43,12 +47,14 @@
         "5": {
           "n": 500,
           "new_admitted": 0,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 1512,
           "pass1_retained": 2500
         },
         "10": {
           "n": 500,
           "new_admitted": 1008,
+          "pass1_only_retained": 992,
           "pass1_rank0_position": 1512,
           "pass1_retained": 3992
         }
@@ -57,12 +63,14 @@
         "5": {
           "n": 500,
           "new_admitted": 1000,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 3413,
           "pass1_retained": 1500
         },
         "10": {
           "n": 500,
           "new_admitted": 2000,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 3413,
           "pass1_retained": 3000
         }
@@ -73,12 +81,14 @@
         "5": {
           "n": 500,
           "new_admitted": 804,
+          "pass1_only_retained": 696,
           "pass1_rank0_position": 989,
           "pass1_retained": 1696
         },
         "10": {
           "n": 500,
           "new_admitted": 2105,
+          "pass1_only_retained": 1895,
           "pass1_rank0_position": 989,
           "pass1_retained": 2895
         }
@@ -87,12 +97,14 @@
         "5": {
           "n": 500,
           "new_admitted": 2242,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 8930,
           "pass1_retained": 258
         },
         "10": {
           "n": 500,
           "new_admitted": 4497,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 8930,
           "pass1_retained": 503
         }
@@ -103,12 +115,14 @@
         "5": {
           "n": 500,
           "new_admitted": 697,
+          "pass1_only_retained": 803,
           "pass1_rank0_position": 1076,
           "pass1_retained": 1803
         },
         "10": {
           "n": 500,
           "new_admitted": 1894,
+          "pass1_only_retained": 2106,
           "pass1_rank0_position": 1076,
           "pass1_retained": 3106
         }
@@ -117,12 +131,14 @@
         "5": {
           "n": 500,
           "new_admitted": 2009,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 4698,
           "pass1_retained": 491
         },
         "10": {
           "n": 500,
           "new_admitted": 4000,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 4698,
           "pass1_retained": 1000
         }
@@ -133,12 +149,14 @@
         "5": {
           "n": 500,
           "new_admitted": 1066,
+          "pass1_only_retained": 934,
           "pass1_rank0_position": 625,
           "pass1_retained": 1434
         },
         "10": {
           "n": 500,
           "new_admitted": 2500,
+          "pass1_only_retained": 2000,
           "pass1_rank0_position": 625,
           "pass1_retained": 2500
         }
@@ -147,12 +165,14 @@
         "5": {
           "n": 500,
           "new_admitted": 2381,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 9092,
           "pass1_retained": 119
         },
         "10": {
           "n": 500,
           "new_admitted": 4751,
+          "pass1_only_retained": 0,
           "pass1_rank0_position": 9092,
           "pass1_retained": 249
         }
@@ -173,6 +193,10 @@
         "new": 3.8112,
         "old": 7.6992
       },
+      "pass1_only_retained_mean": {
+        "new": 3.5888,
+        "old": 0.0
+      },
       "pass1_rank0_position_mean": {
         "new": 2.0588,
         "old": 12.2088
@@ -186,6 +210,10 @@
       "new_admitted_mean": {
         "new": 1.3364,
         "old": 3.8592
+      },
+      "pass1_only_retained_mean": {
+        "new": 1.2636,
+        "old": 0.0
       },
       "pass1_rank0_position_mean": {
         "new": 2.0588,

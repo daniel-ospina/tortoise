@@ -1,7 +1,7 @@
 """#14344 (workstream A of #2513) — the additive second pass is FUSED, not
 concatenated.
 
-The unit under test is :func:`tortoise.search_engine.fuse_expansion_pass`, the
+The unit under test is :func:`tortoise.expansion_merge.fuse_expansion_pass`, the
 one merge rule the C2 entity/fact key expansion's two halves now share
 (``sdk._entity_key_expansion_pass`` sparse, ``sdk._entity_key_dense_pass``
 dense). It is pure — no graph, no embedder — so these tests run in every lane,

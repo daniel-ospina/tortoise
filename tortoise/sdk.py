@@ -49730,7 +49730,7 @@ class TortoiseSDK:
         candidate SET only grows.
 
         ⛔ The ORDER, stated because "additive" is read as more than it means:
-        the merge is `search_engine.fuse_expansion_pass` (#14344), i.e. this
+        the merge is `expansion_merge.fuse_expansion_pass` (#14344), i.e. this
         module's own `rrf_fusion` over the two passes, not the rank
         concatenation (`expanded + pass-1-only`) it used to be. An id BOTH
         passes carry outranks either pass alone (it earns both terms — the entity

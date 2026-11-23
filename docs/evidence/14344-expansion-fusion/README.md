@@ -44,10 +44,17 @@ false of the ORDER. At a fixed `limit`, the tail of the merged leg is exactly wh
 
 500 seeded trials per shape, `k ∈ {5, 10}`, mean rows per leg's first-k positions:
 
-| k | pass-1 evidence retained | expansion-only evidence admitted | position of pass-1's own rank-0 row |
-|---|---|---|---|
-| 5 | **1.14 → 3.66** | **3.86 → 1.34** | **12.21 → 2.06** |
-| 10 | **2.30 → 6.19** | **7.70 → 3.81** | **12.21 → 2.06** |
+| k | pass-1 evidence in the page | of that, evidence the expansion did NOT repeat | expansion-only evidence admitted | position of pass-1's own rank-0 row |
+|---|---|---|---|---|
+| 5 | 1.14 → **3.66** | **0.00 → 1.26** | 3.86 → **1.34** | **12.21 → 2.06** |
+| 10 | 2.30 → **6.19** | **0.00 → 3.59** | 7.70 → **3.81** | **12.21 → 2.06** |
+
+⛔ **Read the third column first, because it is the only one that is not a
+re-description of the second.** Under the concatenation the count of *pass-1-only* ids in the page
+was **exactly zero** in every one of the 2,500 trials — the expansion's rows occupied the head by
+construction, so evidence the first pass had already reached survived only where the expansion
+happened to repeat it. Under the fusion it is **1.26 at k=5 and 3.59 at k=10**. That is the defect
+this change removes, stated as a count rather than as a ranking theory.
 
 The third column is the displacement made visible, and it is measured over the whole merged leg so it
 cannot saturate: under the concatenation pass 1's **own top row** sat at position ~12 — every row the
@@ -56,11 +63,12 @@ doc reported a "did pass-1's top row fall out of the head" boolean instead; that
 BOTH arms by construction, because each rule's merged head is dominated by whatever that rule puts
 first, so it measured nothing and was replaced.)
 
-**Read the second column before claiming a win.** Fusing the merge roughly triples how much of the
+**Read the fourth column before claiming a win.** Fusing the merge roughly triples how much of the
 first pass's evidence survives the page, and roughly halves how many *new* candidates reach the same
 page. The concatenation was not "better recall": it filled the head with the expansion's rows **by
 construction** (with `pass1=10, expanded=10, k=10` the head was simply the expansion), which is the
-same displacement read from the other end.
+same displacement read from the other end — and it is why the pass-1-only count above is a flat zero
+for that rule rather than merely smaller.
 
 ⇒ **The two rules sit on a Pareto frontier of (retention, admission), and no in-leg merge rule can
 leave it:** the union of two passes is larger than the leg's page, so a rule that keeps more of one

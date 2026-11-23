@@ -3,14 +3,18 @@
 **What this measures, stated first because it is easy to over-read.** This is
 NOT a recall@k figure on a query set. It is a measurement of the MERGE RULE that
 joins an additive second retrieval pass to the leg it expands
-(:func:`tortoise.search_engine.fuse_expansion_pass`, and the rank concatenation
+(:func:`tortoise.expansion_merge.fuse_expansion_pass`, and the rank concatenation
 it replaced). Both rules always return the same candidate SET — the union — so
 the only thing they can differ about is ORDER, and order is what a page cut
 consumes. The measurement therefore reports, over seeded randomised pools:
 
-  * ``pass1_retained@k``    — how many of the pass-1 rows the expansion did not
-                              repeat survive in the first ``k`` of the merged
-                              leg (the leg's own page);
+  * ``pass1_retained@k``    — how many pass-1 ids (repeat or not) survive in the
+                              first ``k`` of the merged leg — the leg's own page;
+  * ``pass1_only_retained@k`` — the same count restricted to ids the expansion
+                              did NOT repeat, i.e. the mirror of
+                              ``new_admitted``. Both are reported because only
+                              the second can distinguish "kept what we had" from
+                              "kept what we both found";
   * ``new_admitted@k``      — how many ids ONLY the expansion found reach the
                               first ``k`` (does the lever still ADD?);
   * ``pass1_rank0_position`` — where pass 1's own rank-0 row lands in the
@@ -126,6 +130,9 @@ def _score_rule(merged: list[tuple[str, float]], pass1_ids: set[str],
     positions = [pid for pid, _s in merged]
     return {
         "pass1_retained": sum(1 for pid in head if pid in pass1_ids),
+        "pass1_only_retained": sum(1 for pid in head
+                                   if pid in pass1_ids
+                                   and pid not in expanded_ids),
         "new_admitted": sum(1 for pid in head if pid in expanded_ids
                             and pid not in pass1_ids),
         "pass1_rank0_position": positions.index(pass1_rank0),
@@ -144,15 +151,18 @@ def measure(trials_per_shape: int = TRIALS_PER_SHAPE,
     rng = random.Random(seed)
     shapes: dict[str, dict] = {}
     totals = {
-        "old": {k: {"pass1_retained": 0, "new_admitted": 0,
-                    "pass1_rank0_position": 0, "n": 0} for k in KS},
-        "new": {k: {"pass1_retained": 0, "new_admitted": 0,
-                    "pass1_rank0_position": 0, "n": 0} for k in KS},
+        "old": {k: {"pass1_retained": 0, "pass1_only_retained": 0,
+                    "new_admitted": 0, "pass1_rank0_position": 0, "n": 0}
+                for k in KS},
+        "new": {k: {"pass1_retained": 0, "pass1_only_retained": 0,
+                    "new_admitted": 0, "pass1_rank0_position": 0, "n": 0}
+                for k in KS},
     }
     for n_pass1, n_expanded, shared in SHAPES:
         key = f"pass1={n_pass1},expanded={n_expanded},shared={shared}"
-        per_shape = {arm: {k: {"pass1_retained": 0, "new_admitted": 0,
-                               "pass1_rank0_position": 0, "n": 0} for k in KS}
+        per_shape = {arm: {k: {"pass1_retained": 0, "pass1_only_retained": 0,
+                               "new_admitted": 0, "pass1_rank0_position": 0,
+                               "n": 0} for k in KS}
                      for arm in ("old", "new")}
         for _ in range(trials_per_shape):
             pass1, expanded = _pools(rng, n_pass1, n_expanded, shared)
@@ -169,8 +179,8 @@ def measure(trials_per_shape: int = TRIALS_PER_SHAPE,
                 for k in KS:
                     row = _score_rule(merged, pass1_ids, expanded_ids, k,
                                       pass1[0][0])
-                    for field in ("pass1_retained", "new_admitted",
-                                  "pass1_rank0_position"):
+                    for field in ("pass1_retained", "pass1_only_retained",
+                                  "new_admitted", "pass1_rank0_position"):
                         per_shape[arm][k][field] += row[field]
                         totals[arm][k][field] += row[field]
                     per_shape[arm][k]["n"] += 1
@@ -185,6 +195,9 @@ def measure(trials_per_shape: int = TRIALS_PER_SHAPE,
         f"k={k}": {
             "pass1_retained_mean": {"old": _rate("old", k, "pass1_retained"),
                                     "new": _rate("new", k, "pass1_retained")},
+            "pass1_only_retained_mean": {
+                "old": _rate("old", k, "pass1_only_retained"),
+                "new": _rate("new", k, "pass1_only_retained")},
             "new_admitted_mean": {"old": _rate("old", k, "new_admitted"),
                                   "new": _rate("new", k, "new_admitted")},
             "pass1_rank0_position_mean": {
