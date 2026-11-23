@@ -737,9 +737,16 @@ def test_a_replacement_OVER_the_count_ceiling_is_refused(tmp_path):
     """…and the same write one entry over is refused, so the agreement above is
     not an unconditional admit.
 
-    MUTATION THAT REDS THIS: pass ``adds_entry=False`` unconditionally (or drop
-    the count term entirely) -> the write is ADMITTED at
+    MUTATION THAT REDS THIS: drop ``unreadable_count`` from ``parsed_count``
+    (``parsed_count = len(metas)``) -> ``len(metas) = 2`` with ``adds_entry`` 0
+    makes ``2 <= 2`` and the write is ADMITTED at
     ``parsed_count = 3 > max_entries = 2``.
+
+    ⛔ NOT ``adds_entry=False``: with ``parsed_count = 3`` and NO filed entry the
+    floor refuses independently of that operand, so no value of it can admit here
+    — naming it was an attribution defect (cycle-6 finding 4, measured GREEN).
+    The operand is guarded by the AT-the-ceiling row above and, on the Pi leg, by
+    ``an orphan cannot relieve a COUNT ceiling``.
     """
     for sid in ("sess-a", "sess-b"):
         _write_meta(tmp_path, sid, capture_lane="hook")
@@ -756,6 +763,101 @@ def test_a_replacement_OVER_the_count_ceiling_is_refused(tmp_path):
     assert res["written"] is False, (
         "with no filed entry to evict, a replacement over the ceiling is refused")
     assert res["discards"][-1]["reason"] == "spool_saturated"
+
+
+def test_the_HEALTH_LINE_is_saturated_when_the_writer_refuses_new_work(tmp_path):
+    """The strict arm's floor must carry the ``+1`` the writer will add.
+
+    ``strict`` means "no projection was offered", and every caller of that arm is
+    asking about a NEW capture — ``capture_health_line`` above all — so the
+    post-write count is ``parsed_count + 1``. Without the ``+1`` the floor was one
+    short of the writer's, and the two disagreed whenever
+    ``parsed_count - len(filed) == max_entries`` with at least one filed entry:
+    measured, three readable undelivered + one FILED at ``max_entries=3`` gave
+    health ``DRAINING (3 queued)`` — paging nobody — while the writer refused
+    every NEW capture with ``spool_saturated``. The writer is right (after prune
+    evicts the one filed entry the count is 4, still over 3, so room cannot be
+    made and #10175 requires the refusal); the health line was the false PASS.
+
+    MUTATION THAT REDS THIS: drop the ``+1`` from ``floor_count``
+    (``floor_count = count - len(filed)``) -> health reads ``DRAINING`` while the
+    write is refused.
+    """
+    for sid in ("sess-u0", "sess-u1", "sess-u2"):
+        _write_meta(tmp_path, sid, capture_lane="hook")
+        _write_turns(tmp_path, sid, TURNS)
+    _write_meta(tmp_path, "sess-filed", capture_lane="hook", filed_lane="hook",
+                capture_key="K", filed_key="K")
+    _write_turns(tmp_path, "sess-filed", TURNS)
+    bounds = Bounds(max_entries=3)
+
+    assert capture_health_line(tmp_path, bounds=bounds).state == "saturated", (
+        "the health line must not report a spool healthy while every new"
+        " capture is refused")
+    res = write_spool_entry(tmp_path, _snapshot("sess-new"), bounds)
+    assert res["written"] is False, (
+        "the premise: the writer refuses new work on this spool")
+    assert res["discards"][-1]["reason"] == "spool_saturated"
+
+
+def test_prune_does_NOT_count_a_corrupt_stem_its_own_scan_just_unlinked(tmp_path):
+    """``prune_spool``'s scan REPAIRS, so a corrupt stem is not an entry by the
+    time the eviction loop runs.
+
+    ``_scan_spool`` unlinks a corrupt meta and renames its log to ``.orphan``
+    inside the same call, so the stem it reports in the third element no longer
+    occupies an entry slot (its bytes are correctly 0, and its log is credited as
+    an evictable orphan). Counting it made prune evict one filed entry per corrupt
+    meta for a count overage that had ceased to exist: measured pre-fix, ceiling 2
+    with two filed + one corrupt → one filed destroyed and the spool settled one
+    BELOW its ceiling.
+
+    MUTATION THAT REDS THIS: count the third element as-is
+    (``count = len(metas) + len(unreadable)``) -> one filed entry is evicted.
+    """
+    for i in range(2):
+        _filed_entry(tmp_path, f"sess-f{i}", f"2026-01-01T00:00:0{i}Z")
+    corrupt = _meta_path(tmp_path, "sess-corrupt")
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_text("{ this is not json", encoding="utf-8")
+    _write_turns(tmp_path, "sess-corrupt", TURNS)
+    bounds = Bounds(max_entries=2)
+
+    discards = prune_spool(tmp_path, keep_session_id="sess-new", bounds=bounds)
+
+    assert discards == [], (
+        "the repairing scan already removed the only over-count; nothing to"
+        f" evict: {discards}")
+    assert read_spool_meta(tmp_path, "sess-f0") is not None
+    assert read_spool_meta(tmp_path, "sess-f1") is not None
+
+
+def test_an_over_bound_META_LESS_entry_is_not_reported_as_UNREADABLE(tmp_path):
+    """The ledger may not lie in either direction.
+
+    The over-bound refusal arm is gated on ``prior is None``, which is also true
+    for an entry with NO meta at all — the shape this very PR is about, because
+    the writer stores the log before the meta and an ENOSPC leaves a lone
+    over-bound log. It said the entry's "meta cannot be read" when there is no
+    meta to read; ``prior_desc`` exists precisely so no arm makes that claim.
+
+    MUTATION THAT REDS THIS: use the fixed sentence ("but its meta cannot be
+    read") instead of ``prior_desc`` -> the detail claims an unreadable meta.
+    """
+    _write_turns(tmp_path, "sess-stray",
+                 [{"role": "user", "content": "y" * 3032}])
+    bounds = Bounds(max_entries=1000, max_total_bytes=1 << 20, max_entry_bytes=1000)
+    grown = [{"role": "user", "content": "z" * 3032}]
+
+    res = write_spool_entry(tmp_path, _snapshot("sess-stray", turns=grown), bounds)
+
+    assert res["written"] is False
+    detail = res["discards"][-1]["detail"]
+    assert res["discards"][-1]["reason"] == "entry_too_large"
+    assert "ABSENT" in detail, (
+        f"the record must name what is actually on disk: {detail}")
+    assert "meta cannot be read" not in detail, (
+        f"there is no meta to read: {detail}")
 
 
 def test_prune_spends_a_filed_entry_for_a_count_overage_it_can_see(tmp_path):

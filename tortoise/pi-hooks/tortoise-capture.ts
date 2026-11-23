@@ -1,4 +1,4 @@
-// tortoise-hook-version: 30
+// tortoise-hook-version: 31
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -2705,8 +2705,8 @@ export function writeSpoolEntry(
               retained: true,
               detail:
                 `${detail}, and the content already on disk (${onDisk} bytes) is` +
-                " also over that bound, so this entry can never be filed — but its" +
-                " meta cannot be read, so it cannot be marked terminal either. The" +
+                ` also over that bound, so this entry can never be filed — and` +
+                ` ${priorDesc}, so it cannot be marked terminal either. The` +
                 " write is REFUSED and the entry left byte-identical (a retained" +
                 " refusal, never a reported loss)",
             }),
@@ -3063,7 +3063,22 @@ export function pruneSpool(
       return compareAge(a.meta, b.meta);
     });
 
-  let count = metas.length + unreadable.length;
+  // #14347 review, cycle 6, finding 2: this scan REPAIRS, so a CORRUPT meta is
+  // already unlinked and its log already renamed to `.orphan` by the time we get
+  // here — that stem is in `unreadable` but is NO LONGER AN ENTRY. Counting it
+  // made prune evict one filed entry per corrupt meta for a count overage that
+  // ceased to exist inside the same call. Its bytes are already correct
+  // (`unreadableEntryBytes` reads 0 for it) and its log is credited as an orphan;
+  // only the COUNT was stale. A stem that still has its meta OR its live turn log
+  // is still an entry.
+  const entriesPath = entriesDir(dir);
+  let count =
+    metas.length +
+    unreadable.filter(
+      (stem) =>
+        existsSync(join(entriesPath, `${stem}.meta.json`)) ||
+        existsSync(join(entriesPath, `${stem}.turns.jsonl`)),
+    ).length;
   let total =
     metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
     // #12483: the retained-unreadable class is on disk and can never be evicted
@@ -3370,6 +3385,12 @@ function saturatedForMetas(
   const parsedCount = metas.length + unreadableCount;
   let strict = false;
   let count = parsedCount;
+  // #14347 review, cycle 5, finding 1: the caller's `addsEntry` is the
+  // POST-WRITE entry count — `true` only when the session is not on disk at all —
+  // so an unreadable, corrupt or meta-less-log REPLACEMENT adds nothing. It is
+  // NOT `prior === undefined`: that operand was written when `parsedCount` was
+  // `metas.length` alone, and it now double-counts the unreadable class, which
+  // `unreadableCount` already carries.
   if (projectedBytes === undefined && replacesSessionId === undefined) {
     // STRICT: the question is whether ADDING an entry would cross the ceiling, so
     // a spool exactly AT the count ceiling is already saturated.
@@ -3412,7 +3433,22 @@ function saturatedForMetas(
     total -
     filed.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) -
     reclaimableOrphanBytes;
-  const floorCount = count - filed.length;
+  // ⛔ THE STRICT ARM'S FLOOR MUST CARRY THE `+1` THE WRITER WILL ADD (#14347
+  // review, cycle 6, finding 1). `strict` means "no projection was offered", and
+  // every caller of that arm is asking the question about a NEW capture —
+  // `captureHealthLine` above all — so the post-write count is
+  // `parsedCount + 1`, exactly as `admissionSaturated` computes it for a fresh
+  // session. Without the `+1` the floor is one short of the writer's, and the two
+  // disagree whenever `parsedCount - filed.length === maxEntries` with at least
+  // one filed entry: measured, three readable undelivered + one FILED at
+  // `maxEntries: 3` gave health `DRAINING (3 queued)` while the writer refused
+  // every NEW capture with `spool_saturated`. The writer is right (after prune
+  // evicts the filed entry the count is 4, still over a ceiling of 3, so room
+  // cannot be made and #10175 requires the refusal) — the health line was the
+  // false PASS. The byte axis is deliberately NOT given the same `+1`: a new
+  // capture's bytes are unknown to a caller that offered no projection, and the
+  // `>=` comparison is the conservative stand-in for them.
+  const floorCount = count + (strict ? 1 : 0) - filed.length;
   const overCount = strict ? parsedCount >= bounds.maxEntries : count > bounds.maxEntries;
   const overBytes =
     strict

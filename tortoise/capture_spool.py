@@ -2516,9 +2516,9 @@ def write_spool_entry(
                         "detail": (
                             f"{detail}, and the content already on disk"
                             f" ({on_disk} bytes) is also over that bound, so this"
-                            " entry can never be filed — but its meta cannot be"
-                            " read, so it cannot be marked terminal either. The"
-                            " write is REFUSED and the entry left byte-identical"
+                            f" entry can never be filed — and {prior_desc}, so it"
+                            " cannot be marked terminal either. The write is"
+                            " REFUSED and the entry left byte-identical"
                             " (a retained refusal, never a reported loss)"
                         ),
                     }))
@@ -2999,10 +2999,14 @@ def _saturated_for_metas(
     parsed_count = len(metas) + unreadable_count
     # `adds_entry` is the COUNT answer and `replaces_session_id` is the BYTE
     # answer, and they are NOT the same question (#14347 review, cycle 2,
-    # finding 4): an entry whose meta is unreadable occupies disk (so it is a
-    # byte REPLACEMENT) but is absent from `len(metas)` (so it still ADDS one to
-    # the count — otherwise the writer admitted a write the health line called
-    # SATURATED). Defaults keep every existing caller's behaviour.
+    # finding 4). The caller's answer is the POST-WRITE entry count:
+    # `adds_entry=True` only when the session is not on disk at all — the write
+    # path passes `not entry_on_disk` (#14347 review, cycle 5, finding 1), so an
+    # unreadable, corrupt or meta-less-log REPLACEMENT adds nothing. It is NOT
+    # `prior is None`: that operand was written when `parsed_count` was
+    # `len(metas)` alone, and it now double-counts the unreadable class, which
+    # `unreadable_count` above already carries. The default keeps every other
+    # caller's behaviour.
     if adds_entry is None:
         adds_entry = replaces_session_id is None
     if projected_bytes is None and replaces_session_id is None:
@@ -3048,7 +3052,23 @@ def _saturated_for_metas(
              if _entry_is_filed(m) and m.get("session_id") != replaces_session_id]
     floor_bytes = total - sum(_entry_bytes(root, m["session_id"]) for m in filed) \
         - reclaimable_orphan_bytes
-    floor_count = count - len(filed)
+    # ⛔ THE STRICT ARM'S FLOOR MUST CARRY THE `+1` THE WRITER WILL ADD (#14347
+    # review, cycle 6, finding 1). `strict` means "no projection was offered",
+    # and every caller of that arm is asking the question about a NEW capture —
+    # `capture_health_line` above all — so the post-write count is
+    # `parsed_count + 1`, exactly as `_admission_saturated` computes it for a
+    # fresh session. Without the `+1` the floor is one short of the writer's, and
+    # the two disagree whenever `parsed_count - len(filed) == max_entries` with at
+    # least one filed entry: measured, three readable undelivered + one FILED at
+    # `max_entries=3` gave health `DRAINING (3 queued)` while the writer refused
+    # every NEW capture with `spool_saturated`. The writer is right (after prune
+    # evicts the filed entry the count is 4, still over a ceiling of 3, so room
+    # cannot be made and #10175 requires the refusal) — the health line was the
+    # false PASS, the #2100 class this whole predicate exists to prevent.
+    # The byte axis is deliberately NOT given the same `+1`: a new capture's
+    # bytes are unknown to a caller that offered no projection, and the `>=`
+    # comparison against the ceiling is the conservative stand-in for them.
+    floor_count = count + (1 if strict else 0) - len(filed)
     if over_bytes and (floor_bytes >= bounds.max_total_bytes if strict
                        else floor_bytes > bounds.max_total_bytes):
         return True
@@ -3177,7 +3197,20 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
         (m for m in metas if m.get("session_id") != keep_session_id),
         key=lambda m: (0 if _entry_is_filed(m) else 1, *_age_key(m)),
     )
-    count = len(metas) + len(unreadable)
+    # #14347 review, cycle 6, finding 2: this scan REPAIRS, so a CORRUPT meta is
+    # already unlinked and its log already renamed to `.orphan` by the time we get
+    # here — that stem is in the third element but is NO LONGER AN ENTRY. Counting
+    # it made prune evict one filed entry per corrupt meta for a count overage that
+    # ceased to exist inside the same call (measured: ceiling 2, two filed + one
+    # corrupt → one filed evicted, post-count 1; the readable-undelivered control
+    # landed at 2). Its bytes are already correct (`_unreadable_entry_bytes` reads
+    # 0 for it) and its log is credited as an orphan; only the COUNT was stale.
+    # A stem that still has its meta OR its live turn log is still an entry.
+    entries_dir = _entries_dir(root)
+    count = len(metas) + sum(
+        1 for stem in unreadable
+        if (entries_dir / f"{stem}.meta.json").exists()
+        or (entries_dir / f"{stem}.turns.jsonl").exists())
     total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
     # #12483: the retained-unreadable class is on disk and can never be evicted
     # (see `_unreadable_entry_bytes`), so it counts here too — otherwise the

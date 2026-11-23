@@ -36,6 +36,7 @@ import {
   CAPTURE_REFUSAL_STAMP_MAX,
   COHORT_COST_CAP_CODE,
   DISCARD_COUNT_EXCEEDED,
+  DISCARD_ENTRY_TOO_LARGE,
   DISCARD_HTTP_REJECTED,
   DISCARD_META_UNREADABLE,
   DISCARD_SPOOL_SATURATED,
@@ -6696,8 +6697,15 @@ test("a replacement OVER the count ceiling is REFUSED (#14347 cyc2)", () => {
   // ADMITTED (the sibling row above pins that); what is refused is one entry
   // OVER, which is what this row now pins.
   //
-  // MUTATION THAT REDS THIS: pass `addsEntry: false` unconditionally (or drop
-  // the count term) -> the write is ADMITTED at `parsedCount = 3 > 2`.
+  // MUTATION THAT REDS THIS: drop `unreadableCount` from `parsedCount`
+  // (`parsedCount = metas.length`) -> `metas.length = 2` with `addsEntry` 0 makes
+  // `2 <= 2` and the write is ADMITTED at `parsedCount = 3 > 2`.
+  //
+  // ⛔ NOT `addsEntry: false`: with `parsedCount = 3` and NO filed entry the floor
+  // refuses independently of that operand, so no value of it can admit here —
+  // naming it was an attribution defect (cycle-6 finding 4, measured GREEN). The
+  // operand is guarded by the AT-the-ceiling row above and by
+  // `an orphan cannot relieve a COUNT ceiling`.
   //
   // ⛔ THREE STEMS ON PURPOSE. At `maxEntries: 1` with a single readable plus a
   // single unreadable stem, `parsedCount` (2) is over the ceiling with or
@@ -7293,3 +7301,112 @@ test("a REFUSED write mutates NOTHING, even beside a CORRUPT meta (#14347 cyc5 P
     0,
     "a REFUSED write is not a mutation: nothing may be moved aside",
   );});
+
+test("the HEALTH LINE is saturated when the writer refuses new work (#14347 cyc6 P2)", () => {
+  // The strict arm's floor must carry the `+1` the writer will add. `strict`
+  // means "no projection was offered", and every caller of that arm asks about a
+  // NEW capture — `captureHealthLine` above all — so the post-write count is
+  // `parsedCount + 1`. Without the `+1` the floor was one short of the writer's,
+  // and the two disagreed whenever `parsedCount - filed.length === maxEntries`
+  // with at least one filed entry: measured, three readable undelivered + one
+  // FILED at `maxEntries: 3` gave health `DRAINING (3 queued)` — paging nobody —
+  // while the writer refused every NEW capture with `spool_saturated`. The writer
+  // is right (after prune evicts the one filed entry the count is 4, still over
+  // 3, so room cannot be made and #10175 requires the refusal); the health line
+  // was the false PASS, the agent-infra#2100 class it exists to prevent.
+  //
+  // MUTATION THAT REDS THIS: drop the `+1` from `floorCount`
+  // (`const floorCount = count - filed.length`) -> health reads `DRAINING` while
+  // the write is refused.
+  const spool = tmpSpool();
+  for (const sid of ["sess-u0", "sess-u1", "sess-u2"]) seedSpoolEntry(spool, sid, { readable: true });
+  seedSpoolEntry(spool, "sess-filed", { readable: true, filed: true });
+  const bounds = { maxEntries: 3, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+
+  assert.equal(
+    captureHealthLine(spool, { bounds }).state,
+    "saturated",
+    "the health line must not report a spool healthy while every new capture is refused",
+  );
+  const res = writeSpoolEntry(spool, snapshot("sess-new"), bounds);
+  assert.equal(res.written, false, "the premise: the writer refuses new work on this spool");
+  assert.equal(res.discards.at(-1)?.reason, DISCARD_SPOOL_SATURATED);
+});
+
+test("prune does NOT count a corrupt stem its own scan just unlinked (#14347 cyc6 P3)", () => {
+  // `listSpoolEntries` REPAIRS: it unlinks a corrupt meta and renames its log to
+  // `.orphan` inside the same call, so that stem no longer occupies an entry slot
+  // (its bytes are correctly 0, and its log is credited as an evictable orphan).
+  // Counting it made prune evict one filed entry per corrupt meta for a count
+  // overage that had ceased to exist: measured pre-fix, ceiling 2 with two filed
+  // + one corrupt → one filed destroyed and the spool settled one BELOW its
+  // ceiling.
+  //
+  // MUTATION THAT REDS THIS: count the third element as-is
+  // (`metas.length + unreadable.length`) -> one filed entry is evicted.
+  const spool = tmpSpool();
+  for (let i = 0; i < 2; i += 1) {
+    seedSpoolEntry(spool, `sess-f${i}`, {
+      readable: true,
+      filed: true,
+      stamp: `2026-01-01T00:00:0${i}Z`,
+    });
+  }
+  const dir = join(spool, "entries");
+  writeFileSync(join(dir, `${entryKey("sess-corrupt")}.meta.json`), "{ this is not json");
+  writeFileSync(
+    join(dir, `${entryKey("sess-corrupt")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "x" })}\n`,
+  );
+  const bounds = { maxEntries: 2, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+
+  const discards = pruneSpool(spool, "sess-new", bounds);
+
+  assert.deepEqual(
+    discards,
+    [],
+    `the repairing scan already removed the only over-count; nothing to evict: ${JSON.stringify(discards)}`,
+  );
+  assert.notEqual(
+    readSpoolEntry(spool, "sess-f0"),
+    undefined,
+    "a filed entry is not spent for a count overage that no longer exists",
+  );
+  assert.notEqual(readSpoolEntry(spool, "sess-f1"), undefined);
+});
+
+test("the over-bound refusal does not call an ABSENT meta unreadable (#14347 cyc6 P3)", () => {
+  // The ledger may not lie in either direction. The over-bound refusal arm is
+  // gated on `prior === undefined`, which is also true for an entry with NO meta
+  // at all — the shape this PR is about, because the writer stores the log before
+  // the meta and an ENOSPC leaves a lone over-bound log. It said the entry's
+  // "meta cannot be read" when there is no meta to read; `priorDesc` exists
+  // precisely so no arm makes that claim.
+  //
+  // MUTATION THAT REDS THIS: use the fixed sentence ("but its meta cannot be
+  // read") instead of `priorDesc` -> the detail claims an unreadable meta.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${entryKey("sess-stray")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y".repeat(3032) })}\n`,
+  );
+  const bounds = { maxEntries: 1000, maxTotalBytes: 1 << 20, maxEntryBytes: 1000 };
+
+  const res = writeSpoolEntry(
+    spool,
+    { ...snapshot("sess-stray"), turns: [{ role: "user", content: "z".repeat(3032) }] },
+    bounds,
+  );
+
+  assert.equal(res.written, false);
+  assert.equal(res.discards.at(-1)?.reason, DISCARD_ENTRY_TOO_LARGE);
+  const detail = res.discards.at(-1)?.detail ?? "";
+  assert.ok(detail.includes("ABSENT"), `the record must name what is actually on disk: ${detail}`);
+  assert.equal(
+    detail.includes("meta cannot be read"),
+    false,
+    `there is no meta to read: ${detail}`,
+  );
+});
