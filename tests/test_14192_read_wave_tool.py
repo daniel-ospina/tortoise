@@ -7788,6 +7788,10 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             # ⛔ A LOOP TARGET IS A STORE TOO (#14326 round 25, MEASURED GREEN:
             # `for sys.modules in ({"tortoise.sdk": _Mirror},): pass` replaced the registry
             # with the pin GREEN — every other bind form the file resolves, this one missing).
+            # ⛔ AND THE `AsyncFor` MEMBER IS PINNED, NOT ASSUMED (#14326 round 27: dropping it
+            # from this tuple left the file at `41 passed` while the `async for` twin of that
+            # lever stayed GREEN — the row is in `registry_replacements`, and the census in
+            # `test_the_ASYNC_for_arms_…` now names this arm).
             replaced = _registry_replacement(node.target, ctx)
             if replaced is not None:
                 out.append(
@@ -7886,7 +7890,7 @@ def _findings_of_run(source: str, predicate) -> list[str]:
 
 
 def test_the_ASYNC_for_arms_that_CARRY_the_class_are_pinned_and_the_redundant_ones_are_NAMED() -> None:
-    """The two `ast.AsyncFor` members THIS ROW pins, and the eight it does not.
+    """The two `ast.AsyncFor` members THIS ROW pins, and the nine it does not.
 
     ⛔ MEASURED AT `57735ab47947` (this file, 41 rows). `ast.AsyncFor` appears in TEN code
     arms of this harness — counted by walking the AST for every `Attribute(attr="AsyncFor")`
@@ -7903,6 +7907,25 @@ def test_the_ASYNC_for_arms_that_CARRY_the_class_are_pinned_and_the_redundant_on
         `_per_query_element_mutations`: gate   41 passed  redundant (re-measured below)
         `_per_query_element_mutations`: deriv. 41 passed  redundant (re-measured below)
         `_rebound_after`                       41 passed  redundant (re-measured below)
+
+    ⛔ RE-CENSUSED AT `77a7f04ee44f` (#14326 round 27). This is the third correction of this
+    table, and it found a LIVE fail-open rather than another stale sentence: the count is
+    ELEVEN, because `_constructor_provenance_findings` gained a loop-target arm in round 25
+    (`7508592c24`, the commit that made unpack and `for` targets store to the registry) — ONE
+    arm, landed AFTER the `4473c96648ca` re-census recorded below, which is why the count
+    DRIFTED rather than being mis-taken. Its verdict is NOT redundant:
+
+        `_constructor_provenance_findings`
+               loop-target arm               1 failed   <- pinned HERE (round 27)
+
+    Measured: deleting `ast.AsyncFor` from that arm left this file at **41 passed** while
+    `async for sys.modules in ({"tortoise.sdk": _Mirror},):` stayed GREEN — the sync `for`
+    spelling was RED, so the defect was exactly one node type over, i.e. this row's own class
+    reproduced inside the one arm the census had missed. It is pinned now by the `async for`
+    row in `registry_replacements` below, and that row is the only NEW row the re-census added;
+    a second `async for` spelling was measured, found to red on the SAME single mutant as the
+    first, and therefore not added — a row that changes no verdict is this file's other
+    deletion rule.
 
     ⛔ RE-CENSUSED AT `4473c96648ca`, the peer commit that lands ON TOP of this row: still TEN,
     the same ten arms, every verdict below unchanged. ⛔ AND THE REASON IS STATED FROM THE DIFF, NOT
@@ -7923,8 +7946,9 @@ def test_the_ASYNC_for_arms_that_CARRY_the_class_are_pinned_and_the_redundant_on
     mistake them for pinned clauses" was short by two arms — the stale/false-claim class this
     file deletes clauses for, and a map with two holes in it is that class. Both omissions are
     REDUNDANT (each measured `41 passed` at this head, so no fail-open hides behind them):
-    what was wrong was the COUNT, not the guard. The eight non-THIS-row arms are 2 pinned by
-    sibling rows + 6 redundant = 8, and 2 + 8 = the ten the census now names.
+    what was wrong was the COUNT, not the guard. The nine non-THIS-row arms are 2 pinned by
+    sibling rows + 6 redundant + 1 pinned by the round-27 row above = 9, and 2 + 9 = the
+    eleven the census now names.
 
     ⛔ THE ARMS ARE NAMED, NOT NUMBERED, ON PURPOSE. A `:NNNN` in this docstring is the drift
     class this file keeps being cured of: the numbers in the first version of this table were
@@ -8548,6 +8572,15 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'sys.__dict__["modules"], _x = {"tortoise.sdk": _Mirror}, 1\n',
         "`for sys.modules in ({…},)` TARGET":
             'for sys.modules in ({"tortoise.sdk": _Mirror},):\n    pass\n',
+        # ⛔ `async for` IS THE SAME ARM ONE NODE TYPE OVER, AND IT WAS UNPINNED (#14326
+        # round 27, MEASURED at `77a7f04ee44f`: dropping `ast.AsyncFor` from
+        # `_constructor_provenance_findings`' loop-target arm left this file at **41 passed**
+        # while the lever below stayed GREEN — a live fail-open behind a clause no mutant
+        # could red, which is the defect class this file deletes clauses for). The `for` row
+        # above cannot carry it: the sync spelling never touches the `AsyncFor` member.
+        "`async for sys.modules in ({…},)` TARGET":
+            'async def _a():\n'
+            '    async for sys.modules in ({"tortoise.sdk": _Mirror},):\n        pass\n',
         # ⛔ AND A `sys.__dict__` ALIAS PRODUCED BY AN ALIASED CALLEE (#14326 round 25,
         # MEASURED GREEN at `1515591f`: `builtin_aliases` was built AFTER `sys_dict_names`, so
         # the one site that FILLS that field read it empty and three arms downstream were
