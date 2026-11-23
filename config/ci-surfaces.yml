@@ -2417,7 +2417,16 @@ surfaces:
   # registered under `core` because `tortoise/capture_spool.py` and
   # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
   - test_capture_spool.py
-  # #6388: the session-events DRAIN's CLI consumer (`tortoise session drain`) and
+  # #14342 D2 (#12483/#12484/#12487): the spool-integrity guard belongs beside
+  # `test_capture_spool.py` for the SAME two reasons — its CLI surface
+  # (`tortoise session spool` / `session drain`) lives in `tortoise/__main__.py`,
+  # an EXACT `api` SOURCE_PATTERNS match, so an api-only diff would otherwise run
+  # no guard for the arithmetic this file pins. The `core` row below is the
+  # mechanism half (`tortoise/capture_spool.py` matches no named surface).
+  # ⛔ Both rows are required: an unregistered test file also reds the
+  # `manifest-integrity` leg (`tools/ci_selection.py --integrity`), and the tests
+  # themselves would then run on NO surface at all.
+  - test_12483_12487_spool_integrity.py
   # its SessionStart hook live in `tortoise/__main__.py`, an EXACT `api`
   # SOURCE_PATTERNS match. A match REPLACES the `core` fallback in `select()`, so
   # a `__main__.py`-only diff selected `api` and NOT this guard — the #1349/#2938
@@ -6757,6 +6766,12 @@ surfaces:
   # tortoise/__main__.py); this `core` entry is what runs the guard when the
   # spool module itself — an unmatched `tortoise/` path — changes.
   - test_capture_spool.py
+  # #14342 D2 (#12483/#12484/#12487): the spool-integrity guard's MECHANISM half.
+  # `tortoise/capture_spool.py` matches no named `SOURCE_PATTERNS` entry, so it
+  # falls through to `core`; without this row a change to the spool module itself
+  # would run no guard for the retained-unreadable accounting it pins. Dual
+  # registration mirrors `test_capture_spool.py` one block up.
+  - test_12483_12487_spool_integrity.py
   # #6388: the session-events SEAL policy (`tools/seal_session_events.py` —
   # compress, never discard, per the #3870 ruling). `tools/` is a flat
   # NON_PYTHON_PREFIXES entry, so a change to that tool selects NO surface on
@@ -7792,6 +7807,16 @@ surfaces:
   # (verified with `tools/ci_selection.py --changed-files <path>`), and without
   # this arm the guard would never run on the write path it holds.
   - test_operator_label_vocabulary.py
+  # #14263: the relation-PAIR leg (`tortoise/relation_guards.py`) and its three
+  # wiring sites. Registered under `core` for the same two reasons as the row
+  # above: `tortoise/relation_guards.py` matches no `SOURCE_PATTERNS` entry, so a
+  # module-only diff falls through to `core`; and `tortoise/sdk.py` is a
+  # `SHARED_MODULE` whose own diff forces the FULL matrix, so no narrower row
+  # could rescue a leg on the write path this file exists to pin. Without this
+  # row the file is UNCLASSIFIED — `tools/ci_selection.py --integrity` reds
+  # (`manifest-integrity` is a REQUIRED leg) AND no diff can select it, so the
+  # whole proof-of-work would never execute in CI.
+  - test_relation_guards_14263.py
   - test_operator_source_search.py
   - test_operator_source_unit.py
   - test_ops_safety.py
@@ -14275,6 +14300,14 @@ durations:
   test_session_attribution.py: 0.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.3
   test_session_import_codex.py: 23.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 23.6
   test_capture_spool.py: 3.3  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 4.5
+  # #14342 D2: registering `test_12483_12487_spool_integrity.py` puts one more file
+  # in `fast_pool()`, and `--integrity`'s duration-coverage floor (0.90) is
+  # measured against that pool's own size — so the row must EXIST, not merely
+  # default. Measured locally: 34 tests (11 at #12483/#12487, +6 at the cycle-2
+  # findings, +9 at the cycle-3 ones, and +8 across the cycle-4/5/6 pins),
+  # DB-free / graph-free / network-free / model-free, every case under
+  # `tmp_path`.
+  test_12483_12487_spool_integrity.py: 1.5
   test_6388_session_events_drain.py: 0.3  # The row has to EXIST, not merely default: the `core` + `api` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: DB-free, graph-free, network-free and model-free — every case writes day files under `tmp_path` (`TORTOISE_SESSION_EVENTS_DIR`/`store=`) and drives `drain_session_events` with a recording `PostOutcome` transport; the only subprocess-free cost is gzip encode/decode on the sealed-day cases. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.0
   # #3516 §B: the capture-lane marker. Measured as the CALL sum of an
   # embedded-lane run (23 tests, four of them HTTP round-trips); the docker
@@ -15137,6 +15170,8 @@ durations:
   test_record_reconcile_trigger.py: 2.4  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.2
   test_13337_cache_graph_declaration.py: 4.2  # new in #13337; "a default is not a reading", so the row must EXIST (`api`+`core` above are what put it in `fast_pool()`). What the weight covers: the declaration's source order, the control-plane read's filters, both verbs' flag/whitespace arms and the JSON coordinate are DB-FREE; the store-backed acceptance legs skip without `TEST_RECORD_DB_URI` + `TORTOISE_DB_URI` and are ARMED in `test-record-postgres` — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
   test_record_schema_placement.py: 1.2  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 0.2
+  test_relation_guards_14263.py: 2.0  # new in #14263 (PR #14284) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity`'s coverage check is a RATIO with headroom, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file; the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because the entry-rule pin iterates an EXPLICIT tuple and cannot see a file nobody listed. What the weight covers: the module's four-outcome verdict table (accept / normalised / undeclared / reversed, the reversed state kept DISTINCT per AX §2), the two silent legs staying silent, the shipped-declaration read being the pack catalog rather than a fixture, the `LABEL_ENDPOINTS` mirror against `pack_state._ONTOLOGY_LABELS`, the abstention reasons staying distinct (`ABSTAIN_*` — the module defines
+  # seven stable ids and this file pins four of them by equality), the `declarationOnly` row contributing no pair, the namespace fold being refused, and each of the three connect doors carrying the honest state while still writing the edge (`#1934` warn-not-block). Mostly in-process over an embedded graph; the ingest/door cases build the SDK's own store under `tmp_path`, and on a `TORTOISE_DB_URI`-set lane those constructions are redirected to the server the run was given by the epic-#1647 class-level redirect. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_12901_wave2_control_plane.py: 2.0  # new in #12901 (PR wave 2) — a file a PR ADDS can never carry a CI junit reading yet (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ('a default is not a reading'): the `core` registration above is what puts the file in `fast_pool()`. ⚠️ MEASURED LOCALLY as context, NOT as the weight: whole-file through `tools/test_lane.py run` measured **50 passed in 8.57 s** on a private lane container at head `b4ca3f2849`, so the flat 2.0 UNDERSTATES it until a sweep re-bases it. `--integrity` is the authority and the refresher replaces this row from junit.
   test_10663_placement_table_packaged.py: 0.1  # new in #10663 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.0
   test_11075_record_declared_type_contract.py: 0.3  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 0.2

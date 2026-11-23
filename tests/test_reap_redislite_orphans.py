@@ -1183,11 +1183,53 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     `allow-skipped` budget — "a skip here is a gate evasion and must red rather
     than be absorbed" — so a substrate limitation must be REMOVED, not skipped.
     """
+    # ⛔ THE BINARY MUST SURVIVE AN ARBITRARY `argv[0]`, and `cat` does not.
+    # GNU coreutils' *multi-call* build dispatches on `basename(argv[0])`, so a
+    # copy of it renamed `redis-server` REFUSES and exits: the failing run's own
+    # output carries the child's message, `coreutils: unknown program
+    # 'redis-server'` ("Captured stderr call"), and a SIGTERM never prints
+    # anything. The child is then a ZOMBIE — `comm` still reads `redis-server`
+    # (the kernel sets `comm` from the EXEC'D FILENAME), `/proc/<pid>/cmdline` is
+    # EMPTY — so `_iter_proc_inventory` returns its documented KEEP row with
+    # `socket_dir: None` and the assertion below fails as `None == …`, i.e. on a
+    # fixture that never ran. Reproduced locally by copying `/bin/true` as
+    # `redis-server`: same row (`socket_dir: None`), same ASSERTION text — though
+    # `/bin/true` prints nothing, so the child's message is a property of the
+    # multi-call binary and not of every exiting one. `sh`/`dash`/`bash` are real
+    # ELFs that read stdin with `argc == 1` and do not dispatch on their own name,
+    # so they carry the shape this test needs on the hosts this suite runs on —
+    # and if one ever does dispatch by name, the liveness guard below names the
+    # fixture instead of blaming the reaper.
+    # BOTH sides of the 2026-11-23 merge of `origin/main` fixed this fixture, and
+    # they are complementary rather than duplicative: main (#14335/#14347, landed
+    # independently) picked the shell by `shutil.which` and added a stability
+    # window; this branch added `_argv0_stand_in_source()`, which additionally
+    # REFUSES a busybox applet and a wrapper script by name. The helper is the
+    # strictly stronger selector (it is main's choice PLUS the two exclusions the
+    # #14287 review asked for), so it supplies `source`; the guard below keeps
+    # main's window, whose message names the fixture binary that exited.
+    source = _argv0_stand_in_source()
     binary = tmp_path / "redis-server"
-    binary.write_bytes(_argv0_stand_in_source().read_bytes())
+    binary.write_bytes(source.read_bytes())
     binary.chmod(0o755)
-    gone = tmp_path / "gone-socket-dir"
-    line = f"{binary} unixsocket:{gone}/redis.socket"
+    # ⛔ AND THE SOCKET DIR MUST EXIST, or the fixture is a legitimately REAPABLE
+    # process and this repo's own cleanup kills it (#14347 CI red, measured).
+    # `reap-redislite-orphans.py --apply` runs in the setup of EVERY leg
+    # (`python-ci.yml` ×4, `ci.yml`, `post-merge-validation.yml`) on shared
+    # self-hosted runners whose own orphan gate measures `other_suites=10`. A
+    # process named `redis-server` whose socket dir is ABSENT is classified
+    # `REAP — socket dir … is gone`, so a leg booting while this test runs
+    # SIGTERMs it; the dead child's `/proc/<pid>/cmdline` is then EMPTY, the
+    # inventory returns its row with `socket_dir: None` (the documented KEEP
+    # arm), and the assertion below fails as `None == …` — the same end state
+    # the coreutils arm above produces, from the opposite direction. With
+    # the dir present the same row classifies `KEEP — could be a concurrent
+    # leg's live instance` (age ~0s), so no reaper can take it. Nothing this
+    # test asserts changes: identity is still `comm`, and the socket dir is
+    # still read out of the one-element `argv[0]` line.
+    sockdir = tmp_path / "socket-dir"
+    sockdir.mkdir()
+    line = f"{binary} unixsocket:{sockdir}/redis.socket"
     child = subprocess.Popen(
         [line],
         executable=str(binary),
@@ -1212,20 +1254,22 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
         # survives death, `cmdline` does not, so `child.pid in rows` stayed true
         # while `socket_dir` was None — the test could not tell "a live server the
         # inventory listed" from "a reaped child it listed anyway".
-        # A single `poll()` is not enough: a stand-in that exits at once can still
-        # answer `poll() is None` in the window before its exec lands — measured
-        # with a copy of `/bin/true`, where the guard passed and the assertion
-        # below then redded as `assert None == '/tmp/…'`, i.e. exactly the
-        # confusing red this guard exists to replace. A fixture that BLOCKS is
-        # still running after a short dwell, and one that dies at once is not.
-        for _ in range(20):
-            assert child.poll() is None, (
-                f"the fixture child exited (rc={child.returncode}) instead of blocking on "
-                "stdin, so the inventory below could only enumerate a CORPSE — a zombie "
-                "keeps its `comm` but loses its `cmdline`, which is how this fixture "
-                "false-redded on uutils' multicall coreutils (#14335). The stand-in "
-                "binary must stay alive for the row it asserts to mean anything")
-            time.sleep(0.05)
+        # A STABILITY WINDOW, not a single poll: a stand-in that exits at once can
+        # still answer `poll() is None` before its exit lands — measured with a
+        # copy of `/bin/true`, which exits in ~2 ms. A bare poll reads "alive" and
+        # the assertion below then reds as `assert None == '/tmp/…'`, i.e. exactly
+        # the confusing red this guard exists to replace. A fixture that BLOCKS on
+        # stdin is still running after the window; one that dies at once is not.
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and child.poll() is None:
+            time.sleep(0.02)
+        assert child.poll() is None, (
+            f"the fixture binary ({source}) exited (rc={child.returncode}) instead of "
+            "staying alive on stdin, so the inventory below could only enumerate a "
+            "CORPSE — a zombie keeps its `comm` but loses its `cmdline`, which is how "
+            "this fixture false-redded on uutils' multicall coreutils (#14335). The "
+            "stand-in binary must stay alive for the row it asserts to mean anything"
+        )
         inventory = reaper._iter_proc_inventory()
         assert inventory is not None
         # Written against the rows ALONE, so the pre-fix tree fails on the FACT
@@ -1237,7 +1281,16 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
             "element does not END in `redis-server` — must still be enumerated; "
             f"the pre-fix filter dropped it — inventory held {sorted(rows)}"
         )
-        assert rows[child.pid]["socket_dir"] == str(gone)
+        assert rows[child.pid]["socket_dir"] == str(sockdir)
+        # …and the fixture is not itself reapable litter. This is the half that
+        # makes the fix above non-vacuous: drop the `sockdir.mkdir()` and this
+        # row REDs with `REAP — socket dir … is gone`, i.e. it names the state
+        # in which the repo's own cleanup is entitled to kill the fixture
+        # mid-assertion — the shape that flaked this test on CI.
+        assert reaper.classify(rows[child.pid], reaper.DEFAULT_MAX_AGE_MINUTES * 60.0)[0] is False, (
+            "the fixture must never be a reap candidate, or a concurrent leg's "
+            "cleanup can SIGTERM it mid-assertion (#14347)"
+        )
     finally:
         child.kill()
         child.wait(timeout=30)
