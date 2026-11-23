@@ -649,7 +649,7 @@ def test_a_deferred_batch_is_remembered_and_retried(client, store, monkeypatch):
 def test_the_first_batch_touch_after_a_boot_resumes_unfinished_work(
         client, store, monkeypatch):
     """BLOCKING 5: `recover()` needs a CALLER, or "a restart resumes" is prose."""
-    monkeypatch.setattr(ha, "_BATCH_RECOVERED", set())
+    monkeypatch.setattr(ha, "_BATCH_SCAN", {})
     # The claim the dead process left behind is older than the reclaim window.
     monkeypatch.setattr(bi, "BATCH_RECLAIM_AFTER_S", 0.0)
     submitted: list[str] = []
@@ -722,7 +722,12 @@ def _age_claim(store, org_id, batch_id, item_id,
 
 
 def test_an_embedded_item_can_be_finished_not_re_claimed(store):
-    """NB10: `embedded` is a legal starting point, not an illegal re-entry."""
+    """NB10: `embedded` is a legal starting point, not an illegal re-entry.
+
+    The claim is AGED, not switched off: a FRESH `embedded` row belongs to a live
+    runner and is left alone (`test_a_fresh_claim_is_never_re_claimed_by_the_drain`);
+    the one whose runner is gone must still be finishable.
+    """
     coord = bi.BatchCoordinator(store)
     _batch, items = coord.submit(ORG_ID, ["/d/a.md"])
     coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
@@ -796,7 +801,7 @@ def test_the_first_touch_does_not_requeue_a_batch_a_live_drain_owns(
     process that is still running is not treated as a dead one. Without this the
     live runner's `indexed` outcome became an illegal edge and was discarded.
     """
-    monkeypatch.setattr(ha, "_BATCH_RECOVERED", set())
+    monkeypatch.setattr(ha, "_BATCH_SCAN", {})
     submitted: list[str] = []
     monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
         "ceiling": 2,
@@ -825,7 +830,7 @@ def test_the_first_touch_does_not_requeue_a_batch_a_live_drain_owns(
     # taking a claim a PEER process holds, so a dead-in-this-process claim that is
     # one second old is deliberately left alone by default.
     monkeypatch.setattr(bi, "BATCH_RECLAIM_AFTER_S", 0.0)
-    ha._BATCH_RECOVERED.discard(ORG_ID)
+    ha._BATCH_SCAN.pop(ORG_ID, None)
     assert ha._recover_org_batches({"org_id": ORG_ID}) == [batch.batch_id]
     assert store.items(ORG_ID, batch.batch_id)[0].state is (
         bi.BatchItemState.QUEUED)
@@ -1053,6 +1058,9 @@ def test_a_retry_pass_never_runs_work_on_a_cancelled_batch(store, monkeypatch):
     """
     calls: list[str] = []
 
+    # `_BATCH_RETRY` is a module global shared with every other test in this
+    # module; isolate it so the assertion below is about THIS batch.
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
     monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
     monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
 
@@ -1100,6 +1108,9 @@ def test_a_claim_re_entered_from_extracting_counts_towards_the_ceiling(store,
         calls.append(item.attempts)
         return bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=7)
 
+    # The claim this re-entry inherits is STALE: a live one belongs to a runner
+    # and is never re-claimed at all (`BATCH_RECLAIM_AFTER_S`).
+    monkeypatch.setattr(bi, "BATCH_RECLAIM_AFTER_S", 0.0)
     store = bi.InMemoryBatchStore()
     coord = bi.BatchCoordinator(store)
     batch, items = coord.submit(ORG_ID, ["/d/a.md"])
@@ -1159,7 +1170,7 @@ def test_a_relative_ref_resolves_under_the_org_root_not_the_server_cwd(
     The join under the ORG root must not weaken the tenancy bound: `..` still
     escapes the root and is still refused before any read.
     """
-    base, root = _corpus(tmp_path)
+    base, _root = _corpus(tmp_path)
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
     sdk = sdk_factory(namespace="test_suite_batch14219rel")
     runner = ha._batch_item_runner(sdk, "corpus", ORG_ID)
@@ -1298,7 +1309,8 @@ def test_the_drain_charges_the_one_meter_when_an_item_reports_tokens(
     batch, _ = coord.submit(ORG_ID, ["/d/a.md"])
     ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
 
-    assert charged == [{"org": ORG_ID, "tokens_in": 700, "tokens_out": 30}], (
+    assert charged == [{"org": ORG_ID, "calls": 0, "tokens_in": 700,
+                        "tokens_out": 30}], (
         "an item that spent tokens did not reach the capture meter — the budget "
         "the owner mandated would be reported as unused forever")
 
@@ -1315,8 +1327,8 @@ def test_a_zero_token_item_makes_no_ledger_call(monkeypatch):
     called: list[dict] = []
     monkeypatch.setattr(metering, "record_capture_usage",
                         lambda org_id, **kw: called.append(kw))
-    item = bi.BatchItem(batch_id="b", item_id="b-0", ref="/a.md")
-    assert bi.record_item_spend(ORG_ID, item) == 0
+    assert bi.record_item_spend(ORG_ID, tokens_in=0, tokens_out=0) == 0
+    assert bi.record_item_spend("", tokens_in=500, tokens_out=0) == 0
     assert called == []
 
 
@@ -1387,113 +1399,113 @@ def test_a_restart_defers_a_fresh_claim_instead_of_discarding_it(store,
     the item stayed `extracting` for the process lifetime with the batch reporting
     `pending > 0` and nothing to re-drive it.
     """
-    from tortoise import batch_ingest as bi
-
-    monkeypatch.setattr(ha, "_BATCH_RECOVERED", set())
+    monkeypatch.setattr(ha, "_BATCH_SCAN", {})
+    monkeypatch.setattr(ha, "_BATCH_RESCAN_S", 0)
     monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
-    submitted: list[str] = []
-    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
-        "ceiling": 2,
-        "submit": staticmethod(lambda fn, *a, **k: submitted.append(a[1]) or True),
-    })())
-    coord = bi.BatchCoordinator(store)
-    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
-    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
-    # …the process dies here, one second later the replacement boots.
-
-    resumed = ha._recover_org_batches({"org_id": ORG_ID})
-
-    assert resumed == [batch.batch_id], (
-        "a batch holding only a FRESH claim must still be resumed, or the claim "
-        "is stranded for ever")
-    assert batch.batch_id in submitted
-    assert store.items(ORG_ID, batch.batch_id)[0].state is (
-        bi.BatchItemState.EXTRACTING), (
-        "the fresh claim itself must NOT be requeued — a peer may hold it")
-
-    # Once the claim is genuinely OLD the same batch becomes reclaimable — the
-    # window is aged, not switched off (see `_age_claim`).
-    _age_claim(store, ORG_ID, batch.batch_id, items[0].item_id)
-    stale = bi.BatchCoordinator(store).recover(ORG_ID)
-    assert stale == [batch.batch_id]
-    assert store.items(ORG_ID, batch.batch_id)[0].state is (
-        bi.BatchItemState.QUEUED), "a stale claim must be requeued for a retry"
 
 
-def test_a_drain_does_not_re_enter_a_peer_s_fresh_claim(store, monkeypatch):
-    """⛔ ROUND-5 BLOCKING 2: the window was per BATCH, the claim is per ITEM.
+# ── round 4: ONE liveness rule, a re-scan, a rotating window, one charge ───
+def test_a_fresh_claim_is_never_re_claimed_by_the_drain(store, monkeypatch):
+    """⛔ BLOCKING 3: `recover()`'s care is worthless if the DRAIN ignores it.
 
-    With one `queued` sibling the batch was resumed and this drain walked EVERY
-    non-terminal row — including an `extracting` row another instance was inside
-    the runner call on. Two extractions of one document, two graph writes, and
-    (once tokens are metered) charged twice.
+    A drain iterates every non-terminal item of a batch, so after `recover()`
+    correctly declined to touch a peer's fresh `extracting` row, the very next
+    drain re-claimed it — a second extraction of a document another process was
+    inside, whose outcome then landed as an illegal edge on top. The rule now
+    lives in the CLAIM ARM, which every claim goes through.
     """
-    from tortoise import batch_ingest as bi
-
     calls: list[str] = []
-
     monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
     monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(ha, "_batch_item_runner",
+                        lambda *a, **k: (lambda i: calls.append(i.item_id)
+                                         or bi.ItemOutcome(
+                                             bi.BatchItemState.INDEXED,
+                                             tokens_in=1000)))
 
-    def _runner(sdk, corpus, org_id):
-        def _run(item):
-            calls.append(item.item_id)
-            return bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=1)
-        return _run
-
-    monkeypatch.setattr(ha, "_batch_item_runner", _runner)
     coord = bi.BatchCoordinator(store)
-    batch, items = coord.submit(ORG_ID, ["/d/live.md", "/d/queued.md"])
-    claimed, queued = items[0], items[1]
-    # A PEER is inside the runner call on item 0, right now.
-    coord.advance(ORG_ID, claimed, bi.BatchItemState.EXTRACTING, attempt=True)
+    batch, items = coord.submit(ORG_ID, ["/d/peer.md", "/d/ours.md"])
+    # A peer is INSIDE the first item right now; the second is ours to work.
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
 
     ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
 
-    assert calls == [queued.item_id], (
-        f"the drain ran {calls} — a peer's fresh claim must never be re-entered")
-    rows = {i.item_id: i for i in store.items(ORG_ID, batch.batch_id)}
-    assert rows[claimed.item_id].state is bi.BatchItemState.EXTRACTING, (
-        "the peer's claim must be left exactly as the peer left it")
-    assert rows[claimed.item_id].attempts == 1, (
-        "and must not be counted as one of OUR attempts")
-    assert rows[queued.item_id].state is bi.BatchItemState.INDEXED
+    assert calls == [items[1].item_id], (
+        f"the drain re-claimed a live claim: {calls}")
+    peer = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
+    assert peer.state is bi.BatchItemState.EXTRACTING
+    assert peer.attempts == 1, "a live claim must not be re-counted as an attempt"
 
 
-def test_a_peer_s_fresh_claim_is_not_metered_by_this_process(store, monkeypatch):
-    """⛔ ROUND-6 HIGH: the meter was keyed on the RETURNED row.
+def test_a_claim_the_row_has_moved_past_is_not_run(store, monkeypatch):
+    """⛔ BLOCKING 3, second half: the CAS verdict must be BINDING.
 
-    `run_item` returns a fresh claim untouched when a peer may hold it, and that
-    row can carry the peer's interim tokens (a staged runner's `embedded` write is
-    a legal non-terminal write). Metering the return value charged 500 tokens per
-    tick — five passes over a 900 s window — for work this process never ran. A
-    non-terminal return means "I did nothing here", which owes the ledger nothing.
+    `advance` refuses to write over a newer state, but its return value was
+    ignored, so a row that moved between the read and the claim write was still
+    handed to the runner — a second extraction of a completed document.
     """
-    from tortoise import batch_ingest as bi
+    calls: list[str] = []
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    stale = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
 
+    # The row settles between `run_item`'s read and its claim write.
+    real_advance = coord.advance
+
+    def _advance(org_id, item, new_state, **kw):
+        if new_state is bi.BatchItemState.EXTRACTING and not calls:
+            # A peer settles the row through its OWN copy, so the row in the
+            # store moves while the caller still holds `queued`.
+            peer = store.get_item(org_id, item.batch_id, item.item_id)
+            other = bi.BatchCoordinator(store)
+            other.advance(org_id, peer, bi.BatchItemState.EXTRACTING,
+                          attempt=True)
+            other.advance(org_id, peer, bi.BatchItemState.INDEXED)
+        return real_advance(org_id, item, new_state, **kw)
+
+    monkeypatch.setattr(coord, "advance", _advance)
+    out = coord.run_item(ORG_ID, stale,
+                         lambda i: calls.append(i.item_id) or bi.ItemOutcome(
+                             bi.BatchItemState.INDEXED, tokens_in=500))
+
+    assert calls == [], "the runner ran on a row that had already settled"
+    assert out.state is bi.BatchItemState.INDEXED
+    assert out.charge_in == 0, "nothing landed here, so nothing may be charged"
+
+
+def test_a_retried_item_is_charged_ONCE(store, monkeypatch):
+    """⛔ BLOCKING 4: the meter must sum what was SPENT, not what the row says.
+
+    Pass 1 returns a retryable verdict carrying 100 tokens (the row records
+    them); the retry tick drives pass 2, which lands `indexed` with 100. Charging
+    the row on each pass billed 200 for one 100-token spend, while the status
+    surface reported 100 — the bill and the receipt disagreeing about the same
+    document.
+    """
     charged: list[int] = []
     monkeypatch.setattr(bi, "record_item_spend",
-                        lambda org_id, item: charged.append(int(item.tokens_in)))
+                        lambda org_id, *, tokens_in=0, tokens_out=0:
+                        charged.append(tokens_in + tokens_out) or tokens_in)
     monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
     monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
-    monkeypatch.setattr(ha, "_batch_item_runner",
-                        lambda sdk, corpus, org_id: (
-                            lambda item: bi.ItemOutcome(bi.BatchItemState.INDEXED,
-                                                        tokens_in=1)))
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(bi, "BATCH_RECLAIM_AFTER_S", 0.0)
+
+    verdicts = [bi.ItemOutcome(bi.BatchItemState.QUEUED, reason="lock-held",
+                               tokens_in=100),
+                bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=100)]
+    monkeypatch.setattr(ha, "_batch_item_runner", lambda *a, **k: (
+        lambda i: verdicts.pop(0)))
 
     coord = bi.BatchCoordinator(store)
-    batch, items = coord.submit(ORG_ID, ["/d/live.md"])
-    # A PEER is mid-item and has already written interim tokens.
-    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
-    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING,
-                  tokens_in=500, reason="interim spend by the peer")
+    batch, _ = coord.submit(ORG_ID, ["/d/a.md"])
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)   # pass 1 → queued
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)   # pass 2 → indexed
 
-    for _ in range(5):
-        ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
-
-    assert charged == [], (
-        f"this process charged {charged} tokens for work a peer ran — the meter "
-        "must fire only for items THIS call settled")
+    assert charged == [100, 100], (
+        "each runner call's own spend is charged exactly once — the row's "
+        f"cumulative figure must not be re-charged: {charged}")
 
 
 def test_an_item_that_names_a_url_is_refused_at_acceptance(client):
@@ -1587,3 +1599,64 @@ def test_the_acceptance_copy_says_one_hour_not_1_hours(client):
     message = body.get("message") or body.get("copy") or ""
     assert "in 1 hour," in message, body
     assert "1 hours" not in message, body
+
+def test_recovery_reaches_batches_past_the_per_call_window(client, store,
+                                                           monkeypatch):
+    """⛔ BLOCKING 2: a bounded PREFIX strands every batch past the bound.
+
+    `pending_batches()` order is stable, so `[:50]` re-scanned the same 50 for
+    ever while 51+ were never reached by any scan — non-terminal for life.
+    """
+    monkeypatch.setattr(ha, "_BATCH_SCAN", {})
+    monkeypatch.setattr(ha, "_BATCH_RESCAN_S", 0)
+    monkeypatch.setattr(ha, "_BATCH_RECOVER_LIMIT", 5)
+    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
+        "ceiling": 2,
+        "submit": staticmethod(lambda fn, *a, **k: True),
+    })())
+    coord = bi.BatchCoordinator(store)
+    ids = [coord.submit(ORG_ID, [f"/d/{n}.md"])[0].batch_id for n in range(12)]
+
+    seen: set[str] = set()
+    for _ in range(6):
+        seen.update(ha._recover_org_batches({"org_id": ORG_ID}))
+
+    assert set(ids) <= seen, (
+        f"{sorted(set(ids) - seen)} of {len(ids)} batches were never reached by "
+        "any scan — the window must rotate, not repeat its prefix")
+
+
+def test_a_peer_settling_the_same_state_is_not_charged_by_this_pass(store,
+                                                                   monkeypatch):
+    """⛔ ROUND-5 REVIEW P2/HIGH: "landed" cannot be inferred from the row.
+
+    The peer's first cut tested `landed.state is outcome.state` — which a PEER's
+    write to the SAME state also satisfies, so a settlement this process did not
+    make was still charged. The landing flag is explicit (`_advance_landed`).
+    """
+    charged: list[int] = []
+    monkeypatch.setattr(bi, "record_item_spend",
+                        lambda org_id, *, tokens_in=0, tokens_out=0:
+                        charged.append(tokens_in + tokens_out) or 0)
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+
+    real_advance = coord._advance_landed
+
+    def losing_advance(org_id, item, new_state, **kw):
+        # A PEER settles it to the SAME state the runner is about to write…
+        store.put_item(org_id, bi.BatchItem(
+            batch_id=item.batch_id, item_id=item.item_id, ref=item.ref,
+            state=new_state, tokens_in=0, tokens_out=0,
+            attempts=item.attempts, updated_at=item.updated_at))
+        # …so this pass's compare loses while the row looks exactly as intended.
+        return real_advance(org_id, item, new_state, **kw)
+
+    monkeypatch.setattr(coord, "_advance_landed", losing_advance)
+    out = coord.run_item(
+        ORG_ID, store.get_item(ORG_ID, batch.batch_id, items[0].item_id),
+        lambda i: bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=700))
+    assert out.charge_in == 0 and out.charge_out == 0, (
+        "this pass charged a settlement a peer made — its write did not land")
+    assert charged == []

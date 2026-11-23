@@ -519,6 +519,14 @@ class BatchItem:
     tokens_in: int = 0
     tokens_out: int = 0
     attempts: int = 0
+    #: ⛔ THE FIGURES THIS PROCESS JUST LANDED, and therefore the ONLY ones that
+    #: may be charged — never ``tokens_in/out``, which are the ROW's totals and
+    #: may describe a runner another process ran, or a pass that was already
+    #: charged (#14415 review round 4, BLOCKING 4). Non-persisted on purpose: it
+    #: is a fact about one `run_item` call, not about the document, so it cannot
+    #: be re-read and charged a second time. `as_dict` never emits them.
+    charge_in: int = field(default=0, compare=False, repr=False)
+    charge_out: int = field(default=0, compare=False, repr=False)
     #: True when this item's content differs from the generation already in the
     #: graph — i.e. it REPLACED a Source rather than duplicating one (#13451's
     #: change-vs-duplicate distinction, made visible on the wire).
@@ -1280,10 +1288,9 @@ BATCH_ITEMS_IN_FLIGHT = 2
 BATCH_RECLAIM_AFTER_S = 900.0
 
 
-def record_item_spend(org_id: str, item: BatchItem, *,
-                      tokens_in: int | None = None,
-                      tokens_out: int | None = None) -> int:
-    """Charge one item's MEASURED tokens to the `capture_extraction` meter.
+def record_item_spend(org_id: str, *, tokens_in: int = 0,
+                      tokens_out: int = 0) -> int:
+    """Charge ONE runner call's MEASURED tokens to the `capture_extraction` meter.
 
     ⛔ **ONE BUDGET, ONE METER** (owner `#14275`: *"one budget, not a fourth
     metered thing"*). A batch item that spends tokens must move the SAME
@@ -1292,37 +1299,70 @@ def record_item_spend(org_id: str, item: BatchItem, *,
     the bill, and the NEXT batch's estimate is computed against a headroom that
     no batch can ever consume.
 
-    Returns the tokens recorded (0 when the item spent nothing — the common case
-    today: the per-file indexer this route runs spends no model tokens, and
-    extraction is the `ingest --upgrade-all` sweep's job, declared as a residual).
-    A zero-token call is deliberately NOT made: `record_capture_usage` would
-    mint a `capture_calls` row for a capture that never happened, which is the
-    denominator that keeps a free capture distinguishable from an unmeasured one
-    (#3359) — burning it on a no-op would corrupt that reading on every document.
+    ⛔ **The caller passes the figures it JUST SPENT, never an item row**
+    (#14415 review round 4, BLOCKING 4). A row's ``tokens_in/out`` are the
+    document's totals: another process may have written them, or an earlier pass
+    of this one may already have charged them. Charging from the row therefore
+    double-charges a retried item (measured: pass 1 `queued` with 100 tokens, pass
+    2 `indexed` with 100 → 200 on the meter while the status surface said 100)
+    and re-charges a row a peer settled. :meth:`BatchCoordinator.run_item` puts
+    exactly the landed call's figures on ``item.charge_tokens``, which is not
+    persisted, so the same spend cannot be charged twice.
 
-    The increment's own failure is absorbed and logged at WARNING, exactly as the
-    capture ledger does (#3824/#3981): our bookkeeping fault must never fail a
-    document that was already indexed.
+    ``calls=0``: a batch item is NOT a capture call, and this layer has no
+    measured price for one. That keeps ``capture_calls`` (the denominator that
+    distinguishes a genuinely-free capture from an unmeasured one, #3359) reading
+    true, and it does not add a phantom ``$0`` to the spend ceiling. ⚠️ DECLARED
+    CONSEQUENCE: the cost ceiling therefore does not see batch spend — only the
+    token dimension moves. That is honest while the per-file indexer spends
+    nothing; when the extraction lane is wired here it must pass a real
+    ``cost_usd`` through a sibling call rather than let a token figure imply one.
+
+    Returns the tokens recorded (0 when the call spent nothing — the common case
+    today). A zero-token call is deliberately NOT made: it would mint a row for a
+    capture that never happened.
+
+    A failed increment is REPORTED to the durable operator surface, not merely
+    logged — the capture path's own rule (#3824/#3981): a metering loss must be
+    visible to the surface that exists for it, or the customer's spend silently
+    drifts from the ledger. It never fails a document that was already indexed.
     """
-    # ⛔ THE DELTA, NOT THE ROW (#14415 review round 5, HIGH). A row's counters
-    # are CUMULATIVE and belong to whichever writer settled it, so a caller that
-    # re-reads them off a row it did not write charges a peer's spend a second
-    # time. A caller that knows what IT spent passes it; the row is the fallback
-    # for the single-writer case only.
-    spent_in = int(item.tokens_in or 0) if tokens_in is None else int(tokens_in)
-    spent_out = (int(item.tokens_out or 0) if tokens_out is None
-                 else int(tokens_out))
-    if not org_id or (spent_in + spent_out) <= 0:
+    tokens_in = max(0, int(tokens_in or 0))
+    tokens_out = max(0, int(tokens_out or 0))
+    if not org_id or (tokens_in + tokens_out) <= 0:
         return 0
     try:
         from tortoise.metering import record_capture_usage
 
-        record_capture_usage(org_id, tokens_in=spent_in, tokens_out=spent_out)
-    except Exception:  # never fail a delivered document
-        _logger.warning("batch metering dropped for item %s (team %s)",
-                        item.item_id, org_id, exc_info=True)
+        record_capture_usage(org_id, calls=0, tokens_in=tokens_in,
+                             tokens_out=tokens_out)
+    except Exception as exc:  # never fail a delivered document
+        _logger.warning("batch metering dropped for team %s", org_id,
+                        exc_info=True)
+        _report_unmetered(org_id, exc)
         return 0
     return spent_in + spent_out
+
+
+def _report_unmetered(org_id: str, exc: BaseException) -> None:
+    """Report a dropped token increment to `metering`'s durable surface.
+
+    Mirrors `hosted_api._alert_unmetered`: the same drop class the capture
+    ledger uses, so an operator reads ONE surface and a batch loss cannot hide
+    behind a log line (#14415 review round 4, NB6). Best-effort: this runs on a
+    failure path and must not raise a second time.
+    """
+    try:
+        from tortoise.metering import report_unmetered_increment
+
+        # `capture_ledger` is the lane token this increment belongs to: a batch
+        # item moves the `capture_extraction` dimension, and the token set is
+        # the documented one — inventing a ninth token would make a batch loss
+        # unattributable on the surface that exists to attribute it.
+        report_unmetered_increment("capture_ledger", org_id, exc)
+    except Exception:
+        _logger.warning("batch metering loss could not be reported for %s",
+                        org_id, exc_info=True)
 
 
 class BatchWorker:
@@ -1738,6 +1778,23 @@ class BatchCoordinator:
         # from `embedded`, so re-claiming it would raise IllegalTransition and
         # abort the whole drain (found in review; the current production runner
         # never reports `embedded`, which is the only reason it was invisible).
+        # ⛔ THE ONE LIVENESS RULE (#14415 review round 4, BLOCKING 3). A row is
+        # CLAIMABLE only if nobody holds it: `queued` (no claimant), or
+        # `extracting`/`embedded` whose claim is STALE — the same window
+        # `recover()` applies. Everything else (`cancel`, `recover`) may be
+        # careful about a live claim, but if the DRAIN is not, the care buys
+        # nothing: a drain iterates every non-terminal item of a batch, so a
+        # fresh `extracting` row was re-claimed seconds after `recover()` had
+        # correctly declined to touch it — a second extraction of a document a
+        # peer was inside, its outcome landing as an illegal edge on top.
+        # Applying the rule HERE closes it for every caller, because every claim
+        # goes through this one arm.
+        if fresh.state in (BatchItemState.EXTRACTING, BatchItemState.EMBEDDED
+                           ) and _age_seconds(fresh.updated_at) < float(
+                               BATCH_RECLAIM_AFTER_S):
+            # Someone else's LIVE claim: not ours to run, and not ours to move.
+            # The caller drains the rest and reports this row as it is.
+            return fresh
         if fresh.state is BatchItemState.QUEUED:
             if fresh.attempts >= BATCH_MAX_ATTEMPTS:
                 # ⛔ THE RETRY CEILING (#14415 review B2). A ``retryable`` skip is
@@ -1845,22 +1902,20 @@ class BatchCoordinator:
         except IllegalTransition:
             # Another writer settled this item while the runner was working (a
             # cancel, or the same item drained twice across processes). The
-            # item's row is authoritative — report it rather than crash the
-            # drain, which is what would lose every LATER item.
+            # item's ROW is authoritative — report it rather than crash the
+            # drain, which is what would lose every LATER item. Nothing is
+            # charged: this process did not land the outcome.
             return self._fresh(org_id, fresh)
         if landed:
-            # ⛔ CHARGE HERE, WHERE THE WRITE LANDED, AND ONLY THEN (#14415 review
-            # round 5, HIGH). The old call site charged the row `run_item`
-            # returned, and that row may be SOMEONE ELSE'S: `tokens_in/out` are
-            # CUMULATIVE facts owned by whichever writer settled the row, so
-            # metering them again billed 120 000 tokens for 60 000 spent whenever
-            # a peer settled an item between the drain's snapshot and this pass —
-            # with no second runner at all. `landed` is the only evidence that
-            # THIS pass caused this spend, and the deltas are this pass's own.
-            record_item_spend(
-                org_id, settled,
-                tokens_in=int(outcome.tokens_in or 0),
-                tokens_out=int(outcome.tokens_out or 0))
+            # ⛔ THE CHARGE RECORD (#14415 review round 4, BLOCKING 4 / round 5,
+            # HIGH). Only a call this process ACTUALLY LANDED may be charged, and
+            # only for the figures it just spent — never the row's totals, which
+            # a peer may have written or an earlier pass may already have
+            # charged. `landed` is `_advance_landed`'s EXPLICIT flag, not "the
+            # returned row has the state I wanted": a peer settling to the same
+            # state would pass that test and be charged a second time.
+            settled.charge_in = max(0, int(outcome.tokens_in or 0))
+            settled.charge_out = max(0, int(outcome.tokens_out or 0))
         return settled
 
     def _fresh(self, org_id: str, item: BatchItem) -> BatchItem:
@@ -2022,7 +2077,7 @@ class BatchCoordinator:
     def recover(self, org_id: str, *,
                 live_batches: Collection[str] | Callable[[str], bool] = (),
                 stale_after_s: float | None = None,
-                limit: int = 50) -> list[str]:
+                limit: int = 50, offset: int = 0) -> list[str]:
         """Re-open every batch with unfinished items. Returns the batch ids.
 
         ⛔ **What "recoverable" has to mean.** An item found ``extracting`` (or
@@ -2062,8 +2117,8 @@ class BatchCoordinator:
             else (lambda batch_id, _live=live_batches: batch_id in _live))
         resumed: list[str] = []
         stamp = self._now()
-        window = (float(BATCH_RECLAIM_AFTER_S) if stale_after_s is None
-                  else float(stale_after_s))
+        reclaim_after = (float(BATCH_RECLAIM_AFTER_S) if stale_after_s is None
+                         else float(stale_after_s))
         # ⛔ TWO independent bounds, and both are needed.
         #
         # `is_live` answers "is a drain in THIS process working this batch right
@@ -2085,7 +2140,22 @@ class BatchCoordinator:
         # tenant's first batch touch, from a request, on the 2-worker bookkeeping
         # pool — a tenant with hundreds of unfinished batches must not turn a
         # `GET /v1/batches` into an unbounded scan of all of them.
-        for batch_id in self._store.pending_batches(org_id)[:max(1, int(limit))]:
+        #
+        # ⛔ AND ROTATING, because a prefix is a STRANDING (#14415 review round 4,
+        # BLOCKING 2): `pending_batches()` order is stable, so a plain
+        # `[:limit]` re-scanned the same first 50 on every call and batches 51+
+        # were NEVER reached by any scan in the process's life — non-terminal for
+        # ever, which is the lost-document class the issue forbids. The caller
+        # advances `offset` per scan and wraps, so every unfinished batch is
+        # reached within `ceil(n / limit)` scans.
+        pending = self._store.pending_batches(org_id)
+        width = max(1, int(limit))
+        start = int(offset) % len(pending) if pending else 0
+        # Rotate, then take a window: rotating first means the wrap cannot
+        # repeat a batch (a plain slice-plus-prefix appended the head twice, so
+        # one batch was reported resumed twice in a single call).
+        rotated = pending[start:] + pending[:start]
+        for batch_id in rotated[:width]:
             if is_live(batch_id):
                 # A drain in THIS process owns this batch's claim; see the
                 # `live_batches` note above. Requeueing it would destroy the
@@ -2122,7 +2192,7 @@ class BatchCoordinator:
             for item in items:
                 if item.state in (BatchItemState.EXTRACTING,
                                   BatchItemState.EMBEDDED):
-                    if _age_seconds(item.updated_at) < window:
+                    if _age_seconds(item.updated_at) < reclaim_after:
                         # A LIVE claim: not ours to TAKE — but the batch is still
                         # ours to REPORT (#14415 review round 5, BLOCKING 1).
                         # Skipping the whole batch here discarded the decision
@@ -2136,12 +2206,19 @@ class BatchCoordinator:
                         # re-drives the leftover, and the tick revisits until the
                         # claim is stale enough to reclaim.
                         continue
-                    self.advance(org_id, item, BatchItemState.QUEUED,
-                                 reason="resumed after a process restart — "
-                                        "requeued for a fresh attempt",
-                                 expected=item.state,
-                                 expected_attempts=item.attempts)
-                    moved = True
+                    # ⛔ The requeue carries the CLAIM IDENTITY too (review
+                    # round 5): a peer that re-claimed this row between our read
+                    # and this write leaves the row at a new `attempts`, so a
+                    # state-only compare would requeue work somebody is inside the
+                    # runner call on. And `moved` follows the WRITE, not the
+                    # call: a lost compare must not report the batch as resumed.
+                    requeued = self.advance(
+                        org_id, item, BatchItemState.QUEUED,
+                        reason="resumed after a process restart — "
+                               "requeued for a fresh attempt",
+                        expected=item.state,
+                        expected_attempts=item.attempts)
+                    moved = moved or requeued.state is BatchItemState.QUEUED
             # ⛔ Report a batch as RESUMED when this call gave it work, found
             # unclaimed work, OR found only a fresh claim that a later pass must
             # revisit (#14415 review round 5, BLOCKING 1 — defer, never discard).
@@ -2183,7 +2260,17 @@ class BatchCoordinator:
         if batch.state is BatchState.CANCELLED:
             return batch
         if not items or any(not i.terminal for i in items):
-            if batch.state is not BatchState.RESUMING:
+            # ⛔ `resuming` is a TRANSIENT label, not a second `running`
+            # (#14415 review round 4, NB11). It used to persist for the whole
+            # life of a resumed batch, because nothing but the terminal write
+            # could move it — so the status surface said "resuming" over a batch
+            # that had been working for an hour. Once a worker has claimed an
+            # item (or any item has settled), the resume is OVER.
+            started = any(i.state in (BatchItemState.EXTRACTING,
+                                      BatchItemState.EMBEDDED) or i.terminal
+                          for i in items)
+            if batch.state is not BatchState.RUNNING and (
+                    batch.state is not BatchState.RESUMING or started):
                 batch.state = BatchState.RUNNING
                 batch.updated_at = self._now()
                 self._store.put_batch(batch)

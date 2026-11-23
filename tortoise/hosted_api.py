@@ -16823,9 +16823,25 @@ _BATCH_RETRY_LOCK = threading.Lock()
 _BATCH_RETRY_INTERVAL_S = max(5, _int_env("TORTOISE_BATCH_RETRY_S", 60))
 _BATCH_RETRY_THREAD: threading.Thread | None = None
 
-#: Orgs whose unfinished batches have already been recovered in this process —
-#: the `recover()` hook's own idempotence (one scan per tenant per boot).
-_BATCH_RECOVERED: set[str] = set()
+#: Per-org recovery bookkeeping: WHEN this process last scanned the tenant's
+#: unfinished batches, and WHERE the rotating window stopped.
+#:
+#: ⛔ IT IS A RE-SCAN, NOT A ONCE-PER-BOOT SCAN (#14415 review round 4, BLOCKING
+#: 1). It used to be a plain set, and that made a restart 30 s after a crash a
+#: MISS: `recover()` correctly refuses a claim younger than
+#: `BATCH_RECLAIM_AFTER_S`, and with the mark never expiring, nothing ever asked
+#: again — so the item stayed `extracting` for the process's life. The measured
+#: per-document wall clock is 56 s, so "crashed mid-batch, restarted at once" is
+#: the NORMAL restart shape, not an edge. Re-scanning every
+#: `_BATCH_RESCAN_S` costs one `pending_batches()` read per tenant per window and
+#: makes staleness the only thing that decides a claim.
+_BATCH_SCAN: dict[str, tuple[float, int]] = {}
+#: How many unfinished batches one recovery scan may examine. Bounds the work a
+#: tenant's first request carries (it runs on the 2-worker bookkeeping pool) while
+#: the rotating offset guarantees progress for the rest.
+_BATCH_RECOVER_LIMIT = 50
+_BATCH_RESCAN_S = max(30, _int_env("TORTOISE_BATCH_RESCAN_S",
+                                   int(_batch_ingest.BATCH_RECLAIM_AFTER_S)))
 
 
 def _batch_retry_enqueue(org: dict, batch_id: str) -> None:
@@ -16923,10 +16939,19 @@ def _recover_org_batches(org: dict) -> list[str]:
     org_id = org.get("org_id")
     if not org_id:
         return []
+    now = time.monotonic()
     with _BATCH_RETRY_LOCK:
-        if org_id in _BATCH_RECOVERED:
+        last, offset = _BATCH_SCAN.get(org_id, (0.0, 0))
+        if last and (now - last) < _BATCH_RESCAN_S:
             return []
-        _BATCH_RECOVERED.add(org_id)
+        # ⛔ THE OFFSET ROTATES (#14415 review round 4, BLOCKING 2). `recover()`
+        # is bounded per call, and a bounded PREFIX would re-scan the same first
+        # 50 batches for ever while 51+ were never reached by any scan in the
+        # process's life — non-terminal for ever, which is the lost-document
+        # class the issue forbids. Each scan resumes where the last one stopped;
+        # `recover()` wraps, so a tenant with n > 50 unfinished batches reaches
+        # all of them within ceil(n / 50) scans.
+        _BATCH_SCAN[org_id] = (now, offset + _BATCH_RECOVER_LIMIT)
     try:
         store = _batch_store_for(org)
         coord = _batch_ingest.BatchCoordinator(store)
@@ -16946,11 +16971,14 @@ def _recover_org_batches(org: dict) -> list[str]:
             with _BATCH_DRAINING_LOCK:
                 return candidate in _BATCH_DRAINING
 
-        resumed = coord.recover(org_id, live_batches=_is_live)
+        resumed = coord.recover(org_id, live_batches=_is_live, offset=offset,
+                                limit=_BATCH_RECOVER_LIMIT)
     except Exception:
         _logger.exception("batch recovery failed for team %s", org_id)
         with _BATCH_RETRY_LOCK:
-            _BATCH_RECOVERED.discard(org_id)  # let a later request retry it
+            # Forget the scan so a later request retries it at once, rather than
+            # serving a whole window with recovery down.
+            _BATCH_SCAN.pop(org_id, None)
         return []
     for batch_id in resumed:
         _submit_or_defer(org, batch_id)
@@ -16985,7 +17013,14 @@ def _drain_batch(org: dict, batch_id: str) -> None:
     """
     with _BATCH_DRAINING_LOCK:
         if batch_id in _BATCH_DRAINING:
-            return  # already being worked by this process — never run it twice
+            # ⛔ DO NOT DROP THE HAND-OFF (#14415 review round 4, NB7). The retry
+            # tick REMOVES an entry the moment this drain is accepted, and the
+            # owning drain's `finally` may not have released the claim yet — so
+            # returning silently here lost the entry and left the item `queued`
+            # with nothing to re-drive it. Put it back: the next tick re-enters
+            # after the owner has released.
+            _batch_retry_enqueue(org, batch_id)
+            return
         _BATCH_DRAINING.add(batch_id)
     store = None
     coord = None
@@ -17020,20 +17055,23 @@ def _drain_batch(org: dict, batch_id: str) -> None:
                 # Without this call the overage a customer acknowledged is never
                 # realised on the bill, and the NEXT batch's estimate is computed
                 # against headroom no batch can consume (#14219 review round 2,
-                # BLOCKING 1). Zero-token items (everything the current per-file
-                # indexer produces) make no ledger call — see `record_item_spend`.
+                # BLOCKING 1).
                 #
-                # ⛔ THE CHARGE LIVES IN `run_item`, NOT HERE (#14415 review
-                # round 5, HIGH). `run_item` returns a ROW, and that row may be a
-                # peer's: its `tokens_in/out` are cumulative facts owned by
-                # whoever settled it, so metering the return value billed one
-                # document's tokens twice whenever a peer settled an item between
-                # this drain's snapshot and the run — 120 000 charged for 60 000
-                # spent, with no second runner at all. Only `run_item` knows
-                # whether ITS OWN write landed and what THIS pass spent, so the
-                # charge happens there (`_advance_landed` + explicit deltas) and
-                # charging here as well double-bills every item.
-                _ = done  # the row is the status surface's, not the ledger's
+                # ⛔ AND ONLY WHAT THIS CALL LANDED (#14415 review rounds 4-6).
+                # Three coarser tests were each wrong: metering the ROW re-charged
+                # a retried item (100 billed twice for one 100-token spend) and
+                # re-charged whatever a peer had settled; metering only a TERMINAL
+                # return dropped a retried item's real spend while still charging
+                # a peer's row. `charge_in/charge_out` are set by `run_item` for
+                # the runner call IT wrote — 0 when its write did not land, when
+                # the row was a peer's, or when the runner spent nothing. The
+                # landing test is `_advance_landed`'s explicit flag, not the
+                # returned row's state: a peer settling to the SAME state is not
+                # this pass's write.
+                if done.charge_in or done.charge_out:
+                    _batch_ingest.record_item_spend(
+                        org["org_id"], tokens_in=done.charge_in,
+                        tokens_out=done.charge_out)
             except Exception:
                 # ⛔ ONE ITEM'S FAILURE MUST NOT ABANDON THE REST (#14219
                 # review, NB1). A graph-timeout on a bookkeeping statement used
@@ -17231,6 +17269,8 @@ async def create_batch(body: BatchRequest,
         _logger.warning("batch estimate: usage could not be read", exc_info=True)
         usage_measured = False
         if included_tokens is not None:
+            # `from None`: the cause is ours and already logged; the customer
+            # gets the refusal, not our traceback.
             raise HTTPException(
                 status_code=503,
                 headers={"Retry-After": "30"},
@@ -17241,7 +17281,7 @@ async def create_batch(body: BatchRequest,
                                "cannot be priced honestly. Nothing was accepted "
                                "and nothing was charged — re-send in a few "
                                "seconds.",
-                })
+                }) from None
 
     est = _batch_ingest.estimate_batch(len(body.items),
                                        included_tokens=included_tokens,

@@ -1084,7 +1084,7 @@ def test_a_cancel_between_the_read_and_the_claim_does_not_run_the_runner():
     """
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
-    batch, items = coord.submit(ORG, ["/d/a.md"])
+    batch, _items = coord.submit(ORG, ["/d/a.md"])
 
     ran: list[str] = []
 
@@ -1129,7 +1129,7 @@ def test_a_cancel_that_saw_queued_cannot_relabel_a_claim_that_landed(monkeypatch
     """
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
-    batch, items = coord.submit(ORG, ["/d/a.md"])
+    batch, _items = coord.submit(ORG, ["/d/a.md"])
     stale = store.items(ORG, batch.batch_id)      # what cancel() reads
     assert stale[0].state is BatchItemState.QUEUED
 

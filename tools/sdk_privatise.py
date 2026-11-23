@@ -1858,9 +1858,11 @@ SWEEP_NAMES = 66
 #: before this branch is involved at all. This cut re-derives the pair from the MERGED tree, so it repairs
 #: that red. ⛔ Those two are RECORDED, not attributed: resolving which rows came from where is
 #: `--report --base`'s work, and this block does not claim it (the blocks above state the same convention).
-#: THIS BRANCH'S OWN CONTRIBUTION IS EXACTLY ONE ROW, measured by `--report --base 28ca66878d` on BOTH
-#: trees — `main` `0fbfbb5b210c` reads **11898** over **861** rows, the merged tree reads **11899** over
-#: **862** — and no row was absorbed in either direction:
+#: THIS BRANCH'S OWN CONTRIBUTION IS EXACTLY ONE OCCURRENCE INSIDE ONE EXISTING ROW, measured by
+#: `--report --base 28ca66878d --top 3000` on BOTH trees and diffed row by row: `main` `0fbfbb5b210c`
+#: reads **11898** over **861** distinct rows, and the merged tree reads **11899** over the SAME **861**
+#: rows — `store.list_batches` was REMOVED by this same commit (below), so the row count does not move
+#: and no row is absorbed in either direction.
 #:   * `proj.g.query` **3650 → 3651** (+1), `tortoise/hosted_api.py::_batch_store_for`:
 #:     `_batch_ingest.GraphBatchStore(proj.g.query)`. #14219's batch layer is handed the project handle's
 #:     own door instead of opening a second one — the ordinary-word receiver shape this pin exists to
