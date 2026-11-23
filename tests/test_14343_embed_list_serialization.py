@@ -69,8 +69,7 @@ _SAVING_SHARE_BAND = (29.0, 36.0)
 
 
 #: Padding for an ABSENT key. `None` cannot be used: it is a legitimate value in this
-#: schema (measured: 210 explicitly-`null` cells vs 55 absent ones), so a bare one-argument
-#: `dict.get(k)` would
+#: schema (measured: 210 explicitly-`null` cells vs 55 absent ones), so `dict.get(k)` would
 #: conflate "field not present" with "field present and null". `~` cannot either — it occurs
 #: inside real content. This sentinel is verified absent from the corpus below, which is the
 #: property a real renderer must check at render time rather than assume.
@@ -102,7 +101,11 @@ def _keys_once(embed: dict) -> dict:
         if isinstance(items, list) and items and all(isinstance(x, dict) for x in items):
             keys = list(dict.fromkeys(k for it in items for k in it))
             out[name] = {"cols": keys,
-                         "rows": [[it.get(k, _ABSENT) for k in keys] for it in items]}
+                         # `.get` with a SENTINEL default, never `None`: `null` is a legal
+                         # value in this schema, so a `None` default cannot tell an absent
+                         # key from an explicitly-null one (the trap this test pins).
+                         "rows": [[it.get(k, _ABSENT) for k in keys]
+                                  for it in items]}
         else:
             out[name] = items
     return out
