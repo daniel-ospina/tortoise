@@ -1419,9 +1419,17 @@ def _build_single(provider: str, model_id: str, *, max_tokens, temperature,
     #     ⛔ That sentence is about the hop members only: the ``deepseek-direct``
     #     member returns above this point and is NOT governed by this flag, and
     #     its own gate was widened by this same change (it now suppresses for the
-    #     whole flash FAMILY, so an ask spec naming ``deepseek-flash`` gains
-    #     ``thinking: disabled`` — intended, #4129, since that is the id the
-    #     provider serves for the retired one).
+    #     whole flash FAMILY — intended, #4129). ⛔ The ids that NEWLY match are
+    #     the family-prefixed and tailed spellings: ``deepseek/deepseek-flash``, a
+    #     dated build (``deepseek-v4-flash-0731``), an OpenRouter ``:free`` tail.
+    #     ⛔ NOT the bare registry key ``deepseek-flash``: BOTH lanes remap it
+    #     through ``_REGISTRY_KEY_TO_ID`` to ``deepseek/deepseek-v4-flash`` BEFORE
+    #     this member is built, so the pre-#14357 literal gate already suppressed
+    #     it and that spec gains nothing here. Measured on this head — an ask spec
+    #     ``deepseek-flash`` normalizes to ``deepseek/deepseek-v4-flash``, its
+    #     direct wire id is ``deepseek-v4-flash``, and the OLD literal gate matches
+    #     it. Saying it "newly gains the field" was a false claim, caught by
+    #     review in this very block.
     #   * ``_runs_non_thinking(model_id)`` — the FAMILY gate, so a v4-pro
     #     extraction still keeps its default on all three (#1790).
     #
@@ -1919,8 +1927,13 @@ def build_reader_model(model_id: str | None = None, *,
                                 # member and is not governed by this flag: it
                                 # hardcodes ``thinking: disabled``, and the gate
                                 # that decides WHICH ids get it was widened here
-                                # to the whole flash family (#4129), so an ask
-                                # spec naming ``deepseek-flash`` — the id the
-                                # provider serves for the retired
-                                # ``deepseek-v4-flash`` — newly gains the field.
+                                # to the whole flash family (#4129), so a spec
+                                # naming the family-prefixed form, a dated build,
+                                # or a ``:free`` tail newly gains the field.
+                                # ⛔ NOT the bare registry key ``deepseek-flash``:
+                                # both lanes remap it to
+                                # ``deepseek/deepseek-v4-flash``
+                                # (``_REGISTRY_KEY_TO_ID``) before this member is
+                                # built, so the pre-#14357 literal gate already
+                                # suppressed it — that spec gains nothing here.
                                 suppress_reasoning=False)
