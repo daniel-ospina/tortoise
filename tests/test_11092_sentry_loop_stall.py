@@ -835,6 +835,17 @@ def test_the_real_sdk_builds_an_event_with_no_source_context(real_sentry) -> Non
 #: The first `sentry-sdk` major that rejects `tortoise/sentry.py`'s option set.
 _FIRST_MAJOR_WITHOUT_OUR_OPTIONS = Version("3.0.0")
 
+#: Probe releases across the WHOLE 3.x major, not just its first release (#14347
+#: review, cycle 13, finding 2). The removal happened in 3.0.0 and nothing readds
+#: the options later — `send_default_pii`, `include_local_variables` and
+#: `include_source_context` are absent from the 3.0.0 tables and from 3.1+. Pinning
+#: only `.0` let `>=2.0,!=3.0.0` be GREEN: measured, `3.0.0 admitted: False |
+#: 3.1.0 admitted: True`, i.e. the arm certified a declaration that admits the
+#: major it exists to exclude. A `SpecifierSet` cannot be enumerated, so probe the
+#: edges: the first release, its neighbours, and a far-future minor.
+_THIRD_MAJOR_PROBES = tuple(
+    Version(f"3.{minor}.0") for minor in (0, 1, 2, 5, 12, 99))
+
 #: A 2.x release ABOVE the lock. The ceiling must bound the MAJOR, not the PATCH: an
 #: exact pin would also stop the break, but it would hold back 2.x security fixes
 #: until someone cuts a diff — the same trade `pyproject.toml` refuses for `pyyaml`.
@@ -898,33 +909,43 @@ def test_the_pin_keeps_every_option_our_init_passes_inside_the_ceiling() -> None
 
     Three arms, each with its own mutant:
 
-    1. `Version("3.0.0") not in spec` — mutant: `">=2.0,<3"` → `">=2.0"` (the
-       pre-fix declaration). Red. This is the arm that catches a re-loosened pin
-       BEFORE a resolving env installs the major, which is the only point at which
-       the break is still cheap.
+    1. NO 3.x release is admitted — probed across the major, not just at its first
+       release. Mutants, both red: `">=2.0,<3"` → `">=2.0"` (the pre-fix
+       declaration) and `"…>=2.0,<3"` → `"…>=2.0,!=3.0.0"` (the shape that
+       previously slipped through: 3.0.0 excluded, 3.1+ admitted). This is the arm
+       that catches a re-loosened pin BEFORE a resolving env installs the major,
+       which is the only point at which the break is still cheap.
     2. `Version("2.75.0") in spec` — mutant: `<3` → `==2.68.1` (over-tight). Red:
        the ceiling must not also freeze 2.x patches.
     3. every option name collected from the source is a key of the installed
        SDK's own `DEFAULT_OPTIONS` — the exact predicate `Client`'s own validation
        uses (`client.py`: `if key not in rv: raise TypeError("Unknown option %r")`).
-       Mutant: run this row in an env holding `sentry-sdk` 3.0.0. Red, naming
-       `send_default_pii`, `include_local_variables` and `include_source_context`
-       — so a major that removes them reds HERE with the three names, instead of
-       surfacing as a WARNING that silently disables capture.
+       Mutant: delete the three names from the INSTALLED `DEFAULT_OPTIONS` while the
+       version stays inside the window. Red, naming `send_default_pii`,
+       `include_local_variables` and `include_source_context`.
+
+    ⚠️ Arm 3's OWN mutant (an env holding a 3.x wheel) does NOT reach this check: it
+    reds one arm earlier, at the window guard, which now names the version AND the
+    options that version is missing (review cycle 13, finding 1 — the docstring used
+    to claim the three names came from arm 3's assertion). Both surfaces name the
+    three, so an operator never has to infer them from a WARNING.
     """
     import sentry_sdk
     from sentry_sdk.consts import DEFAULT_OPTIONS
 
     spec = _declared_sentry_specifier()
 
-    assert _FIRST_MAJOR_WITHOUT_OUR_OPTIONS not in spec, (
-        f"pyproject.toml declares `sentry-sdk{spec}`, which ADMITS "
-        f"{_FIRST_MAJOR_WITHOUT_OUR_OPTIONS} — that major removed `send_default_pii`, "
+    admitted_third_major = [str(v) for v in _THIRD_MAJOR_PROBES if v in spec]
+    assert not admitted_third_major, (
+        f"pyproject.toml declares `sentry-sdk{spec}`, which ADMITS 3.x "
+        f"({', '.join(admitted_third_major)}) — that major removed `send_default_pii`, "
         "`include_local_variables` and `include_source_context`, i.e. three of the "
         "options `tortoise/sentry.py::init` passes, so `init()` refuses the whole "
         "config and HOSTED ERROR CAPTURE IS SILENTLY OFF on any env that resolves "
         "fresh (CI's `pip install -e '.[test,…]'`, both Dockerfiles' `pip install` "
-        "path). Lifting the ceiling is the 3.x migration in its own change (#11157)."
+        "path). Lifting the ceiling is the 3.x migration in its own change (#11157). "
+        "Probed releases, so this reds for `!=3.0.0` as well as for a bare `>=2.0`: "
+        "the removal did not stop at the major's first release."
     )
     assert _A_LATER_2X_RELEASE in spec, (
         f"pyproject.toml declares `sentry-sdk{spec}`, which EXCLUDES "
@@ -932,14 +953,19 @@ def test_the_pin_keeps_every_option_our_init_passes_inside_the_ceiling() -> None
         "PATCH: freezing the patch also freezes 2.x security fixes behind a diff."
     )
 
+    # Computed BEFORE the window guard so its message can name what the version
+    # left behind: an env that resolved a 3.x wheel reds one arm up, and the three
+    # option names are exactly what an operator needs there (cycle 13, finding 1).
+    missing = _init_option_names() - set(DEFAULT_OPTIONS)
     installed = Version(sentry_sdk.VERSION)
     assert installed in spec, (
         f"the installed sentry-sdk is {installed}, which the declaration `{spec}` "
         "does not admit — this env is OUTSIDE the validated window, so the option "
         "check below would grade a package this repo never pinned"
+        + (f". This SDK also no longer accepts {sorted(missing)}, which "
+           "`tortoise/sentry.py::init` passes" if missing else "")
     )
 
-    missing = _init_option_names() - set(DEFAULT_OPTIONS)
     assert not missing, (
         "the installed sentry-sdk "
         f"({installed}) does not accept option(s) {sorted(missing)} that "
