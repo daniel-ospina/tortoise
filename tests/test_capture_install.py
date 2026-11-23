@@ -4711,7 +4711,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 29}
+                             "pi": 30}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4824,7 +4824,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     artifact, move the generation, update this pair — all three in one commit").
     What is never rewritten is a SHIPPED entry in ``_GENERATION_DIGESTS``.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 29
+    assert hook_install.read_hook_version(_PI_SRC) == 30
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4915,7 +4915,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: behaviour is untouched) because `contract_version_for('pi')` grades the pair
 #: as ONE contract.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    29, "669165f0d337c419174a35db24b4a2ba984a31965a4694057eeef7de54860b4d")
+    30, "064f534d7b79a2d1f0715817ecf05a41adfd5227608001dd389ac4885e28eaeb")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5021,6 +5021,23 @@ _GENERATION_DIGESTS = {
     # Neither 28 nor 29 has SHIPPED, and a new byte set always gets a NEW entry
     # rather than a rewrite.
     29: "669165f0d337c419174a35db24b4a2ba984a31965a4694057eeef7de54860b4d",
+    # Generation 30 (#14347 review, cycle 5, P2 — the cost of the cycle-4 fix).
+    # Cycle 4 made the fast exit DECLINE (`undefined`) the whole directory as soon
+    # as one meta-less turn log existed. That closed the under-count, but nothing
+    # reaps a meta-less log — `prune_spool` reaps metas and `.orphan` only — so
+    # one abandoned session left every later turn paying the full parse: measured
+    # 137.7 ms -> 690.5 ms per `_admission_saturated` on a 5 000-entry spool,
+    # against the 1.4 s predicate the exit exists to avoid. The commit's stated
+    # reason for declining (`it keeps this exit free of a stat …`) was FALSE: the
+    # loop already stats every dirent to build the byte total. The count is now
+    # EXACT instead — `names` (meta names, which covers parsed+unreadable+corrupt
+    # exactly) plus the byte-bearing meta-less logs, minus the zero-byte ones the
+    # real count also skips — so the fast path stays ON and cannot under-count.
+    # BEHAVIOUR moved on shipped bytes, so a generation-29 copy — which declines a
+    # whole directory over one stray log — must read STALE ("reinstall"), never
+    # `modified-artifact` ("local edit"). Neither 29 nor 30 has SHIPPED, and a new
+    # byte set always gets a NEW entry rather than a rewrite.
+    30: "064f534d7b79a2d1f0715817ecf05a41adfd5227608001dd389ac4885e28eaeb",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -5236,13 +5253,18 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # Generation 29 (#14347 review, cycle 4, P1): header only, same reason — one
     # seam, one contract number.
     29: "09d28db7e084f4f90cb245d434fa94842071759f826cbd747b0b8eca06212975",
+    # Generation 30 (#14347 review, cycle 5): header only, same reason — one
+    # seam, one contract number. The capture half now COUNTS a byte-bearing
+    # meta-less turn log instead of declining the directory; the read half's
+    # behaviour is untouched.
+    30: "ada4cece48443ed9a47aab3cf77b7739ff1e1b4fc7a305eeba4fbc84871fc477",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    29, "09d28db7e084f4f90cb245d434fa94842071759f826cbd747b0b8eca06212975")
+    30, "ada4cece48443ed9a47aab3cf77b7739ff1e1b4fc7a305eeba4fbc84871fc477")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

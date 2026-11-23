@@ -1017,10 +1017,10 @@ def test_the_WRITER_and_the_health_line_AGREE_on_a_META_LESS_turn_log(tmp_path):
     BYTE axis, reopened on the COUNT axis by the shape an ENOSPC actually
     produces — the writer stores the log BEFORE the meta.
 
-    MUTATION THAT REDS THIS: drop the ``log_stems - meta_stems`` exit from
-    ``_cheap_spool_scan`` (count ``*.meta.json`` names only) -> the cheap exit
-    answers "under both ceilings" and the write is ADMITTED while the health
-    line says SATURATED.
+    MUTATION THAT REDS THIS: count ``*.meta.json`` names only in
+    ``_cheap_spool_scan`` (i.e. stop adding the byte-bearing meta-less logs) ->
+    the cheap exit answers "under both ceilings" and the write is ADMITTED while
+    the health line says SATURATED.
     """
     _write_turns(tmp_path, "sess-stray", [{"role": "user", "content": "y" * 10}])
     bounds = Bounds(max_entries=1, max_total_bytes=1 << 20, max_entry_bytes=1 << 20)
@@ -1037,23 +1037,42 @@ def test_the_WRITER_and_the_health_line_AGREE_on_a_META_LESS_turn_log(tmp_path):
     assert res["discards"][-1]["reason"] == "spool_saturated"
 
 
-def test_the_cheap_scan_DECLINES_when_a_log_has_no_meta(tmp_path):
-    """The fast path's contract is "None means do the full scan", not "guess".
+def test_the_cheap_scan_COUNTS_a_meta_less_log(tmp_path):
+    """The fast exit's COUNT is the real count, not the meta-name count.
 
-    Pinned directly, because the guarantee above is about the *shape of the
-    operand*, not about one writer call: a fast path that answers a number for
-    this directory cannot be an upper bound on ``_saturated_for_metas``, whatever
-    the caller then does with it.
+    ``_scan_spool``'s count is ``len(metas) + unreadable + corrupt + stray_logs``.
+    Every ``*.meta.json`` NAME lands in exactly one of the first three terms, so
+    the meta-name count covers those exactly — the fourth needs the LOG names,
+    which the same walk already has. Answering a number that omits it is an
+    UNDER-count of one entry, and under-count is the direction that admits a
+    write the real predicate refuses.
 
-    MUTATION THAT REDS THIS: return ``(names, total)`` for this directory ->
-    ``(0, <bytes>)``, which is an UNDER-count of a spool holding one entry.
+    ⛔ COUNTED, NOT DECLINED (#14347 review, cycle 5, P2). Declining the whole
+    directory (``None``) also fixed the under-count, but nothing reaps a
+    meta-less log — ``prune_spool`` reaps metas and ``.orphan`` only — so one
+    abandoned session turned the fast path off for every later turn of every
+    session: measured 137.7 ms -> 690.5 ms per ``_admission_saturated`` on a
+    5 000-entry spool, against the 1.4 s full parse the exit exists to avoid.
+
+    MUTATION THAT REDS THIS: count ``*.meta.json`` names only -> ``(0, <bytes>)``,
+    an under-count of a spool holding one byte-bearing log.
     """
     _write_turns(tmp_path, "sess-stray", TURNS)
+    entries = _entries(tmp_path)
+    assert _cheap_spool_scan(tmp_path) == (
+        1, sum(p.stat().st_size for p in entries.iterdir())), (
+        "one byte-bearing log with no meta is ONE entry")
 
-    assert _cheap_spool_scan(tmp_path) is None, (
-        "a log with no meta is an entry this scan cannot count — it must decline")
+    # …and a ZERO-byte lone log is not an entry for the real count either, so it
+    # must not be one here (the real predicate skips it, `_scan_spool`:1879).
+    empty = _write_turns(tmp_path, "sess-empty", [])
+    assert empty.stat().st_size == 0, "the premise: no bytes, no entry"
+    assert _cheap_spool_scan(tmp_path) == (
+        1, sum(p.stat().st_size for p in entries.iterdir())), (
+        "a zero-byte stray log adds nothing to the count")
 
-    # …and it still answers, and answers USEFULLY, for the ordinary shape.
+    # The ordinary shape counts ONE entry, not the two files it is made of —
+    # which is what keeps this an upper bound rather than a premature refusal.
     ordinary = tmp_path / "ordinary"
     ordinary.mkdir()
     _write_meta(ordinary, "sess-ok", capture_lane="hook")
