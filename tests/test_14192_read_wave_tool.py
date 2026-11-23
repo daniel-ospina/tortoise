@@ -1575,7 +1575,15 @@ def _bind_target_names(target: ast.AST) -> set[str]:
 
 _NAMESPACE_CALLS = frozenset({"globals", "locals", "vars"})
 _SETATTR_SPELLINGS = frozenset({"setattr"})
-_MAPPING_MUTATORS = frozenset({"update", "setdefault"})
+#: ⛔ AND `__ior__`, WHICH MERGES LIKE `update` (#14326 review cycle 20, EACH MEASURED GREEN
+#: **and LIVE**: `__builtins__.__ior__({"print": getattr})`, `builtins.__dict__.__ior__({...})`,
+#: `dict.__ior__(builtins.__dict__, {...})` and `_ns = globals(); _ns.__ior__({...})` all
+#: redeemed an allow-listed callee name while `__builtins__.update({...})` is REFUSED). The
+#: sibling `_REGISTRY_MUTATORS` set has carried this token since round 20 for exactly this
+#: defect, and `_aliases_of`' fill set carries it too — so the vocabulary was the only gap. The
+#: reason the two sets are kept apart (above) is `__setitem__`'s SINGLE-KEY vocabulary;
+#: `__ior__` takes a mapping operand once, like `update`, so it belongs in both.
+_MAPPING_MUTATORS = frozenset({"update", "setdefault", "__ior__"})
 #: The registry's OWN mutator vocabulary (#14326 round 20, MEASURED GREEN: `sys.modules
 #: .__setitem__("tortoise.sdk", …)` and `sys.modules.__ior__({…})` left the pin green while the
 #: subscript store was red — and this file ALREADY reds `_t.__dict__.__setitem__("TortoiseSDK", …)`,
@@ -3057,6 +3065,18 @@ def _rebound_callee_names(tree: ast.AST,
             # Every arm here binds through `.target` — an annotated/augmented/walrus bind,
             # and a `for`/comprehension TARGET, which carries no `Assign` node at all.
             out |= _bind_target_names(node.target)
+            # ⛔ AND AN AUG-ASSIGN STORE INTO A NAMESPACE IS STILL THAT STORE (#14326 review
+            # cycle 20, MEASURED GREEN **and LIVE**: `__builtins__ |= {"print": getattr}` then
+            # `print(sdk, "_tortoise_fts_query")(<read>)` executed the read, while the `.update`
+            # twin and the subscript store are REFUSED). `|=` on a mapping MERGES the right-hand
+            # mapping exactly as `update` does, so the value is the same namespace store the
+            # `ast.Call` arm below already reads; only the node type differed. `_aliases_of`
+            # carries the same rule one axis over ("`AugAssign` IS THE SAME BIND").
+            # The operand is a MAPPING LITERAL here (`_ns |= {"print": getattr}`), so the keys
+            # come from the census that already reads a mapping operand — not from the
+            # Call/Subscript arms of `_namespace_rebind_names`.
+            if isinstance(node, ast.AugAssign) and _is_namespace_expr(node.target, namespaces):
+                out |= _mapping_keys_of(node.value, consts)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             # ⛔ `optional_vars` IS THE BIND (`with … as X`); the ITEMS' context expressions
             # and the BODY are neither.
@@ -8020,6 +8040,17 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # `builtins.__dict__["print"] = getattr` — one root over, not a new mechanism.
         "a STORE into `__builtins__`": (
             '    __builtins__["print"] = getattr\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
+        # ⛔ AND THE TWO `__ior__` STORE SPELLINGS (#14326 review cycle 20, EACH MEASURED GREEN
+        # **and LIVE**): the mutator vocabulary carried `update`/`setdefault` but not `__ior__`,
+        # and the OPERATOR form reached no arm at all.
+        "a STORE into a namespace by `__ior__`": (
+            '    __builtins__.__ior__({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
+        "a STORE into a namespace by the `|=` operator": (
+            '    __builtins__ |= {"print": getattr}\n'
             '    print(sdk, "_tortoise_fts_query")'
             '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
         "a STORE into an ALIAS of `__builtins__`": (
