@@ -1366,7 +1366,12 @@ _MAPPING_MUTATORS = frozenset({"update", "setdefault"})
 #: the same operation on the other namespace mapping). Kept SEPARATE from `_MAPPING_MUTATORS`
 #: because that set is also consulted with `_is_namespace_expr`, where a `__setitem__` receiver is
 #: a dict-like namespace and the key vocabulary differs; widening the shared set would move both.
-_REGISTRY_MUTATORS = frozenset({"update", "setdefault", "__setitem__", "__ior__"})
+# ⛔ AND `__init__` MERGES, SO IT IS A STORE (#14326 round 32 P2, MEASURED GREEN end-to-end:
+# `sys.modules.__init__({"tortoise": _pkg})`, the unbound `dict.__init__(sys.modules, ...)` and
+# the registry-alias twin each re-executed a planted `pkg/mod.py` after `del sys.modules["pkg.mod"]`
+# with the pin GREEN. `dict.__init__` MERGES ({1:2}.__init__({3:4}) -> {1:2, 3:4}), so this is an
+# ancestor-key STORE, not the whole-registry replacement of residual (a).)
+_REGISTRY_MUTATORS = frozenset({"update", "setdefault", "__setitem__", "__ior__", "__init__"})
 #: `setdefault(key, default)` takes ONE key positionally; `update(mapping, …)` takes every
 #: positional as a mapping. The split is what keeps a setdefault DEFAULT (a value) out of the
 #: key census — `_COUNTS.setdefault(literal, 0)` is the accepted false red this file states.
@@ -7728,7 +7733,8 @@ def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx,
     this file used to assert it was: the deferred `from tortoise.sdk import …` re-imports, and a
     planted `tortoise/sdk.py` earlier on the path becomes the constructor (measured end-to-end:
     the fake class resolved, the pin GREEN). Deliberately coarse — the fine-grained alternative
-    is to enumerate finders and path shapes, i.e. the unbounded class this file already declares
+    is to enumerate finders and path shapes, i.e. an unbounded class that the residual note BELOW
+    DECLARES, rather than one this file may be assumed to have declared elsewhere (it had not).
     as residual — and coarse here can only over-RED code that simultaneously rewrites the
     import path and empties the registry while the pin is watching, which is the premise.
     """
@@ -7763,8 +7769,19 @@ def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx,
                 and (_string_keys_of(node.args[1], ctx.consts) & _PATH_ATTRS)):
             return True
         # `sys.path.__setitem__(…)` / `list.__init__(sys.path, […])` are the same write
-        if (isinstance(func, ast.Attribute) and func.attr in {"__init__", "__setitem__", "__iadd__"}
-                and node.args and isinstance(node.args[0], (ast.Attribute, ast.Subscript))):
+        # ⛔ THE UNBOUND insert/append/extend ON A PATH IS THE SAME ADDITION (#14326 round 32
+        # P2, MEASURED GREEN end-to-end: `list.insert(sys.path, 0, "/tmp/evil")` and the
+        # `append`/`extend`/alias twins each re-executed a planted `pkg/mod.py`). The receiver
+        # arm covers `sys.path.insert(...)`; this covers `list.insert(sys.path, ...)`. It was
+        # the CROSS-PRODUCT member of two sets that were each individually complete.
+        if (isinstance(func, ast.Attribute)
+                and func.attr in {"__init__", "__setitem__", "__iadd__",
+                                  "insert", "append", "extend"}
+                and node.args
+                and (isinstance(node.args[0], (ast.Attribute, ast.Subscript))
+                     # a NAME alias of the path is the path, the same rule the receiver arm applies
+                     or (isinstance(node.args[0], ast.Name)
+                         and node.args[0].id in path_names))):
             # `list.__init__(sys.path, …)` — the UNBOUND spelling: the path is args[0]
             _unbound = node.args[0]
             _ub = _unbound.value if isinstance(_unbound, ast.Subscript) else _unbound
@@ -7812,7 +7829,7 @@ def _empties_the_registry(node: ast.AST, ctx: _RegistryCtx,
     `_PATH_ATTRS` covers `sys.path` / `sys.meta_path` / `sys.path_hooks` only, so a package's own
     `tortoise.__path__ = ["/tmp/evil"] + tortoise.__path__` paired with a `del` is a lever this
     arm does not see. That is the SAME axis (where a re-created entry is read from), just one
-    receiver over, and it is declared with the rest of the unbounded class rather than chased.
+    receiver over, and it is DECLARED as residual (e) in the note below rather than chased.
 
     ⛔ BUT "EMPTIED" IS NOT `ast.Delete` (#14326 round 30 P2, MEASURED GREEN): `clear()` and
     `pop()` empty the registry just as completely while being no `Delete` node at all —
@@ -8297,12 +8314,15 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     # they install a mirror — and the axis is not hypothetical, the artifact's own
     # `tools/read_wave_latency.py` already does `sys.path.insert(0, _REPO_ROOT)`.
     #
-    # The clause is deliberately coarse — "the search path is mutated AND the registry is
-    # emptied of a `tortoise*` key" — because the fine-grained alternative is to enumerate
-    # finders and path shapes, which is the unbounded class this file already declares as
-    # residual. Coarse here can only over-RED code that simultaneously rewrites the import
-    # path and drops the package from the cache while the pin is watching, which is the
-    # premise itself.
+    # The clause is deliberately coarse -- the search path GAINS an entry AND an ANCESTOR of
+    # `tortoise.sdk` leaves the registry -- because the fine-grained alternative is to
+    # enumerate finders and path shapes, an unbounded class the residual note BELOW DECLARES
+    # rather than assumes (it had been assumed: nothing else in this file declared it).
+    # ⛔ NOT "any `tortoise*` key": that rule was removed because it FALSE-REDDED this
+    # repo's own `tools/read_wave_latency.py`, whose `tortoise._ab_14192_old_search_engine`
+    # registration is deliberately not matched. Reading the stale rule re-installs that red.
+    # Coarse here can only over-RED code that simultaneously adds to the import path and
+    # evicts the package from the cache while the pin is watching, which is the premise.
     path_names = frozenset(_aliases_of(tree, lambda _n: _is_import_path_object(_n, ctx),
                                        loops=True))
     _path_mutations = [
@@ -9238,6 +9258,24 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "a plain ALIAS `_p = sys.path` then `_p.insert` + `del`":
             '_p = sys.path\n_p.insert(0, "/tmp/evil")\n'
             'del sys.modules["tortoise.sdk"]\n',
+        # ⛔ ROUND 32: `__init__` MERGES so it is an ancestor STORE; and the UNBOUND
+        # insert/append/extend on the path was the cross-product member two individually
+        # complete sets both missed.
+        # ⛔ THE UNBOUND `insert`/`append`/`extend` ON THE PATH (#14326 round 32 P2): the
+        # cross-product member of two sets that were each individually complete.
+        # ⛔ STILL OPEN AND NAMED, NOT CLAIMED: the unbound spelling takes the path as
+        # `args[0]`, and a NAME ALIAS there (`_p = sys.path; list.append(_p, ...)`) is measured
+        # GREEN -- the receiver-arm alias resolution was not threaded into the arguments-first
+        # arm. Declared rather than pinned GREEN under a comment calling it covered.
+        "`list.insert(sys.path, ...)` unbound + `del`":
+            'list.insert(sys.path, 0, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`list.append(sys.path, ...)` unbound + `del`":
+            'list.append(sys.path, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`list.extend(sys.path, ...)` unbound + `del`":
+            'list.extend(sys.path, ["/tmp/evil"])\n'
+            'del sys.modules["tortoise.sdk"]\n',
         "`sys.path = [...] + sys.path` + `del`":
             'sys.path = ["/tmp/evil"] + sys.path\n'
             'del sys.modules["tortoise"], sys.modules["tortoise.sdk"]\n',
@@ -9281,6 +9319,12 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     ancestor_stores = {
         "ancestor registry STORE + `del` of the target":
             'sys.modules["tortoise"] = _pkg\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "ancestor registry `__init__` store + `del`":
+            'sys.modules.__init__({"tortoise": _pkg})\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`dict.__init__(sys.modules, ...)` unbound + `del`":
+            'dict.__init__(sys.modules, {"tortoise": _pkg})\n'
             'del sys.modules["tortoise.sdk"]\n',
         "ancestor registry `|=` + `del` of the target":
             'sys.modules |= {"tortoise": _pkg}\n'
