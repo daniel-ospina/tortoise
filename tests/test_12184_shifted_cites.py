@@ -45,7 +45,9 @@ document.
 """
 from __future__ import annotations
 
+import ast
 import re
+import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -148,10 +150,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `:51496`) by one, measured at the merge resolution.
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is one of the pairs the header
-    # enumerates as non-comparable at the pin — `_PIN_EOF_PAIRS` below is that split's per-pair
-    # form. ⛔ NO COUNT IS TYPED HERE (#14282 review, P3): the earlier form carried
-    # a figure that matched no published edition once the doc's split was re-derived, so the
-    # population is named by TEXT and its size comes from the graded source. ⛔ The
+    # enumerates as incomparable at the pin (`sdk.py:58099`, `search_engine.py:7577`, `:7579` among
+    # them). ⛔ NO SPLIT FIGURE IS TYPED HERE: the figures this sentence used to carry (`211`/`119`/
+    # `122`/`214`) were the retired `7697a6b762` edition's, so a reader who took them as this head's
+    # was reading a census no address on this line belongs to. The header's own split is recomputed
+    # by `_figure_problems` and by the comparability arm below, and the published sentence is graded
+    # there — read the split from that run, never from this comment (#14269 review, P1). ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
@@ -661,9 +665,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "138 of this document's 234",
+        "136 of this document's 234",
         "dedupes the **345** as-written spellings to 234 — **111**",
-        "345 written spellings → 234 pairs → 111 collisions → 138 drifters of the 234",
+        "345 written spellings → 234 pairs → 111 collisions → 136 drifters of the 234",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -1164,6 +1168,10 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
     )
 
 
+#: The pin every "past the pin's EOF" fact in this file is measured against, and the rev a shallow clone
+#: re-arms with `git fetch origin ccb49741b2ec`.
+_PIN_COMMIT = "ccb49741b2ec"
+
 #: The census pairs the header's comparability split calls NON-comparable, with the pin-side line count that
 #: makes each one so: the pair's line is past `ccb49741b2ec`'s copy of its file. MEASURED, one command per
 #: file — `git show ccb49741b2ec:<path> | wc -l` — and the header publishes the same four counts in its
@@ -1175,6 +1183,16 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
 #: failure this table exists to make unreachable: the split shipped `224`/`ten`/`131`/`seven` — internally
 #: consistent, and wrong — because nothing DERIVED it, and a self-consistent stale split cannot be caught
 #: by arithmetic on its own four figures (224 + 10 == 234 and 131 + 7 == 138 both held).
+#:
+#: ⛔ THE SAME CLASS RECURRED ONE ROUND LATER, which is why membership is now DERIVED rather than trusted to
+#: this table: this branch's re-point of §2.1's operator-expansion rows `:6837`/`:6891` → `:7170`/`:7201` moved
+#: both pairs past the pin's 7,071-line `search_engine.py` (that code moved under `#14224`/`#14262`) — and NOTHING reddened, for the identical
+#: reason the `#14246` finding names (`test_the_comparability_split_names_every_pair_past_the_pins_eof` buys
+#: its `expected_comparable` from THIS dict, so a table left untouched by the editing commit re-derives the
+#: stale split from itself). `test_the_split_membership_is_derived_from_the_pins_own_line_counts` closes the
+#: class in the direction that was blind: it counts the pin's lines itself and demands the table carry every
+#: pair that crossed. The two entries below are that occurrence, and the header publishes `221`/`thirteen`/
+#: `128 of the 221, plus eight of those thirteen`/`136` for them.
 _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 57951): 56415,
     ("tortoise/sdk.py", 58099): 56415,
@@ -1183,6 +1201,8 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58966): 56415,
     ("tortoise/sdk.py", 61999): 56415,
     ("tortoise/sdk.py", 62019): 56415,
+    ("tortoise/search_engine.py", 7170): 7071,
+    ("tortoise/search_engine.py", 7201): 7071,
     ("tortoise/search_engine.py", 7577): 7071,
     ("tortoise/search_engine.py", 7579): 7071,
     ("tortoise/hosted_api.py", 50935): 49851,
@@ -1239,7 +1259,7 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     # (2) every one of them is NAMED where the header promises to name them: the non-comparable enumeration,
     # the sentence between "that are NOT comparable" and "past the pin's copy of its file". Either spelling
     # form the document uses for a pair counts — `SDK/FILE:NNNN` (`sdk.py:57951`) or the bare `:NNNN`
-    # sibling behind an adjacent path (`search_engine.py`'s `:7579`).
+    # sibling behind an adjacent path (`search_engine.py`'s `:7577`).
     start = body.find("that are NOT comparable")
     end = body.find("past the pin's copy of its file")
     assert start != -1 and end > start, (
@@ -1300,7 +1320,8 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     )
     # The incomparable half splits in two: the pairs that DO exist at the named `main` (and so drift) and the
     # ones that exist at neither head (and so cannot be compared at all). Both counts are published, and they
-    # must add up to the population `_PIN_EOF_PAIRS` measures — which is what makes "eight of those eleven"
+    # must add up to the population `_PIN_EOF_PAIRS` measures — which is what makes "eight of those thirteen"
+    # (the split this edition publishes; it read "eight of those eleven" before the `:7170`/`:7201` re-point)
     # checkable rather than asserted.
     drifters_incomparable = _as_int(drift.group(3))
     absent_at_main = _as_int(absent.group(1))
@@ -1312,6 +1333,27 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     assert _as_int(drift.group(4)) == len(_PIN_EOF_PAIRS), (
         f"the drift sentence names `of those {drift.group(4)} pairs` while the split counts "
         f"{len(_PIN_EOF_PAIRS)} non-comparable pairs"
+    )
+    # (4) the comparable DRIFT NUMERATOR is graded too — and until this it was the only figure in the
+    # sentence no assertion read (review at `bda80ef812`, finding P2): `group(2)`, `group(3)` and
+    # `group(4)` were each asserted while `group(1)` was not, so mutating `128` -> `129` in the document
+    # left this whole file green. The relation is DERIVED, not a second literal: the header publishes the
+    # total drifter count one sentence earlier (`N written spellings → P pairs → C collisions → D drifters
+    # of the M`), and the two halves it writes here must add up to it — comparable drifters plus
+    # non-comparable drifters equals the total, so one half is the total minus the other.
+    _total_sentence = _QUADRUPLE.search(body)
+    assert _total_sentence is not None, (
+        "the header no longer publishes the `N written spellings → P pairs → C collisions → D drifters of "
+        "the M` sentence, so the comparable drift numerator has no total to add up to — re-point "
+        "`_QUADRUPLE` against how it is written now, do not drop this arm"
+    )
+    _total_drifters = int(_total_sentence.group(4))
+    assert int(drift.group(1)) == _total_drifters - drifters_incomparable, (
+        f"the split says {drift.group(1)} of the {comparable_denominator} comparable pairs drift, but the "
+        f"header's own total is {_total_drifters} drifters and it calls {drifters_incomparable} of the "
+        f"non-comparable pairs drifters — so the comparable half must be "
+        f"{_total_drifters - drifters_incomparable}. The two halves add up to the total; re-measure the "
+        "split, do not adjust the total to it."
     )
     # The pinned `wc -l` values ARE the membership rule, so the header has to state the one for every file a
     # non-comparable pair lives in — the pin-side fact a reader checks, and the entry `#14246` was missing.
@@ -1325,6 +1367,171 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             "but the header's pin-side `wc -l` parenthetical does not state it. Without that figure the "
             "five numerals above are unverifiable prose, which is how they shipped wrong."
         )
+
+
+#: The pin's copy of EVERY file this document cites, in lines — the SAME rule `_pin_line_count`
+#: measures, carried as a constant because the arm that uses it must grade where `git show` cannot run.
+#: MEASURED once per file at the pin (`git show ccb49741b2ec:<path> | wc -l`, i.e.
+#: `len(text.splitlines())` — the number `sed -n '<N>p'` answers to, which is what membership means).
+#:
+#: ⛔ WHY A CONSTANT AND NOT JUST THE `git show`: this file runs in the `test` job, whose checkout is
+#: `actions/checkout@v4` with NO `with: fetch-depth` (`.github/workflows/python-ci.yml`, the `test` job)
+#: — the default depth 1, where the pin's objects are absent. An arm that reads history there SKIPS, and
+#: a skip over every measurement is the `#3442` rule-3 shape this file exists to refuse: the class would
+#: stay open in the ONE place that gates the PR. A length of an IMMUTABLE commit does not rot (membership
+#: does, and membership is what is derived), so this constant grades in CI and the `git show` grades
+#: everywhere else; where both exist they are asserted equal, and neither can drift unnoticed.
+#:
+#: A cite on a file this map does not carry REDS demanding its measurement rather than escaping the arm.
+_PIN_LENGTHS: dict[str, int] = {
+    "tests/test_10853_session_source_prose.py": 1657,
+    "tests/test_cache_projection.py": 3688,
+    "tests/test_capture_secret_redaction_4911.py": 2369,
+    "tests/test_search_engine_gaps.py": 2759,
+    "tools/backfill_copy_turns.py": 1285,
+    "tortoise/activation_scorecard.py": 1711,
+    "tortoise/aggregate.py": 705,
+    "tortoise/api.py": 3057,
+    "tortoise/assembly.py": 4821,
+    "tortoise/audit.py": 3057,
+    "tortoise/cache_eviction.py": 1677,
+    "tortoise/cache_projection.py": 4022,
+    "tortoise/cohort_cost.py": 495,
+    "tortoise/commit_idempotency.py": 229,
+    "tortoise/coverage_loop.py": 749,
+    "tortoise/definite_description_backfill.py": 947,
+    "tortoise/domain_validators.py": 748,
+    "tortoise/embed_compose.py": 327,
+    "tortoise/ep.py": 3150,
+    "tortoise/event_store.py": 1114,
+    "tortoise/export.py": 289,
+    "tortoise/goal_judgement.py": 2137,
+    "tortoise/hosted_api.py": 49851,
+    "tortoise/hosted_backup.py": 3758,
+    "tortoise/live.py": 1299,
+    "tortoise/mcp_server.py": 11466,
+    "tortoise/metering.py": 2971,
+    "tortoise/migrate_kinds.py": 601,
+    "tortoise/mining.py": 1616,
+    "tortoise/onboarding/seed.py": 455,
+    "tortoise/onboarding/state.py": 1857,
+    "tortoise/pack_manifest_store.py": 670,
+    "tortoise/pack_state.py": 1671,
+    "tortoise/pipeline.py": 985,
+    "tortoise/projection/__init__.py": 22857,
+    "tortoise/projection/edges.py": 3212,
+    "tortoise/projection/entities.py": 7475,
+    "tortoise/projection/propagation.py": 143,
+    "tortoise/quota.py": 2442,
+    "tortoise/record_read.py": 1142,
+    "tortoise/record_reconcile.py": 977,
+    "tortoise/record_serve.py": 1685,
+    "tortoise/residency.py": 301,
+    "tortoise/sdk.py": 56415,
+    "tortoise/search_engine.py": 7071,
+    "tortoise/session_indexer.py": 866,
+    "tortoise/session_projection.py": 195,
+    "tortoise/session_reinjection.py": 905,
+    "tortoise/session_schema.py": 1008,
+    "tortoise/session_source_migration.py": 698,
+    "tortoise/session_source_prose_migration.py": 2563,
+    "tortoise/webhook_delivery.py": 1388,
+    "tortoise/why_snapshot.py": 572,
+}
+
+def _pin_line_count(path: str) -> int | None:
+    """`git show ccb49741b2ec:<path> | wc -l` — the comparability split's membership rule, as code.
+
+    `None` when this clone cannot read the pin's copy (a shallow or partial clone, which is the CI case):
+    the caller falls back to `_PIN_LENGTHS` and REDS only when that carries no figure either. A fallback to
+    a measurement of an immutable commit is not an unchecked pass — `test_the_split_membership_…` asserts
+    the two agree wherever both are available.
+    """
+    shown = subprocess.run(
+        ["git", "show", f"{_PIN_COMMIT}:{path}"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    return len(shown.stdout.splitlines()) if shown.returncode == 0 else None
+
+
+def test_the_split_membership_is_derived_from_the_pins_own_line_counts() -> None:
+    """A pair past the pin's EOF is NON-comparable because the pin's file is shorter — measured here.
+
+    WHY THIS EXISTS. `test_the_comparability_split_names_every_pair_past_the_pins_eof` buys its
+    `expected_comparable` from `_PIN_EOF_PAIRS` (`len(pairs) - len(_PIN_EOF_PAIRS)`) and cross-checks the
+    table's `wc -l` values against the header's PROSE, which states the same numbers — so both sides of
+    that comparison are hand-maintained literals, and a commit that re-points a cite across the boundary
+    without editing the table re-derives the stale split from itself and stays green. That is not a
+    hypothesis: this branch's re-point moved §2.1's `search_engine.py:6837`/`:6891` → `:7170`/`:7201`, both
+    past the pin's 7,071-line copy, and the whole suite passed — the second occurrence of the class
+    `#14246`'s review named ("nothing DERIVED it"). The header's own rule is a `wc -l` on the pin's blob,
+    so this arm runs it: every resolved pair whose line exceeds that file's pin-side length must be in the
+    table, and every length the table states must be the pin's.
+
+    BOTH DIRECTIONS, because each catches a different edit: a pair CROSSING the boundary with the table
+    untouched is caught by `crossed`; a table entry whose pin-side figure was typed rather than measured
+    is `wrong`'s. A pair left behind by a re-point back inside the file is the sibling test's `orphan`.
+
+    ⛔ IT GRADES WHERE `git show` CANNOT RUN. The pin-side figure per file is `_pin_line_count` when this
+    clone has the object, and `_PIN_LENGTHS` when it does not — and the second is the case that matters:
+    the `test` job checks out at `fetch-depth: 1`, so a history-only arm SKIPS on every CI run, which is a
+    green arm over zero measurements — the `#3442` rule-3 shape this file exists to refuse, in the one
+    place that gates the PR. Where both are available they must AGREE (`stale_constants`), so the constant
+    cannot rot silently either; a file the map does not carry and the clone cannot read REDS with the
+    measurement to take, rather than skipping the pair it would have graded.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    _spellings, pairs = _resolved_pairs(text)
+    counts: dict[str, int] = {}
+    stale_constants: list[tuple[str, int, int]] = []
+    unmeasured: list[str] = []
+    for path in sorted({path for path, _line in pairs}):
+        measured = _pin_line_count(path)
+        stated = _PIN_LENGTHS.get(path)
+        if measured is not None:
+            counts[path] = measured
+            if stated is not None and stated != measured:
+                stale_constants.append((path, measured, stated))
+        elif stated is not None:
+            counts[path] = stated
+        else:
+            unmeasured.append(path)
+    assert not unmeasured, (
+        f"{len(unmeasured)} of the files this document cites have no pin-side length this test can read: "
+        f"`{_PIN_COMMIT}`'s copy of {unmeasured[:3]} is absent from this clone (a shallow checkout), and "
+        "`_PIN_LENGTHS` does not carry it either — so whether their pairs sit past the pin's EOF CANNOT be "
+        "decided, and a pair crossing it would escape this arm. Measure each (`git show "
+        "ccb49741b2ec:<path> | wc -l`, which needs only the object) and add it to `_PIN_LENGTHS`."
+    )
+    assert not stale_constants, (
+        f"`_PIN_LENGTHS` disagrees with the pin for {stale_constants} (path, measured now, constant): the "
+        "map is a measurement of an IMMUTABLE commit, so a disagreement means it was typed rather than "
+        "measured — correct the constant to the measured figure."
+    )
+
+    crossed = sorted(pair for pair in pairs if pair[1] > counts[pair[0]] and pair not in _PIN_EOF_PAIRS)
+    assert not crossed, (
+        f"{crossed} sit past the pin `{_PIN_COMMIT}`'s own copy of their file "
+        "(`git show <pin>:<path> | wc -l`, or `_PIN_LENGTHS` where the clone is shallow), so they are NOT "
+        "comparable — but "
+        "`_PIN_EOF_PAIRS` does not carry them, so the header publishes a comparable denominator that "
+        "counts them. Add each pair to the table, name it in the header's non-comparable enumeration, "
+        "and re-measure the four published figures — do not re-point the cites back inside the pin."
+    )
+
+    wrong = sorted(
+        (pair, counts[pair[0]], stated)
+        for pair, stated in _PIN_EOF_PAIRS.items()
+        if pair[0] in counts and counts[pair[0]] != stated
+    )
+    assert not wrong, (
+        f"`_PIN_EOF_PAIRS` states the pin-side line count (pair, measured, stated) for {wrong}, and the "
+        f"pin `{_PIN_COMMIT}` measures a different one. Each entry's figure is the RULE that decides "
+        "membership, not a label: re-run `git show <pin>:<path> | wc -l` and correct the entry (and the "
+        "header's `wc -l` parenthetical, which is the same measurement)."
+    )
 
 
 def test_a_carried_forward_figure_is_reported() -> None:
@@ -2598,3 +2805,61 @@ def test_the_13854_range_anchors_are_inside_the_range_the_token_names() -> None:
             f"{path}:{line} is the anchor pinned for {token!r}, which covers {start}-{end} — a range row "
             "whose anchor sits outside its own range resolves nothing the row quotes."
         )
+
+
+def test_a_def_range_pin_ends_on_the_function_its_prose_names() -> None:
+    """A `def …` span pins BOTH ends, not only its start (review at `bda80ef812`).
+
+    ⛔ WHY. `_PINS` grades the fragment at a range token's START line, and the sibling arm above only asks
+    that an anchor sit INSIDE the span — so `:7582-7621` could be re-pointed to `:7582-7620` with the whole
+    file green (MEASURED pre-fix: that mutation, applied consistently to the document and both pin tables,
+    left 32 passed). The end is therefore DERIVED here from the source itself rather than re-typed, so an
+    insert that moves the definition's last line reds this arm instead of silently leaving the published
+    `:N` stating a line nothing reads.
+
+    ⛔ THE END IS THE FUNCTION'S OWN LAST LINE — NOT ITS DOCSTRING'S CLOSER. An earlier form of this arm
+    derived the end from the docstring delimiters and the row published `:7582-7596`. The function's only
+    consumption site, `rows = graph.query(_SUBJECT_SOURCE_SCOPED_PROBE, …)`, is at `:7598-7599` — i.e.
+    OUTSIDE that span — so the published range did not bracket the consumption the row's own prose
+    describes. `ast` answers the question the row actually asks: `FunctionDef.end_lineno` is the line the
+    function ends on, and the span `:7582-7621` contains the call. Grading the DOCSTRING closer instead
+    would pin a line that is neither the span's end nor what the span is for.
+
+    The START is graded too, against the same AST rather than against the pin's own claim, so a row that
+    names the wrong definition reds here instead of resolving some other `def`'s fragment.
+    """
+    checked = 0
+    for _doc, token, src_path, _line, fragment in _PINS:
+        span = re.search(r":(\d+)-(\d+)$", token.rstrip("`"))
+        if span is None or not fragment.startswith("def "):
+            continue
+        start, end = int(span.group(1)), int(span.group(2))
+        src_text = (REPO / src_path).read_text(encoding="utf-8")
+        name = fragment[len("def "):].split("(")[0].strip()
+        definitions = [
+            node
+            for node in ast.walk(ast.parse(src_text))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+        ]
+        assert definitions, (
+            f"{src_path}:{start} is pinned as {token!r} ('{fragment}') but that file defines no "
+            f"{name!r} — the row states a `def …` span, so the span must start at a definition that is "
+            "there."
+        )
+        derived_start = min(node.lineno for node in definitions)
+        assert derived_start == start, (
+            f"{token!r} names {name!r}'s first definition line as {start}, but {src_path}'s AST puts it "
+            f"at {derived_start} — so the START of the span is not the line the document says it is."
+        )
+        derived_end = max(node.end_lineno for node in definitions)
+        assert derived_end == end, (
+            f"{token!r} names {name!r}'s last line as {end}, but {src_path}'s AST ends that definition "
+            f"at {derived_end} — so the END of the span is not the line the document says it is, and a "
+            "body line inserted inside the function moves it. Re-derive the range from the source, do "
+            "not adjust the sentence to the number."
+        )
+        checked += 1
+    assert checked, (
+        "no `def`-anchored range pin was graded — the arm is vacuous, which is how the END of "
+        "`:7582-7621` stayed unread."
+    )
