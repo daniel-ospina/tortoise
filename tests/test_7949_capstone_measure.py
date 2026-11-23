@@ -7383,8 +7383,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("7605", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("12207", "subject_binding_available,"),
-            ("12260", "and not subject_binding_available(graph):"),
+            ("46621", "subject_binding_available,"),
+            ("12289", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("7605", "def subject_binding_available(graph) -> bool:"),
@@ -7393,8 +7393,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12111`/`12164` -> `12116`/`12169` pair (`#13556` then added a further `+20` to `12136`/`12189`, and a later `origin/main` merge a further `+32` to `12168`/`12221` and a further `+59` to `12227`/`12280`, then `#14290`'s `-21` to the `12206`/`12259` the rows below carry).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("12207", "subject_binding_available,"),
-            ("12260", "and not subject_binding_available(graph):"),
+            ("46621", "subject_binding_available,"),
+            ("12289", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
@@ -7645,8 +7645,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
             # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, onto `12116`/`12169` — the `+1` between `#13486`'s `12110`/`12163` and that pair is `#13456`'s `from . import derived_embedding` (`sdk.py:45`), NOT `#12745`, which is an ancestor of `#13486` — and `#13556`'s own `+20` then took it to `12136`/`12189`, and a later `origin/main` merge a further `+32` took it to `12168`/`12221`, and a further `+59` to `12227`/`12280`, then `#14290`'s `-21` to the live `12206`/`12259`.
-            ("12207", "subject_binding_available,"),
-            ("12260", "and not subject_binding_available(graph):"),
+            ("46621", "subject_binding_available,"),
+            ("12289", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("05-verify.md", "Measured at `9d790287af`", (
             ("1186", '"sha256": sha, "turns": None'),

@@ -191,10 +191,10 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
-   the capture path at `tortoise/sdk.py:22472`). (The probe's own docstring cites it too and was
+   the capture path at `tortoise/sdk.py:22525`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
    insertion then moved both, and `#11835`'s seam stamp moved them once more; both now read
-   `:22472`.)  <!-- Re-derived at the merge of `origin/main` (`#13133`) into this branch, off
+   `:22525`.)  <!-- Re-derived at the merge of `origin/main` (`#13133`) into this branch, off
    `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py` on the MERGED tree — the only
    figure that survives, because this number depends on BOTH sides' `sdk.py` growth:
    `origin/main` carried a figure correct for `main`, and this branch's head had ALREADY moved
@@ -226,12 +226,12 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `grep -n '_ekind = _payload_entity_kind(e)' tortoise/sdk.py` on the tree of that head.
    ⛔ THESE FIGURES ARE HISTORICAL, NOT LIVE, and they went stale the moment `origin/main` advanced
    under them: the merge of `#13971` (`e0accb8fe6`) inserted 43 lines into `tortoise/sdk.py`, 31 of
-   them above this writer (the live cite above is `sdk.py:22472`), so at the merged head
+   them above this writer (the live cite above is `sdk.py:22525`), so at the merged head
    `22441` is `sourceKind="agentSession",`, `22386` is ``# re-capture kept the display column live and the replay wrote `''` ``, and the
-   mint opens at `21190` (`21190-21214`, same `-A 24` window). They are stamped by head and NOT
+   mint opens at `21190` (`21243-21267`, same `-A 24` window). They are stamped by head and NOT
    re-pointed, because re-pointing a past-tense sentence to a new number is the false claim this
    note exists to catch; the LIVE figures are the prose cite above, which was re-derived on the
-   merged tree (`sdk.py:22472`). No arm reads the numbers in THIS block — which is why they rot
+   merged tree (`sdk.py:22525`). No arm reads the numbers in THIS block — which is why they rot
    silently. --> What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
@@ -368,7 +368,7 @@ def is `:3104` at `d69faaf38`; `git grep -n '_hold_endpoint(' -- tortoise/extrac
 def and the one call), which fabricates a `statement` **Point** from an operator ref. A2's population is
 the **Object** mint: every emitted entity is appended unfiltered at the
 `payload_entities.append({` site (`extractor_v2.py:8880` at `80c912244`; **`:9433` at `d69faaf38`**)
-(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:21190-21214`. Nothing
+(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:21243-21267`. Nothing
 filters it, and the tree's own registry says so in `#10997`'s own words —
 `config/v4-mechanisms.yml`'s `failure_policy` row is still **`state: not-implemented`**, its note reads
 *"the gate covers the MINTED candidate only"*, and it still carries the pin built to red the day a create
@@ -457,7 +457,7 @@ named a Subject and the spine relabelled it an Object.
 mints SUBJECT-kind entities as Objects"*) is the **report** whose own closure says **"No code change
 remains"** and names `#5230` as the landing, so cite it for the diagnosis, not for the code. At the head
 this record is measured on,
-the write seam routes by kind (`tortoise/sdk.py:21190-21214`): `_ekind = _payload_entity_kind(e)` →
+the write seam routes by kind (`tortoise/sdk.py:21243-21267`): `_ekind = _payload_entity_kind(e)` →
 `_is_subject = is_subject_kind(_ekind or "")` → `create_entity("subject", …)` **or**
 `create_entity("object", …)`. `#4938` (CLOSED 2026-09-28T15:02:50Z), `#1370` (CLOSED
 2026-09-26T12:35:33Z) and `#1509` (CLOSED 2026-10-10T12:36:56Z) are closed too. So the relabelling is
@@ -899,7 +899,7 @@ grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml
 # *the writer landed, the corpus was not re-measured* (and no rollup query exists, §1).
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '22472p' tortoise/sdk.py                             # the call (`references`'s writer)
+sed -n '22525p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
 # BUNDLE's OWN registration of the A1 row (#10982 landed it AFTER this record was written),
@@ -928,7 +928,7 @@ grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-915
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 git grep -n -A 24 '_ekind = _payload_entity_kind(e)' -- tortoise/sdk.py   # the kind→label routing at the
                                                           # write seam (#5230/#1370's fix); symbol, not a
-                                                          # line — the -A 24 reproduces sdk.py:21190-21214
+                                                          # line — the -A 24 reproduces sdk.py:21243-21267
 for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 # #4889's 13-type hosted census is QUOTED from its scoping comment, not re-derived here:
 gh issue view 4889 --json comments -q '.comments[].body' | grep -n -A 3 'CONTAINS` 35,046'
