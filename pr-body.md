@@ -95,9 +95,9 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```text
-# 45 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
+# 47 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-45 passed
+47 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
@@ -105,12 +105,12 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-407 passed
+736 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-294 pass / 0 fail
+300 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -187,6 +187,19 @@ listed were 12 here, now fixed, plus `tests/test_13098_cypher_inventory.py`'s `I
 unrelated PR diffs, so it is named rather than fixed here). That context is **not** in the
 required set, so it cannot block the merge; it stays red only on that `main`-side row.
 
+**Cycle 5** (a second fresh reviewer, at `ffc6d3fa`, posted as review comment `7114708794`) —
+1 **P1**, 6 P2. Five fixed here, two corrected in the record:
+
+| finding | disposition |
+|---|---|
+| **P1** `read_claim` was not `lstat`-gated, so a FIFO/socket at the claim path blocked FOREVER | **fixed**: it now routes through `_read_raw`, the gated reader `acquire` already used — measured before the fix: `read_claim` never returned (killed at 8 s) while the TypeScript twin answered in ~0 s, and `read_claim` is what `renew`, `_claim_still_ours` and `holder()` call, i.e. the drain, the health line and every later pass. |
+| **P2** the FIFO test asserted on an ABSENT path (a tautology — the mutant it named was the shipped code) | **fixed**: the read runs under a watchdog while the FIFO is still at the path. Verified by running the mutant: an ungated `read_claim` REDS it. |
+| **P2** `release` could dispose of a claim it did not own (three-process interleaving) | **fixed**: it reads the token first and returns `False` without touching the file when the claim is not ours; the takedown stays for the ours branch. A new test pins that a not-ours release does not even change the file's inode/mtime. |
+| **P2** an out-of-range-but-finite `expires_at` raised `OverflowError` out of `flush_spool` (`time.gmtime` outside its try/finally) and, being honoured by rule 2 as never-expiring, blocked the spool PERMANENTLY | **fixed**: the format is guarded, and a test builds that record end-to-end and asserts the operator line still renders. |
+| **P2** the Pi leg could run UNCLAIMED when both takeover attempts lost a race (path momentarily empty → read as "cannot create") | **fixed**: `acquireDrainClaim` reports `state.raced` and `flushSpool` fails CLOSED on it, as the Python leg does for any `None` from `acquire`. A test pins the OTHER arm (an unmakeable root is NOT a lost race) so the documented "run unclaimed and say so" cannot be swallowed by the flag. |
+| **P2** `renew`'s post-write read-back does not close the takeover race it claimed to — the replace IS the clobber | **record corrected, not changed.** Reproduced (a peer record installed between the guard read and the replace is lost; `renew` returns `True`). The comment now states exactly what the read-back covers and what it does not; the residual is below. |
+| **P2** `DRAIN_MAX_IN_FLIGHT` is read by no code and bounds 1 POST per PASS, while a TARGETED pass takes no claim | **record corrected**: the constant's docstring now says the ceiling is per pass, that the claim is what serialises passes, that the box's worst case is **2** in that overlap, and that no test asserts the per-pass property itself. |
+
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
@@ -196,6 +209,23 @@ required set, so it cannot block the merge; it stays red only on that `main`-sid
   generation MARKER moved 32→33 with the pair) instead of
   spending a generation 34 on a refinement of the same unreleased seam. From the
   moment 33 reaches `main` the entries are frozen and a byte change needs 34.
+* **A `renew` that lands inside the read → replace window can overwrite a peer's
+  fresh claim** (reproduced; cycle 5, P2). The window is closed on the other side —
+  a peer that takes over AFTER our replace is seen as "not ours" — but not on this
+  one: two drainers can coexist until the loser's next `renew_if_due` (≤ TTL/3 ≈
+  40 s). Closing it needs a compare-and-swap on the inode, which POSIX does not
+  offer directly; the takedown's move-aside compare is one, and using it on the
+  per-entry refresh path would add a rename + read to every renew. It is bounded by
+  the lease rather than unbounded, and it is stated here rather than implied away.
+* **The per-pass ceiling is 1 POST, and a box can hold 2** when a TARGETED pass (a
+  live session's own shutdown filing, which takes no claim by design) overlaps the
+  claim holder. `DRAIN_MAX_IN_FLIGHT` is a stated ceiling read by no code; the claim
+  is what serialises UNTARGETED passes.
+* **`acquireDrainClaim`'s `state.raced` flag has no forcing test.** The flag is set
+  at the three sites where a takeover is lost and consumed by one `if` in
+  `flushSpool`; the arm that IS tested is the neighbouring one (an unmakeable root
+  is not a race). Forcing the interleaving needs a peer process inside the two
+  acquisition attempts, which this suite does not stage.
 * **A wedged pass holds the claim until its lease (≤120 s).** That is what a lease is; the bound is derived from the transport (`REQUEST_TIMEOUT_MS` 10 s / `urlopen` 30 s), and a real fetch always ends. A hung *mock* does not — which is why the #2100 case above had to release it.
 * **A claim we cannot READ is HONOURED, not taken over** (both legs): a transient
   local error on a regular claim file is not evidence about its holder, and the
