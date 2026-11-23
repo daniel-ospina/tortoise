@@ -950,7 +950,8 @@ class JournalPositionCollision(RecordProjectionError):
     `event_type`/`payload`/`recorded_at` with what it was about to write, and
     that comparison is NECESSARY but not sufficient for a refusal: a difference
     it can read as this record's own drift (same type, same capture, moved
-    payload) is silent, and a capture-time difference alone IS a refusal even
+    payload, and no contradicting identity — see below) is silent, and a
+    capture-time difference alone IS a refusal even
     though the content matches. A guard that turned every replay into an error
     would be a worse defect than the one it fixes, which is why the comparison
     is content AND capture, not merely "the key was taken".
@@ -965,11 +966,13 @@ class JournalPositionCollision(RecordProjectionError):
     claimed that once the key carries the journal "this guard simply never fires"
     — that is backwards (#12904 review P1-4). After `#12894` a conflict IS
     same-journal-same-seq, so a payload difference there is necessarily THIS
-    record's own DERIVATION DRIFT — which the drift arm absorbs SILENTLY
-    (reported to NOBODY: no exception, no counter, no log line), so the guard
-    does not speak to that case at all. What it would still REFUSE is everything
+    record's own DERIVATION DRIFT — and a drift whose identities still AGREE (or
+    are one-sided / absent) is absorbed SILENTLY (reported to NOBODY: no
+    exception, no counter, no log line), so the guard does not speak to that
+    case. What it would still REFUSE is everything
     the drift split does not absorb: a capture time this record's OWN derivation
-    moved, and every difference a `ts`-less write cannot compare at all — i.e.
+    moved, an identity value that derivation re-keyed at the same instant, and
+    every difference a `ts`-less write cannot compare at all — i.e.
     legitimate replays of ONE journal, turned into refusals by a guard the key
     change has made unnecessary.
     And it could not even produce a coherent refusal —
@@ -1002,52 +1005,73 @@ class JournalPositionCollision(RecordProjectionError):
     (`_journal_row` binds
     `COALESCE(%s::timestamptz, now())`), so a re-derivation of the payload
     preserves it, while a second write normally brings its own. ⚠️ "Mostly" is
-    load-bearing: an equal instant does not PROVE one record — the mirror
-    residual below is the shape where it does not — it is only the coordinate
-    the drift reading rests on. The verdict is therefore:
+    load-bearing: an equal instant does not PROVE one record — the "⚠️ RESIDUAL —
+    WHAT THE VERDICT STILL CANNOT SEE" section below is where it does not — it is only the
+    coordinate the drift reading rests on. The verdict is therefore:
 
-    * same `event_type` AND same `recorded_at`, different payload ⇒ **READ AS
-      DRIFT**: the same record, re-derived. Reported to NOBODY — no exception, no
-      counter, no log line. The POSITION row was already consumed and stays as
-      the first derivation wrote it (the table is append-only by trigger); the
-      LAYER rows this write re-derives do LAND — the guard returns without
-      raising, so the write reaches its own commit and the record is repaired to
-      the new derivation. That is the repair story, and it is why this arm is
-      silent rather than fatal;
+    * same `event_type`, same `recorded_at`, different payload, AND an identity
+      reading in `_SILENT_IDENTITY_STATES` (`agrees`/`one_sided`/`none` — the
+      allow-list, never "not `disagrees`") ⇒ **READ AS DRIFT**: the same record,
+      re-derived. Reported to
+      NOBODY — no exception, no counter, no log line. The POSITION row was
+      already consumed and stays as the first derivation wrote it (the table is
+      append-only by trigger); the LAYER rows this write re-derives do LAND —
+      the guard returns without raising, so the write reaches its own commit and
+      the record is repaired to the new derivation. That is the repair story,
+      and it is why this arm is silent rather than fatal;
     * anything else ⇒ a COLLISION, and this class.
 
     ⛔ THE POLARITY THAT DECIDES THE TIE: silence is EARNED, never defaulted.
     The guard is silent on ONE piece of POSITIVE evidence that the position
-    holds THIS record — the conflict query returning NO row, i.e. identical type,
-    identical payload AND identical capture (a replay) — and on ONE
-    DELIBERATE ADMISSION, made with its cost stated below: identical type AND
-    identical capture time, which is the DRIFT reading and NOT evidence of
-    identity (an identical `recorded_at` says only that two writes named one
-    instant, and `ts` is a per-record value the emission path supplies, not one
-    the position derives). ⚠️ A content match at a DIFFERENT capture is NOT
-    silent: the `recorded_at` arm selects it and it refuses (that is the shape
-    `#9318` names). A difference it cannot attribute to
-    drift is NOT silently absorbed: when this write carries no `ts` its capture
-    time cannot be compared, so that difference refuses (the false-red residual
-    at the end of this section).
+    holds THIS record — the conflict query returning NO row: identical type AND
+    payload, which for a `ts`-bearing write is also an identical capture, while a
+    `ts`-less write's capture disjunct is INERT (it compares nothing, so the
+    instant went unexamined — see `capture_state="unknown"`) — and on ONE GATED
+    READING: identical type AND identical capture time, which is the DRIFT
+    reading and NOT evidence of identity, taken ONLY when the two payloads do
+    not name contradicting identities (`_identity_evidence`). ⚠️ A content match
+    at a DIFFERENT capture is NOT silent: the `recorded_at` arm selects it and
+    it refuses (that is the shape `#9318` names). A difference it cannot
+    attribute to drift is NOT silently absorbed. Besides the capture-time
+    difference named just above there are TWO of them, and neither is a content
+    difference in the SQL sense:
+    (1) this write carrying no `ts`, so its capture time cannot be compared, and
+    (2) a pair at one instant whose payloads name CONTRADICTING identities
+    (`disagrees` — the drift shape is one record with its own identities intact,
+    so a contradiction rules it out). ⛔ There is no third: the complement of
+    `_SILENT_IDENTITY_STATES` is exactly `disagrees` today, so an unenumerated
+    state a later edit adds would join (2)'s arm, not form a new one.
+    Both refuse, and BOTH carry a false-red cost:
+    the first is residual shape (a), and a SUBSET of the second is shape (c) — a
+    one-record re-derivation that re-keyed a shared identity value, which the
+    durable line cannot tell from a second journal. The three shapes are listed at
+    the end of this section.
 
     ⛔ AND WHAT THE REFUSAL MAY STILL NOT DO: assert ONE cause. What reaches
     this class is a different `event_type` at the row, a different capture time,
-    or a comparison this write cannot make for want of a `ts` — and each admits
+    a payload pair whose identities CONTRADICT at one capture instant, or a
+    comparison this write cannot make for want of a `ts` — and each admits
     more than one story: a second durable journal, a
     restore, a rotation or a rebuild numbering below the high-water mark on one
-    reading; a derivation that moved a record's own `ts`, or a write with none
-    to compare, on another. The message therefore states the possibilities ONCE
+    reading; a derivation that moved a record's own `ts`, re-keyed its identity,
+    or a write with none to compare, on another. The message therefore states
+    the possibilities ONCE
     and appends only the MECHANICAL reading of the two payloads
     (:func:`_identity_evidence`) — what identities they both carry, whether they
     agree, disagree, exist on one side only, or are not comparable. That reading
-    is a fact about the payloads and supports no cause on its own, which is why
-    it may not choose one: the durable payload carries no record id at all
+    is a fact about the payloads and supports no cause on its own, so it may not
+    CHOOSE one for the diagnosis: the durable payload carries no record id at all
     (`event_id` is stripped by `ENVELOPE_KEYS`, and there is no journal column),
     and `id`/`node_key`/`session_id` are COORDINATES a record shares with its
     neighbours. Three earlier cuts of this class let the reading DECIDE the
     diagnosis — "the SAME record", "two DIFFERENT records", "two records about
     one node" — and each was falsified in review for exactly that reason.
+    ⛔ IT DOES DECIDE ONE THING (#9318): whether a same-type/same-capture payload
+    difference is absorbed as drift or refused as a collision. That is a use of
+    the FACT (`disagrees` rules out the drift shape: one record re-derived with
+    its own identities intact), not a cause — the
+    refusal's message still names both causes, because a contradiction is
+    undecidable between a second journal and a re-keyed record.
 
     ⚠️ RESIDUAL — WHAT THE VERDICT STILL CANNOT SEE, stated rather than implied
     (#12904 P0-2, restated after the `recorded_at` arm). `_journal_row` builds
@@ -1062,48 +1086,59 @@ class JournalPositionCollision(RecordProjectionError):
     guard now compares it, which is why the reachable #9318 shape — two durable
     journals ingesting the SAME document, apart only in capture time — is
     REFUSED rather than absorbed.
-    ⛔ THE MIRROR RESIDUAL, in the SILENT direction, named because the drift arm
-    above is an admission and not identity evidence: **same `event_type` AND
-    same `recorded_at`, but two DIFFERENT records, are absorbed as one.** The
-    capture arm compares `recorded_at`, so a pair differing only in payload
-    lands on the drift reading; `_identity_evidence` is never consulted before
-    that early return, and where it would have answered `disagrees` (the durable
-    row naming `obj-a` against this write's `obj-b`) the refuting evidence is
-    discarded. Two different records CAN share one instant: `ts` is a per-record
-    value the EMISSION path supplies (`_journal_row` binds `record.get("ts")`,
-    and `_emit_event` accepts a `recorded_ts`, minting `now_iso()` only when
-    none is given — `sdk.py`), so nothing ties the instant to the record's
-    identity — a caller of that seam may
-    hand one clock reading to several records, and two independent mints can also
-    land on the same microsecond. The code does not exclude the shape, and it
-    never asks whether an equal instant means one record. `main` (post-#12904)
-    REFUSED this pair — payload
-    differs ⇒ collision — so the drift split widens the silent window by exactly
-    this shape. ⚠️ AND ITS COST IS NOT ONLY THE MISSING ERROR: the POSITION row
-    is absorbed (append-only, it keeps the first record's content), but the
-    second record's LAYER rows are applied and COMMITTED — the guard returns
-    without raising, so the write reaches its own `commit()` — i.e. its content
-    lands at the first record's position, which is the mis-index shape `#9318`
-    exists to stop. It is ADMITTED, not detected, not counted, not repaired, and
-    it is PINNED AS ADMITTED (`tests/test_9318_journal_collision.py`,
-    `test_a_same_capture_instant_pair_is_ADMITTED_not_detected`), so a later
-    reader cannot mistake this silence for coverage.
-    ⚠️ Why it is admitted rather than closed HERE: closing it means requiring
-    that `_identity_evidence` did not answer `disagrees` before taking the drift
-    reading, which is a SEMANTICS change to this verdict — it belongs to a
-    recorded decision on `#9318` (open; `#12904` is MERGED and closed, so it
-    cannot carry one), not to the round that measured the window. That decision
-    is stated in full, with its measurement, on `#9318`. `#12894`'s
-    journal IDENTITY in the key removes it with the rest of the residual,
-    because two journals can then no longer meet at one position at all.
-    ⛔ The remaining false-red subset, named rather than implied — and it has TWO
-    shapes, not one. (a) A write with NO `ts` whose payload derivation has changed
+    ⛔ THE MIRROR SHAPE, AND WHY IT IS NOW REFUSED (#9318). A pair differing only
+    in payload at ONE capture instant used to land on the drift reading with
+    `_identity_evidence` never consulted — so where it would have answered
+    `disagrees` (the durable row naming `obj-a` against this write's `obj-b`) the
+    refuting evidence was discarded and TWO DIFFERENT RECORDS were absorbed as
+    one. Two different records CAN share an instant: `ts` is a per-record value
+    the EMISSION path supplies (`_journal_row` binds `record.get("ts")`, and
+    `_emit_event` accepts a `recorded_ts`, minting `now_iso()` only when none is
+    given — `sdk.py`), so nothing ties the instant to the record's identity — a
+    caller of that seam may hand one clock reading to several records, and two
+    independent mints can also land on the same microsecond. ⚠️ ITS COST WAS NOT
+    ONLY THE MISSING ERROR: the POSITION row was absorbed (append-only, it keeps
+    the first record's content) while the second record's LAYER rows were applied
+    and COMMITTED — the guard returned without raising, so the write reached its
+    own `commit()` — i.e. its content landed at the first record's position,
+    which is the mis-index shape `#9318` exists to stop.
+    ⛔ THE DRIFT READING IS THEREFORE GATED ON THE IDENTITY EVIDENCE (the option
+    B recommended on `#9318`, and the one taken): `disagrees` refuses; `agrees`
+    (the common re-derivation — same node id, moved payload), `one_sided` and
+    `none` keep the silent repair path, because refusing THOSE is what made every
+    position written before a payload-derivation change un-replayable (#12904
+    P0-1). The boundary is pinned in both directions by
+    `tests/test_9318_journal_collision.py`
+    (`test_a_same_capture_instant_pair_is_REFUSED_when_the_identities_disagree`,
+    `test_a_re_derived_record_replays_SILENTLY`,
+    `test_a_same_capture_pair_with_no_comparable_identity_stays_SILENT`,
+    `test_a_ONE_SIDED_identity_at_one_instant_stays_SILENT` — one leg per state,
+    so a future tightening that would break the state a reader expects to survive
+    reds on ITS leg rather than on the unit reads alone).
+    ⚠️ WHAT STILL CANNOT BE SEEN: a pair that shares an instant AND whose
+    identities do not CONTRADICT — `agrees` (a shared node coordinate, moved
+    payload), `one_sided` (exactly one side writes an identity) or `none` (no
+    COMMON comparable identity — neither side names one, each names only keys the
+    other does not, or both name one in scopes that cannot be paired, e.g. a
+    snapshot section on one side and the top level on the other)
+    — reads as drift, because a coordinate cannot identify a record and a
+    pairing that never happens cannot contradict. `#12894`'s journal IDENTITY in
+    the key removes that with the rest of the residual, because two journals can
+    then no longer meet at one position at all.
+    ⛔ The remaining false-red subset, named rather than implied — and it has THREE
+    shapes, not two. (a) A write with NO `ts` whose payload derivation has changed
     at a position an earlier derivation wrote: `COALESCE(..., now())` gives such a
     row a real `recorded_at` while this write has none to compare against, so the
     difference cannot be attributed to drift and is refused. (b) A record whose
     derivation MOVED its own `ts`: that takes the `recorded_at` arm and is
-    REFUSED, although it is one record re-derived, because the capture time is the
-    only signature a second journal has (P0-2). Refusing is the deliberate direction:
+    REFUSED, although it is one record re-derived, because before #9318's identity
+    gate the capture time was the only signature a second journal had (P0-2) —
+    and a moved `ts` is still refused on that ground alone, since a contradicting
+    identity needs a pair that AGREES on the instant to be seen at all. (c) A one-record re-derivation
+    that RE-KEYED a shared identity value at the SAME capture instant (#9318's
+    identity gate): `disagrees` refuses it, and the gate cannot separate a
+    re-keyed record from a second journal — the recorded line is the only
+    evidence, and it is the same evidence in both stories. Refusing is the deliberate direction:
     the alternative — treating an unexplained difference as drift — is the silent
     absorption this class was built to end. `#12894`'s journal IDENTITY in the
     key removes the whole residual, because two journals can then no longer meet
@@ -1121,9 +1156,17 @@ class JournalPositionCollision(RecordProjectionError):
                  event_type: Any, payload_digest: str, payload_bytes: int,
                  stored_event_type: Any, stored_payload_digest: str,
                  stored_payload_bytes: int,
-                 identity_state: str = "none",
-                 identity_detail: str | None = None,
-                 capture_state: str = "unknown") -> None:
+                 # ⛔ REQUIRED, no defaults (#9318 round 16). Both defaults used
+                 # to sit on states that RENDER A MEASURED FACT — `unknown`
+                 # prints "This write carries no `ts`" and `none` prints "no
+                 # identity key is comparable" — so a construction that omitted
+                 # them asserted a measurement nobody took (measured: a bare
+                 # construction about a record WITH a `ts` printed the `ts`-less
+                 # clause). A caller that genuinely could not read the state says
+                 # so; it cannot inherit one.
+                 identity_state: str,
+                 identity_detail: str | None,
+                 capture_state: str) -> None:
         self.org_id = org_id
         self.graph_id = graph_id
         self.seq = seq
@@ -1136,34 +1179,63 @@ class JournalPositionCollision(RecordProjectionError):
         #: ``agrees`` / ``disagrees`` / ``one_sided`` / ``none`` — what the
         #: identities both payloads carry say (:func:`_identity_evidence`). A
         #: mechanical FACT about the two payloads, appended to a diagnosis that
-        #: names both possible causes unconditionally. Never decides the refusal:
-        #: a content difference this write CANNOT attribute to drift refuses, and
-        #: this only says what the ids look
-        #: like. `agrees` does NOT mean "one record" — a shared `id` is a node
-        #: coordinate (see the class docstring).
+        #: names both possible causes unconditionally. ⛔ It decides ONE thing and
+        #: not the cause: `disagrees` is the gate on the DRIFT arm (#9318), so a
+        #: same-instant pair naming different identities refuses rather than
+        #: absorbing. It still does not name WHICH cause applies — a shared `id`
+        #: is a node coordinate, and even a contradiction is undecidable between
+        #: "a second journal" and "this record re-keyed since". `agrees` does NOT
+        #: mean "one record" — a shared `id` is a node coordinate (see the class
+        #: docstring).
         self.identity_state = identity_state
         #: ``differs`` / ``matches`` / ``unknown`` — whether the two sides were
         #: CAPTURED at the same instant (`recorded_at`, stamped by the journal, so
         #: a payload re-derivation preserves it). The mechanical half of the
         #: drift-vs-second-write split (#12904 P0-1), printed because it is what
-        #: makes the refusal checkable: `differs` is the shape of a second journal,
-        #: `unknown` is a write carrying no `ts` at all. Like ``identity_state`` it
-        #: is a FACT, never a cause.
+        #: makes the refusal checkable: `differs` says the surviving row names an
+        #: instant this write does not (a second journal's record there, or this
+        #: record's own `ts` moved by a derivation — see the class's false-red
+        #: shapes); `matches` says it names the SAME instant, so the capture-time
+        #: story cannot explain the refusal (a second record there, or this record
+        #: re-keyed); `unknown` is a write carrying no `ts` at all. Like
+        #: ``identity_state`` it is a FACT about the comparison; it does not choose
+        #: between the stories it lists.
         self.capture_state = capture_state
+        # ⛔ EVERY BRANCH GUARDS ITS DETAIL (#9318 round 18). `identity_detail` is
+        # typed `str | None`, and interpolating a missing one printed
+        # "they share None" / "they disagree on None" — a claim about the payloads
+        # that nobody measured, which is the sentence class the branch below was
+        # fixed for. A caller with no detail gets a statement about the READING.
         if identity_state == "agrees":
-            evidence = f"they share {identity_detail}"
+            evidence = (f"they share {identity_detail}" if identity_detail
+                        else "the identity readings agree")
         elif identity_state == "disagrees":
-            evidence = f"they disagree on {identity_detail}"
+            evidence = (f"they disagree on {identity_detail}" if identity_detail
+                        else "the identity readings contradict")
         elif identity_state == "one_sided":
             evidence = identity_detail or "only one side carries an identity"
-        else:
+        elif identity_state == "none":
             evidence = "no identity key is comparable between them"
+        # ⛔ NO DEFAULT SENTENCE FOR A STATE NOBODY ENUMERATED (#9318 round 17).
+        # The `else` this replaces printed `none`'s sentence for ANY other state
+        # and discarded the caller's detail — i.e. it asserted "no identity key is
+        # comparable" while the measurement it was handed said otherwise. That is
+        # the same defect the required-keyword constructor closes one level up, and
+        # the state it hits is exactly the one the gate's allow-list exists to
+        # refuse. So the caller's own reading is printed, and only a caller that
+        # supplied none gets a statement ABOUT the reading rather than a claim
+        # about the payloads.
+        else:
+            evidence = (identity_detail
+                        or f"the identity reading is {identity_state!r}")
         diagnosis = (
             f"either a DIFFERENT record claimed this position — a second "
             f"durable journal, a restore, a rotation, or a rebuild numbering "
             f"below the high-water mark — or this record's own derivation no "
-            f"longer produces what that row holds (a capture time it moved, or "
-            f"a payload written when this write carried no `ts`). The durable "
+            f"longer produces what that row holds (a derivation can move its "
+            f"capture time, re-key an identity, omit keys this write would "
+            f"carry, or produce a payload this write has no capture time to "
+            f"compare against). The durable "
             f"payload carries no record id, so the record cannot tell which; "
             f"{evidence}"
         )
@@ -1178,6 +1250,18 @@ class JournalPositionCollision(RecordProjectionError):
                 "This write and the surviving row were CAPTURED at different "
                 "times (`recorded_at`), which a re-derivation of the payload "
                 "alone does not change. "),
+            # ⛔ `matches` HAS A CLAUSE OF ITS OWN (#9318). Two things changed
+            # with the identity gate: this state became REACHABLE for a
+            # same-type refusal (before it, a same-type, same-instant pair always
+            # took the drift return), and for that pair the capture-time story is
+            # the ONLY one a reader would otherwise supply — while the arm's own
+            # facts exclude it. So the clause says what this state rules OUT; it
+            # names no cause in, which is why it does not choose between the two
+            # the diagnosis holds open.
+            "matches": (
+                "This write and the surviving row were CAPTURED at the same "
+                "instant (`recorded_at`), so a capture-time difference cannot "
+                "explain it. "),
             "unknown": (
                 "This write carries no `ts`, so its capture time cannot be "
                 "compared with the surviving row's. "),
@@ -6616,8 +6700,9 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
     that tells a REPLAY from a COLLISION reads the cursor's affected-row count
     and, only when it is zero, asks the database whether the surviving row's
     content OR CAPTURE TIME differs — a content difference with the same type and
-    the same instant is drift and stays silent
-    (:func:`_refuse_a_journal_collision`). Rewriting this INSERT
+    the same instant is drift and stays silent, UNLESS the two payloads name
+    contradicting identities, which refuses (#9318's gate on that arm —
+    :func:`_refuse_a_journal_collision`). Rewriting this INSERT
     (a `RETURNING`, a `DO UPDATE`, a probe in the `VALUES` list) would change the
     plan every replay, seam and PGlite caller materializes — and the `#9187`
     snapshot pin (`tests/test_record_writer_seam.py`) exists to notice exactly
@@ -6653,6 +6738,16 @@ def _journal_row(record: Mapping[str, Any], seq: int, org_id: str,
 #: side, a numeric coercion, a key-order guess, an offset read as a difference) is
 #: a second opinion about the same bytes, and its failure mode is the one a guard
 #: like this may never have: a RE-APPLIED SAME POSITION reported as a collision.
+#: ⛔ THAT RULE GOVERNS THE CONTENT AND CAPTURE COMPARISON — NOT THE IDENTITY
+#: READ (#9318). `_identity_evidence` compares the two payloads in PYTHON, after
+#: this query returns them, and that comparison DECIDES refuse-vs-silent for a
+#: same-type/same-capture pair. It is not a re-normalisation of the equality
+#: above and cannot produce that failure mode: a genuine replay never reaches it
+#: (this query selects no row). Its four answers split by `_SILENT_IDENTITY_STATES`:
+#: the three IN that tuple (`agrees`, `one_sided`, `none`) keep the drift arm, so
+#: a pair whose identities cannot be compared is not turned into a collision by a
+#: comparison that never happened; `disagrees` — and any state a later edit adds
+#: — refuses, because silence here is an allow-list.
 #: `IS DISTINCT FROM` (not `<>`) because the row's columns are `NOT NULL` but the
 #: CAST parameters are not, so a NULL-vs-something comparison must still answer
 #: "different" instead of "unknown" (PostgreSQL §9.2.2: `1 IS DISTINCT FROM
@@ -6849,6 +6944,13 @@ def _identity_pairs(payload: Any) -> list[tuple[str, str, str, Any]]:
     return pairs
 
 
+#: The ONLY `_identity_evidence` states the drift arm may read as drift
+#: (#9318). A tuple rather than a `!= "disagrees"` test on purpose: this guard's
+#: polarity is "silence is EARNED, never defaulted", so a state nobody enumerated
+#: must REFUSE rather than be absorbed by a comparison that happens to read false.
+_SILENT_IDENTITY_STATES: tuple[str, ...] = ("agrees", "one_sided", "none")
+
+
 def _identity_evidence(attempted: Any, stored: Any) -> tuple[str, str | None]:
     """``(state, detail)`` — a MECHANICAL reading of two payloads (#9318).
 
@@ -6863,7 +6965,13 @@ def _identity_evidence(attempted: Any, stored: Any) -> tuple[str, str | None]:
     unsupportable whichever way it is phrased.
 
     So the states are FACTS about the payload pair, and the caller's message
-    names both possible causes unconditionally:
+    names both possible causes unconditionally. ⛔ ONE of them ALSO decides:
+    `disagrees` is the gate `_refuse_a_journal_collision` puts on its drift arm
+    (#9318) — a pair whose payloads CONTRADICT cannot be the drift shape (one
+    record, re-derived, its own identities intact), so it refuses instead of
+    absorbing. That is a use of the FACT, not a verdict from it: the refusal's
+    message still names both causes, because `disagrees` alone cannot tell a
+    second journal from a record this tree re-keyed:
 
     * ``agrees`` — every identity both payloads carry agrees. A shared node id,
       i.e. the same node seen twice; whether that is one record re-derived or two
@@ -6944,30 +7052,37 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     FOUR OUTCOMES, and the distinction is the whole point of the change:
 
     * the INSERT affected a row ⇒ nothing to decide, return;
-    * the conflict query returns NO row ⇒ nothing differs (same type, same
-      payload, same capture) ⇒ a genuine REPLAY. Return in SILENCE — no
+    * the conflict query returns NO row ⇒ nothing it compares differs (same type
+      and payload, plus the same capture WHEN this write carries a `ts`; a
+      `ts`-less write's capture disjunct is inert, so its instant went
+      unexamined) ⇒ a genuine REPLAY. Return in SILENCE — no
       exception, no counter, no log line. The schema's *"applying a position
       twice is a no-op"* is preserved exactly. ⚠️ A content match at a DIFFERENT
       capture does NOT reach this arm: the `recorded_at` arm selects it and it is
       REFUSED (#12904 P0-2), which is the shape #9318 names;
-    * it affected none, the `event_type` matches and `recorded_at` matches, and
-      only the payload differs ⇒ READ AS DERIVATION DRIFT: the same record
-      re-derived since that row was written. Also SILENT (#12904 P0-1) —
-      refusing it made every position written before a payload-derivation
-      change un-replayable, which inverts the rule this guard protects.
-      ⚠️ This arm is a READING on two equal coordinates, not identity evidence;
-      `JournalPositionCollision`'s mirror residual names what that admits;
+    * it affected none, the `event_type` matches, `recorded_at` matches, and the
+      identity reading is IN `_SILENT_IDENTITY_STATES` (`agrees` / `one_sided` /
+      `none` — an allow-list, never "not `disagrees`") ⇒ READ AS DERIVATION
+      DRIFT: the same record re-derived since that row was written. Also SILENT
+      (#12904 P0-1) — refusing it made every position written before a
+      payload-derivation change un-replayable, which inverts the rule this guard
+      protects. ⚠️ This arm is a READING on two equal coordinates, GATED on
+      `_identity_evidence` (#9318): where the identities DISAGREE it is not a
+      re-derivation and the pair falls through to the refusal below;
     * anything else ⇒ a COLLISION. Raise :class:`JournalPositionCollision`.
 
     ⛔ SILENCE IS EARNED. It is returned on ONE piece of POSITIVE evidence that
-    the position holds THIS record — the conflict query returning NO row, i.e.
-    identical type, identical payload AND identical capture (a replay) — and on
-    ONE DELIBERATE ADMISSION with its cost stated: identical type AND capture, which
-    is the drift reading and NOT evidence of identity (an equal `recorded_at`
-    says only that two writes named one instant). A difference this function
-    cannot attribute to drift (a `ts`-less write has no capture time to compare)
-    is refused, because defaulting to silence is exactly the silent absorption
-    #9318 exists to end. A cursor that
+    the position holds THIS record — the conflict query returning NO row:
+    identical type AND payload, which for a `ts`-bearing write is also an
+    identical capture, while a `ts`-less write's capture disjunct is INERT and the
+    instant went unexamined — and on ONE GATED READING: identical type AND
+    capture, which is the drift reading and
+    NOT evidence of identity (an equal `recorded_at` says only that two writes
+    named one instant), taken only where the identity evidence does not
+    contradict (`agrees`/`one_sided`/`none`). A difference this function cannot
+    attribute to drift (a `ts`-less write has no capture time to compare, or a
+    payload pair whose identities DISAGREE) is refused, because defaulting to
+    silence is exactly the silent absorption #9318 exists to end. A cursor that
     cannot report ``rowcount``, or a conflict query that returns no row, still
     returns silently: the guard may only fire on evidence it can read.
 
@@ -7046,6 +7161,9 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     else:
         stored_type, stored_payload = stored[0], stored[1]
         same_type, same_capture = stored[2], stored[3]
+    # ⛔ THE IDENTITY READING COMES FIRST (#9318), because the drift arm below
+    # needs it and used to run WITHOUT it. See the gate on that arm.
+    identity_state, identity_detail = _identity_evidence(payload, stored_payload)
     # ⛔ DRIFT IS NOT A COLLISION (#12904 P0-1). Same record type AND the same
     # capture instant, only the payload differs ⇒ this is READ as the same
     # record, whose derivation moved since that row was written. Silent: the
@@ -7054,26 +7172,45 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
     # returns without raising, so the write commits) — that is the repair
     # story (`replay` heals the record), and it must not be version-pinned to the
     # tree that wrote it.
-    # ⛔ AND IT IS A READING, NOT EVIDENCE OF IDENTITY — do not restore the
-    # stronger claim. Identical `recorded_at` says only that two writes named
-    # the same instant, and `ts` is a per-record value the EMISSION path supplies
+    # ⛔ BUT THE READING IS A COORDINATE MATCH, NOT IDENTITY EVIDENCE — and it is
+    # therefore GATED ON THE IDENTITY (#9318, the option B RECOMMENDED on that
+    # issue — the recommendation is the one this lane took, and the issue carries
+    # no ruling beyond it). Identical `recorded_at` says only that two writes named the same
+    # instant, and `ts` is a per-record value the EMISSION path supplies
     # (`_journal_row` binds `record.get("ts")`; `_emit_event` accepts a
-    # `recorded_ts`, minting `now_iso()` only when none is given), so TWO
-    # DIFFERENT RECORDS sharing an instant land here and are absorbed — with
-    # `_identity_evidence` never consulted, even where it would have answered
-    # `disagrees`. That shape is the mirror residual the class docstring names,
-    # and it is PINNED AS ADMITTED (`tests/test_9318_journal_collision.py`,
-    # `test_a_same_capture_instant_pair_is_ADMITTED_not_detected`), so the
-    # silence cannot be mistaken for coverage. `main` (post-#12904) refused it
-    # (payload differs ⇒ collision); closing it here would mean refusing on
-    # `disagrees`, a semantics change to this verdict that belongs to a recorded
-    # decision on `#9318` (open; `#12904` is merged and closed and cannot carry
-    # one), and #12894's journal identity in the key retires it outright.
+    # `recorded_ts`, minting `now_iso()` only when none is given), so nothing
+    # ties an instant to a record's identity: two independent mints on one
+    # microsecond, or a caller handing ONE clock reading to several records, both
+    # land here with different content. ⚠️ NOT "two corpus roots mining one
+    # document carry its frontmatter date as `ts`": a document's date rides the
+    # PAYLOAD (`createdAt`, caller-owned) and is in NEITHER envelope set — so it
+    # SURVIVES `journal_payload`'s `ENVELOPE_KEYS` filter instead of becoming a
+    # `ts` — while the envelope `ts` is a clock mint on every producer. Where the two payloads
+    # name DIFFERENT identities (`disagrees`) the drift reading is no longer
+    # available: the identities this record would write are not the identities
+    # the row holds, so either a second record claimed the position or this tree
+    # RE-KEYED this one — and in both stories the LAYER rows would be committed
+    # under a position row that names different identities. That is exactly the
+    # silent mis-index #9318 exists to
+    # stop. So `disagrees` FALLS THROUGH to the refusal below.
+    # ⚠️ THE OTHER THREE STATES KEEP THE DRIFT ARM, deliberately: `agrees` is the
+    # common re-derivation (same node id, moved payload); `one_sided` is a
+    # derivation that ADDED or DROPPED an identity field (one side carries one,
+    # so a comparison exists on that side only), and `none` is a pair with no
+    # COMMON comparable identity at all — refusing those
+    # would make every pre-derivation-change position un-replayable, which is
+    # #12904 P0-1 over again. A CONTRADICTION refuses — and so does any state
+    # this gate does not recognise (below), because silence is EARNED here.
     # ⚠️ `ts is not None` is written out even though a NULL bind can never read as
     # `same_capture` (`recorded_at` is NOT NULL, so `IS NOT DISTINCT FROM NULL`
     # is false): the two facts live in different places, and a reader must not
     # have to infer the second to trust the first.
-    if same_type and same_capture and ts is not None:
+    # ⛔ AN ALLOW-LIST, not `identity_state != "disagrees"` (#9318 review round
+    # 9). A deny-list grants silence to any fifth state a later edit adds, to a
+    # spelling drift, and to a `None` — the fail-open default the class forbids.
+    # `_SILENT_IDENTITY_STATES` is the whole silent set, named.
+    if (same_type and same_capture and ts is not None
+            and identity_state in _SILENT_IDENTITY_STATES):
         return
     if ts is None:
         capture_state = "unknown"
@@ -7083,7 +7220,6 @@ def _refuse_a_journal_collision(cursor: Any, statement: Statement, index: int,
         capture_state = "differs"
     digest, size = _payload_digest(payload)
     stored_digest, stored_size = _payload_digest(stored_payload)
-    identity_state, identity_detail = _identity_evidence(payload, stored_payload)
     raise JournalPositionCollision(
         org_id=org_id, graph_id=graph_id, seq=seq,
         event_type=event_type, payload_digest=digest, payload_bytes=size,
