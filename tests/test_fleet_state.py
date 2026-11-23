@@ -3707,7 +3707,11 @@ def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
 
 
 def _row_for_pid(pid: int) -> str:
-    """The `command=` text a census would read for ONE pid — a DIAGNOSTIC, never an oracle.
+    """The `command=` text a census would read for ONE pid — see the two callers for its role.
+
+    ⚠️ IT IS NOT ONE THING. In caller 1 it is a DIAGNOSTIC interpolated into a failure message;
+    in caller 2 it IS the assertion's subject (that test's verdict is `assert row`). Calling it
+    "never an oracle" was true of caller 1 only, and contradicts caller 2 eight lines below.
 
     TWO callers (#12039), and BOTH depend on the same ⚠️: `poll()` collects the status and a
     collected child has no row left to quote, so every call site reads the row FIRST.
@@ -3736,8 +3740,16 @@ def _row_for_pid(pid: int) -> str:
 #: an OOM killer or an orphan sweep, SIGINT from the shard's own `timeout -s INT`, SIGHUP from
 #: a dropped controlling terminal. These are evidence about the BOX — a killed child has no
 #: argv[0] for any census to match — so a deadline expiry on one of them is INCONCLUSIVE
-#: (#5049 rule 1). Any OTHER signal is the child CRASHING (SIGSEGV/SIGABRT/SIGBUS/SIGILL/
-#: SIGFPE), which is the substrate's defect and must stay a FAIL (#5049 rule 4).
+#: (#5049 rule 1). Every OTHER signal is TREATED AS a substrate fault and must stay a FAIL
+#: (#5049 rule 4): SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE are the interpreter aborting, and the arm
+#: names the signal rather than assuming one.
+#:
+#: ⚠️ KNOWN RESIDUAL, stated rather than implied: `_OUTSIDE_SIGNALS` is a four-signal allow-list,
+#: so a signal the KERNEL sends on a resource limit — `SIGXCPU` (24) on `RLIMIT_CPU`/`ulimit -t`,
+#: `SIGXFSZ` (25) on `RLIMIT_FSIZE` — lands in the crash arm and is reported as the substrate's
+#: fault. That attribution direction is the one this PR exists to fix, on the signals it was
+#: measured against; widening the allow-list changes verdicts and needs its own measurement, so
+#: it is left as a named residual rather than a quiet guess.
 _OUTSIDE_SIGNALS = frozenset({signal.SIGKILL, signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
 
 #: How many CONSECUTIVE census errors make the error the census's fault rather than the box's.
@@ -3881,9 +3893,10 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
 
     ⚠️ THE COUNT IS PART OF THE CONTRACT. Four `raise` sites and two skip paths; a header that
     states a different count is the drift `test_the_long_path_test_header_names_the_census_error_fail_arm`
-    CANNOT see, because that guard pins two NAMES and not a number. (Measured drift: this block
-    said "THREE" while omitting the ALIVE arm, in the same docstring that says "FOUR
-    classifications" — two contradictory counts, in the block a guard exists to keep honest.)
+    CANNOT see, because that guard pins three NAMES (`_CENSUS_ERROR_STREAK`, `_ps_answers`,
+    `_CENSUS_ERROR_MIN_SPAN_S`) and not a number. (Measured drift: this block said "THREE" while
+    omitting the ALIVE arm, in the same docstring that says "FOUR classifications" — two
+    contradictory counts, in the block a guard exists to keep honest.)
 
     ⛔ IT IS NOT A COPY OF `sleep` ANY MORE (measured on the `ubuntu-26.04` hosted
     runner `GitHub Actions 1000848497`, `test (c)`, head `70116a870dbb`). On that image
