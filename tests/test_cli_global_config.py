@@ -382,22 +382,40 @@ class TestCreatePointRetrySafety:
         assert "may have" not in err
 
     def test_a_read_timeout_is_a_hint_not_a_traceback(self, tmp_path, capsys):
-        """The write landed and the RESPONSE stalled.
+        """The write landed and the RESPONSE stalled — modelled as such.
 
-        `do_open` wraps only the SEND in `except OSError -> raise URLError`, so
-        a `resp.read()` stall raises `TimeoutError` straight through — past the
-        `HTTPError` and `URLError` arms above it. Without its own arm the D2
-        contract this PR exists to close degrades into a bare traceback for a
-        write that was already on the wire, which is the dead-end, not the fix.
+        ⛔ The stall is raised from `read()`, NOT from `urlopen`: a raise from
+        `urlopen` models a SEND-phase failure, which `do_open` already converts
+        into `URLError` (`except OSError as err: raise URLError(err)`). The
+        documented failure is the one AFTER that — the request is fully sent and
+        `resp.read()` raises — which skips the `HTTPError` and `URLError` arms
+        entirely. Faking it from `urlopen` would pass this test while never
+        executing the path its own name claims.
 
         Mutation: delete the `except (TimeoutError, OSError)` arm and this REDs
-        (the exception escapes `main`).
+        (the exception escapes `main`) — observed.
         """
+        class _StalledResponse:
+            """Headers arrived, the body never did."""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+            def read(self):
+                raise TimeoutError("read timed out")
+
         _seed_global(tmp_path)
         with mock.patch("urllib.request.urlopen",
-                        side_effect=TimeoutError("timed out")):
+                        return_value=_StalledResponse()) as urlopen:
             rc = main(["create-point", "hello world"])
         err = capsys.readouterr().err
+
+        # The request really was dispatched before the stall — that is the whole
+        # point of the arm's claim, so assert it rather than assume it.
+        assert urlopen.call_count == 1
         assert rc == 1
         # what changed: the request had left the box before the stall
         assert "MAY have landed" in err

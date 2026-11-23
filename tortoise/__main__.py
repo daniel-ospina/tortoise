@@ -16278,12 +16278,25 @@ def _cmd_doctor(args):
                 # Deliberately the SAME three escapes as that predicate: a FILE
                 # store always counts (the whole point of #11912 — a revoked
                 # stored key must never read green), and so does an explicitly
-                # named `TORTOISE_API_URL` or a hosted-shaped `tt_`/`tk_` key (the
-                # prefixes `signup` and `key create` mint).
+                # named `TORTOISE_API_URL` or a hosted-shaped key.
+                #
+                # ⛔ "Hosted-shaped" is not just `_HOSTED_KEY_PREFIXES`: the
+                # `Hosted` row ALSO admits the `oat_` family as a hosted identity
+                # (`:15490` — an OAuth access token that is MCP-only by design,
+                # ADR-010). Omitting it here left the same one-screen
+                # contradiction this gate exists to remove, narrowed to `oat_`: a
+                # Graph row saying "Run `tortoise init`" beside a Hosted row
+                # naming an OAuth identity. The row's own wording defers
+                # (`the Hosted row below says whether that will work`), which is
+                # what makes the deferral correct for a REST-only verb.
+                # ⛔ Do NOT widen `_HOSTED_KEY_PREFIXES` itself —
+                # `test_the_hosted_prefixes_match_the_auth_contract` pins it to
+                # `tortoise/auth.py::API_KEY_PREFIXES`.
                 import os as _hos
                 _h_env_url_explicit = bool(
                     (_hos.environ.get("TORTOISE_API_URL") or "").strip())
-                _h_hosted_shaped = (_h_key or "").startswith(_HOSTED_KEY_PREFIXES)
+                _h_hosted_shaped = (_h_key or "").startswith(
+                    (*_HOSTED_KEY_PREFIXES, _OAUTH_ONLY_KEY_PREFIX))
                 if _h_key and _is_default_target and (
                         _h_path is not None or _h_env_url_explicit
                         or _h_hosted_shaped):

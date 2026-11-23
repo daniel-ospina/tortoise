@@ -4252,6 +4252,54 @@ class TestDoctorPreInit:
         assert rc == 0
         assert "create-point" in line
 
+    def test_an_oauth_token_counts_as_hosted_too(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """`oat_` is the THIRD admitted Bearer family, and the `Hosted` row
+        already treats it as a hosted identity (`:15490`: an OAuth access token,
+        MCP-only by design — ADR-010). Omitting it from this row's gate left the
+        same one-screen contradiction the gate exists to remove, narrowed to
+        `oat_`: a Graph row saying "Run `tortoise init`" beside a Hosted row
+        naming an OAuth identity.
+
+        The row defers (`the Hosted row below says whether that will work`),
+        which is what makes it correct for a REST-only verb like create-point.
+
+        Mutation: check only `_HOSTED_KEY_PREFIXES` and this REDs — the row
+        flips back to "Run `tortoise init`".
+        """
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "oat_sometokenabcdef")
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "not used by this setup" in line
+        assert "hosted credential" in line
+        assert "Run `tortoise init` to create it" not in line
+
+    def test_an_unrelated_env_key_still_gets_the_init_remedy(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """Guards against over-widening: the `oat_` escape must not turn every
+        unexplained env value into a hosted identity."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "something-unrecognised")
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        rc = _run_doctor(["--offline"])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "Run `tortoise init` to create it" in line
+        assert "hosted credential" not in line
+
 
 class TestDoctorImportHygiene:
     """#2204 O/I/T (3) regression: importing tortoise modules on a clean env
