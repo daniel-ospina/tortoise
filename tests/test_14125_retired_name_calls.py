@@ -5402,6 +5402,26 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     handler") on a block that already carried the skip (review of #14160, cycle 10,
     #     P1-1). The control is the same two arms in the FIXED order: a re-raising arm ABOVE
     #     an unreachable dropping arm drops nothing and does credit.
+    #: ⛔ THIS ROW IS CONJUNCTION-ONLY, AND IT CARRIED NO LABEL SAYING SO — the residual the round
+    #: that labelled the three `_alias_order` rows disclosed rather than fixed (review of PR
+    #: #14287, mutation attribution, P3), closed here. Measured on THIS block, `_covered(...)`
+    #: evaluated directly with each guard reversed in turn:
+    #:
+    #:   neither guard reversed                     -> {'AttributeError', 'NameError', 'TypeError'}
+    #:   `M-exact` (`name in caught_earlier` dropped from `_masked_by`)
+    #:                                               -> the SAME set, row GREEN
+    #:   `M-close` (the family-close replaced by `out |= set(reachable)`)
+    #:                                               -> the SAME set, row GREEN
+    #:   `M-exact` + `M-close`                       -> gains 'ImportError', row REDS
+    #:
+    #: So BOTH terms withhold the credit and NEITHER is independently graded here: with the exact
+    #: term gone, the family-close still withholds `ImportError` because arm 1 DROPPED it; with the
+    #: family-close gone, `_masked_by`'s exact term has already removed `ImportError` from
+    #: `reachable`. What this row pins is the NET behaviour the gate needs — an earlier DROPPING arm
+    #: leaves a later re-raising arm crediting nothing — and a reader must not take it as a witness
+    #: for either term alone. The per-term attribution lives in the rows that CAN separate them:
+    #: `_exact_dead_drop` for `_masked_by`'s exact term (on the charge side) and the three
+    #: `child dropped…` rows in the masking table for the family-close.
     _unreachable_credit = [
         node
         for node in ast.walk(
