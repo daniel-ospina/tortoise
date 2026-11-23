@@ -4928,38 +4928,33 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: head — updated in place during the PR rather than spending a generation 34 on
 #: a refinement of the same unreleased seam. From the moment 33 appears on main,
 #: the entries are frozen: the next byte change needs a NEW generation.
-#: ⚠️ 33's CAPTURE digest was re-cut TWICE under that same never-shipped exception,
-#: and the SECOND re-cut is NOT a comment-only edit — say so, because this is the
-#: note a later re-pinner reads to justify reusing 33:
-#:
-#: 1. the #14423 review found the takedown's restore arm had no test (the sibling
-#:    row in `tortoise-capture.test.ts` claimed a mutant that did not red it), so
-#:    `takedownClaim` / `disposeQuarantine` became the exported test seam — an
-#:    export-only edit, but a comment IS bytes here;
-#: 2. the next cycle found the Pi leg's `release()` still took a claim it did not
-#:    own (and its `state.raced` flag missed the arm reached after a successful
-#:    takedown), which is a BEHAVIOUR change on shipped bytes — the digest covers
-#:    the whole file (`sha256` of `tortoise-capture.ts`, graded at
-#:    `test_a_shipped_pi_seam_byte_change_moves_the_generation`), so it moved with
-#:    it. Reusing an unreleased generation for a behaviour fix is the same
-#:    exception, not a licence: from the moment 33 reaches `main` the entries are
-#:    FROZEN and the next byte change needs a NEW generation.
-#:
-#: The READ half is untouched (`904d2742…`), exactly as generation 31's re-cut did.
-#: ⚠️ And a THIRD and FOURTH byte change landed the same way, both on this branch,
-#: both recorded here because "re-cut in place" is only honest with its history:
-#:
-#: 3. this leg's own review closed two more behaviour defects on the seam — the
-#:    refresh became a real compare-and-swap on the inode (a peer's fresh claim is
-#:    never clobbered) and the capacity refusal is rendered in the same words by
-#:    both legs over the same `status.json`;
-#: 4. the merge of those with the peer lane's fixes above. ⛔ A MERGE IS A BYTE SET
-#:    NEITHER SIDE HASHED, so the digest is derived from the merged tree every
-#:    time — `sha256sum tortoise/pi-hooks/tortoise-capture.ts` — never carried over
-#:    from either parent. A pin that survives a merge unexamined is a pin nobody
-#:    derived, and the install-contract test is what says so.
+#: ⚠️ 33's CAPTURE digest has been re-cut NINE times under that same never-shipped
+#: exception, and the count is stated because THIS note is what a later re-pinner
+#: reads to justify reusing 33: measured over `origin/main..HEAD`, the pinned value
+#: takes TEN distinct forms in this branch's commits —
+#: `3660e09d` → `2416b186` → `15393a96` → `a2314416` → `a97a8a0a` → `5a47bb65` →
+#: `d0e8e41d` → `35235567` → `2d011c33` → `442d76f5` → (this head) — because the PR
+#: has been through seven review cycles and every one of them moved shipped bytes.
+#: Several of those re-cuts are BEHAVIOUR, not comments, and the digest covers them
+#: because it is the `sha256` of the whole file (graded at
+#: `test_a_shipped_pi_seam_byte_change_moves_the_generation`):
+#:   * `c214f341` — the two legs' clock units unified (`CLAIM_VERSION` 1 → 2);
+#:   * `e3577f40` — a claim we cannot READ is honoured, never deleted;
+#:   * `7ed7ca32` — reads `lstat`-gated (the FIFO hang) and the lease format guarded;
+#:   * `9bc74585` — `release` reads the token BEFORE moving anything;
+#:   * this head — the `release`-ordering test seam.
+#: ⛔ Reusing an unreleased generation for a behaviour fix is the same exception, not
+#: a licence, and it does NOT generalise: from the moment 33 reaches `main` the
+#: entries are FROZEN and the next byte change needs a NEW generation. The READ half
+#: is untouched throughout (`904d2742…`), exactly as generation 31's re-cut did.
+#: ⚠️ …and the list above STOPS at `9bc74585`, because the next byte change was not a
+#: commit on either side: it was the MERGE of the two lanes' cycles. ⛔ A MERGE IS A
+#: BYTE SET NEITHER PARENT HASHED, so no row above describes the bytes this pin names
+#: — the digest is re-derived from the merged tree on every merge
+#: (`sha256sum tortoise/pi-hooks/tortoise-capture.ts`), never carried over from
+#: either side. A pin that survives a merge unexamined is a pin nobody derived.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "1e1e684a4b3cceb124b49741af8278f3519ac6ce38c0c5205aa7725a258603ae")
+    33, "53f085bcc89ba004f1b118e613fcae7c9cf207c3b3fcc289b0cd943adb180b0f")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5131,7 +5126,21 @@ _GENERATION_DIGESTS = {
     # keeps draining concurrently with the Python leg and keeps charging the
     # box's refusals to per-entry exponential backoff — the 908-entry /
     # attempts-10-17 shape #14342 starts from — so it must read STALE.
-    33: "1e1e684a4b3cceb124b49741af8278f3519ac6ce38c0c5205aa7725a258603ae",
+    # ⛔ RE-CUT IN PLACE, before it shipped: this same unmerged generation gained the
+    # cycle-6 review's two Pi-leg fixes — `clearUnusableClaimPath` now discriminates
+    # on `isDirectory()` (`rmdirSync` raised `ENOTDIR` on a FIFO/socket, so the arm
+    # that was supposed to clear corruption answered `false` and the object could
+    # never be removed: a permanent drain block), and `release()` reads our token
+    # before it moves anything. Generation 33 has never been on `main`, so no
+    # installed copy carries it and no "local edit" verdict can be falsified — the
+    # one rewrite the rule below permits (#14423 cycle-6 review, P1+P2).
+    # ⛔ AND ONE MORE, from the cycle-7 review: `acquireDrainClaim` gained an
+    # injectable `takedown` seam so THIS leg's release ORDER can be graded on the
+    # CALL, as the Python twin grades it by monkeypatching `_takedown`. The
+    # byte-indistinguishability that made the first attempt vacuous (rename + link
+    # preserves inode, mtime and content) is why the order has to be observed at the
+    # call site rather than at the filesystem.
+    33: "53f085bcc89ba004f1b118e613fcae7c9cf207c3b3fcc289b0cd943adb180b0f",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

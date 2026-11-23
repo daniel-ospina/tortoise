@@ -110,7 +110,7 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-303 pass / 0 fail
+305 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -220,7 +220,7 @@ finding fixed once and the duplication removed rather than merged as-is.
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `1e1e684a…`, re-cut four times: for the export-only test seam, for
+  (capture half `53f085bc…`, re-cut at every byte change: for the export-only test seam, for
   the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
   changes, and for the MERGE of the two — a merge is a byte set neither side
   hashed, so the digest is always derived from the merged tree; the read half moved

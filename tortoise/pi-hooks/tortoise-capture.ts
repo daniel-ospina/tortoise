@@ -5360,16 +5360,28 @@ export function disposeQuarantine(
  * A symlink is removed WITHOUT following it, so this cannot reach outside the
  * spool. A non-empty directory is left alone (`ENOTEMPTY`): deleting unknown
  * content is the worse error, and the caller's answer is to run unclaimed and SAY
- * so. Mirrors `drain_claim._clear_unusable_claim_path`.
+ * so. Mirrors `drain_claim._clear_unusable_claim_path`, which discriminates on
+ * `S_ISDIR` and `unlink`s EVERYTHING else.
+ *
+ * ⛔ THE DISCRIMINATOR IS `isDirectory()`, NOT `isFile()` — the previous cut sent
+ * every non-file, non-symlink object to `rmdirSync`, and for a FIFO, a socket or a
+ * device that raises `ENOTDIR` (POSIX `rmdir(2)`). The `catch` then answered
+ * `false`, the caller answered `undefined` = "somebody else holds it", and NOTHING
+ * on this leg could ever remove the object: every later pass reported "another
+ * drainer holds this spool … pid unknown" with zero POSTs, forever — the exact
+ * permanent block #14350 forbids, clearable only by a PYTHON drain. The Python
+ * twin never had this arm wrong (#14423 cycle-6 review, P1).
  */
 function clearUnusableClaimPath(path: string): boolean {
   try {
     const st = lstatSync(path);
-    if (st.isSymbolicLink() || st.isFile()) {
-      unlinkSync(path);
+    if (st.isDirectory()) {
+      rmdirSync(path);  // an EMPTY directory; refuses ENOTEMPTY otherwise
       return true;
     }
-    rmdirSync(path);  // an EMPTY directory; refuses ENOTEMPTY otherwise
+    // A symlink is unlinked AS A LINK (never followed), and a FIFO, a socket or a
+    // device too: it is an object, not content, so `unlink` is the correct removal.
+    unlinkSync(path);
     return true;
   } catch {
     return false;
@@ -5405,6 +5417,17 @@ export function acquireDrainClaim(
      *  (#14423 review, P2). Mirrors the Python leg, where any `None` from
      *  `acquire` is `held_by_claim`. */
     state?: { raced: boolean };
+    /** ⛔ TEST SEAM for `release`'s ORDERING, and nothing else. The not-ours
+     *  release must take NO destructive step, and that is a fact about which
+     *  function was CALLED — not about the bytes afterwards: a rename + restore
+     *  preserves the inode, the mtime and the content, so the pre-fix order is
+     *  byte-indistinguishable from the fixed one whenever no third process fills
+     *  the gap (#14423 review, cycle 7: reverting `release` to takedown-first left
+     *  the whole suite green, including two release tests). The Python leg asserts
+     *  the same fact by monkeypatching `_takedown`; this is the Pi equivalent. */
+    takedown?: (
+      path: string, token: string,
+    ) => { quarantine: string; raw: string } | undefined;
   },
 ): DrainClaim | undefined {
   const ttlMs = opts.ttlMs ?? DRAIN_CLAIM_TTL_MS;
@@ -5618,7 +5641,7 @@ export function acquireDrainClaim(
         // Ours. The takedown's quarantine compare is what makes the disposal safe
         // against a peer that replaces the record between the read above and the
         // rename below.
-        const moved = takedownClaim(path, token);
+        const moved = (opts.takedown ?? takedownClaim)(path, token);
         if (!moved) return false;
         if (moved.raw !== rawNow) {
           disposeQuarantine(moved.quarantine, moved.raw, path, "\u0000<not-ours>");

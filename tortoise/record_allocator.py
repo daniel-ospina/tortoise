@@ -554,8 +554,10 @@ def _transition(conn: Any, sql: str, *, org_id: str, graph_id: str,
 #: the replay path's `DO NOTHING` absorbed, because that absorption was silent.
 #: `#9318` (PR #12904, merged on `main` while this lane was open) made it a TYPED
 #: refusal instead — `record_projection._refuse_a_journal_collision` asks the
-#: database whether the surviving row's content differs and raises
-#: `JournalPositionCollision`, which the live door reports as the `journal_collision`
+#: database whether the surviving row differs in CONTENT or in CAPTURE TIME (a
+#: `ts` present on this write), then reads the two payloads it returned for
+#: CONTRADICTING identities, and raises `JournalPositionCollision`, which the
+#: live door reports as the `journal_collision`
 #: refusal token. A second counter here would be a second opinion about a verdict
 #: the record already owns, and the benign half (a genuine re-replay) is a
 #: documented no-op that must stay quiet. The ALLOCATED path needs neither: its
