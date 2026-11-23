@@ -302,12 +302,16 @@ an hour for exactly that reason, so the durable fact is NOT which minute a given
 that these three suites move the ceiling by ~0.5 s around a 720.0 s cliff (`720.7 − 720.2` at the
 merged tree; their declared 6.0 s over the 11 shards is ~0.55 s/shard), so any conclusion quoted
 here MUST name the head it was measured at and re-derive BOTH arms with the verb. ⛔ THE FIX IS NOT TO
-LOWER A WEIGHT: the three enter at
+LOWER A WEIGHT: **at `f56aac204ca6`** the three entered at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
-their `durations:` rows, so removing or shrinking those rows changes nothing (measured: dropping
-all three `durations:` rows still emits **721.3** on THIS resolution (re-derived at head
-`f56aac204ca6`; see the `0467ba32` re-cut below) — so lowering or dropping
-those rows moves NOTHING, which is the point of the sentence) — what moves the term is three more
+their `durations:` rows **there**, so removing or shrinking those rows changed nothing (measured: dropping
+all three `durations:` rows still emitted **721.3** on THAT resolution
+(see the `0467ba32` re-cut below) — so lowering or dropping
+those rows moved NOTHING **at that head**, which is the point of the sentence). ⛔ The premise is
+scoped to that head ON PURPOSE: the 2026-11-23 sweep has since lowered two of the three to `0.1`
+(`test_14012_resident_pin.py`, `test_14012_outside_view.py`; only `test_14012_resident_cli.py`
+is still `2.0`), so at this head dropping all three DOES move the worst — `835.2 s → 835.5 s`,
+the 28 m minute unchanged — what moves the term is three more
 files in the pack, +6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is
 applied at the earlier heads. ⛔ **EACH RE-CUT MERGES A DIFFERENT PAIR, SO THE TERM IS READ OFF THE
 RESULTING TREE RATHER THAN INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on the tree that
@@ -352,8 +356,9 @@ hand-added figures are re-added from the emitted 28 m: 59.6 m / **89.5 m** / **0
 above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 59.64 m,
 x 1.5 = 89.5 m, 0.5 m of headroom**, and the `test_demo_session_read_exclusion_8290.py`
 `durations:` row, which repeats 89.5 m against the 90 m cap), which is the 1-decimal restatement of
-the terms' own total, 59.64 m — ⛔ the × 1.5 is taken on the UNROUNDED total, 59.64 → 89.46 →
-**89.5 m**, headroom 90 − 89.46 = 0.54 → **0.5 m**: multiplying the ROUNDED 59.6 instead reads
+the terms' own total, 59.64 m — ⛔ the × 1.5 is taken on the 2-dp total the committed S=11 header
+block states, 59.64 → 89.46 →
+**89.5 m**, headroom 90 − 89.46 = 0.54 → **0.5 m**: multiplying the 1-dp 59.6 instead reads
 89.4 m / 0.6 m and overstates the headroom by 0.06 m, which is how this one sentence came
 to disagree with the row above it. At the 56.64 m total that clause read `84.9 / 5.1`
 before the `#14183` re-cut withdrew it: ⛔ **THIS PARAGRAPH WAS RESTATED AT 84.9 m / 5.1 m UNTIL THE `#14183`
@@ -375,9 +380,13 @@ class completed a cold 3,616,385,308 B save in 12 m 21 s four hours later (PR 11
 ~57 m+ degraded against the **~8.36 m** of room the SUM leaves. Splitting the payload is what brings it
 inside. The room is `60 − SUM_without_cache_write` (arm 2 is `SUM x 1.5 <= 90`, so `SUM <= 60`):
 `60 − (10 + 28 + 6 + 3.03 + 4.23 + 0.38)` = `60 − 51.64` = **8.36 m**. It read `13.36 m` until the
-2026-11-23 sweep, which is `60 − 46.64` — the **23 m** worst-shard era this file still records two
-paragraphs above, i.e. the figure survived the 23 → 25 → 28 m moves while the rest of the paragraph
+2026-11-23 sweep, which is `60 − 46.64` — the **23 m** worst-shard era this file records above in
+this section, i.e. the figure survived the 23 → 25 → 28 m moves while the rest of the paragraph
 was re-cut. Re-derive it with the emission rather than restating it, exactly like the trio above.
+(⛔ `8.36` is the 2-dp arithmetic on the terms as PRINTED above — `60 − 51.64` — and it agrees with
+the committed `config/ci-surfaces.yml` S=11 header block's `0.5 m` of headroom; summing the
+UNROUNDED terms instead gives `60 − 51.6467` = 8.35, which moves no verdict and would put this
+sentence 0.01 m away from the instrument it cites.)
 `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
 that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
@@ -834,10 +843,12 @@ on) needs the JOB-level `started_at` of one run's legs (`…/runs/<id>/jobs`), w
 If the pool grows, invariant 2 permits a larger cap — and that move is not free: the
 `measured_pool` literal in the test is the one input that must be edited with the caps (below). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
-shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `4 × 10.5 m ≈ 42.0 m`,
-slow `2 × 8.5933 m ≈ 17.19 m` (the `8.59` above is that per-leg figure — `6.5933 m` plus the
-`2.0 m` setup allowance, printed as `8.59`, so take the product on the UNROUNDED leg: `2 × 8.59`
-reads 17.18 and is the same ROUNDED-SUM trap this document forbids ~120 lines above; the pin
+shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `4 × 10.5 m ≈ 42.0 m`
+(`ceil(11/3)` = 4 waves at `fast_shards: 11` — read it off the band pin below, not the 3-wave
+reading `ceil(9/3)` an earlier 9-shard shape gave), slow `2 × 8.5933 m ≈ 17.19 m` (the `8.59`
+above is that per-leg figure — `6.5933 m` plus the `2.0 m` setup allowance, printed as `8.59`,
+so take the product on the 2-dp leg: `2 × 8.59` reads 17.18 and is the same ROUNDED-SUM trap the
+`59.64 m` trio clause above forbids; the pin
 recomputes both halves from the map, and both moved on
 the 2026-11-23 sweep, which re-packed the slow pool — they read `8.18 m`/`16.36 m` at the
 2026-11-16 head), carve-out `1 × 9.54 m ≈ 9.54 m`) and compare each against that same
