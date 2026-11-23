@@ -1441,7 +1441,7 @@ def _is_builtins_dict_of(node: ast.AST, names: frozenset[str]) -> bool:
 
     The three compositions `_is_sys_dict_mapping` already resolves one axis over —
     `X.__dict__`, `vars(X)`, `getattr(X, "__dict__")` — pinned to a name that statically
-    denotes the `builtins` module or an alias of it (#14326 round 29).
+    denotes the `builtins` module or an alias of it (#14326 round 30).
     """
     if isinstance(node, ast.Attribute):
         return (node.attr == "__dict__" and isinstance(node.value, ast.Name)
@@ -1464,7 +1464,7 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                          dict_names: frozenset[str] = frozenset()) -> str | None:
     """The `_REGISTRY_BUILTINS` member a callee expression resolves to THROUGH builtins' mapping.
 
-    ⛔ THE MAPPING LOOKUP IS THE NEXT CALLEE SPELLING (#14326 round 29, EACH MEASURED GREEN at
+    ⛔ THE MAPPING LOOKUP IS THE NEXT CALLEE SPELLING (#14326 round 30, EACH MEASURED GREEN at
     `de42a75ac4b5`), while `builtins.getattr` itself was RED:
 
         _g = builtins.__dict__["getattr"]              GREEN
@@ -1479,7 +1479,7 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     a literal resolves too. Narrowed to a name that is provably a `builtins` module one hop
     up: `_cfg["getattr"]` and `vars(_cfg)["getattr"]` stay GREEN.
 
-    ⛔ AND THE BARE SUBSCRIPT, FOR THE ONE NAME THAT CAN BE THE DICT ITSELF (#14326 round 29).
+    ⛔ AND THE BARE SUBSCRIPT, FOR THE ONE NAME THAT CAN BE THE DICT ITSELF (#14326 round 30).
     `__builtins__` is the builtins MODULE in `__main__` and its `__dict__` in an IMPORTED module,
     so `__builtins__["getattr"]` is a live lever in exactly the context a launderer controls —
     and leaving it GREEN while `__builtins__.getattr` is RED would be the in-file asymmetry
@@ -1527,7 +1527,7 @@ class _RegistryCtx(NamedTuple):
     One object cannot be passed "partly", so the hazard is gone by construction rather than by
     a row per call site.
 
-    ⛔ `builtins_names` IS THE MODULE SET, AND IT IS REQUIRED (#14326 round 29): the arms that
+    ⛔ `builtins_names` IS THE MODULE SET, AND IT IS REQUIRED (#14326 round 30): the arms that
     resolve a CALLEE through builtins' mapping (`_callee_names_in`) need the names that denote
     the `builtins` MODULE, exactly as `sys_names` is needed for `sys`. It has NO default on
     purpose — a defaulted field would restore the "call site passed an EMPTY set" hazard this
@@ -1543,7 +1543,7 @@ class _RegistryCtx(NamedTuple):
 
 
 def _callee_names_in(node: ast.AST, ctx: _RegistryCtx) -> set[str]:
-    """`_callee_names_of`, PLUS the builtin a MAPPING LOOKUP resolves to (#14326 round 29).
+    """`_callee_names_of`, PLUS the builtin a MAPPING LOOKUP resolves to (#14326 round 30).
 
     A callee reached as `builtins.__dict__["getattr"]` has no `Name`/`Attribute` segment of
     its own, so `_callee_names_of` returns the empty set and every arm that intersects it
@@ -1590,11 +1590,20 @@ def _is_dunder_dict_key(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
 # review rounds on this axis have now demonstrated.
 #
 # ⛔ AND A CALLEE OBTAINED BY A NON-ENUMERATED ROUTE (#14326 round 28 P3, MEASURED GREEN:
-# `_g = builtins.__dict__["getattr"]`, `_g = __builtins__["getattr"]`, a lambda, and
-# `operator.attrgetter("modules")` all reach `getattr(sys, "modules")`). The bound
+# a lambda and `operator.attrgetter("modules")` both reach `getattr(sys, "modules")`). The bound
 # `getattr(sys, "modules")` read still identifies its callee by an enumerated NAME, so any
 # route outside that set escapes. This is the same unbounded class as (a) and (b) — the list
 # of ways to name a callable does not terminate either.
+#
+# ⛔ TWO OF THE ROUTES THIS NOTE ORIGINALLY LISTED ARE CLOSED, AND THE NOTE IS CORRECTED
+# RATHER THAN LEFT (the file's own rule: a marker that a claim was corrected is not evidence
+# that the correction was right — so the claim is re-MEASURED at this head and the surviving
+# list restated): `_g = builtins.__dict__["getattr"]` and `_g = __builtins__["getattr"]` are
+# RED now, because the MAPPING LOOKUP is a resolved form `_builtin_lookup_name` collects and
+# `_callee_names_in` resolves (#14326 round 30). What survives is the genuinely
+# non-enumerable class: a lambda, `operator.attrgetter`, `object.__getattribute__(sys,
+# "__dict__")`, `partial(getattr, sys)("__dict__")`, `getattr.__call__`, and
+# `builtins.__getattribute__("getattr")` — all MEASURED GREEN at `d57c774e41`.
 #
 # ⛔ AND IT IS THE SAME ROUTE ON THE MAPPING AXIS, WHICH IS A SEPARATE ARM (#14326 round 28,
 # MEASURED at `3652689c4`). `_is_sys_dict_mapping` decides `f(sys, "__dict__")` and `vars(sys)`
@@ -1607,10 +1616,15 @@ def _is_dunder_dict_key(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
 #     __d = sys.__getattribute__("__dict__"); __d["modules"] = {…}
 #     __d = operator.attrgetter("__dict__")(sys); __d["modules"] = {…}
 #     __d = functools.partial(getattr, sys)("__dict__"); __d["modules"] = {…}
-#     _g = builtins.__dict__["getattr"]; __d = _g(sys, "__dict__"); __d["modules"] = {…}
 #     __d = getattr.__call__(sys, "__dict__"); __d["modules"] = {…}
 #
-# plus each one's `vars` twin (e.g. `_v = builtins.__dict__["vars"]; _v(sys)["modules"]`).
+# plus each one's `vars` twin (`_v = functools.partial(vars, sys)()`,
+# `operator.attrgetter("__dict__")(sys)`, `(lambda o: vars(o))(sys)`) — all MEASURED GREEN at
+# `d57c774e41`.
+# ⛔ THE SIXTH ENTRY THIS LIST CARRIED IS GONE FROM IT, CORRECTED AT THE SOURCE (#14326 round
+# 29, MEASURED at `d57c774e41`): `_g = builtins.__dict__["getattr"]; __d = _g(sys, "__dict__")`
+# is RED now — the mapping lookup is a resolved callee form `_builtin_lookup_name` collects and
+# `_callee_names_in` resolves, so it stopped being an instance of this residual. It was listed
 # NOT chased here either, for the reason this note already gives: the ways to name a callable
 # do not terminate, and the round-24/#14326 P3 shape arm cannot be reused — it is callee-blind
 # only where the FIRST argument is already `sys.__dict__`, and making it callee-blind for
@@ -7810,7 +7824,7 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     #: builtins`) the way `sys` already is, and a direct `from builtins import <builtin>`
     #: is collected too.
     #: ⛔ THE ROOT SET CARRIES `__builtins__`, WHICH IS NOT A SPELLING OF `builtins` BUT THE
-    #: ONLY BINDING-FREE WAY TO REACH IT (#14326 round 29, EACH MEASURED GREEN at
+    #: ONLY BINDING-FREE WAY TO REACH IT (#14326 round 30, EACH MEASURED GREEN at
     #: `de42a75ac4b5` while the `import builtins` twin was RED — the whole alias axis, BOTH
     #: axes, walked past every `__builtins__` spelling):
     #:
@@ -7848,7 +7862,7 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
         lambda _n: (isinstance(_n, ast.Name) and _n.id in _REGISTRY_BUILTINS)
         or (isinstance(_n, ast.Attribute) and _n.attr in _REGISTRY_BUILTINS
             and isinstance(_n.value, ast.Name) and _n.value.id in builtins_names)
-        # ⛔ AND THE BUILTIN REACHED THROUGH the module's own MAPPING (#14326 round 29):
+        # ⛔ AND THE BUILTIN REACHED THROUGH the module's own MAPPING (#14326 round 30):
         # `_g = builtins.__dict__["getattr"]` and its `vars(…)` / `getattr(…)` /
         # `dict.get(…)` twins are the CALLEE laundered one composition further out, so they
         # join the same set every arm already intersects rather than each needing an arm.
@@ -7856,6 +7870,12 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
         loops=True))
     sys_dict_names = frozenset(_aliases_of(
         tree, lambda _n: _is_sys_dict_mapping(
+            # ⛔ `builtins_dict_names` IS FILLED HERE EVEN THOUGH IT IS INERT-BY-MUTANT AT THIS
+            # ONE SITE (#14326 round 30, MEASURED: passing `frozenset()` here leaves
+            # `99 passed` — the alias walk this ctx feeds reaches no callee-lookup shape). It
+            # is filled rather than defaulted because an EMPTY set at a construction site is
+            # precisely the hazard `_RegistryCtx` exists to make impossible; the field is
+            # required, so every site must say what it means.
             _n, _RegistryCtx(sys_names, frozenset(), consts, builtin_aliases, builtins_names,
                              builtins_dict_names)),
         loops=True))
@@ -8731,8 +8751,12 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         # ⛔ AND THE MODULE ALIAS BY ASSIGNMENT, which is what the `builtins_names` fixpoint is
         # for (#14326 round 28 P3, MEASURED: reverting the fixpoint to the import aliases alone
         # left `41 passed` — these two rows are what red it).
+        # ⛔ AND IT CARRIES `import builtins` NOW, WHICH IT DID NOT (#14326 round 30):
+        # `_bm = builtins` with no import raises `NameError: name 'builtins' is not defined`
+        # (measured by executing the row source), so the clause it pinned was exercised by a
+        # spelling that could never run — the same defect the sibling round-28 rows had.
         "`_bm = builtins` then `_bm.getattr`":
-            '_bm = builtins\n_g = _bm.getattr\n'
+            'import builtins\n_bm = builtins\n_g = _bm.getattr\n'
             '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
         "`_bb = _b` CHAIN then `_bb.getattr`":
             'import builtins as _b\n_bb = _b\n_g = _bb.getattr\n'
@@ -8749,7 +8773,7 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         # `41 passed` — the docstring above claims `_b = builtins` is resolved "the way `sys`
         # already is", and no row exercised it). Both rows below are RED at the head and
         # GREEN when that union is removed, so the resolve is pinned rather than asserted.
-        # ⛔ AND BOTH ROWS NOW CARRY `import builtins`, WHICH THEY DID NOT (#14326 round 29):
+        # ⛔ AND BOTH ROWS NOW CARRY `import builtins`, WHICH THEY DID NOT (#14326 round 30):
         # without it `_b = builtins` raises `NameError: name 'builtins' is not defined`, so the
         # pin they claimed was over a lever that CANNOT RUN — measured by executing the row
         # source — while `_b = __builtins__` (no import needed) stayed GREEN. Same intent, an
@@ -8761,7 +8785,7 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'import builtins\n_b = builtins\n_v = _b.vars\n'
             '_v(sys)["modules"]["tortoise.sdk"] = _Mirror\n',
         # ⛔ AND `__builtins__`, WHICH IS NOT A SPELLING OF `builtins` BUT THE ONLY BINDING-FREE
-        # WAY TO REACH IT (#14326 round 29, EVERY ROW BELOW MEASURED GREEN at `de42a75ac4b5`
+        # WAY TO REACH IT (#14326 round 30, EVERY ROW BELOW MEASURED GREEN at `de42a75ac4b5`
         # while the `import builtins` twins were RED). CPython injects `__builtins__` into every
         # module's globals, so these need NO import at all — the cheapest callee launder there
         # is, on the axis rounds 24-28 built one spelling at a time. `builtin_roots` now seeds
@@ -8786,7 +8810,7 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "`_b = __builtins__` then `_b[\"vars\"]`":
             '_b = __builtins__\n_v = _b["vars"]\n'
             '_v(sys)["modules"]["tortoise.sdk"] = _Mirror\n',
-        # ⛔ AND THE BUILTIN REACHED THROUGH THE MODULE'S OWN MAPPING (#14326 round 29, EACH
+        # ⛔ AND THE BUILTIN REACHED THROUGH THE MODULE'S OWN MAPPING (#14326 round 30, EACH
         # MEASURED GREEN at `de42a75ac4b5` while `builtins.getattr` itself was RED). The value
         # is the builtin one COMPOSITION further out, which `_aliases_of` never resolved — the
         # same "resolved forms" set `_is_namespace_expr` and `_is_sys_dict_mapping` already
@@ -9001,8 +9025,10 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         # test up; the replacement arm reaches the same alias set through
         # `sys_dict_names`, so the union and the fixpoint are load-bearing on BOTH axes and
         # the rows below red when either is removed.
+        # ⛔ AND THIS ROW CARRIES `import builtins` NOW (#14326 round 30): `_b = builtins` with
+        # no import raises `NameError`, so it pinned its clause with a lever that cannot run.
         "`_b = builtins` then `_g = _b.getattr` REPLACES":
-            '_b = builtins\n_g = _b.getattr\n__d = _g(sys, "__dict__")\n'
+            'import builtins\n_b = builtins\n_g = _b.getattr\n__d = _g(sys, "__dict__")\n'
             '__d["modules"] = {"tortoise.sdk": _Mirror}\n',
         "`_g = getattr` then `_h = _g` REPLACES":
             '_g = getattr\n_h = _g\n__d = _h(sys, "__dict__")\n'
@@ -9010,7 +9036,7 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         # ⛔ AND A CALLEE ALIAS BOUND BY A LOOP TARGET, ON THE STORE AXIS (#14326 round 28):
         # `sys_dict_names` reads the same `builtin_aliases`, so the `for`-target bind is
         # load-bearing here too and reds when `loops` is off.
-        # ⛔ AND IT NOW CARRIES `import builtins`, WHICH IT DID NOT (#14326 round 29): without
+        # ⛔ AND IT NOW CARRIES `import builtins`, WHICH IT DID NOT (#14326 round 30): without
         # it `(builtins,)` raises `NameError`, so the clause it pinned was exercised by a lever
         # that CANNOT RUN. Same clause, an executable spelling.
         "`for _b in (builtins,)` TARGET then `_b.getattr` REPLACES":
@@ -9018,7 +9044,7 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             '    _g = _b.getattr\n'
             '    __d = _g(sys, "__dict__")\n'
             '    __d["modules"] = {"tortoise.sdk": _Mirror}\n',
-        # ⛔ AND THE STORE AXIS OF `__builtins__` (#14326 round 29, BOTH MEASURED GREEN at
+        # ⛔ AND THE STORE AXIS OF `__builtins__` (#14326 round 30, BOTH MEASURED GREEN at
         # `de42a75ac4b5`): the READ axis above pins the same resolve one spelling over, so the
         # root seed is load-bearing on BOTH axes and these rows red if it is removed.
         "`_g = __builtins__.getattr` then `__d` REPLACES":
