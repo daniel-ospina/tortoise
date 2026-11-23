@@ -94,7 +94,7 @@ is §7's lesson one merge later: **a count is only as good as the base it was ta
 record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49788706a`, *feat(extractor):
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
-`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:22031` (`relation_write = apply_relation_edges(` —
+`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:22032` (`relation_write = apply_relation_edges(` —
 the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:22030`, and the
 binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
@@ -191,10 +191,10 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
-   the capture path at `tortoise/sdk.py:22471`). (The probe's own docstring cites it too and was
+   the capture path at `tortoise/sdk.py:22472`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
    insertion then moved both, and `#11835`'s seam stamp moved them once more; both now read
-   `:22471`.)  <!-- Re-derived at the merge of `origin/main` (`#13133`) into this branch, off
+   `:22472`.)  <!-- Re-derived at the merge of `origin/main` (`#13133`) into this branch, off
    `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py` on the MERGED tree — the only
    figure that survives, because this number depends on BOTH sides' `sdk.py` growth:
    `origin/main` carried a figure correct for `main`, and this branch's head had ALREADY moved
@@ -226,12 +226,12 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `grep -n '_ekind = _payload_entity_kind(e)' tortoise/sdk.py` on the tree of that head.
    ⛔ THESE FIGURES ARE HISTORICAL, NOT LIVE, and they went stale the moment `origin/main` advanced
    under them: the merge of `#13971` (`e0accb8fe6`) inserted 43 lines into `tortoise/sdk.py`, 31 of
-   them above this writer (the live cite above is `sdk.py:22471`), so at the merged head
+   them above this writer (the live cite above is `sdk.py:22472`), so at the merged head
    `22440` is `sourceKind="agentSession",`, `22385` is ``# re-capture kept the display column live and the replay wrote `''` ``, and the
    mint opens at `21189` (`21189-21213`, same `-A 24` window). They are stamped by head and NOT
    re-pointed, because re-pointing a past-tense sentence to a new number is the false claim this
    note exists to catch; the LIVE figures are the prose cite above, which was re-derived on the
-   merged tree (`sdk.py:22471`). No arm reads the numbers in THIS block — which is why they rot
+   merged tree (`sdk.py:22472`). No arm reads the numbers in THIS block — which is why they rot
    silently. --> What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
@@ -779,7 +779,7 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
-# sdk.py:22031 (`_capture_session` reaches it at `sdk.py:19897`). Of the three hits only ONE was still prose-about-absence (the stale comment at
+# sdk.py:22032 (`_capture_session` reaches it at `sdk.py:19898`). Of the three hits only ONE was still prose-about-absence (the stale comment at
 # `extractor_v2.py:12487`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
 # ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:12487` was
@@ -900,7 +900,7 @@ grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml
 # *the writer landed, the corpus was not re-measured* (and no rollup query exists, §1).
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '22471p' tortoise/sdk.py                             # the call (`references`'s writer)
+sed -n '22472p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
 # BUNDLE's OWN registration of the A1 row (#10982 landed it AFTER this record was written),
