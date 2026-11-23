@@ -9831,6 +9831,32 @@ def _cmd_session_drain(api_key: str, api_url: str,
               file=_sys.stderr)
     summary = flush_spool(root, _session_post(api_key, api_url),
                           exclude_session_id=exclude_session_id)
+    # #14350 (D1): the two states that are NOT a failure of any entry, printed
+    # even when nothing else happened — a pass that refused to run, and a pass the
+    # box's own capacity stopped, are exactly the cases where a silent drain reads
+    # as "nothing to do".
+    if summary.held_by_claim:
+        print(f"spool drain: {summary.claim_holder or 'another drainer holds this spool'} "
+              "— serialized drain: one drainer per box (#14350)",
+              file=_sys.stderr)
+    if summary.claim_unavailable:
+        print("spool drain: the drain claim could not be created (unwritable spool "
+              "root) — this pass ran WITHOUT the one-drainer exclusion",
+              file=_sys.stderr)
+    if summary.lost_claim:
+        print("spool drain: this pass no longer held the drain claim (a peer took "
+              "it over) — stopping rather than draining twice",
+              file=_sys.stderr)
+    if summary.capacity is not None:
+        yields = (f" after {summary.capacity_yields} yield"
+                  f"{'s' if summary.capacity_yields != 1 else ''}"
+                  if summary.capacity_yields else "")
+        print(f"spool drain: server at capture capacity (HTTP "
+              f"{summary.capacity.get('status')}"
+              f"{' ' + str(summary.capacity['code']) if summary.capacity.get('code') else ''}"
+              f") — pass ended{yields}; nothing charged to any entry's attempts, "
+              f"resumes on the next opportunity",
+              file=_sys.stderr)
     # #4197: a store-only 2xx delivered by THIS drain is the same silent loss
     # the ledger exists to close — turns stored, no import receipt (by design),
     # the capture-failure breadcrumb cleared by the 2xx, and no local record

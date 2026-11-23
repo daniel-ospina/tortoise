@@ -146,8 +146,49 @@ CAPTURE_REFUSAL_STAMP_MAX = 32
 QUOTA_EXCEEDED_CODE = "quota_exceeded"
 COHORT_COST_CAP_CODE = "cohort_cost_cap"
 _REFUSAL_CODES = (QUOTA_EXCEEDED_CODE, COHORT_COST_CAP_CODE)
+#: #14350 (D1): the server's machine-readable CAPACITY category
+#: (``hosted_api._CAPTURE_CAPACITY_CODE``). Declared here for the same reason as
+#: the two 402 categories above: this client ships independently of the server,
+#: so it names the category rather than matching prose, and the Pi leg names the
+#: same string.
+#:
+#: ⛔ Why a CAPACITY refusal is special at all. Every other refusal in this
+#: module is a verdict about the ENTRY (its harness is malformed, its org is out
+#: of quota, the network failed) and so it is charged to the entry's ``attempts``.
+#: A capacity refusal is a verdict about the BOX, in the same instant, for every
+#: entry: the server is simply running ``_CAPTURE_MAX_IN_FLIGHT`` captures right
+#: now. Charging it to the entry is what turned a 908-entry backlog into
+#: ``attempts`` 10–17 — one saturated pass charged EVERY entry, and exponential
+#: backoff then pushed most of them hours out, so the head stopped falling while
+#: every surface reported a drain in progress (#14342 §7.3).
+CAPTURE_CAPACITY_CODE = "capture_capacity_saturated"
 RETRY_BASE_SECONDS = 30
 RETRY_MAX_SECONDS = 6 * 60 * 60
+#: #14350: how many times ONE pass yields to a capacity refusal before it gives
+#: up and lets the next opportunity continue.
+#:
+#: The drain runs DETACHED (``session-start.sh`` backgrounds it with ``nohup``),
+#: so waiting costs the box nothing but the claim — but an unbounded wait would
+#: hold the claim for as long as the box is busy, which is the opposite of what a
+#: lease is for. Three yields honour the server's own ``retry_after`` (30 s) up to
+#: three times, ≈90 s of politeness, after which the pass ends and reports
+#: ``capacity_stopped``. The head has still not RISEN (nothing was charged and no
+#: backoff was armed), so monotone progress is preserved either way; the next
+#: SessionStart resumes from the same oldest entry.
+DRAIN_CAPACITY_YIELDS = 3
+#: #14350: the drain's EXPLICIT in-flight ceiling.
+#:
+#: ONE POST at a time, per box. This is the ceiling the epic asks for, and it is
+#: a *cap on how much of the server's capture budget the drain may hold*, not a
+#: throughput knob: the server admits ``_CAPTURE_MAX_IN_FLIGHT`` = 8 concurrent
+#: captures for the whole box (live captures + every drainer), so a drainer
+#: holding c slots leaves 8 − c for the user. At c = 1 a live capture is refused
+#: only when seven OTHER live captures are in flight; at c = N (N concurrent
+#: drains — the pre-#14350 shape) the drain alone can take all eight, which is the
+#: measured refusal this issue starts from. One POST at a time is also what makes
+#: the ceiling OBSERVABLE: the value is a property of the loop below, not of a
+#: pool, so no configuration can raise it without editing this file.
+DRAIN_MAX_IN_FLIGHT = 1
 # `attempts` is clamped to this before `backoff_delay` computes 2**(n-1): the
 # backoff saturates (30 * 2**10 > 6 h) long before, and a corrupt stored value
 # of 10**400 would otherwise try to materialise an astronomically large int.
@@ -547,6 +588,40 @@ class FlushSummary:
     #: drain's own line names.
     unrecorded: int = 0
     unrecorded_sessions: list[str] = field(default_factory=list)
+    #: #14350 (D1): this pass did NOT run because another drainer holds the
+    #: spool's claim (`tortoise.drain_claim`). The correct answer for the second
+    #: of two concurrent drains — every entry it would have attempted is still on
+    #: the spool and the HOLDER is working the same list. Distinct from every
+    #: other zero-progress state (`held_by_backoff` = refused earlier, `terminal`
+    #: = never retried, `held_back` = the live session) because it is the only one
+    #: that is another PROCESS's doing.
+    held_by_claim: bool = False
+    #: #14350: the pass ENDED early because the server refused a POST for CAPACITY
+    #: (``capture_capacity_saturated``). Nothing was charged to the entry's
+    #: ``attempts`` and no backoff was armed — that is the difference between this
+    #: and a per-entry deferral, and it is what keeps the head monotone.
+    capacity_stopped: bool = False
+    #: #14350: the identity of that refusal (``{"status", "code"?,
+    #: "retry_after"?, "detail"?}``), so the drain line and the durable status
+    #: record can name the cause instead of counting a deferral.
+    capacity: dict | None = None
+    #: #14350: how many times this pass yielded and retried the same entry before
+    #: stopping (``DRAIN_CAPACITY_YIELDS`` is the ceiling). Published so a busy
+    #: box's drain says it politeness-waited rather than looking stuck.
+    capacity_yields: int = 0
+    #: #14350: the operator line naming WHO holds the claim when this pass gave up
+    #: (``held_by_claim``). A count alone cannot be acted on — the pid and the
+    #: lease expiry are what tell a human whether to wait or investigate.
+    claim_holder: str | None = None
+    #: #14350: the pass STOPPED because it no longer held the claim (a peer took
+    #: it over after our refresh was missed). Recorded rather than raised: the
+    #: correct response is to stop being the second drainer, which the pass has
+    #: already done.
+    lost_claim: bool = False
+    #: #14350: the claim could not be CREATED (an unwritable spool root), so this
+    #: pass ran WITHOUT the cross-process exclusion. Never a silent state — see
+    #: `tortoise.drain_claim.DrainClaimUnavailable`.
+    claim_unavailable: bool = False
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -781,6 +856,82 @@ def quota_refusal(outcome: PostOutcome) -> dict | None:
     if detail:
         refusal["detail"] = detail
     return refusal
+
+
+def capacity_refusal(outcome: PostOutcome) -> dict | None:
+    """The CAPACITY refusal this failed POST represents, or ``None`` (#14350).
+
+    The sibling of :func:`quota_refusal`, and typed for the same reason: the
+    server publishes ``detail.code = "capture_capacity_saturated"``
+    (``hosted_api._CAPTURE_CAPACITY_CODE``) precisely so a capture client — which
+    ships independently of the server's prose — can name the condition without
+    matching a message.
+
+    ⛔ What the caller does with this is the whole point of D1, and it is NOT
+    what it does with a quota refusal. A quota refusal is about the ORGANIZATION
+    and is reported (then deferred on the entry's backoff clock, unchanged). A
+    CAPACITY refusal is about the BOX at this instant and is evidence about
+    NOTHING on the spool — so the drain must not charge it to the entry's
+    ``attempts``, and must not arm a backoff from it. It stops the pass instead
+    (see :func:`flush_spool`); ``attempts`` then measures what it is for, the
+    entry's own refusals, which is what makes the epic's ``attempts ≤ 3``
+    falsifiable at all.
+
+    ``retry_after`` is parsed out of the body when the server sent one — the
+    drain honours it instead of inventing a cadence. Every field is OPTIONAL in
+    the returned record (a 429 from an older server carries none of them), so a
+    caller must read it with ``.get``.
+    """
+    if outcome.ok:
+        return None
+    detail = outcome.detail if isinstance(outcome.detail, str) else ""
+    status = outcome.status
+    typed = CAPTURE_CAPACITY_CODE in detail
+    if status != 429 and not typed:
+        return None
+    refusal: dict = {"status": status if status is not None else 429}
+    if typed:
+        refusal["code"] = CAPTURE_CAPACITY_CODE
+    retry_after = _retry_after_seconds(detail)
+    if retry_after is not None:
+        refusal["retry_after"] = retry_after
+    if detail:
+        refusal["detail"] = detail
+    return refusal
+
+
+def _retry_after_seconds(detail: str) -> float | None:
+    """The server's ``Retry-After`` value from a refusal body, or ``None``.
+
+    TOTAL over every shape: an unparseable body, a JSON scalar, a nested
+    ``detail`` object, a string, a negative or non-finite number — each answers
+    ``None`` (the caller then falls back to its own bounded cadence) rather than
+    raising inside the drain's per-entry guard.
+    """
+    if not detail:
+        return None
+    try:
+        body = json.loads(detail)
+    except (ValueError, TypeError):
+        return None
+    candidates = [body]
+    if isinstance(body, dict) and isinstance(body.get("detail"), dict):
+        candidates.append(body["detail"])
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        value = candidate.get("retry_after")
+        number = None
+        if isinstance(value, bool):
+            number = None
+        elif isinstance(value, (int, float)):
+            number = float(value)
+        elif isinstance(value, str):
+            with contextlib.suppress(ValueError):
+                number = float(value)
+        if number is not None and math.isfinite(number) and number >= 0:
+            return number
+    return None
 
 
 def backoff_delay(attempts: int) -> int:
@@ -3635,6 +3786,12 @@ def _refusal_label(reason: object) -> str:
     """
     if not reason or reason in (QUOTA_EXCEEDED_CODE, "402"):
         return "quota"
+    if reason == CAPTURE_CAPACITY_CODE:
+        # #14350: the BOX is at its capture ceiling — a different sentence from
+        # every quota cause, and the right one: nothing about the org's allowance
+        # is involved, and the operator's action is "wait / reduce concurrency",
+        # not "buy a plan".
+        return "capture capacity"
     return str(reason)
 
 
@@ -3869,6 +4026,7 @@ def _record_capture_status(root: Path, summary: FlushSummary) -> None:
     spool and the credential on each line, never stored.
     """
     quota = summary.quota
+    capacity = summary.capacity
     if quota is not None:
         status = quota.get("status")
         record: dict = {
@@ -3880,6 +4038,28 @@ def _record_capture_status(root: Path, summary: FlushSummary) -> None:
         if status is not None:
             record["status"] = status
         detail = quota.get("detail")
+        if isinstance(detail, str) and detail:
+            record["detail"] = detail[:500]
+        write_capture_status(root, record)
+    elif capacity is not None:
+        # #14350: the box is at its capture ceiling. Recorded as BLOCKED with the
+        # server's own 429 so `capture: BLOCKED (n queued, 429 capture capacity
+        # saturated)` names the cause — the same durable half the quota arm gets,
+        # for the same reason: the hook that fired this drain throws its stderr
+        # away, so a console line alone leaves the next process to re-POST to find
+        # out why nothing moved. Self-healing on both ends: a later pass with a
+        # free slot writes `ok`, and `capture_health` clears it when the queue
+        # empties.
+        status = capacity.get("status")
+        record = {
+            "version": 1,
+            "state": "blocked",
+            "reason": capacity.get("code") or (str(status) if status is not None else None),
+            "updated_at": _now_iso(),
+        }
+        if status is not None:
+            record["status"] = status
+        detail = capacity.get("detail")
         if isinstance(detail, str) and detail:
             record["detail"] = detail[:500]
         write_capture_status(root, record)
@@ -3901,8 +4081,10 @@ def flush_spool(
     only_session_id: str | None = None,
     exclude_session_id: str | None = None,
     bounds: Bounds = DEFAULT_BOUNDS,
+    claim_ttl_s: float | None = None,
+    sleep: Callable[[float], None] | None = None,
 ) -> FlushSummary:
-    """One replay opportunity.
+    """One replay opportunity — SERIALIZED against every other drainer (#14350).
 
     For every spooled session whose content has not been filed, attempt one
     POST. Transient failures back off; a permanent 4xx is recorded and the
@@ -3915,13 +4097,116 @@ def flush_spool(
     ``now`` is epoch MILLISECONDS (the same unit as the Pi leg — the two legs
     share one spool directory, so a seconds value written by one would read as
     "in backoff until the year 57000" to the other).
+
+    ── #14350 (D1): WHY THIS PASS IS SERIALIZED AND WHAT ITS CEILING IS ────
+
+    **One drainer per spool.** An UNTARGETED pass (``only_session_id is None``)
+    takes the spool's claim (:mod:`tortoise.drain_claim`, honoured by both legs)
+    and returns immediately — ``held_by_claim``, zero POSTs — when another
+    process holds it. Every ``SessionStart`` backgrounds a drain, ``SessionEnd``
+    takes a final flush and ``agent_end`` another, so on a busy box N drains used
+    to run at once against ONE server ceiling of 8 captures; that is the
+    self-feeding shape #14342 §7.3 measured (908 entries, ``attempts`` 10–17).
+
+    ⛔ **A TARGETED pass does NOT take the claim, deliberately.**
+    ``session capture`` and the SessionEnd flush file ONE named session, and
+    ``session-start.sh`` already excludes the live session from the drain for
+    the same reason: delaying a session's own filing behind a whole-spool drain
+    is a product regression, not contention control. One POST is the most a
+    targeted pass can hold, so the ceiling is respected without the claim.
+
+    **The ceiling is ``DRAIN_MAX_IN_FLIGHT`` = 1 POST at a time** — a cap on how
+    much of the BOX's shared capture budget this process may hold (8 − 1 = 7
+    slots stay available to the user's live captures), enforced by construction:
+    the loop below is sequential. It is not a throughput knob and it cannot be
+    raised by configuration.
+
+    **A capacity refusal ends the pass and charges nobody.** ``_flush_one``
+    returns with ``summary.capacity_stopped`` when the server answers
+    ``capture_capacity_saturated``: no ``attempts`` increment, no backoff. This
+    pass then yields (honouring the server's own ``retry_after``, at most
+    ``DRAIN_CAPACITY_YIELDS`` times) and retries THE SAME entry, because the
+    refusal is about the box and the entry's turn has not come. When the yields
+    are spent the pass ends cleanly: the head has not risen, nothing was charged,
+    and the next opportunity resumes from the same oldest entry.
+
+    **Monotone by construction.** Entries are attempted oldest-first, a pass
+    never re-orders them, and the only thing that can end a pass early leaves
+    every entry's state untouched — so the pending head can only fall or hold.
+    What made it OSCILLATE before was capacity charges inflating ``attempts``,
+    exponential backoff pushing most of the spool out of the window, and the
+    next pass therefore starting on a different (younger) subset.
     """
     now_ms = time.time() * 1000.0 if now is None else now
     summary = FlushSummary()
+    claim = None
+    if only_session_id is None:
+        from tortoise.drain_claim import DEFAULT_TTL_S as _CLAIM_TTL_S
+        from tortoise.drain_claim import DrainClaimUnavailable, acquire, holder
+        try:
+            claim = acquire(
+                root, leg="python",
+                ttl_s=_CLAIM_TTL_S if claim_ttl_s is None else claim_ttl_s)
+        except DrainClaimUnavailable:
+            # An UNWRITABLE spool root, not contention: a root that cannot hold a
+            # 60-byte claim cannot hold a spool entry either, so this pass can
+            # only report the broken spool — which it must, because the false-PASS
+            # direction (a silent drain) is the worse error here. Stated on the
+            # summary so the exclusion being absent is never invisible.
+            summary.claim_unavailable = True
+        if claim is None and not summary.claim_unavailable:
+            # Another drainer owns this box's spool. Every entry this pass would
+            # have attempted is still on disk and THAT process is working the
+            # same oldest-first list, so doing nothing is the whole fix. The
+            # durable status is NOT written either: this pass observed nothing,
+            # and overwriting the holder's record with an empty one would erase
+            # the last thing actually known about the box.
+            summary.held_by_claim = True
+            summary.claim_holder = (
+                holder(root).line(root) if holder(root) is not None else None)
+            return summary
+    try:
+        return _flush_claimed(
+            root, post, summary, now_ms=now_ms,
+            only_session_id=only_session_id,
+            exclude_session_id=exclude_session_id,
+            bounds=bounds, claim=claim,
+            sleep=time.sleep if sleep is None else sleep)
+    finally:
+        if claim is not None:
+            with contextlib.suppress(Exception):
+                claim.release()
+
+
+def _flush_claimed(
+    root: Path,
+    post: PostFn,
+    summary: FlushSummary,
+    *,
+    now_ms: float,
+    only_session_id: str | None,
+    exclude_session_id: str | None,
+    bounds: Bounds,
+    claim,
+    sleep: Callable[[float], None],
+) -> FlushSummary:
+    """`flush_spool`'s loop, under the claim (`flush_spool` owns acquire/release)."""
     metas, discards = list_spool_metas(root)
     summary.discarded.extend(discards)
-    for meta in sorted(metas, key=_age_key):
+    queue = sorted(metas, key=_age_key)
+    index = 0
+    while index < len(queue):
+        meta = queue[index]
         sid = meta.get("session_id", "")
+        # The lease is refreshed BEFORE the attempt, amortised to one write per
+        # third of the TTL (`renew_if_due`): a live-but-slow pass must never be
+        # mistaken for a dead holder, and a killed one must be reclaimable within
+        # one TTL. `False` means the claim is no longer ours — a peer took it over
+        # after our last refresh, so continuing would make us the second drainer
+        # this whole mechanism exists to prevent.
+        if claim is not None and not claim.renew_if_due():
+            summary.lost_claim = True
+            break
         try:
             _flush_one(root, meta, sid, summary, post, now_ms, only_session_id,
                        exclude_session_id, bounds)
@@ -3946,12 +4231,44 @@ def flush_spool(
                     now_ms + backoff_delay(retry_meta["attempts"]) * 1000)
                 _write_meta(root, retry_meta)
             summary.deferred += 1
+        if summary.capacity_stopped:
+            # The refusal is about the BOX, so it refused this entry — the same
+            # entry is retried after yielding, never skipped past: skipping it
+            # would let a busy box starve the OLDEST capture indefinitely.
+            if summary.capacity_yields >= DRAIN_CAPACITY_YIELDS:
+                break
+            summary.capacity_yields += 1
+            sleep(_capacity_yield_seconds(summary.capacity))
+            summary.capacity_stopped = False
+            continue  # same index: retry THIS entry
+        index += 1
     # agent-infra#2100: record the box's state durably AFTER the loop, so every reader (the
     # drain line, `tortoise session health`, `pr-doctor`) sees the same answer
     # whether or not it observed the failing POST itself.
     with contextlib.suppress(Exception):
         _record_capture_status(root, summary)
     return summary
+
+
+def _capacity_yield_seconds(capacity: dict | None) -> float:
+    """How long to yield after a capacity refusal: the server's own number, bounded.
+
+    The server publishes ``retry_after`` (30 s at ``hosted_api``'s ceiling), and
+    honouring it instead of inventing a cadence is the point — but an absent, or
+    absurd, value must still yield for something, and the value is capped at
+    ``RETRY_BASE_SECONDS`` so a hostile/corrupt body cannot park the drain for
+    hours (which would hold the claim that long).
+    """
+    reported = None
+    if isinstance(capacity, dict):
+        value = capacity.get("retry_after")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            if math.isfinite(number) and number >= 0:
+                reported = number
+    if reported is None:
+        return float(RETRY_BASE_SECONDS)
+    return min(max(reported, 0.0), float(RETRY_BASE_SECONDS))
 
 
 def _clear_breadcrumb_for(harness: str | None, session_id: str | None) -> None:
@@ -4348,6 +4665,29 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # into ``capture: BLOCKED (n queued, 402 quota)``.
         summary.quota = quota
         summary.quota_refusals += 1
+    capacity = capacity_refusal(outcome)
+    if capacity is not None:
+        # #14350 (D1): THE BOX, NOT THE ENTRY. Nothing below runs.
+        #
+        # This is the whole convergence fix in three lines. Charging a capacity
+        # refusal to the entry is what made the backlog feed itself: one
+        # saturated pass charged EVERY pending entry, and `backoff_delay` is
+        # exponential (30 s → 6 h), so the spool's whole population drifted out
+        # of the attempt window and `attempts` reached 10–17 on a 908-entry
+        # backlog (#14342 §7.3). The refusal says only that eight captures are
+        # in flight on this box right now; the spool's bytes are exactly as
+        # fileable as they were one millisecond ago.
+        #
+        # So: no `attempts` increment, no `next_attempt_at_ms`, no write at all
+        # to this entry — and the PASS STOPS (`flush_spool` reads
+        # `capacity_stopped` after this returns). Stopping matters as much as
+        # not charging: the remaining entries are all refused by the same
+        # condition, so attempting them buys nothing and spends one server-side
+        # refusal each (which `/health` counts as `capture_capacity_saturated`).
+        summary.capacity = capacity
+        summary.capacity_stopped = True
+        summary.deferred += 1
+        return
     # Re-read before the backoff write-back for the same reason as the CAS
     # above: never clobber newer turns written while the POST was in flight.
     pending = read_spool_meta(root, sid) or meta
