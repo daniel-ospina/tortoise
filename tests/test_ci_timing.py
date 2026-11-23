@@ -3674,6 +3674,132 @@ def test_render_md_emits_one_emphasis_style() -> None:
     )
 
 
+def _code_spans(md: str) -> list[str | None]:
+    """CommonMark code spans in `md`, scanned LEFT TO RIGHT (#1477).
+
+    Deliberately NOT the helper `tools/ci_timing.py` uses, and deliberately not a
+    regex round-trip: the bug this test pins is invisible to `re.fullmatch(r"(`+)(.*)\\1")`,
+    which happily matches the BROKEN render (the outer fence and the trailing
+    backtick pair up, with the inner backticks counted as content). What
+    CommonMark actually does is close a span at the NEXT run of EXACTLY the
+    opening run's length, so the broken render closes at the first inner backtick
+    and re-opens a span on the tail — a span whose content begins with a space,
+    which is MD038 (`no-space-in-code`). This scanner reproduces that.
+
+    Returns the span contents in order (`None` for an unclosed opening run), with
+    the documented one-leading-and-one-trailing space stripped when BOTH are
+    present — so a padded edge-backtick span round-trips to its original content.
+    """
+    spans: list[str | None] = []
+    i, n = 0, len(md)
+    while i < n:
+        if md[i] != "`":
+            i += 1
+            continue
+        j = i
+        while j < n and md[j] == "`":
+            j += 1
+        width = j - i
+        k = j
+        close = -1
+        while k < n:
+            m = md.find("`", k)
+            if m < 0:
+                break
+            e = m
+            while e < n and md[e] == "`":
+                e += 1
+            if e - m == width:
+                close = m
+                break
+            k = e
+        if close < 0:
+            spans.append(None)
+            break
+        body = md[j:close]
+        if len(body) >= 2 and body.startswith(" ") and body.endswith(" "):
+            body = body[1:-1]
+        spans.append(body)
+        i = close + width
+    return spans
+
+
+#: The production shape that redded the required `docs` check on the 2026-11-23 sweep:
+#: a `parametrize`-controlled nodeid carrying its own backtick pair. Taken verbatim
+#: from the artifact row at `docs/ci-timing.md:823`.
+_BACKTICK_NODEID = ("tests/test_7949_capstone_measure.py::"
+                    "test_each_block_arm_reds_on_the_mutation_it_guards"
+                    "[<lambda>-`_HOLD_NONE` (the clause is negated)]")
+
+
+def test_the_flake_table_fences_a_nodeid_that_contains_backticks() -> None:
+    """#1477: a nodeid with backticks must not break the flake table's markup.
+
+    `_md_code_span` was added by the 2026-11-23 repair to size the fence from the
+    longest backtick run inside the span, but NOTHING reached it: every
+    `render_md` call in this suite passed `flakes=[]`, so `if flakes:` — the only
+    caller — never executed. A revert to the pre-fix single-backtick wrap
+    therefore reddened no row, and the 19-MD038 regression that redded the
+    REQUIRED `docs` check could return silently on the next weekly refresh.
+
+    This pins the reachable path through `render_md` AND the helper's edge-padding
+    contract, and it is non-vacuous in the direction that actually failed: the
+    pre-fix wrap is rendered here and its span must be rejected (that is the
+    MD038 shape), while the emitted one must round-trip.
+    """
+    flakes = [
+        {"test": _BACKTICK_NODEID, "run_id": "43792641690",
+         "passed_at": "2026-11-23T05:12:36Z", "passed_run_id": "45071394329"},
+        # an id that ends with a backtick: the cell must be space-padded on both
+        # sides, which is the only CommonMark way to embed an edge backtick
+        {"test": "tests/test_alpha.py::test_p[a`", "run_id": "1",
+         "passed_at": "2026-11-23T05:12:36Z"},
+    ]
+    md = ci_timing.render_md(
+        {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
+         "conclusion": "success"},
+        {}, {}, {k: 0 for k in ci_timing.COUNT_KEYS}, False, "4242", [], flakes,
+    )
+    rows = {ln.split(" | ")[0].removeprefix("| "): ln
+            for ln in md.splitlines() if "::" in ln and ln.startswith("| ")}
+    assert len(rows) == len(flakes), (
+        "the flake table did not render one row per candidate flake — the `if flakes:` "
+        f"branch may be unreachable again; rows={sorted(rows)}")
+
+    for flake in flakes:
+        # locate this flake's own row by its nodeid, then take the first cell
+        line = next(ln for ln in rows.values() if flake["test"] in ln)
+        rendered_cell = line.split(" | ")[0].removeprefix("| ").strip()
+        spans = _code_spans(rendered_cell)
+        assert spans == [flake["test"]], (
+            f"the flake row for {flake['test']!r} renders its nodeid as "
+            f"{rendered_cell!r}, which CommonMark parses as {spans!r} rather than one "
+            "code span holding the nodeid. A parametrize id is user-controlled and may "
+            "contain backticks, which a single-backtick span cannot hold (#1477).")
+        assert not any(s and s != s.strip() for s in spans), (
+            f"{rendered_cell!r} parses to a code span with an edge space, which is "
+            "MD038 (`no-space-in-code`) — the exact finding class that redded the "
+            "required `docs` check on the 2026-11-23 render.")
+
+    # NON-VACUITY, in the direction that failed: the pre-fix wrap (one backtick
+    # either side, no padding) must be REJECTED by the same scanner it is judged by.
+    pre_fix = f"`{_BACKTICK_NODEID}`"
+    pre_fix_spans = _code_spans(pre_fix)
+    assert pre_fix_spans != [_BACKTICK_NODEID], (
+        "the pre-fix single-backtick wrap round-trips, so this test cannot tell the "
+        "fix from the bug it fixes")
+    assert any(s and s != s.strip() for s in pre_fix_spans), (
+        "the pre-fix wrap did not reproduce the MD038 shape (a span with a leading "
+        f"space); got {pre_fix_spans!r} — the scanner is not modelling CommonMark")
+
+    # …and the helper's own contract on content that begins or ends with a backtick.
+    for text in ("`lead", "trail`", "`both`", "no-backtick", "``two``", "a`b``c"):
+        assert _code_spans(ci_timing._md_code_span(text)) == [text], (
+            f"_md_code_span({text!r}) does not round-trip: it renders "
+            f"{ci_timing._md_code_span(text)!r}, which CommonMark parses as "
+            f"{_code_spans(ci_timing._md_code_span(text))!r}")
+
+
 def test_refresh_durations_is_reproducible(tmp_path: Path) -> None:
     path = _bridge_manifest(tmp_path)
     weights = _bridge_weights(test_alpha=12.34, test_gamma=4.5)
