@@ -3848,18 +3848,24 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     box without a usable `ps` does not red a census that is fine — **or** where an
     OUTSIDE signal killed the fixture's child while the poll ran (`_OUTSIDE_SIGNALS` — the OOM
     killer, an orphan sweep, the shard's own timeout; a killed child has no `argv[0]` for any
-    census to match). Everything else stays a FAIL, and there are THREE of them — the taxonomy is
+    census to match). Everything else stays a FAIL, and there are FOUR of them — the taxonomy is
     enumerated here so a reader re-deriving from this header cannot reinstate a skip that the
     arms below deliberately removed (#12039, review cycle 4):
 
+      * the child is **ALIVE** (`poll() is None`) and still unreported — the `-ww` truncation
+        PIN, and the one arm this file exists for. ⛔ Never turn this one into a skip "to satisfy
+        #5049 rule 1": rule 1 is about a deadline expiring on a LIVE subject *whose observation
+        was blocked by load*, and this arm is the regression the pin exists to catch (#14287
+        review P2 — it was missing from this enumeration while a later paragraph in this same
+        docstring already counted it as the fourth);
       * the census **keeps** reporting an error while ``ps`` itself answers — `_CENSUS_ERROR_STREAK`
-        CONSECUTIVE samples, so ONE lost ``ps`` under load is not the census (that is the box,
-        #5049 rule 1, and it does not red a required shard);
+        CONSECUTIVE samples SPANNING `_CENSUS_ERROR_MIN_SPAN_S`, so ONE lost ``ps`` under load is
+        not the census (that is the box, #5049 rule 1, and it does not red a required shard);
       * a clean exit means the fixture never ran its command (``rc >= 0``);
       * a CRASH signal (SIGSEGV/SIGABRT/…) means the interpreter under it died.
 
-    The last two are the test substrate's fault, not the box's, and the first is this test's own
-    subject. See the exits far below.
+    The last two are the test substrate's fault, not the box's; the census-error arm is this
+    test's own subject, and the ALIVE arm is the `-ww` pin. See the exits far below.
 
     ⛔ IT IS NOT A COPY OF `sleep` ANY MORE (measured on the `ubuntu-26.04` hosted
     runner `GitHub Actions 1000848497`, `test (c)`, head `70116a870dbb`). On that image
@@ -3964,8 +3970,17 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
             # basename), so the truncation pin keeps its discriminating power: it takes
             # the FULL deadline and fails, it does not go green.
             deadline = time.time() + 10.0
+            #: When the POLL began — used ONLY by the outside-signal diagnosis below ("after
+            #: X s of the poll"), which really is poll age. ⛔ It must NOT gate
+            #: `_CENSUS_ERROR_MIN_SPAN_S`: that constant is defined as "TWO SECONDS OF
+            #: CONTINUOUS FAILURE", so a poll-age test let a 0.2 s burst raise
+            #: `HarnessDefect` on any poll that had already run 2 s — a false RED of the exact
+            #: load class this fix exists to remove, while the message claimed a 2 s span that
+            #: was really 0.1 s (#14287 review P1).
             poll_started = time.time()
             err_streak = 0
+            #: When the CURRENT streak began — reset on every recovery. THIS is the span.
+            streak_started = 0.0
             pids: list[int] = []
             while True:
                 procs, err = fs.pi_processes()
@@ -3994,10 +4009,19 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     # below classify it.
                     if _child_exited(proc):
                         break
+                    if err_streak == 0:
+                        streak_started = time.time()
                     err_streak += 1
+                    # ⛔ THE SPAN IS THE STREAK'S OWN AGE, NOT THE POLL'S (#14287 review P1).
+                    # `_CENSUS_ERROR_MIN_SPAN_S`'s contract is "two seconds of CONTINUOUS
+                    # failure"; gating on `time.time() - poll_started` measured when the poll
+                    # BEGAN, so once 2 s had elapsed a two-sample (0.2 s) burst decided the
+                    # verdict — and the raised message asserted a span that had not happened.
+                    # The row `burst_late` below pins this direction: healthy samples past the
+                    # 2 s mark, then a 2-sample burst, must NOT red the shard.
                     if (
                         err_streak >= _CENSUS_ERROR_STREAK
-                        and (time.time() - poll_started) >= _CENSUS_ERROR_MIN_SPAN_S
+                        and (time.time() - streak_started) >= _CENSUS_ERROR_MIN_SPAN_S
                     ):
                         # The verdict is due NOW, so the `ps` control runs at most once per
                         # poll instead of once per erroring sample (review round 5, P2: the
@@ -4242,6 +4266,12 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
             "persistent", True, -9, "skip", "INCONCLUSIVE [#5049]",
             "a fixture the BOX killed is classified by its own arm, whatever the census did",
         ),
+        (
+            "burst_late", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "a 2-sample BURST after 2 s of healthy polling has not SPANNED 2 s — the span is "
+            "the STREAK's own age, not the poll's (#14287 review P1: gating on the poll's age "
+            "redded the shard on 0.2 s of failure and asserted a span that never happened)",
+        ),
     ],
 )
 def test_long_path_census_error_is_the_census_only_when_it_persists(
@@ -4276,6 +4306,18 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
 
     def _census():
         calls["n"] += 1
+        if census_kind == "burst_late":
+            # ⛔ A BURST IS NOT A STREAK (#14287 review P1). 25 healthy samples age the POLL
+            # past `_CENSUS_ERROR_MIN_SPAN_S`, then two consecutive errors (0.2 s of
+            # continuous failure) arrive, then recovery. Those must stay the load class, so
+            # the verdict is the ordinary ALIVE arm — not `HarnessDefect` on a span the
+            # streak never spanned. This is the row the poll-age rule reds and the
+            # streak-age rule passes.
+            if calls["n"] <= 25:
+                return [], None
+            if calls["n"] <= 27:
+                return [], err
+            return [], None
         if census_kind == "persistent" or calls["n"] == 1:
             return [], err
         return [], None
