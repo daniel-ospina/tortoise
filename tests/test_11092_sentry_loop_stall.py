@@ -31,16 +31,25 @@ point of failure:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib
 import logging
 import sys
 import threading
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 import tortoise.sentry as tsentry
+
+_ROOT = Path(__file__).resolve().parent.parent
 
 
 # A stand-in for starlette.requests.ClientDisconnect: this module exercises the
@@ -539,8 +548,8 @@ def live_sentry_client(monkeypatch: pytest.MonkeyPatch):
     finally:
         # ``get_global_scope().set_client`` is the modern spelling of
         # ``Hub.current.bind_client`` (which ``hub.py`` aliases to it and deprecates
-        # for removal; the pin ``sentry-sdk>=2.0`` has no upper bound) — review
-        # round 16, P3.
+        # for removal; the ceiling ``sentry-sdk>=2.0,<3`` bounds WHEN that removal can
+        # reach us — review round 16, P3).
         sentry_sdk.get_global_scope().set_client(None)
         threading.Thread.start = stamp_before
         importlib.reload(tsentry)
@@ -756,8 +765,11 @@ def test_the_real_sdk_builds_an_event_with_no_source_context(real_sentry) -> Non
     came back. That is not hypothetical: the SDK has retired an option of exactly
     this kind before (``with_locals``, gone in the 1.x->2.x migration in favour of
     ``include_local_variables``; passing it today raises ``TypeError: Unknown
-    option``), and ``pyproject.toml`` declares ``sentry-sdk>=2.0`` with no upper
-    bound, so another rename is reachable. (As
+    option``). The MAJOR ceiling ``sentry-sdk>=2.0,<3`` keeps one such rename from
+    reaching a resolving env in silence, and
+    ``test_the_pin_keeps_every_option_our_init_passes_inside_the_ceiling`` pins the
+    ceiling AND this option set together, so a 3.x env reds instead of degrading.
+    (As
     of 2.74.0 — the current release — ``include_source_context`` and
     ``include_local_variables`` are still accepted and carry no deprecation
     marker in the vendor tree; ``data_collection`` coexists with them. Do not
@@ -798,4 +810,143 @@ def test_the_real_sdk_builds_an_event_with_no_source_context(real_sentry) -> Non
         "falsifier: with include_source_context=True the recorder must SEE "
         "context_line, otherwise the assertion above measures the recorder rather "
         "than the option"
+    )
+
+
+# ── The MAJOR ceiling on `sentry-sdk`, and the option set it protects ─────────
+#
+# Measured, 2026-11-23 on PR #14347's required `python-ci-gate` (shard `test (k)`,
+# job `137636625187`, run `45157626615`, head `f53fc3a8`): the leg's
+# `pip install -e '.[test,embeddings]'` — an UNBOUNDED resolve — installed
+# `sentry_sdk-3.0.0`, and `init()` then returned `False`:
+#
+#     WARNING  tortoise.sentry:sentry.py:348 sentry init failed — continuing
+#     without: Unknown option 'send_default_pii'
+#
+# The vendor's 2.x→3.x migration guide states the removal: "Sentry SDK 3.x removes
+# `send_default_pii`, `include_local_variables`, and `include_source_context`" —
+# i.e. THREE of the seven options `tortoise/sentry.py::init` passes, all of them
+# the guards #2863 and #11092 exist for. `init()` swallows the refusal
+# (`_log` WARNING, serving continues), so on an env that resolves fresh the
+# consequence is silent: **hosted error capture is off and nothing turns red**.
+# `uv.lock` holds 2.68.1, so a leg that resolves through the lock never sees it —
+# which is why the declaration, not the lock, is what is pinned here.
+
+#: The first `sentry-sdk` major that rejects `tortoise/sentry.py`'s option set.
+_FIRST_MAJOR_WITHOUT_OUR_OPTIONS = Version("3.0.0")
+
+#: A 2.x release ABOVE the lock. The ceiling must bound the MAJOR, not the PATCH: an
+#: exact pin would also stop the break, but it would hold back 2.x security fixes
+#: until someone cuts a diff — the same trade `pyproject.toml` refuses for `pyyaml`.
+_A_LATER_2X_RELEASE = Version("2.75.0")
+
+
+def _declared_sentry_specifier() -> SpecifierSet:
+    """The ONE requirement `pyproject.toml` declares for `sentry-sdk`.
+
+    Asserted singular on purpose: a second spelling (`sentry_sdk`, or a duplicate
+    line under a different case) would let the declaration read bounded while the
+    resolver is free — the failure mode is a looser requirement SHADOWING the pinned
+    one, not a missing line.
+    """
+    doc = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    declared = [
+        Requirement(entry)
+        for entry in doc["project"]["dependencies"]
+        if canonicalize_name(Requirement(entry).name) == "sentry-sdk"
+    ]
+    assert len(declared) == 1, (
+        "expected exactly ONE `sentry-sdk` requirement in pyproject.toml, found "
+        f"{[str(r) for r in declared]} — a duplicated or respelled line can shadow "
+        "the ceiling this row pins"
+    )
+    return declared[0].specifier
+
+
+def _init_option_names() -> set[str]:
+    """Every keyword `tortoise/sentry.py` passes to `sentry_sdk.init`, read from SOURCE.
+
+    Read rather than restated: a copy of this list would drift the moment an option
+    is added, and drift in exactly this list is the failure being guarded against.
+    The call site must stay a single literal-kwargs call — `**kwargs` would hide the
+    option set from this reader, and a second call site would mean the one that runs
+    is not the one pinned.
+    """
+    tree = ast.parse((_ROOT / "tortoise" / "sentry.py").read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "init"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "sentry_sdk"
+    ]
+    assert len(calls) == 1, (
+        f"expected exactly ONE `sentry_sdk.init(...)` call site in tortoise/sentry.py, "
+        f"found {len(calls)}"
+    )
+    assert not [kw for kw in calls[0].keywords if kw.arg is None], (
+        "tortoise/sentry.py passes `**kwargs` to `sentry_sdk.init` — the option set "
+        "this row validates would then be invisible to it"
+    )
+    return {kw.arg for kw in calls[0].keywords if kw.arg}
+
+
+def test_the_pin_keeps_every_option_our_init_passes_inside_the_ceiling() -> None:
+    """The declaration excludes the major that removes our options, and the SDK in this env accepts them.
+
+    Three arms, each with its own mutant:
+
+    1. `Version("3.0.0") not in spec` — mutant: `">=2.0,<3"` → `">=2.0"` (the
+       pre-fix declaration). Red. This is the arm that catches a re-loosened pin
+       BEFORE a resolving env installs the major, which is the only point at which
+       the break is still cheap.
+    2. `Version("2.75.0") in spec` — mutant: `<3` → `==2.68.1` (over-tight). Red:
+       the ceiling must not also freeze 2.x patches.
+    3. every option name collected from the source is a key of the installed
+       SDK's own `DEFAULT_OPTIONS` — the exact predicate `Client`'s own validation
+       uses (`client.py`: `if key not in rv: raise TypeError("Unknown option %r")`).
+       Mutant: run this row in an env holding `sentry-sdk` 3.0.0. Red, naming
+       `send_default_pii`, `include_local_variables` and `include_source_context`
+       — so a major that removes them reds HERE with the three names, instead of
+       surfacing as a WARNING that silently disables capture.
+    """
+    import sentry_sdk
+    from sentry_sdk.consts import DEFAULT_OPTIONS
+
+    spec = _declared_sentry_specifier()
+
+    assert _FIRST_MAJOR_WITHOUT_OUR_OPTIONS not in spec, (
+        f"pyproject.toml declares `sentry-sdk{spec}`, which ADMITS "
+        f"{_FIRST_MAJOR_WITHOUT_OUR_OPTIONS} — that major removed `send_default_pii`, "
+        "`include_local_variables` and `include_source_context`, i.e. three of the "
+        "options `tortoise/sentry.py::init` passes, so `init()` refuses the whole "
+        "config and HOSTED ERROR CAPTURE IS SILENTLY OFF on any env that resolves "
+        "fresh (CI's `pip install -e '.[test,…]'`, both Dockerfiles' `pip install` "
+        "path). Lifting the ceiling is the 3.x migration in its own change (#11157)."
+    )
+    assert _A_LATER_2X_RELEASE in spec, (
+        f"pyproject.toml declares `sentry-sdk{spec}`, which EXCLUDES "
+        f"{_A_LATER_2X_RELEASE} — the ceiling is meant to bound the MAJOR, not the "
+        "PATCH: freezing the patch also freezes 2.x security fixes behind a diff."
+    )
+
+    installed = Version(sentry_sdk.VERSION)
+    assert installed in spec, (
+        f"the installed sentry-sdk is {installed}, which the declaration `{spec}` "
+        "does not admit — this env is OUTSIDE the validated window, so the option "
+        "check below would grade a package this repo never pinned"
+    )
+
+    missing = _init_option_names() - set(DEFAULT_OPTIONS)
+    assert not missing, (
+        "the installed sentry-sdk "
+        f"({installed}) does not accept option(s) {sorted(missing)} that "
+        "`tortoise/sentry.py::init` passes. `sentry_sdk.init()` raises "
+        "`TypeError: Unknown option …` for each, `tortoise.sentry.init` catches it "
+        "and returns False, and the process keeps serving with error capture OFF — "
+        "the silent failure #11157 is about. Migrate the options (#11157) rather "
+        "than deleting them: each one is a security guard (#2863 credentials in "
+        "frame locals, #11092 source-context cost)."
     )
