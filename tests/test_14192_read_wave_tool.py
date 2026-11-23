@@ -1467,10 +1467,40 @@ def _is_builtins_dict_of(node: ast.AST, names: frozenset[str]) -> bool:
                 and node.args[1].value == "__dict__")
 
 
+def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
+    """`(builtins_names, builtins_dict_names)` — the module names and the MAPPING names.
+
+    ONE OWNER (#14326 review cycle 2). The registry axis computed these inline, so when the
+    code-execution axis needed the same two sets (`exec` resolved through
+    `builtins.__dict__["exec"]`), the alternative was a SECOND copy of the root enumeration —
+    the drift this file deletes on sight. Both callers now resolve the roots here.
+
+    ⛔ `__builtins__` IS A ROOT, not an alias of `builtins` (#14326 round 30): CPython injects
+    it into every module's globals, so it needs no import — unlike a bare `builtins`, which
+    raises `NameError` without one (that round's rows pinned a lever that could not RUN).
+    """
+    roots = {"builtins", "__builtins__"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "builtins" and alias.asname:
+                    roots.add(alias.asname)
+    builtins_names = frozenset(roots) | frozenset(_aliases_of(
+        tree, lambda n: isinstance(n, ast.Name) and n.id in roots, loops=True))
+    #: The names that can statically BE the builtins mapping rather than the module — the
+    #: literal `__builtins__` (a `__dict__` in an imported module) and its one-bind aliases.
+    #: Only these accept the BARE subscript form; see `_builtin_lookup_name`.
+    builtins_dict_names = frozenset({"__builtins__"}) | frozenset(_aliases_of(
+        tree, lambda n: isinstance(n, ast.Name) and n.id == "__builtins__", loops=True))
+    return builtins_names, builtins_dict_names
+
+
 def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                          consts: dict[str, frozenset[str]],
-                         dict_names: frozenset[str] = frozenset()) -> str | None:
-    """The `_REGISTRY_BUILTINS` member a callee expression resolves to THROUGH builtins' mapping.
+                         dict_names: frozenset[str] = frozenset(),
+                         members: frozenset[str] | None = None) -> str | None:
+    """The `members` (default `_REGISTRY_BUILTINS`) member a callee expression resolves to
+    THROUGH builtins' mapping.
 
     ⛔ THE MAPPING LOOKUP IS THE NEXT CALLEE SPELLING (#14326 round 30, EACH MEASURED GREEN at
     `de42a75ac4b5`), while `builtins.getattr` itself was RED:
@@ -1497,25 +1527,24 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     a bare subscript on every root name would red code that cannot run.
     """
     if isinstance(node, ast.Subscript):
+        keys = _string_keys_of(node.slice, consts) & (members or _REGISTRY_BUILTINS)
         if (isinstance(node.value, ast.Name) and node.value.id in dict_names):
-            keys = _string_keys_of(node.slice, consts) & _REGISTRY_BUILTINS
             return sorted(keys)[0] if keys else None
         if not _is_builtins_dict_of(node.value, names):
             return None
-        keys = _string_keys_of(node.slice, consts) & _REGISTRY_BUILTINS
         return sorted(keys)[0] if keys else None
     if not isinstance(node, ast.Call):
         return None
     if isinstance(node.func, ast.Name) and node.func.id == "getattr":
         if (len(node.args) >= 2 and isinstance(node.args[0], ast.Name)
                 and node.args[0].id in names):
-            keys = _string_keys_of(node.args[1], consts) & _REGISTRY_BUILTINS
+            keys = _string_keys_of(node.args[1], consts) & (members or _REGISTRY_BUILTINS)
             return sorted(keys)[0] if keys else None
         return None
     if (isinstance(node.func, ast.Attribute) and node.func.attr == "get"
             and isinstance(node.func.value, ast.Name) and node.func.value.id == "dict"
             and len(node.args) >= 2 and _is_builtins_dict_of(node.args[0], names)):
-        keys = _string_keys_of(node.args[1], consts) & _REGISTRY_BUILTINS
+        keys = _string_keys_of(node.args[1], consts) & (members or _REGISTRY_BUILTINS)
         return sorted(keys)[0] if keys else None
     return None
 
@@ -2449,6 +2478,22 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # `test_EVERY_static_binding_form_is_a_READ_reach`.
     """
     out: list[ast.Call] = []
+    # ⛔ THE CODE-EXECUTING NAMES ARE RESOLVED, NOT ENUMERATED (#14326 review cycle 2,
+    # MEASURED: with the bare set alone `_run = exec; _run("<read>")`,
+    # `getattr(builtins, "exec")(…)` and `builtins.__dict__["exec"](…)` all left
+    # `mentions=2 calls=2 indirect=0` while the read executed, end-to-end on the shipped
+    # tool). The spelling axis cannot converge (a lambda, a `getitem`, an alias of an
+    # alias), which is this file's own reason for resolving rather than listing — the same
+    # machinery the getattr/setattr laundering axis uses, asking a different question.
+    _builtins_names, _builtins_dict_names = _builtins_root_names(tree)
+    _code_executing_names = _CODE_EXECUTING_CALLEES | frozenset(_aliases_of(
+        tree,
+        lambda n: (isinstance(n, ast.Name) and n.id in _CODE_EXECUTING_CALLEES)
+        or (isinstance(n, ast.Attribute) and n.attr in _CODE_EXECUTING_CALLEES
+            and isinstance(n.value, ast.Name) and n.value.id in _builtins_names)
+        or _builtin_lookup_name(n, _builtins_names, consts, _builtins_dict_names,
+                                members=_CODE_EXECUTING_CALLEES) is not None,
+        loops=True))
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call):
             continue
@@ -2462,19 +2507,29 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # measured). Every arm below asks whether an OPERAND *IS* the read name; a code
         # string only CONTAINS it, and widening the census to substring containment is the
         # blanket mention red this file deleted (a provenance note that merely names the read
-        # would red). `exec`/`eval`/`compile` are therefore fail-closed BY NAME — a door
-        # mirror has no reason to build code at runtime, and the three shapes were MEASURED
-        # GREEN through the pin's own predicate while the read executed:
+        # would red). `exec`/`eval`/`compile` are therefore fail-closed by RESOLVED name — a
+        # door mirror has no reason to build code at runtime — and the three shapes were
+        # MEASURED GREEN through the pin's own predicate while the read executed:
         #
         #     exec("results = sdk._tortoise_fts_query(query=…, limit=10)")   m=2 c=2 i=0
         #     eval("sdk._tortoise_fts_query(query=…, limit=10)")            m=2 c=2 i=0
         #     exec(compile(<literal>, "<s>", "exec"))                      m=2 c=2 i=0
         #
+        # ⛔ "BY RESOLVED NAME" IS THE WHOLE POINT (#14326 review cycle 2, EACH MEASURED
+        # GREEN with the bare-name arm alone in place): `_run = exec; _run("<code>")`,
+        # `getattr(builtins, "exec")(…)` and `builtins.__dict__["exec"](…)` are the SAME
+        # callee one launder further out. The file's own rule (`_builtin_lookup_name`'s
+        # docstring, and `_aliases_of`) is that a STATICALLY VISIBLE alias is not the
+        # declared "computed at runtime" residual, so the arm resolves the set with the
+        # machinery the getattr/setattr laundering axis already uses rather than enumerating
+        # spellings.
+        #
         # NOT fail-closed, deliberately: `__import__` / `importlib.import_module`, whose
-        # name argument is a MODULE (the import path axis, graded by `_is_import_path_object`),
-        # not code. Unconditional on the name: a REBOUND `exec` is graded as an unknown
-        # here, the same polarity round 6 chose for a rebound pure name.
-        if _callee in _CODE_EXECUTING_CALLEES:
+        # argument is a MODULE name (the import path axis, graded by
+        # `_is_import_path_object`), not code.
+        if _callee in _code_executing_names or \
+                _builtin_lookup_name(n.func, _builtins_names, consts, _builtins_dict_names,
+                                     members=_CODE_EXECUTING_CALLEES) is not None:
             out.append(n)
             continue
         if not any(_carries_read_name(arg, consts)
@@ -6267,10 +6322,14 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         #     callee "all deliver through a SPLAT" is false for the non-splat POSITIONAL
         #     delivery, so the shape gate dropped the fetch entirely.
         #
-        # The `getattr` row isolates the slice (its callee is in the named pair, so only the
-        # position can decide it); the other three isolate the callee gate (the name is at
-        # position 1+, so only the gate can decide them). Restoring either clause reds its
-        # row(s) back to GREEN, measured.
+        # The `getattr` row reds on the POSITION clause (its callee is in the named pair, so
+        # only the position can decide it, and it is the row that aborts the loop under a
+        # faithful reversion of `[1:]` + the deleted `Starred` extend). `__getattribute__` and
+        # `.get` ALSO carry the assembled name at position 0 — corrected here after a
+        # fresh-context review measured the first wording FALSE (#14326 cycle 2): only
+        # `_helper(sdk, …)` has the name at position 1 and isolates the CALLEE GATE. What is
+        # measured for all three: each reds when the gate is restored, and the two position-0
+        # rows red under the position clause as well.
         "`getattr` with the name assembled in the FIRST position": (
             '    getattr("_tortoise" + "_fts_query", sdk)'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
@@ -6296,6 +6355,24 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "`compile` of a static code string": (
             '    _code = compile("sdk._tortoise_fts_query(query=x)", "<pin>", "exec")\n'
             '    exec(_code)\n'),
+        # ⛔ AND THE RESOLVED SPELLINGS OF THE SAME CALLEE (#14326 review cycle 2, EACH
+        # MEASURED GREEN with the bare-name arm alone: `mentions=2 calls=2 indirect=0`, and
+        # `_run = exec` measured GREEN END-TO-END on the shipped tool). A statically visible
+        # alias is not the pin's declared "computed at runtime" residual — this file's own
+        # rule — so `_indirect_reads` resolves the set with `_aliases_of` /
+        # `_builtin_lookup_name` instead of enumerating spellings. Deleting the resolution
+        # (leaving `_CODE_EXECUTING_CALLEES` alone) reds these three rows and only these.
+        "ALIASED `exec`": (
+            '    _run = exec\n'
+            "    _run('results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
+        "`getattr(builtins, \"exec\")` — the module's own MAPPING": (
+            '    import builtins\n'
+            '    getattr(builtins, "exec")('
+            "'results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
+        "`builtins.__dict__[\"exec\"]` — the mapping SUBSCRIPT": (
+            '    import builtins\n'
+            '    builtins.__dict__["exec"]('
+            "'results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
         # ⛔ AND A SUBSCRIPT WHOSE KEY IS ASSEMBLED (#14326 review P0-2, MEASURED GREEN at
         # `cb5c2c81d9`: mentions=2, calls=2, indirect=0) — while the DIRECT key is refused by
         # the `Constant` arm and the SLICED key by `_possible_strings`. The key is the same
@@ -8143,19 +8220,7 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     #: `_b = builtins` rows — which raise `NameError` without an `import builtins` and therefore
     #: pinned a lever that CANNOT RUN — this one needs no import at all. It is a ROOT, not an
     #: alias: seeding it here is the same one-word resolve `sys` got in round 21.
-    _builtin_roots = {"builtins", "__builtins__"}
-    for _node in ast.walk(tree):
-        if isinstance(_node, ast.Import):
-            for alias in _node.names:
-                if alias.name == "builtins" and alias.asname:
-                    _builtin_roots.add(alias.asname)
-    builtins_names = frozenset(_builtin_roots) | frozenset(_aliases_of(
-        tree, lambda _n: isinstance(_n, ast.Name) and _n.id in _builtin_roots, loops=True))
-    #: The names that can statically BE the builtins mapping rather than the module — the
-    #: literal `__builtins__` (a `__dict__` in an imported module) and its one-bind aliases.
-    #: Only these accept the BARE subscript form; see `_builtin_lookup_name`.
-    builtins_dict_names = frozenset({"__builtins__"}) | frozenset(_aliases_of(
-        tree, lambda _n: isinstance(_n, ast.Name) and _n.id == "__builtins__", loops=True))
+    builtins_names, builtins_dict_names = _builtins_root_names(tree)
     imported_builtins = frozenset(
         (alias.asname or alias.name)
         for _node in ast.walk(tree)
