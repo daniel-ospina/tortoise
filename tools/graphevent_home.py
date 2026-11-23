@@ -453,7 +453,8 @@ class RecordUnavailable(RuntimeError):
 def _graph_connection(uri: str):
     from falkordb import FalkorDB
 
-    return FalkorDB.from_url(uri.replace("docker://", "redis://"))
+    from tortoise.projection import _bounded_server_socket_kwargs as socket_kwargs
+    return FalkorDB.from_url(uri.replace("docker://", "redis://"), **socket_kwargs())
 
 
 def _known_graphs(db) -> list[str]:
