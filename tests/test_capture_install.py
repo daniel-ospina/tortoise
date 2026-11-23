@@ -5364,14 +5364,46 @@ def test_the_two_legs_state_the_SAME_addsEntry_operand_rule():
     PRESENT in both.  Mutation (the shape a careless revert of cycle 5
     produces): restore the retracted sentence on either leg — this REDs while
     every behavioural row in the repo stays green.
+
+    ⛔ THE POSITIVE HALF IS ANCHORED TO THE OPERAND SENTENCE, NOT TO A PHRASE
+    THAT ALSO LIVES ELSEWHERE (#14347 review, cycle 10, finding 1).  This row
+    used to assert the unbounded phrase ``POST-WRITE entry count``, which each
+    leg ALSO writes in its unrelated write-path comment
+    (``capture_spool.py:2622``, ``tortoise-capture.ts:2807``) — measured:
+    deleting the whole operand sentence from either leg left the row GREEN, so
+    the pin reliably stopped the retracted wording (the harm that actually hit)
+    and said nothing about its precondition.  Each leg is now keyed on its own
+    operand sentence — ``adds_entry=True`` / ``addsEntry is `true` only when the
+    session is not on disk at all`` — which states the operand, names the
+    question the operand answers, and occurs exactly ONCE per file.  The
+    ``count(anchor) == 1`` half is what keeps it unique: a second, unrelated
+    copy of the sentence would silently re-create the vacuity.
+
+    Mutation (measured on this head, mutant then reverted byte-identically):
+
+    * re-insert ``still ADDS one to the count`` on either leg → RED;
+    * delete/rewrite the operand sentence on either leg, leaving the write-path
+      ``POST-WRITE entry count`` comment intact → RED (it was GREEN before this
+      fix — that is the finding);
+    * duplicate the operand sentence elsewhere in a leg → RED on the
+      ``count(anchor) == 1`` half.
     """
     retracted = "still ADDS one to the count"
-    rule = "POST-WRITE entry count"
-    legs = {
-        "Pi capture seam": _PI_SRC,
-        "Python spool writer": _REPO_ROOT / "tortoise" / "capture_spool.py",
-    }
-    for leg, path in legs.items():
+    # (leg, path, the leg's OWN operand sentence — unique, and deleted by the
+    # exact mutation the retracted sentence is the precondition of).
+    legs = (
+        (
+            "Pi capture seam",
+            _PI_SRC,
+            "`addsEntry` is `true` only when the session is not on disk at all",
+        ),
+        (
+            "Python spool writer",
+            _REPO_ROOT / "tortoise" / "capture_spool.py",
+            "`adds_entry=True` only when the session is not on disk at all",
+        ),
+    )
+    for leg, path, operand_rule in legs:
         assert path.is_file(), f"{leg}: {path} is missing"
         # Collapse the comment wrapping: the two legs' lines are not identical.
         text = " ".join(path.read_text(encoding="utf-8").split())
@@ -5381,11 +5413,19 @@ def test_the_two_legs_state_the_SAME_addsEntry_operand_rule():
             "entry_on_disk`), so an unreadable/corrupt/meta-less-log "
             "REPLACEMENT adds NOTHING — cycle 5 removed that operand from both "
             "legs' code, and both legs' comments must say so.")
-        assert rule in text, (
-            f"{leg} ({path}) no longer states the `adds_entry` operand rule "
-            f"({rule!r}).  The two legs are ONE contract: a reader of either "
-            "must get the same operand, and a deleted sentence is how the "
-            "contradictory one got back in.")
+        found = text.count(operand_rule)
+        assert found == 1, (
+            f"{leg} ({path}) must state the `adds_entry` operand rule exactly "
+            f"ONCE, in the operand's own sentence: {operand_rule!r} — found "
+            f"{found} occurrence(s).  Zero means the operand sentence was "
+            "deleted or reworded (a deleted sentence is how the contradictory "
+            "one got back in: the two legs are ONE contract, so a reader of "
+            "either must get the same operand).  More than one means an "
+            "unrelated copy now satisfies this pin — which is exactly how the "
+            "previous form of this row went vacuous (#14347 review, cycle 10, "
+            "finding 1): `POST-WRITE entry count` also appears in each leg's "
+            "write-path comment, so the operand sentence could be deleted "
+            "while the row stayed green.")
 
 
 def test_a_shipped_pi_read_seam_byte_change_moves_the_generation():
