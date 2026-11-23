@@ -3362,8 +3362,20 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
     #: `_aliases_of` over the two receiver shapes the predicates already accept.
     _mapping_read_aliases = frozenset(_aliases_of(
         tree,
+        # ⛔ THE NAMESPACE IS A RECEIVER TOO (#14326 fail lane cycle 3, EACH MEASURED GREEN **and
+        # LIVE**, while the BOUND-to-a-name twin one clause below was already RED):
+        #
+        #     _g = dict.__dict__.get; _f = _g("get"); _f(m, "exec")(<read>)     GREEN
+        #     _g = dict.__dict__.get; _f = _g("__getitem__"); …                 GREEN
+        #     _g = _n.get   (with `_n = dict.__dict__`)                          RED
+        #
+        # `dict.__dict__.get` is the mapping's OWN `get`, and `dict.__dict__.get("get")` IS
+        # `dict.get` (executed: `is dict.get` → True), so this is the same read one receiver
+        # spelling over. The `{"dict", "copy"}` union was already threaded for the Subscript
+        # clause below and for the `_indirect_reads` arm, and NOT here.
         lambda n: (isinstance(n, ast.Attribute) and n.attr in _BUILTINS_MAPPING_READS
-                   and _is_builtins_mapping(n.value, _builtins_names, _builtins_dict_names,
+                   and _is_builtins_mapping(n.value, _builtins_names | {"dict", "copy"},
+                                            _builtins_dict_names,
                                             _builtins_launderers, consts))
         or (isinstance(n, ast.Attribute) and n.attr in _BUILTINS_MAPPING_READS
             and isinstance(n.value, ast.Name)
@@ -3371,7 +3383,13 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         # ⛔ AND THE `getattr` FETCHER, bound to a name first (#14326 review cycle 7, MEASURED
         # GREEN: `_g = getattr(builtins.__dict__, "get"); _g("exec")(<read>)`). The same
         # `members=` threading as the inline arm inside `_builtin_lookup_name`.
-        or _builtin_lookup_name(n, _builtins_names, consts, _builtins_dict_names,
+        # ⛔ AND THE SAME UNION ON THE RESOLVER ASK (#14326 fail lane cycle 3, EACH MEASURED GREEN
+        # **and LIVE** and each `is dict.get` at runtime): `_f = vars(dict).get("get")` and
+        # `_f = getattr(dict, "__dict__").get("get")`. These receivers are COMPOSITIONS, so they
+        # are resolved by `_builtins_dict_of`, which needs the module in `names` — the union
+        # above supplies it for the Attribute clause, this one for the resolver's receiver arm.
+        or _builtin_lookup_name(n, _builtins_names | {"dict", "copy"}, consts,
+                                _builtins_dict_names,
                                 _builtins_launderers,
                                 members=_BUILTINS_MAPPING_READS,
                                 getattr_fetchers=_getattr_fetchers) is not None
@@ -8005,6 +8023,29 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    m = builtins.__dict__\n'
             '    getattr(builtins, "dict").__dict__["get"](m, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ AND THE NAMESPACE'S OWN `get` APPLIED TO A MEMBER NAME (#14326 fail lane cycle 3,
+        # EACH MEASURED GREEN **and LIVE** while the `_n`-bound twin one row below is RED):
+        #
+        #     _g = dict.__dict__.get; _f = _g("get"); _f(m, "exec")   GREEN  (`_g("get") is dict.get`)
+        #     _f = vars(dict).get("get"); _f(m, "exec")                GREEN
+        #     _f = getattr(dict, "__dict__").get("get"); _f(m, …)     GREEN
+        #
+        # `dict.__dict__.get("get")` IS `dict.get` (executed: `is dict.get` → True), so this is
+        # the same read one FETCH over. The `{"dict", "copy"}` receiver union was threaded for
+        # the Subscript spelling of the same member and not for these.
+        "a READ METHOD fetched out of the namespace's OWN `get`": (
+            '    import builtins\n'
+            '    _g = dict.__dict__.get\n'
+            '    _f = _g("get")\n'
+            '    _f(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD fetched out of `vars(<module>).get`": (
+            '    import builtins\n'
+            '    _f = vars(dict).get("__getitem__")\n'
+            '    _f(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD fetched out of `getattr(<module>, \"__dict__\").get`": (
+            '    import builtins\n'
+            '    _f = getattr(dict, "__dict__").get("get")\n'
+            '    _f(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
         # ⛔ AND THE ONE-BIND ALIAS OF THE NAMESPACE ITSELF (#14326 fail lane, EACH MEASURED
         # GREEN and LIVE: `_n = dict.__dict__; _n["copy"](m)["exec"] is exec` → True). The
         # one-bind alias of the MAPPING one module over (`_d = builtins.__dict__`) has been
@@ -11957,11 +11998,25 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     callee through `_aliases_of` and `_builtin_lookup_name`, and three review cycles found one
     more launder each time: the bare name, then `_run = exec`, then `_d = builtins.__dict__` /
     `from builtins import exec as _e` / `_g = getattr`. Those are closed. What is NOT closed is
-    a callee obtained by a route that is not statically enumerable at all — the same class this
+    a callee obtained by a route that is not statically enumerable AT ALL — the same class this
     file already states for the registry axis (#14326 round 28/33: "the list of ways to name a
     callable does not terminate"). Leaving that unnamed is the defect the round-33 review found
     in the import-path axis: a sentence excusing a lever while naming a declaration that did not
     exist.
+
+    ⛔ AND THE SENTENCE ABOVE WAS TOO BROAD (#14326 fail lane cycle 3, MEASURED GREEN **and
+    LIVE**, ONE node of composition past the arms that ARE closed):
+
+        vars(dict).get("get")(builtins.__dict__, "exec")(<read>)
+
+    is STATICALLY enumerable — both keys are literals — but its callee is produced by applying a
+    MAPPING READ to a literal member name (`… .get("get")` → `dict.get`) and then applying THAT
+    result to the mapping. The closure resolves one hop per node, so a callee built by CALLING a
+    resolved read with a literal key is the CALLEE-COMPOSITION class, not the non-enumerable one.
+    Closing it needs a two-step application in the census, which is new machinery rather than a
+    threaded set; it is DECLARED here (a row below pins it GREEN) rather than left reading as
+    covered. Its ONE-hop twins — `vars(dict).get("get")` BOUND first, `dict.__dict__.get("get")`,
+    and every `[…"get"]`/`dict.get` spelling — are REFUSED and pinned by rows.
 
     ⛔ EACH ROW BELOW WAS MEASURED AS A LIVE LEVER at `7b1589ef9e` — a third reach executing the
     product read while the pin passed (`m=2 c=2 i=0`). They are pinned GREEN so the note cannot
@@ -12052,6 +12107,19 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # passed as `dict_names`, the one argument the file hard-codes in the copy closure for
         # exactly this reason. Both spellings are now asserted REFUSED below, next to the other
         # resolved ones, so a later lane cannot re-declare them.
+        # ⛔ AND THE TWO-STEP APPLICATION (#14326 fail lane cycle 3, MEASURED GREEN **and LIVE**:
+        # `vars(dict).get("get")(m, "exec")` returns the real `exec` and the read runs). Its
+        # ONE-hop twins are all REFUSED and pinned by rows (`_f = vars(dict).get("get")`,
+        # `_g = dict.__dict__.get; _g("get")`, `vars(dict)["get"]`, `dict.get`); what escapes is
+        # a callee produced by APPLYING a resolved mapping read to a literal key and then
+        # applying that result to the mapping — a CALLEE COMPOSITION, which the closure's one-hop
+        # resolution does not follow. Statically enumerable, so it is named HERE rather than
+        # filed under the non-enumerable sentence; closing it needs a two-step application in the
+        # census, not another threaded set.
+        "`vars(dict).get(\"get\")(m, \"exec\")` — a read APPLIED, then applied again": (
+            'import builtins',
+            'vars(dict).get("get")(builtins.__dict__, "exec")',
+            f'("results = {read}")'),
     }
     for label, lines in declared_residual.items():
         assert not refused(*lines), (
