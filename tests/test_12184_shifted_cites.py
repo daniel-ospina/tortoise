@@ -439,7 +439,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4950-4954'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7193'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7226'): 1,
+    # ⛔ `search_engine.py:7226` is NOT declared here. `#14249`'s squash merge unioned its own row
+    # (count `1` — a count matching NO tree: the token is written 0x before `#14278` and 2x after, and
+    # `#14249` adds none of them) into a tree where `#14278` had already declared the SAME key with
+    # count `2`. Two keys for one address is F601, and the survivor silently becomes the verdict, so
+    # the row is declared ONCE, below, at the measurement — `2`: the header sentence (:191) and the
+    # §2.1 `:Point` reader row (:436).
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7600'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7602'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7599-7602`'): 1,
