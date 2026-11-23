@@ -139,7 +139,7 @@ documents (26 %) average more than 6,000 completion tokens per S4 call, up to 24
 mean (5,532) is 1.9× the median. (Those are DOCUMENTS, not calls — one entry per document at
 ≈1.14 calls each.)
 That tail is why `#14295` reported 7,102 output tokens per S4 call while the median is 2,942:
-it is not "S4 costs 7k", it is "S4 costs 3k on three quarters of documents and 10–24k on the
+it is not "S4 costs 7k", it is "S4 costs 3k on three quarters of documents and 7.6–24k on the
 other quarter", and a quarter of documents is where the gap between the mean and the median —
 i.e. most of the 4,973 above — comes from. `#1789`
 measured the delta contract's *aggregate* saving on 26-turn sessions; this is the same

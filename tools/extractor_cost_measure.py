@@ -2373,6 +2373,17 @@ def decompose(rows: list[dict], *, arm: str = "cold",
         # (label, tokens/doc, what it is, provenance)
         "kind vocabulary (`master_list`)": c2 * statics["s2"]["master_list"]
         + c4 * statics["s4"]["master_list"],
+        # ⛔ EVERY static region that `s2_sys`/`s4_sys` charge must own a row
+        # here, or its tokens leave the composition and land in `unattributed`
+        # while the table still sums — the silent-absorption shape this bundle
+        # spends its review cycles removing (agent-infra#3442; the exclusive,
+        # non-overlapping usage-bucket invariant OpenTelemetry GenAI / Langfuse
+        # both mandate). `pack_namespaces` is S2-only and renders EMPTY under
+        # the production default (`core_only` off), so this row is 0 today and
+        # non-zero in a `TORTOISE_CLASSIFY_LATER=1` shell — which is exactly
+        # the posture nobody was charging (review notes at `371fd0a22e96`, P3).
+        "pack namespace list (`pack_namespaces`, S2 only)":
+        c2 * statics["s2"].get("pack_namespaces", 0),
         "mapping rules (`anti_routine`)": c2 * statics["s2"]["anti_routine"]
         + c4 * statics["s4"]["anti_routine"],
         "output schema (`output_contract`)":

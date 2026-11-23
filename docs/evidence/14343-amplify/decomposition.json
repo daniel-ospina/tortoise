@@ -81,6 +81,7 @@
   "mapping rules (`anti_routine`)": 4466.6,
   "memory granularity (S1 only)": 1550.6,
   "output schema (`output_contract`)": 2187.3,
+  "pack namespace list (`pack_namespaces`, S2 only)": 0.0,
   "stage instructions (template prose)": 6430.1
  },
  "serialization": {

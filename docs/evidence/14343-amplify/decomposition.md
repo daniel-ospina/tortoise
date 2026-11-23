@@ -33,6 +33,7 @@ arm `cold` · 50 documents · median document 5,211.0 tokens · calls/doc 3.98 (
 | date anchor | 653 | 1.5% |
 | chains | 547 | 1.3% |
 | graph search results (S4) | 129 | 0.3% |
+| pack namespace list (`pack_namespaces`, S2 only) | 0 | 0.0% |
 | **composition total** | **42,509** | 100.0% |
 | *fitted constant (this arm's own intercept)* | 45,503 | — |
 | *unattributed (fit intercept − composition)* | 2,994 | — |

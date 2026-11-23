@@ -893,6 +893,12 @@ def test_the_composition_sums_and_states_its_unattributed_remainder():
         "**S2's embed list, re-sent to S4**",
         "**S1's story, re-sent to S2 and S4**",
         "kind vocabulary (`master_list`)",
+        # `pack_namespaces` is S2-only and renders EMPTY under the production
+        # default, so its row is 0 in this bundle — but it IS charged into
+        # `s2_sys`, so without a row of its own those tokens leave the
+        # composition and reappear as `unattributed` while the table still
+        # sums (the silent-absorption shape; review notes at `371fd0a22e96`).
+        "pack namespace list (`pack_namespaces`, S2 only)",
         "stage instructions (template prose)",
         "mapping rules (`anti_routine`)",
         "output schema (`output_contract`)",
@@ -903,6 +909,58 @@ def test_the_composition_sums_and_states_its_unattributed_remainder():
     # The remainder is stated, not hidden: it is the OLS intercept's leverage,
     # and a table that closed the gap by construction would be a rounder lie.
     assert abs(dec["unattributed"]) < 0.25 * dec["fitted_constant"]
+
+
+def test_the_pack_namespace_list_is_charged_to_its_own_row(monkeypatch):
+    """`pack_namespaces` is a static region with a row, not absorbed residual.
+
+    ⛔ THE PRE-FIX FAILURE, measured at `371fd0a22e96`: `decompose`'s `regions`
+    map had a term for every static region EXCEPT `pack_namespaces`, while
+    `s2_sys = sum(statics["s2"].values())` — the number the story solve
+    subtracts — includes it. Under the production default the value is 0 (the
+    core-only template is off) so the committed bundle reconciled exactly and
+    NOTHING showed; in a `TORTOISE_CLASSIFY_LATER=1` shell the S2 prompt carries
+    a real pack-namespace list (measured: 18 tokens) and those tokens left the
+    composition, landing in `unattributed` while the table still summed. Both
+    the label-set pin and the loose 25 % residual bound stayed green, which is
+    why this needs its own case in the posture that arms it.
+
+    ⛔ NON-VACUITY: deleting the row reds the label-set pin; reverting it to a
+    CONDITIONAL row (emitted only when non-zero) reds the default-posture leg
+    below, which is the "silent when the condition misfires" shape the row
+    exists to prevent.
+    """
+    # Ambient render switches, pinned as the reproduce pin does: this test is
+    # about ONE posture, and a shell carrying the others would red it with a
+    # message that reads as a tool defect.
+    for knob in ("TORTOISE_S4_DELTA", "TORTOISE_EXTRACTOR_PROMPT",
+                 "TORTOISE_REFERENTIALITY", "TORTOISE_PACKS_DIR"):
+        monkeypatch.delenv(knob, raising=False)
+
+    # Default posture: the row EXISTS and is 0 — an absent row here would mean
+    # the fix was made conditional on the value instead of structural.
+    monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+    default = m.decompose(_evidence_rows())
+    default_row = [k for k in default["regions"] if "pack_namespaces" in k]
+    assert len(default_row) == 1, (
+        f"exactly one pack-namespace row is expected; got {default_row}")
+    assert default["regions"][default_row[0]] == 0, default["regions"]
+
+    # Classify-later posture: the list is real, and the row carries it.
+    monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "1")
+    statics = m._render_regions()
+    namespaces = statics["s2"].get("pack_namespaces", 0)
+    assert namespaces > 0, (
+        "precondition: the core-only S2 render carries a pack-namespace list, "
+        f"got {namespaces} tokens — statics={statics['s2']}")
+    dec = m.decompose(_evidence_rows())
+    row = [k for k in dec["regions"] if "pack_namespaces" in k]
+    assert len(row) == 1, f"the row is missing or duplicated: {row}"
+    assert dec["regions"][row[0]] == pytest.approx(
+        dec["calls_per_doc"]["s2"] * namespaces, abs=0.05), (
+        "the row must be the measured static times the measured S2 call "
+        f"count — got {dec['regions'][row[0]]} for {namespaces} tokens/call "
+        f"× {dec['calls_per_doc']['s2']} calls")
 
 
 def test_the_reemitted_embed_list_is_the_largest_single_region():
