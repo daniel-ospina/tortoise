@@ -1096,9 +1096,13 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     # EMPTY — so `_iter_proc_inventory` returns its documented KEEP row with
     # `socket_dir: None` and the assertion below fails as `None == …`, i.e. on a
     # fixture that never ran. Reproduced locally by copying `/bin/true` as
-    # `redis-server`: row `socket_dir: None`, identical message. `sh`/`dash`/
-    # `bash` are real ELFs that read stdin with `argc == 1` and do not dispatch
-    # on their own name, so they carry the shape this test needs on any host.
+    # `redis-server`: same row (`socket_dir: None`), same ASSERTION text — though
+    # `/bin/true` prints nothing, so the child's message is a property of the
+    # multi-call binary and not of every exiting one. `sh`/`dash`/`bash` are real
+    # ELFs that read stdin with `argc == 1` and do not dispatch on their own name,
+    # so they carry the shape this test needs on the hosts this suite runs on —
+    # and if one ever does dispatch by name, the liveness guard below names the
+    # fixture instead of blaming the reaper.
     source = next((p for n in ("sh", "dash", "bash") if (p := shutil.which(n))), None)
     assert source, "no argv[0]-agnostic, stdin-reading binary to stand in for redis-server"
     binary = tmp_path / "redis-server"
