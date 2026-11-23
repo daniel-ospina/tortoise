@@ -18997,9 +18997,15 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     # ⛔ AND FOLDING THIS INTO THE HONOURS CASE ABOVE — the tidier shape, and the one that
     # file's own convention prefers (`test_the_merge_head_honours_line_is_what_that_head_
     # carries` already reads this same blob and already skips with the measured remedy) — is
-    # NOT available: that case sits above `:16615`, so moving this arm into it would insert
+    # NOT available: that case sits above the derivation line, so moving this arm into it would insert
     # lines above the derivation line and re-stale the record's two cites. Named here rather
     # than left for the next lane to rediscover (14183 delta review, P3).
+    # ⛔ NO LINE NUMBER IS TYPED FOR IT (#14269 review, P3 — MEASURED). This comment used to say
+    # `:16615`, which was the derivation line's number on `origin/main`; this branch's own 49-line
+    # insertion above it moved the derivation to `:16664`, so the pointer named an unrelated comment
+    # and a reader following it landed on the wrong line — the file's own "re-derive, never type"
+    # class. The claim is positional ("above"), so it needs no figure; the derivation line is found
+    # by `grep -n 'n for n, line in enumerate(ext, 1) if'` rather than by a number that moves.
     _d5 = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
     _registry = re.search(
         r"`sdk\.py:(?P<merge>\d+)` is `_registry_cache = PackRegistry\(packs_dir\)` "
