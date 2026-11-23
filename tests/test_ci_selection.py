@@ -10648,6 +10648,18 @@ ROWED_BY_THIS_FOLD = (
     # reading: the `durations` refresher samples push-to-main runs, so a file a PR ADDS
     # cannot have a junit figure yet (#3400/#4348).
     "test_14185_projection_worker.py",
+    # #14357 (PR #14362) — the extractor fallback's reasoning suppression (the wire body
+    # each pool member actually posts) plus the yield guard for a zero-content
+    # `finish_reason=length` collapse. A file this fold ADDED and registered on `core`
+    # (which is what puts it in `fast_pool()`) and on `eval` (its fail-closed grade pin's
+    # subject, `tools/longmem_eval/report.py`, is an EXACT `eval` SOURCE_PATTERN match).
+    # It shipped NO `durations:` row and `--integrity` stayed green over the absence (the
+    # coverage check is a 0.90 RATIO with headroom) — measured at the #14362 review's
+    # head, the same defect #13110's round-5 and #13422's round-9/10 reviews record
+    # surviving a round. Only this tuple can make the ENTRY-RULE pin see the file at all;
+    # the row it now carries is the flat `DEFAULT_FAST_WEIGHT`, not a local reading, for
+    # the #3400/#4348 reason.
+    "test_14357_fallback_thinking.py",
 )
 
 
@@ -10711,6 +10723,38 @@ def test_the_eviction_suite_is_in_the_entry_rule_set_13123():
     real = load_manifest()["durations"]
     assert name in real, (
         f"#13123 put {name} in a fast surface but shipped no `durations:` row, so it "
+        "packs at the flat default")
+    holed = {k: v for k, v in real.items() if k != name}
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
+        "dropping THIS row from the live map must name exactly this file as rowless; "
+        "if another member of the guarded set is missing a row this pin cannot "
+        "distinguish that state from the one it guards")
+
+
+def test_the_14357_repair_suite_is_in_the_entry_rule_set_14362():
+    """#14362 non-vacuity: the ENTRY-RULE pin can only see what this set NAMES.
+
+    The #14362 review's Finding 1 measured this state on its own head: the file is
+    registered on `core` + `eval` (so it is in `fast_pool()`) and carried NO
+    `durations:` row, while `--integrity` stayed green because its coverage check is a
+    0.90 RATIO with headroom. A row alone is not enough either — it can be dropped
+    again and nothing reds while the file is absent from this tuple — so membership is
+    pinned in both directions from the LIVE map, the same shape as
+    `test_the_eviction_suite_is_in_the_entry_rule_set_13123` above.
+
+    Red on the pre-fix tree: the file is registered in `config/ci-surfaces.yml` and
+    carries a `durations:` row, but is not in `ROWED_BY_THIS_FOLD`, so the first
+    assertion fails; with the membership added and the row removed, the second fails.
+    """
+    from tools.ci_selection import load_manifest
+    name = "test_14357_fallback_thinking.py"
+    assert name in ROWED_BY_THIS_FOLD, (
+        f"#14362 registers {name} in a fast surface, but it is not in "
+        "ROWED_BY_THIS_FOLD — the ENTRY-RULE pin cannot see it, so dropping its "
+        "`durations:` row would be silent")
+    real = load_manifest()["durations"]
+    assert name in real, (
+        f"#14357 adds {name} to a fast surface but ships no `durations:` row, so it "
         "packs at the flat default")
     holed = {k: v for k, v in real.items() if k != name}
     assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
