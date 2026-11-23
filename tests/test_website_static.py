@@ -3726,16 +3726,72 @@ def _media_blocks(css: str) -> list[tuple[int, int, str]]:
     return out
 
 
+#: The desktop floor `_css_desktop_rules` compares a `max-` threshold against.
+#: `max-width` / `max-height` are INCLUSIVE (`width <= N`), so a threshold at or
+#: above these DOES apply at a desktop viewport — MDN, "Using media queries":
+#: `@media (max-width: 1440px)` matches a 1440-wide viewport and is equivalent to
+#: `@media (width <= 1440px)`. The pricing measurements are taken at 1440x900 and
+#: the page stacks the cards below ~907px, so 1100 is above the page's own narrow
+#: hatch (nothing it treats as "narrow" is pulled in) and low enough that every
+#: block able to affect a 1440x900 render is seen. Both are deliberately
+#: conservative: a threshold between the floor and 1440 is INCLUDED even though
+#: it cannot affect the 1440 measurement.
+DESKTOP_MIN_WIDTH = 1100
+DESKTOP_MIN_HEIGHT = 900
+
+#: `max-<axis>: <value>` inside a media CONDITION — the value may carry any unit.
+MAX_SIDE_MEDIA_RE = re.compile(r"max-(width|height)\s*:\s*([^)\s]+)")
+
+
+def _media_applies_at_desktop(condition: str) -> bool:
+    """Could a media CONDITION apply at a desktop viewport — by its THRESHOLD?
+
+    The predicate is the comparison a browser makes, not the spelling of the
+    condition. Measured (#14406 review round 6, finding 4): the first draft
+    skipped on the `max-` SUBSTRING, so
+    `@media (max-width: 1440px) { .pricing-card .btn { margin-top: 0 } }` —
+    which matches the very viewport every measurement in this PR is taken at —
+    was invisible to every row of `TestProductTeamsPricingCardCtaBaseline`: all
+    four stayed GREEN while the rendered CTAs split to three baselines 70.2px
+    apart. `max-width: 1200px` is the same shape one breakpoint down, and such
+    a block is a plausible "align the cards on laptops" edit.
+
+    `max-width: 760px` / `max-height: 820px` (the page's own viewport hatches)
+    are still EXCLUDED — they cannot apply at 1440x900, and the cards stack
+    there by design.
+
+    Fail-closed on anything this reader cannot compare: a `max-` value in a unit
+    that is not plain `px` (`50em`, `calc(...)`, `var(...)`) is treated as
+    REACHING a desktop viewport, because guessing "narrow" is the direction that
+    hides an override.
+    """
+    constrained = False
+    for axis, raw in MAX_SIDE_MEDIA_RE.findall(condition):
+        floor = DESKTOP_MIN_WIDTH if axis == "width" else DESKTOP_MIN_HEIGHT
+        if not re.fullmatch(r"\d+(?:\.\d+)?px", raw):
+            return True
+        constrained = True
+        if float(raw[:-2]) >= floor:
+            return True
+    return not constrained
+
+
 def _css_desktop_rules(css: str) -> list[tuple[str, str, str | None]]:
     """Every style rule that can apply at a DESKTOP viewport, `(prelude, body, media)`.
 
     `media` is the `@media` condition the rule sits in, or `None` at top level.
 
-    A rule inside a `max-width`/`max-height` block is EXCLUDED — a viewport
-    hatch, and the pricing cards legitimately stack one per row below ~907px,
-    so a narrow override is the page working as designed. Every OTHER media
-    block is INCLUDED, because `min-width` / `min-height` / preference blocks
-    apply AT desktop size. Measured (#14406 review round 4, finding G3):
+    A rule inside a `max-width`/`max-height` block whose threshold is BELOW the
+    desktop floor (`DESKTOP_MIN_WIDTH` / `DESKTOP_MIN_HEIGHT`) is EXCLUDED — a
+    viewport hatch, and the pricing cards legitimately stack one per row below
+    ~907px, so a narrow override is the page working as designed. Every OTHER
+    media block is INCLUDED, because `min-width` / `min-height` / preference
+    blocks apply AT desktop size — and so does a `max-width` at or above the
+    floor, which is why the test is the THRESHOLD and not the `max-` prefix
+    (#14406 review round 6, finding 4: `@media (max-width: 1440px) { … }`
+    applies at the measured 1440x900 viewport and the prefix test skipped it).
+
+    Measured (#14406 review round 4, finding G3):
     `@media (min-width: 1024px) { .pricing-card .btn { margin-top: 0 } }` left
     the entire CTA class GREEN while the rendered buttons split to three
     baselines, 70.2px apart — the defect signature of #13645 item 6. A reader
@@ -3751,7 +3807,7 @@ def _css_desktop_rules(css: str) -> list[tuple[str, str, str | None]]:
             continue
         condition = next((c for start, end, c in media
                           if start <= m.start() < end), None)
-        if condition is not None and re.search(r"max-(?:width|height)", condition):
+        if condition is not None and not _media_applies_at_desktop(condition):
             continue
         out.append((prelude, _brace_block(blanked, m.end() - 1), condition))
     return out
@@ -3786,8 +3842,10 @@ def _css_reaching_decls(css: str, prop: str, compound: str,
       each comma part, so `.pricing-grid .btn` and `.pricing-card > .btn` both
       count as selecting a `.btn` (`compound` is a SUBSTRING of that compound,
       so `.btn-secondary` counting too is deliberate fail-closed slack).
-    * `min-width` / `min-height` / preference media blocks are reached;
-      `max-width` / `max-height` ones are not (see `_css_desktop_rules`).
+    * `min-width` / `min-height` / preference media blocks are reached, and so
+      is a `max-width` / `max-height` whose THRESHOLD is at or above the desktop
+      floor; only a `max-` block that cannot apply at desktop size is skipped
+      (see `_css_desktop_rules` and `_media_applies_at_desktop`).
     * It is NOT a cascade resolver: it does not prove which declaration wins.
       Callers therefore assert that every candidate AGREES with the pinned
       value — a disagreement is either a live override or dead weight the next
@@ -3881,13 +3939,23 @@ def _css_specificity(selector: str) -> tuple[int, int, int] | None:
     attrs = re.findall(r"\[[^\]]*\]", selector)
     bare = re.sub(r"\[[^\]]*\]", " ", selector)
     pseudo = re.findall(r"::?[\w-]+", bare)
-    elements = len([p for p in pseudo if p.startswith("::")])
+    # The COLUMNS are the standard's, not "pseudo vs element" (MDN, Specificity:
+    # the CLASS column is classes + attribute selectors + PSEUDO-CLASSES, the
+    # TYPE column is type selectors + PSEUDO-ELEMENTS). The first draft counted
+    # every pseudo and then subtracted BOTH the pseudo-elements and every type
+    # selector from the class count, so each type selector cancelled a class:
+    # `div.pricing-card` read (0,0,1) instead of (0,1,1), `p::before` read
+    # (0,-1,2), and a type-qualified override of the popular card's compensation
+    # ranked BELOW the pinned rule — `section .pricing-card.popular { … }`
+    # (0,2,1) stayed GREEN while a browser applied it (#14406 review round 6,
+    # finding 1, measured with the helper itself).
+    pseudo_classes = len([p for p in pseudo if not p.startswith("::")])
+    pseudo_elements = len(pseudo) - pseudo_classes
     rest = re.sub(r"::?[\w-]+|\.[\w-]+|#[\w-]+", " ", bare)
-    elements += len(re.findall(r"(?<![\w-])[a-zA-Z][\w-]*", rest))
+    types = len(re.findall(r"(?<![\w-])[a-zA-Z][\w-]*", rest))
     return (len(re.findall(r"#[\w-]+", bare)),
-            len(re.findall(r"\.[\w-]+", bare)) + len(attrs)
-            + len(pseudo) - elements,
-            elements)
+            len(re.findall(r"\.[\w-]+", bare)) + len(attrs) + pseudo_classes,
+            types + pseudo_elements)
 
 
 def _css_block_end_cascade(css: str, compound: str,
@@ -11126,7 +11194,7 @@ class TestProductTeamsCopy:
                 "owner's instruction — restoring it reverts an owner edit, not "
                 "a builder's paraphrase.")
         # ⛔ THE OTHER 2026-11-23 EDIT HAD NO SUCH PIN, so reverting BOTH the page
-        # (`…html:829`) and `COMPUTE` to "over this context" kept every row green
+        # (`…html:840`) and `COMPUTE` to "over this context" kept every row green
         # (measured on `fb5514dcdc`: 16 passed) — while the same pair-revert for
         # step 03 reds 2. `COMPUTE` catches the page-only revert; this catches the
         # PAIR, for the same reason the PDF's paragraph is pinned absent above.
@@ -11247,6 +11315,19 @@ class TestProductTeamsPricingCardCtaBaseline:
     shorthands) ranked by `!important`, specificity and source order — and
     asserts what a browser applies (#14406 review round 5, finding 1, measured
     with two cascade-valid mutants that both left every row GREEN).
+
+    ⛔ THAT ROW SITS ON `_css_specificity`, SO ITS COUNTER IS PART OF THE GUARD.
+    The first version subtracted BOTH pseudo-elements and every TYPE selector
+    from the class count, so a type selector cancelled a class and a
+    TYPED-QUALIFIED override ranked BELOW the pinned rule: appending
+    `section .pricing-card.popular { padding-bottom: 1.75rem }` (0,2,1) or
+    `div.pricing-card.popular { padding-bottom: 1.75rem }` (0,2,1) — both of
+    which a browser applies at any source order, both of which put the popular
+    CTA back 1px high — left EVERY row in this class GREEN (measured, #14406
+    review round 6 finding 1). The counter now follows the standard's columns
+    (`TestCssDesktopReachAndSpecificity` pins it), and the two mutants above are
+    pinned there: shrinking the counter back to "pseudo minus all elements" reds
+    both that class and the cascade row.
     """
 
     def test_each_card_is_a_flex_column_and_its_cta_takes_the_slack(self):
@@ -11396,6 +11477,13 @@ class TestProductTeamsPricingCardCtaBaseline:
         # `_css_block_end_cascade` reads the whole `padding` FAMILY (both
         # longhands, both shorthands, block-end side) and returns it in cascade
         # order, so the row asserts what a browser actually applies.
+        # Measured mutants that must be caught here (each left every row GREEN
+        # before the round-6 specificity fix, #14406):
+        #   section .pricing-card.popular { padding-bottom: 1.75rem }   (0,2,1)
+        #   div.pricing-card.popular     { padding-bottom: 1.75rem }   (0,2,1)
+        #   .pricing-grid .pricing-card  { padding-bottom: 1.75rem }   (0,2,0, later)
+        #   #pricing-section .pricing-card.popular { padding: 1.75rem } (1,2,0)
+        #   .pricing-card.popular { padding: 1.75rem }   (shorthand in the same block)
         cascade = _css_block_end_cascade(css, ".pricing-card")
         assert cascade, "no rule sets the pricing card's block-END inset"
         prelude, prop, winner = cascade[-1]
@@ -11450,3 +11538,117 @@ class TestProductTeamsPricingCardCtaBaseline:
             "JS-rendered cards (what a real visitor sees) would take the slack "
             "somewhere other than the button while the static cards stay "
             "aligned (#13645 item 6)")
+
+
+class TestCssDesktopReachAndSpecificity:
+    """The two readers `TestProductTeamsPricingCardCtaBaseline` stands on.
+
+    Both are guards-of-the-guard: a cascade row is only as good as the
+    specificity counter and the media-reach predicate behind it, and each of
+    those had a measured FALSE PASS that no page-level row could see, because
+    the mutant lives in the guard's own arithmetic (#14406 review round 6,
+    findings 1 and 4). The rows below mutate the PAGE TEXT the way an editor
+    would — appending a real rule — and assert the reader SEES it.
+    """
+
+    #: The standard's columns (MDN, Specificity: the CLASS column holds classes,
+    #: attribute selectors and PSEUDO-CLASSES; the TYPE column holds type
+    #: selectors and PSEUDO-ELEMENTS). Before the round-6 fix the counter
+    #: subtracted `pseudo + type selectors` from the class count, so every type
+    #: selector CANCELLED a class — `p::before` even went NEGATIVE.
+    SPECIFICITY_CASES = (
+        ("div.pricing-card", (0, 1, 1)),
+        ("div.pricing-card.popular", (0, 2, 1)),
+        ("section .pricing-card.popular", (0, 2, 1)),
+        (".pricing-card.popular", (0, 2, 0)),
+        (".pricing-grid .pricing-card", (0, 2, 0)),
+        ("p::before", (0, 0, 2)),
+        (".pricing-card:hover", (0, 2, 0)),
+        ("#pricing-section .pricing-card.popular:hover", (1, 3, 0)),
+        ("[data-tier='pro'].pricing-card", (0, 2, 0)),
+        ("*", (0, 0, 0)),
+    )
+
+    def test_specificity_puts_type_selectors_in_the_type_column(self):
+        for selector, expected in self.SPECIFICITY_CASES:
+            assert _css_specificity(selector) == expected, (
+                f"`{selector}` is {expected} by the standard's columns; "
+                f"`_css_specificity` says {_css_specificity(selector)}. A type "
+                "selector subtracted from the CLASS count ranks a "
+                "type-qualified override BELOW the rule it beats in a browser, "
+                "which is a false PASS in every row that resolves a cascade "
+                "(#14406 review round 6, finding 1)")
+        for unmodellable in (":is(.a, .b)", ":where(.a)", ":not(.a)", ":has(a)"):
+            assert _css_specificity(unmodellable) is None, (
+                f"`{unmodellable}` changes specificity in ways this counter "
+                "does not model — it must return None so the one caller ranks "
+                "it maximally specific (fail closed), never guess")
+
+    @staticmethod
+    def _page_with(rule: str) -> str:
+        """The page with `rule` appended inside its FIRST `<style>` block.
+
+        Inserted rather than concatenated: appended to the whole document the
+        rule's prelude would carry the closing markup, and
+        `_css_block_end_cascade` skips a prelude containing `<` (it has to, or
+        the document head's hex colours count as ids and the `*` reset wins the
+        cascade). That guard is correct; the mutant has to look like a real edit.
+        """
+        page = _product_teams_html()
+        assert "</style>" in page, "the page has no <style> block to extend"
+        return page.replace("</style>", f"\n{rule}\n</style>", 1)
+
+    def test_a_type_qualified_override_of_the_popular_cards_inset_wins_the_cascade(self):
+        """`section .pricing-card.popular` is (0,2,1) — a browser applies it.
+
+        Both mutants below restore the owner-reported 1px defect (the popular
+        CTA back to 744.78 against 745.78) and BOTH left every row of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN before the round-6
+        specificity fix — measured with the helper itself, which ranked the
+        pinned `calc(1.75rem - 1px)` as the winner in both.
+        """
+        baseline = _css_block_end_cascade(_product_teams_html(), ".pricing-card")
+        assert baseline and baseline[-1][2] == "calc(1.75rem - 1px)", (
+            f"the unmutated page's winning block-end inset reads {baseline[-1:]!r}, "
+            "so the rows below cannot distinguish a caught mutant from a page "
+            "that is already wrong")
+        for mutant in (
+                "section .pricing-card.popular { padding-bottom: 1.75rem }",
+                "div.pricing-card.popular { padding-bottom: 1.75rem }",
+        ):
+            cascade = _css_block_end_cascade(self._page_with(mutant), ".pricing-card")
+            assert cascade[-1][2] == "1.75rem", (
+                f"appending `{mutant}` leaves the cascade reader's winner at "
+                f"{cascade[-1][2]!r} ({cascade[-1][0]!r}), but in a browser that "
+                "rule (0,2,1) out-ranks `.pricing-card.popular`'s (0,2,0) calc "
+                "and the popular CTA drops 1px below the other three "
+                "(#13645 item 6, #14406 review round 6 finding 1)")
+
+    def test_a_max_width_block_at_or_above_the_desktop_floor_is_reached(self):
+        """`@media (max-width: 1440px)` applies at 1440 — so the guard must see it.
+
+        `max-width` is INCLUSIVE (`width <= N`), which is why the `max-` PREFIX
+        is the wrong predicate: the first draft skipped every `max-` block, so
+        `@media (max-width: 1440px) { .pricing-card .btn { margin-top: 0 } }`
+        applied at the very viewport every measurement in this PR uses and was
+        invisible — three baselines, 70.2px apart, every row GREEN (#14406
+        review round 6, finding 4).
+        """
+        seen = "@media (max-width: 1440px) { .pricing-card .btn { margin-top: 0 } }"
+        reached = [(p, v) for p, v in
+                   _css_reaching_decls(self._page_with(seen), "margin-top", ".btn")]
+        assert any(v.strip() == "0" for _p, v in reached), (
+            "the reach reader did not see `.pricing-card .btn { margin-top: 0 }` "
+            "inside `@media (max-width: 1440px)`, which applies at 1440x900 "
+            f"(width <= 1440). Reached: {reached!r}")
+
+        # ...and the page's OWN viewport hatch stays excluded: at 1440x900 a
+        # `max-width: 760px` block cannot apply, and the cards stack there by
+        # design, so pulling it in would be a false RED on a correct page.
+        hatch = "@media (max-width: 760px) { .pricing-card .btn { margin-top: 0 } }"
+        reached = [(p, v) for p, v in
+                   _css_reaching_decls(self._page_with(hatch), "margin-top", ".btn")]
+        assert not any(v.strip() == "0" for _p, v in reached), (
+            "the page's own narrow-viewport hatch (`max-width: 760px`) is now "
+            "read as a desktop rule — the floor comparison has drifted below "
+            f"the page's ~907px stack point. Reached: {reached!r}")
