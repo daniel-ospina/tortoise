@@ -1884,6 +1884,42 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
         loops=True))
 
 
+def _composition_callee_is(func: ast.AST, wanted: str,
+                           names: frozenset[str], launderers: frozenset[str]) -> bool:
+    """Is `func` the builtin `wanted` (`vars`/`getattr`), however the source spells it?
+
+    ⛔ THE MODULE-ATTRIBUTE SPELLING IS THE SAME LEVER (#14395 review, EACH MEASURED GREEN
+    through the pin's own `_read_reach` **and LIVE** at `7334b6ace4`, while its BOUND twin was
+    already REFUSED):
+
+        builtins.vars(builtins)["exec"](<read>)                      GREEN
+        builtins.getattr(builtins, "__dict__")["exec"](<read>)      GREEN
+        import builtins as _b; _b.vars(_b)["exec"](<read>)           GREEN
+        __builtins__.vars(__builtins__)["exec"](<read>)              GREEN
+        _v = builtins.vars; _v(builtins)["exec"](<read>)             REFUSED
+        _v = builtins.__dict__["vars"]; _v(builtins)["exec"](<read>)  REFUSED
+
+    (executed: `builtins.vars(builtins)["exec"] is exec` → True.) Both arms below asked
+    `node.func.id`, so an Attribute callee was never put to the question — and it is the
+    module's OWN spelling of the same builtin, the exact spelling `_builtin_name_aliases`
+    already resolves for the BOUND case (see `_builtins_module_names`' docstring, which
+    records `_v = _b.vars; _f = _v(_b)` as a fail-open that was CLOSED). The enumera-
+    tion was therefore right and its use was incomplete: the in-file asymmetry this file
+    deletes on sight.
+
+    The Attribute's module is gated on `names` — the one enumeration of what statically
+    denotes the `builtins` module — so a user object's `sdk.vars(...)` is NOT accepted, and
+    widening this can only ADD reds (it recognises one more way to spell a builtin that
+    composes a mapping, never a new way to read).
+    """
+    if isinstance(func, ast.Name):
+        return func.id == wanted or func.id in launderers
+    return bool(isinstance(func, ast.Attribute)
+                and func.attr == wanted
+                and isinstance(func.value, ast.Name)
+                and func.value.id in names)
+
+
 def _is_builtins_dict_of(node: ast.AST, names: frozenset[str],
                          launderers: frozenset[str],
                          consts: dict[str, frozenset[str]]) -> bool:
@@ -1936,15 +1972,13 @@ def _is_builtins_dict_of(node: ast.AST, names: frozenset[str],
     # it read `node.args`, where a two-element splice is ONE argument, so the module name in
     # position ZERO was invisible.
     _positions = _spliced_positions(node.args)
-    if (isinstance(node.func, ast.Name)
-            and (node.func.id == "vars" or node.func.id in launderers)
-            and len(_positions) == 1 and isinstance(_positions[0], ast.Name)
-            and _positions[0].id in names):
+    if (len(_positions) == 1 and isinstance(_positions[0], ast.Name)
+            and _positions[0].id in names
+            and _composition_callee_is(node.func, "vars", names, launderers)):
         return True
-    return bool(isinstance(node.func, ast.Name)
-                and (node.func.id == "getattr" or node.func.id in launderers)
-                and len(_positions) >= 2 and isinstance(_positions[0], ast.Name)
+    return bool(len(_positions) >= 2 and isinstance(_positions[0], ast.Name)
                 and _positions[0].id in names
+                and _composition_callee_is(node.func, "getattr", names, launderers)
                 and "__dict__" in _string_keys_of(_positions[1], consts))
 
 
@@ -8875,6 +8909,27 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "literal STRING sliced IN STEPS": (
             '    getattr(sdk, "_tortoise_fts_query_x"[::-1][::-1][:-2])'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE MODULE-ATTRIBUTE SPELLING OF THE COMPOSITION BUILTINS (#14395 review, EACH
+        # MEASURED GREEN through this file's own `_read_reach` AND LIVE at `7334b6ace4` while
+        # its BOUND twin was already REFUSED — `builtins.vars(builtins)["exec"] is exec` → True).
+        # `_is_builtins_dict_of`'s two arms asked `node.func.id`, so an Attribute callee was
+        # never put to the question; `_composition_callee_is` now asks it and gates the module
+        # on the `builtins`-module name set. Non-vacuity MEASURED: reverting that helper's
+        # `Attribute` clause to `False` leaves these four rows GREEN and reds exactly these
+        # four, each named (40 passed before the fix, 44 after).
+        "module-attribute `builtins.vars` composition": (
+            '    import builtins\n'
+            '    builtins.vars(builtins)["exec"]("results = sdk._tortoise_fts_query(q)")\n'),
+        "module-attribute `builtins.getattr` composition": (
+            '    import builtins\n'
+            '    builtins.getattr(builtins, "__dict__")["exec"]('
+            '"results = sdk._tortoise_fts_query(q)")\n'),
+        "module-attribute composition through the IMPORT ALIAS": (
+            '    import builtins as _b\n'
+            '    _b.vars(_b)["exec"]("results = sdk._tortoise_fts_query(q)")\n'),
+        "module-attribute composition through `__builtins__`": (
+            '    __builtins__.vars(__builtins__)["exec"]('
+            '"results = sdk._tortoise_fts_query(q)")\n'),
     }
     for label, body in rows.items():
         assert _pin_refuses(_pin_source(body)), (
@@ -12480,6 +12535,18 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`_g = <copy namespace>.get; _f = _g(\"copy\")` — a copy callee COMPOSED": (
             'import builtins, copy', '_g = copy.__dict__.get', '_f = _g("copy")',
             '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        # ⛔ THE `.__getitem__` SPELLING OF THE SAME DECLARED CLASS (#14395 review P3, MEASURED
+        # GREEN and LIVE at `7334b6ace4`: `dict.__dict__.__getitem__("get") is dict.get` → True,
+        # and applying it to the mapping yields `exec`). It is not a new hole — the class is
+        # already declared — but the table's stated guarantee is that closing the class must
+        # EDIT this table, and a spelling no row carries lets a future partial closure red the
+        # `.__getitem__` shape (or the `.get` ones) with nothing here to red it. `__getitem__`
+        # is already a member of `_BUILTINS_MAPPING_READS`, so this is the same two-step
+        # composition one receiver-member over, aliased twin included.
+        "`dict.__dict__.__getitem__(\"get\")(m, \"exec\")` — the dunder twin": (
+            'import builtins',
+            'dict.__dict__.__getitem__("get")(builtins.__dict__, "exec")'
+            f'("results = {read}")'),
     }
     for label, lines in declared_residual.items():
         assert not refused(*lines), (
