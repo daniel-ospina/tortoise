@@ -2434,11 +2434,12 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        it was written for is left with no note at all. Measured on the REAL map
        (this head, every row re-based once, which is what a weekly refresh does):
        **36 rows lost their block, 349 lines were folded into row lines**. The text
-       survives but the ATTRIBUTION does not, and two MERGE-GATING guards read prose
-       off whichever row line it sits on (`_durations_rows_claiming_the_flat_default`,
-       `_durations_rows_stating_a_stale_watchdog_floor`) — a swallowed block carrying
-       one of those claim shapes is judged against the wrong row's value, i.e. a
-       false red or a false green in a required leg.
+       survives but the ATTRIBUTION does not, and the guard that reads prose
+       off whichever row line it sits on (`_durations_rows_claiming_the_flat_default`)
+       — a swallowed block carrying that claim shape is judged against the wrong
+       row's value, i.e. a false red or a false green in a required leg. (The
+       watchdog-floor sibling of that guard went with the durations-map
+       arithmetic cut; this note names only the arm that still runs.)
 
        So: a block that opens a note is NOT this row's note. It is not joined, not
        appended into, and not dropped — the row line is rewritten and the block is

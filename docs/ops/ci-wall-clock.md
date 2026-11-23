@@ -866,8 +866,9 @@ NOTE that §2's command keys on `.steps[].started_at|completed_at`, so it yields
 not the within-run start stagger; the stagger (4.0–23.9 m, the 2–4 wave claim invariant 1 rests
 on) needs the JOB-level `started_at` of one run's legs (`…/runs/<id>/jobs`), which §2 never reads.
 
-If the pool grows, invariant 2 permits a larger cap — and that move is not free: the
-`measured_pool` literal in the test is the one input that must be edited with the caps (below). If
+If the pool grows, invariant 2 permits a larger cap — and that move is not free: re-read the pool
+and re-derive the caps together (no measured-pool literal is left to edit: the wave and sum
+arithmetic was cut as durations-map arithmetic, so nothing restates the pool in the suite). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
 shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `4 × 10.5 m ≈ 42.0 m`
 (`ceil(11/3)` = 4 waves at `fast_shards: 11` — read it off the band pin below, not the 3-wave
@@ -881,13 +882,12 @@ the 2026-11-23 sweep, which re-packed the slow pool — they read `8.18 m`/`16.3
 2026-11-16 head), carve-out `1 × 9.54 m ≈ 9.54 m`) and compare each against that same
 matrix's uncapped band before trusting the +17.9 m figure above.
 
-⛔ **Re-measuring the pool is not only a reason to move a cap — it is an edit to the pin.**
-`tests/test_ci_selection.py` holds `measured_pool = 12` as a **literal** and asserts
-`sum(caps) <= measured_pool - reserved_for_others`. The test pins the INVARIANTS; the pool they
-are measured against is the one number in it that is measured rather than derived, so it has to
-move **in the same change as the caps**. Landing a permitted re-tune without it (4/4/4 against a
-16-runner pool, say) satisfies both invariants and still reds the required check on the stale
-constant.
+⛔ **Re-measuring the pool is a cap decision, not an edit to a pin.** The suite pins the caps'
+PRESENCE (the arm named in the bullet above); it does NOT hold
+the measured pool, the reserved-for-others headroom or `sum <= 9` any more — those went with the
+durations-map arithmetic cut — so a permitted re-tune (4/4/4 against a 16-runner pool, say)
+passes the suite and is refused by nothing. Re-derive the three numbers from the fresh pool in the
+same change and state the arithmetic here; there is no stale constant that will go red for you.
 
 ⛔ **The re-derivation cannot use per-job queue wait to see the cost this creates.** This section's
 own measurement table records a per-job queue wait (`created_at → started_at`, p50 5.4 m / p95

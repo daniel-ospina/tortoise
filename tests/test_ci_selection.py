@@ -11070,9 +11070,6 @@ def test_every_matrix_bearing_job_declares_a_fan_out_cap():
         "and nothing else in the suite names the absence")
 
 
-_ZERO_CASE_CLAIM_RE = re.compile(r"\b0\s+(?:tests|cases)\b")
-
-
 #: A row asserting that its OWN committed weight stands at N — "The 3.7 weight sits
 #: inside that range and is deliberately unchanged". The number is a claim about the
 #: row it sits in, so it can be falsified by that row's value.
