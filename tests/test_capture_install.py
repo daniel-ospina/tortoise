@@ -4915,7 +4915,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: behaviour is untouched) because `contract_version_for('pi')` grades the pair
 #: as ONE contract.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    30, "5334a2cd9f0e3919dbd1165ab995312b74220e07dc84d534900f435e44e92858")
+    30, "06afdd39f5f1e13c45799bc4d9ba4a22607cf001f1b6aa8aa6a8be2b5637cddf")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5021,8 +5021,17 @@ _GENERATION_DIGESTS = {
     # Neither 28 nor 29 has SHIPPED, and a new byte set always gets a NEW entry
     # rather than a rewrite.
     29: "669165f0d337c419174a35db24b4a2ba984a31965a4694057eeef7de54860b4d",
-    # Generation 30 (#14347 review, cycle 5, findings 1+2): the COUNT term of the
-    # admission fast path named two different populations in two places. The
+    # Generation 30 (#14347 review, cycle 5 — two independent lanes, merged).
+    # (a) Cycle 4 made the fast exit DECLINE the whole directory as soon as one
+    # meta-less turn log existed. That closed the under-count, but nothing reaps
+    # a meta-less log — `prune_spool` reaps metas and `.orphan` only — so one
+    # abandoned session left every later turn paying the full parse: measured
+    # 137.7 ms -> 690.5 ms per `_admission_saturated` on a 5 000-entry spool. The
+    # count is now EXACT instead: `names` (meta names, which covers
+    # parsed+unreadable+corrupt exactly) plus the BYTE-BEARING meta-less logs,
+    # minus the zero-byte ones the real count also skips — so the fast path stays
+    # ON and cannot under-count.
+    # (b) The COUNT term named two different populations in two places. The
     # writer's `addsEntry` operand was `prior === undefined`, written when
     # `parsedCount` was `metas.length` alone; `parsedCount` later became
     # `metas.length + unreadableCount`, so an unreadable entry was counted twice
@@ -5030,13 +5039,11 @@ _GENERATION_DIGESTS = {
     # the projection only grows) on a spool the health line called relievable.
     # `pruneSpool`'s `count` was still `metas.length` while the ceiling was set
     # from `parsedCount`, so with K retained-unreadable entries the spool settled
-    # at `maxEntries + K` and every admitted write spent one filed entry without
-    # reaching the ceiling. Both are behaviour changes on shipped bytes: a
-    # generation-29 copy still over-counts the replacement and still settles over
-    # its own count ceiling, so it must read STALE ("reinstall"), never
-    # `modified-artifact` ("local edit"). Neither 29 nor 30 has SHIPPED, and a
-    # new byte set always gets a NEW entry rather than a rewrite.
-    30: "5334a2cd9f0e3919dbd1165ab995312b74220e07dc84d534900f435e44e92858",
+    # at `maxEntries + K`. All three are behaviour changes on shipped bytes, so a
+    # generation-29 copy must read STALE ("reinstall"), never `modified-artifact`
+    # ("local edit"). Neither 29 nor 30 has SHIPPED, and a new byte set always
+    # gets a NEW entry rather than a rewrite.
+    30: "06afdd39f5f1e13c45799bc4d9ba4a22607cf001f1b6aa8aa6a8be2b5637cddf",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -5252,8 +5259,10 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # Generation 29 (#14347 review, cycle 4, P1): header only, same reason — one
     # seam, one contract number.
     29: "09d28db7e084f4f90cb245d434fa94842071759f826cbd747b0b8eca06212975",
-    # Generation 30 (#14347 review, cycle 5, findings 1+2): header only, same
-    # reason — one seam, one contract number.
+    # Generation 30 (#14347 review, cycle 5): header only, same reason — one
+    # seam, one contract number. The capture half now COUNTS a byte-bearing
+    # meta-less turn log instead of declining the directory, and its two count
+    # operands now name one population; the read half's behaviour is untouched.
     30: "ada4cece48443ed9a47aab3cf77b7739ff1e1b4fc7a305eeba4fbc84871fc477",
 }
 

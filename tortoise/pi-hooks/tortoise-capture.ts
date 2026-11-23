@@ -2052,51 +2052,53 @@ function boundsStamp(bounds: SpoolBounds): string {
   return `${bounds.maxEntries}:${bounds.maxTotalBytes}`;
 }
 
-/** `(meta-name count, bytes)` from ONE directory listing, PARSING no file.
+/** `(entry count, bytes)` from ONE directory listing, PARSING no file.
  *
  * The write path asks `spoolSaturated` on EVERY turn — synchronously from the
  * `turn_end` hook — and the real predicate `JSON.parse`s every meta (measured
  * 1.4 s at 20 000 entries, the ceiling this PR raises 20x). Both numbers here
- * are UPPER bounds on what `saturatedForMetas` computes (the count is read from
- * names alone, so it can only over-count a spool carrying corrupt or unreadable
- * metas, and the byte total sums EVERY regular file in `entries/`, so it can
- * only over-count the live entries plus orphans), which makes "under both
- * ceilings here" a proof of "not saturated there".
+ * are UPPER bounds on what `saturatedForMetas` computes, which makes "under
+ * both ceilings here" a proof of "not saturated there".
+ *
+ * ⛔ THE COUNT IS EXACT, AND THAT MATTERS (#14347 review, cycle 4, P1; cycle 5,
+ * P2). The real count is `metas + unreadable + corrupt + strayLogs`
+ * (`listSpoolEntries`'s return). Every `.meta.json` NAME lands in exactly one of
+ * parsed/unreadable/corrupt, so the meta-name count IS the first three terms —
+ * not merely an upper bound on them. The fourth is a byte-bearing
+ * `<key>.turns.jsonl` with no sibling meta: the shape this writer produces when
+ * it stores the log BEFORE the meta and the meta write fails. A count read from
+ * meta names alone cannot see it, so it is added here from the same listing
+ * (`strayStems` minus `metaStems`), and a ZERO-byte log is skipped because the
+ * real count skips it too. Counting it keeps this exit EXACT rather than
+ * declining it: returning `undefined` whenever such a log existed also worked,
+ * but nothing reaps a meta-less log (`pruneSpool` reaps metas and `.orphan`
+ * only), so one abandoned session left every later turn paying the full parse.
  *
  * Returns `undefined` — never a guess — for anything it cannot bound: an
- * unreadable directory, a dirent whose stat fails, a NON-REGULAR dirent (a
+ * unreadable directory, a dirent whose stat fails, or a NON-REGULAR dirent (a
  * symlinked entry's own size is the length of a path while `spoolEntryBytes`
  * follows the link, so summing it would UNDER-count — the one direction that
- * could admit a write the real predicate refuses), or a `*.turns.jsonl` with no
- * sibling `*.meta.json`. That last one is not belt-and-braces: the real
- * predicate counts a META-LESS turn log as an entry (`scanSpool`'s third
- * element, the #14347 cycle-3 finding 3 class), and `names` counts
- * `*.meta.json` stem names only — so a lone log is in the real count and NOT in
- * this one, which would stop `names` being an upper bound. The writer stores the
- * log BEFORE the meta, so an ENOSPC produces exactly that shape. `undefined`
- * means "do the full scan". Mirrors the Python leg's `_cheap_spool_scan`. */
+ * could admit a write the real predicate refuses). `undefined` means "do the
+ * full scan". Mirrors the Python leg's `_cheap_spool_scan`. */
 export function cheapSpoolScan(dir: string): { names: number; total: number } | undefined {
   try {
     const base = entriesDir(dir);
     let names = 0;
     let total = 0;
     const metaStems = new Set<string>();
-    const logStems = new Set<string>();
+    const strayStems = new Set<string>();
     for (const entry of readdirSync(base, { withFileTypes: true })) {
       if (!entry.isFile()) return undefined;
-      total += lstatSync(join(base, entry.name)).size;
+      const size = lstatSync(join(base, entry.name)).size;
+      total += size;
       if (entry.name.endsWith(".meta.json")) {
         names += 1;
-        metaStems.add(entry.name.slice(0, -".meta.json".length));
-      } else if (entry.name.endsWith(".turns.jsonl")) {
-        logStems.add(entry.name.slice(0, -".turns.jsonl".length));
+        metaStems.add(entry.name.slice(0, -`.meta.json`.length));
+      } else if (entry.name.endsWith(".turns.jsonl") && size > 0) {
+        strayStems.add(entry.name.slice(0, -`.turns.jsonl`.length));
       }
     }
-    // ⛔ A META-LESS TURN LOG IS AN ENTRY THIS COUNT CANNOT SEE (#14347 review,
-    // cycle 4, P1). Size is deliberately not consulted: the real predicate skips
-    // a ZERO-byte stray log too, but falling through to the full scan on one is
-    // only ever slower — never wrong.
-    for (const stem of logStems) if (!metaStems.has(stem)) return undefined;
+    for (const stem of strayStems) if (!metaStems.has(stem)) names += 1;
     return { names, total };
   } catch {
     return undefined;
