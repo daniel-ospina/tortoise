@@ -733,7 +733,7 @@ matrix gains its second wave (`ceil(5/3)` = 2): one wave of the slow-leg wall is
 committed map's PROJECTION (`slow_wall_projection()`'s 8.59 m per leg, recomputed below — ⛔ not the
 measured p50, which the row above puts at 8.9 m; a projection is not a measurement and this file does
 not conflate them), so its band goes ~8.6 m → ~17.2 m (1 wave → 2), still narrower than
-the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. **The wall
+the fast band under the same cap (~42 m), so it does not become the run's widest leg. **The wall
 guard measures that band, not the per-leg share**: `slow_wall_projection()` takes the job's
 `max-parallel` and reports `waves x (max leg + setup)` — `8.59 m` per leg → **`17.19 m`** from the
 committed `durations` map (re-derived from the map, not restated: registering
@@ -834,7 +834,7 @@ on) needs the JOB-level `started_at` of one run's legs (`…/runs/<id>/jobs`), w
 If the pool grows, invariant 2 permits a larger cap — and that move is not free: the
 `measured_pool` literal in the test is the one input that must be edited with the caps (below). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
-shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `3 × 10.5 m ≈ 31.5 m`,
+shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `4 × 10.5 m ≈ 42.0 m`,
 slow `2 × 8.5933 m ≈ 17.19 m` (the `8.59` above is that per-leg figure — `6.5933 m` plus the
 `2.0 m` setup allowance, printed as `8.59`, so take the product on the UNROUNDED leg: `2 × 8.59`
 reads 17.18 and is the same ROUNDED-SUM trap this document forbids ~120 lines above; the pin
