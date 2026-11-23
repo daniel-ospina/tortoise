@@ -32,7 +32,7 @@ re-derive the table
 (the audit's own figure for that loop is ~45 runner-hours/day), and at this head two OPEN
 PRs still carry hunks into this document and this file (`#14296`, `#14140`, read with
 `gh pr list --json files`). `#14038` is the third, and it is MERGED — its merge
-resolution is what dropped the `sdk.py:22074` row this file now restores, so it is cited
+resolution is what dropped the `sdk.py:22127` row this file now restores, so it is cited
 here as history rather than as a live conflict. It is deleted rather than re-cut, and the
 arms that existed only to grade it went with it.
 
@@ -111,20 +111,20 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `:Document`; `grep -nF 'D10: a document is a ``:Source``, not a'` returns the line ABOVE the
     # `:Document` one, which is how the +35-instead-of-+36 arithmetic was introduced and never caught).
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
-    (_SUBSTRATE, 'tortoise/sdk.py:37835', _SDK, 37835, "``:Document`` node)."),
-    (_SUBSTRATE, '`:37877` in `_file_human_approval`', _SDK, 37877, "``:Document`` node)."),
+    (_SUBSTRATE, 'tortoise/sdk.py:37888', _SDK, 37888, "``:Document`` node)."),
+    (_SUBSTRATE, '`:37930` in `_file_human_approval`', _SDK, 37930, "``:Document`` node)."),
     # ⛔ Review cycle 2 (P1): these were RE-POINTED and left with no content pin, so a one-line
     # regression shipped green — MEASURED by mutating each destination by one line and watching the
     # whole suite stay at `31 passed`. A re-point nobody grades is the `#13854` class this file exists for.
-    (_INDEX, 'sdk.py:22074', _SDK, 22074, '"stats": _capture_stats_with_step_witness('),
-    (_SUBSTRATE, 'opening `:37815`', _SDK, 37815, "def record_decision(self, approver_id: str, artifact_id: str,"),
+    (_INDEX, 'sdk.py:22127', _SDK, 22127, '"stats": _capture_stats_with_step_witness('),
+    (_SUBSTRATE, 'opening `:37868`', _SDK, 37868, "def record_decision(self, approver_id: str, artifact_id: str,"),
     # ⛔ ADOPTED at the `origin/main` rebase (`#14416`'s fold): `main` added this row for the `:Source`
     # line BETWEEN the two `opening` defs, after a merge resurrected the `+21`-era siblings
     # (`(opening :37548` = a kwarg line) while the two graded headlines stayed right — green pins over
     # a wrong sentence (`#14038` review, cycle 2). It grades a SURVIVING document, so this cut keeps
     # it: only the `_AUDIT` rows go. Re-verified by content at the rebased head, not carried.
-    (_SUBSTRATE, '`:37834` is the `:Source` line', _SDK, 37834, "D10: a document is a ``:Source``, not a"),
-    (_SUBSTRATE, 'opening `:37855`', _SDK, 37855, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
+    (_SUBSTRATE, '`:37887` is the `:Source` line', _SDK, 37887, "D10: a document is a ``:Source``, not a"),
+    (_SUBSTRATE, 'opening `:37908`', _SDK, 37908, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -141,7 +141,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- docs/evidence/13083-capability-census/README.md
     (_CENSUS, "cache_projection.py:2776", _CP, 2776, "tail_denied = forbidden | {"),
     # --- docs/00_index.md — its entity-verdict row carries a SECOND present-tense this-head address
-    # (`entity_verdict.py:43`) besides the pinned `sdk.py:22074`; the neighbour was unpinned, so a
+    # (`entity_verdict.py:43`) besides the pinned `sdk.py:22127`; the neighbour was unpinned, so a
     # rotation of `entity_verdict.py` under that cite would have moved it silently.
     (_INDEX, "`entity_verdict.py:43`", _EV, 43, "writing `dedup_reviewed='link'` is worse than inert"),
     # ⛔ These three rows spell their document path LITERALLY, not through a constant — so a
@@ -150,9 +150,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # tokens and still hold. They are the SAME `sdk.py` pair `00_index.md` and
     # `ENTITY-VERDICT-BANDS.md` each cite, plus the merge call below it; re-resolved at this head
     # before being restored, not assumed.
-    ("docs/00_index.md", '`sdk.py:28582` at this head', _SDK, 28582, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", '(`sdk.py:28582`), so any non-NULL', _SDK, 28582, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", 'called at `sdk.py:28946`', _SDK, 28946, "result = apply_entity_merge("),
+    ("docs/00_index.md", '`sdk.py:28635` at this head', _SDK, 28635, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", '(`sdk.py:28635`), so any non-NULL', _SDK, 28635, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", 'called at `sdk.py:28999`', _SDK, 28999, "result = apply_entity_merge("),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the reader table cites
     # `hosted_backup.py:2683` for `_index_has_is_operator()`, and that document had NO pin at all,
     # so nothing would have reddened the next rotation of it.
@@ -261,7 +261,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # `origin/main:tests/test_12184_shifted_cites.py` rather than counted by hand: the base holds 18
     # surviving rows and this head holds 21. The three that are not survivors are `_CENSUS`'s two
     # probe re-points (the cut's own docstring rewrite moved them one line, and this file's rule is
-    # that every re-point carries a content pin) plus `_INDEX`'s `sdk.py:22074`, which the base
+    # that every re-point carries a content pin) plus `_INDEX`'s `sdk.py:22127`, which the base
     # WRITES but does not PIN — its row was lost as a casualty of `#14038`'s merge resolution, and an
     # address a surviving document writes with no row is the uncovered-claim class this file refuses.
     # Two of the eighteen are re-worded at the rebase (`(opening `:37815`` -> `opening `:37815``, and
