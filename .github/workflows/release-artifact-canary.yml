@@ -202,10 +202,20 @@ jobs:
             # MEASURED). It used to say "the verdict.json the exit code was derived from",
             # which holds only on the `rc=1` + `verdict=FAIL` path: on a PASS run the code
             # came from the tool's own exit, and on the retag path it came from the
-            # CLASSIFIER because the JSON could not be read — where this line then also
-            # dangled a colon over the `cat` failure on stderr. Naming the file (and the
-            # two values the reader needs) is true in all three states.
-            echo "published-artifact-canary exit_code=$rc published_fail=$published_fail — the verdict.json this step read:"
+            # CLASSIFIER because the JSON could not be read.
+            # ⛔ AND IT MUST NOT ASSERT A READ EITHER (fresh-context review of #14314, P3,
+            # MEASURED — the earlier wording of THIS comment claimed the dangled-colon defect
+            # was fixed while it was still live one phrase along). `-s` is true for a DIRECTORY
+            # too, so on the retag path this branch runs over an unreadable `verdict.json`:
+            # `json.load` has already raised, the header still claimed a read that did not
+            # happen, and the colon dangled over `cat`'s own error:
+            #
+            #   stdout: … — the verdict.json this step read:
+            #   stderr: cat: /…/runner/canary/verdict.json: Is a directory
+            #
+            # Naming the file and the two values the reader needs, and saying the payload is
+            # PRINTED rather than read, is true in all three states.
+            echo "published-artifact-canary exit_code=$rc published_fail=$published_fail — verdict.json at $RUNNER_TEMP/canary/verdict.json (printed below; a read failure prints its own error):"
             # `|| true`: printing the reading must never be able to change the reading.
             cat "$RUNNER_TEMP/canary/verdict.json" || true
           else

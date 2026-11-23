@@ -2773,6 +2773,17 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
         "the severity signal was not published, or disagrees with the exit — `cat` failing "
         f"under `-e` aborted the step before `$GITHUB_OUTPUT` was written: {published!r}"
     )
+    # ⛔ AND THE HEADER MUST NOT ASSERT A READ ON THIS PATH (fresh-context review of #14314,
+    # P3, MEASURED). `[ -s ]` is TRUE for a directory, so this branch runs over a
+    # `verdict.json` the step could not read at all — `json.load` has already raised. The
+    # header used to say "the verdict.json this step read", which asserted a read that never
+    # happened and left its colon dangling over `cat`'s own error. That is the same
+    # claim-more-than-you-can-see class as #12660's original misread, so it is pinned by what
+    # the line MAY NOT say rather than by the wording it happens to use today.
+    assert "this step read" not in printed, (
+        "the header claimed a verdict.json READ on the unreadable path, where `json.load` has "
+        f"already raised and the colon dangles over `cat`'s error: {printed!r}"
+    )
 
     # (d) ⛔ THE PASS LEG IS AN ARM TOO (review cycle 12, P2, MEASURED). The docstring above
     # claims the log must answer PASS / FAIL / crash; only the last two had a case, so a
@@ -2958,8 +2969,8 @@ def _strip_shell_comments(script: str) -> str:
         # stripped as a comment, and a substitution on it RAN unremarked — the silent pass this
         # file calls worse than no pin, one level out from the quoted-`}` case below:
         #
-        #   $ bash -e -c 'echo "${x:-"} # $(touch /tmp/dq1)"}"'    → '} #', dq1 CREATED
-        #   $ bash -e -c 'echo "${x:-"} # `touch /tmp/dq2`"}"'     → '} #', dq2 CREATED
+        #   $ bash -e -c 'echo "${x:-"} # $(touch /tmp/dq1)"}"'    → '} # ', dq1 CREATED
+        #   $ bash -e -c 'echo "${x:-"} # `touch /tmp/dq2`"}"'     → '} # ', dq2 CREATED
         #   $ _executable_prose_lines(…)                            → []   (BOTH)
         #
         # …while the SAME script with the outer `"` removed was already reported (`brace_quotes`
