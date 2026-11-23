@@ -1028,3 +1028,24 @@ def test_the_live_drain_test_is_asked_per_batch_not_snapshotted():
         "the batch whose claim appeared after the first probe must be skipped")
     assert store.items(ORG, second.batch_id)[0].state is (
         BatchItemState.EXTRACTING)
+
+
+def test_a_lost_cancel_is_derived_cancelled_not_partial():
+    """⛔ ROUND-3 NB4: `settle()`'s docstring promised a state it never wrote.
+
+    A cancel whose own `put_batch` was lost leaves every item `cancelled` over a
+    row that derived `partial` — with an empty `cancel_reason`, so the route's
+    copy told the customer "this batch had already finished, so nothing was
+    stopped" over a batch they cancelled.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
+    for it in items:
+        coord.advance(ORG, it, BatchItemState.CANCELLED, reason="customer stop")
+
+    settled = coord.settle(ORG, batch.batch_id)
+
+    assert settled.state is BatchState.CANCELLED
+    assert settled.cancelled_at, "a derived cancel still records when"
+    assert settled.cancel_reason == "customer stop"

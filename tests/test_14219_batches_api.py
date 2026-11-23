@@ -11,6 +11,8 @@ behaviour (the ordering of write-then-dispatch) rather than a worker's.
 """
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 from tortoise import batch_ingest as bi
@@ -918,3 +920,171 @@ def test_cancelling_an_already_finished_batch_does_not_claim_it_was_stopped(
         "the copy must not tell the customer work was stopped and not charged "
         f"over a completed batch: {body['message']!r}")
     assert "already finished" in body["message"]
+
+
+# ── #14415 review round 3: the three blocking findings, pinned ────────────
+def test_a_breakdown_that_hides_the_leftover_still_re_drives(store,
+                                                            monkeypatch):
+    """⛔ ROUND-3 BLOCKING 1: the re-drive was conditional on the read that broke.
+
+    One graph outage spans `settle()`'s read and the `finally`'s own read
+    back-to-back, so `any(not item.terminal ...)` never evaluated and nothing was
+    enqueued — the round-2 wedge, restored. An unreadable leftover is not
+    evidence of completion: it re-drives blind.
+    """
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_batch_item_runner",
+                        lambda sdk, corpus, org_id: (
+                            lambda item: bi.ItemOutcome(bi.BatchItemState.QUEUED,
+                                                        reason="index lock held")))
+
+    coord = bi.BatchCoordinator(store)
+    batch, _items = coord.submit(ORG_ID, ["/d/a.md"])
+    # The batch's first read succeeds and every LATER one fails: the drain claims
+    # the item, then its settle read and the finally's read both blow up.
+    real_items = store.items
+    calls = {"n": 0}
+
+    def flaky_items(org_id, batch_id):
+        calls["n"] += 1
+        if calls["n"] <= 1:
+            return real_items(org_id, batch_id)
+        raise RuntimeError("graph outage")
+
+    monkeypatch.setattr(store, "items", flaky_items)
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert [bid for _org, bid in ha._BATCH_RETRY] == [batch.batch_id], (
+        "a leftover we could not READ must be re-driven, never assumed finished")
+    assert batch.batch_id not in ha._BATCH_DRAINING
+
+
+def test_a_settle_write_that_failed_leaves_the_row_repaired_not_lagging(
+        store, monkeypatch):
+    """⛔ ROUND-3 BLOCKING 1 arm B: all items terminal, `settle()` lost.
+
+    `any(not item.terminal)` is False, so nothing re-drove and nothing repaired:
+    the row sat `accepted` over finished, charged work for the process lifetime —
+    `complete: false`, `pending: 0` — while ONE pass repairs it to `completed`.
+    """
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_batch_item_runner",
+                        lambda sdk, corpus, org_id: (
+                            lambda item: bi.ItemOutcome(bi.BatchItemState.INDEXED,
+                                                        tokens_in=5)))
+
+    coord = bi.BatchCoordinator(store)
+    batch, _items = coord.submit(ORG_ID, ["/d/a.md"])
+    # Every item lands; only the batch row's write fails.
+    real_put_batch = store.put_batch
+    state = {"fail": True}
+
+    def flaky_put_batch(row):
+        if state["fail"]:
+            raise RuntimeError("put_batch timeout")
+        return real_put_batch(row)
+
+    monkeypatch.setattr(store, "put_batch", flaky_put_batch)
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+    state["fail"] = False
+    # The pass could not write the row, so it must remember the batch…
+    assert [bid for _org, bid in ha._BATCH_RETRY] == [batch.batch_id]
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    # …and the repair pass, with the write working again, settles it.
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+    row = store.get_batch(ORG_ID, batch.batch_id)
+    assert row.state is bi.BatchState.COMPLETED, (
+        f"a lagging row over finished work must be repaired, not left {row.state}")
+    assert [bid for _org, bid in ha._BATCH_RETRY] == []
+
+
+def test_a_retry_pass_never_runs_work_on_a_cancelled_batch(store, monkeypatch):
+    """⛔ ROUND-3 BLOCKING 2: the re-drive could spend AFTER a cancel.
+
+    A drain whose terminal write failed left an item `extracting` with
+    attempts=1; `cancel()` leaves such a row alone (it may be a live runner); the
+    retry tick then re-entered the drain and started a THIRD runner call after
+    the cancel the customer was told would not be charged — measured: three
+    runner calls, 3,000 tokens, row `cancelled`, both items `indexed`.
+    """
+    calls: list[str] = []
+
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+
+    def _runner(sdk, corpus, org_id):
+        def _run(item):
+            calls.append(item.item_id)
+            return bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=1000)
+        return _run
+
+    monkeypatch.setattr(ha, "_batch_item_runner", _runner)
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md", "/d/b.md"])
+    # Item 2 is mid-flight when the process's bookkeeping write fails and the
+    # customer, seeing a stuck batch, cancels.
+    coord.advance(ORG_ID, items[1], bi.BatchItemState.EXTRACTING, attempt=True)
+    coord.cancel(ORG_ID, batch.batch_id, reason="stuck, stop it")
+    before = list(calls)
+
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert calls == before, (
+        f"the retry tick ran {len(calls) - len(before)} runner call(s) after a "
+        "cancel — nothing may run and nothing may be charged after it")
+    after = store.items(ORG_ID, batch.batch_id)
+    assert all(i.terminal for i in after), (
+        f"the dead claim must be settled, not stranded non-terminal: "
+        f"{[(i.ref, str(i.state)) for i in after]}")
+    assert all(i.state is bi.BatchItemState.CANCELLED for i in after)
+    assert store.get_batch(ORG_ID, batch.batch_id).state is bi.BatchState.CANCELLED
+    assert [bid for _org, bid in ha._BATCH_RETRY] == [], (
+        "a cancelled batch must not be re-driven at all")
+
+
+def test_a_claim_re_entered_from_extracting_counts_towards_the_ceiling(store,
+                                                                     monkeypatch):
+    """⛔ ROUND-3 BLOCKING 3: the ceiling never fired on a re-entered claim.
+
+    It lived inside `if fresh.state is QUEUED`, so an item re-driven from a dead
+    `extracting` claim never incremented `attempts`: every retry tick called the
+    runner again, spending real tokens the failed advance never recorded.
+    """
+    calls: list[int] = []
+
+    def _runner(item):
+        calls.append(item.attempts)
+        return bi.ItemOutcome(bi.BatchItemState.INDEXED, tokens_in=7)
+
+    store = bi.InMemoryBatchStore()
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+
+    # The terminal write keeps failing, so the item stays `extracting` and is
+    # re-entered by each pass. The ceiling must bound it.
+    real_put_item = store.put_item
+
+    def failing_terminal_write(org_id, item):
+        if item.state in (bi.BatchItemState.INDEXED,):
+            raise RuntimeError("put_item timeout")
+        return real_put_item(org_id, item)
+
+    monkeypatch.setattr(store, "put_item", failing_terminal_write)
+    for _ in range(bi.BATCH_MAX_ATTEMPTS + 2):
+        row = store.items(ORG_ID, batch.batch_id)[0]
+        # The drain's own per-item guard: a bookkeeping failure must not
+        # abandon the rest, and the item keeps whatever state it reached.
+        with contextlib.suppress(RuntimeError):
+            coord.run_item(ORG_ID, row, _runner)
+
+    assert len(calls) <= bi.BATCH_MAX_ATTEMPTS, (
+        f"the runner was called {len(calls)} times for a bound of "
+        f"{bi.BATCH_MAX_ATTEMPTS} — an unbounded re-entry spends invisibly")
+    final = store.items(ORG_ID, batch.batch_id)[0]
+    assert final.state is bi.BatchItemState.FAILED
+    assert "gave up" in final.reason

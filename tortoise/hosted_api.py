@@ -16842,6 +16842,21 @@ def _submit_or_defer(org: dict, batch_id: str) -> None:
     _batch_retry_enqueue(org, batch_id)
 
 
+def _batch_row_is_terminal(store, org_id: str, batch_id: str) -> bool:
+    """Is this batch's own ROW in a terminal state?
+
+    ⛔ An unreadable row answers NO on purpose (#14415 review round 3): the caller
+    that asks this is deciding whether a LAGGED row needs repairing, and a read
+    failure must lead to an attempt, never to the conclusion that the row is
+    fine.
+    """
+    try:
+        row = store.get_batch(org_id, batch_id)
+    except Exception:
+        return False
+    return row is not None and row.state in _batch_ingest.TERMINAL_BATCH_STATES
+
+
 def _recover_org_batches(org: dict) -> list[str]:
     """Resume this tenant's unfinished batches, ONCE per process (#14219 item 4).
 
@@ -16923,10 +16938,25 @@ def _drain_batch(org: dict, batch_id: str) -> None:
             return  # already being worked by this process — never run it twice
         _BATCH_DRAINING.add(batch_id)
     store = None
+    coord = None
+    cancelled_batch = False
     try:
         store = _batch_store_for(org)
         coord = _batch_ingest.BatchCoordinator(store)
         batch = store.get_batch(org["org_id"], batch_id)
+        if (batch is not None
+                and batch.state is _batch_ingest.BatchState.CANCELLED):
+            # ⛔ NOTHING MAY RUN AFTER A CANCEL (#14415 review round 3, BLOCKING
+            # 2). The retry tick used to re-enter this drain for a cancelled
+            # batch and start a NEW runner call on a claim whose runner was gone
+            # (`cancel()` leaves an `extracting` item with attempts != 0 alone) —
+            # spending after the cancel the customer was told would not be
+            # charged. The dead claim is settled instead (the boot path's rule),
+            # so the row does not strand non-terminal either.
+            cancelled_batch = True
+            coord.abandon_dead_claims(org["org_id"], batch_id)
+            coord.settle(org["org_id"], batch_id)
+            return
         corpus_name = batch.corpus_name if batch else ""
         runner = _batch_item_runner(_org_sdk_for_credential(org),
                                     corpus_name, org["org_id"])
@@ -16966,10 +16996,42 @@ def _drain_batch(org: dict, batch_id: str) -> None:
         # `BATCH_MAX_ATTEMPTS` is what bounds the loop, so a condition that never
         # clears settles `failed` visibly.
         try:
-            if store is None or any(
-                    not item.terminal
-                    for item in store.items(org["org_id"], batch_id)):
+            if cancelled_batch:
+                # Nothing may run after a cancel; the dead claim was settled
+                # above, so there is no leftover to re-drive.
+                pass
+            elif coord is None or store is None:
+                # ⛔ A PASS THAT COULD NOT BUILD ITS STORE STILL KNOWS THE BATCH
+                # EXISTS: re-drive blind and let the next tick re-read the rows
+                # (#14415 review round 2, BLOCKING 1; round 3 kept this arm).
                 _batch_retry_enqueue(org, batch_id)
+            else:
+                leftover = True
+                try:
+                    leftover = any(not item.terminal
+                                   for item in store.items(org["org_id"], batch_id))
+                except Exception:
+                    # ⛔ COULD NOT READ ⇒ RE-DRIVE BLIND (#14415 review round 3,
+                    # BLOCKING 1 arm A). This is the same `store.items()` the
+                    # failure may have broken, so exiting here is how the
+                    # process-lifetime wedge survived the previous fix.
+                    _logger.exception(
+                        "batch %s: leftover read failed; re-driving blind",
+                        batch_id)
+                if leftover:
+                    _batch_retry_enqueue(org, batch_id)
+                elif not _batch_row_is_terminal(store, org["org_id"], batch_id):
+                    # ⛔ …OR THE ROW LAGGED ITS ITEMS (round 3, BLOCKING 1 arm B):
+                    # every item is terminal but `settle()`'s own write failed, so
+                    # `any(not item.terminal)` is False and nothing would ever
+                    # repair it (`recover()` is one-shot per org). Repair now; if
+                    # the repair cannot be written, re-drive so the next pass can.
+                    try:
+                        coord.settle(org["org_id"], batch_id)
+                    except Exception:
+                        _logger.exception(
+                            "batch %s: row repair failed; re-driving", batch_id)
+                        _batch_retry_enqueue(org, batch_id)
         except Exception:
             _logger.exception("batch %s: could not re-drive the leftover",
                               batch_id)

@@ -1338,6 +1338,24 @@ class BatchCoordinator:
                             "retryable skip, or a process that stopped "
                             "mid-item); re-submit this item to try again"))
             self.advance(org_id, fresh, BatchItemState.EXTRACTING, attempt=True)
+        elif fresh.state in (BatchItemState.EXTRACTING,
+                             BatchItemState.EMBEDDED):
+            # ⛔ A RE-ENTERED CLAIM IS AN ATTEMPT TOO (#14415 review round 3,
+            # BLOCKING 3). The ceiling above only ran for a `queued` item, so an
+            # item re-driven from a DEAD claim (`extracting`/`embedded` — its
+            # runner died, or its own terminal write kept failing) never
+            # incremented `attempts` and never reached the bound: every retry
+            # tick called the runner again, spending real tokens that the failed
+            # advance never recorded, for as long as the bookkeeping write kept
+            # failing. Count it here, and let the same ceiling bound it.
+            if fresh.attempts >= BATCH_MAX_ATTEMPTS:
+                return self.advance(
+                    org_id, fresh, BatchItemState.FAILED,
+                    reason=(f"gave up after {fresh.attempts} attempt(s) on an "
+                            "unsettled claim — its own bookkeeping write never "
+                            "landed; re-submit this item to try again"))
+            self.advance(org_id, fresh, fresh.state,
+                         reason="re-claimed by a retry pass", attempt=True)
         try:
             outcome = active(fresh)
         except Exception as exc:  # an escaped exception is a FAILED ITEM
@@ -1384,10 +1402,17 @@ class BatchCoordinator:
           receipt says so, because hiding a real spend is the worse defect;
         * an item already terminal is untouched.
 
-        The batch itself becomes ``cancelled`` and reports both halves
-        (``tokens_spent_before_cancel`` on the summary), so "cancel any time"
-        (the copy, decision (d)) is a statement about the FUTURE work, which is
-        the only thing we can honestly stop.
+        The batch itself becomes ``cancelled`` **when there is anything left to
+        stop**; over a batch whose items have all reached a terminal state it is
+        reported as it is (and, if that state was `cancelled` on every item, the
+        batch is DERIVED `cancelled` from the rows — see :meth:`settle`). The
+        status body carries the spend half on the summary as ``tokens_spent``
+        (the sum over the items; there is no separate
+        ``tokens_spent_before_cancel`` field — that name appeared in an earlier
+        revision of this docstring and never existed on the wire, #14415 review
+        round 3 NB5), so "cancel any time" (the copy, decision (d)) is a
+        statement about the FUTURE work, which is the only thing we can honestly
+        stop.
 
         ⛔ A batch already in a TERMINAL state is returned UNCHANGED: cancelling
         cannot un-spend tokens, and relabelling a settled batch would make this
@@ -1437,6 +1462,35 @@ class BatchCoordinator:
         return batch, self._store.items(org_id, batch_id)
 
     # -- resume (brief item 4) -------------------------------------------
+    def abandon_dead_claims(self, org_id: str, batch_id: str) -> None:
+        """Settle a CANCELLED batch's claims that NO runner is holding.
+
+        ⛔ NOTHING MAY RUN AFTER A CANCEL (#14415 review round 3, BLOCKING 2).
+        A cancelled batch can still carry `extracting`/`embedded` rows whose
+        runner is gone — it died, or its own terminal write kept failing and the
+        customer cancelled a batch that looked stuck. `_drain_batch` refuses to
+        work a cancelled batch; without this, those rows would either sit
+        non-terminal for ever or (before that refusal) be re-entered by the
+        retry tick, which started a NEW runner call after the cancel the
+        customer was told would not be charged — measured: three runner calls,
+        3,000 tokens spent, row `cancelled`, two items `indexed`.
+
+        The claim is void, so it settles `cancelled` with no token counts
+        invented for a run nothing can observe — the same rule the boot path has
+        always applied, now in ONE place both callers use.
+        """
+        for item in self._store.items(org_id, batch_id):
+            if item.state in (BatchItemState.EXTRACTING,
+                              BatchItemState.EMBEDDED):
+                self.advance(org_id, item, BatchItemState.QUEUED,
+                             reason="cancelled batch, claim released")
+                self.advance(
+                    org_id, item, BatchItemState.CANCELLED,
+                    reason="batch was cancelled before this item completed")
+            elif item.state is BatchItemState.QUEUED:
+                self.advance(org_id, item, BatchItemState.CANCELLED,
+                             reason="batch was cancelled")
+
     def recover(self, org_id: str, *, live_batches: Collection[str] | Callable[[str], bool] = ()
                 ) -> list[str]:
         """Re-open every batch with unfinished items. Returns the batch ids.
@@ -1508,19 +1562,7 @@ class BatchCoordinator:
                 # every boot and never resolved — an inert row). At boot nothing
                 # is running, so its claim is void: settle it ``cancelled``,
                 # without inventing token counts for a run we cannot observe.
-                for item in self._store.items(org_id, batch_id):
-                    if item.state in (BatchItemState.EXTRACTING,
-                                      BatchItemState.EMBEDDED):
-                        self.advance(
-                            org_id, item, BatchItemState.QUEUED,
-                            reason="cancelled batch, in-flight at restart")
-                        self.advance(
-                            org_id, item, BatchItemState.CANCELLED,
-                            reason="batch was cancelled before this item "
-                                   "completed")
-                    elif item.state is BatchItemState.QUEUED:
-                        self.advance(org_id, item, BatchItemState.CANCELLED,
-                                     reason="batch was cancelled")
+                self.abandon_dead_claims(org_id, batch_id)
                 continue
             items = self._store.items(org_id, batch_id)
             moved = False
@@ -1573,6 +1615,23 @@ class BatchCoordinator:
                 self._store.put_batch(batch)
             return batch
         ok = sum(1 for i in items if i.state is BatchItemState.INDEXED)
+        if not ok and all(i.state is BatchItemState.CANCELLED for i in items):
+            # ⛔ ``cancelled`` IS DERIVED, NOT ONLY RECORDED (#14415 review round
+            # 3, NB4). This docstring has always promised it, but the only writer
+            # of `cancelled` was `cancel()` itself — so a cancel whose own
+            # put_batch was lost left every item `cancelled` over a row that
+            # derived `partial`, with an empty `cancel_reason` and the route's
+            # copy saying "this batch had already finished, so nothing was
+            # stopped". An all-cancelled set of rows is exactly a customer
+            # cancel; derive it (keeping any reason the rows already carry).
+            batch.state = BatchState.CANCELLED
+            batch.cancelled_at = batch.cancelled_at or self._now()
+            batch.cancel_reason = (
+                batch.cancel_reason
+                or next((i.reason for i in items if i.reason), ""))
+            batch.updated_at = self._now()
+            self._store.put_batch(batch)
+            return batch
         batch.state = (BatchState.COMPLETED if ok == len(items)
                        else BatchState.PARTIAL)
         batch.updated_at = self._now()
