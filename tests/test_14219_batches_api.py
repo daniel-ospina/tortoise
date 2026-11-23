@@ -1332,6 +1332,25 @@ def test_a_zero_token_item_makes_no_ledger_call(monkeypatch):
     assert called == []
 
 
+def test_a_metred_item_reports_the_sum_it_charged(monkeypatch):
+    """The SUCCESS path returns the figure it charged.
+
+    ⛔ A `NameError` on this return — `spent_in + spent_out` against parameters
+    named `tokens_in`/`tokens_out` — is a drain that dies on its FIRST real
+    spend. It is invisible to the tests around it because the caller that meters
+    a spend wraps it in `except Exception`, so the ledger row it already wrote
+    stands while the item is logged as failed.
+    """
+    from tortoise import metering
+
+    seen: list[dict] = []
+    monkeypatch.setattr(metering, "record_capture_usage",
+                        lambda org_id, **kw: seen.append(kw))
+    assert bi.record_item_spend(ORG_ID, tokens_in=7, tokens_out=3) == 10
+    assert seen == [{"calls": 0, "tokens_in": 7, "tokens_out": 3}], (
+        "a metered item did not reach the capture ledger with its own figures")
+
+
 def test_a_drain_that_leaves_an_item_queued_is_put_back_on_the_retry_tick(
         store, monkeypatch):
     """BLOCKING 3: a retryable verdict must not strand the batch forever."""

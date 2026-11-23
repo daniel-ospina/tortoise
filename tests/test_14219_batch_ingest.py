@@ -1386,7 +1386,7 @@ def test_a_cancel_stops_a_dead_claim_instead_of_reporting_the_batch_finished(
     coord.advance(ORG, items[1], BatchItemState.EXTRACTING, attempt=True)
 
     rows = store.items(ORG, batch.batch_id)
-    stale, fresh = rows[0], rows[1]
+    stale = rows[0]
     stale.updated_at = _ancient_stamp()
     store.put_item(ORG, stale)
 

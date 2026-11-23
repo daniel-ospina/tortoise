@@ -1346,7 +1346,7 @@ def record_item_spend(org_id: str, *, tokens_in: int = 0,
                         exc_info=True)
         _report_unmetered(org_id, exc)
         return 0
-    return spent_in + spent_out
+    return tokens_in + tokens_out
 
 
 def _report_unmetered(org_id: str, exc: BaseException) -> None:
