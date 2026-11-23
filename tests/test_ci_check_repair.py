@@ -4399,11 +4399,14 @@ def test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit():
         "the document no longer runs `git show --stat <sha> -- docs/ops/ci-wall-clock.md`; "
         "if the command was reworded, re-aim this pin at the new shape rather than "
         "deleting it — an unrunnable citation is what it exists to catch")
+    # The token rule is the TOOL's own (`_HEX`), not a copy of it: this pin kept a
+    # `{7,40}` literal while `doc_citation_defects` widened to git's `{4,40}`, so a
+    # legitimate 6-char cite was `rc == 0` in the depth-0 `docs` job and a FALSE BLOCK
+    # here — two arms of the same guard disagreeing is the defect class above.
+    from tools.ci_check_repair import _HEX
+
     for ref in refs:
-        # upper-case hex is a real commit token (git is case-insensitive) — the tool
-        # was fixed for this and this hand-copied reader was left behind, which is the
-        # same false block one layer up (#13998 review, P3).
-        assert re.fullmatch(r"[0-9a-fA-F]{7,40}", ref), (
+        assert _HEX.fullmatch(ref), (
             f"`git show --stat {ref}` is cited in docs/ops/ci-wall-clock.md but {ref!r} is "
             "not a commit — a placeholder here reads as evidence while being unrunnable, "
             "so name the sha the claim was measured at")
@@ -4721,26 +4724,41 @@ def test_a_missing_base_ref_is_UNVERIFIED_not_a_defect(tmp_path):
     assert "does not resolve" in findings[0] and "UNVERIFIED" in findings[0]
 
 
-def test_an_ambiguous_prefix_is_a_DEFECT_not_UNVERIFIED(tmp_path):
-    """An ambiguous prefix is UNRUNNABLE — a DEFECT, and the message must name ambiguity.
+def test_an_ambiguous_prefix_is_a_DEFECT_naming_ambiguity(tmp_path):
+    """An ambiguous prefix is UNRUNNABLE — a DEFECT whose message NAMES the ambiguity.
 
-    `rev-parse --verify <ambiguous>^{commit}` exits 128, so the cite's own command cannot
-    run. This also pins the resolved-sha handoff to `merge-base`: passing the raw token
-    there exits 128 and used to turn this into rc 2 (UNVERIFIED), pointing the reader at
-    the checkout instead of the document.
+The fixture is simulated at the `rev-parse` probe: a one-commit fixture cannot produce
+    a genuinely ambiguous object id (measured: `git rev-parse --disambiguate=6960` → 0
+    entries there), so an earlier cut of this test exercised ABSENCE while claiming
+    ambiguity, and nothing pinned the ambiguity clause at all — deleting it left the
+    file green. Only the probe is stubbed; the rest of the tool really runs.
     """
     from tools import ci_check_repair as R
 
     root = _citation_tree(tmp_path, "placeholder")
-    probe = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify",
-                            "6960^{commit}"], capture_output=True, text=True)
-    if probe.returncode == 0:
-        pytest.skip("this fixture's object ids do not make `6960` ambiguous")
+    real_run = R.subprocess.run
+
+    def fake_run(argv, *a, **kw):
+        if "rev-parse" in argv and "--verify" in argv:
+            return subprocess.CompletedProcess(
+                argv, 128, "",
+                "error: short object ID 6960 is ambiguous\n"
+                "fatal: Needed a single revision\n")
+        return real_run(argv, *a, **kw)
+
     (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
         "… `git show --stat 6960 -- docs/ops/ci-wall-clock.md` is empty …\n")
-    rc, findings = R.doc_citation_defects(root)
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(R.subprocess, "run", fake_run)
+        rc, findings = R.doc_citation_defects(root)
+    finally:
+        monkeypatch.undo()
     assert rc == 1, f"an unrunnable (ambiguous) cite is a DEFECT, got rc={rc}: {findings}"
     assert "does not resolve to a single" in findings[0]
+    assert "AMBIGUOUS" in findings[0], (
+        "the message must NAME ambiguity rather than leave it as generic absence, or "
+        f"the reader is sent to the checkout instead of the document: {findings[0]!r}")
 
 
 def test_a_short_hex_abbreviation_is_not_a_defect(tmp_path):
