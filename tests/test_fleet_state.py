@@ -4379,6 +4379,11 @@ def _verdict_or_fail(expect, why: str, call):
     [
         (None, AssertionError, "was ALIVE and invisible to the census", "the -ww pin still fails"),
         (-9, "skip", "INCONCLUSIVE [#5049]", "SIGKILL from outside is the box (rule 1)"),
+        (
+            -15, "skip", "INCONCLUSIVE [#5049]",
+            "SIGTERM is the box too — an orphan sweep or the shard's own `timeout -s TERM` "
+            "(cycle-8 P2: only `-9` was driven, so the set could shrink silently)",
+        ),
         (-11, HarnessDefect, "the fixture child CRASHED on", "SIGSEGV is the substrate (rule 4)"),
         (1, HarnessDefect, "exited rc=", "a clean exit is the substrate (rule 4)"),
     ],
@@ -4552,26 +4557,20 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     # pins today's numbers, so raising `_CENSUS_ERROR_STREAK` — the natural direction for a
     # load-sensitivity constant — silently retires the pin instead of reding.
     step_s = clock.step_s
-    # `late` = the burst's first sample, placed far enough into the poll that a span measured from
-    # `poll_started` is already past `_CENSUS_ERROR_MIN_SPAN_S` (`(late - 1) * step_s > MIN_SPAN`,
-    # strictly, by the floor's definition).
-    late = 2 + int(_CENSUS_ERROR_MIN_SPAN_S / step_s)
     # `burst` = how many consecutive errors: at least the count `_CENSUS_ERROR_STREAK` so the COUNT
     # condition is always reachable.
     burst = max(2, _CENSUS_ERROR_STREAK)
-    # ⛔ THE PREMISE THE PLACEMENT RESTS ON, ASSERTED (#12039 cycle 8, P2). `late` grows with
-    # `_CENSUS_ERROR_MIN_SPAN_S`; the poll's own 10 s deadline does not. Past a span bound of about
-    # 9.8 s the burst is placed AFTER the poll has already broken, `assert calls["n"] > late +
-    # burst` then fires on the CORRECT implementation, and this arm reds the very thing it exists
-    # to protect. MEASURED on a copy at `_CENSUS_ERROR_MIN_SPAN_S = 9.8` with the implementation
-    # UNMUTATED: `AssertionError: the poll must keep running after a burst that satisfies the COUNT
-    # but not the SPAN (late=100, burst=2)`. The arm is independent of BOTH constants only while
-    # this holds, so it is pinned rather than assumed. `10.0` is spelled here because it is also a
-    # literal in the code under test (the poll's `deadline`) — pinned, not reachable by import.
-    assert census_kind != "late_pair" or late + burst < 10.0 / step_s, (
-        f"_CENSUS_ERROR_MIN_SPAN_S={_CENSUS_ERROR_MIN_SPAN_S:g} places the late burst at sample "
-        f"{late} (+{burst}), past the poll's own 10.0s deadline — this arm would then red the "
-        f"CORRECT implementation (#12039)")
+    # ⛔ THE BURST IS PLACED BY SIMULATED TIME, NOT BY A SAMPLE INDEX (#12039 cycle 9, P1). The old
+    # placement was `late = 2 + int(MIN_SPAN / step_s)` — a SAMPLE index derived as if one sample
+    # cost one `time()` call — while the poll's deadline is SIMULATED TIME. The implementation's
+    # per-sample call count has changed twice (one, then three, then five for an erroring sample),
+    # and each change silently moved the burst: at `_CENSUS_ERROR_MIN_SPAN_S = 3.1` the placement
+    # put it past the poll's break, so `assert calls["n"] > started_at + burst` fired on the
+    # CORRECT implementation — a FALSE RED from raising a documented load-sensitivity constant, the
+    # #5049 rule-1 inversion in the one arm that pins rule 1. MEASURED on copies at the head that
+    # carried it, implementation UNMUTATED: span 2.0/2.5/3.0 green, 3.1 RED, 3.2/3.3 RED. Waiting
+    # for the CLOCK instead makes the placement independent of that count, which is the whole point.
+    burst_state: dict[str, int | None] = {"left": 0, "started_at": None}
 
     def _census():
         calls["n"] += 1
@@ -4628,11 +4627,10 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
             clock.now += _CENSUS_SAMPLE_TIMEOUT_S
             return [], err
         if census_kind == "late_pair":
-            # Healthy samples first, then a burst of consecutive errors, then healthy again.
-            # `late` places the burst's FIRST sample just after `_CENSUS_ERROR_MIN_SPAN_S` of
-            # healthy polling (each healthy sample costs ONE `time()` call, so `step_s` of
-            # simulated time), which is what makes the old gate's from-`poll_started` span
-            # already over the bound when the burst starts — it raises `HarnessDefect` on a
+            # Healthy samples first, then a burst of consecutive errors, then healthy again. The
+            # burst STARTS once the POLL's own simulated clock is past `_CENSUS_ERROR_MIN_SPAN_S`
+            # (see `burst_state` above), which is what makes the old gate's from-`poll_started`
+            # span already over the bound when the burst begins — it raises `HarnessDefect` on a
             # required shard, while the fixed gate measures the span from the STREAK and keeps
             # polling.
             # ⛔ BOTH the placement AND the length are DERIVED (measured, #12039). They were the
@@ -4664,11 +4662,26 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
             # cycle 8, P2): the premise is ASSERTED above, not assumed — at
             # `_CENSUS_ERROR_MIN_SPAN_S = 9.8` the placement runs past the break and this arm
             # reds the CORRECT implementation.
-            if calls["n"] == late:
+            if burst_state["started_at"] is None:
+                # Still in the healthy prefix. Wait until the POLL has genuinely run past the span
+                # bound in SIMULATED TIME — measured on the clock, so no derivation has to assume
+                # what a sample costs. The margin is THREE steps: TWO cover the reads taken before
+                # the loop (`deadline`, `poll_started`, both visible a few lines above), so a
+                # from-`poll_started` span is strictly GREATER than the bound at the burst's first
+                # sample, and the third is slack. MEASURED at `+ step_s`: span 1.90 < 2.0, i.e. the
+                # mutant did NOT fire and this arm went SILENT — the margin is load-bearing, not
+                # decoration.
+                if clock.now - _FakeClock.START < _CENSUS_ERROR_MIN_SPAN_S + 3 * step_s:
+                    return [], None
+                burst_state["started_at"] = calls["n"]
+                burst_state["left"] = burst
+            if burst_state["left"]:
+                burst_state["left"] -= 1
                 clock.step_s = 0.0
-            elif calls["n"] >= late + burst:
+                return [], err
+            if clock.step_s == 0.0:
                 clock.step_s = step_s
-            return ([], err) if late <= calls["n"] < late + burst else ([], None)
+            return [], None
         return ([], err) if calls["n"] == 1 else ([], None)
 
     class _Completed:
@@ -4681,8 +4694,9 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     # `_row_for_pid` shells out to `ps` for a DIAGNOSTIC only; stub it so the arm stays hermetic.
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _Completed())
     if census_kind == "persistent_beyond_budget":
-        # Override the bound AFTER `late`/`burst` are derived (they describe `late_pair`) and BEFORE
-        # the call, because the gate being unreachable inside the budget is precisely the case.
+        # Override the bound AFTER the placement state is built (it describes `late_pair`) and
+        # BEFORE the call, because the gate being unreachable inside the budget is precisely the
+        # case.
         monkeypatch.setattr(module, "_CENSUS_ERROR_MIN_SPAN_S", 1e9)
 
     raised = _verdict_or_fail(
@@ -4696,10 +4710,14 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     if census_kind == "once":
         assert calls["n"] > _CENSUS_ERROR_STREAK, "a single error must not decide the verdict"
     if census_kind == "late_pair":
-        assert calls["n"] > late + burst, (
+        assert burst_state["started_at"] is not None, (
+            "the burst never started: `_CENSUS_ERROR_MIN_SPAN_S` was not reachable inside the "
+            "poll's own budget, so this arm never placed the blip and graded the deadline arm "
+            "instead — raise the poll's budget or lower the bound (#12039)")
+        assert calls["n"] > burst_state["started_at"] + burst, (
             "the poll must keep running after a burst that satisfies the COUNT but not the SPAN "
-            f"(late={late}, burst={burst}) — a census verdict here is the #5049 rule-1 false red "
-            "this arm pins against")
+            f"(started_at={burst_state['started_at']}, burst={burst}) — a census verdict here is "
+            "the #5049 rule-1 false red this arm pins against")
 
 
 def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
@@ -4832,6 +4850,26 @@ def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
         "error would be excused as the box's and the regression this file pins stays green "
         "forever. Read the INVOCATION first: a mistyped field exits non-zero with empty stdout "
         "and raises nothing, so the `except` arm never fires")
+
+
+def test_the_outside_signal_set_is_exactly_the_signals_the_box_sends() -> None:
+    """`_OUTSIDE_SIGNALS` is the rule-1/rule-4 boundary, so its MEMBERSHIP must be pinned.
+
+    A signal in this set SKIPS (the box killed the fixture — orphan sweep, OOM sweep, the shard's
+    `timeout`); a signal outside it FAILS as a substrate crash. Shrinking the set therefore routes
+    a box-caused kill into the crash arm — a FAIL on a required shard for something the box did,
+    which is the inversion this PR exists to remove. Nothing pinned the membership: measured on a
+    copy at the cycle-8 head, `_OUTSIDE_SIGNALS = frozenset({signal.SIGKILL})` left the whole file
+    green (`175 passed`), because the parametrized expiry arm only drove `-9`. The `-15` case above
+    now covers the second most likely signal behaviourally; this assertion covers the other two
+    (`SIGINT` from an interrupt, `SIGHUP` from a dropped session), which no arm drives.
+    """
+    assert frozenset(
+        {signal.SIGKILL, signal.SIGTERM, signal.SIGINT, signal.SIGHUP}) == _OUTSIDE_SIGNALS, (
+        "`_OUTSIDE_SIGNALS` is the boundary between 'the box killed it' (skip, #5049 rule 1) and "
+        "'the substrate crashed' (FAIL, rule 4). A member added here excuses a real crash; one "
+        "removed FAILs a required shard for the box's own doing — state the change deliberately "
+        "in the arms above rather than editing this set (#12039)")
 
 
 def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
