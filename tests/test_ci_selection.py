@@ -14106,17 +14106,33 @@ def test_the_emission_block_guard_is_not_vacuous():
         721.8: set("abcdegijk"), 721.7: {"f", "h"}}, (
         "a clause wrapped across two comment lines was not joined into one sentence — a figure that "
         f"happens to land on the next line then makes a claim unread: {wrapped}")
+    # ⛔ ROUND 5 SPLIT THE GUARD, so BOTH halves of the split need a witness or the split is
+    # reversible with everything green (measured: restoring the pre-round-5 order leaves this suite
+    # at 2 passed, and deleting the `not groups` return does too). These two fixtures carry a
+    # `ceil(...)` clause and NO partition clause — the shape that makes the two branches disagree.
+    #   1. wrong multiplier → MUST raise for the headroom, not fall down the generic `None` path
+    #      this check exists to avoid (that is the whole reason the assert now precedes the
+    #      empty-`groups` return);
+    #   2. correct multiplier → MUST be `None`, because the block states no emission to grade.
+    with pytest.raises(AssertionError, match="WATCHDOG_HEADROOM"):
+        _emission_block_claims("# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
+    assert _emission_block_claims(
+        "# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n") is None, (
+        "a block with a correct derivation but NO partition clause states no emission to grade — "
+        "it must read as `None`, not as a claim")
     # The RANGE spelling this block ITSELF used at `4ff7964acc` (`a–e, g, i–k`) and
-    # `29a2da4c9c` (`a–e, i, j`) — an arm no other fixture reaches, because every other
-    # sample spells its names out. Without this, `_EMISSION_RANGE_RE` and the `span`
-    # branch could be deleted with both rows still green, and the map's other spelling
-    # would silently become an unread claim (the no-op-gate class this file keeps
-    # re-learning). Measured: neutering the pattern reds this assertion and nothing else.
+    # `29a2da4c9c` (`a–e, i, j`). ⛔ `wrapped` above reaches this same arm with the `a–e, g, i–k`
+    # mix, so this fixture deliberately uses the OTHER historical spelling — otherwise the two
+    # would be the same test twice, and the claim that it pins `29a2da4c9c`'s spelling would be
+    # prose about a string the file never contains (which is what an earlier cut of this comment
+    # did). Without it, `_EMISSION_RANGE_RE` and the `span` branch could be deleted and the map's
+    # other spelling would silently become an unread claim. Measured: neutering the pattern reds
+    # this assertion and `wrapped`.
     ranged = _emission_block_claims(
-        "# nine shards at 721.8 s (a–e, g, i–k) and two at 721.7 s (f, h)\n"
+        "# seven shards at 721.8 s (a–e, i, j) and two at 721.7 s (f, h)\n"
         "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
-    assert ranged is not None and ranged[0][721.8] == set("abcdegijk"), (
-        "the RANGE spelling this block used at `4ff7964acc`/`29a2da4c9c` is unread — an arm "
+    assert ranged is not None and ranged[0][721.8] == set("abcdeij"), (
+        "the RANGE spelling this block used at `29a2da4c9c` (`a–e, i, j`) is unread — an arm "
         "that only reads explicit lists turns the map's other spelling into an unread claim: "
         f"{ranged}")
     # A SHARD FIGURE the clause parser cannot read is invisible to the row above — and this
