@@ -3719,27 +3719,44 @@ def _row_for_pid(pid: int) -> str:
     in caller 2 it IS the assertion's subject (that test's verdict is `assert row`). Calling it
     "never an oracle" was true of caller 1 only, and contradicts caller 2 below.
 
-    TWO callers (#12039), and BOTH depend on the same ⚠️: `poll()` collects the status and a
+    FOUR call sites (#12039), and they do NOT play one role. `poll()` collects the status and a
     collected child has no row left to quote, so every call site reads the row FIRST.
 
       1. the fixture test's FAILURE path — when the poll ends without the census seeing the
          fixture's pid (the deadline expiring, or the child dying early), what settles the cause
          in one run is whether the table holds the fixture at all, holds it under a truncated
-         argv[0], or does not hold it at all;
+         argv[0], or does not hold it at all. DIAGNOSTIC: interpolated into a message;
       2. `test_child_exited_reads_the_status_without_reaping_the_row`, on a PASSING path, where
          the row IS the assertion's subject — it is how `_child_exited`'s `WNOWAIT` is proven to
-         have left the status uncollected.
+         have left the status uncollected;
+      3. the CAPABILITY GATE in `test_ps_answers_is_the_control_it_claims_to_be`;
+      4. the CAPABILITY GATE in `test_child_exited_reads_the_status_without_reaping_the_row`.
 
-    ("Only ever called on a failure path" was true before caller 2 existed, and is not any more.)
-    `""` means the table has no row for the pid.
+    ⛔ CALLERS 3 AND 4 ARE GATES, NOT DIAGNOSTICS (#12039 cycle 14 P1/P2): they decide SKIP vs
+    FAIL, and at site 3 this call is the *witness* that stops a broken `_ps_answers` from skipping
+    the very test that must catch it. Its argv is pinned textually by its own guard, because
+    dropping `-p` would make it answer from the whole table for ANY pid and silently satisfy
+    `assert row` at site 2.
+
+    ⛔ AND IT MUST CARRY A TIMEOUT (#12039 cycle 14 P1). It had none, which made it the worst kind
+    of authority: a `ps` slower than `_ps_answers`'s 60 s budget answered HERE while the probe said
+    "cannot answer", and `assert answers is True` turned that into a required-shard FAIL produced by
+    LOAD — the #5049 rule-1 inversion this PR exists to remove — while a `ps` that HUNG held the
+    shard open indefinitely (measured: `timeout -s KILL 45` → exit 137, zero output). A timeout, or
+    any `OSError`/`SubprocessError`, returns `""`, so an unreadable-in-time table lands on the
+    existing SKIP arm and can never be what reds the shard.
+
+    `""` means the table has no row for the pid — or could not be read within the budget.
     """
     import subprocess  # no module-level import in this file; the caller imports it too
 
-    out = subprocess.run(
-        ["ps", "-ww", "-p", str(pid), "-o", "command="],
-        capture_output=True, text=True,
-    ).stdout.strip()
-    return out
+    try:
+        return subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=_CENSUS_SAMPLE_TIMEOUT_S,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):  # a `ps` that cannot answer in time
+        return ""
 
 
 #: The signals a signal-death most often comes from OUTSIDE the fixture: SIGKILL/SIGTERM from
@@ -4496,7 +4513,8 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
     monkeypatch.setattr(module, "time", clock)
     monkeypatch.setattr(module.fs, "pi_processes", lambda: ([], None))
     monkeypatch.setattr("subprocess.Popen", lambda *a, **k: child)
-    # `_row_for_pid` shells out to `ps` for a DIAGNOSTIC only; stub it so the arm stays hermetic.
+    # `_row_for_pid` shells out to `ps`; stub it so the arm stays hermetic. It is the DIAGNOSTIC
+    # here and the CAPABILITY WITNESS at the two gate sites, so one stub covers both roles.
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _Completed())
 
     raised = _verdict_or_fail(
@@ -4884,7 +4902,8 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     monkeypatch.setattr(module.fs, "pi_processes", _census)
     monkeypatch.setattr(module, "_ps_answers", lambda: ps_answers)
     monkeypatch.setattr("subprocess.Popen", lambda *a, **k: child)
-    # `_row_for_pid` shells out to `ps` for a DIAGNOSTIC only; stub it so the arm stays hermetic.
+    # `_row_for_pid` shells out to `ps`; stub it so the arm stays hermetic. It is the DIAGNOSTIC
+    # here and the CAPABILITY WITNESS at the two gate sites, so one stub covers both roles.
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _Completed())
     if census_kind == "persistent_beyond_budget":
         # Override the bound AFTER the placement state is built (it describes `late_pair`) and
@@ -5075,7 +5094,7 @@ def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
     # It pins the WHOLE argv, not two substrings: `-p <pid>` is the selector the function's own
     # docstring rests on ("asked about our OWN pid so it cannot depend on the fixture"), and
     # dropping just that token left this file `184 passed` (measured), so substrings are not the
-    # property. The census invocation (`ps -ww -axo …`) is pinned separately, in the header guard.
+    # property. `_row_for_pid`'s own argv carries its own pin, below.
     invocation = inspect.getsource(_ps_answers)
     assert (
         '["ps", "-p", str(os.getpid()), "-o", "command="]' in invocation
@@ -5085,6 +5104,18 @@ def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
         "answering from the whole table, and every census error would then be excused as the "
         f"box's. Its invocation is: {invocation!r}")
 
+    # ⛔ AND THE WITNESS'S ARGV, BY THE SAME RULE (#12039 cycle 14 P2). Without `-p` it answers
+    # from the WHOLE table for any pid, which satisfies `assert row` in the `WNOWAIT` test even when
+    # the child's status was collected — disarming the only pin on `_child_exited`'s real branch
+    # (measured: `_child_exited → proc.poll()` plus a `-p`-less witness = `184 passed`).
+    witness_invocation = inspect.getsource(_row_for_pid)
+    assert (
+        '["ps", "-ww", "-p", str(pid), "-o", "command="]' in witness_invocation
+    ), (
+        "`_row_for_pid` stopped selecting ONE pid: it answers from the whole table, so the "
+        "`WNOWAIT` pin's `assert row` cannot fail and the capability witness answers for a table "
+        f"it never read. Its invocation is: {witness_invocation!r}")
+
     if shutil.which("ps") is None:  # pragma: no cover — no `ps` to ask
         pytest.skip("no `ps` on this box: the positive direction cannot be measured")
     # ⛔ THE SKIP NEEDS A WITNESS THAT IS NOT THE PREDICATE UNDER TEST (#12039 cycle 13 P1). This
@@ -5093,8 +5124,11 @@ def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
     # test exists to catch) read as "this box cannot answer" and SKIPPED a required-shard FAIL arm.
     # Measured: `_ps_answers`'s real call given `timeout=0.000001` → `182 passed, 2 skipped, 0
     # failed` here, against `1 failed` on the parent commit. The witness is now a DIFFERENT
-    # invocation: the census itself, asked about our own pid. A table one probe can read while the
-    # other says it cannot is the CONTROL's breakage, and it FAILS.
+    # invocation — `_row_for_pid(os.getpid())`, i.e. `ps -ww -p <pid> -o command=`: the SAME
+    # question with `-ww`, on its own budget, through a probe that shares no code path with
+    # `_ps_answers`. (It is NOT the census's `ps -ww -axo …` call; neither test makes that one.) A
+    # table one probe can read while the other says it cannot is the CONTROL's breakage, and it
+    # FAILS.
     answers = _ps_answers()
     if not answers and not _row_for_pid(os.getpid()):
         # pragma: no cover — a `ps` that exists and cannot answer
@@ -5103,9 +5137,10 @@ def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
             "this box cannot measure the positive direction; the invocation was pinned TEXTUALLY "
             "above")
     assert answers is True, (
-        "`ps -p <our pid> -o command=` answered nothing while the census's own `ps -ww -axo …` "
-        "DID return our row, so the control is what broke — every census error would be excused "
-        "as the box's and the regression this file pins would stay green")
+        "`ps -p <our pid> -o command=` answered nothing while `_row_for_pid` — the same question "
+        "with `-ww`, on its own budget — DID return our row, so the control is what broke: every "
+        "census error would be excused as the box's and the regression this file pins would stay "
+        "green")
 
 
 def test_the_outside_signal_set_is_exactly_the_signals_the_box_sends() -> None:
@@ -5153,8 +5188,8 @@ def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
     # 12 P2, cycle 13 P1). Without a gate, a `ps` that exists but cannot answer turns the row
     # assertion below into a required-shard FAIL for a box reason — the inversion this PR removes
     # everywhere else. Keyed on `_ps_answers()` ALONE the gate is a fail-open: a broken control
-    # would skip this test too. The census is the witness, so only a box where BOTH invocations
-    # come back empty skips.
+    # would skip this test too. `_row_for_pid` is the witness (same question with `-ww`, own
+    # budget), so only a box where BOTH invocations come back empty skips.
     if not _ps_answers() and not _row_for_pid(os.getpid()):
         # pragma: no cover — a `ps` that exists and cannot answer
         pytest.skip(
