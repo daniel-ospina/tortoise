@@ -1128,8 +1128,6 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     # derived from the interpreter we are already running under, so it names the prefix the
     # copied bytes would have used in place.
     child_env = {**os.environ, "PYTHONHOME": sys.base_prefix}
-    gone = tmp_path / "gone-socket-dir"
-    line = f"{binary} unixsocket:{gone}/redis.socket"
     # ⛔ AND THE SOCKET DIR MUST EXIST, or the fixture is a legitimately REAPABLE
     # process and this repo's own cleanup kills it (#14347 CI red, measured).
     # `reap-redislite-orphans.py --apply` runs in the setup of EVERY leg
