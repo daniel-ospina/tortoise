@@ -2958,8 +2958,8 @@ def _strip_shell_comments(script: str) -> str:
         # stripped as a comment, and a substitution on it RAN unremarked — the silent pass this
         # file calls worse than no pin, one level out from the quoted-`}` case below:
         #
-        #   $ bash -e -c 'echo "${x:-}"} # $(touch /tmp/dq1)"}"'    → '} #', dq1 CREATED
-        #   $ bash -e -c 'echo "${x:-}"} # `touch /tmp/dq2`"}"'     → '} #', dq2 CREATED
+        #   $ bash -e -c 'echo "${x:-"} # $(touch /tmp/dq1)"}"'    → '} #', dq1 CREATED
+        #   $ bash -e -c 'echo "${x:-"} # `touch /tmp/dq2`"}"'     → '} #', dq2 CREATED
         #   $ _executable_prose_lines(…)                            → []   (BOTH)
         #
         # …while the SAME script with the outer `"` removed was already reported (`brace_quotes`
@@ -2967,10 +2967,13 @@ def _strip_shell_comments(script: str) -> str:
         # green and this one did not. `not brace_quotes` is the whole of the ordering fix: once a
         # level is open the scan falls through to the `${`-consuming branch below, whose
         # per-level quote state is already correct. It is deliberately the ONLY context named
-        # here: measured, a `$[ … ]` or `$(( … ))` inside a double-quoted span does not execute
-        # what follows the `#` (bash rejects the arithmetic and no marker is created), and a
-        # `$( )`/backtick there survives in `out` and is reported by the token scan — none of the
-        # three is a silent pass today, so modelling them here would be unmeasured code.
+        # here because of what was MEASURED, not assumed: a `$[ … ]` inside a double-quoted span
+        # DOES run the substitution before the arithmetic rejects the text (marker IS created,
+        # `syntax error: invalid arithmetic operator`), and a `$(( … ))` there is a
+        # `bad substitution` parse error that creates none — but in BOTH the `$(` stays in
+        # `out`, so the token scan reports the line and neither is a silent pass. A `$( )` or a
+        # backtick there likewise survives and is reported. None of the three needs the brace
+        # model, so modelling them here would be unmeasured code.
         if quote == '"' and not brace_quotes:
             # A backslash escapes the next byte inside double quotes, so `\"` must not
             # close the quote. The PAIR is kept verbatim here; this lexer does not judge
@@ -4199,6 +4202,43 @@ def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
     assert _executable_prose_lines(arith) == ["echo $(( 1 << 2 ))"], (
         "arithmetic `<<` opened a phantom heredoc body and swallowed the rest of the block — "
         f"the real comment after it was scanned as code: {_executable_prose_lines(arith)!r}"
+    )
+
+
+def test_the_report_quotes_the_physical_line_bash_READS():
+    """`splitlines()` is not `split("\\n")`: a `\\r` made the report name the WRONG line (P3).
+
+    Fresh-context review of #14314. `_executable_prose_lines` derives `physical` (the lines it
+    RETURNS) and `owners` (each joined character's physical-line index) from the same text — but
+    `owners` advances only on `\\n`, while `str.splitlines()` also splits on `\\r`, `\\v`, `\\f`,
+    `\\x1c`-`\\x1e`, `\\x85` and the Unicode line separators. The two indices then disagree and
+    the report quotes a line that does not contain the token:
+
+        $ python3 -c "print('echo ok\\recho $(printf CR) here\\n'.splitlines())"
+        ['echo ok', 'echo $(printf CR) here']
+        $ _executable_prose_lines(…)                     → ['echo ok']
+
+    bash reads that `\\r` as an ordinary byte of ONE physical line, so `['echo ok']` is a line a
+    human cannot find in the file — the unfollowable-output class this PR ends for the canary's
+    own log, and contrary to this function's promise to quote text that IS in the file. The gate
+    still went RED (no false pass), which is why the defect is a P3; the pin exists because an
+    UNPINNED diagnostic fix regresses silently — measured, reverting it leaves all 116 tests
+    green, which is the vacuous-pin direction this file refuses.
+    """
+    cr_line = "echo ok\recho $(printf CRLINE) here\n"
+
+    # PREMISE, executed: the substitution really runs (its OUTPUT cannot come from the source),
+    # so the only question left is WHICH line the report names for it.
+    ran = subprocess.run([*_RUNNER_SHELL, cr_line], capture_output=True, text=True)
+    assert ran.returncode == 0 and "CRLINE" in ran.stdout, (
+        f"the substitution did not run, so this pin's premise is gone: {ran.stdout!r} "
+        f"{ran.stderr!r}"
+    )
+
+    assert _executable_prose_lines(cr_line) == ["echo ok\recho $(printf CRLINE) here"], (
+        "the report must quote the one physical line bash reads; a `splitlines()` regression "
+        "names a line that does not contain the token — `['echo ok']` is text a human cannot "
+        f"find: {_executable_prose_lines(cr_line)!r}"
     )
 
 
