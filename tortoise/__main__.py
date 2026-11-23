@@ -6084,8 +6084,11 @@ def _cmd_create_point(args) -> int:
         # safe" — and BOTH halves were unactionable here: the advertised delay
         # is a `Retry-After` HEADER this verb discarded, and nothing told the
         # caller how to make the repeat safe (the `dedup` fold above does).
-        print(_create_point_retry_hint(e, dedup_used=bool(payload.get("dedup"))),
-              file=_sys.stderr)
+        # Empty for codes whose next action is not "re-send" (a 422 rejects
+        # the body), so nothing is printed that would misadvise one.
+        _hint = _create_point_retry_hint(e, dedup_used=bool(payload.get("dedup")))
+        if _hint:
+            print(_hint, file=_sys.stderr)
         return 1
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
@@ -6129,8 +6132,21 @@ def _create_point_retry_hint(exc, *, dedup_used: bool) -> str:
     * how to override — no flag is required to re-send; the cost of omitting
       `--dedup` is a duplicate, which is the caller's call to make.
 
+    ⛔ WHICH ARM SPEAKS ABOUT THE WRITE — the claims are not transferable. A
+    `504` is the transport's wait-bound breach, whose own text says the work may
+    still complete (measured: it can, and it does not always — two attempts on
+    one content landed once). A `429` is an ADMISSION refusal (`hosted_api`'s
+    ingest/rate-limit refusals are answered before the write runs), so it must
+    not inherit the duplicate warning; a bare `503` may come from a proxy whose
+    origin died mid-write, so it gets the safe-re-send advice and NOT the claim
+    that the write completed. Anything else returns empty — a `422` is the
+    server rejecting the body, and "re-send it" is not the next action.
+
     Kept out of the handler so the wording is testable without an HTTP mock.
     """
+    code = getattr(exc, "code", None)
+    if code not in (429, 503, 504):
+        return ""
     retry_after = None
     headers = getattr(exc, "headers", None)
     if headers is not None:
@@ -6143,24 +6159,31 @@ def _create_point_retry_hint(exc, *, dedup_used: bool) -> str:
         lines.append(
             f"The server advertised Retry-After: {retry_after} s — wait that "
             f"long before re-sending.")
-    elif getattr(exc, "code", None) in (429, 503, 504):
+    else:
         lines.append(
             "The server advertised no Retry-After; wait the delay its body "
             "names before re-sending.")
-    if getattr(exc, "code", None) in (429, 503, 504):
+    if code == 429:
+        # Refused at admission: the write never ran, so a re-send after the
+        # delay cannot duplicate anything.
+        lines.append(
+            "A rate-limit refusal is answered before the write runs, so "
+            "re-sending after that delay is safe.")
+        return "\n".join(lines)
+    if code == 504:
         lines.append(
             "This failure does NOT mean nothing was written: the work may have "
             "completed on the server.")
-        if dedup_used:
-            lines.append(
-                "Re-running is safe with this attempt's --dedup: the server "
-                "folds identical content onto the existing Point instead of "
-                "adding another.")
-        else:
-            lines.append(
-                "Re-running WITHOUT --dedup can create a duplicate Point for "
-                "content that already landed (measured: 4 attempts, 4 Points). "
-                "Re-run with --dedup to make the retry safe.")
+    if dedup_used:
+        lines.append(
+            "Re-running is safe with this attempt's --dedup: the server "
+            "folds identical content onto the existing Point instead of "
+            "adding another.")
+    else:
+        lines.append(
+            "Re-running WITHOUT --dedup can create a duplicate Point for "
+            "content that already landed (measured: 4 attempts, 4 Points). "
+            "Re-run with --dedup to make the retry safe.")
     return "\n".join(lines)
 
 
@@ -16204,7 +16227,9 @@ def _cmd_doctor(args):
                     _hosted_identity = (_h_path.name if _h_path else "env", _h_url)
             except MemoryError:
                 raise
-            except Exception:  # a refused store is §8's finding
+            except (_ConfigError, OSError, RuntimeError):
+                # The same state §8's own resolver arm grades: a refused store is
+                # its finding, not this row's — no network was attempted either.
                 _hosted_identity = None
             if _hosted_identity is not None:
                 _src, _h_url = _hosted_identity

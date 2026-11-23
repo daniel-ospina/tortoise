@@ -256,6 +256,23 @@ class TestCreatePointRetrySafety:
         assert rc == 1
         assert "--dedup" not in err
         assert "Retry-After" not in err
+        assert "re-sending" not in err
+
+    def test_a_rate_limit_refusal_does_not_claim_a_duplicate_risk(
+            self, tmp_path, capsys):
+        """The arms are NOT interchangeable: a 429 is an admission refusal — the
+        write never ran — so it must not inherit the 504 duplicate warning, which
+        would tell a caller to reach for a flag that changes nothing here."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(429, {"Retry-After": "30"})):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "Retry-After: 30" in err
+        assert "re-sending after that delay is safe" in err
+        assert "duplicate" not in err
+        assert "may have" not in err
 
 
 class TestConfigErrorCommandHandling:
