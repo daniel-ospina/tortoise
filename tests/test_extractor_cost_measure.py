@@ -842,13 +842,22 @@ def test_the_documented_reproduce_command_regenerates_the_committed_bundle(
     conclude the artifacts had rotted.
     """
     monkeypatch.delenv("TORTOISE_S4_DELTA", raising=False)
-    # ⛔ The other two render switches are AMBIENT too: a dev shell in compact
-    # mode (`TORTOISE_EXTRACTOR_PROMPT=compact`) or in classify-later
-    # (`TORTOISE_CLASSIFY_LATER=1`) renders different S2/S4 statics, and without
+    # ⛔ The other render switches are AMBIENT too: a dev shell in compact mode
+    # (`TORTOISE_EXTRACTOR_PROMPT=compact`), in classify-later
+    # (`TORTOISE_CLASSIFY_LATER=1`), or with the referentiality contract armed
+    # (`TORTOISE_REFERENTIALITY=1`) renders different S1/S2 statics, and without
     # these pins the failure would read as a rotted artifact. The bundle was
-    # generated under the production defaults.
+    # generated under the production defaults. The `TORTOISE_REFERENTIALITY`
+    # pin is the FOURTH, found by measuring rather than by reading the three the
+    # README named: measured, it moves `output_contract` 951 -> 1,019 and the
+    # S1 story 2,656 -> 2,588. `docs/evidence/7949-capstone/probes/
+    # capstone_measure.py`'s `DOOR_PINNED_OFF` already listed it as an ambient
+    # prompt-contract switch, which is why the `#14343` capstone session — the
+    # one the README sends a re-runner into — is exactly the session that
+    # carries it.
     monkeypatch.delenv("TORTOISE_EXTRACTOR_PROMPT", raising=False)
     monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+    monkeypatch.delenv("TORTOISE_REFERENTIALITY", raising=False)
     bundle = _REPO_ROOT / "docs" / "evidence" / "14343-amplify"
     committed = json.loads((bundle / "decomposition.json").read_text())
     regenerated = m.decompose(

@@ -23,13 +23,20 @@ count already in `#14295`'s `measurements.jsonl`.
 
 ```bash
 # Requires the PRODUCTION render posture — `TORTOISE_S4_DELTA`,
-# `TORTOISE_EXTRACTOR_PROMPT` and `TORTOISE_CLASSIFY_LATER` all unset: each
-# moves S2/S4's static prose, so a shell in compact/classify-later mode (or a
-# revert-flagged S4_DELTA) regenerates different §1/§2 numbers and the diff
-# reads as rot. `tests/test_extractor_cost_measure.py` pins all three. The
+# `TORTOISE_EXTRACTOR_PROMPT`, `TORTOISE_CLASSIFY_LATER` and
+# `TORTOISE_REFERENTIALITY` all unset: each moves the S1/S2/S4 static prose, so a
+# shell in compact/classify-later mode, with the referentiality contract armed,
+# or on a revert-flagged S4_DELTA regenerates different §1/§2 numbers and the
+# diff reads as rot. Measured per switch (the first three move 8–34 lines;
+# `TORTOISE_REFERENTIALITY=1` moves `output_contract` 951 -> 1,019 and the S1
+# story 2,656 -> 2,588). `tests/test_extractor_cost_measure.py` pins all FOUR —
+# the fourth came from measuring the set rather than reading it, and the
+# capstone door (`docs/evidence/7949-capstone/probes/capstone_measure.py`,
+# `DOOR_PINNED_OFF`) already listed it as an ambient prompt-contract switch. The
 # `#14343` layout toggle (`TORTOISE_S4_EMBED_JSON`) is NOT in that set: measured,
 # it moves no recorded number here — the embed-list region is priced from the
-# receipts, not re-rendered.
+# receipts, not re-rendered. `TORTOISE_LABEL_ORDER` changes bytes but not token
+# counts (3,187 either way), so it needs no pin.
 uv run python tools/extractor_cost_measure.py decompose \
     --evidence docs/evidence/14277-extractor-cost/measurements.jsonl \
     --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
