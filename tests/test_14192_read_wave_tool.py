@@ -12637,9 +12637,15 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # this arm naming the row. ⛔ ITS GUARANTEE IS EXACTLY THIS AND NO MORE (#14395 review P3):
         # it proves the read literal is an argument of SOME call, not that the callee of that call
         # is the resolved mapping read — a row rewritten to `_x = print` + `_x("results = …")`
-        # still satisfies it. The half it cannot see is covered by the row's own VERDICT
-        # (`not refused`), which is what a row exists to pin; this arm only stops the shape from
-        # degrading silently while that verdict stays constant.
+        # still satisfies it. ⛔ AND THE ROW'S OWN VERDICT DOES **NOT** COVER THAT BLIND HALF,
+        # MEASURED (#14395): the same `_x = print` mutant still reads `refused=False`, so for
+        # EVERY row except the one the call-of-call guard below covers, NEITHER arm can tell a
+        # live lever from a `print` — the previous sentence here claimed the verdict covered it,
+        # and the mutation falsifies that. What a row DOES pin is that the class is not closed:
+        # `refused` going True is what reds it and forces this table to be edited. The shape is
+        # therefore a declaration a reader keeps honest, NOT a detection — a row that stops
+        # exercising the read is the same defect class as a stale figure in this docstring, and
+        # re-measuring it is the repair.
         assert [
             n for n in ast.walk(_pin_source(body(*lines)))
             if isinstance(n, ast.Call)
