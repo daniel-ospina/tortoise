@@ -409,7 +409,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1400 lines at this head, measured through THIS
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1451 lines at this head, measured through THIS
     function's own walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`, so a
     prose edit that moves the run REDS naming both numbers instead of quietly publishing a stale
     figure, which is what the sentence this one replaces asked a reader to do by hand; re-derive it
@@ -429,7 +429,9 @@ def _residue_block() -> str:
     above is RE-MEASURED on THIS merged tree rather than inherited from either side — which the
     next reflow repeats; THIS BRANCH's own review-round prose then took the run past `main`'s
     1376 to 1400, measured through this walk on each blob (1376 on `origin/main`'s, 1400 here) —
-    the same rule, applied once more), AND THE ARMS GRADE ALL OF IT
+    the same rule, applied once more; the merge with `origin/main` `9aaaff10` KEPT both sides and
+    re-pin paragraph for `main`'s stale residue pin added 15 more, so the figure above was
+    re-measured on THAT merged tree rather than inherited from either side), AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so

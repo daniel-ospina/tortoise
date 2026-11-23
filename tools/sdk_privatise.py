@@ -1546,7 +1546,22 @@ SWEEP_NAMES = 66
 #: block above attributes row-by-row on ITS base (11861 → 11875), which is the cross-check that the
 #: branch's contribution survived the merge unchanged; ⛔ the sum is a CHECK, never the source: the
 #: pair below is `--repin`'s own output at the resolved tree.
-SWEEP_RESIDUE = (11886, "0fc02dac32dfe1dd")
+#: ⛔ RE-CUT AGAIN AT THE `origin/main` MERGE (`663eb19` × `main` `9aaaff10`), AND THE MOVER IS
+#: `main`'S RED, NOT THIS BRANCH'S. `main`'s own tree at `9aaaff10` derives
+#: **(11887, "e21c8c3fd680e043")** against its own pin of 11886 — measured by running `--check` in
+#: a detached worktree at that sha — so `surface-guard` was RED on `main` BEFORE this branch merged
+#: it, and the merged tree reproduces `main`'s set bit-for-bit (same digest), never a new one.
+#: Attribution, measured rather than assumed: THIS branch contributes **0** references of that
+#: class — `git diff -U0 <merge-base> 663eb19 | grep '^+' | grep -cE '\.(ro_)?(query|execute)\s*\('`
+#: prints **0** — while the `+1` is `main`'s `#14389` (`9aaaff10`), which adds exactly ONE new
+#: residue shape row (`1  lost_fields.update`) and did not re-cut this pin with the file;
+#: `--report --base 28ca66878d7c --top 5000` on `9d6d2e347` (its parent) versus `9aaaff10` is the
+#: one-row diff that says so. DECLARED, not swept: `lost_fields` is a plain `set[str]` local in a
+#: test helper (`tests/test_14343_embed_list_serialization.py:377`), so the untyped-receiver arm is
+#: doing exactly what it documents, and re-spelling another PR's file to move a count would be the
+#: wrong repair. The pair below is `--repin`'s own output on the fully resolved merged tree — a
+#: THIRD measurement, neither parent's line — and carrying it here repairs `main`'s red as well.
+SWEEP_RESIDUE = (11887, "e21c8c3fd680e043")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
