@@ -611,23 +611,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6989`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7599-7602`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7605-7644`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:844`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8522`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:916`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`expand_ops` preview at `:7190`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11597`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5250`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:38171`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:58387` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:62585` (reads)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:62605` (`_config_reset_state`)'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2712-2723'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2724-2726'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24627'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7226'): 2,  # measured: `grep -o 'search_engine.py:7226' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 2, at the header's prose mention (`:191`) and the `Q2f` label-scan table row (`:436`) — so a prose edit reds this pin too, not only a table edit. The duplicate `: 1` row that `ruff`'s F601 flagged was dropped at `71c607c777` on this branch, and `origin/main` carries the same removal independently, which is why THIS diff shows no `-` line here: the branch commit message is the record, not the net diff. The runtime value was already 2, so it was a dead-line removal and no expectation moved.
@@ -673,19 +659,13 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # one ROW per SITE, never one row per STRING: the label-scan row writes this address BARE
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:25071-25075`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22840-22841'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22969-22970'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23062'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23549'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23551-23553'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23615'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:25071-25075'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45713-45725'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45713-45730'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:51620'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51620`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`expand_ops` preview at `:7190`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
     ('docs/00_index.md', '`sdk.py:28582` at this head'): 1,
     # ⛔ #14087 review round 7: the pin row added for the SAME line's other present-tense address.
@@ -726,13 +706,84 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16078-16083'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3802'): 1,
     # the SIX restored BARE sibling sites + row 2d's `:Meta` pair (#14038 merge-resolution restore) —
-    # each count MEASURED on the document: `grep -o -F '<token>' <doc> | wc -l`.
+    # each count MEASURED on the document: `grep -o -F '<token>' <doc> | wc -l`. THREE are written
+    # here; the two `sdk.py` `:Tag` sites (`62585`, `62605`) are already carried ABOVE, and the
+    # `origin/main` side of the `#14038` fold re-wrote them here as well — F601-flagged duplicates
+    # whose last copy silently replaced the first. Dropped rather than re-counted (see the arm
+    # `test_the_occurrence_table_declares_every_key_exactly_once`).
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:15874`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:16078-16083`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3802`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:62585` (reads)'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:62605` (`_config_reset_state`)'): 1,
 }
+
+
+def test_the_occurrence_table_declares_every_key_exactly_once() -> None:
+    """A repeated key in `_TOKEN_OCCURRENCES` silently keeps the LAST count and discards the review.
+
+    WHY THIS EXISTS. The literal's own header above says every key must appear EXACTLY ONCE, that
+    `ruff`'s F601 is "the only instrument that sees a duplicate", and that "#9314 is the
+    pytest-level guard this file does not have". Measured at `#14038`'s fold: the literal carried
+    22 duplicates — `origin/main`'s side of the merge re-inserting rows the branch already held — and
+    the ONLY red they produced was `agent-infra-ci / lint`, a check that is NOT a required context of
+    this repo. So nothing on the merge path refused them, which is the same shape the header records
+    for `#13345`.
+
+    WHAT IT GRADES, and why it is not a copy of F601's answer: it parses THIS file's own AST, so it
+    runs in the required pytest legs, on a checkout at `fetch-depth: 1`, with no linter installed. It
+    reds on a duplicate key, on a row that the dict cannot hold (row count != len), and on a vacuous
+    parse (a renamed or emptied literal), because an arm that reads nothing must not report success.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+
+    table: ast.Dict | None = None
+    for node in ast.walk(tree):
+        # `_TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {…}` is an AnnAssign; a bare `= {…}`
+        # is an Assign. Both are the same literal, and reading only one shape is how this arm
+        # reported "not found" on the very table it grades.
+        if isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        else:
+            continue
+        if not any(getattr(target, "id", None) == "_TOKEN_OCCURRENCES" for target in targets):
+            continue
+        if isinstance(value, ast.Dict):
+            table = value
+    assert table is not None, "the `_TOKEN_OCCURRENCES` dict literal was not found in this file"
+
+    rows: list[tuple[object, int]] = []
+    for key in table.keys:
+        if isinstance(key, ast.Tuple) and len(key.elts) == 2:
+            rows.append((ast.literal_eval(key), key.lineno))
+
+    assert len(rows) > 100, (
+        f"parsed {len(rows)} row(s) out of the literal — this arm read nothing, so it grades nothing. "
+        "The table's real size is the count the header publishes, not a bound this arm invents."
+    )
+
+    first_seen: dict[object, int] = {}
+    duplicates: dict[object, list[int]] = {}
+    for key, lineno in rows:
+        if key in first_seen:
+            duplicates.setdefault(key, [first_seen[key]]).append(lineno)
+        else:
+            first_seen[key] = lineno
+
+    assert not duplicates, (
+        f"`_TOKEN_OCCURRENCES` repeats {len(duplicates)} key(s). Python keeps the LAST row's count "
+        "and silently discards the reviewed earlier one — and because what survives IS a count, every "
+        "other arm in this file stays green over a tree whose reviewed value is gone. Drop the later "
+        "copy (if the two values DISAGREE, the surviving count is the wrong one and one SITE is "
+        "unguarded — measure the document, do not just delete): "
+        + "; ".join(
+            f"{key} at lines {lines}" for key, lines in sorted(duplicates.items(), key=lambda kv: kv[1])
+        )
+    )
+    assert len(rows) == len(_TOKEN_OCCURRENCES), (
+        f"the literal writes {len(rows)} row(s) but the dict holds {len(_TOKEN_OCCURRENCES)} key(s) "
+        "— a repeated key discarded a reviewed count."
+    )
 
 
 def test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence() -> None:
