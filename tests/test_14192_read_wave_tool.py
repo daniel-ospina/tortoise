@@ -263,6 +263,16 @@ class _ResolutionDidNotConverge(RuntimeError):
 #: diverging shape a failed test instead of a hung one.
 _FIXPOINT_MAX_PASSES = 64
 
+# ⛔ THE BUDGET ITSELF IS GUARDED (#14326 review P1, measured: raising it to 10**9 makes
+# `test_a_BIND_CYCLE_REFUSES_instead_of_spinning` HANG — `rc=124` after 40 s — instead of
+# failing, so the row that exercises the budget reports neither green nor red, which is
+# verbatim the defect the budget was added to close). A hang is not a verdict, so the
+# constant is asserted to be BOUNDED and POSITIVE here, at its own definition.
+assert 0 < _FIXPOINT_MAX_PASSES <= 64, (
+    f"_FIXPOINT_MAX_PASSES={_FIXPOINT_MAX_PASSES} — the fixpoint budget must stay bounded "
+    "and positive: an unbounded one turns the bind-cycle row into a HANG (no verdict at "
+    "all), and a zero/negative one refuses every source at the first pass")
+
 #: Combinations the JOIN forms (an f-string's parts, a `%` template's operands, a
 #: `.format` call's arguments) may build before the resolver refuses. A real file joins a
 #: handful of literals — 4096 combinations is far past anything in `tools/` — and the same
@@ -6188,6 +6198,29 @@ def _generator_filter_findings(key: str, gen: ast.comprehension) -> list[str]:
     return []
 
 
+def _namespace_update_sets_the_constructor(node: ast.Call) -> bool:
+    """True when `node` is `<namespace>.update(...)` that can set `TortoiseSDK`.
+
+    The receiver must be a module's own namespace (`x.__dict__` / `vars(x)`); a plain
+    mapping update only STORES a string and rebinds nothing (measured: `_LABELS.update({
+    "TortoiseSDK": "tortoise.sdk"})` must stay green).
+    """
+    if getattr(node.func, "attr", None) != "update":
+        return False
+    receiver = node.func.value
+    is_namespace = ((isinstance(receiver, ast.Attribute) and receiver.attr == "__dict__")
+                    or (isinstance(receiver, ast.Call)
+                        and getattr(receiver.func, "id", None) == "vars"))
+    if not is_namespace:
+        return False
+    for arg in node.args:
+        if isinstance(arg, ast.Dict) and any(
+                isinstance(k, ast.Constant) and k.value == _SDK_CONSTRUCTOR
+                for k in arg.keys):
+            return True
+    return any(kw.arg in (_SDK_CONSTRUCTOR, None) for kw in node.keywords)
+
+
 def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     """Every reason the name `TortoiseSDK` is not provably the class the product ships.
 
@@ -6282,14 +6315,21 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             # the reviewer flagged shape-only): `x.__dict__.update({"TortoiseSDK": _Mirror})`
             # is the attribute store with the key in a dict, and it needs no receiver test for
             # the same reason as `setattr` — a NON-constant key is not this clause's subject.
-            elif (getattr(node.func, "attr", None) == "update" and node.args
-                    and isinstance(node.args[0], ast.Dict)
-                    and any(isinstance(k, ast.Constant) and k.value == _SDK_CONSTRUCTOR
-                            for k in node.args[0].keys)):
+            # ⛔ …ITS KWARG SPELLING, AND SCOPED TO A NAMESPACE RECEIVER (#14326 review
+            # P1/P2, both MEASURED at `9283c174`). `dict.update` takes keywords, which set
+            # the SAME keys: `_t.__dict__.update(TortoiseSDK=_Mirror)` left the pin GREEN
+            # while the positional form of the identical store was caught, and a `**` splat
+            # is fail-closed for the same reason `_call_argument_findings` refuses one.
+            # Conversely the arm must NOT fire on a mapping that merely HOLDS the name —
+            # an inert label table (`_LABELS.update({"TortoiseSDK": "tortoise.sdk"})`)
+            # stores nothing — so the receiver must be a module's own namespace
+            # (`x.__dict__`, `vars(x)`), which is what `run()`'s deferred import resolves.
+            elif _namespace_update_sets_the_constructor(node):
                 out.append(
                     f"line {node.lineno} `.update`s `{_SDK_CONSTRUCTOR}` into "
                     f"`{ast.unparse(node.func.value)}` — the same rebind through a mapping "
-                    "key, so the pin's provenance clause does not bound it")
+                    "key on a module's own namespace, so the provenance clause does not "
+                    "bound it")
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) \
                 and isinstance(node.slice, ast.Constant) \
                 and node.slice.value == _SDK_CONSTRUCTOR:
@@ -6444,11 +6484,31 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         got = ctor_findings(shipped + mod_dotted)
         assert got, mod_dotted
 
-    keyed_store = (shipped + 'sys.modules["tortoise.sdk"] = _M\n')
+    # ⛔ A GENUINELY UNRELATED KEY, because `sys.modules["tortoise.sdk"]` is NOT one
+    # (#14326 review P2, measured): that is the module `run()`'s deferred import resolves
+    # THROUGH, so a shim stored there delivering `TortoiseSDK` mirrors the door. The store
+    # is caught today only INDIRECTLY (a shim without the module's other names collapses the
+    # session with an ImportError — noise, not the clause), so the control uses a key no
+    # import can reach.
+    keyed_store = (shipped + 'sys.modules["tortoise.other"] = _M\n')
     assert ctor_findings(keyed_store) == []          # an unrelated KEY is not this store
     keyed_ctor = (shipped + '_t.__dict__["TortoiseSDK"] = _Mirror\n')
     got = ctor_findings(keyed_ctor)
     assert got and any("under a string key" in g for g in got), got
+
+    # ⛔ THE KWARG SPELLING OF THE SAME `.update` STORE (#14326 review P1, MEASURED GREEN
+    # at `9283c174`: `_t.__dict__.update(TortoiseSDK=_Mirror)` left the pin green while the
+    # POSITIONAL form of the identical store red). And its two controls: a `vars()`
+    # receiver is the same namespace, an inert label table is not.
+    for kwarg_store in ('_t.__dict__.update(TortoiseSDK=_Mirror)\n',
+                        'vars(_t).update(TortoiseSDK=_Mirror)\n',
+                        '_t.__dict__.update(**{"TortoiseSDK": _Mirror})\n'):
+        got = ctor_findings(shipped + kwarg_store)
+        assert got and any("`.update`s" in g for g in got), (kwarg_store, got)
+
+    labels = (shipped + '_LABELS = {}\n'
+                       '_LABELS.update({"TortoiseSDK": "tortoise.sdk"})\n')
+    assert ctor_findings(labels) == []               # a label table stores nothing
 
     # ⛔ THE `asname` HALF IS ITS OWN CLAUSE (#14326 review P2, measured: deleting it left
     # 31 passed, because the `subclass` row above satisfies the arm's FIRST disjunct).
