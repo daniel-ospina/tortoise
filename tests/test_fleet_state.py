@@ -32,7 +32,7 @@ import pytest
 # product-defect FAIL. Imported at module level (stdlib + pytest only, so the #1686 test-mode
 # import ordering is untouched) because `test_pi_processes_sees_a_real_long_path_lane` needs it
 # on the path where the FIXTURE — not the census — is what went away.
-from tests._verdict import inconclusive
+from tests._verdict import HarnessDefect, inconclusive
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -3767,16 +3767,24 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     measured. It does not widen the match, so the truncation pin keeps its power: a
     `-ww`-less census truncates on every sample, burns the deadline and fails.
 
-    ⛔ THE EXPIRY HAS TWO EXITS, SPLIT ON THE FIXTURE'S OWN LIVENESS (#5049 rule 1). The pin's
-    claim is "a `-ww`-less census misses a LIVE child", so a live child that survives the poll
-    unreported is still a FAIL. But a child that has already been REAPED (observed on
-    `pi-runner-cell3-x64-1`, 2026-11-23: the table row read `'[python] <defunct>'` while the
-    census correctly matched a *different* `pi` the runner box itself runs) has no `argv[0]`
-    left for any census to match, so the expiry says nothing about the flag — it is an
-    INCONCLUSIVE skip that names the 10 s deadline, exactly as `tests/_verdict.py` requires.
-    Before this split that case redded a REQUIRED shard on a diff
-    (`tests/test_12184_shifted_cites.py`) that cannot reach this file, and a re-run could not
-    clear it because the fixture dies again on the same box.
+    ⛔ THE EXPIRY HAS THREE EXITS, SPLIT ON WHAT ACTUALLY HAPPENED TO THE FIXTURE (#5049
+    rules 1 and 4). The pin's claim is "a `-ww`-less census misses a LIVE child", so:
+
+      * child **ALIVE** (`poll() is None`) and unreported → **FAIL**. The real regression.
+      * child **SIGNALLED** (`poll() < 0`) → **INCONCLUSIVE**, naming the 10 s deadline. The box
+        killed it (OOM, an orphan sweep) and a killed child has no `argv[0]` for any census to
+        match, so the expiry says nothing about the flag. Observed on `pi-runner-cell3-x64-1`,
+        2026-11-23: the row read `'[python] <defunct>'` while the census correctly matched a
+        *different* `pi` the runner box itself runs. Before this split that case redded a
+        REQUIRED shard on a diff (`tests/test_12184_shifted_cites.py`) that cannot reach this
+        file.
+      * child **EXITED CLEANLY** (`poll() >= 0`) → **`HarnessDefect`**, deliberately a FAIL per
+        rule 4. `time.sleep(60)` cannot return inside a 10 s deadline, so a clean exit means the
+        fixture never ran its command — the class the docstring above records as a CAUGHT bug
+        (the `ubuntu-26.04` uutils multi-call `sleep` that exited 1). Skipping *this* one would
+        make a permanently-refusing fixture green-by-skip on every run: a false PASS that no
+        instrument reds, since neither static nodeid manifest carries this file and the
+        INCONCLUSIVE family deliberately trips no skip-guard.
     """
     import shutil
     import subprocess
@@ -3828,24 +3836,43 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                 # shard on a diff (`tests/test_12184_shifted_cites.py`) that cannot reach this
                 # file at all.
                 row = _row_for_pid(proc.pid)
-                if proc.poll() is not None:
+                rc = proc.poll()
+                if rc is None:
+                    # ALIVE and unreported after the full deadline: the census, or the `-ww`
+                    # flag, is broken. This is the assertion the pin exists for.
+                    raise AssertionError(
+                        f"a lane whose argv[0] is {str(pi)!r} was ALIVE and invisible to the "
+                        f"census for {10.0:.0f}s of polling (pids seen: {pids}; the table's row "
+                        f"for the fixture pid read {row!r}) — a narrow/`-ww`-less census truncates "
+                        f"the argv[0] on every sample, so this is the flag removed or the matcher "
+                        f"broken")
+                if rc < 0:
+                    # A SIGNAL, not an exit: the box killed the child (OOM, an orphan sweep).
+                    # That is evidence about the machine, never about the census — #5049 rule 1.
                     inconclusive(
-                        "a live lane whose argv[0] is a long path (the fixture child "
-                        "exited before the census could observe it)",
+                        "a long-path `pi` lane visible to the census",
                         deadline_s=10.0,
                         diagnosis=(
-                            f"The fixture process {proc.pid} had already exited "
-                            f"(returncode {proc.poll()!r}); the table's row read {row!r} "
-                            f"and the census matched {pids!r}. A reaped child has no "
-                            f"argv[0] left to match, so the property was never observable "
-                            f"and this expiry is evidence about the box, not the census."),
+                            f"The fixture process {proc.pid} was killed by signal {-rc} before "
+                            f"the census could observe it; the table's row read {row!r} and the "
+                            f"census matched {pids!r}. A killed child has no argv[0] left to "
+                            f"match, so the property was never observable and this expiry is "
+                            f"evidence about the box, not the census."),
                     )
-                raise AssertionError(
-                    f"a lane whose argv[0] is {str(pi)!r} was ALIVE and invisible to the "
-                    f"census for {10.0:.0f}s of polling (pids seen: {pids}; the table's row "
-                    f"for the fixture pid read {row!r}) — a narrow/`-ww`-less census truncates "
-                    f"the argv[0] on every sample, so this is the flag removed or the matcher "
-                    f"broken")
+                # ⛔ rc >= 0 is NOT the box and NOT the census: the child exited ON ITS OWN.
+                # `time.sleep(60)` cannot return inside a 10 s deadline, so a clean exit means
+                # the fixture never slept at all — a HARNESS defect, which
+                # `tests/_verdict.py` rule 4 keeps a FAIL on purpose. The docstring above cites
+                # exactly this class as a CAUGHT bug (the `ubuntu-26.04` uutils multi-call
+                # `sleep` that printed `coreutils: unknown program 'pi'` and exited 1). 
+                # Skipping it here would make a permanently-refusing fixture green-by-skip on
+                # every run: a false PASS, and nothing reds it — neither static manifest carries
+                # this file, and the INCONCLUSIVE family deliberately trips no skip-guard.
+                raise HarnessDefect(
+                    f"the fixture child exited rc={rc} on its own before the {10.0:.0f}s "
+                    f"deadline — `time.sleep(60)` cannot do that, so the fixture never ran its "
+                    f"command (table row read {row!r}). This is the TEST SUBSTRATE at fault, not "
+                    f"the census: the child must stay alive for the poll to observe it.")
         finally:
             proc.terminate()
             proc.wait(timeout=10)
