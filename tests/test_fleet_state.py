@@ -33,7 +33,13 @@ import pytest
 # product-defect FAIL. Imported at module level (stdlib + pytest only, so the #1686 test-mode
 # import ordering is untouched) because `test_pi_processes_sees_a_real_long_path_lane` needs it
 # on the path where the FIXTURE — not the census — is what went away.
-from tests._verdict import HarnessDefect, inconclusive
+#
+# `_HARNESS_PREFIX` is imported privately ON PURPOSE: it is the single source of the
+# `HARNESS DEFECT [#5049]` family marker, and every in-tree `HarnessDefect` raise site
+# (`tests/_verdict.py:458`, `:632`) renders it from this same constant. Duplicating the
+# literal here would let the two drift, and the marker is what makes a harness fault
+# attributable in a log rather than only by its exception class.
+from tests._verdict import _HARNESS_PREFIX, HarnessDefect, inconclusive
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -3801,17 +3807,38 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     measured. It does not widen the match, so the truncation pin keeps its power: a
     `-ww`-less census truncates on every sample, burns the deadline and fails.
 
-    ⛔ THE EXPIRY HAS THREE EXITS, SPLIT ON WHAT ACTUALLY HAPPENED TO THE FIXTURE (#5049
-    rules 1 and 4). The pin's claim is "a `-ww`-less census misses a LIVE child", so:
+    ⛔ THE EXPIRY SPLITS ON WHAT ACTUALLY HAPPENED TO THE FIXTURE — FOUR classifications,
+    not the three this list carried before the crash arm landed (#5049 rules 1 and 4). The
+    pin's claim is "a `-ww`-less census misses a LIVE child", so:
 
       * child **ALIVE** (`poll() is None`) and unreported → **FAIL**. The real regression.
-      * child **SIGNALLED** (`poll() < 0`) → **INCONCLUSIVE**, naming the 10 s deadline. The box
-        killed it (OOM, an orphan sweep) and a killed child has no `argv[0]` for any census to
-        match, so the expiry says nothing about the flag. Observed on `pi-runner-cell3-x64-1`,
-        2026-11-23: the row read `'[python] <defunct>'` while the census correctly matched a
-        *different* `pi` the runner box itself runs. Before this split that case redded a
-        REQUIRED shard on a diff (`tests/test_12184_shifted_cites.py`) that cannot reach this
-        file.
+      * child killed by an **OUTSIDE** signal (`-rc in _OUTSIDE_SIGNALS`: SIGKILL, SIGTERM,
+        SIGINT, SIGHUP) → **INCONCLUSIVE**, naming the 10 s deadline. The box killed it (OOM,
+        an orphan sweep, the shard's own `timeout`) and a killed child has no `argv[0]` for
+        any census to match, so the expiry says nothing about the flag. Before this split
+        that case redded a REQUIRED shard on a diff (`tests/test_12184_shifted_cites.py`)
+        that cannot reach this file.
+
+        ⛔ HOW THE 2026-11-23 INCIDENT IS ATTRIBUTED — THE INFERENCE, NOT THE ROW TEXT. The
+        failing log carried `pids seen: [1104635]` (a healthy census matching a *different*
+        `pi` the runner box itself runs) and `the table's row for the fixture pid read
+        '[python] <defunct>'`, but it printed NO returncode — and a cleanly-exited child is an
+        unreaped zombie too, leaving the identical `'[python] <defunct>'` row. So the row text
+        identifies NEITHER arm. The attribution rests on the command itself: the payload is
+        `import time; time.sleep(60)`, which cannot return inside a 10 s deadline, so a child
+        that vanished did so by being KILLED, not by exiting on its own. That is the
+        inference — stated here because the row text cannot carry it.
+
+        ⛔ AND IF THAT INFERENCE IS WRONG, THIS REDS RATHER THAN SKIPS — deliberately. A child
+        that exits `>= 0` under a `sleep(60)` payload means the interpreter never ran it, and a
+        CRASH signal (SIGSEGV/SIGABRT/…) means the interpreter died under it; both are
+        substrate faults that rule 4 requires to FAIL (see the last two exits). An honest red
+        that names the substrate beats a permanent green that hides it; the cost is that such
+        an image fails this required shard until the fixture is updated, and the
+        `HarnessDefect` message says so.
+
+      * child killed by a **CRASH** signal (any other signal → `HarnessDefect`), deliberately
+        a FAIL per rule 4: the interpreter aborted, which is the substrate, never the box.
       * child **EXITED CLEANLY** (`poll() >= 0`) → **`HarnessDefect`**, deliberately a FAIL per
         rule 4. `time.sleep(60)` cannot return inside a 10 s deadline, so a clean exit means the
         fixture never ran its command — the class the docstring above records as a CAUGHT bug
@@ -3875,10 +3902,28 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                 # seconds of polling cannot make a dead process visible, so that red measured
                 # what happened to the FIXTURE, not the `-ww` flag — and it redded a REQUIRED
                 # shard on a diff (`tests/test_12184_shifted_cites.py`) that cannot reach this
-                # file at all. WHICH exit a dead child gets depends on WHY it died, which is the
-                # returncode's sign: a SIGNAL is the box's doing (skip), a clean exit is the
-                # test substrate's (FAIL) — see the two exits below and the class the docstring
-                # above records as CAUGHT.
+                # file at all. WHICH exit a dead child gets depends on WHY it died, and the
+                # returncode only says that much — its SIGN decides between "the box killed it"
+                # and "it died on its own": `_OUTSIDE_SIGNALS` (SIGKILL/SIGTERM/SIGINT/SIGHUP)
+                # is the box's doing; a CRASH signal and a clean exit are both the substrate's.
+                # The four arms, in order below:
+                #
+                #   rc is None                    → ALIVE and unreported → AssertionError. THE
+                #                                   `-ww` PIN. If a future reader is tempted to
+                #                                   turn this one into a skip "to satisfy #5049
+                #                                   rule 1", do not: rule 1 is about a deadline
+                #                                   expiring on a LIVE subject, and this arm is
+                #                                   the regression the pin exists to catch.
+                #                                   (Round 1 of this review caught exactly that
+                #                                   version — a `poll() is not None` skip that
+                #                                   sent a cleanly-exiting fixture green. Do not
+                #                                   reinstate it.)
+                #   rc < 0, -rc outside-signal    → inconclusive. Rule 1: the box, not the flag.
+                #   rc < 0, any other signal      → HarnessDefect. Rule 4: the interpreter
+                #                                   crashed, so the substrate never ran the
+                #                                   command.
+                #   rc >= 0                       → HarnessDefect. Rule 4: it exited on its own
+                #                                   under a `sleep(60)` payload, so it never ran.
                 row = _row_for_pid(proc.pid)
                 rc = proc.poll()
                 if rc is None:
@@ -3913,7 +3958,7 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     # deliberately trips no skip-guard). Only signals the box sends are the
                     # machine's; an abort belongs to the substrate.
                     raise HarnessDefect(
-                        f"the fixture child CRASHED on signal {-rc} "
+                        f"{_HARNESS_PREFIX}: the fixture child CRASHED on signal {-rc} "
                         f"({signal.Signals(-rc).name}) before the {10.0:.0f}s deadline "
                         f"(table row read {row!r}) — an abort is the TEST SUBSTRATE at fault, "
                         f"neither the box nor the census.")
@@ -3927,12 +3972,110 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                 # every run: a false PASS, and nothing reds it — neither static manifest carries
                 # this file, and the INCONCLUSIVE family deliberately trips no skip-guard.
                 raise HarnessDefect(
-                    f"the fixture child exited rc={rc} on its own before the {10.0:.0f}s "
-                    f"deadline — `time.sleep(60)` cannot do that, so the fixture never ran its "
-                    f"command (table row read {row!r}). This is the TEST SUBSTRATE at fault, not "
-                    f"the census: the child must stay alive for the poll to observe it.")
+                    f"{_HARNESS_PREFIX}: the fixture child exited rc={rc} on its own before "
+                    f"the {10.0:.0f}s deadline — `time.sleep(60)` cannot do that, so the "
+                    f"fixture never ran its command (table row read {row!r}). This is the TEST "
+                    f"SUBSTRATE at fault, not the census: the child must stay alive for the "
+                    f"poll to observe it.")
         finally:
             proc.terminate()
             proc.wait(timeout=10)
     finally:
         shutil.rmtree(long_dir, ignore_errors=True)
+
+
+class _FakeClock:
+    """A clock that advances a fixed step only when the code under test asks the time.
+
+    Monkeypatched over this module's `time` binding, so `time.sleep` costs nothing and the
+    loop's own `time.time()` calls are the only thing that moves it — which is what makes
+    "did the poll end EARLY?" measurable without waiting ten real seconds.
+    """
+
+    START = 1_000.0
+
+    def __init__(self, step_s: float) -> None:
+        self.now = self.START
+        self.step_s = step_s
+
+    def time(self) -> float:
+        self.now += self.step_s
+        return self.now
+
+    def sleep(self, _s: float) -> None:
+        return None
+
+
+class _FakeChild:
+    """A stand-in for the fixture's `Popen`: a scripted `poll()`, no process behind it."""
+
+    def __init__(self, rc: int | None) -> None:
+        # An id almost certainly absent from the table, so `os.waitid` raises ECHILD and
+        # `_child_exited` takes its documented `poll()` fallback.
+        self.pid = 4_000_001
+        self._rc = rc
+
+    def poll(self) -> int | None:
+        return self._rc
+
+    def terminate(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0 if self._rc is None else self._rc
+
+
+@pytest.mark.parametrize(
+    ("rc", "expect", "marker", "why"),
+    [
+        (None, AssertionError, "was ALIVE and invisible to the census", "the -ww pin still fails"),
+        (-9, "skip", "INCONCLUSIVE [#5049]", "SIGKILL from outside is the box (rule 1)"),
+        (-11, HarnessDefect, "HARNESS DEFECT [#5049]", "SIGSEGV is the substrate (rule 4)"),
+        (1, HarnessDefect, "HARNESS DEFECT [#5049]", "a clean exit is the substrate (rule 4)"),
+    ],
+)
+def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc, expect, marker, why) -> None:
+    """The expiry's FOUR exits, driven without spawning anything (#12039; #5049 rules 1 and 4).
+
+    Both directions of the split this PR exists to get right are pinned here, and neither needs
+    the real fixture: a DEAD fixture must not red a required shard (the 2026-11-23 incident),
+    and a fixture that dies ON ITS OWN — a clean exit under a `time.sleep(60)` payload, or a
+    crash signal — must not go green by skip (the false PASS the first fix nearly shipped, which
+    the `rc >= 0` arm guards and the crash arm guards from the other side).
+
+    Each `HarnessDefect` message must carry the `HARNESS DEFECT [#5049]` family marker — the
+    contract `tests/_verdict.py:56-59` states — or a triager sees the FAIL only by its exception
+    class. That marker is the discriminating assertion in this test: without it the two
+    substrate arms pass on the pre-fix tree, since the classification itself was already right.
+
+    The elapsed-time assertion pins the poll's EARLY BREAK (`_child_exited`, `be6161b7`): a dead
+    child must end the loop on the first sample, not after the 10 s budget. The ALIVE arm is the
+    control — it still burns the whole deadline AND still fails, which is why the early break
+    cannot convert the `-ww` pin into a skip.
+    """
+    module = sys.modules[__name__]
+    clock = _FakeClock(step_s=0.1)
+    child = _FakeChild(rc)
+
+    class _Completed:
+        stdout = ""
+
+    monkeypatch.setattr(module, "time", clock)
+    monkeypatch.setattr(module.fs, "pi_processes", lambda: ([], None))
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: child)
+    # `_row_for_pid` shells out to `ps` for a DIAGNOSTIC only; stub it so the arm stays hermetic.
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _Completed())
+
+    if expect == "skip":
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            test_pi_processes_sees_a_real_long_path_lane(monkeypatch)
+    else:
+        with pytest.raises(expect) as excinfo:
+            test_pi_processes_sees_a_real_long_path_lane(monkeypatch)
+
+    assert marker in str(excinfo.value), why
+    elapsed = clock.now - _FakeClock.START
+    if rc is None:
+        assert elapsed >= 10.0, "the ALIVE arm must still burn the full deadline and still fail"
+    else:
+        assert elapsed < 10.0, "a dead child must end the poll on the first sample, not at 10s"
