@@ -2348,7 +2348,7 @@ def test_every_pinned_row_grades_a_line_inside_the_address_its_token_names() -> 
 
     MEASURED, and shipped in the reviewed tree: two rows pinned a STALE address while grading the
     CORRECT line — `("`:31496`", `sdk.py`, `31551`)` for the §2.5 `:Tag` header entry and
-    `("`:37555` in `_file_human_approval`", `sdk.py`, `37547`)` in the substrate map. Both arms were
+    `("`:37534` in `_file_human_approval`", `sdk.py`, `37547`)` in the substrate map. Both arms were
     green: `_resolve`'s content arm opened `31551` / `37547` (where the fragment is), and its token
     arm only asks whether the token string occurs SOMEWHERE in the document (it did). So the
     document could name an address 55 lines above the statement it describes — the `#13290` class this
@@ -2374,8 +2374,8 @@ def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
     assert problems, "a token naming `:31496` must not be allowed to grade line 31551"
     assert "31496" in problems[0] and "31551" in problems[0], problems[0]
     # The substrate-map row the same review found, in its shipped form.
-    shipped = (_SUBSTRATE, "`:37555` in `_file_human_approval`", _SDK, 37547, "``:Document`` node).")
-    assert _rows_outside_their_token((shipped,)), "the `:37555` row graded 37547 must red"
+    shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37547, "``:Document`` node).")
+    assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37547 must red"
     # A range token is accepted on any line INSIDE the range it names (the anchor convention).
     inside = (_AUDIT, "`:7576-7579`", _SE, 7579, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
     assert not _rows_outside_their_token((inside,)), "a line inside the named range must pass"
