@@ -5120,9 +5120,13 @@ def test_an_accumulation_over_several_ITERATIONS_is_the_DECLARED_residual() -> N
     the exact class this pin exists to remove (measured: 1 failed / 36 passed over it). A
     guard that refuses ordinary code reds every PR; one that under-approximates is named.
 
-    Each row below is a DIFFERENT spelling of that same un-enumerated count, and each is
-    pinned GREEN so the note cannot go stale: if a later change starts resolving one, the
-    assertion fails and the author updates the docstring with it.
+    ⛔ WHAT EACH ROW CAN AND CANNOT CATCH (round-5 review P2, MEASURED both ways). The two
+    literal-`for` rows FLIP when the applied count is enumerated again — replayed against the
+    reverted enumerating implementation, `absent` becomes False for them and only them — so
+    they are regression detectors for the enumeration class. The remaining rows return the
+    SAME set under both implementations: they are not detectors, they pin the boundary AS IT
+    STANDS, so the docstring cannot drift without a red. Both jobs are stated here rather
+    than implied, and the docstring's residual note is scoped to match.
     """
     cases = {
         "literal `for` body": ('    _S = "_tortoise"\n'
@@ -5138,12 +5142,25 @@ def test_an_accumulation_over_several_ITERATIONS_is_the_DECLARED_residual() -> N
                                      '        _S = _S + _p\n'),
         "comprehension ELEMENT (a walrus)": ('    _S = "_tortoise"\n'
                                              '    [(_S := _S + _p) for _p in ("_fts", "_query")]\n'),
-        "`while` body": ('    _S = "_tortoise"\n    _n = 0\n'
-                         '    while _n < 2:\n        _S = _S + "_fts"\n        _n += 1\n'),
+        "comprehension `if` clause": ('    _S = "_tortoise"\n'
+                                       '    [_p for _p in ("_fts", "_query")'
+                                       ' if (_S := _S + _p)]\n'),
     }
     for label, source in cases.items():
         consts = _str_constants(ast.parse("def run():\n" + source))
-        assert "_tortoise_fts_query" not in consts.get("_S", frozenset()), label
+        # ⛔ THE NAME MUST BE PRESENT (a missing name would satisfy every "not in" below
+        # vacuously — round-5 review P2), and the READ NAME must not be among its values.
+        assert "_S" in consts, f"{label}: `_S` did not resolve at all — vacuous row"
+        assert "_tortoise_fts_query" not in consts["_S"], label
+    # ⛔ AND THE `while` ROW MEASURES THE APPLIED COUNT, not just the read name: a loop that
+    # appends `_fts` can only build `_tortoise` / `_tortoise_fts` / `_tortoise_fts_fts`, so
+    # "the read name is absent" is trivially true there whatever the count. The value that
+    # MOVES with the count is the doubled suffix (round-5 review P2; measured: two
+    # applications produce it, one does not).
+    while_src = ('    _S = "_tortoise"\n    _n = 0\n'
+                 '    while _n < 2:\n        _S = _S + "_fts"\n        _n += 1\n')
+    while_consts = _str_constants(ast.parse("def run():\n" + while_src))
+    assert "_tortoise_fts_fts" not in while_consts["_S"]
 
 
 def test_the_pin_DOES_NOT_REFUSE_on_ordinary_loop_accumulation() -> None:
