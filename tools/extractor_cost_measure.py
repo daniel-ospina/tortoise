@@ -1966,6 +1966,33 @@ def _render_regions() -> dict[str, dict[str, int]]:
     return out
 
 
+def _source_transcript_tokens(doc_id: str | None) -> int:
+    """Tokens of the SOURCE TRANSCRIPT block S2/S4 append for this document.
+
+    ⛔ MEASURED, NOT ASSUMED. The block is rendered from the conversation's
+    EDUs and omitted when they exceed `_SOURCE_TRANSCRIPT_CAP`, so whether a
+    document carries one — and how big it is — is a property of THAT document,
+    not of the corpus. `decompose` subtracts it per document before taking the
+    medians, and publishes the count separately, because a residual solve that
+    ignores it books verbatim source text into "S1's story".
+
+    Returns 0 when the document cannot be read (a row whose `id` no longer
+    resolves — the artefact still reproduces, and the row is then a documented
+    floor rather than a silent subtraction of nothing).
+    """
+    if not doc_id:
+        return 0
+    path = _REPO_ROOT / doc_id
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    from tortoise import extractor_v2 as X
+    edus = X._edus_from_conversation([{"role": "user", "content": text}])
+    block = X._render_source_transcript(edus)
+    return len(_encoding().encode(block)) if block else 0
+
+
 def decompose(rows: list[dict], *, arm: str = "cold",
               receipts: Path | None = None) -> dict:
     """Attribute the two fitted constants of #14295 to the regions that make
@@ -1982,6 +2009,16 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     if not docs:
         raise SystemExit(f"no usable `{arm}` document rows in the evidence")
     statics = _render_regions()
+    #: ⛔ THE SOURCE-TRANSCRIPT TAIL IS SUBTRACTED, NOT IGNORED. `render_s2_prompt`
+    #: / `render_s4_prompt` append `_render_source_transcript(edus)` OUTSIDE
+    #: `_fill_template` whenever the document's EDU text fits
+    #: `_SOURCE_TRANSCRIPT_CAP` (8,000 chars), and `_render_regions` renders with
+    #: `edus=None` — so the residual solve `story = pc2 − s2_sys − clause` booked
+    #: that block into "S1's story, re-sent to S2 and S4". Same class as the
+    #: `compose_one` misattribution (review cycle 8, P2), and it is measured per
+    #: document here: 9 of the 50 corpus documents carry a tail.
+    tails: dict[str, int] = {r.get("id") or "": _source_transcript_tokens(
+        r.get("id")) for r in docs}
 
     def _per_call(stage: str) -> tuple[float, float, float]:
         """(calls/doc, prompt tokens per call, completion tokens per call).
@@ -1999,7 +2036,9 @@ def decompose(rows: list[dict], *, arm: str = "cold",
             if not s or not s.get("calls"):
                 continue
             calls.append(s["calls"])
-            pc.append(s["prompt_tokens"] / s["calls"])
+            # the tail rides on EVERY S2/S4 call for a document that carries one
+            tail = tails.get(r.get("id") or "", 0) if stage in ("s2", "s4") else 0
+            pc.append((s["prompt_tokens"] / s["calls"]) - tail)
             oc.append(s["completion_tokens"] / s["calls"])
         return (sum(calls) / len(calls), statistics.median(pc),
                 statistics.median(oc))
@@ -2039,6 +2078,9 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     # the same, which is what makes §1's fit-vs-composition agreement tighter.
     story = max(0.0, pc2 - s2_sys - clause)
     embed = max(0.0, pc4 - s4_sys - story - clause)
+    #: the median per-call tail (0 for a transcript-free corpus — which the nine
+    #: affected documents above are not; see `source_transcript` in the result).
+    tail_med = statistics.median(list(tails.values())) if tails else 0
 
     regions = {
         # (label, tokens/doc, what it is, provenance)
@@ -2107,6 +2149,12 @@ def decompose(rows: list[dict], *, arm: str = "cold",
             "reemission_tail": _output_tail(docs),
         },
         "statics": statics,
+        "source_transcript": {
+            "documents": len(tails),
+            "documents_with_a_tail": sum(1 for v in tails.values() if v),
+            "tokens_per_call_median": tail_med,
+            "tokens_per_call_max": max(tails.values()) if tails else 0,
+        },
         "solved": {"story_tokens": round(story, 1),
                    "embed_list_tokens": round(embed, 1),
                    "embed_over_emission": round(embed / oc2, 2) if oc2 else None},
@@ -2336,6 +2384,19 @@ def render_decompose(dec: dict) -> str:
                  f"{doc_term['documents_taking_two_s1_calls']} of "
                  f"{doc_term['documents']} documents here.")
     lines.append("")
+    st = dec.get("source_transcript") or {}
+    if st.get("documents_with_a_tail"):
+        lines.append(
+            f"⚠️ **{st['documents_with_a_tail']} of {st['documents']} documents "
+            "carry a SOURCE TRANSCRIPT block** (S2 and S4 append it outside the "
+            "template whenever the EDU text fits the 8,000-char cap; up to "
+            f"{st['tokens_per_call_max']:,} tokens per call). Those tails are "
+            "**subtracted per document before the medians**, so the *S1's story* "
+            "row is the narrative alone — without the subtraction it books "
+            "verbatim source text as narrative (measured: 2,656 → 2,110 tokens "
+            "per S2 call). The median document carries none, which is why the "
+            "correction moves the row and adds no row of its own.")
+        lines.append("")
     solved = dec["solved"]
     lines.append(f"Solved dynamic regions: the S1 story is **{solved['story_tokens']:,.0f}** "
                  f"tokens as the later stages see it, and S2's embed list is "
