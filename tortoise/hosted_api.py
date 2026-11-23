@@ -4691,8 +4691,14 @@ async def _capacity_notice_sweep_loop(interval: float,
     contradicts ("short-circuits BEFORE the gauge is read" — the gauge read is
     one of the three). An account whose ledger
     mark is already at the top threshold short-circuits before the gauge is read
-    (``notify_account``). ``first_delay`` spreads a fleet-wide restart so a boot
-    storm does not fire N passes in the same second.
+    (``notify_account``). ``first_delay`` is a 150–300 s SPREAD, not a jitter
+    (#14038 review, P3): the formula is ``min(interval, 300) * (0.5 + pid/2000)``, so
+    the first pass fires 150–300 s AFTER boot — the jitter only breaks the tie
+    between processes that booted together, and "so a boot storm does not fire N
+    passes in the same second" described a sub-second spread this code never
+    produced. The boot rung's value is unaffected (a 150–300 s delay still beats a
+    deploy gap whose median is ~0.48 h), but a reader re-pricing the trigger has to
+    know the real delay is minutes, not milliseconds.
     """
     if first_delay is None:
         first_delay = min(interval, 300.0) * (0.5 + (os.getpid() % 1000) / 2000.0)

@@ -50,6 +50,17 @@ arithmetic (#13998 requirement 5):
 * ⛔ IF EITHER CANNOT BE READ, NOTHING IS SENT AND THE PASS LOGS IT
   (:func:`evaluate` returns a named reason instead of a percentage). A guessed
   percentage in a customer's inbox is worse than no email.
+* ⛔ **`{n}` IN THE APPROVED COPY IS THE THRESHOLD CROSSED (80 / 100), NOT THE
+  GAUGE READING — and an earlier cut of this note implied otherwise (#14038
+  review, P2).** The reading decides WHICH notice fires (the floored
+  `capacity_pct`, carried on :class:`Notice` as ``measured_pct``); the copy then
+  announces the tier that was reached, which is the fact the subject line claims
+  ("Your search layer is at {n}%") and the number the ledger stamps. Rendering
+  ``measured_pct`` instead was considered and NOT done: the sentence is the
+  owner's verbatim copy (2026-11-20) and "using 97 % of …" is a different promise
+  from "is at 80 %", so changing which figure fills a slot in HIS sentence is his
+  call, not a lane's. The consequence is stated rather than hidden: a customer
+  reading the mail beside the dashboard sees the threshold, not their live share.
   ⚠️ The reading is an ESTIMATE that systematically under-reports (it excludes
   the HNSW index — `graph_storage.VECTOR_INDEX_EXCLUDED`), which pushes this
   notice LATE. ⛔ It is NOT a one-way bound, and an earlier cut of this line said
@@ -123,6 +134,7 @@ import asyncio
 import html
 import logging
 import math
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -284,10 +296,11 @@ class Notice:
     threshold: int
     used_mb: float
     allowance_mb: float
-
-    @property
-    def pct(self) -> int:
-        return self.threshold
+    #: The FLOORED measured share (`capacity_pct`) that selected `threshold`. It is carried so a caller
+    #: can state the honest figure, and `render` does NOT read it: the approved copy's `{n}` is the
+    #: THRESHOLD this notice announces, not the gauge reading (see the `{n}` note in the module
+    #: docstring — the two are different facts and the copy template is the owner's, verbatim).
+    measured_pct: int | None = None
 
 
 @dataclass(frozen=True)
@@ -381,6 +394,38 @@ NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
 #: process's budget — never against a pass count you did not measure.
 NOTICE_MAX_SENDS_PER_PASS_DEFAULT = 5
 NOTICE_MAX_SENDS_ENV = "TORTOISE_CAPACITY_NOTICE_MAX_SENDS"
+
+#: How long a SENT-BUT-UNSTAMPED (org, threshold) is suppressed from re-entering the send path.
+#:
+#: ⛔ WHY THIS EXISTS, AND WHAT IT FIXES (#14038 review, P2). The stamp-failure arm deliberately
+#: reports ``sent`` so the delivered notice counts against the per-pass cap — correct for ONE pass,
+#: but a pass whose ledger WRITES fail while its READS still work then spends that cap on the SAME
+#: lowest-id accounts on every interval: the rest of the fleet is never reached (starvation), and
+#: those accounts are re-mailed each pass, deduped by the provider only inside its 24 h window and
+#: then genuinely duplicated roughly daily. The cap cannot tell "this account owes a send" from "this
+#: account was already mailed and we could not record it", so the module remembers the second set
+#: itself. In-process on purpose: it is a BURST guard for a broken ledger, not durable state — after a
+#: restart the ledger is re-read (and if writes are still broken, the same account is mailed again,
+#: which the provider dedupes inside the window). The TTL matches the provider's window so the two
+#: mechanisms cannot disagree about what counts as a duplicate.
+UNSTAMPED_SUPPRESS_TTL_S = 24 * 60 * 60
+_UNSTAMPED: dict[tuple[str, int], float] = {}
+
+
+def _note_unstamped(org_id: str, threshold: int) -> None:
+    """Remember `(org_id, threshold)` was delivered but its mark could not be written."""
+    _UNSTAMPED[(org_id, int(threshold))] = time.monotonic()
+
+
+def _unstamped_recently(org_id: str, threshold: int) -> bool:
+    """TRUE while a delivered-but-unrecorded `(org, threshold)` is still inside the TTL."""
+    seen = _UNSTAMPED.get((org_id, int(threshold)))
+    if seen is None:
+        return False
+    if (time.monotonic() - seen) >= UNSTAMPED_SUPPRESS_TTL_S:
+        _UNSTAMPED.pop((org_id, int(threshold)), None)
+        return False
+    return True
 
 #: Ops cap on accounts PROCESSED per pass.
 #:
@@ -646,7 +691,7 @@ def evaluate(org_id: str, *, limits: dict | None = None,
     if threshold is None:
         return None, "below-threshold"
     return Notice(org_id=org_id, threshold=threshold, used_mb=float(used),
-                  allowance_mb=allowance_mb), None
+                  allowance_mb=allowance_mb, measured_pct=pct), None
 
 
 def claim_notice(cp, org_id: str, threshold: int,
@@ -1141,7 +1186,20 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         return {"status": "already-notified", "org_id": org_id,
                 "threshold": notice.threshold,
                 "notified": account.notice_pct}
-    # ⛔ THE RECIPIENT IS RESOLVED HERE, NOT IN `read_account` (#14038 review, P1).
+    if _unstamped_recently(org_id, notice.threshold):
+        # A previous pass DELIVERED this threshold and could not write its mark.
+        # Re-sending here is what turned a broken ledger into a daily duplicate AND
+        # starved the rest of the fleet of the per-pass cap (#14038 review, P2) — so a
+        # delivered-but-unrecorded notice is held off the send path for the provider's
+        # own idempotency window. The status is deliberately NOT `sent`: the burst guard
+        # must not be spent on an account that is not being mailed.
+        logger.warning(
+            "capacity notice: team %s owes the %s%% notice but a previous pass "
+            "DELIVERED it and could not write the mark — suppressed until the "
+            "ledger is writable again, or for %s s from that send",
+            org_id, notice.threshold, UNSTAMPED_SUPPRESS_TTL_S)
+        return {"status": "unstamped-deferred", "org_id": org_id,
+                "threshold": notice.threshold}
     # Above this point the account has not been shown to owe a notice, so paying
     # for the chain's third rung (two network calls per account) on the whole
     # fleet every interval would buy nothing. Below it, the notice is due and the
@@ -1248,6 +1306,12 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
             "this pass's cap; the mark stays unset and a later pass may send "
             "this threshold again after the provider key's 24 h window",
             org_id, notice.threshold, type(e).__name__)
+        # ⛔ AND IT GOES ON THE SUPPRESS LIST (#14038 review, P2): counting it against the cap is
+        # right for THIS pass, and it is exactly what made a ledger-write outage mail the same
+        # lowest-id accounts every interval and starve the rest of the fleet. The next pass sees the
+        # unset mark (`threshold <= fresh` is false) but `_unstamped_recently` holds it off the send
+        # path, so the cap is no longer consumed by accounts that are not being mailed.
+        _note_unstamped(org_id, notice.threshold)
         return {"status": "sent", "org_id": org_id,
                 "threshold": notice.threshold,
                 "message_id": (result or {}).get("message_id"),
@@ -1257,13 +1321,60 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         # went out; the provider key collapses only a replay of the SAME
         # threshold, and only inside its 24 h window (the key names the
         # threshold), so it bounds a duplicate of this send inside that window and
-        # says nothing about a different one. The log states exactly that rather
-        # than overclaiming.
-        logger.warning(
-            "capacity notice: sent to team %s at %s%% but the mark moved "
-            "concurrently (replaying this threshold inside the provider key's "
-            "24 h window is collapsed; a DIFFERENT threshold's notice is not)",
-            org_id, notice.threshold)
+        # says nothing about a different one.
+        #
+        # ⛔ A LOST RACE MUST NOT DISCARD THE RECORD (#14038 review, P2). Logging
+        # and returning left the mark BELOW the threshold that had just been
+        # DELIVERED, so the next pass found `threshold > mark` and sent it again —
+        # collapsed by the provider inside 24 h, a real duplicate beyond it. The
+        # module docstring's own claim ("two notices in the wrong order, never a
+        # lost or duplicated record") was therefore false for exactly this arm.
+        # The repair is a bounded, idempotent RE-CLAIM against the value just
+        # observed: if the mark is still below what we sent, re-run the same CAS
+        # with that fresh value as its guard. One retry, never a loop — a second
+        # loss means another pass is stamping ahead of us and ITS value is the
+        # higher, correct one.
+        reclaimed = False
+        try:
+            from .supabase_control import org_storage_notice_pct
+
+            current = await asyncio.to_thread(
+                org_storage_notice_pct, cp, org_id)
+        except Exception as e:
+            current = None
+            logger.warning(
+                "capacity notice: team %s at %s%% lost the stamp race AND the "
+                "mark could not be re-read (%s) — a later pass may re-send this "
+                "threshold after the provider key's 24 h window",
+                org_id, notice.threshold, type(e).__name__)
+        # ⛔ `current is None` IS ALSO A RE-CLAIM CASE, and excluding it was a bug
+        # caught by the test below: a lost CAS whose re-read finds the row STILL
+        # UNSET (the peer that beat us stamped a different column state, or its own
+        # write rolled back) is exactly the state our own stamp is entitled to claim.
+        # The CAS keeps that safe — `previous=None` matches only an unset row.
+        if current is None or notice.threshold > current:
+            try:
+                reclaimed = await asyncio.to_thread(
+                    claim_notice, cp, org_id, notice.threshold, current)
+            except Exception as e:
+                reclaimed = False
+                logger.warning(
+                    "capacity notice: team %s at %s%% lost the stamp race and "
+                    "the re-claim raised (%s) — the mark stays at %s",
+                    org_id, notice.threshold, type(e).__name__, current)
+        if reclaimed:
+            logger.info(
+                "capacity notice: team %s at %s%% lost the stamp race and "
+                "RE-CLAIMED the mark from %s — no duplicate is pending",
+                org_id, notice.threshold, current)
+        else:
+            logger.warning(
+                "capacity notice: sent to team %s at %s%% but the mark moved "
+                "concurrently and could not be re-claimed (replaying this "
+                "threshold inside the provider key's 24 h window is collapsed; "
+                "a DIFFERENT threshold's notice is not)",
+                org_id, notice.threshold)
+            _note_unstamped(org_id, notice.threshold)
     return {"status": "sent", "org_id": org_id, "threshold": notice.threshold,
             "message_id": (result or {}).get("message_id")}
 

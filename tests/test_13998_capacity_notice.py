@@ -1712,6 +1712,116 @@ class TestNoticeMark:
         cp = _fake_cp(storage_notice_pct="eighty")
         assert org_storage_notice_pct(cp, ORG_ID) is None
 
+    def test_the_cas_guard_is_EQUALITY_on_the_value_the_caller_read(self):
+        """⛔ The VALUE arm of the guard, which no row above pins (#14038 review, P3).
+
+        The rows above cover unset→stamp, `80→100`, and `100→80`. Every one of those
+        is also refused-or-allowed by the monotone early return at the top of
+        `set_org_storage_notice_pct`, so a guard widened to `gte`/`neq` would keep the
+        whole suite green while silently letting a STALE read overwrite a newer mark —
+        the exact race the docstring promises cannot happen. These two rows couple the
+        decision to the guard itself: a stored `100` read as `70` must be REFUSED, and a
+        stored `80` read as `70` must stamp `100` (so the comparison is equality on the
+        value read, not an inequality that happens to pass both cases).
+        """
+        cp = _fake_cp(storage_notice_pct=100)
+        assert set_org_storage_notice_pct(cp, ORG_ID, 100, previous=70) is False, (
+            "a stale read of 70 overwrote a stored 100 — the CAS guard is not "
+            "equality on the value the caller read")
+        assert org_storage_notice_pct(cp, ORG_ID) == 100
+
+        cp = _fake_cp(storage_notice_pct=80)
+        assert set_org_storage_notice_pct(cp, ORG_ID, 100, previous=70) is False, (
+            "a stale read of 70 stamped over a stored 80")
+        assert set_org_storage_notice_pct(cp, ORG_ID, 100, previous=80) is True
+        assert org_storage_notice_pct(cp, ORG_ID) == 100
+
+
+class _LostRaceCP(FakeControlPlane):
+    """A control plane where the FIRST stamp loses its CAS and later ones succeed.
+
+    The shape is the one `notify_account` cannot prevent by ordering: a peer process
+    stamped between our pre-send re-read and our PATCH, so `claim_notice` matches no
+    row and returns False while the email has already been DELIVERED.
+    """
+
+    def __init__(self, rows):
+        super().__init__(rows)
+        self.patches = 0
+
+    def query(self, table, *, select=None, filters=None, method="GET",
+              json_body=None, **kwargs):
+        if method == "PATCH":
+            self.patches += 1
+            if self.patches == 1:
+                return []          # the row moved under us: CAS matched nothing
+        return super().query(table, select=select, filters=filters,
+                             method=method, json_body=json_body, **kwargs)
+
+
+def test_a_lost_stamp_race_is_reclaimed_rather_than_discarded():
+    """⛔ A DELIVERED notice must not lose its record to a race (#14038 review, P2).
+
+    Pre-fix, `if not stamped:` logged and returned, leaving the mark BELOW the
+    threshold that had just been delivered — so the next pass found
+    `threshold > mark` and mailed the same customer again (collapsed by the provider
+    only inside its 24 h window, a real duplicate beyond it). Non-vacuity: with the
+    re-claim removed, `patches == 1` and the mark stays unset.
+    """
+    cn._UNSTAMPED.clear()
+    cp = _LostRaceCP({"organizations": [_org_row()]})
+    send = _Sender()
+    out = asyncio.run(cn.notify_account(ORG_ID, cp=cp, send=send,
+                                        limits=_limits(102),
+                                        reading=_Reading(120.0)))
+    assert out["status"] == "sent", out
+    assert len(send.calls) == 1, "the notice must still be delivered exactly once"
+    assert cp.patches == 2, (
+        "the lost CAS was not re-attempted — the delivered notice's record is "
+        "discarded and the next pass re-sends it")
+    assert org_storage_notice_pct(cp, ORG_ID) == 100, (
+        "the mark is below the threshold that was delivered")
+    again = asyncio.run(cn.notify_account(ORG_ID, cp=cp, send=send,
+                                          limits=_limits(102),
+                                          reading=_Reading(120.0)))
+    assert again["status"] == "already-notified", again
+    assert len(send.calls) == 1, "a second pass re-sent an already-delivered notice"
+
+
+def test_an_unwritable_ledger_does_not_starve_the_fleet_or_remail_daily():
+    """⛔ The stamp-failure arm may not consume the cap forever (#14038 review, P2).
+
+    A pass whose ledger WRITES fail is expected to report `sent` (the mail went out),
+    but that arm spends the per-pass cap on the same lowest-id accounts on every
+    interval: the rest of the fleet is never reached and those accounts are re-mailed
+    each pass. Non-vacuity: with `_note_unstamped` removed, the second pass mails
+    again (`len(send.calls) == 2`) and `unstamped-deferred` never appears.
+    """
+    cn._UNSTAMPED.clear()
+
+    class _UnwritableCP(FakeControlPlane):
+        def query(self, table, *, select=None, filters=None, method="GET",
+                  json_body=None, **kwargs):
+            if method == "PATCH":
+                raise RuntimeError("HTTP 503: ledger writes are down")
+            return super().query(table, select=select, filters=filters,
+                                 method=method, json_body=json_body, **kwargs)
+
+    cp = _UnwritableCP({"organizations": [_org_row()]})
+    send = _Sender()
+    first = asyncio.run(cn.notify_account(ORG_ID, cp=cp, send=send,
+                                          limits=_limits(102),
+                                          reading=_Reading(120.0)))
+    assert first["status"] == "sent" and first["stamped"] is False, first
+    assert len(send.calls) == 1
+    second = asyncio.run(cn.notify_account(ORG_ID, cp=cp, send=send,
+                                           limits=_limits(102),
+                                           reading=_Reading(120.0)))
+    assert second["status"] == "unstamped-deferred", (
+        f"the delivered-but-unrecorded notice re-entered the send path: {second}")
+    assert len(send.calls) == 1, "a broken ledger re-mailed the same account"
+    cn._UNSTAMPED.clear()
+
 
 # ── the shared sender: one path, budget-guarded, idempotency-keyed ──────────
 
