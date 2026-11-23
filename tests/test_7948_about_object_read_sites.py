@@ -150,10 +150,10 @@ WHAT THIS PINS
    builtin name; a repeated function-local VARIABLE target no longer resolves
    (`#9817` — the NAME of a nested `def`/`class` still does, and that residue is
    declared in the note at `_DOOR_REACH_HOPS`), the
-   budget is a BOUND (3, plus every `_DISTANCE_EXCEPTIONS` entry — four at this
-   head, each equal to its reader's deepest measured door; a typed COUNT here is
-   exactly the rot this file spends its arms on, so the register is the authority),
-   and its acceptance COUNT is pinned by (22) so it cannot
+   budget is a BOUND (3, plus every `_DISTANCE_EXCEPTIONS` entry — each equal to
+   its reader's deepest measured door; a typed COUNT here is exactly the rot this
+   file spends its arms on, so the register is the authority on how many there
+   are), and its acceptance COUNT is pinned by (22) so it cannot
    loosen again silently. **The REST door is keyed on `(verb, path)`, not path
    alone** — a cell naming the sibling `GET` of a `POST` route is a different
    door, and was green before the verb was checked.
