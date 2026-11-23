@@ -6055,6 +6055,13 @@ def _cmd_create_point(args) -> int:
         "content": args.content,
         "kind": args.kind or "statement",
     }
+    if getattr(args, "dedup", False):
+        # #14424: the server's create door accepts `dedup` (content-hash fold,
+        # #1643 P1-2) and defaults it to False. Opting in is what makes a RETRY
+        # after a wait-bound breach safe — the measured failure is 4 attempts
+        # through this verb leaving 4 identical Points, because the refusal
+        # text tells the caller to re-send and nothing made re-sending safe.
+        payload["dedup"] = True
 
     try:
         data = _json.dumps(payload).encode("utf-8")
@@ -6072,9 +6079,18 @@ def _cmd_create_point(args) -> int:
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
         print(f"API error ({e.code}): {body}", file=_sys.stderr)
+        # #14424: the wait-bound refusal's own text is "wait for the advertised
+        # delay before retrying, and retry only if repeating the operation is
+        # safe" — and BOTH halves were unactionable here: the advertised delay
+        # is a `Retry-After` HEADER this verb discarded, and nothing told the
+        # caller how to make the repeat safe (the `dedup` fold above does).
+        print(_create_point_retry_hint(e, dedup_used=bool(payload.get("dedup"))),
+              file=_sys.stderr)
         return 1
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        print("Nothing was sent, so nothing was written; re-run once the API is "
+              "reachable.", file=_sys.stderr)
         return 1
 
     point_id = result.get("id", result.get("point_id", "unknown"))
@@ -6083,6 +6099,61 @@ def _cmd_create_point(args) -> int:
     content_preview = args.content[:100] + "..." if len(args.content) > 100 else args.content
     print(f"  Content: {content_preview}")
     return 0
+
+
+def _create_point_retry_hint(exc, *, dedup_used: bool) -> str:
+    """The next action after a failed `tortoise create-point` (#14424).
+
+    THE DEAD-END THIS CLOSES. Measured on the deployed build (2026-11-23):
+    `tortoise create-point` hit `504` four times and **all four writes
+    committed** — the org read back 4 identical Points. The server's own
+    refusal says *"wait for the advertised delay before retrying, and retry
+    only if repeating the operation is safe"*, and this verb made both halves
+    unactionable: the delay is a `Retry-After` **header** it discarded, and no
+    word of the output said how a repeat could be made safe. The AX rule is
+    that a surface must not refuse where the next action is knowable
+    (`docs/ax/ax-principles.md`, #10183); here it is knowable, so it is stated:
+
+    * what changed — the write MAY have landed even though this command failed;
+    * what to do next — wait the advertised delay, then re-run **with
+      `--dedup`**, which folds the retry onto the same content hash instead of
+      adding a second Point;
+    * how to override — no flag is required to re-send; the cost of omitting
+      `--dedup` is a duplicate, which is the caller's call to make.
+
+    Kept out of the handler so the wording is testable without an HTTP mock.
+    """
+    retry_after = None
+    headers = getattr(exc, "headers", None)
+    if headers is not None:
+        try:
+            retry_after = headers.get("Retry-After")
+        except Exception:  # noqa: BLE001 - a header object we cannot read
+            retry_after = None
+    lines: list[str] = []
+    if retry_after:
+        lines.append(
+            f"The server advertised Retry-After: {retry_after} s — wait that "
+            f"long before re-sending.")
+    elif getattr(exc, "code", None) in (429, 503, 504):
+        lines.append(
+            "The server advertised no Retry-After; wait the delay its body "
+            "names before re-sending.")
+    if getattr(exc, "code", None) in (429, 503, 504):
+        lines.append(
+            "This failure does NOT mean nothing was written: the work may have "
+            "completed on the server.")
+        if dedup_used:
+            lines.append(
+                "Re-running is safe with this attempt's --dedup: the server "
+                "folds identical content onto the existing Point instead of "
+                "adding another.")
+        else:
+            lines.append(
+                "Re-running WITHOUT --dedup can create a duplicate Point for "
+                "content that already landed (measured: 4 attempts, 4 Points). "
+                "Re-run with --dedup to make the retry safe.")
+    return "\n".join(lines)
 
 
 def _context_source_label(api_url: str | None) -> str:
@@ -16108,13 +16179,43 @@ def _cmd_doctor(args):
             _session_index_reason = ("pre-init-default" if _is_default_target
                                      else "pre-init-configured")
             _icon = "⚠️" if _is_default_target else "❌"
-            _detail = (
-                f"not set up yet — no Tortoise DB at {target}"
-                + (f" ({_missing})" if _missing else "")
-                + ". Run `tortoise init` to create it, or point "
-                "doctor at your setup with TORTOISE_DB_URI / "
-                "TORTOISE_DB_PATH / --db."
-            )
+            # #14424: on the DEFAULT target with a HOSTED credential, "run
+            # `tortoise init`" is the WRONG next action — that verb builds a
+            # local graph the user will never write to. Measured on a clean HOME
+            # with a fresh signup key (2026-11-23): doctor printed "Run
+            # `tortoise init` to create it" to a box whose memory lives at
+            # api.premiselabs.co. The AX rule is that a surface must not refuse
+            # where the next action is knowable (#10183); here it is knowable,
+            # so the row names the hosted action and says `init` is the override.
+            # Resolution is OFFLINE (`_resolve_config_path`, no request), so the
+            # no-credential-means-no-network contract below is untouched.
+            _hosted_identity: tuple[str, str | None] | None = None
+            try:
+                _h_path, _h_cfg, _h_key, _h_url = _resolve_config_path()
+                if _h_key and _is_default_target:
+                    _hosted_identity = (_h_path.name if _h_path else "env", _h_url)
+            except (MemoryError,):
+                raise
+            except Exception:  # noqa: BLE001 - a refused store is §8's finding
+                _hosted_identity = None
+            if _hosted_identity is not None:
+                _src, _h_url = _hosted_identity
+                _detail = (
+                    f"not used by this setup — you have a hosted credential "
+                    f"({_src}{', ' + _h_url if _h_url else ''}), so your memory "
+                    f"lives there and a local graph is not required. Your next "
+                    f"step is `tortoise create-point \"…\"` — the `Hosted` row "
+                    f"below says whether that will work. Override: run "
+                    f"`tortoise init` only if you ALSO want a local graph."
+                )
+            else:
+                _detail = (
+                    f"not set up yet — no Tortoise DB at {target}"
+                    + (f" ({_missing})" if _missing else "")
+                    + ". Run `tortoise init` to create it, or point "
+                    "doctor at your setup with TORTOISE_DB_URI / "
+                    "TORTOISE_DB_PATH / --db."
+                )
             results.append(("Graph: health", _icon, _detail))
         else:
             try:
@@ -18307,6 +18408,11 @@ def main(argv: list[str] | None = None) -> int:
     cp = sp.add_parser("create-point", help="Create a Point via Tortoise Cloud API")
     cp.add_argument("content", help="Point content (text)")
     cp.add_argument("--kind", default="statement", help="Point kind (default: statement)")
+    cp.add_argument(
+        "--dedup", action="store_true",
+        help="Fold onto an existing Point with the same content instead of "
+             "creating a duplicate — makes a retry after a timeout safe (the "
+             "server's content-hash dedup, #1643) (#14424)")
     # tortoise session <subcommand>
     session = sp.add_parser("session", help="Manage Tortoise Cloud sessions")
     session_sp = session.add_subparsers(dest="session_cmd")

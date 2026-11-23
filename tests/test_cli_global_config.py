@@ -159,6 +159,94 @@ class TestGlobalConfigCommands:
         assert "# Tortoise memory (from previous sessions) — hosted (tortoise.example.com)" in out
 
 
+class TestCreatePointRetrySafety:
+    """#14424 — `create-point` must not leave a first-run user in a dead-end.
+
+    MEASURED on the deployed build (2026-11-23, commit `e74cf1d13da7`): four
+    attempts of this verb each returned `504` and **all four committed**, so the
+    org held 4 identical Points. The server's refusal says *"wait for the
+    advertised delay before retrying, and retry only if repeating the operation
+    is safe"* — and the verb made both halves unactionable: it discarded the
+    `Retry-After` header that IS the advertised delay, and nothing said how a
+    repeat could be made safe. See `docs/evidence/14424-onboarding/`.
+
+    Mutation check: drop the `_create_point_retry_hint` print from
+    `_cmd_create_point` and the two refusal tests RED; drop the `dedup` payload
+    arm and `test_dedup_flag...` REDs.
+    """
+
+    @staticmethod
+    def _refusal(code: int, headers: dict[str, str] | None = None):
+        import io as _io
+        from email.message import Message
+        from urllib.error import HTTPError
+
+        msg = Message()
+        for k, v in (headers or {}).items():
+            msg[k] = v
+        body = json.dumps({"detail": "the server's wait budget was exceeded"}).encode()
+        return HTTPError("https://api.premiselabs.co/v1/points", code,
+                         "Gateway Timeout", msg, _io.BytesIO(body))
+
+    def test_dedup_flag_sends_the_content_hash_fold(self, tmp_path):
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok(
+                {"id": "p1"})) as urlopen:
+            rc = main(["create-point", "hello world", "--dedup"])
+        assert rc == 0
+        payload = json.loads(urlopen.call_args.args[0].data.decode())
+        assert payload["dedup"] is True
+        assert payload["content"] == "hello world"
+
+    def test_omitting_the_flag_keeps_the_existing_payload(self, tmp_path):
+        """No behaviour change for the default path — `dedup` stays server-side
+        default (False) unless the caller opts in."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok(
+                {"id": "p1"})) as urlopen:
+            assert main(["create-point", "hello world"]) == 0
+        assert "dedup" not in json.loads(urlopen.call_args.args[0].data.decode())
+
+    def test_wait_bound_refusal_names_the_delay_and_the_safe_retry(
+            self, tmp_path, capsys):
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(504, {"Retry-After": "10"})):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        # the advertised delay is the HEADER the refusal points at
+        assert "Retry-After: 10" in err
+        # what changed: the failure does not mean nothing was written
+        assert "may have" in err and "completed on the server" in err
+        # the next action, and the cost of skipping it
+        assert "--dedup" in err
+        assert "duplicate" in err
+
+    def test_a_504_retried_with_dedup_is_told_it_is_safe(self, tmp_path, capsys):
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(504, {"Retry-After": "10"})):
+            rc = main(["create-point", "hello world", "--dedup"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "Re-running is safe" in err
+        # the duplicate warning belongs to the arm that did NOT opt in
+        assert "duplicate Point" not in err
+
+    def test_a_non_wait_bound_error_gets_no_retry_prose(self, tmp_path, capsys):
+        """A 422 is the server rejecting the body: retrying it is not the next
+        action, so the hint must stay quiet rather than advise a re-send."""
+        _seed_global(tmp_path)
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._refusal(422)):
+            rc = main(["create-point", "hello world"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "--dedup" not in err
+        assert "Retry-After" not in err
+
+
 class TestConfigErrorCommandHandling:
     """D6 per-site _ConfigError handling: a corrupt/unreadable global config
     must never traceback — context falls back to local mode, create-point and

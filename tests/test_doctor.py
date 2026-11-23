@@ -4109,6 +4109,63 @@ class TestDoctorPreInit:
         assert "❌" not in line
         assert not (tmp_path / ".tortoise").exists()  # no dir created by the probe
 
+    def test_a_hosted_box_is_not_told_to_run_tortoise_init(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """#14424: the first-run row must name the next action a user's MODE has.
+
+        MEASURED on a clean HOME holding a fresh signup key (2026-11-23): doctor
+        printed `Graph: health: not set up yet — no Tortoise DB at
+        ~/.tortoise/tortoise.db … Run `tortoise init` to create it` — a
+        self-hosted action, to a box whose memory lives at api.premiselabs.co.
+        `init` would build a local graph that user never writes to.
+
+        Mutation: delete the `_hosted_identity` arm and this REDs on
+        `create-point` being absent from the row (and on the row telling a
+        hosted user to run `init`).
+        """
+        import json as _json
+
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        store = tmp_path / ".tortoise"
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "credentials.json").write_text(_json.dumps({
+            "api_key": "tt_hostedkey0123456789",
+            "api_url": "https://api.premiselabs.co",
+        }))
+        # The hosted probe is NOT this test's subject: keep it offline so no
+        # request leaves the box and the assertion stays about the graph row.
+        rc = _run_doctor(["--offline"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        line = _health_line(out)
+        assert "⚠️" in line and "❌" not in line   # hosted-only is not a failure
+        assert "not used by this setup" in line
+        assert "create-point" in line               # the mode's own next action
+        # ...and the self-hosted remedy is demoted to the named override
+        assert "init` only if you ALSO want a local graph" in line
+
+    def test_a_self_hosted_box_still_gets_the_init_remedy(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The complement, so the hosted arm cannot silently swallow the
+        self-hosted first run: no credential → the row keeps `tortoise init`."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+
+        rc = _run_doctor([])
+        line = _health_line(capsys.readouterr().out)
+
+        assert rc == 0
+        assert "not set up yet" in line
+        assert "Run `tortoise init` to create it" in line
+        assert "create-point" not in line
+
 
 class TestDoctorImportHygiene:
     """#2204 O/I/T (3) regression: importing tortoise modules on a clean env
