@@ -2001,6 +2001,22 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                  # names in `launderers` are `dict`/`getattr`/`vars` aliases, whose
                  # two-positional-argument forms are TypeErrors.
                  or (isinstance(node.func, ast.Name) and node.func.id in launderers
+                     and len(node.args) >= 1)
+                 # ⛔ AND THE COPY CALLEE REACHED AS A NAMESPACE MEMBER (#14326 review cycle 12,
+                 # EACH MEASURED GREEN **and LIVE** while the BOUND twin was REFUSED — the
+                 # in-file asymmetry by this file's own definition):
+                 #
+                 #     dict.__dict__["copy"](builtins.__dict__)    GREEN   `_f = dict.__dict__["copy"]; _f(m)` RED
+                 #     vars(dict)["copy"](builtins.__dict__)       GREEN   (`dict.__dict__["copy"] is dict.copy`)
+                 #     copy.__dict__["copy"](builtins.__dict__)    GREEN
+                 #
+                 # The BOUND spelling is resolved by `_builtin_name_aliases`; the INLINE one is
+                 # the same expression and was never asked. `_builtin_lookup_name` answers it
+                 # through its SUBSCRIPT arm — the receiver set only has to name the module the
+                 # namespace belongs to (`dict`/`copy`), which is what the literal pair is.
+                 or (_builtin_lookup_name(node.func, names | {"dict", "copy"}, consts,
+                                          dict_names, launderers,
+                                          members=_COPY_CALLEES) is not None
                      and len(node.args) >= 1))
             # ⛔ AND THE ONE-ELEMENT `*` SPREAD OF THE SAME ARGUMENT (#14326 review round 9,
             # EACH MEASURED GREEN and LIVE at `cb87c7c8cb`: `_f = dict; _d =
@@ -2198,6 +2214,10 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
                                      names, dict_names, launderers, consts)):
         keys = _string_keys_of(node.args[1], consts) & _members
         return sorted(keys)[0] if keys else None
+    # ⛔ NO SUBSCRIPT-CALLEE ARM HERE (#14326 review cycle 12, MEASURED DEAD: `dict.__dict__[
+    # "get"](m, "exec")` is refused through the ALIAS closure — `_mapping_read_aliases` collects
+    # a Subscript value — so an arm matching a Subscript `func` in this resolver flipped 0 of
+    # 223 rows when deleted. The file deletes a clause no mutant can red.)
     # ⛔ AND THE MAPPING'S OWN METHODS, WHICH ARE THE SUBSCRIPT ONE SPELLING OVER (#14326
     # round 35, EACH MEASURED GREEN at `a12902a5d4` while the `m["exec"]` subscript of the
     # IDENTICAL mapping was RED):
@@ -3236,7 +3256,17 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
         or _builtin_lookup_name(n, _builtins_names, consts, _builtins_dict_names,
                                 _builtins_launderers,
                                 members=_BUILTINS_MAPPING_READS,
-                                getattr_fetchers=_getattr_fetchers) is not None,
+                                getattr_fetchers=_getattr_fetchers) is not None
+        # ⛔ AND THE NAMESPACE-SUBSCRIPT SPELLING, BOUND TO A NAME (#14326 review cycle 12,
+        # MEASURED GREEN: `_g = dict.__dict__["get"]; _g(builtins.__dict__, "exec")(<read>)`
+        # executed the read while the INLINE form is REFUSED by the arm that reads a Subscript
+        # CALLEE). `dict.get` (an Attribute) has been collected here since round 7; the member
+        # fetched out of the module's OWN namespace is the same method, one spelling over.
+        or (isinstance(n, ast.Subscript)
+            and (_string_keys_of(n.slice, consts) & _BUILTINS_MAPPING_READS)
+            and isinstance(n.value, ast.Attribute) and n.value.attr == "__dict__"
+            and isinstance(n.value.value, ast.Name)
+            and n.value.value.id in {"dict", "copy"}),
         loops=True))
     _code_executing_names = _CODE_EXECUTING_CALLEES | frozenset(_aliases_of(
         tree,
@@ -7715,6 +7745,19 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    _f = __builtins__["dict"].copy\n'
             '    _d = _f(builtins.__dict__)\n'
             '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        # ⛔ THE NAMESPACE-SUBSCRIPT TWINS (#14326 review cycle 12, EACH MEASURED GREEN **and
+        # LIVE** while the bound spelling was REFUSED): the copy callee and the read method,
+        # fetched as a member of the module's OWN `__dict__` and called inline. `dict.get(m, k)`
+        # and `dict.copy(m)` were already refused; the member fetched out of the namespace is
+        # the same callable, one spelling over — so each is CLOSED, and its row reds the arm.
+        "a COPY CALLEE fetched from the module's `__dict__`": (
+            '    import builtins\n'
+            '    _d = dict.__dict__["copy"](builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "a READ METHOD fetched from the module's `__dict__`": (
+            '    import builtins\n'
+            '    _g = dict.__dict__["get"]\n'
+            '    _g(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a COPY CALLEE fetched with `getattr` off a MAPPING fetch": (
             '    import builtins\n'
             '    _f = getattr(__builtins__["dict"], "copy")\n'
@@ -11776,6 +11819,15 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`_f = getattr(builtins.dict, \"copy\")`": (
             'import builtins', '_f = getattr(builtins.dict, "copy")',
             '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        # ⛔ THE NAMESPACE-SUBSCRIPT READ METHODS, BOUND (#14326 review cycle 12 — the
+        # INLINE twin is refused by the Subscript-callee arm; the BOUND one needed the alias
+        # collector to read a Subscript value, which is what this clause adds).
+        "`_g = dict.__dict__[\"get\"]`": (
+            'import builtins', '_g = dict.__dict__["get"]',
+            '_d = _g(builtins.__dict__, "exec")', f'_d("results = {read}")'),
+        "`_g = dict.__dict__[\"__getitem__\"]`": (
+            'import builtins', '_g = dict.__dict__["__getitem__"]',
+            '_d = _g(builtins.__dict__, "exec")', f'_d("results = {read}")'),
         "`_f = getattr(getattr(builtins, \"dict\"), \"copy\")`": (
             'import builtins', '_f = getattr(getattr(builtins, "dict"), "copy")',
             '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
