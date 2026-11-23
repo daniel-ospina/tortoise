@@ -18464,19 +18464,35 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # so absence there is the clone's shape and never read as a pass.
     _MEMBER_DOC = ("docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md")
     _I7_TARGET = "hosted_api.py:15449-15526"
-    _member = re.search(
-        r"IS in this diff at the head this was read at \(`(?P<head>[0-9a-f]{40})`\), "
+    # ⛔ BOTH POLARITIES OF THE MEMBERSHIP CLAIM (#14237 merge lane, MEASURED). The single
+    # spelling this arm used to read ("IS in this diff at the head this was read at
+    # (`<sha>`), by its PAIR") had NO honest form at a head where `main` has since absorbed
+    # the whole file: `git diff --numstat origin/main...HEAD -- <04-plan.md>` is EMPTY
+    # there, so the only true sentence is the history one and the arm could only ever red
+    # it — the same "the sentence had no spelling it could pass with" dead end this block
+    # already repaired for the I7 polarity below. EXACTLY ONE polarity is legal per head,
+    # and the live numstat is what decides which; a sentence that names the wrong one is
+    # still a failure, so this stays a gate rather than an escape from one.
+    _member_is = re.search(
+        r"\bIS in this diff at the head this was read at \(`(?P<head>[0-9a-f]{40})`\), "
         r"by its PAIR", text)
+    _member_not = re.search(
+        r"\bis NOT in this diff at the head this was read at \(`(?P<head>[0-9a-f]{40})`\), "
+        r"by its PAIR", text)
+    _member = _member_is or _member_not
+    _member_claims_present = _member_is is not None
     _measured: list[str] = []
     if _member is None:
         failures.append(
             "D5 no longer states `04-plan.md`'s membership AS OF A NAMED HEAD and by its "
-            "PAIR — the spelling this arm reads is 'IS in this diff at the head this was "
-            "read at (`<full 40-char sha>`), by its PAIR'. Re-derive the sentence and name "
-            "the FULL head you read the numstat at (a prefix is ambiguous about WHICH "
-            "object it names, and this is the one sha in the row that is provenance rather "
-            "than a line number); a headless 'at this head' inverts the moment this branch "
-            "merges and is refused by the next assertion (#14260 fix lane, finding 1)")
+            "PAIR — ONE of the two spellings this arm reads is 'IS in this diff at the head "
+            "this was read at (`<full 40-char sha>`), by its PAIR', the other 'is NOT in "
+            "this diff at the head this was read at (`<full 40-char sha>`), by its PAIR'. "
+            "Re-derive the sentence and name the FULL head you read the numstat at (a "
+            "prefix is ambiguous about WHICH object it names, and this is the one sha in "
+            "the row that is provenance rather than a line number); a headless 'at this "
+            "head' inverts the moment this branch merges and is refused by the next "
+            "assertion (#14260 fix lane, finding 1; both-polarity arm, #14237 merge lane)")
     else:
         _member_head = _member.group("head")
         _member_blob = subprocess.run(
@@ -18526,14 +18542,30 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         else:
             _measured.append(f"the live `{_base}...HEAD` numstat")
             if not _numstat.stdout.strip():
-                failures.append(
-                    f"D5 says `04-plan.md` IS in this diff by its PAIR, but "
-                    f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` is EMPTY — so at "
-                    f"the head you are running, that file carries no re-point of this "
-                    f"diff. Either the re-point was dropped, or the sentence no longer "
-                    f"describes this head. Re-derive the membership (#14260 fix lane, "
-                    f"finding 3)")
+                # ⛔ THE HONEST-HISTORY STATE (#14237 merge lane, MEASURED). `main` can absorb
+                # the whole file, and then the ONLY true sentence is the history one: the
+                # document's membership is not this diff's any more. The polarity is graded in
+                # BOTH directions — the wrong one still fails — so this is not an escape hatch
+                # for a dropped re-point.
+                if _member_claims_present:
+                    failures.append(
+                        f"D5 says `04-plan.md` IS in this diff by its PAIR, but "
+                        f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` is EMPTY — so at "
+                        f"the head you are running, that file carries no re-point of this "
+                        f"diff. Either the re-point was dropped, or the sentence no longer "
+                        f"describes this head. Re-derive the membership: if `main` has absorbed "
+                        f"the same content, state it as HISTORY (`is NOT in this diff at the "
+                        f"head this was read at (`<sha>`), by its PAIR`) rather than as this "
+                        f"diff's (#14260 fix lane, finding 3; both-polarity arm, #14237 merge "
+                        f"lane)")
             else:
+                if not _member_claims_present:
+                    failures.append(
+                        f"D5 calls `04-plan.md`'s membership HISTORY ('is NOT in this diff at "
+                        f"the head this was read at'), but `git diff --numstat "
+                        f"{_base}...HEAD -- {_MEMBER_DOC}` prints a pair — so at this head the "
+                        f"document IS in this diff and the sentence understates it. State the "
+                        f"live membership instead of the inherited one (#14237 merge lane)")
                 _base_copy = _git("show", f"{_base}:{_MEMBER_DOC}")
                 if _base_copy.returncode == 0:
                     # ⛔ BOTH POLARITIES, because one of them is the head this arm was written
@@ -18589,6 +18621,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "becomes false while a phrase-assertion over it stays green — the class the block's "
         "own rule forbids ('a phrase-only assertion was green over the old claim, re-landed, "
         "and was green again'). Name the FULL head (#14260 fix lane, finding 1)")
+    assert "is NOT in this diff at this head, by its PAIR" not in text, (
+        "D5 has gone back to stating `04-plan.md`'s membership HISTORY without the head it "
+        "was read at ('at this head, by its PAIR'). The polarity is the part that moved, so "
+        "a headless spelling of it is the SAME defect in the other direction: it is a claim "
+        "about a head nobody can read back. Name the FULL head (#14237 merge lane)")
     # and the chimera is refused, not merely absent from the message above
     # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
     # pair-lists in BOTH arrow conventions (ASCII `->` and unicode `→`) and does not always
