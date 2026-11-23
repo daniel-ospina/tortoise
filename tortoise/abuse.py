@@ -1911,15 +1911,29 @@ class AbuseEngine:
         if total <= threshold:
             # Clean window → end any active flag episode for this rule, so a
             # later burst starts fresh (re-flag, never a stale-flag suspend).
+            #
+            # `flagged` is what makes this an EPISODE end. The clean window is the
+            # overwhelmingly common evaluation — an org under its threshold — and
+            # for it there is no episode at all; firing the episode-end work on
+            # that branch anyway cost up to 8 R2 GETs per `record_point_create`
+            # (2 rules × 2 incident kinds × 2 subject spellings,
+            # `resolve_incident_state` → `_read_json` → `storage.download`), on the
+            # 4-worker abuse pool whose documented cost profile is "microseconds of
+            # accounting" (`monitoring.py` CONTROL_PLANE_ABUSE_*). Zero pre-#14407.
+            #
+            # A `latest_flag_at` that RAISES still counts as not-ended: a store
+            # failure must reduce alert volume, never increase it (#3631).
             ended = False
+            flagged = False
             try:
-                if self.store.latest_flag_at(org_id, rule) is not None:
+                flagged = self.store.latest_flag_at(org_id, rule) is not None
+                if flagged:
                     self.store.flag_clear(org_id, rule, now=now)
                 ended = True
             except Exception as e:
                 report_abuse_decision_fault(
                     "clean_window_episode_end", org_id, rule, e)
-            if ended:
+            if ended and flagged:
                 # Episode CONFIRMED over: re-arm the alert budget so a NEW
                 # episode alerts again (#3631 — per-episode, not a wall-clock
                 # cooldown). NOT released when the episode-end read/write
