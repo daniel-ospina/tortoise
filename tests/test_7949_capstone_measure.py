@@ -6814,14 +6814,23 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ⛔ THE GATES `_IDLE_CITES["vet"]` NAMES, in the rule's own docstring — the second
-        # surface of one claim (#14269 review). `_IDLE_CITES["vet"]` above was re-pointed
-        # `:17967` -> `:17970`; this docstring, whose whole subject is "the FLAG is not the
-        # GATE", kept `:17967`, which reads `vet_s2_pool: dict = {}` — so a reader following
-        # the sentence landed on an assignment. No leg could see it: `_BUNDLE_CITE` needs a
-        # cite to NAME its file (this is a bare continuation), and the only other row reaching
-        # this docstring scopes on "with the flag ON", whose number sits one markdown line
-        # ABOVE the gate sentence. Measured pre-fix, `git grep -n -F '17967'` here also hits 2
-        # JSON substrings — no other CITE carried it.
+        # surface of one claim (#14269 review). ⛔ THE CAUSAL STORY HERE WAS WRONG TWICE and is
+        # corrected to the measurement: this is NOT a stale number. `main`'s `588cf7aeb6`
+        # re-pointed BOTH copies of this claim in ONE commit — `git show 588cf7aeb6 --
+        # docs/evidence/7949-capstone/probes/capstone_measure.py` moves the docstring line AND
+        # the `_IDLE_CITES`-style line `:17967` -> `:17970` together — and `git grep -n -F 17967`
+        # over that file exits 1 at this head. So no head of `main` or of this branch ever carried
+        # a split state, and nothing here is a figure to re-offset (this file's own header says
+        # the failure it was written for was not a stale number but a FALSE CORRECTION — which is
+        # what re-telling it as "the docstring kept `:17967`" invites). What the merge resolution
+        # with `588cf7aeb6` DROPPED is this ROW, and what makes the row necessary is main's WRAP:
+        # main puts `:15372` on its own line, where no row can scope it.
+        # ⛔ AND IT IS NOT "THE ONLY OTHER ROW": FIVE other rows reach this docstring (AST span
+        # 1871-1918) — those scoping on `with the flag ON` (1886), `follows at` (1884), `emits
+        # literally` (1885), `so an acceptance test of` (1877) and `is different code` (1896).
+        # They pin `:14791`/`:14792`, `:14823`, `:14819-14822`, `:15706-15720` and `:14757` — NOT
+        # the gate pair `:17970`/`:15372`, which no other row reads. That, not uniqueness of the
+        # docstring, is why this row is needed and not a duplicate.
         # ⛔ RE-ADDED after the merge resolution with `origin/main` `588cf7aeb6` dropped it: the
         # resolution took `main`'s whole copy of this file, which was right for the D5 block
         # (unreachable) but ALSO discarded THIS row, ~900 lines away and not D5 machinery. The
@@ -6830,9 +6839,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # and complete_list:`` (``:15372``) `` sentence. Measured: WITHOUT this row, mutating
         # `:17970` -> `:17967` in that probe leaves `444 passed` (green); WITH it, the same
         # mutation reds `test_the_bare_continuation_cites_name_what_they_say`.
-        # Non-vacuity: on the pre-fix line `:17970` is ABSENT (it carried `:17967`), so this row
-        # reds on exactly the number it was added for, and the `_locate_hint` leg names the live
-        # line (`if vet_enabled and embed_list:` at `:17970`).
+        # Non-vacuity, MEASURED at this head: mutating `:17970` -> `:17967` in that probe reds
+        # `test_the_bare_continuation_cites_name_what_they_say`; the row's scope is what makes
+        # that number observable at all, since no other row reads the pair. The `_locate_hint`
+        # leg names the live line (`if vet_enabled and embed_list:` at `:17970`).
         ("probes/capstone_measure.py", "and ``if vet_enabled and complete_list:``", (
             ("17970", "if vet_enabled and embed_list:"),
             ("15372", "if vet_enabled and complete_list:"),
