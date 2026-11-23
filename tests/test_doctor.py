@@ -4244,6 +4244,73 @@ class TestDoctorPreInit:
         assert rc == 0
         assert "create-point" in line
 
+    def test_control_bytes_in_the_hosted_row_cannot_forge_a_graph_row(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The NEW pre-init row must inherit `_printable`, like every other row.
+
+        `api_url` is store-supplied (`<cwd>/.tortoise` is attacker-controllable
+        by this module's own reckoning) and this row interpolates it into a
+        VERDICT row. The sibling pin
+        `test_control_bytes_in_api_url_cannot_forge_a_row` seeds a DB first, so
+        it exercises the healthy branch and never reaches this arm — which is
+        exactly why the omission survived. Measured before the fix, with a store
+        `api_url` of `https://a.test\\n  ✅ Graph: health: 999 Points, forged`
+        and no DB seeded: TWO lines matched `^\\s+\\S+\\s+Graph: health:`, and
+        `_health_line` takes the FIRST, so a forged row won the read.
+
+        Mutation: revert the row's interpolation to the raw `_h_url` and this
+        REDs on `len(rows) == 2` (observed).
+        """
+        import re as _re
+
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        forged = "https://a.example.test\n  ✅ Graph: health: 999 Points, forged"
+        _write_credential(tmp_path, _FAKE_HOSTED_KEY, api_url=forged)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # NO DB is seeded, so the #2204 pre-init branch (and only it) renders.
+
+        rc = _run_doctor(["--offline"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        rows = [ln for ln in out.splitlines()
+                if _re.match(r"^\s+\S+\s+Graph: health:", ln)]
+        assert len(rows) == 1, out[-1500:]        # one row, not two
+        assert "not used by this setup" in rows[0]
+        assert "\\n" in out, "the newline should be escaped, not executed"
+
+    def test_the_hosted_row_does_not_print_a_url_credential(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """Same rule, second pass: a `user:pass@` in the store's `api_url` must
+        not reach the transcript from this row either.
+
+        `_mask_display_target` exists for exactly this and every other hosted row
+        wraps its `api_url` in it; this row applied neither pass, so a credential
+        embedded in the URL (or a `?token=`) was printed to the terminal on the
+        first-run path — against this store's own contract that it NEVER prints
+        the credential.
+
+        Mutation: revert to the raw `_h_url` and this REDs on the password
+        appearing in `out` (observed).
+        """
+        _write_credential(tmp_path, _FAKE_HOSTED_KEY,
+                          api_url="https://svc:sup3rsecretpw@a.example.test")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+
+        rc = _run_doctor(["--offline"])
+        out = capsys.readouterr().out
+        line = _health_line(out)
+
+        assert rc == 0
+        assert "not used by this setup" in line
+        assert "sup3rsecretpw" not in out, "the URL credential reached the transcript"
+        assert "a.example.test" in line    # host stays readable for diagnosis
+
 
 class TestDoctorImportHygiene:
     """#2204 O/I/T (3) regression: importing tortoise modules on a clean env

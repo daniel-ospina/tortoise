@@ -16295,9 +16295,25 @@ def _cmd_doctor(args):
                 _hosted_identity = None
             if _hosted_identity is not None:
                 _src, _h_url = _hosted_identity
+                # ⛔ `_h_url` is STORE-SUPPLIED and lands in a verdict row, so it
+                # needs the same TWO passes every other row in this verb applies
+                # (see `base = _printable(_mask_display_target(api_url or ""))`
+                # in `_doctor_hosted_rows`), and for the same reason:
+                #   * `_printable` — a store `api_url` of
+                #     `https://a.test\n  ✅ Graph: health: 999 Points, forged`
+                #     printed a SECOND `Graph: health` results row on the
+                #     pre-init path (measured: two rows matched
+                #     `^\s+\S+\s+Graph: health:`), and a verdict report must
+                #     never let a store forge a row; `_health_line` takes the
+                #     FIRST match, so a forged line can win the read.
+                #   * `_mask_display_target` — a `user:pass@` or `?token=` in
+                #     that URL otherwise reaches the transcript, against this
+                #     store's own contract that it NEVER prints the credential.
+                _display_url = _printable(_mask_display_target(_h_url or ""))
                 _detail = (
                     f"not used by this setup — you have a hosted credential "
-                    f"({_src}{', ' + _h_url if _h_url else ''}), so your memory "
+                    f"({_src}{', ' + _display_url if _display_url else ''}), "
+                    f"so your memory "
                     f"lives there and a local graph is not required. Your next "
                     f"step is `tortoise create-point \"…\"` — the `Hosted` row "
                     f"below says whether that will work. Override: run "
