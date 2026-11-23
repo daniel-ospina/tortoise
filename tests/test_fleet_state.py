@@ -3710,6 +3710,23 @@ def _row_for_pid(pid: int) -> str:
     return out
 
 
+def _child_exited(proc) -> bool:
+    """Has the child EXITED? Never collects its status, so `ps` still renders the zombie row.
+
+    `proc.poll()` answers the same question but COLLECTS the status (`waitpid`), and a collected
+    child disappears from the process table — the diagnosis below interpolates exactly that row
+    (`'[python] <defunct>'`) as its evidence. `waitid(WNOWAIT)` reports an exited child without
+    reaping it, so the evidence survives. Without `waitid` the fallback is `poll()`: the answer
+    is still right and the row is then empty.
+    """
+    try:
+        return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except AttributeError:  # pragma: no cover — POSIX waitid absent
+        return proc.poll() is not None
+    except (ChildProcessError, OSError):  # pragma: no cover — not our child / already reaped
+        return proc.poll() is not None
+
+
 def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     """End-to-end MATCHER coverage: a real process named `pi` under a long path is found.
 
@@ -3815,7 +3832,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                 if err:
                     pytest.skip(f"the process table is unreadable here: {err}")
                 pids = [p["pid"] for p in procs]
-                if proc.pid in pids or time.time() >= deadline:
+                # ⛔ A DEAD CHILD ENDS THE POLL (#12039 review finding 4a). Liveness was
+                # consulted only AFTER the 10 s deadline burned, so on a box where the child
+                # dies the conclusion available at the first sample cost the deadline plus ~100
+                # `ps` invocations. The exits below are untouched — this only reaches them
+                # sooner. `_child_exited` does not collect the status on purpose: reaping here
+                # would empty the table row the diagnosis quotes.
+                if proc.pid in pids or _child_exited(proc) or time.time() >= deadline:
                     break
                 time.sleep(0.1)
             if proc.pid not in pids:
