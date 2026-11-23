@@ -428,10 +428,11 @@ def _residue_block() -> str:
     it NAMES, and this pair-merge keeps both sides at every step for that reason, so the figure
     above is RE-MEASURED on THIS merged tree rather than inherited from either side — which the
     next reflow repeats; THIS BRANCH's own review-round prose then took the run past `main`'s
-    1376 at the rebase onto `origin/main` `d2cd8ab06e` — and EVERY later prose edit moves it again,
-    so this figure is re-measured on the tree it is published from rather than inherited from
-    either side, the same rule applied once more, with no per-round arithmetic restated here
-    because that sum is exactly the figure the walk already grades), AND THE ARMS GRADE ALL OF IT
+    1376 on THIS tree, measured through this walk rather than inherited from either side — the same
+    rule, applied once more. ⛔ AND NO INTERMEDIATE PER-REVISION FIGURE IS QUOTED: a figure
+    anchored to an EVENT instead of to a REVISION is precisely the drift this block exists to stop,
+    so only the GRADED figure above is stated, and every prose edit re-derives it), AND THE ARMS
+    GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
