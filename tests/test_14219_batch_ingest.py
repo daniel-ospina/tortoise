@@ -16,9 +16,11 @@ from tortoise.batch_ingest import (
     ACCEPT_COPY,
     ACKNOWLEDGEMENT_TOKEN_THRESHOLD,
     BATCH_ITEMS_IN_FLIGHT,
+    BATCH_LABEL,
     OVERAGE_USD_PER_MILLION_TOKENS,
     PROVIDER_MECHANICS_WORDS,
     SECONDS_PER_DOCUMENT,
+    TERMINAL_BATCH_STATES,
     TERMINAL_ITEM_STATES,
     TOKENS_PER_MEDIAN_DOCUMENT,
     Batch,
@@ -285,13 +287,29 @@ def test_a_cancelled_batch_is_not_resumed_by_a_restart():
 
 
 def test_a_completed_batch_is_not_reported_as_pending():
+    """A settled batch is never resumable — and an UNSETTLED one always is.
+
+    ⛔ The definition is "unfinished is EITHER half" (#14415 review round 2): a
+    batch is pending when its ROW is non-terminal, or when any item is. The
+    second half is what lets `recover()` repair a row that lagged its items (a
+    settle write that timed out, a process killed between the last item write
+    and the settle) — that row used to be invisible to every path, including a
+    fresh boot, and `cancel()` was the only call that would move it. So the
+    assert below is the SETTLED state, which is the property that matters: after
+    `settle()` nothing re-derives the batch, ever.
+    """
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
     batch, items = coord.submit(ORG, ["/a.md"])
     coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
     coord.advance(ORG, items[0], BatchItemState.INDEXED)
-    assert store.pending_batches(ORG) == []
+    # Every item is terminal but the row has not settled yet: still pending, by
+    # design — that is the lagging state `recover()` must be able to see.
+    assert store.pending_batches(ORG) == [batch.batch_id]
     assert coord.settle(ORG, batch.batch_id).state is BatchState.COMPLETED
+    assert store.pending_batches(ORG) == [], (
+        "a settled batch must never be re-derived, or recovery would re-open "
+        "finished work for ever")
 
 
 # ── cancel (brief item 6) ──────────────────────────────────────────────────
@@ -666,6 +684,24 @@ def test_graph_store_resume_query_screens_out_terminal_states():
     assert set(params["terminal"]) == {str(s) for s in TERMINAL_ITEM_STATES}
 
 
+def test_the_resume_query_selects_the_lagging_batch_row_too():
+    """⛔ #14415 review round 2: "unfinished" is EITHER half, in the GRAPH too.
+
+    The in-memory store and the graph store must answer the same question or the
+    repair only works in tests. A batch whose items are all terminal but whose
+    row is not is unfinished (the settle write timed out, or the process died
+    before it), and it is invisible to an item-keyed query — which is how a
+    charged, fully-indexed batch came to be relabelled by `cancel()`.
+    """
+    rec = _Recorder()
+    GraphBatchStore(rec).pending_batches(ORG)
+    cypher, params = rec.statements[-1], rec.params[-1]
+    assert BATCH_LABEL in cypher and "b.state" in cypher, (
+        "the batch row must be selected, not only the item rows")
+    assert set(params["batch_terminal"]) == {str(s) for s in TERMINAL_BATCH_STATES}
+    assert set(params["terminal"]) == {str(s) for s in TERMINAL_ITEM_STATES}
+
+
 def test_an_unknown_stored_state_reads_as_queued_not_as_terminal():
     """Version skew must never silently settle an item as done."""
     rec = _Recorder(answers=[[[
@@ -850,7 +886,7 @@ def test_a_retryable_skip_is_retried_but_a_condition_that_never_clears_settles_f
     assert bi.BATCH_MAX_ATTEMPTS >= 2, "a ceiling of 1 is not a retry at all"
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
-    _batch, items = coord.submit(ORG, ["/locked.md"])
+    batch, _items = coord.submit(ORG, ["/locked.md"])
 
     outcomes = []
 
@@ -859,9 +895,9 @@ def test_a_retryable_skip_is_retried_but_a_condition_that_never_clears_settles_f
         return ItemOutcome(BatchItemState.QUEUED, reason="index lock held")
 
     for _ in range(bi.BATCH_MAX_ATTEMPTS + 2):
-        coord.run_item(ORG, store.items(ORG, _batch.batch_id)[0], locked)
+        coord.run_item(ORG, store.items(ORG, batch.batch_id)[0], locked)
 
-    final = store.items(ORG, _batch.batch_id)[0]
+    final = store.items(ORG, batch.batch_id)[0]
     assert final.state is BatchItemState.FAILED
     assert f"{bi.BATCH_MAX_ATTEMPTS} attempt" in final.reason
     assert "re-submit" in final.reason
@@ -907,3 +943,88 @@ def test_cancelling_a_settled_batch_reports_it_unchanged_rather_than_relabelling
     assert first.cancelled_at == second.cancelled_at
     assert second.cancel_reason == "first", (
         "a second cancel must not rewrite the recorded reason")
+
+
+# ── #14415 review round 2: the repair paths, pinned ───────────────────────
+def test_a_batch_row_that_lagged_its_items_is_repaired_by_recovery():
+    """⛔ ROUND-2 BLOCKING 1 arm 2 + BLOCKING 2: a lagging ROW wedged for ever.
+
+    `settle()`'s own write can time out, and a process can die between the last
+    item write and the settle. Every item is then terminal and charged while the
+    batch row still reads `accepted` — and because `pending_batches()` selected
+    on ITEM state, that row was invisible to every path, including a fresh boot.
+    The only call that would ever move it was `cancel()`, which relabelled it
+    `cancelled` (B3's wrong outcome, reached with no injected fault).
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
+    for it in items:
+        coord.advance(ORG, it, BatchItemState.EXTRACTING, attempt=True)
+        coord.advance(ORG, it, BatchItemState.INDEXED, tokens_in=5)
+    # …the process dies here, before `settle()`.
+    assert store.get_batch(ORG, batch.batch_id).state is not BatchState.COMPLETED
+    assert store.pending_batches(ORG) == [batch.batch_id], (
+        "an unsettled row must be VISIBLE to recovery, or nothing ever derives it")
+
+    # A fresh boot's recovery pass settles it from the rows.
+    assert BatchCoordinator(store).recover(ORG) == [], (
+        "nothing to RESUME — the work is done; the row is what was stale")
+    assert store.get_batch(ORG, batch.batch_id).state is BatchState.COMPLETED
+    assert store.pending_batches(ORG) == []
+
+
+def test_cancel_derives_the_truth_over_a_lagging_row_instead_of_relabelling_it():
+    """⛔ ROUND-2 BLOCKING 2: the guard is on remaining WORK, not on the row.
+
+    Keying only on ``batch.state`` reproduced B3's exact outcome — a fully
+    indexed, charged batch relabelled `cancelled` with an invented
+    `cancelled_at` — whenever the row lagged its items.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
+    for it in items:
+        coord.advance(ORG, it, BatchItemState.EXTRACTING, attempt=True)
+        coord.advance(ORG, it, BatchItemState.INDEXED, tokens_in=5)
+    # The row lags: no settle() was written.
+    after, after_items = coord.cancel(ORG, batch.batch_id, reason="too late")
+
+    assert after.state is BatchState.COMPLETED, (
+        "there is nothing left to stop, so the derived state is the truth")
+    assert not after.cancelled_at and after.cancel_reason == ""
+    assert all(i.state is BatchItemState.INDEXED for i in after_items)
+    assert sum(i.tokens_in for i in after_items) == 10
+
+
+def test_the_live_drain_test_is_asked_per_batch_not_snapshotted():
+    """⛔ ROUND-2 NB4: a snapshot taken before `recover()`'s reads left a window.
+
+    A drain that claimed the batch INSIDE that window still had its claim
+    requeued, so the same discarded outcome survived, narrowed to one query's
+    round trips. The seam is now a predicate evaluated at the moment of the
+    decision — this pin is about WHEN it is asked, not what it answers.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    first, first_items = coord.submit(ORG, ["/a.md"])
+    second, second_items = coord.submit(ORG, ["/b.md"])
+    for items in (first_items, second_items):
+        coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+
+    probed: list[str] = []
+
+    def is_live(batch_id: str) -> bool:
+        probed.append(batch_id)
+        # The claim lands only after the FIRST probe: a snapshot taken before
+        # the reads would have answered "not live" for both batches.
+        return batch_id == second.batch_id and len(probed) >= 1
+
+    resumed = coord.recover(ORG, live_batches=is_live)
+
+    assert set(probed) == {first.batch_id, second.batch_id}, (
+        f"the predicate must be asked per candidate batch, got {probed}")
+    assert resumed == [first.batch_id], (
+        "the batch whose claim appeared after the first probe must be skipped")
+    assert store.items(ORG, second.batch_id)[0].state is (
+        BatchItemState.EXTRACTING)

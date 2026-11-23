@@ -16873,11 +16873,15 @@ def _recover_org_batches(org: dict) -> list[str]:
         # item's outcome (the row is `extracting`, `recover()` requeues it, the
         # live runner's `indexed` is then an illegal edge and is discarded) and
         # left the item `queued` with nothing to re-drive it. The claim is only
-        # void when its process is gone, so the live set is passed in and
-        # skipped.
-        with _BATCH_DRAINING_LOCK:
-            live = set(_BATCH_DRAINING)
-        resumed = coord.recover(org_id, live_batches=live)
+        # void when its process is gone, so the predicate is asked PER BATCH, at
+        # the moment of the requeue — a set snapshotted before `recover()`'s own
+        # reads left a window in which a fresh claim was still destroyed (review
+        # round 2, NB4).
+        def _is_live(candidate: str) -> bool:
+            with _BATCH_DRAINING_LOCK:
+                return candidate in _BATCH_DRAINING
+
+        resumed = coord.recover(org_id, live_batches=_is_live)
     except Exception:
         _logger.exception("batch recovery failed for team %s", org_id)
         with _BATCH_RETRY_LOCK:
@@ -16918,6 +16922,7 @@ def _drain_batch(org: dict, batch_id: str) -> None:
         if batch_id in _BATCH_DRAINING:
             return  # already being worked by this process — never run it twice
         _BATCH_DRAINING.add(batch_id)
+    store = None
     try:
         store = _batch_store_for(org)
         coord = _batch_ingest.BatchCoordinator(store)
@@ -16940,22 +16945,34 @@ def _drain_batch(org: dict, batch_id: str) -> None:
                 _logger.exception("batch %s: item %s failed", batch_id,
                                   getattr(item, "item_id", "?"))
         coord.settle(org["org_id"], batch_id)
-        # ⛔ AN ITEM LEFT NON-TERMINAL BY THIS PASS MUST BE RE-DRIVEN IN THIS
-        # PROCESS (#14415 review B2). Nothing did: `_BATCH_RETRY` is filled only
-        # when a SUBMIT is refused, and `recover()` runs once per org per
-        # process — so a `retryable` skip (mapped to `queued` on purpose), a
-        # bookkeeping exception, or the swallowed `IllegalTransition` stranded
-        # the item for the process lifetime: the customer's status surface read
-        # `pending > 0` with no error and no progress. The retry thread re-enters
-        # this same drain on its next tick; `BATCH_MAX_ATTEMPTS` is what bounds
-        # the loop, so a condition that never clears settles `failed` visibly.
-        if any(not item.terminal for item in store.items(org["org_id"], batch_id)):
-            _batch_retry_enqueue(org, batch_id)
     except Exception:
         # The rows are durable; an escaped failure leaves items `extracting`,
-        # which the next boot's `recover()` requeues. Never swallow silently.
+        # which `recover()` requeues — on the next boot, or (for a leftover this
+        # process leaves behind) through the re-drive below. Never swallow
+        # silently.
         _logger.exception("batch %s drain failed", batch_id)
     finally:
+        # ⛔ AN ITEM LEFT NON-TERMINAL — OR A PASS THAT DID NOT GET FAR ENOUGH TO
+        # LOOK — MUST BE RE-DRIVEN IN THIS PROCESS, SO THE RE-DRIVE LIVES IN
+        # `finally` (#14415 review round 2, BLOCKING 1). As the `try` block's last
+        # statement it ran only when the pass got that far, so ONE transient
+        # failure before it — `_batch_store_for`, a `store.items()`, `settle()` —
+        # left the items `queued` with `_BATCH_RETRY` empty and nothing else to
+        # re-drive them (`recover()` is one-shot per org via `_BATCH_RECOVERED`),
+        # and the status surface reported `pending > 0` for the process lifetime
+        # with no error and no progress. A pass that could not even build a store
+        # still knows the batch exists, so it re-drives blind and lets the next
+        # tick re-read the rows. The retry thread re-enters this same drain;
+        # `BATCH_MAX_ATTEMPTS` is what bounds the loop, so a condition that never
+        # clears settles `failed` visibly.
+        try:
+            if store is None or any(
+                    not item.terminal
+                    for item in store.items(org["org_id"], batch_id)):
+                _batch_retry_enqueue(org, batch_id)
+        except Exception:
+            _logger.exception("batch %s: could not re-drive the leftover",
+                              batch_id)
         with _BATCH_DRAINING_LOCK:
             _BATCH_DRAINING.discard(batch_id)
 
@@ -17196,9 +17213,21 @@ async def cancel_batch(batch_id: str,
         _logger.exception("batch cancel failed (batch %s)", batch_id)
         raise HTTPException(status_code=503, detail="Batch could not be stopped")  # noqa: B904
     body = _batch_ingest.status_body(batch, items)
-    body["message"] = (
-        "Cancelled. Work that had not started will not run and is not charged; "
-        "documents already processed are kept.")
+    # ⛔ THE COPY MUST AGREE WITH THE PAYLOAD (#14415 review round 2, NB5). It
+    # used to be set unconditionally, so cancelling a batch that had already
+    # settled returned `status: completed`, an empty `cancelled_at` — beside the
+    # sentence "Cancelled. … not charged" over work that completed and WAS
+    # charged. The structured fields were honest and any surface rendering this
+    # sentence was not, which is the same lie B3 exists to prevent.
+    if batch.state is _batch_ingest.BatchState.CANCELLED:
+        body["message"] = (
+            "Cancelled. Work that had not started will not run and is not "
+            "charged; documents already processed are kept.")
+    else:
+        body["message"] = (
+            "This batch had already finished, so nothing was stopped — every "
+            "item reached its own final state and the batch is reported as it "
+            "is.")
     return body
 
 

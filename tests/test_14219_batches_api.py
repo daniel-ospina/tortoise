@@ -862,3 +862,59 @@ def test_both_suites_are_selected_by_a_hosted_api_only_diff():
     for name in ("test_14219_batch_ingest.py", "test_14219_batches_api.py"):
         assert name in layer, (
             f"{name} is not selected by a tortoise/batch_ingest.py diff")
+
+
+# ── #14415 review round 2: the caller halves, pinned ──────────────────────
+def test_a_drain_that_fails_before_it_can_read_the_rows_still_re_drives(store,
+                                                                      monkeypatch):
+    """⛔ ROUND-2 BLOCKING 1 arm 1: the re-drive was the try block's last line.
+
+    One transient failure BEFORE it — `_batch_store_for`, a `store.items()`,
+    `settle()` — and nothing re-drove the batch: `_BATCH_RETRY` stayed empty and
+    `recover()` is one-shot per org, so the status surface reported
+    `pending > 0` for the process lifetime with no error and no progress. The
+    re-drive lives in `finally` now, and a pass that cannot even build a store
+    still re-drives blind — the next tick re-reads the rows.
+    """
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+
+    def _no_store(org):
+        raise RuntimeError("credential refresh failed")
+
+    monkeypatch.setattr(ha, "_batch_store_for", _no_store)
+    coord = bi.BatchCoordinator(store)
+    batch, _items = coord.submit(ORG_ID, ["/d/a.md"])
+
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert [bid for _org, bid in ha._BATCH_RETRY] == [batch.batch_id], (
+        "a pass that failed before it could read the rows must still re-drive")
+    assert batch.batch_id not in ha._BATCH_DRAINING, (
+        "the process-local claim must be released even on that path, or the "
+        "batch could never be worked again")
+
+
+def test_cancelling_an_already_finished_batch_does_not_claim_it_was_stopped(
+        client, store, monkeypatch):
+    """⛔ ROUND-2 NB5: the copy contradicted the payload.
+
+    The message was set unconditionally, so cancelling a settled batch returned
+    `status: completed` beside "Cancelled. … not charged" over work that
+    completed and WAS charged — the same lie B3 exists to prevent, one layer up.
+    """
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    for it in items:
+        coord.advance(ORG_ID, it, bi.BatchItemState.EXTRACTING, attempt=True)
+        coord.advance(ORG_ID, it, bi.BatchItemState.INDEXED, tokens_in=9)
+    coord.settle(ORG_ID, batch.batch_id)
+
+    r = client.post(f"/v1/batches/{batch.batch_id}/cancel")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "completed"
+    assert not body["cancelled_at"]
+    assert "Cancelled." not in body["message"], (
+        "the copy must not tell the customer work was stopped and not charged "
+        f"over a completed batch: {body['message']!r}")
+    assert "already finished" in body["message"]
