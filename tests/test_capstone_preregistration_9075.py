@@ -2249,7 +2249,7 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # positions stay — they are what those commits actually did — and the live slot is the
     # last one, so the set grows by exactly one on each such insertion.
     _expected_ranges = {"275-283", "2713-2715", "2724-2726", "2736-2738",
-                        "2738-2740", "2747-2749", "2800-2802"}
+                        "2738-2740", "2747-2749", "2800-2802", "2845-2847"}
     assert cited_ranges == _expected_ranges, (
         "the record's cited ranges are "
         f"{sorted(cited_ranges)}; missing={sorted(_expected_ranges - cited_ranges)} "
@@ -2272,9 +2272,10 @@ def test_the_real_machine_record_agrees_with_the_pins():
     assert re.search(r"a1dff7cec8[^:]{0,40}:2713-2715\s*(?:->|→|to)\s*:2724-2726\b", read_back), (
         "the record must attribute the FIRST move to a1dff7cec8 — the SHA in the same clause "
         "as the ranges — at the intermediate position it actually reached")
-    assert read_back.count(":2800-2802") >= 2, (
-        f"the record states :2800-2802 {read_back.count(':2800-2802')} time(s): the LAST "
-        "move (#11695's) supplies one mention and the LIVE cite must supply the other")
+    assert read_back.count(":2845-2847") >= 2, (
+        f"the record states :2845-2847 {read_back.count(':2845-2847')} time(s): the LAST "
+        "move (#14343's carried set) supplies one mention and the LIVE cite must supply "
+        "the other")
     # ⛔ The SECOND move, with the same SHA binding as the first — not a count. When `main`
     # merged in, `#11517` (`7dabb59e0f45`) put its `TORTOISE_RENARRATE_KEEP_RATE` arm
     # inside `DOOR_PINNED_OFF`, above this window, and moved it `:2724-2726 -> :2736-2738`
@@ -2308,19 +2309,27 @@ def test_the_real_machine_record_agrees_with_the_pins():
     assert re.search(r"#11695[^:]{0,160}:2747-2749\s*(?:->|→|to)\s*:2800-2802\b", read_back), (
         "the record must attribute the E6 producer's move to #11695 — the issue in the same "
         "clause as the ranges — at the position the live tree actually reached")
+    # ⛔ AND THE SIXTH MOVE, the one that makes the LIVE cite right at this head: #14343's
+    # `DOOR_CARRIED` set, its read-back and its two renderers sit ABOVE the census window
+    # (`:2800-2802 -> :2845-2847`, +45). Bound to the ISSUE like its two predecessors:
+    # without it the field could credit any later commit with the live position and every
+    # row here stayed green.
+    assert re.search(r"#14343[^:]{0,200}:2800-2802\s*(?:->|→|to)\s*:2845-2847\b", read_back), (
+        "the record must attribute the carried-set insertion's move to #14343 — the issue "
+        "in the same clause as the ranges — at the position the live tree actually reached")
     # ⛔ No separate `":2713-2715" in read_back` arm: the SET pin above already requires
     # that literal, and it is evaluated first, so the smaller arm was UNREACHABLE — a
     # mutant that removed the window reddened the set row (`missing=['2713-2715']`) and
     # never reached it (measured, agent-infra#3442 rule 3: an assertion that can never be
     # the row that reds is not attribution, it is dead weight). The set pin's message
     # already names the missing range, so nothing is lost by deleting it.
-    assert probe[2800 - 1].strip() == "for name, count, anchored in projection.g.query(", (
-        f"capstone_measure.py:2800 reads {probe[2800 - 1].strip()!r}, not the census call")
+    assert probe[2845 - 1].strip() == "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:2845 reads {probe[2845 - 1].strip()!r}, not the census call")
     # Equality, like its two siblings above: a substring let the closing line's SHAPE
     # change while the row stayed green (measured: renaming the `AS anchored` alias broke
     # the very unpacking this arm consumes, and nothing reddened).
-    assert probe[2802 - 1].strip() == '"count(r.sourceVersion) AS anchored ORDER BY t").result_set:', (
-        f"capstone_measure.py:2802 reads {probe[2802 - 1].strip()!r}, not the "
+    assert probe[2847 - 1].strip() == '"count(r.sourceVersion) AS anchored ORDER BY t").result_set:', (
+        f"capstone_measure.py:2847 reads {probe[2847 - 1].strip()!r}, not the "
         "anchored count that closes the query")
 
 
