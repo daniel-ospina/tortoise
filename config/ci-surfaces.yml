@@ -63,8 +63,8 @@ version: 1
 # x 1.5 = 85.0 m, 5.0 m of headroom — and the 2026-11-23 sweep moved it AGAIN, to a 28 m worst
 # shard: arm-2 SUM 59.64 m, x 1.5 = 89.5 m, 0.5 m of headroom. The sweep's own commit (`d2cd8ab06e22`)
 # emitted 835.5 s worst against 835.7 s at THIS head, and the +0.2 s arrives with `#14365`
-# (`298536dc05b2`), which added `tests/test_extractor_embed_json_14343.py` into shard `e`. The folds
-# after it that touched only test COMMENTS (`#14387`, `a7baa98d053d`) emit byte-identically — measured, not
+# (`298536dc05b2`), which added `tests/test_extractor_embed_json_14343.py` into shard `e`. The one fold
+# after it that touched only test COMMENTS (`#14387` = `a7baa98d053d`) emits byte-identically — measured, not
 # assumed, because the previous cut of this sentence credited the move to one of them and was wrong. So at
 # THIS head the same verb packs five shards at 835.7 s (a, c, d, e, k)
 # and six at 835.6 s (b, f, g, h, i, j), `ceil(835.7/60 x 2)` = 28 m: the MINUTE is where the sweep

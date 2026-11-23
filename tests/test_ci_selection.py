@@ -13858,6 +13858,15 @@ def test_the_emission_block_guard_is_not_vacuous():
     # block's claim and must not be joined into it.
     assert _emission_block_claims(
         "fast_shards: 11\n# packs 2 shards at 700.0 s (a, b)\n") is None
+    # ⛔ THE FIXTURE ABOVE IS NOT A WITNESS FOR THE BOUND. `None` arrives there for two
+    # independent reasons — an EMPTY header (bounded) or a missing `ceil(...)` clause (which
+    # the unbounded read also lacks) — so a revert of the truncation passes it. With the ceil
+    # clause present the two implementations disagree, and only the bounded one is right.
+    assert _emission_block_claims(
+        "fast_shards: 11\n# packs 2 shards at 700.0 s (a, b)\n"
+        "# `ceil(700.0/60 x 2)` = 24 m\n") is None, (
+        "a shard-count comment BELOW `fast_shards:` was read as this block's claim — the "
+        "subject is not truncated at the key")
     # A RENAMED key must not silently widen the subject to the whole 1.18 MB file: the
     # bound is `split("\nfast_shards:", 1)[0]`, which with no key returns EVERYTHING —
     # so a renamed key used to hand the guard every shard-count sentence in the map and
@@ -13877,6 +13886,19 @@ def test_the_emission_block_guard_is_not_vacuous():
         "a", "c", "d", "e", "k", "<est 835.7 stated twice>"}, (
         "a subset restated at the same est was absorbed into the group beside it — the "
         f"guard would grade a claim the block does not make: {repeated[0][835.7]}")
+    # A SUPERSET restatement reds by the same marker — it is not the subset case's leftover.
+    # Measured through the guard itself (2026-11-23): a stray clause naming all five PLUS two
+    # more at 835.7 leaves `{…, '<est 835.7 stated twice>'}` against a live group of five, so
+    # the partition comparison reds. Stated because the fix commit's own record claimed this
+    # shape was absorbed, which was wrong.
+    superset_repeat = _emission_block_claims(
+        "# five shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
+        "# and seven at 835.7 s (a, c, d, e, i, j, k) — `ceil(835.7/60 x 2)` = 28 m\n"
+        "\nfast_shards: 11\n")
+    assert superset_repeat is not None
+    assert "<est 835.7 stated twice>" in superset_repeat[0][835.7], (
+        "a SUPERSET restated at the same est was absorbed — the repeat marker must fire on "
+        f"ANY second clause at one est, not only on a subset: {superset_repeat[0][835.7]}")
 
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
 
