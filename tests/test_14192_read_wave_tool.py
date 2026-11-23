@@ -3221,8 +3221,28 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
         # while `import sys as _s; _s.modules[…]` was RED). `_aliases_of` walks assignment
         # nodes only, so an `ImportFrom` bound nothing. The synthesized `sys.modules`
         # Attribute is exactly what the runtime binds and exactly what the predicate reads;
-        # restricted to `sys`/`modules` so no other import can be mistaken for the registry.
-        elif isinstance(node, ast.ImportFrom) and node.module == "sys":
+        # restricted to the MODULES AND MEMBERS an axis in this file grades, so no other
+        # import can be mistaken for the object a predicate is looking for.
+        #
+        # ⛔ AND `sys`/`modules` WAS THE WHOLE LIST UNTIL THIS LANE (#14326 fix lane at
+        # `a12902a5`, each MEASURED GREEN through the pin's own predicate at that head,
+        # `mentions=2 calls=2 indirect=0` while a planted `tortoise/sdk.py` resolved
+        # end-to-end):
+        #
+        #     from sys import path as _p; _p.insert(0, "/tmp/evil"); del sys.modules[…]  GREEN
+        #     from builtins import exec as _run; _run("<read call>")                     GREEN
+        #
+        # Each is the SAME static alias of the SAME object the file already refuses one
+        # spelling over — `_p = sys.path` + `_p.insert` and `_run = exec` are both RED — so
+        # an arm that enumerates ONE module and TWO members is an in-file asymmetry, not a
+        # declared residual (the file's own rule: a statically visible alias is not the
+        # "computed at runtime" residual). The member sets below ARE the sets their axes
+        # own (`_PATH_ATTRS`, `_CODE_EXECUTING_CALLEES`), so this is not a second copy of
+        # any list, and a member no axis grades (`from sys import argv as _a`) still binds
+        # nothing that can widen a predicate.
+        elif isinstance(node, ast.ImportFrom) and node.module in {"sys", "builtins"}:
+            _imported_members = (frozenset({"modules", "__dict__"}) | _PATH_ATTRS
+                                 if node.module == "sys" else _CODE_EXECUTING_CALLEES)
             for alias in node.names:
                 # ⛔ `__dict__` IS BOUND THE SAME WAY (#14326 round 28 P2, MEASURED GREEN:
                 # `from sys import __dict__ as _d; _d["modules"] = {…}` and
@@ -3230,11 +3250,11 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
                 # `_d = sys.__dict__` was RED). `from sys import __dict__` binds the LIVE dict
                 # (`_d is sys.__dict__`), so it is the same one-clause rule the `modules`
                 # import already carried, not a new axis.
-                if alias.name not in {"modules", "__dict__"}:
+                if alias.name not in _imported_members:
                     continue
                 binds.append((
                     ast.Name(id=alias.asname or alias.name, ctx=ast.Store()),
-                    ast.Attribute(value=ast.Name(id="sys", ctx=ast.Load()),
+                    ast.Attribute(value=ast.Name(id=node.module, ctx=ast.Load()),
                                   attr=alias.name, ctx=ast.Load())))
             continue
         else:
@@ -6428,6 +6448,28 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "ALIASED `exec`": (
             '    _run = exec\n'
             "    _run('results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
+        # ⛔ AN IMPORT BINDS THE NAME THE SAME WAY, AND THAT SPELLING WAS OPEN (#14326 fix
+        # lane at `a12902a5`, EACH MEASURED GREEN at that head: `mentions=2 calls=2
+        # indirect=0` while the read executed, and the planted `tortoise/sdk.py` resolved
+        # end-to-end). This file's own rule is that a statically visible alias is NOT the
+        # "computed at runtime" residual — yet the registry axis has collected
+        # `from builtins import <member> as alias` since round 27 and `_aliases_of`'s SYS arm
+        # has collected `from sys import modules as _m` since round 20, so the code-execution
+        # axis reading only the ASSIGNMENT spelling was an in-file asymmetry, one module
+        # over. Deleting the `builtins` half of that arm reds these three rows and only
+        # these; one row per form, because a form with no row is one a later lane can drop
+        # with the suite green.
+        "IMPORTED `exec` (`from builtins import exec as _run`)": (
+            '    from builtins import exec as _run\n'
+            "    _run('results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
+        "IMPORTED `compile`, handed to an ALIASED `exec`": (
+            '    from builtins import compile as _c\n'
+            '    _run = exec\n'
+            "    _run(_c('sdk._tortoise_fts_query(query=x)', '<pin>', 'exec'))\n"),
+        "an ALIAS OF AN IMPORTED `exec`": (
+            '    from builtins import exec as _run\n'
+            '    _r2 = _run\n'
+            "    _r2('results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
         "`getattr(builtins, \"exec\")` — the module's own MAPPING": (
             '    import builtins\n'
             '    getattr(builtins, "exec")('
@@ -9576,6 +9618,20 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'del sys.modules["tortoise.sdk"]\n',
         "a plain ALIAS `_p = sys.path` then `_p.insert` + `del`":
             '_p = sys.path\n_p.insert(0, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        # ⛔ AN IMPORT BINDS `sys.path` TOO (#14326 fix lane at `a12902a5`, MEASURED GREEN
+        # at that head — a planted `/tmp/evil/tortoise/sdk.py` resolved end-to-end — while
+        # the ASSIGNMENT spelling above was RED). `from sys import path as _p` binds exactly
+        # the object the row above binds; only the BIND FORM differed, and `_aliases_of`'s
+        # import arm enumerated `{modules, __dict__}`, so the path axis was blind to it.
+        # Deleting `_PATH_ATTRS` from that arm's member set reds this row and `meta_path`
+        # below; the `from sys import argv` control stays GREEN in
+        # `test_the_IMPORT_PATH_axis_residuals_are_NAMED_and_pinned_GREEN`'s neighbours.
+        "an IMPORT ALIAS `from sys import path as _p` then `_p.insert` + `del`":
+            'from sys import path as _p\n_p.insert(0, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "an IMPORT ALIAS `from sys import meta_path as _mp` then `_mp.insert` + `del`":
+            'from sys import meta_path as _mp\n_mp.insert(0, None)\n'
             'del sys.modules["tortoise.sdk"]\n',
         # ⛔ ROUND 32: `__init__` MERGES so it is an ancestor STORE; and the UNBOUND
         # insert/append/extend on the path was the cross-product member two individually
