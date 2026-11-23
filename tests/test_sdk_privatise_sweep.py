@@ -1633,6 +1633,25 @@ def test_the_mutation_anchors_do_not_red_an_honest_rewording(monkeypatch):
         "the moment its anchor is reworded")
 
 
+def _arm_refspecs_literal_keys() -> list[str]:
+    """Every KEY EXPRESSION written in the `_ARM_REFSPECS` dict literal, in source order.
+
+    Read from THIS file's own source rather than from the imported mapping, because the defect it
+    grades is invisible in the imported mapping: a duplicate key does not raise, it is silently
+    collapsed by Python, so `_ARM_REFSPECS` reports only the survivor. The literal is the only place
+    the shadowed row still exists (#14282 review cycle 12, P3).
+    """
+    body = Path(__file__).read_text().split("_ARM_REFSPECS: dict[str, str] = {", 1)[1].splitlines()
+    keys: list[str] = []
+    for line in body:
+        if line == "}":
+            break
+        matched = re.match(r'^    ("[^"]+"|[A-Z_]+):', line)
+        if matched:
+            keys.append(matched.group(1))
+    return keys
+
+
 def test_every_addressed_rev_names_a_fetchable_refspec():
     """Review round 12 (P2): every rev a skip names must be FETCHABLE, or the skip is a lie.
 
@@ -1767,6 +1786,36 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     assert _ARM_REFSPECS[RESIDUE_PR_HEAD].lstrip("+").partition(":")[2] == "refs/pull/14108/head", (
         "the destination must be the ref `_ref_sha` reads, or the fix re-arms a different ref")
     assert _ARM_REFSPECS["origin/main"].lstrip("+").partition(":")[2] == "refs/remotes/origin/main"
+    # ⛔ TWO EDITS ON THIS MAP WERE UNGRADED (#14282 review cycle 12, P3 both). Reverting either one
+    # to its pre-review text left all 35 other tests green, so the map could silently lose the very
+    # property the commit that fixed it argued for. Both are graded here, once.
+    #
+    # (1) THE DESTINATION NAMESPACE. `git fetch --prune origin` DELETES a remote-tracking ref the
+    # remote does not advertise, so a `refs/remotes/origin/<abbrev>` destination arms a ref the very
+    # next routine prune removes — an inert re-arm that reads as a live one. `origin/main` is the one
+    # legitimate `refs/remotes/` row: `main` IS advertised, so prune leaves it alone.
+    assert not [
+        (rev, dest) for rev, dest in _ARM_REFSPECS.items()
+        if re.fullmatch(r"\+[0-9a-f]{40}", dest.partition(":")[0]) and ":refs/remotes/" in dest
+    ], (
+        "a sha-want row arms a `refs/remotes/origin/…` destination — `git fetch --prune origin` "
+        "removes it, so the printed re-arm is inert. Use `refs/pi/<abbrev>`, which prune does not touch")
+    #
+    # (2) ONE KEY, ONE ROW. A literal key that spells an abbreviation ALREADY bound by one of the
+    # constant keys (`RESIDUE_REWRITE_PARENT` is `2fe01fc775e`) does not raise — Python keeps the LAST
+    # duplicate — so the constant's row becomes dead data and the printed remedy silently changes.
+    # The literal-key count is the mechanical tell: every key expression in the dict literal must
+    # survive into the mapping, so a duplicate (two literals, or a literal shadowing a constant) makes
+    # the two numbers disagree.
+    assert len(_ARM_REFSPECS) == len([
+        line for line in _arm_refspecs_literal_keys()
+    ]), (
+        "`_ARM_REFSPECS` states a key more than once — a duplicate literal (or a literal spelling an "
+        "abbreviation a constant key already binds) shadows an earlier row, so the map's printed "
+        "remedy is not the one it looks like it states")
+    assert _ARM_REFSPECS[RESIDUE_REWRITE_PARENT] == _PR_HEAD_REFSPEC, (
+        "`RESIDUE_REWRITE_PARENT` no longer maps to `_PR_HEAD_REFSPEC` — a later duplicate key "
+        "shadowed the row that creates `refs/pull/14108/head`")
 
 
 def test_the_refspec_shape_guards_red_every_inert_shape_and_pass_every_live_one(monkeypatch):
@@ -1787,7 +1836,12 @@ def test_the_refspec_shape_guards_red_every_inert_shape_and_pass_every_live_one(
         test_every_addressed_rev_names_a_fetchable_refspec()
 
     for refspec in (
-        "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/remotes/origin/5e83c2a2f6",  # full sha
+        # ⛔ THIS CASE'S DESTINATION CHANGED (#14282 review cycle 12, P3). It was
+        # `…:refs/remotes/origin/5e83c2a2f6` and listed as LIVE — but `git fetch --prune origin`
+        # removes a remote-tracking ref the remote does not advertise, so that destination was the
+        # INERT shape wearing the live case's clothes, and the arm accepted it. A sha want now must
+        # arm `refs/pi/…`; the `refs/remotes/` form is graded as inert below.
+        "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/pi/5e83c2a2f6",            # full sha
         "+main:refs/remotes/origin/main",                                            # ref NAME
         "+refs/pull/14108/head:refs/pull/14108/head",                                # ref NAME
     ):
@@ -1824,6 +1878,11 @@ def test_the_refspec_shape_guards_red_every_inert_shape_and_pass_every_live_one(
         # width is graded too. Both were GREEN under `{7,}` while `git fetch` refused them.
         "+5e83c2:refs/remotes/origin/5e83c2a2f6",      # 6 hex
         "+5e83:refs/remotes/origin/5e83c2a2f6",        # 4 hex: git's minimum abbreviation
+        # ⛔ AND THE PRUNE-DELETABLE DESTINATION (#14282 review cycle 12, P3). A FULL sha sources
+        # this one, so every abbreviation guard passes it — it was the LIVE case above until the
+        # namespace became graded. `git fetch --prune origin` deletes the ref it creates, so the
+        # re-arm it prints is inert, which is the failure the map's own comment argues against.
+        "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/remotes/origin/5e83c2a2f6",
     ):
         with pytest.raises(AssertionError):
             arm_with(refspec)
