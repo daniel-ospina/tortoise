@@ -1477,8 +1477,40 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
 _REGISTRY_BUILTINS = frozenset({"dict", "getattr", "vars"})
 
 
-def _builtin_name_aliases(tree: ast.AST,
-                          builtins_names: frozenset[str]) -> frozenset[str]:
+def _builtins_module_names(tree: ast.AST) -> frozenset[str]:
+    """Every name that statically denotes the `builtins` MODULE — roots and their aliases.
+
+    ⛔ ONE OWNER (#14326 review cycle 6). `_builtins_root_names` computed this enumeration
+    inline while `_builtin_name_aliases`' module-attribute disjunct hard-coded the LITERAL
+    `"builtins"`, so two spellings of the same root got two verdicts (MEASURED through the
+    pin's own `_read_reach`):
+
+        _dd = builtins.dict;  _x = _dd(builtins.__dict__)   REFUSED
+        import builtins as _b
+        _dd = _b.dict;        _x = _dd(_b.__dict__)         GREEN   <-- fail-open
+        _v = _b.vars;         _f = _v(_b)                    GREEN   <-- fail-open
+        _dd = __builtins__.dict                             GREEN   <-- fail-open
+
+    and the runtime lever is real: `_dd(_b.__dict__)["exec"]("y = 40+2")` sets `y = 42`.
+    A module ROOT is a statically visible name, so this is not the declared
+    callee-composition residual class — "SPELLING IS NOT IDENTITY" covers it, and the fix
+    is ONE enumeration shared by both callers rather than a wider literal that drifts again.
+
+    ⛔ NO FIXPOINT RISK: this walks `ast.Import` and `_aliases_of` only. It does NOT call
+    `_builtin_lookup_name`, which is why it can be used by `_builtin_name_aliases` — the
+    set that `_builtin_lookup_name`'s own construction site consumes.
+    """
+    roots = {"builtins", "__builtins__"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "builtins" and alias.asname:
+                    roots.add(alias.asname)
+    return frozenset(roots) | frozenset(_aliases_of(
+        tree, lambda n: isinstance(n, ast.Name) and n.id in roots, loops=True))
+
+
+def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
     """Names STATICALLY bound to one of `_REGISTRY_BUILTINS` — `_gr = getattr`, `_v = vars`.
 
     ⛔ THE SPELLING OF THE BUILTIN IS NOT THE BUILTIN (#14326 round 35, MEASURED: with the
@@ -1498,17 +1530,19 @@ def _builtin_name_aliases(tree: ast.AST,
     `"__dict__"` as its key, so the only thing the union can red is `_d(builtins, "__dict__")`
     — a `dict` alias called where `getattr` is meant, which is a TypeError and cannot run.
     """
+    _module_names = _builtins_module_names(tree)
     return frozenset(_aliases_of(
         tree,
         lambda n: (isinstance(n, ast.Name) and n.id in _REGISTRY_BUILTINS)
-        # ⛔ AND THE MODULE-ATTRIBUTE SPELLING, ON THE RESOLVED NAME SET (#14326 review
+        # ⛔ AND THE MODULE-ATTRIBUTE SPELLING, ON THE RESOLVED MODULE-NAME SET (#14326 review
         # cycles 5-6, MEASURED GREEN: `from builtins import dict as _dd; _x =
-        # _dd(builtins.__dict__)` and `import builtins as _b; _dc = _b.dict; _x =
-        # _dc(_b.__dict__)` both executed the read while `_dd = dict` was RED). The
-        # `ImportFrom` arm synthesizes this Attribute, and `_b` is a builtins alias the module
-        # name set already holds — the literal `builtins` was the half left raw.
+        # _dd(builtins.__dict__)`, `import builtins as _b; _dc = _b.dict; _x =
+        # _dc(_b.__dict__)` and `_dd = __builtins__.dict` all executed the read while
+        # `_dd = dict` was RED). The `ImportFrom` arm synthesizes this Attribute, and a module
+        # root is a statically visible name — `_builtins_module_names` is the one owner of
+        # that enumeration, so a literal here would drift again.
         or (isinstance(n, ast.Attribute) and n.attr in _REGISTRY_BUILTINS
-            and isinstance(n.value, ast.Name) and n.value.id in builtins_names)
+            and isinstance(n.value, ast.Name) and n.value.id in _module_names)
         # ⛔ AND AN ALIAS OF A COPY CALLEE (#14326 review cycle 6, MEASURED GREEN:
         # `_f = copy.deepcopy; _x = _f(builtins.__dict__)`; also `copy.copy` and `dict.copy`).
         # The file resolves `_dc = dict` already, so an alias of the callee that COPIES the
@@ -1667,14 +1701,7 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
     it into every module's globals, so it needs no import — unlike a bare `builtins`, which
     raises `NameError` without one (that round's rows pinned a lever that could not RUN).
     """
-    roots = {"builtins", "__builtins__"}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "builtins" and alias.asname:
-                    roots.add(alias.asname)
-    builtins_names = frozenset(roots) | frozenset(_aliases_of(
-        tree, lambda n: isinstance(n, ast.Name) and n.id in roots, loops=True))
+    builtins_names = _builtins_module_names(tree)
     #: The names that can statically BE the builtins mapping rather than the module — the
     #: literal `__builtins__` (a `__dict__` in an imported module) and its one-bind aliases.
     #: Only these accept the BARE subscript form; see `_builtin_lookup_name`.
@@ -1684,7 +1711,7 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
     #: axis has graded `__d = sys.__dict__` RED since round 21, so leaving the mapping alias
     #: raw here was an in-file asymmetry, not a boundary. Widening this set can only ADD reds
     #: (it feeds the bare-subscript branch of `_builtin_lookup_name` and the receiver test).
-    _bu_launderers = _builtin_name_aliases(tree, builtins_names)
+    _bu_launderers = _builtin_name_aliases(tree)
     #: The string-key resolver for the `"__dict__"` argument (`_K = "__dict__"`
     #: resolves like every other key in this file — `_builtin_lookup_name`'s own rule).
     _bu_consts = _str_constants(tree)
@@ -2818,8 +2845,10 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
     # sibling lane's `490ae765a6`). This function carried one, and a mutant MEASURED it INERT
     # on the merged tree: `_aliases_of`'s `ImportFrom` arm now resolves that bind for EVERY
     # axis (its `builtins` member set IS `_CODE_EXECUTING_CALLEES | _REGISTRY_BUILTINS |
-    # {"__dict__"}` — it was `_CODE_EXECUTING_CALLEES` alone until #14326 review cycle 5 added
-    # the FETCHER (`getattr`) and the mapping (`__dict__`) spellings; a lane trusting a stale
+    # {"__dict__"}` — it was `_CODE_EXECUTING_CALLEES` alone until the sibling lane's
+    # `30dd26e1004c` added the FETCHER (`getattr`) as `_CODE_EXECUTING_CALLEES |
+    # _REGISTRY_BUILTINS` (merged into this branch at `9f6bdcf8947a`), and #14326 review
+    # cycle 5 added only the MAPPING (`__dict__`) spelling; a lane trusting a stale
     # note here reverts that widening believing it redundant), so the arm reddened no
     # row — and the file's own rule is to DELETE a clause no mutant can red rather than leave
     # it reading as an independent check. The row it pinned is the sibling's
@@ -2830,7 +2859,7 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
     #: `_g = getattr` since round 21 (a hard-coded name there would be the same asymmetry).
     #: Statically-visible aliases of the three builtins used to BUILD the mapping (#14326
     #: round 35) — the composition half `getattr_fetchers` does not reach.
-    _builtins_launderers = _builtin_name_aliases(tree, _builtins_names)
+    _builtins_launderers = _builtin_name_aliases(tree)
     _getattr_literal = frozenset({"getattr"})
     _getattr_fetchers = frozenset({"getattr"}) | frozenset(_aliases_of(
         tree,
@@ -6863,6 +6892,26 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    from builtins import dict as _dd\n'
             '    _x = _dd(builtins.__dict__)\n'
             '    _x["exec"]("sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        # ⛔ AND EVERY OTHER SPELLING OF THE MODULE ROOT, because a receiver hard-coded to the
+        # literal `builtins` admitted these three while refusing the row above (#14326 review
+        # cycle 6, EACH MEASURED GREEN before the fix; the runtime lever is real —
+        # `_dd(_b.__dict__)["exec"]("y = 40+2")` sets y = 42). A module ROOT is a statically
+        # visible name, so this is "SPELLING IS NOT IDENTITY", not the callee-composition
+        # residual the class table declares.
+        "IMPORTED-alias module root (`import builtins as _b`)": (
+            '    import builtins as _b\n'
+            '    _dd = _b.dict\n'
+            '    _x = _dd(_b.__dict__)\n'
+            '    _x["exec"]("sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`__builtins__` root attribute (`__builtins__.dict`)": (
+            '    _dd = __builtins__.dict\n'
+            '    _x = _dd(__builtins__)\n'
+            '    _x["exec"]("sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "ALIASED module root (`_b = builtins`)": (
+            '    import builtins\n'
+            '    _b = builtins\n'
+            '    _v = _b.vars\n'
+            '    _v(_b)["exec"]("sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         "`builtins.__dict__[\"exec\"]` — the mapping SUBSCRIPT": (
             '    import builtins\n'
             '    builtins.__dict__["exec"]('
@@ -8991,7 +9040,7 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
         # `dict.get(…)` twins are the CALLEE laundered one composition further out, so they
         # join the same set every arm already intersects rather than each needing an arm.
         or _builtin_lookup_name(_n, builtins_names, consts, builtins_dict_names,
-                                _builtin_name_aliases(tree, builtins_names)) is not None,
+                                _builtin_name_aliases(tree)) is not None,
         loops=True))
     sys_dict_names = frozenset(_aliases_of(
         tree, lambda _n: _is_sys_dict_mapping(
