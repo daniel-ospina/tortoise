@@ -168,11 +168,24 @@ Every fix has a test that reds without it. Cycle 3 reverted **16 primitives** an
 all 16 red — and that check is how the broken first version of the expiry test
 (cycle 1) and the untested quarantine name were found.
 
+**Cycle 4** (the #14423 review record at `d532a67d`) — 1 **P0**, 1 P1, 1 P2:
+
+| finding | disposition |
+|---|---|
+| **P0** the two legs wrote `expires_at` in DIFFERENT UNITS, so each stole the other's live claim | **already fixed at `c214f34`** (before this head): one on-disk unit (milliseconds, `TIMESTAMP_UNIT_MS`), `CLAIM_VERSION` 1→2 so a surviving v1 record is unattributable rather than misevaluated, and two cross-leg tests that run the real TypeScript predicate under `node` against a claim this leg wrote (and the reverse). Both red on a revert to seconds. |
+| **P1** `tests/test_14350_drain_convergence.py` was registered in NO surface, so the D1 suite ran nowhere and `manifest-integrity` (a required leg) refused the PR | **already fixed at `bc157acb`**: dual-registered `api` + `core`. `tools/ci_selection.py --integrity` reports every test file classified. |
+| **P2** the takedown test's stated mutant cannot red it, and the acquisition-time restore call site was never reached | **fixed here, both halves.** The stated mutant was wrong: compare-then-unlink DOES take over an expired claim with a single writer, so it produces exactly the asserted state; the line now names the mutant that does red it (dropping the takeover arm). And the acquisition path's own `disposeQuarantine(moved.quarantine, moved.raw, path, raw)` — the one the review named — is now covered by a test that drives `takedownClaim`/`disposeQuarantine` directly (exported as the test seam, mirroring the Python twin's direct drive of `_takedown`/`_dispose_quarantine`): a successor claim installed underneath the taker is RESTORED byte-for-byte, and one the taker did judge is dropped. Measured: deleting the restore arm reds this test **and** the release-path twin added at `c214f34`. |
+
+The review's last mutation-table row ("`tortoise-capture.test.ts` … stays GREEN") is
+what the P2 row above removes: the row now names the behaviour it protects, and
+the mutant reds it.
+
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `d0e8e41d…`; the read half moved `708b6a…`→`904d2742…` because its
+  (capture half `35235567…`, re-cut once more for the export-only test seam above;
+  the read half moved `708b6a…`→`904d2742…` because its
   generation MARKER moved 32→33 with the pair) instead of
   spending a generation 34 on a refinement of the same unreleased seam. From the
   moment 33 reaches `main` the entries are frozen and a byte change needs 34.

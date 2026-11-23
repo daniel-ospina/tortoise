@@ -97,6 +97,8 @@ import {
   sourceName,
   spoolEntryBytes,
   spoolSaturated,
+  takedownClaim,
+  disposeQuarantine,
   truncationMarker,
   warnIfCredentialStoreIsReadable,
   writeSpoolEntry,
@@ -7739,7 +7741,11 @@ test("#14350: a takedown never disposes of a claim it did not judge", async () =
   // two-drainer defect: the stale taker's `unlink` removes the LIVE claim a peer
   // installed between its read and its write. The takedown MOVES the file first
   // and compares in quarantine, so a claim installed underneath it is kept.
-  // MUTATION THAT REDS THIS: go back to compare-then-unlink.
+  // MUTATION THAT REDS THIS: make `acquireDrainClaim` return `undefined` for a
+  // stale claim (drop the takeover arm). ⚠️ Reverting to compare-then-unlink does
+  // NOT red THIS test — with one writer there is nothing to interleave — so the
+  // restore behaviour is named by the sibling test below, which drives the
+  // takedown directly (review finding: this row used to claim the wrong mutant).
   const spool = tmpSpool();
   const staleBytes = `${JSON.stringify({
     version: DRAIN_CLAIM_VERSION, token: "gone", leg: "pi", pid: 999999999,
@@ -7752,6 +7758,52 @@ test("#14350: a takedown never disposes of a claim it did not judge", async () =
   assert.equal(live?.token, fresh.token);
   assert.notEqual(live?.token, "gone");
   fresh.release();
+});
+
+test("#14350: a displaced claim is RESTORED, never disposed of", async () => {
+  // The restore arm itself (the Python twin drives `_takedown` /
+  // `_dispose_quarantine` the same way). A taker reads a claim, judges it stale,
+  // and — between its read and its takedown — a THIRD process installs a fresh,
+  // LIVE claim. The takedown moves the LIVE bytes aside, and the compare in
+  // quarantine must therefore fail: the displaced holder's claim is put BACK with
+  // `linkSync` and only the quarantine is dropped. Deleting it instead is the
+  // two-drainer defect this whole PR exists to remove, and it is silent: the
+  // displaced holder only notices at its next refresh.
+  // MUTATION THAT REDS THIS: make `disposeQuarantine` unlink unconditionally (drop
+  // the `raw !== expected` arm) — the successor's claim vanishes.
+  const spool = tmpSpool();
+  const path = join(spool, "drain.claim");
+  const successor = `${JSON.stringify({
+    version: DRAIN_CLAIM_VERSION, token: "successor", leg: "python",
+    pid: process.pid, host: "box-a", boot_id: "boot-1",
+    started_at: Date.now(), expires_at: Date.now() + 120_000,
+  })}\n`;
+  writeFileSync(path, successor);
+  // What the taker READ before the third process wrote: a different, stale claim.
+  const judged = `${JSON.stringify({
+    version: DRAIN_CLAIM_VERSION, token: "gone", leg: "pi", pid: 999999999,
+    host: "box-a", boot_id: "boot-1", started_at: 0, expires_at: 1,
+  })}\n`;
+  const moved = takedownClaim(path, "gone");
+  assert.ok(moved, "the takedown moves whatever is there into quarantine");
+  assert.equal(moved.raw, successor, "…and the bytes it holds are the SUCCESSOR's");
+  const disposed = disposeQuarantine(moved.quarantine, moved.raw, path, judged);
+  assert.equal(disposed, false, "we did not judge this claim, so it is not ours to drop");
+  assert.equal(
+    readDrainClaim(spool)?.token, "successor",
+    "a claim installed underneath the taker must be RESTORED, not deleted",
+  );
+  assert.equal(existsSync(moved.quarantine), false, "the quarantine is not left behind");
+  assert.equal(
+    readFileSync(path, "utf8"), successor,
+    "the restored bytes are the displaced holder's OWN, byte for byte",
+  );
+  // The other direction, same seam: a claim we DID judge is disposed of.
+  const ours = takedownClaim(path, "successor");
+  assert.ok(ours);
+  assert.equal(disposeQuarantine(ours.quarantine, ours.raw, path, successor), true);
+  assert.equal(existsSync(path), false, "a claim we judged IS dropped");
+  assert.equal(existsSync(ours.quarantine), false);
 });
 
 test("#14350: a FUTURE-version claim is unattributable, not reinterpreted", async () => {

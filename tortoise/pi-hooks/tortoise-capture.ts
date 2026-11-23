@@ -5276,8 +5276,14 @@ export interface DrainClaim {
  * CONTENT THAT WAS THERE lands in the quarantine — so the caller compares bytes
  * it provably owns the moment of. Returns `[quarantine, raw]`, or `undefined`
  * when the claim was already gone (a peer moved it first; not a failure).
+ *
+ * ⚠️ EXPORTED AS THE TEST SEAM, mirroring the Python twin, which drives
+ * `drain_claim._takedown` directly: the restore branch this pairs with is a
+ * two-writer interleaving that a single-threaded caller can never reach through
+ * `acquireDrainClaim`, so exporting is the only way to test the real bytes
+ * rather than an asserted-away claim.
  */
-function takedownClaim(
+export function takedownClaim(
   path: string, token: string,
 ): { quarantine: string; raw: string } | undefined {
   // ⚠️ The `.tmp-` INFIX is load-bearing: `sweepStaleTempFiles` collects
@@ -5308,8 +5314,10 @@ function takedownClaim(
  * between our rename and our write — so it is restored by `linkSync` (which
  * cannot replace a claim a FOURTH process has since installed; on `EEXIST` the
  * displaced holder loses and stops at its next refresh — the safe direction).
+ *
+ * ⚠️ EXPORTED AS THE TEST SEAM — see `takedownClaim`.
  */
-function disposeQuarantine(
+export function disposeQuarantine(
   quarantine: string, raw: string, path: string, expected: string,
 ): boolean {
   if (raw !== expected) {
