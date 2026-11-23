@@ -439,7 +439,13 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4950-4954'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7193'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7226'): 1,
+    # `search_engine.py:7226` is declared ONCE, in the re-derived block below, with its true count
+    # of 2 (`grep -o 'search_engine\.py:7226' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc
+    # -l` -> 2). The `: 1` row that used to sit here was DEAD — a dict literal keeps only the LAST
+    # value for a repeated key, so the lower block already won and this row asserted nothing. It
+    # was invisible except as ruff F601 (`ruff check .` red on `main` and every PR) and as
+    # `test_dod_5090_probe.py::test_no_module_declares_the_same_dict_key_twice`, which reds the
+    # REQUIRED `python-ci-gate` aggregate. Root: #14367.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7600'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7602'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7599-7602`'): 1,
