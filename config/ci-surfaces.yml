@@ -27,7 +27,7 @@ version: 1
 # subtracts main's published job names against.
 #
 # S=11 is also what the lane-parity contract permits: main publishes
-# `test (a)`…`test (k)` — `fast_shards: 11` above, and `.github/workflows/python-ci.yml`
+# `test (a)`…`test (k)` — `fast_shards: 11` below, and `.github/workflows/python-ci.yml`
 # names the job `test (${{ matrix.half }})`, so eleven halves are eleven published
 # names — and a PR may only ADD to that set, never remove from it
 # (`test_shard_labels_are_a_superset_when_s_changes` pins the polarity; the

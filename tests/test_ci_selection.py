@@ -13757,9 +13757,9 @@ def test_the_head_total_guard_is_not_vacuous(tmp_path):
 #: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
 #: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head
 #: above — re-derive them with that verb rather than trusting them", and the same block
-#: had already gone stale twice before that promise was written (#11298 review cycle 5,
-#: #14015) — three times, counting #14296, which is what this guard is for. A promise in
-#: prose is not a guard, so the sentence is graded against the live emission here instead.
+#: had already gone stale twice before this guard (#11298 review cycle 5, #14015) — three
+#: times, counting #14296, which is what this guard is for. A promise in prose is not a
+#: guard, so the sentence is graded against the live emission here instead.
 #:
 #: Shard names are read in BOTH spellings this map uses — an explicit list (`f, h`)
 #: and a range (`a–e`) — and the count may be a word (`nine`) as the surrounding prose
@@ -13860,8 +13860,12 @@ def _emission_block_claims(
     # `None` (which the caller reports as "states no emission the guard can read" — fail-closed,
     # but it would send the next reader looking for a missing sentence rather than a moved
     # constant).
-    headrooms = {h for _est, h, _minutes in ceil_matches}
-    assert headrooms == {f"{cs.WATCHDOG_HEADROOM:g}"}, (
+    # ⛔ Compare the headroom NUMERICALLY, not as a spelling. `f"{2.0:g}"` is `"2"`, so a string
+    # comparison reds a block that writes `x 2.0` — the same multiplier, and the spelling this very
+    # file uses above (`shard_watchdog_minutes()` rounds `840.2/60 x 2.0`). A false block is the one
+    # failure this check must not produce, so `2` and `2.0` must both satisfy it.
+    headrooms = {float(h) for _est, h, _minutes in ceil_matches}
+    assert headrooms == {float(cs.WATCHDOG_HEADROOM)}, (
         f"the block derives its watchdog with headroom {sorted(headrooms)}, but the code uses "
         f"`ci_selection.WATCHDOG_HEADROOM` = {cs.WATCHDOG_HEADROOM:g} — the `ceil(...)` operand "
         "no longer states the code's own multiplier, so the figures beside it are not the ones "
@@ -14039,6 +14043,28 @@ def test_the_emission_block_guard_is_not_vacuous():
         _emission_block_claims(
             "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
             "# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
+    # …but the comparison is NUMERIC, so the same multiplier spelled `2.0` — which this very file
+    # uses above, in `shard_watchdog_minutes()`'s `840.2/60 x 2.0` — must NOT red. A false block is
+    # the one failure that check must never produce, and a string compare would produce it.
+    spelled = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2.0)` = 28 m\n\nfast_shards: 11\n")
+    assert spelled is not None and (spelled[1], spelled[2]) == (836.4, 28), (
+        "`x 2.0` is the same multiplier as `x 2` and must read identically — a spelling-sensitive "
+        f"comparison would refuse a CORRECT block: {spelled}")
+    # A clause WRAPPED across two comment lines must still be read. The block itself wrapped exactly
+    # there at `2d57abb3e98c` (`… and two at` / `# 721.7 s (f, h)`), so without the comment-line join
+    # the `721.7` group is silently lost and the guard REDS A CORRECT BLOCK. Nothing else in this
+    # suite reaches the join branch, so without this fixture `re.sub(r"\n\s*#\s?", " ", …)` can be
+    # deleted with both rows still green (measured against the live manifest: identical claim).
+    wrapped = _emission_block_claims(
+        "# nine shards at 721.8 s (a–e, g, i–k) and two at\n"
+        "# 721.7 s (f, h)\n"
+        "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
+    assert wrapped is not None and wrapped[0] == {
+        721.8: set("abcdegijk"), 721.7: {"f", "h"}}, (
+        "a clause wrapped across two comment lines was not joined into one sentence — a figure that "
+        f"happens to land on the next line then makes a claim unread: {wrapped}")
     # The RANGE spelling this block ITSELF used at `4ff7964acc` (`a–e, g, i–k`) and
     # `29a2da4c9c` (`a–e, i, j`) — an arm no other fixture reaches, because every other
     # sample spells its names out. Without this, `_EMISSION_RANGE_RE` and the `span`
