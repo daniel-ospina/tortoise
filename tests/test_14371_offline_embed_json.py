@@ -473,7 +473,6 @@ def test_the_committed_artifact_states_what_it_does_not_deliver():
     assert data["encoder_cache"]["network_used"] is False, (
         "the recorded run fetched the BPE ranks — it is not the offline run the "
         "artifact claims; re-run on a warm cache and re-record")
-    assert data["encoder_cache"]["fetched"] == []
     assert data["encoder_cache"]["fetched"] == [], (
         "the artifact names a fetched blob, so `network_used` must not be False")
     # the posture is DERIVED and the layout is RECORDED, not asserted as prose
