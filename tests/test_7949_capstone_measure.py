@@ -6828,20 +6828,25 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # ⛔ AND IT IS NOT "THE ONLY OTHER ROW": FIVE other rows reach this docstring (AST span
         # 1871-1918) — those scoping on `with the flag ON` (1886), `follows at` (1884), `emits
         # literally` (1885), `so an acceptance test of` (1877) and `is different code` (1896).
-        # They pin `:14791`/`:14792`, `:14823`, `:14819-14822`, `:15706-15720` and `:14757` — NOT
-        # the gate pair `:17970`/`:15372`, which no other row reads. That, not uniqueness of the
-        # docstring, is why this row is needed and not a duplicate.
+        # They pin `:14801` (`follows at`), `:14833` (`with the flag ON`), `:14802` (`emits
+        # literally`), `:14829`/`:14833`/`:15716`/`:15722`/`:15726`/`:15730` (`so an acceptance
+        # test of`) and `:14767` (`is different code`) — re-derived at THIS head by the §10.41
+        # re-cut, and NOT the gate pair `:18055`/`:15382`, which no other row reads. That, not
+        # uniqueness of the docstring, is why this row is needed and not a duplicate.
         # ⛔ RE-ADDED after the merge resolution with `origin/main` `588cf7aeb6` dropped it: the
         # resolution took `main`'s whole copy of this file, which was right for the D5 block
         # (unreachable) but ALSO discarded THIS row, ~900 lines away and not D5 machinery. The
         # claim it guards is live and is in this PR's own net diff —
-        # `probes/capstone_measure.py`'s `` ``embed_list:`` (``:17970``) and ``if vet_enabled
-        # and complete_list:`` (``:15372``) `` sentence. Measured: WITHOUT this row, mutating
-        # `:17970` -> `:17967` in that probe leaves `444 passed` (green); WITH it, the same
-        # mutation reds `test_the_bare_continuation_cites_name_what_they_say`.
-        # Non-vacuity, MEASURED at this head: mutating `:17970` -> `:17967` in that probe reds
-        # `test_the_bare_continuation_cites_name_what_they_say`; the row's scope is what makes
-        # that number observable at all, since no other row reads the pair. The `_locate_hint`
+        # `probes/capstone_measure.py`'s `` ``embed_list:`` (``:18055``) and ``if vet_enabled
+        # and complete_list:`` (``:15382``) `` sentence. Measured at the head that still carried
+        # `:17970`/`:17967` — this PR re-points both, so that mutation no longer exists in today's
+        # probe: WITHOUT this row, mutating `:17970` -> `:17967` left `444 passed` (green); WITH
+        # it, the same mutation made `test_the_bare_continuation_cites_name_what_they_say` fail.
+        # Non-vacuity, MEASURED at the head that carried `:17970`: mutating it to `:17967` in the
+        # probe reds `test_the_bare_continuation_cites_name_what_they_say`; the row's scope is what
+        # makes that number observable at all, since no other row reads the pair. ⛔ The pair is
+        # re-pointed to `:18055`/`:15382` at THIS head by the §10.41 re-cut, so the mutation above
+        # is HISTORY, not a recipe reproducible against today's probe. The `_locate_hint`
         # leg names the live line (`if vet_enabled and embed_list:` at `:18055`).
         ("probes/capstone_measure.py", "and ``if vet_enabled and complete_list:``", (
             ("18055", "if vet_enabled and embed_list:"),
@@ -6849,9 +6854,9 @@ def test_the_bare_continuation_cites_name_what_they_say():
         )),
         # ⛔ THE THIRD COPY OF THE SAME CLAIM (`#14269` review at `e587f2c8100d`, P2). The row
         # above guards the `_pass_ran` docstring's copy of the gate pair; `_IDLE_CITES["vet"]`
-        # carries the same `(:17970)` in a sentence a future run PRINTS to a reader, and nothing
-        # read it: MEASURED on this head, mutating that `:17970` -> `:17967` in the probe leaves
-        # `2 passed, 442 deselected` (`-k 'bare_continuation or epic_bundle'`) — green.
+        # carries the same `(:18055)` in a sentence a future run PRINTS to a reader, and nothing
+        # read it: MEASURED at the head that carried `:17970`, mutating it to `:17967` in the probe
+        # left `2 passed, 442 deselected` (`-k 'bare_continuation or epic_bundle'`) — green.
         # ⛔ The phrase carries the cite's own `(:18055)` token because the sentence around it does
         # NOT scope: `"pass is gated on the LIST"` occurs on TWO lines of the probe (the
         # `classify_later` value's `classify pass is gated on the LIST` is the other), and an
