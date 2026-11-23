@@ -391,16 +391,6 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "_checkpoint": "tortoise_checkpoint",  # retired method, seam-wrapping door (#11609)
     "_diary_write": "tortoise_diary_write",
     "create_entity": "tortoise_create_entity",
-    # ⛔ `link_entities` was a `_quota_gated` wrap site with NO row here, so
-    # `write_surface_map_violations` reported "unmapped _quota_gated wrap sites:
-    # ['link_entities']" and `test_no_write_tool_counted_as_read` was RED on `main`
-    # (measured at `0467ba329d73` in a scratch worktree, not only on this branch).
-    # The row is not a new capability: `tortoise_link_entities` is a live registry
-    # entry (`tool_registry.py:1608`, `sdk_method="link_entities"`) and its handler
-    # wraps `_quota_gated(sdk.link_entities, "points")` (`mcp_server.py:7925`), so the
-    # code already declares it a WRITE — this declaration was simply missing, which is
-    # the direction the arm exists to catch. No MCP tool or SDK method is added here.
-    "link_entities": "tortoise_link_entities",
     # ⛔ `update` LEFT this map in #11609 lane B (#12915 review F1): no MCP handler
     # quota-gates `sdk.update` any more. `tortoise_update` — the door the
     # `tortoise_update_knowledge` container's `props` arm delegates to — routes
