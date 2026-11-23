@@ -8678,12 +8678,18 @@ def _record_health() -> dict:
     #
     #   ``write_failed``      the record was unreachable or the projection
     #                         refused the row — a REPLAY heals it.
-    #   ``journal_collision`` the position row holds a record this write does not
-    #                         continue — a different record, or (with no `ts` to compare) a
-    #                         payload whose derivation moved (#9318): a REPLAY DOES NOT HEAL
+    #   ``journal_collision`` the position row cannot be indexed by this write —
+    #                         a different record type, a different capture time,
+    #                         identities this write's payload CONTRADICTS, or (for
+    #                         a write with no `ts` to compare) a payload whose
+    #                         derivation moved (#9318): a
+    #                         REPLAY DOES NOT HEAL
     #                         IT, it re-raises. Remedy = journal identity in the key (#12894).
-    #                         Same-capture drift is not this counter (#12904) — and neither,
-    #                         silently, is a DIFFERENT record there (`.JournalPositionCollision`).
+    #                         Same-capture drift is not this counter (#12904) — but a
+    #                         same-capture pair whose payloads name CONTRADICTING
+    #                         identities IS, and immediately (an equal instant is a
+    #                         coordinate, not identity — a second record there, or this
+    #                         record re-keyed; `.JournalPositionCollision`).
     #   ``no_tenant``         armed with no tenant in scope; heal the tenant
     #                         resolution, then replay.
     #   ``malformed_dsn``     the value is configured but unusable — fix the
