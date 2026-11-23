@@ -89,31 +89,44 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+#: The application role + its connect-time spelling have ONE home
+#: (`test_9078_record_written_by_production_path.py`), imported rather than
+#: copied: the `options=-c role=…` / `quote_via=quote` spelling is #9600's own
+#: libpq finding — the thing that decides whether the CONNECT succeeds or trips
+#: the write circuit breaker — and a second copy would be a second answer to it.
+#: Same rule the `schema` fixture below follows for `_ensure_record_schema`.
+from tests.test_9078_record_written_by_production_path import (  # noqa: E402
+    _app_role_dsn,
+)
 from tortoise import record_writer  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.search_engine import (  # noqa: E402
+    MECHANISM_PGVECTOR,
+    MECHANISM_SCAN_FALLBACK,
+    VECTOR_MECHANISM_KEY,
+)
 
 #: The env a lane points at a throwaway Postgres carrying the record migrations
 #: (the `TEST_RECORD_DB_URI` convention). Unset ⇒ the legs SKIP, never pass.
 RECORD_DB_ENV = "TEST_RECORD_DB_URI"
 
-#: The APPLICATION role the record's gate requires (#9554 / #9600): `replay()`
-#: refuses a connection whose `current_user` can bypass RLS, and the
-#: provisioning superuser is all four bypasses at once. `options=-c role=…` is
-#: libpq's connect-time spelling of `SET ROLE`, so the session opens already
-#: switched — the credentials stay the provisioner's.
-RECORD_APP_ROLE = "tortoise_record_app"
+#: The APPLICATION role's name and its connect-time spelling both come from the
+#: `test_9078_record_written_by_production_path.py` import above — nothing here
+#: re-declares them.
 
-#: The dense leg's own recorded verdict tokens. Named here so a rename lands on
-#: this file rather than letting an assertion compare two literals.
-MECHANISM_RECORD = "pgvector"
-MECHANISM_GRAPH_SCAN = "scan_fallback"
+#: The dense leg's own recorded verdict tokens and its trace key, IMPORTED from
+#: their one home in `search_engine` (#4280) rather than re-minted here: a local
+#: copy would go stale on a rename and redden with a message that reads as a
+#: production break instead of a renamed constant.
+MECHANISM_RECORD = MECHANISM_PGVECTOR
+MECHANISM_GRAPH_SCAN = MECHANISM_SCAN_FALLBACK
+MECHANISM_KEY = VECTOR_MECHANISM_KEY
 
 DIM = 384
 
@@ -130,17 +143,6 @@ def _conn():
     conn = psycopg2.connect(dsn)
     conn.autocommit = True
     return conn
-
-
-def _app_role_dsn(dsn: str) -> str:
-    """`dsn`, but connecting as :data:`RECORD_APP_ROLE` (see its comment)."""
-    parts = urlsplit(dsn)
-    query = parse_qs(parts.query)
-    query["options"] = [f"-c role={RECORD_APP_ROLE}"]
-    # `quote_via=quote` so a space is `%20`, never `+`: libpq's URI parser does
-    # NOT decode `+`, so `urlencode`'s default would hand the backend the
-    # literal `-c+role=…` and the CONNECT itself would fail (#9600 cycle 7).
-    return urlunsplit(parts._replace(query=urlencode(query, doseq=True, quote_via=quote)))
 
 
 def _vec(hot: int = 7) -> list[float]:
@@ -306,14 +308,22 @@ def test_a_live_write_lands_in_the_record_with_its_vector(schema, armed, tenant)
 
     with schema.cursor() as cur:
         cur.execute(
-            "SELECT vector_dims(embedding_vec) FROM public.point "
-            "WHERE org_id=%s AND graph_id=%s AND id=%s", (*tenant, point_id))
+            "SELECT id FROM public.point WHERE org_id=%s AND graph_id=%s "
+            "AND id=%s", (*tenant, point_id))
         row = cur.fetchone()
         assert row is not None, f"no `public.point` row for id {point_id!r}"
-        assert row[0] == DIM, (
-            f"the record's vector is {row[0]}-dimensional, the leg serves "
-            f"{DIM} — a dimension mismatch is a read that returns nothing and "
-            "reports `ok`")
+        assert row[0] == point_id, (
+            f"the record's row is keyed {row[0]!r}, not the id the write "
+            f"returned {point_id!r} — the dense leg joins the kNN's hit back to "
+            "this column, so a row under a different key is a row the read "
+            "returns and cannot resolve")
+    # ⛔ NO `vector_dims() == DIM` ASSERTION HERE, on purpose: `embedding_vec` is
+    # declared `vector(384) GENERATED ALWAYS AS public.record_embedding_vector(
+    # embedding) STORED` (`20261109000001_record_embedding_vector.sql:207`), so
+    # `vector_dims()` returns 384 for EVERY non-NULL value — and `with_vec == 1`
+    # above already proved non-NULL. It would be an assertion that cannot fail,
+    # which is the one thing this file exists to not be. A width drift is caught
+    # where it happens instead: the INSERT raises, or `with_vec` reads 0.
 
     assert _count(schema, "journal_event", tenant)[0] == 1, (
         "no `journal_event` position row — the fold consumed the record but did "
@@ -355,7 +365,17 @@ def _dense_answer(sdk, query_vec, *, limit: int = 5):
 def test_the_dense_leg_answers_from_the_record(schema, armed, tenant):
     """The epic's acceptance line, on the wire: `mechanism: pgvector`.
 
-    ⛔ THE TRACE IS THE ASSERTION, not the hit list. A hit proves *some* store
+    ⛔ `pgvector`, NOT the epic's word `index`, AND THE DIFFERENCE IS LOAD-BEARING.
+    The epic's sentence (quoted at the top of this file) says *`mechanism: index`*;
+    the wire token is `pgvector` because `search_engine.MECHANISM_PGVECTOR` is
+    deliberately a FOURTH value rather than a reuse of `MECHANISM_INDEX` — its own
+    docstring: *"the graph's index and the record's index are different stores with
+    different failure modes, and a measurement that cannot tell which one answered
+    cannot price the move or detect a store silently reverting to the other"*. So a
+    reader who "repairs" the token below to the epic's spelling would red a HEALTHY
+    tree; the constant is imported, not re-minted, for the same reason.
+
+    ⛔ AND THE TRACE IS THE ASSERTION, not the hit list. A hit proves *some* store
     answered, and the two stores hold the same vector by construction — so a
     broken record leg falling through to the graph returns the SAME id and the
     same distance. The leg's own recorded verdict is the only thing that says
@@ -376,8 +396,8 @@ def test_the_dense_leg_answers_from_the_record(schema, armed, tenant):
     assert trace, "the read recorded no leg trace at all — nothing can say which store answered"
     leg = trace[0]
     assert leg["ran"] is True, f"the vector leg did not run: {leg}"
-    assert leg["mechanism"] == MECHANISM_RECORD, (
-        f"the dense leg answered with mechanism={leg['mechanism']!r}, not "
+    assert leg[MECHANISM_KEY] == MECHANISM_RECORD, (
+        f"the dense leg answered with {MECHANISM_KEY}={leg[MECHANISM_KEY]!r}, not "
         f"{MECHANISM_RECORD!r} — the record did not serve this read. Full trace: {leg}")
     assert leg["reason"] == "ok", f"the leg ran but did not say `ok`: {leg}"
     assert leg["degraded"] is False, (
@@ -428,9 +448,9 @@ def test_the_record_still_answers_with_the_graphs_copy_deleted(schema, armed, te
         f"with the graph's node deleted the dense read returned {ids!r} — the "
         "point exists ONLY in the record now, so an empty (or short) answer is "
         "the record failing to serve the read the epic exists for")
-    assert trace[0]["mechanism"] == MECHANISM_RECORD, (
+    assert trace[0][MECHANISM_KEY] == MECHANISM_RECORD, (
         f"a read that can only have come from the record reported "
-        f"mechanism={trace[0]['mechanism']!r}: {trace[0]}")
+        f"{MECHANISM_KEY}={trace[0][MECHANISM_KEY]!r}: {trace[0]}")
 
 
 # ── 4. the falsifier ───────────────────────────────────────────────────────
@@ -465,7 +485,7 @@ def test_deleting_the_record_row_flips_the_read_to_the_graph(schema, armed, tena
 
     # The control: with the row present the leg says it served the record.
     control_hits, control_trace, _ = _dense_answer(sdk, embedding)
-    assert control_trace[0]["mechanism"] == MECHANISM_RECORD, (
+    assert control_trace[0][MECHANISM_KEY] == MECHANISM_RECORD, (
         f"the control read did not come from the record, so this leg cannot "
         f"say anything about the row it removes: {control_trace[0]}")
 
@@ -478,9 +498,9 @@ def test_deleting_the_record_row_flips_the_read_to_the_graph(schema, armed, tena
 
     hits, trace, _ = _dense_answer(sdk, embedding)
     ids = [row[0] if isinstance(row, (tuple, list)) else row for row in hits]
-    assert trace[0]["mechanism"] == MECHANISM_GRAPH_SCAN, (
+    assert trace[0][MECHANISM_KEY] == MECHANISM_GRAPH_SCAN, (
         f"the record row is gone and the leg STILL reports "
-        f"mechanism={trace[0]['mechanism']!r} — the answer did not follow the "
+        f"{MECHANISM_KEY}={trace[0][MECHANISM_KEY]!r} — the answer did not follow the "
         f"record row, so legs 2-3 were proving something else. Trace: {trace}")
     assert point_id in ids, (
         f"the graph branch did not answer after the record declined ({ids!r}) "
@@ -613,24 +633,50 @@ def test_the_runner_folds_and_a_second_run_is_a_no_op(schema, unarmed, tenant):
     assert final["fully_consumed"] is True, f"status did not report completion: {final}"
 
 
-def test_the_runner_opens_no_graph_connection(unarmed, tenant, monkeypatch):
+def test_the_runner_cannot_reach_the_cache():
     """The runner is a fold, not a migration of the graph (`#10175`).
 
-    `#7879`'s stamp and `CURATION-11469.md` both forbid the runner from
-    deleting, pruning or "cleaning" the graph, and the guarantee is structural
-    rather than a promise: the tool takes no graph handle and issues no Cypher.
-    A leg is worth having because "it opens no graph connection" is the kind of
-    claim that is true until the day someone adds a convenience import — and a
-    runner that starts reaching into the graph is a data-loss surface, not a
-    regression.
-    """
-    sdk, journal = unarmed
-    sdk._create_point("statement", "the graph must be untouched", extractedFrom=None,
-                      embedding=_vec())
+    ⛔ IT IS STRUCTURAL AND IT IS DB-FREE. `#10175` forbids the runner from
+    deleting, pruning or "cleaning" the graph and `#5333` governs customer
+    memories, so the guarantee cannot be a promise the tool makes at runtime — it
+    has to be that the tool *has no way in*. `#7879`'s own stamp said the same
+    thing in its "not authorised here" line.
 
-    source = (REPO_ROOT / "tools" / "record_runner.py").read_text(encoding="utf-8")
-    for forbidden in ("falkordb", "redislite", "projection.g", "DETACH DELETE"):
-        assert forbidden not in source, (
-            f"`tools/record_runner.py` mentions {forbidden!r} — the runner must "
-            "not be able to reach the cache (#10175 forbids pruning or deleting "
-            "it, and #5333 governs customer memories)")
+    Asserted on the module's IMPORTS (via `ast`), not on its text: a runner that
+    reached the cache would do it through `from tortoise.projection import …` or
+    a `falkordb`/`redis`/`redislite` client, and every one of those is an import
+    binding. A substring scan over the source would also match PROSE — this very
+    file's sibling suites discuss the graph in comments — so it both over- and
+    under-matches. `ast` sees what the module can actually reach.
+
+    Deliberately no DSN and no tenant: the subject is a file's import graph, so
+    this leg RUNS in the fast matrix instead of skipping there.
+    """
+    import ast
+
+    tree = ast.parse((REPO_ROOT / "tools" / "record_runner.py").read_text(encoding="utf-8"))
+
+    #: Every module whose import would give the runner a way into the cache.
+    #: PREFIX-matched: a submodule of any of these (`tortoise.projection.edges`)
+    #: is the same door.
+    FORBIDDEN = (
+        "falkordb", "redislite", "redis", "FalkorDB", "redislite.client",
+        "tortoise.projection", "tortoise.cache_projection", "tortoise.sdk",
+        "tortoise.api", "tortoise.mining",
+    )
+    reached: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            reached.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            reached.append(node.module)
+    hits = sorted({name for name in reached
+                   for bad in FORBIDDEN
+                   if name == bad or name.startswith(bad + ".")})
+    assert hits == [], (
+        f"`tools/record_runner.py` imports {hits} — the runner must not be able "
+        "to reach the cache at all (#10175 forbids pruning or deleting it, and "
+        "#5333 governs customer memories). A fold that can open a graph handle "
+        "is a data-loss surface, not a regression. Imports seen: "
+        f"{sorted(reached)}")
+
