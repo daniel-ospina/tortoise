@@ -2352,3 +2352,42 @@ def test_the_run_REFUSES_a_bypassed_capture_at_the_CALL_SITE_that_arms_the_witne
         f"arm never runs it and a `try/except SystemExit` arm swallows the very "
         f"refusal it exists to make, while the run still writes a table saying "
         f"`measured: true` and exits 0 (#10983 review P2 at 7eb4a042)")
+
+
+def test_an_armed_pinned_off_switch_is_ANNOUNCED_before_it_is_discarded(monkeypatch):
+    """Pinning `TORTOISE_S4_EMBED_JSON` OFF must SAY so, not discard it silently.
+
+    ⛔ Review cycle 11 (P3): the notice is the ENTIRE point of `#14343`'s
+    `_pin_off_the_door` change — four documents told an operator to arm the lever
+    and "re-run the capstone to prove the bars hold", while the door popped it
+    for the whole run. Without this case, reverting the call site to a bare
+    `os.environ.pop(key, None)` and deleting the function left every test in this
+    file green: the pop semantics are identical either way, so only the NOTICE
+    distinguishes a discarded arm from a silent one.
+
+    The pin itself is a registered decision (`preregistration.json`: UNSET is the
+    only state the corpus was scored under) and this case does not weaken it —
+    it asserts that an operator who armed the switch is TOLD the run measured the
+    pinned value instead.
+    """
+    probe = _load_probe()
+    assert "TORTOISE_S4_EMBED_JSON" in probe.DOOR_PINNED_OFF, (
+        "the lever is no longer a pinned-off switch — if that is deliberate, the "
+        "documents that promise `arm it and re-run` are finally true and this "
+        "case must be replaced, not deleted")
+    monkeypatch.setenv("TORTOISE_S4_EMBED_JSON", "compact")
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        probe._pin_off_the_door("TORTOISE_S4_EMBED_JSON")
+    said = buf.getvalue()
+    assert "PINNED-OFF OVERRIDE" in said, (
+        "an armed pinned-off switch was discarded SILENTLY — the run then scores "
+        "the pinned value while the operator believes the armed one was measured")
+    assert "TORTOISE_S4_EMBED_JSON" in said and "compact" in said, (
+        "the notice must name the switch AND the value it discarded")
+    assert "os.environ" not in said  # a message, not a repr dump
+    import os as _os
+    assert _os.environ.get("TORTOISE_S4_EMBED_JSON") is None, (
+        "the notice must not replace the pop — the pin still has to HOLD")
