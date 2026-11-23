@@ -19411,11 +19411,13 @@ def _embed_json_kwargs() -> dict:
 
     The composition of the input constant (#14343, `docs/evidence/14343-amplify`)
     says the largest single region is **S2's embed list re-sent to S4** —
-    14,164 of the 43,567 **attributed** tokens, i.e. **32.5%** of the
+    14,149 of the 42,509 **attributed** tokens, i.e. **33.3%** of the
     composition and **31.1%** of the 45,503 fitted constant (both denominators
     are printed in the bundle; neither is the other). Measured on the 14 real S2
     emissions in `tests/eval/write_path/receipts/7947-arms-2026-10-18`
-    (580 items), **32.5% of that JSON is `indent=1` whitespace**: 77,561 tokens
+    (580 items), **32.5% of that JSON is `indent=1` whitespace** — a share of the
+    SERIALIZED LIST, not of the composition, which is why the two numbers are
+    close without being the same quantity: 77,561 tokens
     indented vs 52,346 with
     compact separators, i.e. **1,801 tokens per emission** (the ratio is stable —
     29.6–35.0% across all 14). The list's CONTENT is byte-identical either way;

@@ -103,9 +103,9 @@ document text once **per call**, and 34 of 50 documents take a **second** S1 cal
    static explains it; S4 reads the list S2 just wrote, re-serialized at **1.23×** S2's own
    emission (the `indent=1` dump plus the post-S2 normaliser's added fields — this bundle
    does not separate those two, because separating them needs a real emission, §0).
-2. **The static instruction set is 23,165 tokens/doc** — 53 % of the composition (51 % of
+2. **The static instruction set is 23,165 tokens/doc** — 54.5 % of the composition (51 % of
    the 45,503 constant) — and it is the same bytes on every call: the kind vocabulary
-   (7,330) alone is 16.8 % of the composition. (23,165 is the seven static rows summed; the
+   (7,330) alone is 17.2 % of the composition. (23,165 is the seven static rows summed; the
    `graph search results (S4)` row is **not** in it — that row is the empty `sdk=None`
    lookup, a *floor*, and adding it would give 23,294.)
 3. **S1's story is charged three times per document**: once as S1's output, once as S2's
@@ -241,7 +241,13 @@ be exactly that decision taken silently.
 uv run python tools/extractor_cost_measure.py compose \
     --out docs/evidence/14343-amplify/compose-after.json
 
-# 2. before → after on the SAME corpus (arms are labels; the cache ladder is the axis)
+# 2. before → after on the SAME corpus. ⛔ The ARM IS A SETTING, NOT A LABEL:
+#    `run --arms before,after` sets TORTOISE_S4_EMBED_JSON=compact for the
+#    `after` rows and pins it OFF for the `before` rows, in-process, and records
+#    `s4_embed_json` on every row so a mislabelled measurement cannot hide.
+#    (Until review cycle 9 it wrote nothing and measured the same render twice,
+#    returning a −0 delta with no banner.) The resume key is (arm, kind, id), so
+#    a separate `--arms after` invocation appends to the same file correctly.
 uv run python tools/extractor_cost_measure.py run --docs 50 --arms before,after \
     --out docs/evidence/14343-amplify/measurements.jsonl
 uv run python tools/extractor_cost_measure.py decompose \
@@ -274,11 +280,11 @@ so the re-serialized copy is ~1.3× the emission it copies: the whitespace is *a
 prompt builder, not by the model.
 
 **Before → after, in the measured unit.** The document corpus's embed region is
-**12,332 tokens per S4 call** (solved in §1) — about twice the receipts' ~5,540, because a
+**12,412 tokens per S4 call** (solved in §1) — about twice the receipts' ~5,540, because a
 document yields a longer list — which is **14,149 tokens per document** at the measured
 1.14 S4 calls/document. ⚠️ The 32.5 % ratio is applied to the **per-document** figure, because
 the before→after table below is per document: 32.5 % × 14,149 = **4,598**. (Applying it to
-12,332 would give 4,008 — the per-CALL saving — which is a different row, not a different
+12,412 would give 4,034 — the per-CALL saving — which is a different row, not a different
 answer.)
 
 | | before | after (flag armed) | Δ |
@@ -305,7 +311,7 @@ Unchanged by this bundle, and re-stated so the lever's value is on the record. F
 | team | 24M | 370 | 533 | 750 |
 
 A 30 % cut — which the composition says is available *in principle* (S2's re-read plus the
-kind vocabulary alone are 49 % of the composition, 47 % of the constant) — is worth
+kind vocabulary alone are 50.5 % of the composition, 47 % of the constant) — is worth
 **+43 %** documents per allowance. The one lever shipped here (disarmed) is worth **+8 %**
 on its own. **Neither is quotable as a plan until the capstone re-runs green**: what is
 measured here is the size of the lever, not its safety.
