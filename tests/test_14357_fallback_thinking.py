@@ -605,10 +605,14 @@ def test_s1_collapsed_base_survives_a_failed_escalation():
 
     m = _S1BaseCollapsesEscAborts()
     stats: dict = {}
-    with pytest.raises(v2._ReasoningCollapse):
+    with pytest.raises(v2._ReasoningCollapse) as ei:
         v2.run_s1(m, "user: we decided X", stats=stats)
     assert m.budgets[:2] == [1500, 32000], m.budgets
-    assert v2._classify_error(v2._ReasoningCollapse("x")) == "reasoning_collapse"
+    # Asserted on the exception the ABORT ARM raised, never on a freshly
+    # constructed one: a bare ``_classify_error(_ReasoningCollapse("x"))`` is a
+    # constant that no mutation of this diff can redden (agent-infra#3442
+    # rule 3), so it would have pinned nothing.
+    assert v2._classify_error(ei.value) == "reasoning_collapse"
 
 
 def test_collapsed_extraction_yields_no_document_and_is_recorded(monkeypatch):
