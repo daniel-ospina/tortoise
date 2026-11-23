@@ -10577,6 +10577,14 @@ ROWED_BY_THIS_FOLD = (
     # mapping key, which `--integrity` reds rather than silently keeping the last value.
     "test_13110_goalstate_doors.py",
     "test_13034_currency_rule_reads_position.py",
+    # #7879 — the epic's acceptance-line guard. A file this PR ADDED and registered
+    # on `core` because its subjects (`tortoise/record_writer.py`,
+    # `tortoise/record_vector.py`) match no SHARED_MODULE and no SOURCE_PATTERN, so a
+    # diff to the live seam or the coverage gate collects nowhere else. Its row is the
+    # header's flat `DEFAULT_FAST_WEIGHT` (a file a PR adds can never carry a CI junit
+    # reading yet); the armed cost of its DB-gated legs belongs to
+    # `test-record-postgres`, not to the fast shard it packs in.
+    "test_7879_record_chain.py",
     # #13422 (PR #13466) — the fold that made `object`/`subject` record-served behind the
     # `#689` cage. A file this fold ADDED and registered on `core` because
     # `tortoise/record_vector.py` has no `SOURCE_PATTERNS` entry, so it collects nowhere on the
@@ -10919,6 +10927,39 @@ def test_the_14357_repair_suite_is_in_the_entry_rule_set_14362():
     assert name in real, (
         f"#14357 adds {name} to a fast surface but ships no `durations:` row, so it "
         "packs at the flat default")
+    holed = {k: v for k, v in real.items() if k != name}
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
+        "dropping THIS row from the live map must name exactly this file as rowless; "
+        "if another member of the guarded set is missing a row this pin cannot "
+        "distinguish that state from the one it guards")
+
+
+def test_the_record_chain_suite_is_in_the_entry_rule_set_7879():
+    """#7879 non-vacuity: the ENTRY-RULE pin can only see what this set NAMES.
+
+    MEASURED on this PR's own head before this pin: `test_7879_record_chain.py` was
+    registered on `core` (so it is in `fast_pool()`) and carried a `durations:` row,
+    yet `grep -c` for the filename in THIS module was **0** and deleting its row from
+    the live map left `ci_timing.integrity_problems` at **0 problems** — the row could
+    be dropped and nothing reddened (`--integrity`'s coverage check is a RATIO with
+    headroom). That is the same state `#13123` and `#14362` each measured and repaired
+    on their own heads, and it is the reason this tuple is explicit rather than derived.
+
+    Both directions are asserted from the LIVE map, exactly as
+    `test_the_eviction_suite_is_in_the_entry_rule_set_13123` above does: membership
+    alone is not enough (the row can be dropped again), and the row alone is not
+    enough (the file can be absent from this tuple while `--integrity` stays green).
+    """
+    from tools.ci_selection import load_manifest
+    name = "test_7879_record_chain.py"
+    assert name in ROWED_BY_THIS_FOLD, (
+        f"#7879 registers {name} in a fast surface, but it is not in "
+        "ROWED_BY_THIS_FOLD — the ENTRY-RULE pin cannot see it, so dropping its "
+        "`durations:` row would be silent")
+    real = load_manifest()["durations"]
+    assert name in real, (
+        f"#7879 put {name} in a fast surface but shipped no `durations:` row, so it "
+        "packs at the flat default with nothing recording that it was a choice")
     holed = {k: v for k, v in real.items() if k != name}
     assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
         "dropping THIS row from the live map must name exactly this file as rowless; "
