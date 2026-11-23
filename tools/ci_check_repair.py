@@ -196,7 +196,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0` (grep the symbol if the line has moved —
 #: it is the identifier that is load-bearing, the number is only a shortcut); and
 #: `docs/ops/ci-wall-clock.md` §6
-#: (lines 525-527) records that derivation in its own words — *"The budget's default is
+#: (lines 531-533) records that derivation in its own words — *"The budget's default is
 #: derived from this document's own §1 measurement (max first-job wait 81.9 min →
 #: 90 min), so it fires past the measured-normal population rather than on it."* 5400 s
 #: sits on the same side of the same measurement: past the measured maximum, so a run
@@ -2826,13 +2826,25 @@ def main(argv: list[str] | None = None) -> int:
 
 DOC_CITATION_PATHS = ("docs/ops/ci-wall-clock.md",)
 
+# The branch a cited commit must SURVIVE in. This repo squash-merges and has
+# `delete_branch_on_merge` on, so a sha that only a PR branch holds stops resolving
+# the moment that branch lands and is deleted — and because this arm runs in the
+# REQUIRED, path-filter-free `docs` job, one document's evidence then reds EVERY PR.
+# Measured on #14038: its §2 cite named a PR-branch commit
+# (`git rev-list origin/main | grep -c ^8abf4844` -> 0, `git branch -a --contains` ->
+# the PR branch only), so it was a defect AT PR TIME, not only after the merge.
+DOC_CITATION_BASE = "origin/main"
+
 # The command shape the document rests its claims on. WIDENED past the exact spelling:
 # the first version matched only `git show --stat <ref>`, so a cite written as
 # `git -C . show --stat <ref> -- <doc>` was invisible while the pass stayed green
 # (#13998 review P3-1) — a citation the regex cannot see is a citation nothing checks.
 _CITE = re.compile(
     r"git\b[^`]*?\bshow\s+--stat\s+([^\s`]+)[^`]*?--\s+docs/ops/ci-wall-clock\.md")
-_HEX = re.compile(r"[0-9a-fA-F]{7,40}")   # git resolves upper-case hex too (P2-1)
+# git's own minimum is 4 hex (`git rev-parse --verify 6960^{commit}` answers), so a
+# {7,n} floor reported a legitimate 6-char abbreviation as "is not a commit" and redded
+# the required job — the same false-block family as the upper-case-hex P2 (P2-1).
+_HEX = re.compile(r"[0-9a-fA-F]{4,40}")
 
 
 def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
@@ -2844,8 +2856,10 @@ def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
     sentence is the fail-open the first version shipped (#13998 review P2-2: citing a
     commit that really did edit the file still read as verified):
 
-    1. **runnable** — the ref is a commit token git can resolve; and
-    2. **empty** — `git show --stat <ref> -- docs/ops/ci-wall-clock.md` prints nothing.
+    1. **runnable** — the ref is a commit token git can resolve;
+    2. **durable** — it is an ancestor of `DOC_CITATION_BASE`, because a sha only a PR
+       branch holds stops resolving once that branch is squash-merged and deleted; and
+    3. **empty** — `git show --stat <ref> -- docs/ops/ci-wall-clock.md` prints nothing.
 
     Returns `(rc, findings)`; rc is 0 = every claim verified, 1 = a DEFECT in the
     document, 2 = UNVERIFIED — the question cannot be answered in THIS checkout (no
@@ -2904,6 +2918,41 @@ def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
                     "FULL checkout, so the command the paragraph invites cannot be "
                     "run.")
                 continue
+            # DURABILITY. A cite that resolves TODAY can still expire: this repo
+            # squash-merges with `delete_branch_on_merge`, so a sha that only a PR
+            # branch holds is gone from a fresh clone the moment that branch lands.
+            # Fail CLOSED when the base ref itself is unresolvable (#4244: an ancestry
+            # question a checkout cannot answer is UNVERIFIED, never a pass) — the
+            # depth-0 `docs` job always has `origin/main`, so this cannot false-block
+            # it, and anywhere it cannot be answered the claim is simply not verified.
+            base = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--verify",
+                 DOC_CITATION_BASE],
+                capture_output=True, text=True)
+            if base.returncode != 0:
+                return 2, [
+                    f"{rel}: `{DOC_CITATION_BASE}` does not resolve in this checkout, "
+                    f"so whether `{ref}` SURVIVES a squash-merge cannot be answered "
+                    "— the citation is UNVERIFIED, not disproved"]
+            anc = subprocess.run(
+                ["git", "-C", str(root), "merge-base", "--is-ancestor", ref,
+                 DOC_CITATION_BASE],
+                capture_output=True, text=True)
+            if anc.returncode == 1:
+                findings.append(
+                    f"{rel}: cites `git show --stat {ref}` as evidence, but {ref} "
+                    f"is NOT an ancestor of {DOC_CITATION_BASE}. This repo "
+                    "squash-merges with `delete_branch_on_merge`, so a sha only a "
+                    "PR branch holds stops resolving the moment that branch "
+                    "lands — the cite would red this required job on every PR "
+                    f"afterwards. Cite a commit {DOC_CITATION_BASE} reaches, or "
+                    "drop the command and keep the prose.")
+                continue
+            if anc.returncode != 0:
+                return 2, [
+                    f"{rel}: `git merge-base --is-ancestor {ref} "
+                    f"{DOC_CITATION_BASE}` failed ({anc.returncode}): "
+                    f"{(anc.stderr or anc.stdout).strip()} — UNVERIFIED"]
             shown = subprocess.run(
                 ["git", "-C", str(root), "show", "--stat", ref, "--", rel],
                 capture_output=True, text=True)

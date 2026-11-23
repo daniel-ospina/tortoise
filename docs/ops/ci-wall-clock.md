@@ -324,9 +324,15 @@ shards at **721.3 s** (a, b, c, i) and **seven** at **721.2 s**, and `ceil(721.3
 **25 m**. An earlier cut of this paragraph overwrote that split with THIS head's 721.6 while the
 sentence still carried the `10e51693f1` sha — one tree's emission carried under another tree's sha
 is the exact defect class this section exists to record for the minute boundary — and the follow-up
-that claimed to restore the split carried no edit to this file at all (`git show --stat 8abf4844 --
-docs/ops/ci-wall-clock.md` is empty), which is why the figure is restored here by measurement
-instead. Nothing grades this number (`grep -rn '721\.' tests/ tools/` finds no pin), so re-derive it
+that claimed to restore the split carried no edit to this file at all, which is why the figure is
+restored here by measurement instead. ⛔ The command this § invites names a **durable** commit, not
+the follow-up: that follow-up was a commit on this PR's own branch, and this repo squash-merges with
+`delete_branch_on_merge`, so a cite naming its sha stops resolving the moment the branch lands —
+which is a RED on the required `docs` job for every PR afterwards, not a missing footnote. The
+citation below therefore names a commit that is an ancestor of `main` and never touched this file
+(`git show --stat 10e51693f1 -- docs/ops/ci-wall-clock.md` is empty), i.e. that tree's split was
+never carried over from an edit here — it is re-emitted, which is what the paragraph asserts.
+Nothing grades this number (`grep -rn '721\.' tests/ tools/` finds no pin), so re-derive it
 with `--emit-push-matrix` at the sha the sentence names. The three
 hand-added figures are re-added from the
 emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row above, plus `config/ci-surfaces.yml`'s S=11

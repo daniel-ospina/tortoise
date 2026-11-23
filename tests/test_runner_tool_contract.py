@@ -173,10 +173,13 @@ KNOWN_UNCOVERED = {
         # reach `gh`. `tools/ci_check_repair.py` is a `gh` executor through its REPAIR
         # arms (`--apply`, `--workflow-state`, `--no-live`/queue reads); this job runs it
         # only as `--check-doc-citations`, which is stdlib-only — it shells out to `git`
-        # and nothing else (measured: every `subprocess.run` call reachable from that
-        # arm is `git` — the `rev-parse` probes AND the one `git show --stat` — and the
-        # arm returns from `main()` before any repair path is reached). So there is no `gh`
-        # to provision here, exactly as there is none on `--static`. ⚠️ The gap is real
+        # and nothing else (measured: six `git` calls — the `rev-parse` probes, the
+        # durability `merge-base`/base probes and the one `git show --stat` — and the
+        # arm returns from `main()` before any repair path is reached). So there is no
+        # `gh` to provision here, exactly as there is none on `--static`. ⚠️ The claim is
+        # asserted from the AST, not from this sentence:
+        # `tests/test_ci_check_repair.py::test_the_citation_arm_reaches_no_command_but_git`
+        # reds if the arm ever reaches anything but `git`. ⚠️ The gap is real
         # and it is the WHOLE job: if `docs` ever gains a real `gh` command, this row
         # suppresses the scan for it — the row must be re-read (and the job given the
         # `runner-tools.sh ensure gh` contract step) rather than carried forward.

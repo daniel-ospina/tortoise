@@ -1891,7 +1891,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
     this floor defers to is `tools/ci_queue_health.py:395`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 lines 525-527 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 531-533 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
     population rather than on it"). This docstring carries the SECOND citation of that same
     span, and the mechanical pin below holds it EQUAL to the one in
@@ -4458,7 +4458,13 @@ def test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit():
 # nobody runs. The `rc==2` arm of the first case below records the clone shape each is valid in.
 
 def _citation_tree(tmp_path, cited: str):
-    """A throwaway git checkout holding only the document, citing `cited`."""
+    """A throwaway git checkout holding only the document, citing `cited`.
+
+    `refs/remotes/origin/main` is pinned to the root commit, because the tool now
+    grades DURABILITY against `DOC_CITATION_BASE`: a cite that only a PR branch holds
+    expires when the branch is squash-merged and deleted, so a fixture without a base
+    ref would answer UNVERIFIED (exit 2) instead of exercising the arms under test.
+    """
     import subprocess as sp
     root = tmp_path / "tree"
     (root / "docs" / "ops").mkdir(parents=True)
@@ -4467,6 +4473,8 @@ def _citation_tree(tmp_path, cited: str):
     sp.run(["git", "init", "-q", str(root)], check=True)
     sp.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=c",
             "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    sp.run(["git", "-C", str(root), "update-ref", "refs/remotes/origin/main",
+            "HEAD"], check=True)
     return root
 
 
@@ -4490,10 +4498,17 @@ def test_the_wall_clock_citations_resolve_at_this_head():
         # to any rc==2: only a clone that reports NOT a full graph (`true` = grafted,
         # "" = no `git` / not a work tree) may skip. A FULL clone answering 2 would
         # mean the tool declining to answer on a graph that can — a real defect, red.
-        shallow = subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parents[1]),
-             "rev-parse", "--is-shallow-repository"],
-            capture_output=True, text=True).stdout.strip()
+        try:
+            shallow = subprocess.run(
+                ["git", "-C", str(Path(__file__).resolve().parents[1]),
+                 "rev-parse", "--is-shallow-repository"],
+                capture_output=True, text=True).stdout.strip()
+        except (FileNotFoundError, OSError):
+            # No `git` at all: the tool's own contract reports that as UNVERIFIED
+            # (rc 2), so this arm must SKIP rather than error — the same guard the
+            # sibling arm above and `doc_citation_defects` already carry (P3 item 3).
+            pytest.skip("`git` is not installed here, so the wall-clock cites are "
+                        "UNVERIFIED rather than wrong")
         if shallow != "false":
             pytest.skip(
                 "this checkout cannot answer the resolve question (`git rev-parse "
@@ -4569,6 +4584,95 @@ def test_an_UPPERCASE_hex_cite_is_not_a_defect(tmp_path):
     assert rc == 0, f"upper-case hex is a real commit token, got rc={rc}: {findings}"
 
 
+def test_the_citation_arm_reaches_no_command_but_git():
+    """The `docs` job's KNOWN_UNCOVERED row suppresses its `gh` scan for the WHOLE job.
+
+    That row rests on "this arm shells out to `git` and nothing else" (#13998 review
+    P3). A sentence in a comment cannot hold that: a later edit that reached `gh` here
+    would be invisible to the hazard scan AND fail at runtime, since the `docs` job
+    provisions no `gh`. So the claim is asserted from the AST — a vacuous reader (no
+    call found) fails too, rather than passing by finding nothing.
+    """
+    import ast
+
+    from tools import ci_check_repair as R
+
+    tree = ast.parse(Path(R.__file__).read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "doc_citation_defects")
+    progs = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "run") or not node.args:
+            continue
+        first = node.args[0]
+        if (isinstance(first, ast.List) and first.elts
+                and isinstance(first.elts[0], ast.Constant)):
+            progs.append(first.elts[0].value)
+    assert progs, (
+        "no `subprocess.run([...])` call with a literal argv was found in "
+        "doc_citation_defects — the READER broke, so this arm proves nothing")
+    assert set(progs) == {"git"}, (
+        "the citation arm must reach `git` and nothing else (the `docs` job provisions "
+        f"no `gh`), got {sorted(set(progs))}")
+
+
+def test_a_short_hex_abbreviation_is_not_a_defect(tmp_path):
+    """git's own minimum is 4 hex, so a 6-char abbreviation must not be "not a commit".
+
+    `_HEX` was `{7,40}` while `git rev-parse --verify 696038^{commit}` answers rc 0: a
+    legitimate abbreviation was reported as "is not a commit" and would have redded a
+    REQUIRED job — the same false-block family as the upper-case-hex P2 (#13998 P3).
+    """
+    from tools import ci_check_repair as R
+    root = _citation_tree(tmp_path, "placeholder")
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    short = sha[:6]
+    assert subprocess.run(["git", "-C", str(root), "rev-parse", "--verify",
+                           f"{short}^{{commit}}"],
+                          capture_output=True).returncode == 0, (
+        "the fixture's 6-char abbreviation must be git-resolvable for this arm to mean")
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        f"… `git show --stat {short} -- docs/ops/ci-wall-clock.md` is empty …\n")
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 0, (
+        f"{short!r} is a real commit token to git, so it must NOT be a DEFECT: "
+        f"rc={rc} {findings}")
+
+
+def test_a_branch_ONLY_cite_is_a_DEFECT(tmp_path):
+    """A sha that only a PR branch holds EXPIRES when the branch is squash-merged.
+
+    This repo squash-merges with `delete_branch_on_merge`, so citing such a commit in a
+    document whose citations a REQUIRED job checks turns into a red on EVERY PR the
+    moment the branch is deleted. It was a defect at PR time, not only after merge
+    (#13998 review P1) — measured on the PR itself: the §2 cite named a commit that
+    `git branch -a --contains` reported on the PR branch only.
+    """
+    from tools import ci_check_repair as R
+    root = _citation_tree(tmp_path, "placeholder")
+    # A commit the base ref does NOT reach: `origin/main` still points at the root.
+    subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b",
+                    "-c", "user.name=c", "commit", "-q", "--allow-empty",
+                    "-m", "branch-only"], check=True)
+    side = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    assert subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor",
+                           side, "refs/remotes/origin/main"],
+                          capture_output=True).returncode == 1, (
+        "the fixture must hold a commit the base does NOT reach")
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        f"… `git show --stat {side} -- docs/ops/ci-wall-clock.md` is empty …\n")
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 1, (
+        "a cite that resolves only through a PR branch must be a DEFECT AT PR TIME, "
+        f"not a red for every PR after the merge: rc={rc} {findings}")
+    assert "is NOT an ancestor of" in findings[0]
+
+
 def test_a_cite_whose_command_PRINTS_OUTPUT_is_a_DEFECT(tmp_path):
     """The sentence asserts the command is EMPTY; resolving is not the same as true.
 
@@ -4592,6 +4696,10 @@ def test_a_cite_whose_command_PRINTS_OUTPUT_is_a_DEFECT(tmp_path):
                          capture_output=True, text=True).stdout.strip()
     (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
         f"… `git show --stat {sha} -- docs/ops/ci-wall-clock.md` is empty …\n")
+    # The edit commit is the new tip, so move the base too: this arm is about the
+    # EMPTY-vs-PRINTS polarity, and a durability finding would be the wrong reason.
+    subprocess.run(["git", "-C", str(root), "update-ref",
+                    "refs/remotes/origin/main", sha], check=True)
     rc, findings = R.doc_citation_defects(root)
     assert rc == 1, (
         "a cite whose own command prints a stat CONTRADICTS the sentence it is cited "
