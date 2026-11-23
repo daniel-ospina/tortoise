@@ -358,6 +358,73 @@ def test_the_claim_lives_in_the_spool_ROOT_so_it_is_never_COUNTED(tmp_path):
 # ── flush_spool: serialized, and capacity charges nobody ──────────────────
 
 
+def test_a_lease_that_LAPSED_OUR_OWN_SCAN_does_not_stall_the_drain(tmp_path, monkeypatch):
+    """The pass's one UNBOUNDED step runs inside the lease, so a long scan expired the
+    holder's OWN claim — and every later pass then did nothing, forever.
+
+    `renew` refuses an already-expired record on purpose (a holder that overran must
+    not overwrite the successor that legitimately took over), but the scan
+    (`list_spool_metas`) happens BETWEEN the acquisition and the first refresh, so a
+    scan longer than the TTL left the pass unable to renew, `lost_claim`, zero POSTs,
+    and the next opportunity repeated it — with a message blaming a peer that does not
+    exist. Measured at the production TTL before the fix: two passes, `attempted: 0`,
+    `lost_claim: True` (#14423 merge-gate review, runtime finding).
+
+    The lease lapsing is simulated by making the FIRST `renew_if_due` answer `False`
+    (the expired-lease answer); `reclaim` then runs for real against a real claim file
+    whose token is ours.
+
+    MUTATION THAT REDS THIS: drop the `reclaim` retry at the top of the loop (the pass
+    then reports `lost_claim` and attempts nothing).
+    """
+    root = _spool(tmp_path, sessions=2)
+    posts: list[str] = []
+
+    def post(payload):
+        posts.append(payload["session_id"])
+        return PostOutcome(ok=True, status=200, body={})
+
+    from tortoise.drain_claim import DrainClaim
+
+    real_renew_if_due = DrainClaim.renew_if_due
+    calls = {"n": 0}
+
+    def lapsed_once(self, now_s=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False          # what an expired lease answers
+        return real_renew_if_due(self, now_s)
+
+    monkeypatch.setattr(DrainClaim, "renew_if_due", lapsed_once)
+    summary = flush_spool(root, post, now=1000.0)
+    assert summary.lost_claim is False, (
+        "our OWN lease lapsing during our own scan must not be reported as a takeover")
+    assert len(posts) == 2, "every entry is still attempted"
+    assert summary.filed == 2
+
+
+def test_a_REAL_takeover_still_stops_a_lapsed_pass(tmp_path, monkeypatch):
+    """The other direction, and it is what makes the retry safe: the re-arm only
+    happens while the record on disk is OURS. A peer that claimed in the gap wins.
+
+    MUTATION THAT REDS THIS: reclaim without the token check.
+    """
+    root = _spool(tmp_path, sessions=2)
+    posts: list[str] = []
+
+    def post(payload):
+        posts.append(payload["session_id"])
+        return PostOutcome(ok=True, status=200, body={})
+
+    claim = drain_claim.acquire(root, leg="python", now=1000.0, ttl_s=60.0)
+    assert claim is not None
+    peer = drain_claim.acquire(root, leg="pi", now=1200.0, ttl_s=60.0)  # the lease expired
+    assert peer is not None
+    assert claim.reclaim(now_s=1201.0) is False, "a peer's record must never be re-armed"
+    assert drain_claim.read_claim(root)["token"] == peer.token
+    peer.release()
+
+
 def test_a_HELD_claim_makes_a_whole_spool_pass_attempt_NOTHING(tmp_path):
     """The second of two concurrent drains does nothing AT ALL — not one POST, not
     one status write (that would erase what the holder last observed).

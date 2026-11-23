@@ -4325,7 +4325,17 @@ def _flush_claimed(
         # one TTL. `False` means the claim is no longer ours — a peer took it over
         # after our last refresh, so continuing would make us the second drainer
         # this whole mechanism exists to prevent.
-        if claim is not None and not claim.renew_if_due():
+        # ⛔ `renew` refuses an EXPIRED record (a holder that overran must not
+        # overwrite the successor that took over), and one step of the pass is
+        # unbounded BETWEEN acquisition and the first refresh: the whole-spool scan
+        # above. A scan longer than the TTL therefore expired our OWN lease and this
+        # pass would attempt nothing, forever — the permanent stall the claim exists
+        # to prevent, with a message blaming a peer that does not exist (#14423
+        # merge-gate review). `reclaim` re-arms it with the same compare-and-swap, and
+        # only while the record on disk is OURS: a real takeover still wins and still
+        # stops us. `lost_claim` is set only when NEITHER answers.
+        if (claim is not None and not claim.renew_if_due()
+                and not (callable(getattr(claim, "reclaim", None)) and claim.reclaim())):
             summary.lost_claim = True
             break
         try:
@@ -4377,7 +4387,12 @@ def _flush_claimed(
             # the token, so a lost claim is detected HERE rather than at the next
             # loop turn — and the pass then stops instead of becoming the second
             # drainer.
-            if claim is not None and not claim.renew():
+            # Same rule as the top of the loop: a lease that lapsed during OUR own
+            # work (here, a bounded run of capacity yields) is re-armed when the record
+            # on disk is still ours; a real takeover still stops us.
+            if (claim is not None and not claim.renew()
+                    and not (callable(getattr(claim, "reclaim", None))
+                             and claim.reclaim())):
                 summary.lost_claim = True
                 break
             summary.capacity_stopped = False

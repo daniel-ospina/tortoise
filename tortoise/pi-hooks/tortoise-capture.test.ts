@@ -7811,6 +7811,32 @@ test("#14350: a displaced claim is RESTORED, never disposed of", async () => {
   assert.equal(existsSync(ours.quarantine), false);
 });
 
+test("#14350: reclaim re-arms OUR lapsed lease and refuses a peer's", async () => {
+  // `renew` refuses an EXPIRED record (a holder that overran must not overwrite the
+  // successor that took over), and the pass's one unbounded step — the whole-spool
+  // scan — runs inside the lease, so a scan longer than the TTL expired the holder's
+  // OWN claim: every later pass then attempted nothing, forever, blaming a peer that
+  // does not exist (#14423 merge-gate review, runtime finding; mirrored from Python).
+  // `reclaim` decides on OWNERSHIP: the record on disk must still carry our token, and
+  // the re-arm is the same compare-and-swap `renew` uses.
+  // MUTATION THAT REDS THIS: drop the token check in `reclaim` (a peer's claim is then
+  // re-armed under it), or return false unconditionally (the lapsed holder stalls).
+  const spool = tmpSpool();
+  const mine = acquireDrainClaim(spool, { leg: "pi", nowMs: 1000, ttlMs: 60 });
+  assert.ok(mine);
+  assert.equal(mine.renew(1100), false, "renew refuses an expired lease");
+  assert.equal(mine.reclaim(1100), true, "…but our OWN lapsed lease is re-armable");
+  const armed = readDrainClaim(spool);
+  assert.equal(armed?.token, mine.token);
+  assert.equal(armed?.expires_at, 1100 + 60, "re-armed from NOW, in ms");
+  // A peer's record is never re-armed.
+  const peer = acquireDrainClaim(spool, { leg: "python", nowMs: 2000, ttlMs: 60 });
+  assert.ok(peer, "the re-armed lease expired, so a peer may take over");
+  assert.equal(mine.reclaim(2001), false, "a peer's claim must never be re-armed");
+  assert.equal(readDrainClaim(spool)?.token, peer.token);
+  peer.release();
+});
+
 test("#14350: a symlink at the claim path is removed AS A LINK, never followed", async () => {
   // `clearUnusableClaimPath` unlinks whatever is at the claim path when it is not a
   // regular file. Removing the LINK is the whole point: following it would delete a

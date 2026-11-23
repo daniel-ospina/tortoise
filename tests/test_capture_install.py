@@ -4958,7 +4958,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: (`sha256sum tortoise/pi-hooks/tortoise-capture.ts`), never carried over from
 #: either side. A pin that survives a merge unexamined is a pin nobody derived.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "3852e172f3e0ce4d8247d655718d99387e0a8ad006a4618785a46d0745540b9a")
+    33, "29b2243ed06a65195d45fa15d26934fc59f86f398f9a482ccaa3a874d7e5a1cd")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5144,7 +5144,11 @@ _GENERATION_DIGESTS = {
     # byte-indistinguishability that made the first attempt vacuous (rename + link
     # preserves inode, mtime and content) is why the order has to be observed at the
     # call site rather than at the filesystem.
-    33: "3852e172f3e0ce4d8247d655718d99387e0a8ad006a4618785a46d0745540b9a",
+    # ⛔ AND THE MERGE-GATE REVIEW'S RUNTIME FINDING: `reclaim` — the compare-and-swap
+    # that re-arms a lease which lapsed during the pass's own unbounded whole-spool
+    # scan, on both legs. A behaviour change on shipped bytes, and the digest moves
+    # with it; 33 still has never shipped, and freezes the moment it reaches `main`.
+    33: "29b2243ed06a65195d45fa15d26934fc59f86f398f9a482ccaa3a874d7e5a1cd",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
