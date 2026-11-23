@@ -50,7 +50,10 @@ corpus, `raw` + `narrative` arm each) — **7 sessions / 14 emissions / 580 item
 **1,801 tokens per emission**, and the ratio is a property of the serialization rather than
 of one session — the per-emission saving spans **29.6 %–35.0 %** across all 14.
 This **reproduces the bundle's §4a figures exactly** (77,561 / 52,346 / 25,215 / 32.5 % /
-1,801), which is the point of re-running it: the instrument and the record agree.
+1,801), which is the point of re-running it: the instrument and the record agree. The cells
+are that function's own return value (`serialization_lever(receipts)` on the branch head),
+not a re-implementation — its `saved_pct` is the rounded `32.5`, and the exact ratio
+`25,215 / 77,561 = 32.5094 %` is what §2 applies to a per-document region.
 
 `tests/test_14343_embed_list_serialization.py` pins the payload bytes the cells above were
 measured on (278,874 → 224,109 characters) and pins the parsed-object equivalence on **every**
