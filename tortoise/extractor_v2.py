@@ -1563,7 +1563,7 @@ def run_s1(model, transcript: str, *,
         model, system, user_msg, base, stats, True)
     finish = stats.get("finish_reason") if stats is not None else (
         getattr(model, "last_finish_reason", None))
-    truncated = finish == "length"
+    truncated = finish == "length" or bool(_collapse)  # ``finish`` above is a POST-HOC read of a race-prone shared attr (#1780 F4) on the ``stats=None`` form; ``_collapse`` is authoritative (#14417)
     if not truncated:
         return response
     _rec = stats.setdefault("recovery", {}) if stats is not None else None

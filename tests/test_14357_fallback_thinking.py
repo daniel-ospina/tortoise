@@ -43,6 +43,14 @@ def _clean_env(monkeypatch):
               "OPENROUTER_API_KEY", "VENICE_API_KEY",
               "TORTOISE_EXTRACT_MODEL", "TORTOISE_JSON_MODE",
               "TORTOISE_EXTRACTOR_MAX_TOKENS",
+              # The escalation RUNG budget, not just the base cap: the ``s1_*``
+              # tests below pin the literal 32000, and ``_extractor_escalation_
+              # tokens`` reads this knob from the environment at call time (any
+              # in-range 16000..64000 value used AS-IS) — an ambient value would
+              # red them for a reason that is not the diff. Precedent:
+              # ``tests/test_extractor_v2.py::test_extractor_escalation_tokens_
+              # env_semantics`` delenv's it around the same assertion.
+              "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
               "TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN",
               # ``test_reader_lane_wire_body_is_not_suppressed`` is the one test
               # here that goes through ``resolve_reader_provider``, which reads
@@ -699,3 +707,62 @@ def test_s1_empty_escalated_reply_is_not_a_recovery():
     assert out["error_census"]["reasoning_collapse"] == 1
     assert any("S1 chunk failed" in e for e in out["errors"])
     assert out["embed_list"] == {}
+
+
+def test_s1_stats_less_form_cannot_ship_a_held_collapse():
+    """#14417 — the drop decision must read the HELD flag, not a post-hoc read.
+
+    ``run_s1``'s documented public form is ``run_s1(model, transcript)`` — no
+    ``stats`` — and the two callers that use it in this repo do exactly that
+    (``tests/test_extractor_reliability.py``). On that form the ``finish`` the
+    truncation gate reads is not ``_complete``'s in-thread capture, which
+    ``_complete`` stages into ``stats`` before its yield guard raises: it is
+    ``getattr(model, "last_finish_reason")`` read AFTER the call returned. This
+    module's own F4 comment (#1780) declares that read race-prone by
+    construction — a peer thread's ``complete()`` can overwrite the attribute
+    under ``--workers > 1`` — and a duck-typed wrapper need not expose it.
+
+    ``_collapse``, by contrast, is authoritative: the hold returns ``("", True)``
+    only from ``_complete``'s guard, i.e. only for a base that came back empty
+    at ``finish_reason="length"``. Reading the re-derived ``finish`` instead
+    shipped ``""`` with no exception, no ``error_census`` entry and no
+    escalation episode — the empty-document fail-open #14357 exists to close,
+    and S1 has no parse ladder to catch an empty narrative downstream.
+
+    The adapter below reproduces the race rather than a missing attribute: the
+    FIRST read of ``last_finish_reason`` (``_call_once``'s in-thread capture,
+    the one that raises the collapse) says ``"length"``, and every later read
+    — the post-hoc one the gate used to trust — says ``"stop"``.
+    """
+    class _RaceAfterCollapse:
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def __init__(self):
+            self.budgets: list[int] = []
+            self._reads = 0
+
+        # the in-thread capture sees "length"; everything after it sees "stop"
+        @property
+        def last_finish_reason(self):
+            self._reads += 1
+            return "length" if self._reads == 1 else "stop"
+
+        @last_finish_reason.setter
+        def last_finish_reason(self, _value):
+            self._reads = 0
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.budgets.append(max_tokens)
+            self._reads = 0          # the capture below is the FIRST read again
+            if (max_tokens or 0) >= 32000:
+                self.last_completion_tokens = 12
+                return "the recovered narrative"
+            self.last_completion_tokens = 1500
+            return ""                # the collapse, at the 1500 S1 cap
+
+    m = _RaceAfterCollapse()
+    # NO stats: the documented public form, and the arm with no other guard.
+    out = v2.run_s1(m, "1: user: we decided X")
+    assert m.budgets == [1500, 32000], m.budgets
+    assert out == "the recovered narrative", out
