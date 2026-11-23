@@ -1396,7 +1396,13 @@ those calls block on the seam, which waits out the boot under
 `TORTOISE_EMBED_WORKER_STARTUP_S` (600 s); on `external` they block on the ROUND TRIP, bounded by
 `TORTOISE_EMBED_QUERY_TIMEOUT_S` (30 s) — there is no boot to wait for, which is why
 `backing_booting()` answers `False` for it. So the first create/update/capture after a deploy can be
-slow rather than wrong. That is the deliberate trade, not an oversight.
+slow rather than wrong. That is the deliberate trade, not an oversight. ⚠️ **And it is not only
+`compute_embeddings`:** the write paths that deliberately bypass the `#13224` gate —
+`encode_batch_for_store`'s turn writers, and `graph-scripts/backfill_embeddings.py` — reach the same
+`_ensure_started` under the same 600 s budget, and `_Collector.submit`'s valve does not shorten it
+because `encode_texts` bypasses the collector. Pre-seam the equivalent cold path was
+`EmbeddingModel.get()`, bounded by `_LOAD_TIMEOUT_S` (300 s); the 600 s branch is new, so a backfill
+run started against a cold `worker` is the slow case to expect, not a hung one.
 
 ⚠️ **NOTHING WARMS THE WORKER AT BOOT TODAY.** The lifespan pre-warm is skipped on `worker` /
 `external` (it would load a local copy), and no equivalent kick boots the *worker* — so the first
