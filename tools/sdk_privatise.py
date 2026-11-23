@@ -1462,7 +1462,6 @@ SWEEP_NAMES = 66
 #: they did not PARSE and their residue shapes were silently uncounted. A census of a tree
 #: that does not parse is a reading of a DIFFERENT tree — the same class this block keeps
 #: naming, one layer out. Re-pin only from a tree whose covering suites are green.
-SWEEP_RESIDUE = (11872, "1f07a0b7bcf05138")
 #: ⛔ THIS PR'S OWN CONTRIBUTION IS ZERO ROWS, and that is measured rather than asserted:
 #: `edits_for` run over BOTH files whose CENSUS text this change touches yields zero typed
 #: references and ZERO residue rows (`tools/sdk_privatise.py` contributes only the two
@@ -1490,6 +1489,7 @@ SWEEP_RESIDUE = (11872, "1f07a0b7bcf05138")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
+SWEEP_RESIDUE = (11872, "1f07a0b7bcf05138")
 _SDKISH = re.compile(r"(?i)(?:^|_)sdk\d*(?:_|$)")
 
 
