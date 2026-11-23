@@ -3824,16 +3824,19 @@ _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 #:   K = 5, same mutant                    -> `1 failed`   (the row reds — it IS the real pin)
 #: ⛔ MEASURE THE MUTANT YOU NAME (#12039 cycle 13). An earlier version of this paragraph reported
 #: "still `2 failed` at `K = 8`" from a mutant that made the check UNREACHABLE rather than moving it
-#: below the gate — that is DELETE-entirely, not a reordering, and it reds at any K because nothing
-#: observes the death at all. The two are not interchangeable, and the difference is the finding.
+#: below the gate — that is DELETE-entirely, not a reordering. It reds at every K at which the file
+#: is green unmutated, for a different reason (nothing observes the death), and the two are NOT
+#: interchangeable: the difference is the finding.
 #: WHY the typo is NOT survivable: with the gate not yet qualified at the death sample the poll
 #: keeps going; a moved-below check then meets the already-dead child on that same sample and
 #: breaks to the same outside-signal SKIP the shipped order produces — both orderings agree, and
-#: the arm can no longer distinguish them. (Deleting instead reds at EVERY K for a DIFFERENT reason:
-#: nothing observes the death, so the streak runs on and `HarnessDefect` fires. At the shipped
-#: `K = 5` that happens ON the death sample (`on 2 consecutive samples over 2.50s`); only from
-#: `K = 7` is it genuinely "a sample later" (`K = 8`: count 3, span 3.15 s). Either way it reds,
-#: which is why the wrong mutant looked reassuring.)
+#: the arm can no longer distinguish them. (Deleting the check instead reds the row on every K at
+#: which the file is green unmutated — for a DIFFERENT reason, since nothing observes the death at
+#: all — which is exactly why the wrong mutant looked reassuring. ⛔ SCOPE A CLAIM TO THE K IT WAS
+#: MEASURED AT: the deletion raises on the death sample itself at the shipped `K = 5`
+#: (`on 2 consecutive samples over 2.50s`) and only one sample later from `K = 7` (`K = 8`: count 3,
+#: span 3.15 s), and at `K = 1` nothing at all is attributable — premise (b) below reds the FILE
+#: with no mutant applied, the same `11 failed, 173 passed` either way.)
 #: SO: no static assertion can pin this constant, and the `death_after_streak` ROW pins it only at
 #: the shipped value. Say that here rather than claiming a pin that does not exist.
 _LONG_PATH_STREAK_TIME_CALLS = 5
