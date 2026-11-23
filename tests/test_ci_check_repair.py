@@ -4400,7 +4400,10 @@ def test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit():
         "if the command was reworded, re-aim this pin at the new shape rather than "
         "deleting it — an unrunnable citation is what it exists to catch")
     for ref in refs:
-        assert re.fullmatch(r"[0-9a-f]{7,40}", ref), (
+        # upper-case hex is a real commit token (git is case-insensitive) — the tool
+        # was fixed for this and this hand-copied reader was left behind, which is the
+        # same false block one layer up (#13998 review, P3).
+        assert re.fullmatch(r"[0-9a-fA-F]{7,40}", ref), (
             f"`git show --stat {ref}` is cited in docs/ops/ci-wall-clock.md but {ref!r} is "
             "not a commit — a placeholder here reads as evidence while being unrunnable, "
             "so name the sha the claim was measured at")
@@ -4470,39 +4473,113 @@ def _citation_tree(tmp_path, cited: str):
     return root
 
 
+def _graft_licence_allows_an_abstention(root: Path) -> bool:
+    """May an UNVERIFIED (rc 2) verdict be treated as an abstention HERE?
+
+    ⛔ Only a checkout that reports it is NOT a full graph licenses it: `true` means the
+    graph is grafted (CI's `test` job is `fetch-depth: 1`), and `""` means there is no
+    `git` / no work tree at all. `false` — a FULL clone — licenses NOTHING: a 2 there is
+    the tool declining to answer a question its graph can answer, i.e. a real defect, and
+    the caller must red. This helper exists so that licence is TESTED rather than asserted
+    in prose: an `if rc == 2: skip` written inline cannot be told apart from an
+    unconditional skip by any environment CI runs (#13998 review, P3).
+    """
+    try:
+        answered = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+            capture_output=True, text=True).stdout.strip()
+    except FileNotFoundError:      # no `git` on this host: nothing can be resolved
+        return True
+    return answered != "false"
+
+
 def test_the_wall_clock_citations_resolve_at_this_head():
     """The tree this pin is written on must be GREEN — else the tool is the defect."""
     from tools.ci_check_repair import doc_citation_defects
     rc, findings = doc_citation_defects(Path(__file__).resolve().parents[1])
-    if rc == 2:
-        # ⛔ rc==2 IS NOT A VERDICT ABOUT THE DOCUMENT, AND THIS FILE RUNS IN THE
-        # DEPTH-1 `test` JOB. `actions/checkout` there grafts the graph, so the doc's
-        # `git show --stat 8abf4844` (5 commits back) is simply an absent object and
-        # the tool answers UNVERIFIED by its own contract — measured in a `--depth 2`
-        # clone of this head: rc=2, "it reports a grafted (shallow) history … 8abf4844
-        # is UNVERIFIED, not disproved". Asserting 0 there is a FALSE BLOCK of a
-        # correct document: the same class the commit one layer down fixed, and it is
-        # the shape the pytest sibling above already skips for. The DEFECT arms here
-        # are unaffected (a placeholder is caught before any history is asked for, so
-        # it still exits 1 in every clone), and the resolve arm is proved where it can
-        # be — the depth-0 `docs` job runs this very function.
-        # …but the abstention is LICENSED by the checkout's own state, never granted
-        # to any rc==2: only a clone that reports NOT a full graph (`true` = grafted,
-        # "" = no `git` / not a work tree) may skip. A FULL clone answering 2 would
-        # mean the tool declining to answer on a graph that can — a real defect, red.
-        shallow = subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parents[1]),
-             "rev-parse", "--is-shallow-repository"],
-            capture_output=True, text=True).stdout.strip()
-        if shallow != "false":
-            pytest.skip(
-                "this checkout cannot answer the resolve question (`git rev-parse "
-                "--is-shallow-repository` reports a grafted history), so the "
-                f"wall-clock cites are UNVERIFIED rather than wrong: {findings[0]} "
-                "The depth-0 `docs` job runs "
-                "`tools/ci_check_repair.py --check-doc-citations`, which is where "
-                "they are proved.")
-    assert rc == 0, f"the wall-clock doc's own citations are a defect at this head: {findings}"
+    # ⛔ rc==2 IS NOT A VERDICT ABOUT THE DOCUMENT, AND THIS FILE RUNS IN THE
+    # DEPTH-1 `test` JOB. `actions/checkout` there grafts the graph, so the doc's
+    # `git show --stat 8abf4844` (5 commits back) is simply an absent object and the
+    # tool answers UNVERIFIED by its own contract — measured in a `--depth 2` clone of
+    # this head: rc=2, "it reports a grafted (shallow) history … 8abf4844 is
+    # UNVERIFIED, not disproved". Asserting 0 there is a FALSE BLOCK of a correct
+    # document: the same class the commit one layer down fixed. The DEFECT arms here
+    # are unaffected (a placeholder is caught before any history is asked for, so it
+    # still exits 1 in EVERY clone), and the resolve+stat arms are proved where they
+    # can be — the depth-0 `docs` job runs this very function.
+    # …and the abstention is LICENSED by the checkout's own state, never granted to any
+    # rc==2: `_graft_licence_allows_an_abstention` is what makes that testable.
+    if rc == 2 and _graft_licence_allows_an_abstention(
+            Path(__file__).resolve().parents[1]):
+        pytest.skip(
+            "this checkout cannot answer the resolve question (`git rev-parse "
+            "--is-shallow-repository` reports a grafted history), so the wall-clock "
+            f"cites are UNVERIFIED rather than wrong: {findings[0]} The depth-0 `docs` "
+            "job runs `tools/ci_check_repair.py --check-doc-citations`, which is where "
+            "they are proved.")
+    assert rc == 0, (
+        "the wall-clock doc's own citations are not verified at this head — rc=2 is "
+        "UNVERIFIED (a missing answer), rc=1 is a DEFECT in the document: "
+        f"{findings}")
+
+
+def test_a_GRAFTED_clone_never_reports_a_DEFECT_from_its_stat(tmp_path, monkeypatch):
+    """A grafted graph lies in the STAT direction too, not only in the resolve probe.
+
+    #13998 review, measured on a `--depth 10` clone whose boundary IS the cited commit:
+    git has no parent there, so `git show --stat <that commit>` reports it as a ROOT and
+    prints `1 file changed, 868 insertions(+)` for a commit that changed nothing in the
+    file. A correct document then reads as DEFECT — the same false block one layer down,
+    and it is why the licence must gate EVERY history arm rather than just `rev-parse`.
+    """
+    from tools import ci_check_repair as R
+    root = _citation_tree(tmp_path, "placeholder")
+    # A REAL hex sha, so the pure-text arm passes and the history arms are reached.
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        f"… `git show --stat {sha} -- docs/ops/ci-wall-clock.md` is empty …\n")
+    real_run = subprocess.run
+
+    def grafted_boundary(argv, *a, **kw):
+        if "rev-parse" in argv and "--is-shallow-repository" in argv:
+            return subprocess.CompletedProcess(argv, 0, "true\n", "")
+        if "show" in argv and "--stat" in argv:
+            # what a graft boundary emits: the commit as a root, full stat
+            return subprocess.CompletedProcess(argv, 0, " docs/ops/ci-wall-clock.md | 868 +++\n", "")
+        return real_run(argv, *a, **kw)
+
+    monkeypatch.setattr(R.subprocess, "run", grafted_boundary)
+    rc, findings = R.doc_citation_defects(root)
+    assert rc == 2, (
+        "a grafted graph cannot tell an absent ancestor from a bogus sha, nor a root "
+        f"stat from a real one — it must ABSTAIN, got rc={rc}: {findings}")
+    assert "grafted" in findings[0]
+
+
+def test_the_pin_REDS_when_a_FULL_clone_answers_2(monkeypatch):
+    """Mutation E: the LICENCE must be WIRED INTO the pin, not merely available.
+
+    The two licence cases above test `_graft_licence_allows_an_abstention` in isolation,
+    so writing `if rc == 2: pytest.skip` (unconditionally) at the pin still left every
+    case green — measured. This drives the PIN itself with a full-graph 2 and asserts it
+    raises instead of skipping, which is the only thing that can tell the two apart.
+    """
+    import tests.test_ci_check_repair as M
+    import tools.ci_check_repair as R
+    monkeypatch.setattr(R, "doc_citation_defects",
+                        lambda root: (2, ["`git` is not installed here …"]))
+    monkeypatch.setattr(M, "_graft_licence_allows_an_abstention", lambda root: False)
+    try:
+        M.test_the_wall_clock_citations_resolve_at_this_head()
+    except AssertionError:
+        return          # correct: a full graph's 2 is a defect, and the pin says so
+    except BaseException as exc:   # pytest.skip is an OutcomeException, NOT an Exception
+        # This is EXACTLY the mutation's signature: the pin ABSTAINED where it must red.
+        pytest.fail(
+            "the pin abstained on a FULL clone's rc=2 — the graft licence is not wired "
+            f"into it ({type(exc).__name__}: {exc})")
+    pytest.fail("the pin neither redded nor abstained on a full-graph rc=2")
 
 
 def test_a_mistyped_sha_in_a_full_clone_is_a_DEFECT(tmp_path):
@@ -4602,18 +4679,80 @@ def test_a_cite_whose_command_PRINTS_OUTPUT_is_a_DEFECT(tmp_path):
 def test_a_cite_written_in_an_UNMATCHED_shape_is_still_seen(tmp_path):
     """A citation the regex cannot see is a citation nothing checks (#13998 P3 item 1).
 
-    The first version matched only `git show --stat <ref>`; `git -C . show --stat …`
+    The first version matched only `git show --stat <ref>`, so `git -C . show --stat …`
     in the same document was invisible while the pass stayed green.
+
+    ⛔ The FIXTURE is the point: the document's OTHER cite must be RESOLVABLE and empty,
+    or the case passes for the wrong reason — the earlier version cited `8abf4844`, which
+    does not exist in the throwaway tree, so rc=1 came from that cite and narrowing the
+    regex still left the test green (measured, mutation c). Here the plain cite is this
+    tree's own HEAD (empty w.r.t. the doc), so a narrowed pattern returns rc=0 and only
+    the widened one reds, naming `deadbeef0`.
     """
     from tools import ci_check_repair as R
-    root = _citation_tree(tmp_path, "8abf4844")
-    doc = root / "docs" / "ops" / "ci-wall-clock.md"
-    doc.write_text(doc.read_text() +
-                   "… `git -C . show --stat deadbeef0 -- docs/ops/ci-wall-clock.md` …\n")
+    root = _citation_tree(tmp_path, "placeholder")
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    (root / "docs" / "ops" / "ci-wall-clock.md").write_text(
+        f"… `git show --stat {sha} -- docs/ops/ci-wall-clock.md` is empty …\n"
+        "… `git -C . show --stat deadbeef0 -- docs/ops/ci-wall-clock.md` …\n")
     rc, findings = R.doc_citation_defects(root)
     assert rc == 1, (
         "a bogus sha written in a different (still conventional) command shape must "
         f"not be invisible, got rc={rc}: {findings}")
+    assert "deadbeef0" in " ".join(findings), (
+        "the finding must NAME the cite the widened pattern found — otherwise this "
+        f"case is passing for some other reason: {findings}")
+
+
+def test_the_abstention_licence_reds_a_FULL_clone(monkeypatch, tmp_path):
+    """A FULL clone may NEVER abstain: that is how "licensed" is distinguished from "always".
+
+    Mutation E of the previous round (`if rc == 2: pytest.skip`, unconditionally, or
+    `if True:`) turned a red into a green with every case still passing, because no
+    environment CI runs contains a full clone whose tool answers 2. This case builds that
+    environment directly: the answer is 2 and the graph is full, so the licence must say NO.
+    """
+    root = _citation_tree(tmp_path, "placeholder")
+
+    def full_answered(argv, *a, **kw):
+        # a FULL clone: the graft question answers "false", everything else runs for real
+        if "rev-parse" in argv and "--is-shallow-repository" in argv:
+            return subprocess.CompletedProcess(argv, 0, "false\n", "")
+        return real_run(argv, *a, **kw)
+
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run", full_answered)
+    try:
+        assert _graft_licence_allows_an_abstention(root) is False, (
+            "a FULL clone answered rc=2 — the tool declined to answer a question its "
+            "graph can answer, so the pin must RED rather than skip")
+    finally:
+        monkeypatch.setattr(subprocess, "run", real_run)
+
+
+def test_the_abstention_licence_accepts_a_GRAFTED_clone(monkeypatch, tmp_path):
+    """…and a grafted one (or no `git` at all) licenses the abstention it reports."""
+    root = _citation_tree(tmp_path, "placeholder")
+
+    def grafted(argv, *a, **kw):
+        if "rev-parse" in argv and "--is-shallow-repository" in argv:
+            return subprocess.CompletedProcess(argv, 0, "true\n", "")
+        return real_run(argv, *a, **kw)
+
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run", grafted)
+    try:
+        assert _graft_licence_allows_an_abstention(root) is True
+    finally:
+        monkeypatch.setattr(subprocess, "run", real_run)
+
+    def no_git(argv, *a, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(subprocess, "run", no_git)
+    assert _graft_licence_allows_an_abstention(root) is True, (
+        "a host with no `git` resolves nothing, so it licenses the abstention")
 
 
 def test_a_host_without_git_is_UNVERIFIED(tmp_path, monkeypatch):

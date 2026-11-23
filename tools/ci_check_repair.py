@@ -2869,6 +2869,18 @@ def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
     if inside.returncode != 0 or inside.stdout.strip() != "true":
         return 2, [f"{root} is not inside a git work tree, so no cited sha can be "
                    "resolved — the citations are UNVERIFIED, not disproved"]
+    # ⛔ THE GRAFT LICENCE GATES EVERY HISTORY ARM, NOT ONLY THE RESOLVE PROBE (#13998
+    # review: answering a document defect from a grafted graph). `--is-shallow-repository`
+    # reads a GRAFT, and a grafted graph lies in BOTH directions: an ancestor can be
+    # simply absent (a bogus sha then looks like a real one) AND a commit that IS present
+    # can sit on the graft boundary, where `git show` has no parent and reports the
+    # commit as a ROOT — a full stat for a commit that changed nothing in the file. So a
+    # shallow clone is asked ONE question (the pure-text hex arm, which is clone-
+    # independent and is what caught the real defect) and then abstains: exit 2, never a
+    # finding against the document.
+    shallow = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+        capture_output=True, text=True).stdout.strip()
     for rel in DOC_CITATION_PATHS:
         path = root / rel
         try:
@@ -2884,21 +2896,19 @@ def doc_citation_defects(root: Path) -> tuple[int, list[str]]:
                     "placeholder here reads as evidence while being unrunnable: name "
                     "the sha the claim was measured at.")
                 continue
+            if shallow == "true":
+                return 2, [
+                    f"{rel}: `git show --stat {ref}` cannot be checked in this clone "
+                    "— it reports a grafted (shallow) history, in which an absent "
+                    "ancestor and a bogus sha are indistinguishable AND a commit on "
+                    f"the graft boundary reports a root's full stat. {ref} and its "
+                    "stat are UNVERIFIED, not disproved. Re-derive on a full clone: "
+                    "`git fetch --unshallow origin`."]
             probe = subprocess.run(
                 ["git", "-C", str(root), "rev-parse", "--verify",
                  f"{ref}^{{commit}}"],
                 capture_output=True, text=True)
             if probe.returncode != 0:
-                shallow = subprocess.run(
-                    ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
-                    capture_output=True, text=True).stdout.strip()
-                if shallow == "true":
-                    return 2, [
-                        f"{rel}: `git show --stat {ref}` cannot be checked in this "
-                        "clone — it reports a grafted (shallow) history, so an absent "
-                        f"ancestor and a bogus sha are indistinguishable here. {ref} "
-                        "is UNVERIFIED, not disproved. Re-derive on a full clone: "
-                        "`git fetch --unshallow origin`."]
                 findings.append(
                     f"{rel}: `git show --stat {ref}` — {ref} does not resolve in this "
                     "FULL checkout, so the command the paragraph invites cannot be "
