@@ -6254,3 +6254,129 @@ test("#9599: a not-yet-created transcript under a symlink still keys like Python
   // A wholly non-existent path is still anchored (lexically) rather than throwing.
   assert.match(localSessionId(join(root, "a", "b", "c.jsonl"))!, /^c-[0-9a-f]{12}$/);
 });
+
+test("#14359: a window shift is NOT orphaned and a torn tail IS (both legs agree)", () => {
+  // The quarantine before a NON-EXTENDING rewrite is gated on the RESIDUE the
+  // rewrite cannot carry (`unexplainedLogBytes`), mirroring Python's
+  // `_unexplained_log_bytes`. Both coarser gates are wrong, and the Pi leg runs
+  // this write SYNCHRONOUSLY from `turn_end` against the SAME spool directory:
+  //
+  // (1) ⛔ "the log has bytes" copies the whole log aside on EVERY turn of a
+  //     session past the caller's window: the window drops the oldest turn as
+  //     the newest arrives, so the snapshot is never a prefix-extension and
+  //     every turn is a non-extending rewrite.
+  //     MUTATION THAT REDS (1): gate on `turnLogHasContent`. Python measured the
+  //     shape at 4 shifts -> 4 orphans for a 228-byte log; this row pins it.
+  // (2) A torn tail's complete records DO parse, so `stored` is non-empty —
+  //     which is what tells a byte gate apart from a PARSE gate.
+  //     MUTATION THAT REDS (2): gate on `stored.length === 0`.
+  const turns = [0, 1, 2].map((i) => ({ role: "user" as const, content: `turn ${i}` }));
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+
+  const winSid = "14359-window";
+  let windowed = turns;
+  writeSpoolEntry(spool, snapshot(winSid, windowed));
+  for (let step = 0; step < 2; step += 1) {
+    windowed = [...windowed.slice(1), { role: "user" as const, content: `new ${step}` }];
+    writeSpoolEntry(spool, snapshot(winSid, windowed));
+    const orphans = readdirSync(dir).filter(
+      (name) => name.startsWith(entryKey(winSid)) && name.includes(".orphan"),
+    );
+    assert.deepEqual(
+      orphans,
+      [],
+      "a window shift carries every turn it parsed, so nothing may be copied aside",
+    );
+  }
+
+  const tornSid = "14359-torn";
+  writeSpoolEntry(spool, snapshot(tornSid, windowed));
+  const tornLog = join(dir, `${entryKey(tornSid)}.turns.jsonl`);
+  appendFileSync(tornLog, '{"role": "user", "content": "half-writ');
+  writeSpoolEntry(spool, snapshot(tornSid, [{ role: "user" as const, content: "fresh" }]));
+  const kept = readdirSync(dir).filter(
+    (name) => name.startsWith(entryKey(tornSid)) && name.includes(".orphan"),
+  );
+  assert.equal(kept.length, 1, "the unparseable tail is bytes the rewrite cannot carry");
+  assert.ok(
+    readFileSync(join(dir, kept[0]!), "utf8").includes("half-writ"),
+    "the orphan must hold the residue, not the rewritten log",
+  );
+});
+
+test("#14359: the residue gate is writer-agnostic, so it reads a PYTHON-written log correctly", () => {
+  // The two legs share ONE spool directory but serialise differently: this leg
+  // writes `JSON.stringify` (compact), Python writes `json.dumps` defaults with
+  // `", "` / `": "` separators — a measured 40 vs 43 bytes for one turn. A gate
+  // that measured the residue by RE-SERIALISING the parsed turns therefore
+  // overshot a spaced log's real size and reported residue where none exists,
+  // copying the whole log aside on a clean window shift (the per-turn
+  // accumulation the residue gate exists to prevent). `unexplainedLogBytes`
+  // measures the raw line bytes instead.
+  //
+  // MUTATION THAT REDS THIS: `Buffer.byteLength(turns.map(serialiseTurn).join(""))`
+  // (the shipped cycle-1 form) — the spaced log reads 3 bytes/turn of phantom
+  // residue and an `.orphan` appears.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  const sid = "14359-crossleg";
+  const spaced = (i: number) => `{"role": "user", "content": "turn ${i}"}\n`;
+  const turns = [0, 1, 2].map((i) => ({ role: "user" as const, content: `turn ${i}` }));
+  writeSpoolEntry(spool, snapshot(sid, turns));
+  // Rewrite the log in PYTHON's spaced form, as the other leg would have.
+  writeFileSync(join(dir, `${entryKey(sid)}.turns.jsonl`), [0, 1, 2].map(spaced).join(""));
+
+  const shifted = [...turns.slice(1), { role: "user" as const, content: "new" }];
+  assert.equal(writeSpoolEntry(spool, snapshot(sid, shifted)).written, true);
+  const orphans = readdirSync(dir).filter(
+    (name) => name.startsWith(entryKey(sid)) && name.includes(".orphan"),
+  );
+  assert.deepEqual(
+    orphans,
+    [],
+    "a spaced log has no residue — nothing was destroyed, so nothing may be copied aside",
+  );
+});
+
+test("#14359: a duplicate meta does not double the Pi leg's byte arithmetic", () => {
+  // `saturatedForMetas` and `pruneSpool` summed `spoolEntryBytes` once per META,
+  // so two metas naming one session made the byte total exceed what is on disk:
+  // admission refused a write the cheap scan (`cheapSpoolScan`, which sums each
+  // FILE once) would admit, and prune then evicted a FILED entry for an overage
+  // that did not exist. Python's `_saturated_for_metas`/`prune_spool` were fixed
+  // the same way; the two legs write ONE directory and must agree.
+  //
+  // ⚠️ The admission assertion runs while the entries are UNFILED on purpose:
+  // `saturatedForMetas` ends with "is anything filed", which satisfies it
+  // regardless of the arithmetic.
+  //
+  // MUTATION THAT REDS THIS: revert either sum to per-meta — the total doubles.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  const sid = "14359-ts-dup";
+  writeSpoolEntry(spool, snapshot(sid, [{ role: "user" as const, content: "x".repeat(400) }]));
+  writeFileSync(join(dir, "dup.meta.json"), readFileSync(join(dir, `${entryKey(sid)}.meta.json`)));
+
+  const onDisk = () => readdirSync(dir).reduce((sum, name) => sum + statSync(join(dir, name)).size, 0);
+  const unfiled = onDisk();
+  assert.equal(
+    spoolSaturated(spool, { maxEntries: 1000, maxTotalBytes: unfiled + 1, maxEntryBytes: 1 << 20 }),
+    false,
+    `the spool holds ${unfiled} bytes under a ${unfiled + 1}-byte ceiling; a duplicate meta must not double it`,
+  );
+
+  // FILE the entry, then: the admission predicate proved the spool is under the
+  // ceiling, so prune must not evict anything for that same bound.
+  const metaPath = join(dir, `${entryKey(sid)}.meta.json`);
+  const meta = JSON.parse(readFileSync(metaPath, "utf8")) as { capture_key: string; filed_key?: string };
+  meta.filed_key = meta.capture_key;
+  writeFileSync(metaPath, JSON.stringify(meta));
+  writeFileSync(join(dir, "dup.meta.json"), readFileSync(metaPath));
+  const filed = onDisk();
+  assert.deepEqual(
+    pruneSpool(spool, null, { maxEntries: 1000, maxTotalBytes: filed + 1, maxEntryBytes: 1 << 20 }),
+    [],
+    "prune evicted on a bound its own admission predicate proved is not crossed",
+  );
+});

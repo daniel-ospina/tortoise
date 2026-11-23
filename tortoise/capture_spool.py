@@ -48,6 +48,7 @@ import json
 import math
 import os
 import re
+import shutil
 import tempfile
 import time
 from collections.abc import Callable, Mapping
@@ -970,6 +971,158 @@ def _turn_log_has_content(root: Path, session_id: str) -> bool:
     content and is never deleted.
     """
     return _file_size(_log_path(root, session_id)) > 0
+
+
+def _unexplained_log_bytes(log: Path, turns: list[dict]) -> int:
+    """Bytes in ``log`` that its PARSED ``turns`` do not account for.
+
+    The measure a non-extending rewrite must gate its quarantine on (#14359).
+    ``_turn_log_has_content`` answers "is there anything here?", which is the
+    right question when the whole entry is being dropped and the WRONG one when
+    the log is about to be REPLACED: a rewrite reproduces every turn it parsed,
+    so bytes it parsed are bytes it carries forward, and only the residue it
+    could not parse — a torn append's tail, a half-written object, a hand-edited
+    blob — is about to be destroyed with no trace.
+
+    ⛔ WHY NOT "the log has bytes" (measured, review cycle 1). Every turn of a
+    session past the caller's window is a NON-EXTENDING rewrite: the window
+    drops the oldest turn while the newest arrives, so the new snapshot is never
+    a prefix-extension of the stored log (``window_turns`` -> ``MAX_TURNS``,
+    ``__main__.py``; the Pi leg shifts by one turn). Gating on "has bytes" thus
+    copied the WHOLE log aside on EVERY turn — measured 4 window shifts -> 4
+    orphans, 1 645 bytes on disk for a 228-byte live log (7.2x). Those copies are
+    byte-evictable only ABOVE ``max_total_bytes``, and ``_cheap_spool_scan`` sums
+    every file in ``entries/`` as an upper bound, so the accumulation costs the
+    write path its fast path long before the ceiling is reached: the synchronous
+    per-turn ``json.loads`` scan of every meta (1.4 s at 20 000 entries) returns.
+
+    ⛔ NOT a parse result either. Gating on the parse (``not stored``) is the
+    original defect of #14359 shape 1: a log holding bytes that parses to zero
+    turns is exactly the entry whose bytes are most worth keeping, and it is the
+    case where ``stored`` is empty — so the residue test covers it (`explained`
+    is 0, so every byte is unexplained) while still firing on a torn tail whose
+    complete records DO parse.
+    """
+    size = _file_size(log)
+    if size <= 0:
+        return 0
+    explained = sum(len(_serialise_turn(t).encode("utf-8")) for t in turns)
+    return max(0, size - explained)
+
+
+def _unexplained_log_bytes(log: Path) -> int:
+    """Raw bytes in ``log`` that do NOT become a turn when it is read back.
+
+    The measure a non-extending rewrite gates its quarantine on (#14359). A
+    rewrite reproduces every turn the reader can parse out of this log, so those
+    bytes are carried forward; only the residue the reader cannot parse — a torn
+    append's tail, a half-written object, a line that is JSON but not a turn — is
+    about to be destroyed with no trace.
+
+    ⛔ MEASURED ON THE RAW BYTES, never by re-serialising the parsed turns
+    (review cycle 2, P1). The two legs serialise differently — Python
+    ``json.dumps`` defaults to ``", "``/``": "`` separators, the Pi leg's
+    ``JSON.stringify`` is compact, a measured 43-vs-40 bytes for one turn — and
+    they share ONE spool directory. An ``explained = Σ len(serialise(turn))``
+    reading was wrong in BOTH directions across the legs: re-serialising a
+    compact log overshot its real size, so a CLEAN window shift looked like
+    residue and copied the whole log aside per turn (the very defect this gate
+    exists to prevent), while re-serialising a spaced log undershot it, so a torn
+    tail read as explained and was destroyed with no ``.orphan`` (the capture
+    loss #14359 was filed for). The line spans are what the reader actually
+    consumed, so the measurement is writer-agnostic.
+
+    ⛔ NOT ``_turn_log_has_content`` ("the log has bytes"): every turn of a
+    session past the caller's turn window is a NON-EXTENDING rewrite — the window
+    drops the oldest turn as the newest arrives, so the new snapshot is never a
+    prefix-extension of the stored log (``window_turns`` -> ``MAX_TURNS``,
+    ``__main__.py``; the Pi leg shifts by one turn). Gating on "has bytes" copied
+    the WHOLE log aside on EVERY turn — measured at 4 window shifts -> 4 orphans,
+    1 645 bytes on disk for a 228-byte live log. Those copies are byte-evictable
+    only ABOVE ``max_total_bytes``, and ``_cheap_spool_scan`` sums every file in
+    ``entries/`` as an upper bound, so the accumulation costs the write path its
+    fast path long before the ceiling is reached.
+
+    ⛔ NOT the parse result either (``not stored``): a log that parses to zero
+    turns is exactly the log whose bytes are most worth keeping, and it is the
+    case ``stored`` is empty for — which this test covers, because every one of
+    its bytes is residue, while still firing on a torn tail whose complete
+    records DO parse.
+
+    Blank lines are not residue: both readers skip them, so a rewrite that drops
+    one carries every byte that was ever content.
+
+    STATED RESIDUAL: the line split is on ``\\n``, which is what both writers
+    emit. A log separated some other way (``\\r`` only) measures as one span, so
+    its residue is read as a single line — over-quarantining it (keeping bytes)
+    rather than destroying them.
+    """
+    try:
+        data = log.read_bytes()
+    except OSError:
+        # Present but unreadable: every byte is unexplained, and a rewrite would
+        # destroy bytes nobody could measure. The safe direction is to keep them
+        # (`_turn_log_has_content` states the same rule for the drain).
+        return _file_size(log)
+    residue = 0
+    segments = data.split(b"\n")
+    last = len(segments) - 1
+    for index, raw in enumerate(segments):
+        # The span of this line in the file: its bytes, plus the newline unless
+        # it is the final, unterminated segment.
+        span = len(raw) + (0 if index == last else 1)
+        if not raw.strip():
+            continue
+        try:
+            parsed = json.loads(raw.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, ValueError):
+            residue += span
+            continue
+        # The SAME predicate `read_spool_turns` applies: a line only becomes a
+        # turn when `role` is a non-empty string and `content` is a string.
+        role = parsed.get("role") if isinstance(parsed, dict) else None
+        if not (isinstance(role, str) and role and isinstance(parsed.get("content"), str)):
+            residue += span
+    return residue
+
+
+def _preserve_log_bytes(log: Path) -> Path | None:
+    """Keep a COPY of the log's bytes as ``<log>.orphan[N]``, leaving ``log`` IN PLACE.
+
+    The forensic move for a non-extending rewrite (#14359). ⛔ It COPIES rather
+    than renames (review cycle 2, P1): a rename makes the live log ABSENT for the
+    whole window between the move and the new bytes landing, and that window is
+    not covered by any ``except`` — a SIGKILL, SIGTERM or OOM-kill in it leaves
+    the meta on disk with no turn log, so the next drain records a FALSE
+    ``transcript_empty`` and UNLINKS a stored, deliverable capture, while the
+    ``.orphan`` is documented not re-fileable. Measured: a real ``os._exit(9)``
+    between the rename and the write produced exactly that (``transcript_empty``,
+    meta gone, bytes stranded in a non-re-fileable orphan). With a copy the log
+    is never absent, so a kill at ANY instant leaves a coherent meta+log pair.
+
+    A HARDLINK first — ``os.link`` is O(1) and allocates no second copy of the
+    bytes (the subsequent ``_atomic_write`` replaces ``log`` with a new inode, so
+    the orphan keeps the old one). A filesystem without hardlinks falls back to a
+    byte copy. Best-effort, like ``_quarantine_log``: ``None`` means nothing was
+    preserved, and the write proceeds as it did before (#14359 review).
+    """
+    if _file_size(log) <= 0:
+        return None
+    target = log.with_name(log.name + ".orphan")
+    suffix = 1
+    while target.exists():
+        suffix += 1
+        target = log.with_name(f"{log.name}.orphan{suffix}")
+    try:
+        os.link(log, target)
+        return target
+    except OSError:
+        pass
+    try:
+        shutil.copyfile(log, target)
+    except OSError:
+        return None
+    return target
 
 
 def _quarantine_log(log: Path) -> Path | None:
@@ -2204,13 +2357,17 @@ def write_spool_entry(
                 "bytes": (_entry_bytes(root, snapshot.session_id) if prior else 0),
                 "discards": discards}
 
-    # #14359: a log that holds bytes but parses to ZERO turns is unusable, yet
-    # the rewrite below would replace it silently. Keep those bytes as an
-    # `.orphan` first (the same forensic move a corrupt meta's log gets), so
-    # the stored content is never destroyed without a trace. Gated on the
-    # BYTES, not on the parse, and on a non-extending rewrite only.
-    if not extends and _turn_log_has_content(root, snapshot.session_id):
-        _quarantine_log(log_path)
+    # #14359: a non-extending rewrite REPLACES the log, so any byte the reader
+    # cannot parse out of it is destroyed with no trace. Preserve those bytes
+    # first — the same forensic move a corrupt meta's log gets — while leaving the
+    # live log in place, so a kill anywhere in the window below still leaves a
+    # deliverable entry. See `_unexplained_log_bytes` for why the gate is the
+    # RESIDUE and not "the log has bytes" (an `.orphan` per turn of a windowed
+    # session) nor the parse result (the parse-gated decision #14359 exists to
+    # remove), and `_preserve_log_bytes` for why this copies instead of renaming.
+    preserved: Path | None = None
+    if not extends and _unexplained_log_bytes(log_path) > 0:
+        preserved = _preserve_log_bytes(log_path)
     try:
         if extends:
             fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -2222,6 +2379,24 @@ def write_spool_entry(
             _atomic_write(log_path, log_text)
         _atomic_write(meta_path, meta_text)
     except OSError as exc:
+        # The live log was NEVER made absent, so a failure here costs nothing that
+        # was stored: `_atomic_write` is temp-file + `os.replace`, so the original
+        # is either untouched or fully replaced. What the failure leaves behind is
+        # a question only the inodes answer:
+        #   * SAME inode as the preserved copy -> the replace never happened, the
+        #     stored log IS the original, and the copy is pure litter: drop it.
+        #   * DIFFERENT inode -> the log was replaced but the META write raised. The
+        #     stored meta still describes the OLD content, so the preserved copy is
+        #     the only trace of the bytes that meta names: keep it.
+        #   * `samefile` cannot answer (the log vanished) -> keep it. Keeping bytes
+        #     is never the harmful direction here.
+        if preserved is not None:
+            still_original = True
+            with contextlib.suppress(OSError):
+                still_original = os.path.samefile(preserved, log_path)
+            if still_original:
+                with contextlib.suppress(OSError):
+                    preserved.unlink()
         # A filesystem failure (full disk, read-only home) is a LOSS — record
         # it with a reason rather than returning an empty discard list.
         discards.append(record_discard(root, {
@@ -2565,7 +2740,14 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
         key=lambda m: (0 if _entry_is_filed(m) else 1, *_age_key(m)),
     )
     count = len(metas)
-    total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
+    # #14359: one count per DISTINCT session_id — two metas naming the same
+    # session address the same files. Summed per meta, this scanner answered "over
+    # the ceiling" about a spool `_saturated_for_metas` had just proved under it,
+    # and the two halves of one arithmetic (the admission decision and the pruning
+    # that runs immediately after an admitted write) disagreed about one
+    # directory. `_entry_bytes` accumulates, so a repeated sid would otherwise be
+    # counted twice.
+    total = sum(_entry_bytes(root, sid) for sid in {m["session_id"] for m in metas})
     total += sum(_file_size(path) for path in orphans)
     # The quarantined-log pass runs AFTER the filed-entry pass below, never
     # before it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on

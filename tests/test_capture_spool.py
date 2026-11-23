@@ -5376,3 +5376,228 @@ def test_a_readable_meta_over_a_zero_turn_log_is_orphaned_and_a_duplicate_meta_n
     assert spool_saturated(dup_root, Bounds(max_total_bytes=on_disk + 1)) is False, (
         f"the spool holds {on_disk} bytes under a {on_disk + 1}-byte ceiling; "
         "a duplicate meta must not make it read as saturated")
+
+
+def test_a_window_shift_is_not_orphaned_and_a_failed_rewrite_restores_the_log(tmp_path):
+    """#14359 review cycle 1: the two ways an UNGATED quarantine lies.
+
+    The quarantine is gated on the RESIDUE a non-extending rewrite cannot carry
+    (`_unexplained_log_bytes`), because the two coarser gates are both wrong:
+
+    (1) ⛔ "the log has bytes" copies the WHOLE log aside on every turn of a
+        session past the caller's turn window: the window drops the oldest turn
+        as the newest arrives, so the snapshot is never a prefix-extension of the
+        stored log and every turn is a non-extending rewrite. Orphans are
+        byte-evictable only ABOVE `max_total_bytes`, and `_cheap_spool_scan`
+        sums every file in `entries/` as an upper bound — so the copies cost the
+        write path its fast path while the spool is still nowhere near a ceiling.
+        MUTATION THAT REDS (1): gate on `_turn_log_has_content` (the shipped
+        first attempt) — each shift leaves an `.orphan`, and this row counts it.
+    (2) ⛔ The bytes are COPIED aside, never RENAMED: a rename makes the live log
+        ABSENT for the whole window before the new bytes land, and a SIGKILL in
+        that window leaves the meta on disk with no turn log — the next drain
+        reads zero turns, takes the `transcript_empty` arm and UNLINKS a stored,
+        deliverable capture, recording a reason that is simply false. An
+        `.orphan` is not re-fileable. MUTATION THAT REDS (2): rename instead of
+        copy (`_quarantine_log`) — the subprocess row below dies mid-write and
+        finds no live log.
+    (3) A TORN TAIL is still kept, and it is the case that tells a byte gate
+        apart from a PARSE gate: the complete records parse (so `stored` is
+        non-empty) while the residue is real.
+        MUTATION THAT REDS (3): gate on `not stored` instead of the residue.
+    (4) The residue is counted from the RAW LINE BYTES, so it is writer-agnostic:
+        the two legs serialise differently (compact `JSON.stringify` vs
+        `json.dumps`' `", "`, a measured 43-vs-40 bytes per turn) against ONE
+        spool directory. A `Σ len(serialise(turn))` reading missed a torn tail in
+        a COMPACT log (its re-serialisation overshot the real size) and invented
+        residue in a SPACED one.
+        MUTATION THAT REDS (4): measure `explained` by re-serialising `stored` —
+        the compact-with-tail case below finds no orphan.
+    """
+    from tortoise import capture_spool as cs
+    from tortoise.capture_spool import _entries_dir, _log_path
+
+    turns = [{"role": "user", "content": f"turn {i}"} for i in range(3)]
+
+    # (1) window shifts: every snapshot drops the oldest turn and adds one.
+    windowed = tmp_path / "windowed"
+    write_spool_entry(windowed, _snapshot("win", turns=list(turns)))
+    for step in range(2):
+        turns = [*turns[1:], {"role": "user", "content": f"new {step}"}]
+        assert write_spool_entry(windowed, _snapshot("win", turns=list(turns)))["written"] is True
+        orphans = [p for p in _entries_dir(windowed).iterdir() if ".orphan" in p.name]
+        assert orphans == [], (
+            f"a window shift carries every turn it parsed; nothing was destroyed,"
+            f" so nothing may be copied aside — found {[p.name for p in orphans]}")
+
+    # (3) a torn tail: the complete records parse, the residue does not.
+    torn = tmp_path / "torn"
+    write_spool_entry(torn, _snapshot("torn", turns=list(turns)))
+    log = _log_path(torn, "torn")
+    with log.open("ab") as fh:
+        fh.write(b'{"role": "user", "content": "half-writ')
+    assert write_spool_entry(torn, _snapshot("torn", turns=[
+        {"role": "user", "content": "a fresh turn"}]))["written"] is True
+    orphans = [p for p in _entries_dir(torn).iterdir() if ".orphan" in p.name]
+    assert [b'half-writ' in p.read_bytes() for p in orphans] == [True], (
+        f"the unparseable tail is bytes the rewrite cannot carry — it must be"
+        f" kept as an orphan, found {[p.name for p in orphans]}")
+
+    # (2) a rewrite that raises must put the stored bytes back.
+    restore = tmp_path / "restore"
+    write_spool_entry(restore, _snapshot("keep", turns=list(turns)))
+    kept = _log_path(restore, "keep")
+    with kept.open("ab") as fh:
+        fh.write(b'{"role": "user", "content": "torn')
+    before = kept.read_bytes()
+    real = cs._atomic_write
+
+    def boom(path, text):
+        if str(path).endswith(".turns.jsonl"):
+            raise OSError(28, "No space left on device")
+        return real(path, text)
+
+    cs._atomic_write = boom
+    try:
+        result = write_spool_entry(restore, _snapshot("keep", turns=[
+            {"role": "user", "content": "rewound"}]))
+    finally:
+        cs._atomic_write = real
+    assert result["written"] is False
+    assert [d["reason"] for d in result["discards"]] == ["spool_write_failed"]
+    assert kept.read_bytes() == before, (
+        "a failed rewrite must not consume the stored log: the meta is still the"
+        " OLD meta, so the OLD bytes are what a drain can still deliver")
+    assert {p.name for p in _entries_dir(restore).iterdir()
+            if ".orphan" in p.name} == set(), (
+        "the preserved copy was the SAME file as the untouched log, so it was"
+        " litter and must be dropped — a failed rewrite leaves no orphan behind")
+
+    # (4) a COMPACT (Pi-written) log with a torn multi-byte tail: the residue must
+    # be measured from the raw line bytes, not from a re-serialisation of `stored`.
+    compact = tmp_path / "compact"
+    compact_log = _log_path(compact, "compact")
+    _entries_dir(compact).mkdir(parents=True, exist_ok=True)
+    write_spool_entry(compact, _snapshot("compact", turns=list(turns)))
+    complete = b"".join(
+        json.dumps(t, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+        for t in turns)
+    torn = complete + b"\xe2\x82"
+    compact_log.write_bytes(torn)
+    assert write_spool_entry(compact, _snapshot("compact", turns=[
+        {"role": "user", "content": "rewritten"}]))["written"] is True
+    orphans = [p for p in _entries_dir(compact).iterdir() if ".orphan" in p.name]
+    assert [p.read_bytes() == torn for p in orphans] == [True], (
+        f"a compact log's torn tail is residue even though re-serialising its"
+        f" parsed turns would overshoot its real size — found {[p.name for p in orphans]}")
+
+
+def test_a_killed_rewrite_leaves_the_stored_log_deliverable(tmp_path):
+    """#14359 review cycle 2, P1: the preservation must not make the log ABSENT.
+
+    A rename-based quarantine leaves the window between the move and the new
+    bytes landing uncovered by any `except` — a SIGKILL / SIGTERM / OOM-kill in it
+    leaves the meta on disk with NO turn log, so the next drain reads zero turns,
+    takes the `transcript_empty` arm and UNLINKS a stored, deliverable capture,
+    under a reason that is false; the `.orphan` that holds the bytes is documented
+    NOT re-fileable. The window is hundreds of ms wide for a large log, i.e.
+    exactly the kind of kill a memory-pressured box produces.
+
+    This row dies for real: a subprocess patches the log write to `os._exit(9)`,
+    so the kill lands inside the window.
+
+    MUTATION THAT REDS THIS: `_quarantine_log(log_path)` (rename) instead of
+    `_preserve_log_bytes(log_path)` (copy) — the log is gone and the bytes are
+    stranded in a non-re-fileable `.orphan`.
+    """
+    import sys
+
+    from tortoise.capture_spool import _entries_dir, _log_path, read_spool_turns
+
+    spool = tmp_path / "killed"
+    write_spool_entry(spool, _snapshot("kill", turns=[
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+    ]))
+    log = _log_path(spool, "kill")
+    with log.open("ab") as fh:
+        fh.write(b'{"role": "user", "content": "tor')
+    before = log.read_bytes()
+
+    child = f'''\
+import os, sys
+from pathlib import Path
+from tortoise import capture_spool as cs
+from tortoise.capture_spool import Snapshot, write_spool_entry
+
+real = cs._atomic_write
+def die(path, text):
+    if str(path).endswith(".turns.jsonl"):
+        os._exit(9)
+    return real(path, text)
+cs._atomic_write = die
+write_spool_entry(Path({str(spool)!r}), Snapshot(
+    session_id="kill", turns=[{{"role": "user", "content": "rewound"}}],
+    source="t.jsonl", machine_id="m" * 64, harness="claude"))
+os._exit(0)
+'''
+    proc = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True,
+                          timeout=120,
+                          env={**os.environ,
+                               "PYTHONPATH": str(Path(__file__).resolve().parent.parent)})
+    assert proc.returncode == 9, (
+        f"the probe did not die inside the write window: rc={proc.returncode}"
+        f" stderr={proc.stderr[-600:]}")
+
+    assert log.exists(), (
+        "the kill landed after the stored log had been moved aside — the entry is"
+        " left undeliverable and the bytes sit in a non-re-fileable `.orphan`")
+    assert log.read_bytes() == before, "the stored bytes were consumed by a killed rewrite"
+    assert [t["content"] for t in read_spool_turns(spool, "kill")] == ["one", "two"], (
+        "the stored turns must still be readable, so the next drain delivers"
+        " rather than taking the transcript_empty arm")
+    assert list(_entries_dir(spool).glob("*.meta.json")), (
+        "the meta must still be there for the entry to be deliverable")
+
+
+def test_prune_and_admission_agree_when_one_session_has_two_metas(tmp_path):
+    """#14359 shape 2, second half: the SAME arithmetic on both sides.
+
+    `_saturated_for_metas` answered "under the ceiling" while `prune_spool` — run
+    immediately after an admitted write — summed `_entry_bytes` once per META,
+    read the spool as over it, and evicted a FILED entry for an overage the
+    corrected predicate had just proved did not exist.
+
+    ⚠️ The admission assertion is made while BOTH metas are UNFILED on purpose:
+    `_saturated_for_metas` ends with `not any(_entry_is_filed(...))`, so a filed
+    entry satisfies it regardless of the byte arithmetic — asserting it after
+    filing tested nothing (review cycle 2, P3).
+
+    MUTATION THAT REDS THIS: sum `_entry_bytes` per meta in `_saturated_for_metas`
+    (the first assertion) or in `prune_spool` (the second) — the byte total
+    doubles and the filed entry is reaped under a bound the spool is under.
+    """
+    from tortoise.capture_spool import _entries_dir, _meta_path, prune_spool, spool_saturated
+
+    sid = "14359-prune-dup"
+    write_spool_entry(tmp_path, _snapshot(sid, turns=[{"role": "user", "content": "x" * 400}]))
+    (_entries_dir(tmp_path) / "dup.meta.json").write_text(
+        _meta_path(tmp_path, sid).read_text(encoding="utf-8"), encoding="utf-8")
+
+    unfiled_bytes = sum(p.stat().st_size for p in _entries_dir(tmp_path).iterdir())
+    assert spool_saturated(tmp_path, Bounds(max_total_bytes=unfiled_bytes + 1)) is False, (
+        "the spool holds "
+        f"{unfiled_bytes} bytes under a {unfiled_bytes + 1}-byte ceiling; a duplicate"
+        " meta must not double the byte total")
+
+    # FILE the entry, so it is the class prune is allowed to evict at all.
+    meta = json.loads(_meta_path(tmp_path, sid).read_text(encoding="utf-8"))
+    meta["filed_key"] = meta["capture_key"]
+    _meta_path(tmp_path, sid).write_text(json.dumps(meta), encoding="utf-8")
+    (_entries_dir(tmp_path) / "dup.meta.json").write_text(
+        _meta_path(tmp_path, sid).read_text(encoding="utf-8"), encoding="utf-8")
+
+    on_disk = sum(p.stat().st_size for p in _entries_dir(tmp_path).iterdir())
+    assert prune_spool(tmp_path, None, Bounds(max_total_bytes=on_disk + 1)) == [], (
+        "the admission predicate proved the spool is under the ceiling, so prune"
+        " must not evict anything for that same bound")

@@ -284,8 +284,10 @@ import {
   appendFileSync,
   chmodSync,
   closeSync,
+  copyFileSync,
   existsSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -1745,6 +1747,115 @@ function turnLogHasContent(dir: string, sessionId: string): boolean {
   }
 }
 
+/** Raw bytes in the turn log that do NOT become a turn when it is read back.
+ *
+ *  The measure a non-extending rewrite gates its quarantine on (#14359) — the
+ *  Python leg's `_unexplained_log_bytes`. A rewrite reproduces every turn the
+ *  reader can parse out of this log, so those bytes are carried forward and only
+ *  the residue it cannot parse (a torn tail, a half-written object) is destroyed
+ *  with no trace.
+ *
+ *  ⛔ MEASURED ON THE RAW BYTES, never by re-serialising the parsed turns
+ *  (review cycle 2, P1): the two legs serialise differently (`JSON.stringify`
+ *  compact vs Python's `json.dumps` `", "` separators, a measured 43-vs-40
+ *  bytes per turn) and they share ONE spool directory, so a re-serialisation was
+ *  wrong in BOTH directions across the legs — over-quarantining a clean window
+ *  shift over a spaced log, and MISSING a torn tail in a compact one.
+ *
+ *  ⛔ NOT `turnLogHasContent`: every turn of a session past the caller's window
+ *  is a NON-EXTENDING rewrite (the window drops the oldest turn as the newest
+ *  arrives), so "has bytes" copies the WHOLE log aside on EVERY turn.
+ *  ⛔ NOT the parse result either: a log that parses to zero turns is the case
+ *  `stored` is empty for, and every one of its bytes is residue, so this test
+ *  covers it while still firing on a torn tail whose complete records DO parse.
+ *
+ *  Blank lines are not residue: both readers skip them. `latin1` is the byte
+ *  view — one char per byte — so `line.length` IS the byte span, and the JSON
+ *  probe still decodes those exact bytes as UTF-8. */
+function unexplainedLogBytes(log: string): number {
+  let data: Buffer;
+  try {
+    data = readFileSync(log);
+  } catch {
+    // Present but unreadable: every byte is unexplained, and a rewrite would
+    // destroy bytes nobody could measure. Keeping them is the safe direction.
+    return fileSize(log);
+  }
+  const parts = data.toString("latin1").split("\n");
+  const last = parts.length - 1;
+  let residue = 0;
+  for (let index = 0; index <= last; index += 1) {
+    const raw = parts[index]!;
+    // Its bytes, plus the newline unless this is the final, unterminated line.
+    const span = raw.length + (index === last ? 0 : 1);
+    if (!raw.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.from(raw, "latin1").toString("utf8"));
+    } catch {
+      residue += span;
+      continue;
+    }
+    // The SAME predicate `readSpoolTurns` applies.
+    const fields = parsed as { role?: unknown; content?: unknown };
+    if (
+      !(
+        typeof fields.role === "string" &&
+        fields.role.length > 0 &&
+        typeof fields.content === "string"
+      )
+    ) {
+      residue += span;
+    }
+  }
+  return residue;
+}
+
+/** Keep a COPY of the log as `<log>.orphan[N]`, leaving `log` IN PLACE.
+ *
+ *  The forensic move for a non-extending rewrite (#14359). ⛔ It COPIES rather
+ *  than renames (review cycle 2, P1): a rename makes the live log ABSENT for the
+ *  whole window between the move and the new bytes landing, and a SIGKILL in it
+ *  leaves the meta on disk with no turn log — the next drain records a FALSE
+ *  `transcript_empty` and UNLINKS a stored, deliverable capture. With a copy the
+ *  log is never absent, so a kill at any instant leaves a coherent meta+log
+ *  pair. A HARDLINK first (O(1), no second copy of the bytes: the subsequent
+ *  `atomicWrite` replaces `log` with a new inode, so the orphan keeps the old
+ *  one); a byte copy where hardlinks are unavailable. Mirrors Python's
+ *  `_preserve_log_bytes`. */
+function preserveLogBytes(log: string): string | null {
+  if (fileSize(log) <= 0) return null;
+  let target = `${log}.orphan`;
+  let suffix = 1;
+  while (existsSync(target)) {
+    suffix += 1;
+    target = `${log}.orphan${suffix}`;
+  }
+  try {
+    linkSync(log, target);
+    return target;
+  } catch {
+    // no hardlinks here — fall through to a copy
+  }
+  try {
+    copyFileSync(log, target);
+  } catch {
+    return null;
+  }
+  return target;
+}
+
+/** Whether two paths are the SAME file (the `os.path.samefile` twin). */
+function sameFile(a: string, b: string): boolean | null {
+  try {
+    const left = statSync(a);
+    const right = statSync(b);
+    return left.ino === right.ino && left.dev === right.dev;
+  } catch {
+    return null;
+  }
+}
+
 /** Move a turn log ASIDE instead of unlinking it — kept FOR FORENSICS.
  *  Used when the META is corrupt and the transcript (which the corruption never
  *  touched, and which is the only copy) must survive (#7708). An empty/absent
@@ -1756,7 +1867,7 @@ function turnLogHasContent(dir: string, sessionId: string): boolean {
  *  the session id) is REMOVED, so no verb can rebuild the session id the server
  *  needs. The bytes are kept FOR FORENSICS, not for a retry. (The wording here
  *  once said "recoverable", which overstated what the name can deliver.) */
-function quarantineLog(log: string): void {
+function quarantineLog(log: string): string | null {
   let size = 0;
   try {
     size = statSync(log).size;
@@ -1769,7 +1880,7 @@ function quarantineLog(log: string): void {
     } catch {
       // already gone
     }
-    return;
+    return null;
   }
   let target = `${log}.orphan`;
   let suffix = 1;
@@ -1781,7 +1892,9 @@ function quarantineLog(log: string): void {
     renameSync(log, target);
   } catch {
     // leave it in place — better than deleting it
+    return null;
   }
+  return target;
 }
 
 /** Quarantined turn logs in the entries dir, OLDEST first (#8531 review).
@@ -2514,6 +2627,17 @@ export function writeSpoolEntry(
     };
   }
 
+  // #14359: a non-extending rewrite REPLACES the log, so any byte the reader
+  // cannot parse out of it is destroyed with no trace. Preserve those bytes
+  // first, leaving the live log in place so a kill anywhere in the window below
+  // still leaves a deliverable entry — see `unexplainedLogBytes` (why the gate is
+  // the RESIDUE) and `preserveLogBytes` (why this copies instead of renaming).
+  // Mirrors the Python writer, because both legs write ONE spool directory.
+  let preserved: string | null = null;
+  if (!extendsStored && unexplainedLogBytes(logPath) > 0) {
+    preserved = preserveLogBytes(logPath);
+  }
+
   try {
     if (extendsStored) {
       // fsync the append: this is the path holding the MOST RECENT turns, and a
@@ -2531,6 +2655,24 @@ export function writeSpoolEntry(
     atomicWrite(metaPath, metaText);
     sweepStaleTempFiles(dir);
   } catch (err) {
+    // The live log was NEVER made absent, so a failure here costs nothing that
+    // was stored: `atomicWrite` is temp-file + rename, so the original is either
+    // untouched or fully replaced. What the failure leaves behind is a question
+    // only the inodes answer:
+    //   * SAME file as the preserved copy -> the rename never happened, the stored
+    //     log IS the original, and the copy is pure litter: drop it.
+    //   * DIFFERENT file -> the log was replaced but the META write raised. The
+    //     stored meta still describes the OLD content, so the preserved copy is
+    //     the only trace of the bytes that meta names: keep it.
+    //   * Unknown (the log vanished) -> keep it. Keeping bytes is never the
+    //     harmful direction here.
+    if (preserved !== null && sameFile(preserved, logPath) === true) {
+      try {
+        unlinkSync(preserved);
+      } catch {
+        // already gone
+      }
+    }
     // A filesystem failure (full disk, read-only home) is a LOSS — record it
     // with a reason rather than returning an empty discard list (the silent
     // drop this issue exists to remove).
@@ -2630,9 +2772,15 @@ export function pruneSpool(
     });
 
   let count = metas.length;
-  let total =
-    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
-    orphans.reduce((sum, path) => sum + fileSize(path), 0);
+  // #14359: one count per DISTINCT session_id — two metas naming the same
+  // session address the same files, and summing per meta made this scanner
+  // answer "over the ceiling" about a spool `saturatedForMetas` had just proved
+  // under it. Both halves of one arithmetic must agree about one directory.
+  const orphanBytes = orphans.reduce((sum, path) => sum + fileSize(path), 0);
+  let total = [...new Set(metas.map((m) => m.session_id))].reduce(
+    (sum, sid) => sum + spoolEntryBytes(dir, sid),
+    orphanBytes,
+  );
   // The quarantined-log pass runs AFTER the filed-entry pass below, never before
   // it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on the
   // wire), while an orphan's delivered-ness is unknowable — so the certain
@@ -2817,9 +2965,15 @@ function saturatedForMetas(
   // Bytes `pruneSpool` may reclaim WITHOUT spending an undelivered entry: the
   // orphan class is byte-evictable only (see below).
   const reclaimableOrphanBytes = orphanPaths(dir).reduce((sum, path) => sum + fileSize(path), 0);
+  // #14359: one count per DISTINCT session_id — two metas naming the same
+  // session address the same files. Summed per meta, this predicate answered
+  // "saturated" about a spool whose real bytes were under the ceiling, and the
+  // cheap scan's stated upper-bound premise (`cheapSpoolScan`) stopped holding.
   let total =
-    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
-    reclaimableOrphanBytes;
+    [...new Set(metas.map((m) => m.session_id))].reduce(
+      (sum, sid) => sum + spoolEntryBytes(dir, sid),
+      0,
+    ) + reclaimableOrphanBytes;
   const { projectedBytes, replacesSessionId } = projection;
   if (projectedBytes === undefined && replacesSessionId === undefined) {
     // STRICT: the question is whether ADDING an entry would cross the ceiling, so
