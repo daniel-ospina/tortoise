@@ -1244,9 +1244,33 @@ SWEEP_NAMES = 66
 #: merged in, and `--repin` printed the same pair before and after that merge, so the merge
 #: contributes no row here either — nor do the sibling commits merged after it (all on this
 #: branch's census file, and named by log rather than counted here, because a count restated in this
-#: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
-#: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
-#: not carried forward.
+#: block goes stale at the next sibling push, the class `2465cda150` was written to stop). The
+#: pin is RE-DERIVED after every integration rather than carried forward. ⛔ EVERY PAIR HERE IS
+#: SCOPED TO THE TREE IT WAS MEASURED ON, and an earlier cut of this paragraph attributed one to
+#: another (review of #14287, round 4, P1): `(11861, "f0647020531c078c")` is what `main` COMMITS
+#: at `0467ba329d` and again at `47e28b549e76` (measured: `git show <rev>:tools/sdk_privatise.py`),
+#: and it is the pair THIS BRANCH carried before its FIRST rebase (`561a53ec04a7` and the original
+#: tip `f800a528acb9` both carry it) — so integrating `main` at those two commits re-measured the
+#: SAME pair and added no untyped receiver. The FIRST rebase is what moved the pin, and it moved it
+#: to `main`'s own pair: `--repin` on that rebased tree prints `(11864, "2a6400518a87775c")`, the
+#: SAME pair `main` commits at `588cf7aeb61f`, so those three arrived with `main`'s commits. The
+#: SECOND rebase onto `main` `cc936d47dba1` did NOT move it: `--repin` on the pre-rebase tip
+#: `a7690edb9ce8` prints `(11864, "2a6400518a87775c")` and so does the rebased tree, and
+#: `--check` exits 0 on each. ⛔ NOT EVERY REBASE MOVES IT, and asserting that it always does was
+#: the fault of an earlier cut of this sentence (review of #14287, round 8, P2): "the REBASE … DID
+#: move the pin" was TRUE of the first and FALSE of the second, and it named `f800a528acb9` as
+#: "the pre-rebase tip" when that rev is the pre-rebase tip of the FIRST rebase, NOT an ancestor of
+#: the tip it meant (measured: `git merge-base --is-ancestor f800a528acb9 a7690edb9ce8` exits 1).
+#: ⛔ "NO INTEGRATION ADDED A
+#: ROW" IS FALSE AS A GENERAL CLAIM: an integration CAN add untyped receivers, and re-cutting the
+#: pin is exactly how that gets recorded — the block BELOW is one, where merging `10e51693` moved
+#: the pair to `(11864, …)`, "FOUR MORE than this branch's parent". ⛔ AND THE EVIDENCE IS
+#: `--repin`'s OUTPUT, NOT THE CHECK'S EXIT: `--check` exiting 0 says the observed pair equals the
+#: pin, which it reports just as readily on a tree whose pin was re-cut after the integration
+#: added rows.
+#: ⛔ NAMED BY ITS COMMITS, NOT BY "this branch's base": the base moves under every integration
+#: and a parenthetical reading `this branch's base` went stale at the very next merge (measured:
+#: written naming `0467ba329d`, false the moment `47e28b549e76` was merged).
 #: ⛔ MERGED `origin/main` `10e51693` INTO THIS BRANCH AND KEPT BOTH SIDES' BLOCKS ABOVE — each is a
 #: true measurement of the tree it NAMES, which is the ground rule of this run, so neither side is
 #: dropped to make the conflict go away. THE PIN IS THEN RE-MEASURED ON THE RESOLVED TREE, because
@@ -1492,8 +1516,51 @@ SWEEP_NAMES = 66
 #: above states. Re-pin only from a tree that PARSES: the first reading of this resolution was
 #: `11844`, taken while two conflicting test files still carried `<<<<<<<` markers, so their residue
 #: shapes went uncounted — the same "a census of a tree that does not parse is a reading of a
-#: DIFFERENT tree" defect the block above records, re-committed here.
-SWEEP_RESIDUE = (11875, "7f3e4f2028a773f5")
+#: DIFFERENT tree" defect the block above records, re-committed here. That re-pin is kept as the
+#: RECORD of `#14383`'s own tree `(11875, "7f3e4f2028a773f5")`; the live pin is the merge below.
+#: RE-CUT AT THE `#14232` MERGE (`432540dc44`, × `main` `0467ba329d`) — `main`'s
+#: `(11861, "f0647020531c078c")` → `(11875, "6c8727fc80045370")`, and the +14 is ENTIRELY the
+#: `#14232` change rather than inherited drift, which is measured rather than assumed the same way
+#: the merge notes above measure it: `--report --base 28ca66878d --top 5000` on `origin/main`
+#: `0467ba329d`'s own tree prints **11861** — the number that tree re-cut to, so the base
+#: contributes nothing — and **11875** on the merged tree. Seven shapes move, each read on BOTH
+#: trees and none absorbed in the other direction:
+#:   * `_proj().g.query` did not exist on the base and reads **6** here: the six
+#:     `_proj().g.query(` reads the async-ACK rows add in `tests/test_14232_ingest_ack_split.py`
+#:     (`git diff origin/main...HEAD -- tests/ | grep -c '^+.*_proj()\.g\.query'` → 6);
+#:   * `proj.g.query` 3646 → 3649 (**+3**, the NET of `tortoise/hosted_api.py` +8/−6 as the capture
+#:     path is split around the ACK, plus +1 in `tools/acceptance_14232_drain.py`);
+#:   * `graph_cls.query` 11 → 12 (**+1**), `registry.query` 38 → 39 (**+1**) and
+#:     `string 'query' on untyped receiver` 109 → 110 (**+1**), all three in this branch's own test
+#:     rows;
+#:   * two shapes the base did not carry at all: `self.get_session` **0 → 1** and
+#:     `transport.get_session` **0 → 1**, the acceptance tool's transport read reached through an
+#:     untyped receiver, left alone deliberately like every other row here.
+#: 6 + 3 + 1 + 1 + 1 + 1 + 1 = 14 = 11875 − 11861, which is the cross-check that no row was
+#: silently absorbed; the pair is `--repin`'s output on the merged tree at `432540dc44`, not
+#: arithmetic on `main`'s, and `--check` exits 0 on it with `typed references still pointing at a
+#: public name` at **0**.
+#: ⛔ THIS PR-LEVEL MERGE (`origin/main` `a7baa98d05` × `#14232`, resolved on `a740f2c6fd`) KEEPS
+#: BOTH RECORDS ABOVE, which is this chain's ground rule: `main`'s `#14263` chain re-cut ITS OWN
+#: tree to `(11872, "1f07a0b7bcf05138")` and this branch re-cut its tree to
+#: `(11875, "6c8727fc80045370")`; each is a true measurement of the tree it NAMES, so neither is
+#: deleted to make a conflict go away. The pair below is a THIRD measurement — `--repin` RUN on the
+#: fully resolved merge tree, never inherited from either parent's line (they disagree, 11872 against
+#: 11875) and never arithmetic across them. ⛔ Re-pin only from a tree whose covering suites are
+#: green: a tree that does not PARSE reads a DIFFERENT tree, which is the class the blocks above
+#: already record one layer out. `--check` exits 0 on the pair below with
+#: `typed references still pointing at a public name: 0`.
+#: It reads **11886**, i.e. `main`'s 11872 plus this branch's own 14 — the SAME +14 the `#14232`
+#: block above attributes row-by-row on ITS base (11861 → 11875), which is the cross-check that the
+#: branch's contribution survived the merge unchanged; ⛔ the sum is a CHECK, never the source: the
+#: pair below is `--repin`'s own output at the resolved tree.
+#: ⛔ THIS MERGE (`origin/main` `9aaaff10acd9` into `integration/pair-14140-14220`) KEEPS BOTH
+#: sides' records above, which is this chain's ground rule: `#14383`'s own re-pin and `#14232`'s
+#: re-pin are each a true measurement of the tree it NAMES, so neither is deleted to make a
+#: conflict go away. The pair below is a THIRD measurement — `--repin` RUN on the fully resolved
+#: merge tree, never inherited from either parent's line (they disagree) and never arithmetic
+#: across them. ⛔ Re-pin only from a tree that PARSES and whose covering suites are green.
+SWEEP_RESIDUE = (11890, "11d9b3f14dc9fd8f")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

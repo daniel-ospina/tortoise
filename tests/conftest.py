@@ -2170,6 +2170,72 @@ from tests._verdict import (  # noqa: E402
     reset_process_globals,
 )
 
+#: The window the SUITE opens `_CAPTURE_ACK_DEADLINE_S` to. Deliberately far larger
+#: than any real capture, because the grace is anchored on ARRIVAL and must survive a
+#: COLD record phase: measured 2026-11-22 on this box, the first capture in a process
+#: reached the join with `arrival_age = 123.6 s`. A window below that is already spent
+#: when the join starts, so the ACK defers and a pre-existing in-budget assertion reds.
+_CAPTURE_ACK_WINDOW_S = 300.0
+
+
+@pytest.fixture(autouse=True)
+def _capture_ack_window_is_deterministic(monkeypatch):
+    """#14232: the suite pins the IN-BUDGET capture, never the deferral.
+
+    The handler joins the extraction for at most ``_CAPTURE_ACK_DEADLINE_S``
+    (0.5 s in production, anchored on arrival and clamped to half the transport
+    bound) and answers with the
+    async `accepted` receipt when the join misses. Whether the join misses on a
+    given run is a question about MACHINE LOAD — the offline `MockModel` seam's
+    whole capture measured 0.008 s to 0.95 s on one host depending on the test
+    that preceded it — so leaving the production window in place would make every
+    pre-existing "the POST body reports what was extracted" assertion a wall-clock
+    race. `#5049` rule 1 forbids exactly that: a deadline expiry may not produce a
+    verdict about the code under test.
+
+    So the window is opened for the whole suite AND the clamp is opened with it
+    (`_capture_ack_ceiling_s` is overridden below), so the join is genuinely
+    unbounded here. Both halves are load-bearing: opening only the window, as an
+    earlier cut of this fixture did at 30 s, left the production clamp
+    `min(30.0, _TRANSPORT_WAIT_BOUND_S / 2.0)` = **5 s** in force, which is shorter
+    than a cold `build_master_list` (~12 s; measured), so the rows this fixture
+    exists to protect still raced a deadline on a cold shard — review round 5. The
+    deferral is exercised WHERE IT IS THE PROPERTY — `tests/test_14232_ingest_ack_split.py`
+    commutes this same value to 0 for the ack-path tests. Nothing in the product
+    reads this constant differently; it is the test substrate that must not race.
+
+    ⛔ THE WINDOW MUST COVER THE **RECORD** PHASE, not only the extraction. The
+    grace is anchored on ARRIVAL (`_capture_ack_grace_s`), so by the time the join
+    is reached the record phase has already spent part of it — and a COLD one is
+    expensive: measured on this box 2026-11-22, the first capture in a process had
+    `arrival_age = 123.6 s` at the join, which is a spent window at ANY deadline
+    below that and defers the ACK. That is how
+    `test_hosted_api.py::TestSessionCapture::test_capture_session_returns_expected_shape`
+    (a pre-existing row asserting the in-budget receipt) reds — measured RED
+    identically with the pre-change 5 s clamp and with 30 s, so it was never the
+    clamp alone. `_CAPTURE_ACK_WINDOW_S` therefore carries a cold-start margin.
+    """
+    module = sys.modules.get("tortoise.hosted_api")
+    if module is not None:
+        monkeypatch.setattr(module, "_CAPTURE_ACK_DEADLINE_S",
+                            _CAPTURE_ACK_WINDOW_S)
+        # ⛔ THE CLAMP IS OPENED WITH THE WINDOW, or the sentence above is false.
+        # The production clamp is `min(window, half the transport bound)`, i.e.
+        # `min(300.0, 5.0) = 5.0` — five seconds of wall clock in front of every
+        # "the POST body reports what was extracted" assertion in the suite. The
+        # seam is ONE function so this stays a single override, and it reads the
+        # LIVE deadline so a row that pins the deadline itself (`_force_join`) still
+        # gets the value it pinned rather than this fixture's window.
+        monkeypatch.setattr(module, "_capture_ack_ceiling_s",
+                            lambda: module._CAPTURE_ACK_DEADLINE_S)
+        # A tail left pending by a torn-down loop can never run again (its loop is
+        # gone), so holding a strong reference to it only makes the registry lie
+        # about what is live.
+        module._CAPTURE_TAIL_TASKS.clear()
+    yield
+    if module is not None:
+        module._CAPTURE_TAIL_TASKS.clear()
+
 
 @pytest.fixture(autouse=True)
 def _process_global_isolation(monkeypatch):
