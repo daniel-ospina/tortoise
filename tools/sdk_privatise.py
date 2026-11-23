@@ -1875,7 +1875,28 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
 #: legitimised by the re-cut; the pair below is `--repin`'s own output on THIS tree, never arithmetic
 #: on the last pin, and `--check` exits 0 on it.
-SWEEP_RESIDUE = (11898, "8cf59d52af09e536")
+#: ⛔ MERGED `origin/main` `43182ac0` (× `bbe54363`) INTO THIS BRANCH (`#14414`, the abuse
+#: alert-delivery PR) AND RE-CUT ON THE RESOLVED TREE — both sides' blocks above are KEPT, this
+#: file's standing ground rule. The pin arrived ALREADY STALE, and that half is MEASURED rather
+#: than inferred: `--repin` in a detached worktree at `origin/main` `43182ac0` prints
+#: `(11901, "953c70c05b55923b")` on `main`'s OWN tree, i.e. `main` carries `11898` and derives
+#: `11901` — so every open PR is graded against a number `main` does not read (the
+#: `#14062`/`#14394` recurrence the block above records once already).
+#: THE TWO CONTRIBUTIONS ARE MEASURED SEPARATELY, never differenced into the pin:
+#:   * `main`'s +3 is ONE file — `tests/test_7879_record_chain.py`, added by `#14434` after the
+#:     pin was cut: `projection.g.query` +2 (a fake control plane's own accessor) and
+#:     `env.update` +1 (a test double's environment) — ordinary-word receivers of exactly the
+#:     kind this pin exists to DECLARE rather than rewrite;
+#:   * THIS branch's +7, measured per file by running `edits_for` over `origin/main`'s blob and
+#:     the branch's for every file the two differ in: `tests/test_14407_alert_delivery.py`
+#:     `storage.delete` +3 and `super().delete` +2 (the migration tests drive `AlertStore`'s
+#:     delete-to-move legs through a `MemoryStorage` subclass), and `tortoise/alert_store.py`
+#:     `self._storage.delete` +2 (the migration's legacy-object release and its rollback).
+#: Neither side legitimises a typed reference: every added row is an untyped receiver, and
+#: `typed references still pointing at a public name: 0` on this tree.
+#: `11901 + 7 = 11908` is the CROSS-CHECK of those two measurements, never the source — the pair
+#: below is `--repin`'s own output on THIS resolved tree, and `--check` exits 0 on it.
+SWEEP_RESIDUE = (11908, "288f7b1715d252ba")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
