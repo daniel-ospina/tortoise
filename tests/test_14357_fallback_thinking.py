@@ -545,6 +545,72 @@ def test_base_collapse_with_a_failed_escalation_stays_reasoning_collapse():
     assert v2._classify_error(ei.value) == "reasoning_collapse", ei.value
 
 
+def test_s1_empty_length_base_still_runs_the_escalation_rung():
+    """#14357 review (P1) — ``run_s1`` must keep its own #2134 rung too.
+
+    ``run_s1`` calls ``_complete`` DIRECTLY at the S1 cap (1500) and read
+    ``finish`` only after it returned, so the new yield guard's raise made an
+    empty-length base fatal BEFORE the chunk ladder — while pre-#14357 that
+    same response escalated to 32K and could recover. The pilot's own measured
+    collapse (1500/1500, ``finish_reason=length``) is an S1 collapse, so this
+    is the population the rung exists for.
+    """
+    class _S1BaseCollapsesEscRecovers:
+        last_finish_reason = "length"
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def __init__(self):
+            self.budgets: list[int] = []
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.budgets.append(max_tokens)
+            if (max_tokens or 0) >= 32000:
+                self.last_finish_reason = "stop"
+                self.last_completion_tokens = 20
+                return "a recovered narrative"
+            self.last_finish_reason = "length"
+            self.last_completion_tokens = 1500
+            return ""  # the collapse: no content at all, finish=length
+
+    m = _S1BaseCollapsesEscRecovers()
+    out = v2.run_s1(m, "user: we decided X", stats={})
+    assert m.budgets[:2] == [1500, 32000], m.budgets
+    assert out == "a recovered narrative", out
+
+
+def test_s1_collapsed_base_survives_a_failed_escalation():
+    """#14357 review (P1) — and when the S1 rung itself aborts, the class must
+    stay ``reasoning_collapse`` rather than degrade to an empty narrative.
+
+    The abort arm's pre-#14357 contract is to return the RETAINED truncated
+    summary; on a held collapse that summary is ``""``, so returning it would
+    re-open the empty-document fail-open this PR exists to close.
+    """
+    class _S1BaseCollapsesEscAborts:
+        last_finish_reason = "length"
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def __init__(self):
+            self.budgets: list[int] = []
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.budgets.append(max_tokens)
+            if (max_tokens or 0) >= 32000:
+                raise RuntimeError("500 upstream")
+            self.last_finish_reason = "length"
+            self.last_completion_tokens = 1500
+            return ""
+
+    m = _S1BaseCollapsesEscAborts()
+    stats: dict = {}
+    with pytest.raises(v2._ReasoningCollapse):
+        v2.run_s1(m, "user: we decided X", stats=stats)
+    assert m.budgets[:2] == [1500, 32000], m.budgets
+    assert v2._classify_error(v2._ReasoningCollapse("x")) == "reasoning_collapse"
+
+
 def test_collapsed_extraction_yields_no_document_and_is_recorded(monkeypatch):
     """End to end: a collapsed S1 is a RECORDED failure that extracts nothing.
 

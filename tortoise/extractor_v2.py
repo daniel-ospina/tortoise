@@ -1559,8 +1559,8 @@ def run_s1(model, transcript: str, *,
               .replace("{date_anchor}", _date_anchor(session_date)))
     user_msg = "CONVERSATION:\n" + transcript  # ⛔ UNFRAMED BY DESIGN — #10301 (OPEN): S1_TMPL system clause + re-measured S1 request sizes; do NOT wrap in _render_untrusted_block here
     base = _stage_cap(_S1_MAX_TOKENS)
-    response = _complete(model, system, user_msg,
-                         max_tokens=base, stats=stats)
+    response, _collapse = _base_complete_holding_collapse(
+        model, system, user_msg, base, stats, True)
     finish = stats.get("finish_reason") if stats is not None else (
         getattr(model, "last_finish_reason", None))
     truncated = finish == "length"
@@ -1581,11 +1581,9 @@ def run_s1(model, transcript: str, *,
             + int(stats.get("completion_tokens") or 0))
     esc = _extractor_escalation_tokens(base)
     if esc <= base:
-        # P2-15: no headroom → the truncated summary stands (S1 narrative is
-        # never a list-damage class; the truncation is already recorded).
-        # NO escalation episode is counted (matches _complete_parsed's
-        # esc<=base ordering: `escalated` counts calls that actually fired —
-        # the 3-bucket invariant stays literal under the no-headroom config).
+        # P2-15: no headroom → the truncated summary stands; NO escalation
+        # episode is counted (matches _complete_parsed's esc<=base ordering —
+        # `escalated` counts calls that actually fired).
         return response
     retained = response
     if _rec is not None:
@@ -1625,6 +1623,8 @@ def run_s1(model, transcript: str, *,
             stats["retries"] = int(base_retries or 0) \
                 + int(stats.get("retries") or 0)
             stats["truncated"] = True
+        if _collapse:
+            raise _ReasoningCollapse(f"base collapsed; esc aborted: {e}") from e
         return retained
     if stats is not None:
         _rec = stats.setdefault("recovery", {})
