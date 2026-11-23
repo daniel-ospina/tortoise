@@ -4365,6 +4365,13 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
             "`ps` reds a required shard (cycle-7 finding: dropping the count left 175 passed)",
         ),
         (
+            "persistent_beyond_budget", True, None, AssertionError,
+            "was ALIVE and invisible to the census",
+            "a span bound the poll budget cannot contain must still reach a VERDICT: the error "
+            "branch spends the budget and breaks, so the loop cannot spin (cycle-6 P2: deleting "
+            "that break left the file fully green, and a constant bump then HANGS the shard)",
+        ),
+        (
             "late_pair", True, None, AssertionError, "was ALIVE and invisible to the census",
             "a burst that satisfies the ERROR COUNT but not the SPAN, arriving AFTER "
             "_CENSUS_ERROR_MIN_SPAN_S of healthy polling, is still the load class — the span "
@@ -4395,10 +4402,12 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
                                                 first turns a box-caused kill into a census FAIL,
                                                 which is the 2026-11-23 class this PR removes.
 
-    The harness also pins the streak's SPAN: the fake clock advances 0.1 s per `time()` call, so
-    the verdict may only fire after `_CENSUS_ERROR_MIN_SPAN_S` of simulated failure, and the
-    assertion below fails a sample-count-only rule. Hermetic throughout: no child is spawned,
-    `ps` never runs, and the clock only advances when the code asks it.
+    The harness also pins the streak's SPAN: the fake clock advances one `step_s` per `time()`
+    call (`0.1 s`, except `once_slow`'s `2.5 s` — that slow clock is what makes ONE sample span the
+    bound, and is how the COUNT half stays pinned), so the verdict may only fire after
+    `_CENSUS_ERROR_MIN_SPAN_S` of simulated failure, and the assertion below fails a
+    sample-count-only rule. Hermetic throughout: no child is spawned, `ps` never runs, and the
+    clock only advances when the code asks it.
     """
     module = sys.modules[__name__]
     # ⛔ NOT A GLOBAL STEP: `once_slow` exists because the COUNT half of the gate is otherwise
@@ -4426,6 +4435,18 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
         calls["n"] += 1
         if census_kind == "persistent":
             return [], err
+        if census_kind == "persistent_beyond_budget":
+            # ⛔ THE CAP IS THE INSTRUMENT, NOT THE SUBJECT (cycle-6 P2). With a span bound the
+            # budget cannot contain, the count+span gate can NEVER fire, so the only thing that
+            # ends this poll is the error branch's own deadline check. Without it this loop never
+            # ends, and a hang is indistinguishable from a slow box — so the cap converts that into
+            # a RED. It cannot masquerade as a pass: the post-condition requires the ALIVE arm's
+            # marker, and this AssertionError does not carry it.
+            assert calls["n"] < 500, (
+                "the error branch never spent the poll budget: 500 consecutive erroring samples "
+                "with a span bound the budget cannot contain means the poll cannot reach a "
+                "verdict — it HANGS, which is the failure this arm exists to catch")
+            return [], err
         if census_kind == "once_slow":
             # ONE erroring sample — the same shape as `once`, ridden by a clock whose step is
             # larger than the span bound. `err_streak` is 1, so the COUNT half is the only thing
@@ -4447,17 +4468,23 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
             # `1 failed, 5 passed` for the mutant). A pin that goes QUIET on a constant bump is
             # the same false-PASS class this PR removes.
             # ⛔ AND THE CLOCK IS FROZEN ACROSS THE BURST so its SPAN is structurally ZERO, not
-            # merely "one sample". MEASURED per-sample cost of the implementation's own
-            # `time()` calls, on this very poll (probe, `-k census_error`, clock deltas between
-            # consecutive census entries: `Counter({1: 99, 2: 1})`) — every sample costs ONE call
-            # and only the FIRST erroring sample costs TWO, because `streak_started` is guarded
-            # by `err_streak == 0` and then the span is taken. So without the freeze the streak's
-            # own span grows `(k - 1) * step_s` at its k-th erroring sample, and a burst long
-            # enough to reach a large `_CENSUS_ERROR_STREAK` would trip the span bound in the
-            # CORRECT implementation too — the same silent retirement, moved from the count axis
-            # to the span axis. Freezing makes the arm independent of BOTH constants: the
-            # mutant's from-`poll_started` span is frozen at ≥ the bound (fires), the streak's own
-            # span is frozen at 0 (does not).
+            # merely "one sample". MEASURED per-sample cost of the implementation's own `time()`
+            # calls on this very poll: the FIRST erroring sample costs THREE (the `streak_started`
+            # read, the span read, and the error branch's own deadline check) and every later one
+            # TWO (span + deadline), so the streak's span reaches `step_s + 2(k - 1) * step_s` at
+            # its k-th erroring sample. At `_CENSUS_ERROR_STREAK = 20` that is
+            # `0.1 + 19 x 0.2 = 3.9 s`, past the 2.0 s bound — MEASURED with the freeze removed:
+            # the CORRECT implementation trips (`1 failed`), so the freeze is required, not a
+            # flourish. A burst long enough to reach a large `_CENSUS_ERROR_STREAK` would otherwise
+            # trip the span bound in the CORRECT implementation too — the same silent retirement,
+            # moved from the count axis to the span axis. Freezing makes the arm independent of
+            # BOTH constants: the mutant's from-`poll_started` span is frozen at >= the bound
+            # (fires), the streak's own span is frozen at 0 (does not).
+            # (This block previously cited `Counter({1: 99, 2: 1})` — deltas measured BEFORE the
+            # error branch's deadline check existed. That check is the third call on the first
+            # erroring sample and the second on every later one, so the citation was retired with
+            # the shape it described rather than left to mis-predict: `(k - 1) * step_s` says the
+            # freeze is unnecessary, the measurement says the correct implementation trips.)
             if calls["n"] == late:
                 clock.step_s = 0.0
             elif calls["n"] >= late + burst:
@@ -4474,6 +4501,10 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     monkeypatch.setattr("subprocess.Popen", lambda *a, **k: child)
     # `_row_for_pid` shells out to `ps` for a DIAGNOSTIC only; stub it so the arm stays hermetic.
     monkeypatch.setattr("subprocess.run", lambda *a, **k: _Completed())
+    if census_kind == "persistent_beyond_budget":
+        # Override the bound AFTER `late`/`burst` are derived (they describe `late_pair`) and BEFORE
+        # the call, because the gate being unreachable inside the budget is precisely the case.
+        monkeypatch.setattr(module, "_CENSUS_ERROR_MIN_SPAN_S", 1e9)
 
     raised = _verdict_or_fail(
         expect, why, lambda: test_pi_processes_sees_a_real_long_path_lane(monkeypatch))
