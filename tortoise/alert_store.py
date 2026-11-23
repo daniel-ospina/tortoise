@@ -61,6 +61,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable  # noqa: UP035
@@ -81,6 +82,13 @@ from tortoise.security import redact_for_publication
 logger = logging.getLogger(__name__)
 
 DEDUP_PREFIX = "ops/alerts/"
+
+#: Serialises `migrate_incident_subject` WITHIN one process (#14407): two rules of
+#: one org can migrate concurrently from the same legacy sentinel, and the claim
+#: check that follows the create is only meaningful when the create+release pair is
+#: not interleaved here. Cross-process ordering is the claim check's job, not this
+#: lock's.
+_MIGRATION_LOCK = threading.Lock()
 # #2844: the spellings of a SUBJECT-LESS (platform-scoped) sentinel, one per
 # writer. The store writes the canonical first entry; the DR driver writes
 # `global`. Both are read and both are deleted — see the module docstring.
@@ -529,7 +537,8 @@ class AlertStore:
             if new_key == legacy_key:
                 return False
             legacy = _read_json(self._storage, legacy_key)
-            if not legacy.get("issue_number"):
+            number = legacy.get("issue_number")
+            if not number:
                 return False
             if _read_json(self._storage, new_key):
                 return False
@@ -539,30 +548,67 @@ class AlertStore:
             # recognisable (see the platform-scoping guard in `_alias_states`).
             state["org_id"] = new_subject
             state["team_id"] = new_subject
-            # CREATE-IF-ABSENT, like every other write in this store: two rules of
-            # the same org can fire concurrently (the abuse pool is 4 workers and
-            # `_claim_notify` serialises only the SAME rule), and a blind write
-            # would let both mint a scoped sentinel for ONE issue — two dedup
-            # linearisation points, then one rule's episode end closes the issue
-            # while the other sentinel still claims it (`_issue_is_live` false →
-            # re-file). That is the #2844 alias class this migration exists to
-            # prevent, so only the winner releases the legacy object.
-            if not self._storage.create_if_not_exists(
-                    new_key, json.dumps(state).encode()):
-                return False
-            try:
-                self._storage.delete(legacy_key)
-            except Exception as e:  # noqa: BLE001, RUF100 — the move itself succeeded
-                logger.warning(
-                    "dedup: %s/%s was migrated to %s but the legacy object could "
-                    "not be released (%s) — it is inert once the scoped key holds "
-                    "the issue", kind, legacy_subject, new_subject, e)
+            # ONE OWNER, or the legacy issue ends up claimed twice — which is the
+            # #2844 alias class this migration exists to remove, with the harm
+            # landing on exactly the org #10576 describes: two rules of one org can
+            # fire concurrently (the abuse pool is 4 workers; `_claim_notify`
+            # serialises only the SAME rule), and two scoped sentinels naming ONE
+            # issue means one rule's episode end closes the issue the other rule is
+            # tracked by (`_issue_is_live` false → it re-files), i.e. a `✅` pushed
+            # while the other rule is still breaching.
+            #
+            # `create_if_not_exists` alone is NOT enough: it serialises writers on
+            # ONE key, while the racers here write DIFFERENT keys from one shared
+            # legacy object. So the create is followed by a CLAIM CHECK — only the
+            # migrator that still finds the legacy object holding this issue number
+            # may release it — and a migration that cannot complete is ROLLED BACK
+            # (its scoped key deleted) rather than left as a second claimant. The
+            # in-process lock closes the same-process window; the claim check covers
+            # the cross-process one.
+            with _MIGRATION_LOCK:
+                if not self._storage.create_if_not_exists(
+                        new_key, json.dumps(state).encode()):
+                    return False
+                current = _read_json(self._storage, legacy_key)
+                if not current or current.get("issue_number") != number:
+                    # Another migrator released the legacy object first: it owns
+                    # this issue, and our scoped sentinel would be a second claim.
+                    self._discard_migration(new_key, kind, new_subject)
+                    return False
+                try:
+                    self._storage.delete(legacy_key)
+                except Exception as e:  # noqa: BLE001, RUF100
+                    # ROLL BACK: leaving the scoped key in place would let the NEXT
+                    # rule migrate the same issue number again, and the survivor
+                    # legacy object is the adoption SOURCE (so it is not inert).
+                    self._discard_migration(new_key, kind, new_subject)
+                    logger.warning(
+                        "dedup: %s/%s could not be released after migrating to %s "
+                        "(%s) — the migration was rolled back; the incident stays "
+                        "under its legacy spelling", kind, legacy_subject,
+                        new_subject, e)
+                    return False
             return True
         except Exception as e:  # noqa: BLE001, RUF100 — adoption is best-effort
             logger.warning(
                 "dedup: %s/%s could not be migrated to %s (%s) — the caller files "
                 "under the new subject", kind, legacy_subject, new_subject, e)
             return False
+
+    def _discard_migration(self, key: str, kind: str, subject: str) -> None:
+        """Roll back a migration's scoped key (#14407) — best-effort, never raises.
+
+        A migration that cannot release the legacy object must leave ONE claimant,
+        not two: the scoped key is deleted so the incident stays under its legacy
+        spelling until the next attempt.
+        """
+        try:
+            self._storage.delete(key)
+        except Exception as e:  # noqa: BLE001, RUF100
+            logger.warning(
+                "dedup: %s/%s could not be rolled back (%s) — a second claimant "
+                "for that issue may exist; check `open_subjects(%r)`",
+                kind, subject, e, kind)
 
     def incident_record(self, kind: str, org_id: str = "") -> dict[str, Any]:
         """The sentinel this store tracks for ``(kind, org_id)``, or ``{}`` (#14407).
