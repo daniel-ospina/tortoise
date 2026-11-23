@@ -4928,14 +4928,26 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: head — updated in place during the PR rather than spending a generation 34 on
 #: a refinement of the same unreleased seam. From the moment 33 appears on main,
 #: the entries are frozen: the next byte change needs a NEW generation.
-#: ⚠️ 33's CAPTURE digest was re-cut once, by the same never-shipped exception: the
-#: #14423 review found the takedown's restore arm had no test (the sibling row in
-#: `tortoise-capture.test.ts` claimed a mutant that did not red it), so
-#: `takedownClaim` / `disposeQuarantine` are now exported as the test seam — an
-#: EXPORT-ONLY edit, no behaviour change, but a comment IS bytes here. The READ
-#: half is untouched (`904d2742…`), exactly as generation 31's re-cut did.
+#: ⚠️ 33's CAPTURE digest was re-cut TWICE under that same never-shipped exception,
+#: and the SECOND re-cut is NOT a comment-only edit — say so, because this is the
+#: note a later re-pinner reads to justify reusing 33:
+#:
+#: 1. the #14423 review found the takedown's restore arm had no test (the sibling
+#:    row in `tortoise-capture.test.ts` claimed a mutant that did not red it), so
+#:    `takedownClaim` / `disposeQuarantine` became the exported test seam — an
+#:    export-only edit, but a comment IS bytes here;
+#: 2. the next cycle found the Pi leg's `release()` still took a claim it did not
+#:    own (and its `state.raced` flag missed the arm reached after a successful
+#:    takedown), which is a BEHAVIOUR change on shipped bytes — the digest covers
+#:    the whole file (`sha256` of `tortoise-capture.ts`, graded at
+#:    `test_a_shipped_pi_seam_byte_change_moves_the_generation`), so it moved with
+#:    it. Reusing an unreleased generation for a behaviour fix is the same
+#:    exception, not a licence: from the moment 33 reaches `main` the entries are
+#:    FROZEN and the next byte change needs a NEW generation.
+#:
+#: The READ half is untouched (`904d2742…`), exactly as generation 31's re-cut did.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "2d011c33d635eac5630c99cd9f714c33d0f1fa057c0b76a8065a25f0f47a4736")
+    33, "442d76f58d897da130c7f91712135f9cae35739fc68c22bedbf6651576feb6cb")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5107,7 +5119,7 @@ _GENERATION_DIGESTS = {
     # keeps draining concurrently with the Python leg and keeps charging the
     # box's refusals to per-entry exponential backoff — the 908-entry /
     # attempts-10-17 shape #14342 starts from — so it must read STALE.
-    33: "2d011c33d635eac5630c99cd9f714c33d0f1fa057c0b76a8065a25f0f47a4736",
+    33: "442d76f58d897da130c7f91712135f9cae35739fc68c22bedbf6651576feb6cb",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

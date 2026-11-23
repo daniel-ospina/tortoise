@@ -270,31 +270,46 @@ def test_a_SUCCESSORS_claim_survives_a_slow_holders_release(tmp_path):
     successor.release()
 
 
-def test_a_release_does_not_MOVE_a_claim_that_is_not_ours(tmp_path):
-    """A not-ours release must touch nothing at all.
+def test_a_release_does_not_MOVE_a_claim_that_is_not_ours(tmp_path, monkeypatch):
+    """A not-ours release must take NO destructive step at all — not even a rename.
 
     The takedown-then-compare version `rename`d the successor's claim aside before
     discovering it was not ours; if a THIRD process installed into the now-empty
     path, the restore `link` failed `EEXIST` and the successor's bytes were
     unlinked — a live claim destroyed by a release that was trying to be polite
-    (#14423 review, P2; reproduced: `release()` returned False and the successor's
-    claim was GONE).
+    (#14423 review, P2).
+
+    ⛔ The first version of this test asserted the file's inode and mtime were
+    unchanged, and that CANNOT fail on the order it named: `os.rename` keeps the
+    inode and `os.link` restores a second name to the SAME inode, so both hold
+    under either order (measured — restoring the pre-fix `release` left the whole
+    suite green). What discriminates is whether the takedown was CALLED at all, so
+    the assertion is on exactly that.
 
     MUTATION THAT REDS THIS: take the claim aside before reading its token (the
-    file's inode then changes, and a third party's install lands in the gap).
+    takedown then runs for a release that does not own the claim).
     """
     root = tmp_path / "spool"
     slow = drain_claim.acquire(root, leg="python", now=1000.0, ttl_s=60.0)
     assert slow is not None
     successor = drain_claim.acquire(root, leg="pi", now=1100.0, ttl_s=60.0)
     assert successor is not None
-    before = os.stat(drain_claim.claim_path(root))
+    calls: list[str] = []
+    real = drain_claim._takedown
+
+    def _counting(path, token):
+        calls.append(token)
+        return real(path, token)
+
+    monkeypatch.setattr(drain_claim, "_takedown", _counting)
     assert slow.release() is False, "the token is no longer ours"
-    after = os.stat(drain_claim.claim_path(root))
-    assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns), (
-        "a release that does not own the claim must not move, replace or touch it")
+    assert calls == [], (
+        "a release that does not own the claim must not even MOVE it — the takedown "
+        "is what opens the window a third process installs into")
     assert drain_claim.read_claim(root)["token"] == successor.token
-    successor.release()
+    # …and an OURS release still takes it, so the guard did not disable the path.
+    assert successor.release() is True
+    assert calls == [successor.token], calls
 
 
 def test_an_ABSURD_but_finite_lease_cannot_block_the_spool(tmp_path):
