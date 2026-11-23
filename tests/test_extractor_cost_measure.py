@@ -1731,15 +1731,56 @@ def test_the_mode_is_productions_own_resolution_not_a_second_parser(monkeypatch)
         "json.dumps, not a re-parse of the environment")
 
 
-def test_a_stage_failure_error_is_incomplete_even_when_calls_line_up():
-    """A stage that RAISED is a lost call, whatever the counters say."""
-    failed = _complete_artifact()
-    failed["pipeline"] = {"calls": 3, "retries": 0,
-                          "errors": ["S4 failed: TimeoutError: read timeout"]}
-    report = m.compose_report([failed])
+def test_a_post_call_S4_failure_is_a_note_when_the_call_was_measured():
+    """⛔ THE OVER-BLOCK ONE MARKER OVER from cycle 9's (review cycle 15, P3).
+
+    `capture_session` appends `"S4 failed: …"` from ONE `except` that wraps
+    `run_s4(...)` (`tortoise/extractor_v2.py:15286`) *and* the post-call
+    merge/shape work that follows it (`:15292`–`:15333`), while
+    `_Recording.complete` appends a call only after the adapter RETURNS. So an
+    S4 whose prompt was rendered, sent and measured and whose output then failed
+    to parse or merge carries the marker on a call that WAS measured — and
+    treating the marker as a lost call refused an intact composition and made
+    `main` exit 1 on it.
+
+    This is the assertion the pre-fix code fails: `_LOST_CALL_MARKERS` held
+    `"S4 failed"`, so `complete` came back False for a row in which all three
+    stages reported a call.
+    """
+    noted = _complete_artifact()
+    noted["pipeline"] = {"calls": 3, "retries": 0,
+                         "errors": ["S4 failed: ValueError: bad json — kept S2 "
+                                    "output"]}
+    report = m.compose_report([noted])
+    assert report["complete"] is True, (
+        "an S4 that RETURNED a measured call and then failed to parse must not "
+        "refuse the composition — the prompt was sent and counted")
+    rendered = m.render_compose(report)
+    assert "INCOMPLETE LIVE RUN" not in rendered, (
+        "a post-call S4 failure must not print the incompleteness banner")
+    assert "content-level notes" in rendered, (
+        "…but it must still be DISCLOSED, or the reader is told the emission "
+        "was clean when it was not")
+
+
+def test_a_stage_that_recorded_NO_call_is_still_incomplete():
+    """The fail-closed half of the same change: the CALLS decide, not the marker.
+
+    `"S4 failed"` left `_LOST_CALL_MARKERS`, so the run where S4 genuinely
+    produced nothing must still be refused — by `_REQUIRED_STAGES`, which reads
+    the recorded calls (`compose_report` builds `stages` only from calls, so a
+    call-less stage is absent). Asserted explicitly, because dropping a marker
+    from the lost-call set is only safe while this stays true.
+    """
+    lost = _compose_artifact(live=True,
+                             calls=[_call(stage=s, sections={})
+                                    for s in ("s1", "s2")])
+    lost["pipeline"] = {"calls": 2, "retries": 0,
+                        "errors": ["S4 failed: TimeoutError: read timeout"]}
+    report = m.compose_report([lost])
     assert report["complete"] is False, (
-        "a recorded stage FAILURE must make the run incomplete even when the "
-        "call counts happen to agree")
+        "a stage with NO recorded call must make the run incomplete whatever "
+        "the pipeline error says")
     assert "INCOMPLETE LIVE RUN" in m.render_compose(report)
 
 

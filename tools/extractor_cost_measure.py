@@ -1889,8 +1889,25 @@ def compose_report(artifacts: list[dict]) -> dict:
 #: `extractor_v2` records (a truncated tail it dropped, a malformed section it
 #: kept past, a failed S5/chain/entity-resolution/classify step) is recorded on a
 #: call that RETURNED and was measured, so it is a note and not a verdict.
-_LOST_CALL_MARKERS = ("chunk failed", "S2 failed", "S4 failed",
-                      "no embed list produced")
+#:
+#: ⛔ `"S4 failed"` IS DELIBERATELY ABSENT FROM THIS SET (review cycle 15, P3).
+#: `capture_session` appends it from ONE `except` that wraps `run_s4(...)`
+#: (`tortoise/extractor_v2.py:15286`) *and* the post-call merge/shape work that
+#: follows it (`:15292`–`:15333`), while `_Recording.complete` appends a call
+#: only after the adapter RETURNS — so the marker is the error TYPE of a
+#: failure, not the fact that no call happened. An S4 whose prompt was rendered,
+#: sent and measured but whose output then failed to parse or merge carries this
+#: marker on a call that WAS measured, and reading it as a lost call refused an
+#: intact composition and exited 1: the same over-block class cycle 9 fixed for
+#: `"S4 output partial"`, one marker over. The fail-open it used to close stays
+#: closed STRUCTURALLY — `compose_report` builds `stages` only from recorded
+#: calls, so an S4 that really produced no call leaves `"s4"` out of `stages`
+#: and `_REQUIRED_STAGES` below already refuses the row. That split is also the
+#: one OpenTelemetry's GenAI conventions draw: a failure AFTER a response was
+#: received (schema validation, parsing) keeps the response content and its
+#: token usage and records an `error.type`, while only a request failure means
+#: nothing was measured.
+_LOST_CALL_MARKERS = ("chunk failed", "S2 failed", "no embed list produced")
 
 _REQUIRED_STAGES = ("s1", "s2", "s4")
 
@@ -1922,6 +1939,13 @@ def _row_complete(row: dict) -> bool:
     such a `--doc`. The fail-open this block exists for is still closed by the
     missing-stage test and the retry-aware call count below; a content-level
     error is a NOTE, not an incompleteness.
+
+    ⛔ AND THE LOST-CALL SET IS A NAMED SET, NOT "ANY ERROR" (review cycle 15,
+    P3 — see `_LOST_CALL_MARKERS`'s `"S4 failed"` note). A marker that the
+    pipeline can append AFTER the call RETURNED describes a failure of
+    post-processing, so it is a note; the incompleteness of a genuinely
+    call-less stage is decided by the recorded CALLS themselves, through
+    `_REQUIRED_STAGES` below.
     """
     pipe = row.get("pipeline") or {}
     if any(marker in err for err in (pipe.get("errors") or [])

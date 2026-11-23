@@ -1210,6 +1210,54 @@ def test_the_probe_refuses_a_LEAKED_PINNED_OFF_switch(monkeypatch):
             f"seam it did not actually run (got {exc.value})")
 
 
+def test_the_door_SAYS_SO_when_it_discards_an_armed_pinned_off_switch(capsys,
+                                                                     monkeypatch):
+    """⛔ The DISCLOSURE, asserted — the whole point of the change it shipped with.
+
+    #14343 put `TORTOISE_S4_EMBED_JSON` on `DOOR_PINNED_OFF`, and four documents
+    told an operator to arm it and "re-run the capstone in the same session" to
+    prove the bars hold. `measured_arm()` pops it, so that run scored the DEFAULT
+    render while the log's `pinned_off` read-back simply said `None` and nothing
+    said the exported flag had been discarded — a fabricated green for anyone who
+    believed the armed layout had been validated (review cycle 10, P1).
+
+    `_pin_off_the_door` announces the discard on stderr. Without this test the
+    announcement is unpinned: reverting the call site to a bare
+    `os.environ.pop(key, None)` (and deleting the function) left the suite green,
+    because the leak tests only assert the POP semantics, which are identical
+    either way (review cycle 15, P3).
+    """
+    probe = _load_probe()
+    key = "TORTOISE_S4_EMBED_JSON"
+    assert key in probe.DOOR_PINNED_OFF, (
+        "this test pins the disclosure for the #14343 render toggle; if it left "
+        "DOOR_PINNED_OFF the announcement below is moot")
+
+    # NEGATIVE CONTROL FIRST: an unset switch must be SILENT, or the positive
+    # assertion below would pass for an implementation that always prints.
+    monkeypatch.delenv(key, raising=False)
+    with probe.measured_arm():
+        pass
+    assert "PINNED-OFF OVERRIDE" not in capsys.readouterr().err, (
+        "the door announced a discard for a switch that was never armed")
+
+    # THE POSITIVE: armed in the shell, pinned OFF by the door, and SAID SO.
+    monkeypatch.setenv(key, "compact")
+    with probe.measured_arm() as observed:
+        assert observed.get(key) in (None, ""), (
+            f"the door did not pin {key} OFF for the run (read back "
+            f"{observed.get(key)!r})")
+    err = capsys.readouterr().err
+    assert "PINNED-OFF OVERRIDE" in err, (
+        f"an armed {key} was discarded IN SILENCE: a run that exported it would "
+        f"score the default render while its log read back `None`, and nothing "
+        f"would tell the operator the flag they armed never applied "
+        f"(stderr was {err!r})")
+    assert key in err and "compact" in err, (
+        f"the notice must name the switch and the value it DISCARDED, so the "
+        f"operator can see which arm they did not measure (stderr was {err!r})")
+
+
 def test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run():
     """The door is a PATH, not only an environment fact (#10983 review r11).
 
