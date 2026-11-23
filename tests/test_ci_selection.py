@@ -13867,10 +13867,11 @@ def test_the_emission_block_guard_is_not_vacuous():
         "# `ceil(700.0/60 x 2)` = 24 m\n") is None, (
         "a shard-count comment BELOW `fast_shards:` was read as this block's claim — the "
         "subject is not truncated at the key")
-    # A RENAMED key must not silently widen the subject to the whole 1.18 MB file: the
-    # bound is `split("\nfast_shards:", 1)[0]`, which with no key returns EVERYTHING —
-    # so a renamed key used to hand the guard every shard-count sentence in the map and
-    # still return a readable claim. It fails closed on the bound itself now.
+    # A RENAMED key must not silently widen the subject to the whole 1.18 MB file: the bound is
+    # `manifest_text[:key.start()]` for the `key` `re.search(r"^fast_shards:")` returned, and an
+    # absent key yields NO bound at all (the whole file) — so a renamed key used to hand the guard
+    # every shard-count sentence in the map and still return a readable claim. It fails closed on
+    # the bound itself now, before it reads a single clause.
     with pytest.raises(AssertionError, match="carries no `fast_shards:` key"):
         _emission_block_claims(
             "fast_shards_x: 11\n# five shards at 835.7 s (a, c, d, e, k)\n")
