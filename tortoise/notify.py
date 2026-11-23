@@ -813,6 +813,26 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                     reason=("no incident could be attributed — an incident exists "
                             "but carries no issue number (filing was deferred or "
                             "failed)"))
+            elif not (
+                outcome is OpenOutcome.DEDUP
+                or outcome is OpenOutcome.FILED
+            ):
+                # SUPPRESSED (an operator paused the kind) or a future outcome
+                # member: NOTHING was sent and NOTHING was filed, so the window must
+                # not be spent. Left armed, lifting a suppression of a still-live
+                # condition would be silent for the rest of the window — the
+                # "#4872: never a mute" direction — and an unclassified outcome
+                # would be a total mute with no log line at all.
+                release_abuse_delivery(kind, subject)
+                logger.info(
+                    "abuse notify: %s (%s) sent nothing (outcome %s) — the delivery "
+                    "window was released, not spent", kind, subject,
+                    getattr(outcome, "name", outcome))
+            # DEDUP without `deliver` and FILED without a send are REACHED here on
+            # purpose: the repeat was FOLDED into the current window (and, for
+            # FILED, the store's own create-once push is the episode's first
+            # message). Releasing the window there would let the next detection
+            # send again — the per-detection storm this change removes.
             return
 
     deliver, folded = _claim_delivery(kind, subject, _INCIDENT_DELIVERY_WINDOW_S)

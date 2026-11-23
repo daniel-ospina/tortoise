@@ -270,6 +270,10 @@ _MAX_PENDING_EPISODE_RESOLVES = 4096
 #: is spent inside one cooldown. Each retry costs the same incident reads as the
 #: first attempt, so an unbounded retry is a read tax on the request path.
 _EPISODE_RESOLVE_RETRY_TTL_S = 90_000.0
+#: Minimum spacing between retries of a pending episode-end close (#14407), on par
+#: with the store's default `close_cooldown_min` (60 min): a retry inside the
+#: cooldown is refused AFTER it has already paid a store read.
+_EPISODE_RESOLVE_RETRY_BACKOFF_S = 3_600.0
 
 
 def _negative_env(raw: str | None) -> bool:
@@ -1819,6 +1823,9 @@ class AbuseEngine:
         # so a close that can never succeed is dropped instead of retried for
         # ever. In-process and bounded — a hint, never an authority.
         self._pending_episode_resolves: dict[tuple[str, str], datetime] = {}
+        # Last retry instant per subject, so a failing close is retried at the
+        # store's own backoff pace instead of once per clean evaluation (#14407).
+        self._last_resolve_attempt: dict[tuple[str, str], datetime] = {}
 
     def _claim_notify(self, org_id: str, rule: str, stage: str,
                       now: datetime, window_s: int) -> bool:
@@ -1887,6 +1894,28 @@ class AbuseEngine:
         else:
             self._remember_pending_resolve(org_id, rule)
 
+    def _resolve_retry_due(self, org_id: str, rule: str) -> bool:
+        """May the pending episode-end close be retried NOW? (#14407)
+
+        The retry branch fires on every clean-window evaluation of the rule, and a
+        clean window is by definition an org UNDER its threshold — so a retry with
+        no rate bound is up to ~1000 store reads per hour per rule, for as long as
+        the close keeps failing, on the abuse pool whose documented cost profile is
+        microseconds of accounting. The store backs off for `close_cooldown_min`
+        after a failure, but it reads the alias set BEFORE honouring that cooldown,
+        so the FIRST read is paid either way: the retry is therefore spaced by the
+        same backoff here.
+
+        Deliberately conservative: `_EPISODE_RESOLVE_RETRY_BACKOFF_S` (one hour)
+        matches the store's documented default cooldown, so a retry never lands
+        inside a cooldown it would only be refused by.
+        """
+        with self._notify_lock:
+            last = self._last_resolve_attempt.get((org_id, rule))
+        if last is None:
+            return True
+        return (_utcnow() - last).total_seconds() >= _EPISODE_RESOLVE_RETRY_BACKOFF_S
+
     def _remember_pending_resolve(self, org_id: str, rule: str) -> None:
         """Queue an episode-end resolution that did not COMPLETE, for a retry.
 
@@ -1910,6 +1939,8 @@ class AbuseEngine:
         """
         key = (org_id, rule)
         now = _utcnow()
+        with self._notify_lock:
+            self._last_resolve_attempt[key] = now
         first = self._pending_episode_resolves.get(key)
         if first is not None and (now - first).total_seconds() > _EPISODE_RESOLVE_RETRY_TTL_S:
             self._pending_episode_resolves.pop(key, None)
@@ -2031,7 +2062,9 @@ class AbuseEngine:
                 self._release_notify(org_id, rule, EVENT_FLAG)
                 self._release_notify(org_id, rule, EVENT_REVIEW)
                 self._end_alert_episode(org_id, rule)
-            elif ended and (org_id, rule) in self._pending_episode_resolves:
+            elif (ended
+                  and (org_id, rule) in self._pending_episode_resolves
+                  and self._resolve_retry_due(org_id, rule)):
                 # A previous episode end could not close its incidents (a failed
                 # close re-raises by design, #5143, or returned SKIPPED_WINDOW
                 # because the recovery window is not satisfied yet, #3146). Retry

@@ -574,6 +574,11 @@ class AlertStore:
             try:
                 if not self._storage.create_if_not_exists(
                         new_key, json.dumps(state).encode()):
+                    # Nothing of ours was created here (another writer owns the
+                    # scoped key), so only the CLAIM is released: leaving it would
+                    # permanently block any later migration of this issue number
+                    # and strand the legacy sentinel — a permanent #2844 alias.
+                    self._discard_migration(claim_key, kind, new_subject)
                     return False
                 try:
                     self._storage.delete(legacy_key)
