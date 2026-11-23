@@ -13,7 +13,7 @@ aboutObjects: "#14371, #14343, #14365, #14295, #14277, #14275, #7949"
 
 ## The S4 embed-list saving, measured offline (#14371)
 
-⛔ **OFFLINE — zero provider calls, zero spend, no key read.** Both layouts are `json.dumps` over the SAME objects, counted with `cl100k_base`; the encoder cache was **warm — tiktoken's own reader was never called** (cache dir `/tmp/data-gym-cache`).
+⛔ **OFFLINE — zero provider calls, zero spend, no key read.** Both layouts are `json.dumps` over the SAME objects, counted with `cl100k_base`; the encoder cache was **warm — tiktoken's own reader was never called** (cache dir `/tmp/data-gym-cache`). A regeneration on a box whose encoder cache is COLD fetches the ~1.6 MB of BPE ranks once and records `FETCHED` for ITS OWN run — that changes this line and no cell, so a difference here is the field working, not a disagreement.
 
 Corpus: `tests/eval/write_path/receipts/7947-arms-2026-10-18` (7 sessions / 14 emissions / 580 items). Vertex: `docs/evidence/14277-extractor-cost/measurements.jsonl` arm `cold`. Posture: **production** (every switch read, not asserted: TORTOISE_S4_DELTA=<unset>, TORTOISE_EXTRACTOR_PROMPT=<unset>, TORTOISE_CLASSIFY_LATER=<unset>, TORTOISE_REFERENTIALITY=<unset>, TORTOISE_PACKS_DIR=<unset>, TORTOISE_S4_EMBED_JSON=indent)
 

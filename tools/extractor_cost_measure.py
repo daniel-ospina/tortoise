@@ -3184,7 +3184,10 @@ def render_embed_json_measurement(m: dict) -> str:
         + ("**FETCHED during this run** (network used)"
            if m["encoder_cache"]["network_used"]
            else "**warm — tiktoken's own reader was never called**")
-        + f" (cache dir `{m['encoder_cache']['cache_dir']}`).", "",
+        + f" (cache dir `{m['encoder_cache']['cache_dir']}`). A regeneration on a "
+        "box whose encoder cache is COLD fetches the ~1.6 MB of BPE ranks once "
+        "and records `FETCHED` for ITS OWN run — that changes this line and no "
+        "cell, so a difference here is the field working, not a disagreement.", "",
         f"Corpus: `{m['receipts']}` ({agg['receipts']} sessions / "
         f"{agg['emissions']} emissions / {agg['items']:,} items). Vertex: "
         f"`{m['evidence']}` arm `{m['arm']}`. Posture: "
