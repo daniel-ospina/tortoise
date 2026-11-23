@@ -226,16 +226,21 @@ def test_an_adopted_legacy_incident_is_not_closed_by_the_other_rules_window(
     assert len(delivered.filed) == 1, "adoption must not file a second issue"
     assert delivered.closed == []
 
-    # rule B has its own (absent) episode ending clean — it must touch nothing.
-    notify.resolve_abuse_episode("org-a", "key_create")
-    assert delivered.closed == [], (
-        "another rule's clean window closed this incident (false all-clear): "
-        f"{delivered.closed} — and the next detection would re-file it")
-
     # rule A's own episode end still resolves it (the recovery path works) —
     # after the recovery window: #3146 applies to the abuse kinds, so ONE clean
     # observation is observation 1 of DR_RECOVERY_STREAK and the close lands on
     # the second (the engine's pending-retry supplies it in production).
+    #
+    # ⛔ There is deliberately NO ``resolve_abuse_episode("org-a", "key_create")``
+    # step here with an ``assert delivered.closed == []`` after it: it was DEAD
+    # WEIGHT (agent-infra#3442's rule 3 — an assertion whose value cannot vary
+    # under any mutation of this diff). Adoption has already MOVED the sentinel
+    # onto A's scoped key, so a resolution aimed at the bare ``{org}`` spelling or
+    # at another rule's key resolves nothing, and a mutant doing exactly that ran
+    # GREEN. Cross-rule isolation is carried by the LIVE rows instead: the
+    # ``filed == 1`` assertion above (adoption must not file a second issue) and
+    # ``test_the_incident_subject_is_rule_scoped`` (a shared-subject mutant reds
+    # it), plus the two clean-observation assertions below.
     notify.resolve_abuse_episode("org-a", "point_create")
     assert delivered.closed == [], (
         "one clean observation closed the incident — the #3146 recovery window "
@@ -1208,6 +1213,63 @@ def test_the_digest_reports_how_many_it_folded(delivered, monkeypatch):
 
     assert len(delivered.pushes) == 2
     assert "2 further" in delivered.pushes[-1], delivered.pushes[-1]
+
+
+def test_a_folded_digest_with_an_org_says_its_detections_are_recorded(
+        delivered, monkeypatch):
+    """The FOLDED sentence's positive arm: a scoped detection DOES write a row.
+
+    ``_abuse_message`` states, for the folded detections, whether they are on the
+    dashboard alert list — and the caller only writes a row when the detection
+    carried an org. Without this arm a mutant that always emitted the anonymous
+    wording would stay green (the conditional would be pinned on one side only,
+    which is exactly how the sibling activity sentence was left half-covered).
+    """
+    import tortoise.notify as notify
+
+    clock = [1_000.0]
+    monkeypatch.setattr(notify, "_delivery_now", lambda: clock[0])
+    for _ in range(3):
+        notify.notify_abuse("abuse_new_ip", {"org_id": "org-a"}, {"country": "ES"})
+    assert len(delivered.pushes) == 1
+
+    clock[0] += notify._ACTIVITY_DELIVERY_WINDOW_S + 1.0
+    notify.notify_abuse("abuse_new_ip", {"org_id": "org-a"}, {"country": "ES"})
+
+    assert len(delivered.pushes) == 2, delivered.pushes
+    folded_line = delivered.pushes[-1]
+    assert "2 further" in folded_line, folded_line
+    assert "all of them are recorded on the dashboard alert list" in folded_line, \
+        folded_line
+    assert "they are NOT recorded on the dashboard" not in folded_line, folded_line
+
+
+def test_a_folded_anonymous_digest_says_its_detections_are_not_recorded(
+        delivered, monkeypatch):
+    """The FOLDED sentence's negative arm: no org ⇒ no row, and it must say so.
+
+    The dashboard write is guarded by ``if org_id``, and ``notify_abuse`` maps a
+    missing one to ``"_"``. Telling an anonymous subject that its folded
+    detections "are recorded on the dashboard alert list" would assert an
+    attribution that does not exist — the defect class #14407 removes.
+    """
+    import tortoise.notify as notify
+
+    clock = [1_000.0]
+    monkeypatch.setattr(notify, "_delivery_now", lambda: clock[0])
+    for _ in range(3):
+        notify.notify_abuse("abuse_new_ip", {}, {"country": "ES"})
+    assert len(delivered.pushes) == 1
+
+    clock[0] += notify._ACTIVITY_DELIVERY_WINDOW_S + 1.0
+    notify.notify_abuse("abuse_new_ip", {}, {"country": "ES"})
+
+    assert len(delivered.pushes) == 2, delivered.pushes
+    folded_line = delivered.pushes[-1]
+    assert "2 further" in folded_line, folded_line
+    assert "they are NOT recorded on the dashboard" in folded_line, folded_line
+    assert "all of them are recorded on the dashboard alert list" not in folded_line, \
+        folded_line
 
 
 # ── 4. no incident channel ⇒ still deliver, and SAY why ─────────────────────
