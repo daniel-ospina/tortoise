@@ -8002,8 +8002,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # (`git diff --numstat origin/main...HEAD -- tortoise/sdk.py` prints nothing), so the two
     # heads carry ONE number and there is one present-tense fact to state. Typing it again
     # would repeat the very defect D5 exists to catch, so this row reads the line out of the
-    # tree and asserts the twins against it: a half-move still reds (count 1), an all-move
-    # still reds (count 0), and a shift of `sdk.py` reds on the number.
+    # tree and asserts the sentence against it. ⛔ THE RED CASES ARE `0` AND THE NUMBER, NOT `1`
+    # (#14386 review round 11, P3 — MEASURED): with ONE occurrence in the row, deleting or
+    # moving the sentence takes the count to 0 and reds, and a `sdk.py` shift reds on the
+    # derived number. An earlier cut of this comment said "a half-move still reds (count 1)",
+    # which was true only while the row carried TWO copies of the sentence — the duplicated
+    # clause this PR removed — so `1` is now the PASS state, not a red one.
     _rs_hits = [
         _n for _n, _line in enumerate(
             _EPIC_CITE_SOURCES["sdk"].read_text(encoding="utf-8").splitlines(), start=1)
