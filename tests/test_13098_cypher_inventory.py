@@ -48,7 +48,6 @@ sys.path.insert(0, str(ROOT))
 from tools import cypher_diff_harness as harness  # noqa: E402
 from tools import cypher_inventory as census  # noqa: E402
 
-
 # --------------------------------------------------------------------------- #
 # WHERE THE DOC-VS-TREE PIN RUNS (#2148/B1)
 # --------------------------------------------------------------------------- #
