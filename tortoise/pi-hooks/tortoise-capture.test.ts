@@ -6692,13 +6692,22 @@ test("the writer and the health line AGREE at the count ceiling (#14347 cyc2)", 
   //
   // MUTATION THAT REDS THIS: pass `addsEntry: prior !== undefined` -> the write
   // is ADMITTED while the health line says SATURATED.
+  //
+  // ⛔ THE FIXTURE SITS AT `maxEntries: 2`, ON TWO STEMS, ON PURPOSE (#14347
+  // review, P3 — the Python twin got this fix, this leg did not). At
+  // `maxEntries: 1` the SAME mutation measures GREEN: one readable plus one
+  // unreadable stem already put `parsedCount` (2) over the ceiling, so the
+  // mutation's `+0` instead of `+1` decided nothing and the named edit could not
+  // be discriminated. At 2 it IS the deciding term — the honest answer is
+  // 2+1=3 > 2 (refused) and the mutation's is 2+0=2 > 2 false (admitted).
+  // Measured on both sides of that move, not asserted.
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-ok"));
   const locked = join(spool, "entries", `${entryKey("sess-locked")}.meta.json`);
   writeFileSync(locked, JSON.stringify({ version: 1, session_id: "sess-locked" }));
   writeFileSync(join(spool, "entries", `${entryKey("sess-locked")}.turns.jsonl`),
     '{"role":"user","content":"x"}\n');
-  const bounds = { maxEntries: 1, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+  const bounds = { maxEntries: 2, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
   chmodSync(locked, 0o000);
   try {
     const health = captureHealthLine(spool, { bounds });
