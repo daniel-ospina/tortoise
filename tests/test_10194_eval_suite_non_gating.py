@@ -237,12 +237,13 @@ def _expected_legs(manifest: dict) -> set[str]:
     the `test (a)`/`test (b)` names the rail subtracts (and NOT a rename past the
     first two labels — measured green), and
     `test_ci_selection.py::test_push_legs_partitions_every_classified_file`
-    for the positional `a`..`k` sequence a matrix is built from (a NINE-shard
-    matrix, so a rename past the ninth label is caught by a THIRD seam, not this
-    one — the nine-shard stability arm that used to hold that measurement went
-    with the durations-map arithmetic cut; it previously measured index 10
-    renamed leaving both of the other seams green while
-    `test_push_legs_partitions_every_classified_file` went red).
+    for the positional `a`..`k` sequence a matrix is built from — ELEVEN labels,
+    matching `fast_shards: 11`. ⛔ The nine-shard stability arm that used to hold
+    the "rename past the last label" measurement went with the durations-map
+    arithmetic cut, so that measurement is no longer re-derived anywhere; the
+    `a`..`i` / NINE-shard wording it left behind was already stale against
+    `fast_shards: 11` on `main` and is corrected here rather than carried
+    through the rewrite of this paragraph.
     What this pin refuses is the DECLARED side: a leg `_gating_sets()` produces
     that is not declared here (a gating set added or moved below without
     `_LEG_KINDS`/this derivation following) reds, and the message names both
