@@ -55,18 +55,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 #: The server's own gate (`hosted_api._CAPTURE_MAX_IN_FLIGHT`).
 SERVER_LIMIT = 8
-#: `hosted_api._CAPTURE_CAPACITY_RETRY_AFTER_S`.
-RETRY_AFTER = 30
-
-CAPACITY_BODY = json.dumps({
-    "detail": {
-        "code": "capture_capacity_saturated",
-        "message": "capture capacity saturated",
-        "retry_after": RETRY_AFTER,
-        "in_flight": SERVER_LIMIT,
-        "limit": SERVER_LIMIT,
-    }
-})
 
 
 def _seed_spool(root: Path, sessions: int) -> None:
@@ -90,7 +78,7 @@ class CeilingServer:
     which is what really happened on a box with several sessions open).
 
     ``retry_after`` is advertised in the body. The real server advertises 30 s
-    (`hosted_api._CAPACITY_CAPACITY_RETRY_AFTER_S`); the measurement uses a
+    (`hosted_api._CAPTURE_CAPACITY_RETRY_AFTER_S`); the measurement uses a
     fraction of a second, because the WAIT is scaled and the MECHANISM is not —
     the drain still honours the server's own number instead of inventing one.
     """

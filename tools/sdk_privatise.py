@@ -1876,7 +1876,13 @@ SWEEP_NAMES = 66
 #: `python-ci-gate` for EVERY open PR — leaving it is a fleet-wide landing block, not this PR's
 #: inconvenience. `--check` exits 0 on the pair below with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11898, "8cf59d52af09e536")
+#: ⛔ RE-CUT AGAIN on a later fold of `origin/main`, and the +3 is `main`'s for the SAME
+#: reason: `--repin` on the resolved tree prints **11901 / `953c70c05b55923b`** where the
+#: pin said 11898, and a detached worktree at `origin/main` measures the IDENTICAL pair
+#: (11901 / `953c70c0`), so this branch contributes zero rows and the drift arrived on
+#: `main` between the two folds — the same class as the paragraph above, and the same
+#: repair (a tree that does not match its pin reds every PR that merges it).
+SWEEP_RESIDUE = (11901, "953c70c05b55923b")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

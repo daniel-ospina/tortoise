@@ -9840,8 +9840,13 @@ def _cmd_session_drain(api_key: str, api_url: str,
               "— serialized drain: one drainer per box (#14350)",
               file=_sys.stderr)
     if summary.claim_unavailable:
-        print("spool drain: the drain claim could not be created (unwritable spool "
-              "root) — this pass ran WITHOUT the one-drainer exclusion",
+        # ⛔ THE REASON IS THE SUMMARY'S, not a hard-coded sentence: this arm covers
+        # an unwritable root AND an unclearable obstruction at the claim path, and
+        # telling an operator "unwritable spool root" about a non-empty directory is
+        # a false diagnosis (review finding).
+        print("spool drain: the drain claim could not be created "
+              f"({summary.claim_unavailable_reason or 'unwritable spool root'}) — "
+              "this pass ran WITHOUT the one-drainer exclusion",
               file=_sys.stderr)
     if summary.lost_claim:
         print("spool drain: this pass no longer held the drain claim (a peer took "

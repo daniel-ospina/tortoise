@@ -15,6 +15,8 @@ import {
   appendFileSync,
   chmodSync,
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -91,6 +93,7 @@ import {
   claimIsStale,
   quarantineEntry,
   readCaptureStatus,
+  writeCaptureStatus,
   readDrainClaim,
   readDiscards,
   readSpoolEntry,
@@ -8073,4 +8076,69 @@ test("#14350: an UNREADABLE claim file is HONOURED, never drained beside", async
   chmodSync(claimPath, 0o600);
   assert.equal(summary.heldByClaim, true, "something is at the claim path — fail CLOSED");
   assert.equal(posts, 0, "nothing may be posted beside an unreadable claim");
+});
+
+test("#14350: the capacity cause renders the SAME words on both legs", async () => {
+  // Both legs persist `reason: "capture_capacity_saturated"` into the SAME
+  // `<spool>/status.json`, so the health line is a shared surface: it read
+  // `429 capture capacity` on the Python leg (`capture_spool._refusal_label`) and
+  // `429 capture_capacity_saturated` here, because this leg's `refusalLabel` had
+  // no capacity arm. The PR body publishes the first as the contract (R6: one
+  // protocol, a divergence is a defect).
+  // MUTATION THAT REDS THIS: delete the `reason === CAPTURE_CAPACITY_CODE` arm
+  // from `refusalLabel` — the line then carries the raw code.
+  const spool = tmpSpool();
+  // A REAL backlog: `queued` is measured from the spool, not read off the record,
+  // and the BLOCKED arm only renders when something is actually waiting.
+  for (let i = 0; i < 2; i += 1) writeSpoolEntry(spool, snapshot(`sess-capname${i}`));
+  writeCaptureStatus(spool, {
+    version: 1,
+    state: "blocked",
+    status: 429,
+    reason: CAPTURE_CAPACITY_CODE,
+    queued: 2,
+    updated_at: new Date(1000).toISOString(),
+  });
+  const line = captureHealthLine(spool, { apiKey: "tt_x" }).line;
+  assert.ok(
+    line.includes("429 capture capacity"),
+    `the capacity cause must render as "capture capacity": ${line}`,
+  );
+  assert.ok(
+    !line.includes(CAPTURE_CAPACITY_CODE),
+    `the raw code must not leak into the operator line: ${line}`,
+  );
+});
+
+test("#14350: the renew install is CREATE-IF-ABSENT, so it cannot clobber a peer", async () => {
+  // `renew` installs its refreshed record with `linkSync` after moving the old one
+  // aside (`takedownClaim`), which makes the refresh a compare-and-swap: a peer
+  // that claimed inside that window makes the install fail `EEXIST` and ITS record
+  // stands. `renameSync` — what this used to do — replaces unconditionally, so the
+  // peer's fresh claim is destroyed and both processes hold the spool.
+  //
+  // ⛔ SCOPE, stated rather than implied: this pins the PROPERTY the CAS depends on
+  // (an existing claim path cannot be overwritten by the install). The full
+  // interleaving (peer claims between the takedown and the install) is covered
+  // deterministically on the Python twin
+  // (`test_a_RENEW_never_clobbers_a_peer_that_claimed_in_the_window`), which drives
+  // the same `_takedown` arbitrage; a single-threaded test here cannot open that
+  // window without injecting into the module under test.
+  // MUTATION THAT REDS THIS: install with `renameSync` — it does NOT throw EEXIST.
+  const spool = tmpSpool();
+  const claimPath = join(spool, "drain.claim");
+  writeFileSync(claimPath, '{"token":"peer"}\n');
+  const tmp = join(spool, "drain.claim.tmp-probe");
+  writeFileSync(tmp, '{"token":"ours"}\n');
+  assert.throws(() => linkSync(tmp, claimPath), /EEXIST/);
+  assert.equal(
+    JSON.parse(readFileSync(claimPath, "utf8")).token, "peer",
+    "the existing claim must be untouched",
+  );
+  // and the complementary half: `renameSync` WOULD have replaced it.
+  renameSync(tmp, claimPath);
+  assert.equal(
+    JSON.parse(readFileSync(claimPath, "utf8")).token, "ours",
+    "rename replaces unconditionally — which is why the install cannot use it",
+  );
 });

@@ -4951,8 +4951,14 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: a licence, and it does NOT generalise: from the moment 33 reaches `main` the
 #: entries are FROZEN and the next byte change needs a NEW generation. The READ half
 #: is untouched throughout (`904d2742…`), exactly as generation 31's re-cut did.
+#: ⚠️ …and the list above STOPS at `9bc74585`, because the next byte change was not a
+#: commit on either side: it was the MERGE of the two lanes' cycles. ⛔ A MERGE IS A
+#: BYTE SET NEITHER PARENT HASHED, so no row above describes the bytes this pin names
+#: — the digest is re-derived from the merged tree on every merge
+#: (`sha256sum tortoise/pi-hooks/tortoise-capture.ts`), never carried over from
+#: either side. A pin that survives a merge unexamined is a pin nobody derived.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "a843e3a0e74c9e9edf70aa9b801421e3dc4b44701432bbd114c2a9eaf056f878")
+    33, "3852e172f3e0ce4d8247d655718d99387e0a8ad006a4618785a46d0745540b9a")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5138,7 +5144,7 @@ _GENERATION_DIGESTS = {
     # byte-indistinguishability that made the first attempt vacuous (rename + link
     # preserves inode, mtime and content) is why the order has to be observed at the
     # call site rather than at the filesystem.
-    33: "a843e3a0e74c9e9edf70aa9b801421e3dc4b44701432bbd114c2a9eaf056f878",
+    33: "3852e172f3e0ce4d8247d655718d99387e0a8ad006a4618785a46d0745540b9a",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

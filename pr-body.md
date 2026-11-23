@@ -87,17 +87,17 @@ The last rows matter as much as the first: on today's main the free server is **
 * **Class:** `code`
 * **R1** — two concurrent UNTARGETED drains cannot both POST to one spool; the survivor is a no-op that reports who holds it, and it writes no durable status.
 * **R2** — a claim is reclaimed when its holder is provably gone or its lease expires, and a slow holder can never delete a successor's claim.
-* **R3** — a `429` capacity refusal charges no entry (`attempts`, `next_attempt_at_ms` untouched) and ends the pass; the pass retries the *same* entry after a bounded yield.
+* **R3** — a `429` capacity refusal charges no entry (`attempts`, `next_attempt_at_ms` untouched) and ends the pass; on the Python leg the pass retries the *same* entry after a bounded yield, and on the Pi leg it ends and lets the next opportunity continue (its pass is `await`ed on `session_shutdown`, so it must not sleep). Both legs charge nothing — that is the rule; the yield is the Python leg's implementation of it.
 * **R4** — no behaviour change for a spool whose box is not saturated and whose drain is the only one running (guarded: the free-server measurement and the existing suites).
 * **R5** — nothing here writes a raw captured turn to the graph, moves extraction into the drain, or changes the spool's on-disk format.
-* **R6** — both legs implement ONE protocol; a divergence is a defect.
+* **R6** — both legs implement ONE protocol; a divergence is a defect. **The one deliberate asymmetry is R3's yield** (Python sleeps and retries, Pi ends the pass), stated here rather than left for a reviewer to re-derive as a defect; everything else — the claim record and its version, the staleness rules, the compare-and-delete takedown, the capacity rule, the on-disk unit, the refusal's rendering — is the same on both sides and pinned by cross-leg tests that run one leg's predicate under the other's runtime.
 
 ## Tests
 
 ```text
-# 47 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
+# 51 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-47 passed
+51 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
@@ -105,12 +105,12 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-736 passed
+740 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-300 pass / 0 fail
+305 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -197,26 +197,48 @@ required set, so it cannot block the merge; it stays red only on that `main`-sid
 | **P2** `release` could dispose of a claim it did not own (three-process interleaving) | **fixed**: it reads the token first and returns `False` without touching the file when the claim is not ours; the takedown stays for the ours branch. A new test pins that a not-ours release does not even change the file's inode/mtime. |
 | **P2** an out-of-range-but-finite `expires_at` raised `OverflowError` out of `flush_spool` (`time.gmtime` outside its try/finally) and, being honoured by rule 2 as never-expiring, blocked the spool PERMANENTLY | **fixed**: the format is guarded, and a test builds that record end-to-end and asserts the operator line still renders. |
 | **P2** the Pi leg could run UNCLAIMED when both takeover attempts lost a race (path momentarily empty → read as "cannot create") | **fixed**: `acquireDrainClaim` reports `state.raced` and `flushSpool` fails CLOSED on it, as the Python leg does for any `None` from `acquire`. A test pins the OTHER arm (an unmakeable root is NOT a lost race) so the documented "run unclaimed and say so" cannot be swallowed by the flag. |
-| **P2** `renew`'s post-write read-back does not close the takeover race it claimed to — the replace IS the clobber | **record corrected, not changed.** Reproduced (a peer record installed between the guard read and the replace is lost; `renew` returns `True`). The comment now states exactly what the read-back covers and what it does not; the residual is below. |
+| **P2** `renew`'s post-write read-back does not close the takeover race it claimed to — the replace IS the clobber | **record corrected, not changed.** Reproduced (a peer record installed between the guard read and the replace is lost; `renew` returns `True`). The comment now states exactly what the read-back covers and what it does not; the residual is below. ⚠️ **SUPERSEDED at cycle 6**: the residual below is CLOSED on both legs rather than documented — see the closed residual. |
 | **P2** `DRAIN_MAX_IN_FLIGHT` is read by no code and bounds 1 POST per PASS, while a TARGETED pass takes no claim | **record corrected**: the constant's docstring now says the ceiling is per pass, that the claim is what serialises passes, that the box's worst case is **2** in that overlap, and that no test asserts the per-pass property itself. |
+
+**Cycle 6** (a fresh-context reviewer at `a61c123644`, merged with a peer lane's
+overlapping cycle-5 work at `818505a9`) — the two lanes reviewed the same branch
+concurrently and fixed overlapping findings; this is the merged state, with each
+finding fixed once and the duplication removed rather than merged as-is.
+
+| finding | disposition |
+|---|---|
+| **P1** an UNCLEARABLE obstruction at the claim path collapsed into *contention*, so the drain wedged forever naming a holder that does not exist, and `claim_unavailable` was unreachable | **fixed** (this cycle only): the `DrainClaimUnavailable` arm branches on the object's TYPE — a regular file we cannot read stays `held_by_claim`, anything that cannot be a claim record (non-empty directory, FIFO, device) sets `claim_unavailable`, runs the pass unclaimed, and names the path in the new `claim_unavailable_reason`. The operator line prints that instead of a hard-coded "unwritable spool root", which was a false diagnosis of a real failure. Two `flush_spool`-level tests; the mutant (`S_ISREG` → `True`) reds the obstruction case and the fail-closed case is pinned separately. |
+| **P1** `renew`'s verify-after-write reads back the bytes it just wrote, so it cannot close the race its own comment claims — a peer's fresh claim is clobbered and two drainers hold the spool | **fixed, both legs** — see the closed residual below. The peer lane had recorded this as a residual ("record corrected, not changed"); the measurement shows the cost argument does not hold, so it is closed instead of documented. |
+| **P2** the Pi leg rendered the capacity cause as the raw code (`429 capture_capacity_saturated`) while Python rendered `429 capture capacity` — over the same `status.json` | **fixed**: `refusalLabel` gained the capacity arm. A cross-leg test renders the health line on the Pi side and asserts the words; the mutant reds it with the raw code. |
+| **P2** `""` was "untargeted" for the claim and the filter but "targeted" for the probe guard, so an empty session id drained probes too | **fixed**: one predicate (`not only_session_id`) at all three sites, which is what the docstring above already claimed held. |
+| **P2** the `flush_spool` docstring was left grammatically broken where the `""` paragraph was inserted | **fixed**: the two fragments are re-joined and the untargeted/targeted rule reads in one sentence. |
+| **P2** R3/R6 were stated as applying to *both legs* while only Python yields and retries | **fixed in the contract**: R3 and R6 now state the per-leg yield and why, so a future reviewer cannot re-derive the asymmetry as a defect. |
+| **P2** the measurement harness carried two dead constants and cited a constant that does not exist (`_CAPACITY_CAPACITY_RETRY_AFTER_S` for `_CAPTURE_CAPACITY_RETRY_AFTER_S`) | **fixed**: the unused `RETRY_AFTER`/`CAPACITY_BODY` are deleted and the name is corrected. |
+| **P2** the receipts in this record were stale | **fixed**: re-measured at this head (51 / 740 / 302), and `WORKTREE-REPORT.md` carries the commands verbatim. |
 
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `35235567…`, re-cut once more for the export-only test seam above;
-  the read half moved `708b6a…`→`904d2742…` because its
-  generation MARKER moved 32→33 with the pair) instead of
+  (capture half `53f085bc…`, re-cut at every byte change: for the export-only test seam, for
+  the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
+  changes, and for the MERGE of the two — a merge is a byte set neither side
+  hashed, so the digest is always derived from the merged tree; the read half moved
+  `708b6a…`→`904d2742…` because its generation MARKER moved 32→33 with the pair)
+  instead of
   spending a generation 34 on a refinement of the same unreleased seam. From the
   moment 33 reaches `main` the entries are frozen and a byte change needs 34.
-* **A `renew` that lands inside the read → replace window can overwrite a peer's
-  fresh claim** (reproduced; cycle 5, P2). The window is closed on the other side —
-  a peer that takes over AFTER our replace is seen as "not ours" — but not on this
-  one: two drainers can coexist until the loser's next `renew_if_due` (≤ TTL/3 ≈
-  40 s). Closing it needs a compare-and-swap on the inode, which POSIX does not
-  offer directly; the takedown's move-aside compare is one, and using it on the
-  per-entry refresh path would add a rename + read to every renew. It is bounded by
-  the lease rather than unbounded, and it is stated here rather than implied away.
+* ~~**A `renew` that lands inside the read → replace window can overwrite a peer's
+  fresh claim**~~ — **CLOSED at cycle 6, on both legs.** Cycle 5 recorded this as a
+  residual on the argument that a compare-and-swap would "add a rename + read to
+  every renew". That argument does not survive the measurement: `renew` runs from
+  `renew_if_due` at TTL/3 intervals (≈40 s), NOT per entry, so the added `rename`
+  the takedown already performs is not on any hot path — and the cost of being
+  wrong was two drainers on one spool, which R1 forbids outright. The refresh is
+  now a real CAS on the inode (takedown-aside → byte compare → `link` install;
+  `EEXIST` means the peer's claim stands), so the window is gone rather than
+  bounded. A test drives the real `_takedown`, injects the peer's claim, and
+  asserts the peer's wins; the mutant (`link` → `os.replace`) reds it.
 * **The per-pass ceiling is 1 POST, and a box can hold 2** when a TARGETED pass (a
   live session's own shutdown filing, which takes no claim by design) overlaps the
   claim holder. `DRAIN_MAX_IN_FLIGHT` is a stated ceiling read by no code; the claim

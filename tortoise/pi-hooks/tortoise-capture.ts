@@ -5537,16 +5537,49 @@ export function acquireDrainClaim(
       token,
       renew(nowMsArg?: number): boolean {
         const at = nowMsArg ?? Date.now();
-        const current = readDrainClaim(dir);
-        if (!current || current.token !== token) return false;
-        // ⛔ An ALREADY-EXPIRED claim is never resurrected (review finding):
-        // `renew` is a read-then-`rename` with no compare, so a holder that
-        // overran its lease is still the token owner on disk and would overwrite
-        // the successor a peer legitimately installed — returning `true` while
-        // two drainers exist. Refusing converts that into "no longer the holder",
-        // which the caller already handles by stopping.
-        const expires = (current as unknown as Record<string, unknown>).expires_at;
+        // Read the RAW record first: the CAS below compares BYTES, and a
+        // re-serialised object is not proof of what was on disk. lstat-gated, so a
+        // FIFO at the claim path cannot hang the refresh (the Python twin's
+        // `read_claim` had that bug; see `readDrainClaim`).
+        let rawNow: string;
+        try {
+          if (!lstatSync(path).isFile()) return false;
+          rawNow = readFileSync(path, "utf8");
+        } catch {
+          return false;
+        }
+        let current: unknown;
+        try {
+          current = JSON.parse(rawNow);
+        } catch {
+          return false;
+        }
+        if (!current || typeof current !== "object" || Array.isArray(current)) return false;
+        if ((current as Record<string, unknown>).token !== token) return false;
+        // ⛔ An ALREADY-EXPIRED claim is never resurrected (review finding): a
+        // holder that overran its lease is still the token owner on disk and must
+        // not overwrite the successor a peer legitimately installed.
+        const expires = (current as Record<string, unknown>).expires_at;
         if (typeof expires === "number" && at >= expires) return false;
+        // ⛔ THE REFRESH IS A COMPARE-AND-SWAP ON THE INODE, not a read followed by
+        // a `rename`. The earlier version read, renamed, and then READ BACK to
+        // verify — which reads the bytes this process just wrote, so it always
+        // matched and the guard was vacuous. The race it claimed to cover is real
+        // (a peer whose takeover lands between our read and our rename has its
+        // fresh claim clobbered, and both processes then hold the spool for up to
+        // `ttl/3`), and the trigger is a renewal landing at the deadline. Reusing
+        // `takedownClaim` (the same arbiter `acquire` uses) and installing the
+        // refresh with `linkSync` makes the window a real CAS: `EEXIST` means a
+        // peer claimed in it and THEIR claim stands, which is the safe direction.
+        // The Python twin states the same reasoning; this is one protocol (R6).
+        const moved = takedownClaim(path, token);
+        if (!moved) return false;
+        if (moved.raw !== rawNow) {
+          // We displaced a NEWER record than the one we judged — dispose puts it
+          // back, and we are no longer the holder.
+          disposeQuarantine(moved.quarantine, moved.raw, path, rawNow);
+          return false;
+        }
         const next: DrainClaimRecord = {
           ...record,
           started_at: record.started_at,
@@ -5555,22 +5588,27 @@ export function acquireDrainClaim(
         const tmpPath = join(dir, `${DRAIN_CLAIM_FILE}.tmp-${process.pid}-${token}`);
         try {
           writeFileSync(tmpPath, `${JSON.stringify(next)}\n`, { mode: 0o600 });
-          renameSync(tmpPath, path);
-        } catch {
-          try { unlinkSync(tmpPath); } catch { /* best effort */ }
+          try {
+            linkSync(tmpPath, path);  // create-if-absent: a peer's claim is never clobbered
+          } finally {
+            try { unlinkSync(tmpPath); } catch { /* best effort */ }
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+            // A peer holds the claim now. Their record STANDS; ours is obsolete.
+            disposeQuarantine(moved.quarantine, moved.raw, path, rawNow);
+            return false;
+          }
           // A failed WRITE is not "not ours" (review finding): reporting it as a
           // lost claim aborts a pass that still owns the spool AND parks the claim
           // with a live pid, so every later pass reads `heldByClaim` for up to the
-          // full lease while the operator is told a peer took it.
+          // full lease while the operator is told a peer took it. Put ours BACK.
+          try { linkSync(moved.quarantine, path); } catch { /* a peer has it */ }
+          try { unlinkSync(moved.quarantine); } catch { /* best effort */ }
           const still = readDrainClaim(dir);
           return !!still && still.token === token;
         }
-        // ⛔ VERIFY AFTER WRITING (the Python twin states the reasoning): the write
-        // REPLACES the inode and the read above is not a compare, so a peer's
-        // takeover landing in that window would have its fresh claim overwritten
-        // while this returns `true` — two drainers (found in review).
-        const written = readDrainClaim(dir);
-        if (!written || written.token !== token) return false;
+        disposeQuarantine(moved.quarantine, moved.raw, path, rawNow);
         renewedAt = at;
         return true;
       },
@@ -6029,9 +6067,18 @@ function spoolHealthLine(
  * allowance) stays exactly that. A DIFFERENT recorded category is named as
  * itself — a spend cap reported as "quota" sends the owner to buy a plan that
  * cannot lift it.
+ *
+ * ⛔ THE CAPACITY ARM IS THE PYTHON TWIN'S (`capture_spool._refusal_label`),
+ * and its absence here was an R6 divergence over a file both legs write: both
+ * legs persist `reason: "capture_capacity_saturated"` into the same
+ * `<spool>/status.json`, so the health line read
+ * `429 capture capacity` on the Python leg and `429 capture_capacity_saturated`
+ * on this one — and the PR body's "Named, durably" row states the first as the
+ * contract (review finding).
  */
 function refusalLabel(reason: string | undefined): string {
   if (!reason || reason === QUOTA_EXCEEDED_CODE || reason === "402") return "quota";
+  if (reason === CAPTURE_CAPACITY_CODE) return "capture capacity";
   return reason;
 }
 
