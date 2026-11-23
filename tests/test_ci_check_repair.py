@@ -4604,16 +4604,33 @@ def test_a_cite_written_in_an_UNMATCHED_shape_is_still_seen(tmp_path):
 
     The first version matched only `git show --stat <ref>`; `git -C . show --stat …`
     in the same document was invisible while the pass stayed green.
+
+    ⛔ THE FIXTURE ITSELF MUST READ GREEN TO THE NARROWER REGEX, or this arm proves
+    nothing. An earlier cut of this test cited a bogus sha in the OLD shape up front,
+    so the pre-fix tool already returned 1 for the WRONG cite and `assert rc == 1`
+    passed against it — measured, pre-fix: `(1, ['… cited `git show --stat 8abf4844` —
+    8abf4844 does not resolve …'])`, i.e. the arm was silent about the widening it
+    exists to pin. The first cite therefore names this fixture's OWN commit
+    (resolvable, and `git show --stat` of the empty root commit prints nothing), so
+    only the appended `git -C . show` cite can turn the answer red — and the finding
+    is asserted to NAME that cite, not merely to exist.
     """
     from tools import ci_check_repair as R
-    root = _citation_tree(tmp_path, "8abf4844")
+    root = _citation_tree(tmp_path, "placeholder")
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
     doc = root / "docs" / "ops" / "ci-wall-clock.md"
-    doc.write_text(doc.read_text() +
-                   "… `git -C . show --stat deadbeef0 -- docs/ops/ci-wall-clock.md` …\n")
+    doc.write_text(
+        f"… `git show --stat {sha} -- docs/ops/ci-wall-clock.md` is empty …\n"
+        "… `git -C . show --stat deadbeef0 -- docs/ops/ci-wall-clock.md` …\n")
     rc, findings = R.doc_citation_defects(root)
     assert rc == 1, (
         "a bogus sha written in a different (still conventional) command shape must "
         f"not be invisible, got rc={rc}: {findings}")
+    assert len(findings) == 1 and "deadbeef0" in findings[0], (
+        "the ONLY finding must be the `git -C . show` cite: a second finding (or one "
+        "against the resolvable first cite) means the fixture is red for the wrong "
+        f"reason and this arm would pass on the pre-fix tool too: {findings}")
 
 
 def test_a_host_without_git_is_UNVERIFIED(tmp_path, monkeypatch):
