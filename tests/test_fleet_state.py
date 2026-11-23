@@ -35,10 +35,12 @@ import pytest
 # on the path where the FIXTURE — not the census — is what went away.
 #
 # `_HARNESS_PREFIX` is imported privately ON PURPOSE: it is the single source of the
-# `HARNESS DEFECT [#5049]` family marker, and every in-tree `HarnessDefect` raise site
-# (`tests/_verdict.py:458`, `:632`) renders it from this same constant. Duplicating the
-# literal here would let the two drift, and the marker is what makes a harness fault
-# attributable in a log rather than only by its exception class.
+# `HARNESS DEFECT [#5049]` family marker, and every in-tree `HarnessDefect` raise site renders it
+# from this same constant — `tests/_verdict.py` and this file's three arms (census-error, crash,
+# clean-exit); `grep -rn 'raise HarnessDefect(' --include=*.py tests/ tools/ tortoise/` is the
+# census, re-measured rather than listed here, because a list written into prose goes stale the
+# moment a fourth arm lands. Duplicating the literal would let the two drift, and the marker is
+# what makes a harness fault attributable in a log rather than only by its exception class.
 from tests._verdict import _HARNESS_PREFIX, HarnessDefect, inconclusive
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -4241,19 +4243,15 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
     crash signal — must not go green by skip (the false PASS the first fix nearly shipped, which
     the `rc >= 0` arm guards and the crash arm guards from the other side).
 
-    ⛔ EACH ARM CARRIES ITS OWN MARKER, NOT THE SHARED FAMILY ONE (#12039 review cycle 2). Both
-    substrate arms used to assert `HARNESS DEFECT [#5049]`, so the `-11` param could not tell a
-    CRASH from a clean exit — measured: DELETING the crash arm (so a SIGSEGV is reported as
-    "exited rc=-11 on its own … the fixture never ran its command") left all four params GREEN.
-    The shared marker pinned "a fixture death FAILs", never "a crash is diagnosed AS a crash".
-    So the crash arm's marker is the phrase only it can produce (`CRASHED on`) and the clean
-    exit's is `exited rc=`. Every `HarnessDefect` message still carries the `HARNESS DEFECT
-    [#5049]` family marker its contract requires — that is a separate assertion, below.
-
-    Each `HarnessDefect` message must carry the `HARNESS DEFECT [#5049]` family marker — the
-    contract `tests/_verdict.py:56-59` states — or a triager sees the FAIL only by its exception
-    class. That marker is the discriminating assertion in this test: without it the two
-    substrate arms pass on the pre-fix tree, since the classification itself was already right.
+    ⛔ EACH ARM CARRIES TWO MARKERS WITH TWO DIFFERENT JOBS (#12039 review cycles 2 and 3).
+    The ARM-SPECIFIC phrase is the DISCRIMINATOR; the family marker is a separate CONTRACT. Both
+    substrate arms used to assert only `HARNESS DEFECT [#5049]`, which discriminates nothing —
+    measured: DELETING the crash arm (so a SIGSEGV is reported as "exited rc=-11 on its own …
+    the fixture never ran its command") left all four params GREEN, because the shared marker
+    pinned "a fixture death FAILs" and never "a crash is diagnosed AS a crash". So the crash
+    arm now asserts the phrase only it can produce (`CRASHED on`) and the clean exit asserts
+    `exited rc=`. The family marker (`tests/_verdict.py` documents the contract) is asserted
+    SEPARATELY below, so an arm cannot drop the prefix merely to look unique.
 
     The elapsed-time assertion pins the poll's EARLY BREAK (`_child_exited`, `be6161b7`): a dead
     child must end the loop on the first sample, not after the 10 s budget. The ALIVE arm is the
