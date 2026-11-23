@@ -6911,6 +6911,29 @@ def test_edge_census_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_extractor_cost_measure_tool_change_fails_closed_to_full():
+    # `#14343`: tools/extractor_cost_measure.py owns
+    # tests/test_extractor_cost_measure.py and the lever's own
+    # tests/test_extractor_embed_json_14343.py. Same silent-drop class as the
+    # carve-outs above, and it was MEASURED on both arms, not predicted: with
+    # the TOOL_CARVEOUTS entry, `--changed-files tools/extractor_cost_measure.py`
+    # returns the FULL matrix (`test_files == "ALL"`); with the entry deleted it
+    # returns `surfaces: []`, `full: false` and a 106-file list holding NEITHER
+    # suite, so the instrument's own pins would never run on the PR that changes
+    # the instrument. No SOURCE_PATTERNS entry matches the path, so it takes the
+    # unknown-path branch -> full matrix (fail closed).
+    r = _sel(["tools/extractor_cost_measure.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+    # ⛔ AND THE ENTRY ITSELF. `select()`'s three values above would also hold
+    # if the path matched a SOURCE_PATTERN that happened to mean FULL — the
+    # entry is the thing that makes the path KEPT, and deleting it from the
+    # tuple is the mutation this pin exists to redden (review cycle 5 measured
+    # that removal reddening NOTHING before this line existed).
+    assert "tools/extractor_cost_measure.py" in cs.TOOL_CARVEOUTS
+
+
 def test_embedded_evidence_tool_change_fails_closed_to_full():
     # #3827: tools/embedded_evidence.py owns tests/test_embedded_evidence.py.
     # Same silent-drop class as the preflight carve-out above: the flat "tools/"
@@ -10638,6 +10661,11 @@ ROWED_BY_THIS_FOLD = (
     # file nobody listed has no `durations:` row and nothing reds (#14086 cycle-3 review, F1).
     "test_10893_capture_off_loop.py",
     "test_10893_pre_handler_parts.py",
+    # #14232 — the ingest ACK split's module, registered on `api` + `core` by this
+    # fold with its `durations:` row in the same commit. Listed here for the reason
+    # every entry above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a
+    # file nobody listed has no `durations:` row and nothing reds.
+    "test_14232_ingest_ack_split.py",
     # #14185 (PR #14222) — the record fold's OWN loop: the projection worker and the seven
     # conditions under which a write may be deferred (four correctness arms, the
     # unimportable loop, and the two switches). A file this fold ADDED and registered
@@ -10648,6 +10676,19 @@ ROWED_BY_THIS_FOLD = (
     # reading: the `durations` refresher samples push-to-main runs, so a file a PR ADDS
     # cannot have a junit figure yet (#3400/#4348).
     "test_14185_projection_worker.py",
+    # #14343 (this PR) — the S4 embed-serialization lever's own pins (`_embed_json_kwargs`
+    # in `tortoise/extractor_v2.py`: the default is the pre-change bytes, garbage cannot
+    # coerce, compact changes only the layout, the read is per CALL). A file this fold
+    # ADDED and registered on `core`, which is what puts it in `fast_pool()`, and it
+    # shipped WITHOUT a `durations:` row — `--integrity` stays green over the absence (a
+    # 0.90 RATIO check with ~70 files of headroom), so nothing reddened and the file packed
+    # at `DEFAULT_FAST_WEIGHT` as an unread default, the #3400 regression this ENTRY RULE
+    # exists for. Found by the review that rebuilt `integrity()`'s predicate from the head
+    # manifest instead of reading the diff; the same defect its two sibling rows above
+    # record surviving a round each. ⛔ The row is the flat `DEFAULT_FAST_WEIGHT`, not a
+    # local reading — the refresher samples push-to-main runs, so a file a PR ADDS cannot
+    # have a junit figure yet (#3400/#4348).
+    "test_extractor_embed_json_14343.py",
     # #14263 (PR #14284) — the relation-PAIR leg's falsifiers. A file this fold ADDED,
     # registered on `core` + `durations:` because `tortoise/relation_guards.py` matches
     # no `SOURCE_PATTERNS` entry (a module-only diff falls through to `core`) and
@@ -10664,6 +10705,18 @@ ROWED_BY_THIS_FOLD = (
     # tuple: `--integrity` was green and the ENTRY-RULE pin was VACUOUS for this
     # file, because it iterates THIS tuple and nobody had listed it.
     "test_expansion_fusion_14344.py",
+    # #14343 increment 2 (this PR) — the embed list's SHAPE pinned on the REAL emissions
+    # (character tripwire + round-trip + the keys-declared-once traps). Same defect its
+    # three sibling rows above record, on its third occurrence in this fold: the file first
+    # landed with NO manifest row, so `--integrity` redded the required `manifest-integrity`
+    # leg AND — the larger half — selection is surface->membership, so a file in no surface
+    # is selected by no diff class and the pin would never have run, not even on a diff to
+    # the `tortoise/extractor_v2.py` line it guards. Listed here for the reason every row
+    # above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody
+    # listed has no `durations:` row and nothing reds. ⛔ The row is the flat
+    # `DEFAULT_FAST_WEIGHT`, not a local reading — the refresher samples push-to-main runs,
+    # so a file a PR ADDS cannot have a junit figure yet (#3400/#4348).
+    "test_14343_embed_list_serialization.py",
 )
 
 
