@@ -43,6 +43,7 @@ import sys
 import tempfile
 import tokenize
 import types
+import warnings
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -6823,8 +6824,16 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # a split state, and nothing here is a figure to re-offset (this file's own header says
         # the failure it was written for was not a stale number but a FALSE CORRECTION — which is
         # what re-telling it as "the docstring kept `:17967`" invites). What the merge resolution
-        # with `588cf7aeb6` DROPPED is this ROW, and what makes the row necessary is main's WRAP:
-        # main puts `:15372` on its own line, where no row can scope it.
+        # with `588cf7aeb6` DROPPED is this ROW, and the WRAP that made it necessary is the
+        # BASE's, not `main`'s — MEASURED, because the sentence here said the inverse and was
+        # false: at the base `ff2218b6a776` line 1888 reads
+        # ``embed_list:`` (``:17970``) and ``if vet_enabled and complete_list:`` `` and the
+        # `(:15372)` falls on 1889, so no row scoping that phrase could see the second gate;
+        # `main`'s `#14269` JOINS them, so 1888 carries BOTH cites at `origin/main` and at this
+        # head (`grep -n 'if vet_enabled and complete_list:'` -> 1848 (the `_IDLE_CITES` value)
+        # and 1888 (the docstring, now one line)). The row therefore grades the PAIR here, and
+        # the "main's WRAP" this comment carried would have described a head that wraps where
+        # this one does not (#14269 review, P3 — corrected to the measurement, not to a side).
         # ⛔ AND IT IS NOT "THE ONLY OTHER ROW": FIVE other rows reach this docstring (AST span
         # 1871-1918) — those scoping on `with the flag ON` (1886), `follows at` (1884), `emits
         # literally` (1885), `so an acceptance test of` (1877) and `is different code` (1896).
@@ -8025,7 +8034,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 279 cite-shaped `:N` tokens (the `~50` these
+    # because D5 is one markdown LINE carrying 278 cite-shaped `:N` tokens (the `~50` these
     # comments used to say was about five times low, `265/50 ≈ 5.3`, not a tenfold one —
     # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
@@ -17765,10 +17774,10 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 279 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 278 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
-    any commit moving the line off `279` reds instead of leaving four comments behind (a
+    any commit moving the line off `278` reds instead of leaving four comments behind (a
     mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
     ⛔ The merge that brought `origin/main` in took THIS branch's row (its own 16 review rounds
     and the pins that read it live here), so the branch row's count is the one that holds; a
@@ -17979,7 +17988,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 279 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 278 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -18012,7 +18021,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 279 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 278 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
@@ -18361,6 +18370,19 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
                 ["git", "merge-base", "--is-ancestor", "HEAD", "origin/main"],
                 cwd=_REPO, capture_output=True, text=True).returncode == 0)
         _merged_state = _ancestor and not _in_diff
+        if _merged_state:
+            # ⛔ STATED, NOT SILENT (#14269 review, P3 — the observability half). A suppression
+            # that prints nothing is indistinguishable from an arm that ran and agreed, which is
+            # the shape this file treats as a false PASS elsewhere; the sibling `_registry_cache`
+            # arm records its merged reading the same way. `warnings.warn` rather than
+            # `pytest.skip` on purpose: the rest of this function still grades the named head and
+            # the anchor rows, and a skip would abandon those too.
+            warnings.warn(
+                "D5's `04-plan.md` membership is HISTORY at this head: `HEAD` is an ancestor of "
+                "`origin/main`, so `git diff --numstat origin/main...HEAD` is empty by "
+                "construction. The named-head and anchor halves above/below are still graded "
+                "(#14260 fix lane, finding 3).",
+                stacklevel=1)
         if not _merged_state:
             _expected = _stated[0] if _in_diff else _stated[1]
             assert _expected in text, (
@@ -18526,7 +18548,7 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
     re-pointed the `_dedup_content_candidates` / `alreadyDecided` pair and the `_extract_session_llm`
     docstring / empty-gate return dict pair, and restoring EITHER number to its pre-fix
     value left this file's whole D5 selection GREEN — `_D5_CURRENT_CLAIMS` named neither,
-    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 279 of
+    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 278 of
     them. A row whose own thesis is that a typed line number rots cannot re-point a figure
     and leave it unread; that is the class #13879 review named when a reverted address
     "reddened no arm at all".
