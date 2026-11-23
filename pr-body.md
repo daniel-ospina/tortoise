@@ -19,7 +19,7 @@ Two independent mechanisms, both measured:
 | **A stated ceiling** | `DRAIN_MAX_IN_FLIGHT = 1` POST in flight, *per box*. It is a cap on how much of the shared 8-slot budget the drain may hold (7 stay available to live captures), not a throughput knob, and no configuration raises it. |
 | **Capacity charges nobody** | `capacity_refusal()` + `_flush_one`'s early return: no `attempts` increment, no backoff armed, and the **pass stops**. It then yields, honouring the server's own `retry_after`, bounded at `DRAIN_CAPACITY_YIELDS = 3`, and retries **the same** entry — so a busy box starves nothing and a head never rises. |
 | **Named, durably** | The refusal is recorded as `blocked` + 429 + the code, so the health line reads `capture: BLOCKED (n queued, 429 capture capacity)` instead of a box that cannot file looking healthy. Self-healing on both ends. |
-| **Both legs** | The Pi seam implements the same file, the same three staleness rules and the same capacity rule; hook generation 32 → 33. A lock one leg cannot take is a lock the other leg does not have. |
+| **Both legs** | The Pi seam implements the same file, the same three staleness rules and the same capacity rule — including the same on-disk timestamp UNIT, which a review cycle proved was not true at first (seconds vs milliseconds: each leg stole the other's live claim). Hook generation 32 → 33. A lock one leg cannot take is a lock the other leg does not have, and four cross-leg tests now RUN the real TypeScript predicate under `node` against a claim this leg wrote (and the reverse) rather than trusting either leg's opinion of the other. |
 
 ### Why a lease and not a lockfile or a config promise
 
@@ -34,7 +34,8 @@ So: an atomically-created record (`os.link`/`linkSync` — create-if-absent, and
 
 | | `origin/main` @ f7b3e9a5 | this branch |
 |---|---|---|
-| POSTs during the 12 saturated passes | **2,399** (~200/pass) | **108** (9/pass) |
+| POSTs during the 12 saturated passes | **2,399** (~200/pass) | **48** (4/pass) |
+| POSTs in the whole run (incl. the free passes) | 2,400 | **108** |
 | of those, refused at the ceiling | **2,399** — every one | **48** |
 | max `attempts` reached (high-water) | **4** | **0** |
 | the free pass: pending | **60 → 60** | **60 → 0** |
@@ -94,9 +95,9 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```
-# 33 cases — the claim protocol, the capacity rule, the falsifier
+# 45 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-33 passed
+45 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
@@ -104,10 +105,12 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-722 passed
+407 passed
 
+# the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
+# seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-290 pass / 0 fail
+294 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -136,18 +139,50 @@ dispositioned:
 | **P2** `_summary_dict` receipt missing claim/capacity fields | **fixed** (`claim_unavailable`, `lost_claim` added to the two already there). |
 | **P2** `attempted`/`deferred` count one entry per yield | **documented, not changed**: they count POSTs and deferral *events*, and a pass that retried one entry four times made four POSTs. The counter says what it counts; the capacity line names the yields beside it. |
 
-Every fix has a test that reds without it — checked by reverting each primitive
-in turn (expiry guard, takedown order, reader tolerance), which is how the broken
-first version of the expiry test was found.
+**Cycle 2** (fresh reviewer at `d532a67d`) — 1 **P0**, 1 P1, 5 P2:
+
+| finding | disposition |
+|---|---|
+| **P0** the legs write `expires_at` in DIFFERENT UNITS — each steals the other's live claim | **fixed.** Python wrote seconds, the Pi leg milliseconds, and neither normalised: a live Python claim read as expired to the Pi leg (measured: `acquireDrainClaim` returned a claim over a live holder), and a Pi claim read here was live for ~55,000 years. One unit on disk (milliseconds, `TIMESTAMP_UNIT_MS`), `CLAIM_VERSION` 1→2 so a surviving v1 record is unattributable rather than misevaluated, and **two cross-leg tests that run the real TypeScript predicate under `node`** against a claim this leg wrote (and the reverse) — the class of test whose absence let it ship. Both red on a revert to seconds. |
+| **P1** an unreadable claim became a PERMANENT block | **fixed** (both legs), see cycle 3 — cycle 2's fix was incomplete and cycle 3 found it. |
+| **P2** `renew` was read-then-replace with no compare | **fixed**: verify-after-write, both legs. |
+| **P2** a pass that RECOVERED from a capacity refusal still recorded `blocked`/429 | **fixed**: the durable record and the operator line key on `capacity_stopped`. |
+| **P2** `capacity_refusal` relabelled the server's `ingest_rate_limited` 429 | **fixed** in Python (server's `detail.code` wins); the Pi leg was found still hardcoding it in cycle 3 and fixed with a both-legs test. |
+| **P2** the Pi leg's restore path was untested (240/240 green with it deleted) | **fixed**: the slow-holder-vs-successor test is ported; it reds when the restore is removed. |
+| **P2** the receipt hardcoded `max_attempts: 0` in its "further cycle" round | **fixed**: measured. |
+
+**Cycle 3** (fresh reviewer at `c214f341`) — 1 **P0**, 1 P1, 5 P2:
+
+| finding | disposition |
+|---|---|
+| **P0** a transient READ error deleted a LIVE claim | **fixed.** `_read_raw` answered `None` for every `OSError`, and `None` routed to "clear the obstruction", which unlinked any regular file — so EMFILE/EIO/EACCES on a perfectly good claim handed the spool to a second process while the first was still draining (reproduced with one read failure). The decision is now taken from `lstat`'s TYPE: a regular file we could not read is honoured, only a non-regular object is cleared. Both legs. |
+| **P1** the Pi leg hardcoded the capacity code, relabelling `ingest_rate_limited` in the SHARED `status.json` | **fixed** (`serverRefusalCode`), with a test that feeds ONE refusal body to BOTH legs and compares. |
+| **P2** a FIFO at the claim path hung every drain forever | **fixed**: reads are `lstat`-gated to regular files, so a FIFO answers immediately and is cleared as an object. |
+| **P2** `holder(root)` was called twice → `AttributeError` on the contention path | **fixed**. |
+| **P2** `only_session_id == ""` untested (the cycle-1 fix could be reverted silently) | **fixed**: one case per leg; `""` drains everything, so it must take the claim. |
+| **P2** `renew` advanced `started_at` here but not in the Pi leg | **fixed**: pinned in the cross-leg test. |
+| **P2** this PR record was stale (counts, cycle log, the POST row, the digest) | **fixed** (this update). |
+
+Every fix has a test that reds without it. Cycle 3 reverted **16 primitives** and
+all 16 red — and that check is how the broken first version of the expiry test
+(cycle 1) and the untested quarantine name were found.
 
 ## Residuals, stated
 
 - **Generation 33 is introduced by this PR and has never shipped**, so its recorded
-  seam digest in `test_capture_install.py` was updated in place at the final head
-  (capture half `a2314416…`; the read half's bytes did not move) instead of
+  seam digest in `test_capture_install.py` was updated in place at each head
+  (capture half `d0e8e41d…`; the read half moved `708b6a…`→`904d2742…` because its
+  generation MARKER moved 32→33 with the pair) instead of
   spending a generation 34 on a refinement of the same unreleased seam. From the
   moment 33 reaches `main` the entries are frozen and a byte change needs 34.
 - **A wedged pass holds the claim until its lease (≤120 s).** That is what a lease is; the bound is derived from the transport (`REQUEST_TIMEOUT_MS` 10 s / `urlopen` 30 s), and a real fetch always ends. A hung *mock* does not — which is why the #2100 case above had to release it.
+- **A claim we cannot READ is HONOURED, not taken over** (both legs): a transient
+  local error on a regular claim file is not evidence about its holder, and the
+  same reasoning applies to anything at the claim path that is not a regular file
+  (it is cleared as an object, never read — reading a FIFO blocks forever). The
+  cost is that a permanently unreadable claim file blocks the drain until a human
+  looks, which is the fail-closed direction the issue's "never two drainers" rule
+  prefers over the alternative.
 - **A targeted filing is exempt from the claim.** It is one POST, so the ceiling (1 slot) is respected; the exemption buys the live session's own shutdown filing never being queued behind a backlog.
 - **The Pi leg does not yield on a capacity stop** — it ends the pass and lets the next opportunity continue, because its pass is `await`ed on `session_shutdown` and must not sleep. Both legs charge nothing. This asymmetry is deliberate and is stated in the code.
 - **A non-`capture_capacity_saturated` 429 is also treated as box-level** (status triggers, code names). Narrowing to the typed category would leave the defect alive on any server that does not send one.
