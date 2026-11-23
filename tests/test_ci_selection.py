@@ -13751,7 +13751,12 @@ def _emission_block_claims(
     The subject is bounded to that header so a shard-count sentence elsewhere in the
     1.18 MB map cannot be mistaken for this block's claim.
     """
-    header = manifest_text.split("\nfast_shards:", 1)[0]
+    key = re.search(r"^fast_shards:", manifest_text, re.MULTILINE)
+    assert key is not None, (
+        "the manifest carries no `fast_shards:` key, so the bound below is the WHOLE 1.18 MB "
+        "file rather than the block this guard claims to read — fail closed here instead of "
+        "silently widening the subject a renamed key would hand it.")
+    header = manifest_text[:key.start()]
     # Comment line breaks are PRESENTATION — a sentence wraps at will — so join the block
     # into one string before reading it; otherwise a figure that happens to land on the
     # next line makes a claim unread, which is the no-op-gate class this guard's own
@@ -13768,10 +13773,19 @@ def _emission_block_claims(
             # the caller reds rather than silently believing one side.
             names = names | {f"<count says {stated_n}>"}
         est = float(m.group("est"))
+        if est in groups:
+            # A SECOND clause at the same `est` merges under `|` into a claim LARGER than
+            # either sentence makes, so a restatement of a subset (`two at 835.7 s (a, k)`
+            # beside the clause that already names five) would be invisible, and a
+            # duplicated one would grade as if it were a single statement. Mark the repeat
+            # so the caller reds rather than believing a claim the block does not make.
+            groups[est] = groups[est] | {f"<est {est} stated twice>"}
+        else:
+            groups[est] = set()
         # `|` rather than `set.update`: a `.update(` on a receiver this sweep cannot
         # type is one more member of the `tools/sdk_privatise.py` residue pin, and a
         # test is not a reason to move a pinned count.
-        groups[est] = groups.get(est, set()) | names
+        groups[est] = groups[est] | names
     ceil_match = _EMISSION_CEIL_RE.search(header)
     if not groups or ceil_match is None:
         return None
@@ -13844,6 +13858,26 @@ def test_the_emission_block_guard_is_not_vacuous():
     # block's claim and must not be joined into it.
     assert _emission_block_claims(
         "fast_shards: 11\n# packs 2 shards at 700.0 s (a, b)\n") is None
+    # A RENAMED key must not silently widen the subject to the whole 1.18 MB file: the
+    # bound is `split("\nfast_shards:", 1)[0]`, which with no key returns EVERYTHING —
+    # so a renamed key used to hand the guard every shard-count sentence in the map and
+    # still return a readable claim. It fails closed on the bound itself now.
+    with pytest.raises(AssertionError, match="carries no `fast_shards:` key"):
+        _emission_block_claims(
+            "fast_shards_x: 11\n# five shards at 835.7 s (a, c, d, e, k)\n")
+    # A SECOND clause at the same `est` is a repeat, not a second statement of one fact:
+    # `|` would absorb a subset (`two at 835.7 s (a, k)` beside the clause naming five)
+    # into a claim the block does not make, invisibly. The repeat is marked instead.
+    repeated = _emission_block_claims(
+        "# five shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
+        "# and two at 835.7 s (a, k) — `ceil(835.7/60 x 2)` = 28 m\n"
+        "\nfast_shards: 11\n")
+    assert repeated is not None
+    assert repeated[0][835.7] == {
+        "a", "c", "d", "e", "k", "<est 835.7 stated twice>"}, (
+        "a subset restated at the same est was absorbed into the group beside it — the "
+        f"guard would grade a claim the block does not make: {repeated[0][835.7]}")
+
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
 
 
