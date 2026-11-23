@@ -2742,6 +2742,8 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # and with the gate armed the re-picked page is exactly what the
         # rank-identity check exists to catch — the same ground
         # `window_quality_m2.py` and `tools/miss_rate_m5.py` hold.
+        # The read itself names no lever: the two calls are `query=`, `limit=10` and,
+        # on the measured one, `leg_trace=` (`tools/read_wave_latency.py:297`, `:306-307`).
         # ⛔ AND THE MIRROR IS ASSERTED, not declared: `tests/test_14192_read_wave_tool.py::
         # test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags` DERIVES the
         # allowed arguments from the `/v1/search` door's own call site
