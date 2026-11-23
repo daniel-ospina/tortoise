@@ -7608,11 +7608,33 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     #: _v(sys)["modules"][…] = …` each replaced the registry while the INLINE
     #: `builtins.getattr(...)`/`builtins.vars(...)` spellings were RED — the alias set
     #: collected a bare `Name` only, so the module-qualified VALUE matched nothing).
-    builtin_aliases = frozenset(_aliases_of(
+    #: ⛔ AND THE MODULE ITSELF IS RESOLVED, NOT SPELLED (#14326 round 27, MEASURED GREEN:
+    #: `from builtins import getattr as _g; _g(sys, "modules")[…] = …`,
+    #: `import builtins as _b; _g = _b.getattr; _g(sys, "modules")[…] = …` and the `vars`
+    #: twins each installed a mirror while the `import builtins` spelling was RED). Fixing
+    #: the value's spelling one round earlier left the MODULE's spelling open — the same
+    #: asymmetry one hop out, so `builtins` is aliased (`import builtins as _b`, `_b =
+    #: builtins`) the way `sys` already is, and a direct `from builtins import <builtin>`
+    #: is collected too.
+    _builtin_roots = {"builtins"}
+    for _node in ast.walk(tree):
+        if isinstance(_node, ast.Import):
+            for alias in _node.names:
+                if alias.name == "builtins" and alias.asname:
+                    _builtin_roots.add(alias.asname)
+    builtins_names = frozenset(_builtin_roots) | frozenset(_aliases_of(
+        tree, lambda _n: isinstance(_n, ast.Name) and _n.id in _builtin_roots, loops=True))
+    imported_builtins = frozenset(
+        (alias.asname or alias.name)
+        for _node in ast.walk(tree)
+        if isinstance(_node, ast.ImportFrom) and _node.module == "builtins"
+        for alias in _node.names
+        if alias.name in _REGISTRY_BUILTINS)
+    builtin_aliases = imported_builtins | frozenset(_aliases_of(
         tree,
         lambda _n: (isinstance(_n, ast.Name) and _n.id in _REGISTRY_BUILTINS)
         or (isinstance(_n, ast.Attribute) and _n.attr in _REGISTRY_BUILTINS
-            and isinstance(_n.value, ast.Name) and _n.value.id == "builtins"),
+            and isinstance(_n.value, ast.Name) and _n.value.id in builtins_names),
         loops=True))
     sys_dict_names = frozenset(_aliases_of(
         tree, lambda _n: _is_sys_dict_mapping(
@@ -7684,6 +7706,26 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             receiver = registry or (isinstance(target, ast.Attribute)
                                     and target.attr == "__dict__") or \
                 (isinstance(target, ast.Name) and target.id in namespaces)
+            # ⛔ `_d = sys.__dict__; _d |= {"modules": {...}}` REPLACES THE REGISTRY (#14326
+            # round 27, MEASURED GREEN: it replaced `sys.modules` at runtime while
+            # `_d["modules"] = {…}` and `_d["modules"] |= {…}` were both RED). The key here
+            # is `"modules"`, which is neither the class key nor the module key, so the
+            # receiver-keyed vocabulary below could not see it — the third vocabulary is a
+            # WHOLE-REGISTRY REPLACEMENT, and it only exists on `sys`'s own mapping.
+            # ⛔ ONLY THE NAME FORM (#14326 round 27): `_d = sys.__dict__; _d |= {…}` calls
+            # `dict.__ior__` and replaces the key IN PLACE, whereas the DIRECT
+            # `sys.__dict__ |= {…}` is an attribute augmented assignment that raises
+            # `AttributeError: readonly attribute` — it cannot be a lever, and red-ing it
+            # would be a false red on code that cannot run.
+            if ("modules" in keys and isinstance(target, ast.Name)
+                    and target.id in sys_dict_names):
+                out.append(
+                    f"line {node.lineno} REPLACES `modules` on `{ast.unparse(target)}` — "
+                    "`|=` here stores the key `modules` on `sys`'s own namespace, so "
+                    "`run()`'s deferred `from tortoise.sdk import …` resolves THROUGH a "
+                    "swapped registry at CALL time"
+                )
+                continue
             hit = keys & ({_SHIPPED_MODULE} if registry else {_SDK_CONSTRUCTOR})
             if receiver and hit:
                 out.append(
@@ -8378,6 +8420,19 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "`builtins.dict.get` CARRIED in a name":
             'import builtins\n_bg = builtins.dict.get\n'
             '_bg(sys.__dict__, "modules")["tortoise.sdk"] = _Mirror\n',
+        # ⛔ AND THE `builtins` MODULE ITSELF IS ALIASED, NOT SPELLED (#14326 round 27, EACH
+        # MEASURED GREEN at `2b17619cd9` while the `import builtins` spelling was RED).
+        # Resolving the VALUE's spelling left the MODULE's spelling open — the same asymmetry
+        # one hop out, which is why `sys` was already aliased this way.
+        "`from builtins import getattr as _g`":
+            'from builtins import getattr as _g\n'
+            '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`import builtins as _b` then `_b.getattr`":
+            'import builtins as _b\n_g = _b.getattr\n'
+            '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
+        "`import builtins as _b` then `_b.vars`":
+            'import builtins as _b\n_v = _b.vars\n'
+            '_v(sys)["modules"]["tortoise.sdk"] = _Mirror\n',
         "`builtins.getattr` CARRIED in a name":
             'import builtins\n_g = builtins.getattr\n'
             '_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
@@ -8497,7 +8552,14 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         # MEASURED GREEN at `1515591f`: `builtin_aliases` was built AFTER `sys_dict_names`, so
         # the one site that FILLS that field read it empty and three arms downstream were
         # blind to the alias).
-        "`_g = getattr` then `__d = _g(sys, \"__dict__\")` REPLACES":
+        # ⛔ `_d = sys.__dict__; _d |= {"modules": {…}}` REPLACES (#14326 round 27, MEASURED
+        # GREEN at `2b17619cd9` while `_d["modules"] = {…}` and `_d["modules"] |= {…}` were
+        # both RED). The key is `"modules"` — neither the class key nor the module key — so the
+        # receiver-keyed vocabulary below could not see it.
+        "`_d = sys.__dict__` then `_d |= {\"modules\": {…}}`":
+            '_d = sys.__dict__\n'
+            '_d |= {"modules": {"tortoise.sdk": _Mirror}}\n',
+        "`_d = getattr` then `__d = _g(sys, \"__dict__\")` REPLACES":
             '_g = getattr\n__d = _g(sys, "__dict__")\n'
             '__d["modules"] = {"tortoise.sdk": _Mirror}\n',
     }
@@ -8547,6 +8609,15 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   # …and a DIFFERENT KEY on sys's own dict is not the registry read, which is
                   # what pins the read arm's `_is_modules_key(node.args[1])` clause (#14326
                   # round 26, MEASURED: dropping that clause left the file at `41 passed`).
+                  # ⛔ AND THE ALIAS CONTROLS FOR ROUND 27: an aliased module that is NOT
+                  # `builtins`, an unrelated `__dict__` ending in `|=`, and the DIRECT
+                  # `sys.__dict__ |= {…}` — which cannot be a lever at all (it raises
+                  # `AttributeError: readonly attribute`), so red-ing it would be a false red
+                  # on code that cannot run.
+                  'from mypkg import getattr as _g\n_g(sys, "modules")["tortoise.sdk"] = _Mirror\n',
+                  '_d = other.__dict__\n'
+                  '_d |= {"modules": {"tortoise.sdk": _Mirror}}\n',
+                  'sys.__dict__ |= {"modules": {"tortoise.sdk": _Mirror}}\n',
                   'dict.get(sys.__dict__, "os")["tortoise.sdk"] = _Mirror\n',
                   'sys.__dict__.get("path")["tortoise.sdk"] = _Mirror\n',
                   # ⛔ AND THE ALIAS/COMPOSITION CONTROLS FOR ROUND 22, for the same reason: an
