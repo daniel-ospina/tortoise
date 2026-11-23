@@ -151,20 +151,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
-    # so the header counts it as drifted rather than compared, and it is one of the THIRTEEN that are
-    # incomparable at the pin — the whole `_PIN_EOF_PAIRS` table, not this pair alone. Measured at this
-    # head: 13 non-comparable of 228, 215 comparable, and the drift is 123 of the 215 comparable plus
-    # 8 of the 13 = 131 of the 228. ⛔ That numerator was `128` (and the total `136` of `234` pairs) for the
-    # editions up to `3c60ec9207`, and it went stale at `5171be0d53` — the commit that re-pointed the audit's
-    # sibling-file cites: re-measured at this head by the header's own rule (per pair, `git show
-    # ccb49741b2ec:<path>` against `git show ae54df166d:<path>`, line text for line text, comparability
-    # against the PIN's copy length) it is 123, and the two-code-span basis is 134 of 231. The denominators
-    # moved again when the `session_schema.py` cluster was re-pointed (`234`/`111` -> `228`/`117`), so these
-    # literals are re-derived by hand whenever the document's cites move — no arm applies this rule. ⛔ This comment said "ONE OF THREE … 211 comparable, 119 of them
-    # drifted … 122 of the 214": that was the PRE-re-derivation split, it survived the pass that moved
-    # `_PIN_EOF_PAIRS` 11 → 13, and its denominator reconciles with no table this file holds — which is
-    # the `#14269` review's finding (a figure block is the one place a stale value cannot be caught by
-    # the pin rows beside it). ⛔ The
+    # so the header counts it as drifted rather than compared, and it is one of the pairs the header
+    # enumerates as non-comparable at the pin — `_PIN_EOF_PAIRS` below is that split's per-pair
+    # form. ⛔ NO COUNT IS TYPED HERE (#14282 review, P3): the earlier form carried
+    # a figure that matched no published edition once the doc's split was re-derived, so the
+    # population is named by TEXT and its size comes from the graded source. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
@@ -246,7 +237,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6990`", _PI, 6990, '("Source", ["_searchText"])'),
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", 'sdk.py:24626', "tortoise/sdk.py", 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:24626", "tortoise/sdk.py", 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
     (_AUDIT, "search_engine.py:7201", _SE, 7201, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3508", _SE, 3508, "``:Source``/``:Document`` row must not contribute"),
@@ -408,10 +399,10 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     # sent readers to the pin. ⛔ NOT "where every one is a comment": at the pin `sdk.py:24059` is a DELETE
     # statement and `hosted_api.py:22919` is `if is_subject_kind(...)`, both executable. The pin is wrong for
     # all six; it is a comment for most, and unrelated CODE for the two that matter most here.
-    ('sdk.py:24626', "tortoise/sdk.py", 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
+    ("sdk.py:24626", "tortoise/sdk.py", 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
     ("search_engine.py:7201", _SE, 7201, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
-    ('sdk.py:22267', "tortoise/sdk.py", 22267, "s.summary=CASE WHEN $sum"),
-    (':22390', "tortoise/sdk.py", 22390, "s.summary, s.topics, s."),
+    ("sdk.py:22267", "tortoise/sdk.py", 22267, "s.summary=CASE WHEN $sum"),
+    (":22390", "tortoise/sdk.py", 22390, "s.summary, s.topics, s."),
     ("hosted_api.py:23501", "tortoise/hosted_api.py", 23501, "MERGE (s:Source {url:$did})"),
     (":23313", "tortoise/hosted_api.py", 23313, "def _execute_commit_writes"),
 )
@@ -1380,7 +1371,7 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     # (2) every one of them is NAMED where the header promises to name them: the non-comparable enumeration,
     # the sentence between "that are NOT comparable" and "past the pin's copy of its file". Either spelling
     # form the document uses for a pair counts — `SDK/FILE:NNNN` (`sdk.py:57951`) or the bare `:NNNN`
-    # sibling behind an adjacent path (`search_engine.py`'s `:7577`).
+    # sibling behind an adjacent path (`search_engine.py`'s `:7579`).
     start = body.find("that are NOT comparable")
     end = body.find("past the pin's copy of its file")
     assert start != -1 and end > start, (

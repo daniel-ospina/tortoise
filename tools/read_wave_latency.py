@@ -50,9 +50,8 @@ import sys
 # #5128: refuse a <3.12 interpreter before the imports below.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
-        f"tools/read_wave_latency.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        "`uv run python tools/read_wave_latency.py`"
+        f"tools/read_wave_latency.py requires Python >= 3.12 (got {sys.version_info[0]}."
+        f"{sys.version_info[1]}) — run it as `uv run python tools/read_wave_latency.py`"
     )
 
 import argparse
