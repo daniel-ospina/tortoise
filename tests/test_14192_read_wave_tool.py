@@ -4162,14 +4162,39 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
         # `setdefault(k, v)` inserts a VALUE rather than the mapping and is unaffected.
         elif (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
               and isinstance(node.value.func, ast.Attribute)
-              and node.value.func.attr in {"update", "__init__", "__ior__"}
-              and node.value.args):
+              and node.value.func.attr in {"update", "__init__", "__ior__"}):
             # ⛔ ON THE SPLICED POSITIONS (#14326 review cycle 17, EACH MEASURED GREEN **and
             # LIVE**: `_d.update(*(builtins.__dict__,))`, its `*[m]` form and the `__init__` /
             # `__ior__` twins, while the un-starred fill is a REFUSED row). Cycle 16 applied the
             # splice rule to three predicates and left THIS arm reading the raw first argument.
-            binds.append((node.value.func.value,
-                          _spliced_positions(node.value.args)[0]))
+            # ⛔ AND BOTH FILL SPELLINGS, FROM THE SAME CALL (#14326 review cycle 18, EACH
+            # MEASURED GREEN **and LIVE**):
+            #
+            #     _d.update(**builtins.__dict__)            GREEN  `_d.update(m)`        RED
+            #     dict.update(_d, builtins.__dict__)        GREEN  `_d.update(m)`        RED
+            #     dict.update(_d, **builtins.__dict__)      GREEN  (same fill)
+            #
+            # The `**` slot is the operand, exactly as `_mapping_keys_in_keywords` already
+            # reads it one axis over; and the UNBOUND spelling carries the TARGET in `args[0]`
+            # and the source in `args[1]` — the bound/unbound rule `_mapping_mutation_keys`
+            # states. Guarded: an EMPTY literal splice (`_counts.update(*())`) leaves nothing
+            # to bind and must not raise (#14326 review cycle 18 measured the unguarded `[0]`
+            # killing the pin with an IndexError on an innocent no-op fill).
+            _fill = node.value
+            _fill_positions = _spliced_positions(_fill.args)
+            _kw_source = next((_k.value for _k in _fill.keywords if _k.arg is None), None)
+            # The UNBOUND spelling names the constructor as the receiver (`dict.update`), so
+            # the fill's target is `args[0]` and its source is `args[1]` or the `**` operand.
+            if isinstance(_fill.func.value, ast.Name) and _fill.func.value.id == "dict":
+                if _fill_positions:
+                    _fill_source_ = (_fill_positions[1] if len(_fill_positions) >= 2
+                                     else _kw_source)
+                    if _fill_source_ is not None:
+                        binds.append((_fill_positions[0], _fill_source_))
+            else:
+                _fill_source_ = _fill_positions[0] if _fill_positions else _kw_source
+                if _fill_source_ is not None:
+                    binds.append((_fill.func.value, _fill_source_))
             continue
         elif loops and isinstance(node, (ast.For, ast.AsyncFor)):
             for source in _loop_target_sources(node.iter):
@@ -7980,6 +8005,24 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    vars(builtins.dict)["copy"](builtins.__dict__)'
             '["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ THE OTHER TWO FILL SPELLINGS, AND THE EMPTY-SPLICE GUARD (#14326 review cycle 18,
+        # EACH MEASURED GREEN **and LIVE**): the `**` slot delivers the operand exactly as a
+        # positional does, and the UNBOUND spelling carries the TARGET in `args[0]`.
+        "a COPY filled in place through `**`": (
+            '    import builtins\n'
+            '    _d = {}\n'
+            '    _d.update(**builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY filled in place by the UNBOUND spelling": (
+            '    import builtins\n'
+            '    _d = {}\n'
+            '    dict.update(_d, builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY filled in place, UNBOUND, through `**`": (
+            '    import builtins\n'
+            '    _d = {}\n'
+            '    dict.update(_d, **builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a COPY filled in place by `__init__`": (
             '    import builtins\n'
             '    _d = {}\n'
