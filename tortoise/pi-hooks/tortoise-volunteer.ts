@@ -1,4 +1,4 @@
-// tortoise-hook-version: 24
+// tortoise-hook-version: 32
 // Tortoise volunteering-memory seam for Pi — the per-turn READ half
 // (epic #2080, issue #2119).
 //
