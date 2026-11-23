@@ -581,10 +581,20 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Mod):
             _operands = _mod_operands(value.right, _values)
             return _percent_strings(_values(value.left), _operands) if _operands else set()
+        # ⛔ THE `.format` ARM ABOVE, ONE METHOD AND ONE DELIVERY SHORT (#14326 round 15, the
+        # four shapes MEASURED GREEN at `1044c2a0ea5d` — `refuses=False`, `m=2 c=2 i=0`, a
+        # third `kind="statement"` reach executing the product read):
+        #     "{k}".format(**{"k": …})"  "{k}".format_map({"k": …})   both BOUND and INLINE
+        # The class was enumerated by a HARD-CODED method name, so `str.format_map` — the
+        # same template-plus-mapping build under the other method name — matched no arm at
+        # all, and the `**` spread was DROPPED on sight ("keys are not statically visible",
+        # true of a name-held mapping and false of a display). `_format_call_strings` is now
+        # the single entry point for BOTH resolvers, so neither can carry one spelling and
+        # not the other — the asymmetry this file has paid for three times (`+`, `%`,
+        # `.format`).
         if (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
-                and value.func.attr == "format"):
-            return _format_strings(_values(value.func.value),
-                                   _format_operands(value.args, value.keywords, _values))
+                and value.func.attr in _FORMAT_SPELLINGS):
+            return _format_call_strings(value, _values)
         # ⛔ THE SAME `+` ARM, ON THE BIND PATH (#14326 round 12, MEASURED at `c380075b4`):
         # `_N = "_tortoise_" + "fts_query"; getattr(sdk, _N)(…, kind="statement")` left the pin
         # GREEN while the INLINE spelling of the same sum was refused — the verdict was decided
@@ -878,15 +888,95 @@ def _percent_strings(templates, operands) -> set[str]:
     return out
 
 
-def _format_operands(args, keywords, resolve) -> tuple[list, list] | None:
-    """The ``str.format`` call's (positional combinations, keyword mappings), or ``None``."""
-    if any(keyword.arg is None for keyword in keywords):
-        return None  # a `**mapping` spread — its keys are not statically visible here
+#: The two `str` FORMATTING methods that build a string out of a template and a mapping:
+#: `.format(…)` takes keywords (and one `**` spread) and `.format_map(m)` takes the mapping
+#: positionally. Both fill the template's `{field}`s from the same place, so they are ONE
+#: spelling of the same static literal — see `_format_call_strings`.
+_FORMAT_SPELLINGS = frozenset({"format", "format_map"})
+
+
+def _mapping_option_sets(node: ast.AST, resolve) -> list[dict[str, str]] | None:
+    """Every statically possible KEY→VALUE mapping a DICT DISPLAY can deliver.
+
+    ⛔ THIS IS WHAT A `**` SPREAD AND `.format_map` NEED, AND THE TWO PATHS THAT READ A
+    MAPPING ALREADY RESOLVE IT (#14326 round 15, EACH MEASURED GREEN at
+    `1044c2a0ea5d` — `refuses=False`, `m=2 c=2 i=0`, a third reach executing the read):
+
+        _N = "{k}".format(**{"k": "_tortoise_fts_query"})       # BOUND,  GREEN
+        getattr(sdk, "{k}".format(**{"k": "_tortoise_fts_query"}))(…)   # INLINE, GREEN
+        _N = "{k}".format_map({"k": "_tortoise_fts_query"})     # BOUND,  GREEN
+        getattr(sdk, "{k}".format_map({"k": "_tortoise_fts_query"}))(…) # INLINE, GREEN
+
+    `_format_operands` BAILED on `keyword.arg is None` ("its keys are not statically
+    visible"), which is true of a NAME-held mapping and false of a display — and
+    `_mapping_keys_in_keywords` resolves the display for a namespace `update(**{…})`, so the
+    verdict was decided by which call the same display was handed to. `.format_map` matched
+    no arm at all: the formatting class round 13 closed was enumerated by METHOD NAME and
+    stopped one method short, the same shape `%` → `.format` cost in that round.
+
+    Only a DISPLAY is read: a `**` spread of a NAME-held mapping, a `.format_map` over one,
+    and a pair ITERABLE stay the stated residual (nothing about their pairing is statically
+    visible here), and a display whose keys or values do not resolve yields `None` — the
+    caller then treats the whole call as unresolved rather than guessing.
+    """
+    if not isinstance(node, ast.Dict):
+        return None
+    options: list[dict[str, str]] = [{}]
+    for key, value in zip(node.keys, node.values, strict=True):
+        if key is None:  # a `**spread` INSIDE the display, one level out from the caller
+            inner = _mapping_option_sets(value, resolve)
+            if inner is None:
+                return None
+            merged = [{**left, **right} for left in options for right in inner]
+        else:
+            keys = resolve(key)
+            if len(keys) != 1:  # a computed key has no static NAME to pair with
+                return None
+            name = next(iter(keys))
+            values = resolve(value)
+            if not values:
+                return None
+            merged = [{**option, name: text} for option in options
+                      for text in sorted(values)]
+        if len(merged) > _PRODUCT_MAX_COMBINATIONS:
+            # the same refusal `_string_products` makes: an unbudgeted product is a hang,
+            # and a hung pin answers neither green nor red.
+            raise _ResolutionDidNotConverge(
+                f"a mapping display would build more than {_PRODUCT_MAX_COMBINATIONS} "
+                "key→value pairings: no useful verdict comes from materialising it, so the "
+                "pin REFUSES rather than spin")
+        options = merged
+    return options
+
+
+def _format_operands(args, keywords, resolve,
+                     map_spelling: bool = False) -> tuple[list, list] | None:
+    """The ``str.format``/``str.format_map`` call's (positional combos, mappings), or ``None``.
+
+    ``map_spelling`` is `.format_map`, whose ONE positional argument IS the mapping and which
+    takes no keywords at all — so its positional half is empty by construction, not by an
+    argument being unresolvable.
+    """
+    if map_spelling:
+        if len(args) != 1 or keywords:
+            return None
+        mappings = _mapping_option_sets(args[0], resolve)
+        return ([()], mappings) if mappings else None
     positional = [tuple(combo) for combo in
                   _string_products([resolve(arg) for arg in args])]
-    mappings = [dict(zip([keyword.arg for keyword in keywords], combo, strict=True))
-                for combo in _string_products([resolve(keyword.value)
-                                               for keyword in keywords])]
+    mappings: list[dict[str, str]] = [{}]
+    for keyword in keywords:
+        if keyword.arg is None:
+            spread = _mapping_option_sets(keyword.value, resolve)
+            if spread is None:
+                return None  # a `**mapping` whose contents are not statically visible
+            mappings = [{**left, **right} for left in mappings for right in spread]
+        else:
+            values = resolve(keyword.value)
+            if not values:
+                return None
+            mappings = [{**mapping, keyword.arg: text} for mapping in mappings
+                        for text in sorted(values)]
     if (args and not positional) or (keywords and not mappings):
         return None
     return positional or [()], mappings or [{}]
@@ -908,6 +998,22 @@ def _format_strings(templates, operands) -> set[str]:
                 if isinstance(rendered, str):
                     out.add(rendered)
     return out
+
+
+def _format_call_strings(call: ast.Call, resolve) -> set[str]:
+    """Every string a literal ``template.format(…)`` / ``template.format_map(…)`` builds.
+
+    ⛔ ONE ENTRY POINT FOR BOTH RESOLVERS (#14326 round 15). The two recursions are separate
+    (`_values` for a BIND, `_possible_strings` for an INLINE operand) and this file has paid
+    for fixing one and leaving the other open three times — `+`, `%`, `.format`. Sharing the
+    call keeps the `.format_map` spelling from being added to one and not the other, and the
+    `map_spelling` flag is the ONLY difference between the two methods here.
+    """
+    operands = _format_operands(call.args, call.keywords, resolve,
+                               map_spelling=call.func.attr == "format_map")
+    if not operands:
+        return set()
+    return _format_strings(resolve(call.func.value), operands)
 
 
 def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> frozenset[str]:
@@ -974,12 +1080,15 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
                                   lambda operand: _possible_strings(operand, consts))
         return (frozenset(_percent_strings(_possible_strings(node.left, consts), _operands))
                 if _operands else frozenset())
+    # ⛔ `%` AND `.format` ON THE INLINE PATH, the mirror of `_values`' arms (#14326 round 13):
+    # `getattr(sdk, "%s_fts_query" % "_tortoise")(…)` was GREEN at `b6be33738f` at
+    # `m=2 c=2 i=0` while a `+` that builds the same string was refused. ⛔ AND `.format_map`
+    # IS THE SAME SPELLING, reached through the SHARED entry point so the two resolvers
+    # cannot disagree about it (#14326 round 15).
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "format"):
-        return frozenset(_format_strings(
-            _possible_strings(node.func.value, consts),
-            _format_operands(node.args, node.keywords,
-                             lambda operand: _possible_strings(operand, consts))))
+            and node.func.attr in _FORMAT_SPELLINGS):
+        return frozenset(_format_call_strings(
+            node, lambda operand: _possible_strings(operand, consts)))
     # ⛔ A LITERAL-ONLY `+` IS A LITERAL (#14326 round 9, MEASURED GREEN at `d6ed6799`):
     # `getattr(sdk, "_tortoise_" + "fts_query")(…, kind="statement")` passed the pin at
     # `m=2 c=2 i=0`, while the IMPLICIT-CONCAT spelling of the same string (which `compile()`
@@ -5425,6 +5534,31 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "`.format()` BOUND to a name": (
             '    _N = "_tortoise_fts_query".format()\n'
             f'    {reach.format(name="_N")}\n'),
+        # ⛔ THE `.format` CLASS WAS ENUMERATED BY METHOD NAME, AND ONE DELIVERY SHORT (#14326
+        # round 15, all five MEASURED GREEN at `1044c2a0ea5d` — `refuses=False`, `m=2 c=2
+        # i=0`, with a third reach carrying `kind="statement"`): `str.format_map` is the SAME
+        # template-plus-mapping build under the other method name and matched no arm at all,
+        # and a `**` DISPLAY is statically visible even though a name-held mapping is not —
+        # `_mapping_keys_in_keywords` already resolves the display for a namespace
+        # `update(**{…})`, so the verdict was decided by which call the same display was
+        # handed to (the `%` → `.format` shape of round 13, one method and one delivery over).
+        # The BOUND rows red `_values`, the INLINE rows `_possible_strings`; both go through
+        # the shared `_format_call_strings`, so neither resolver can carry one spelling only.
+        "`.format(**{…})` spread BOUND to a name": (
+            '    _N = "{k}".format(**{"k": "_tortoise_fts_query"})\n'
+            f'    {reach.format(name="_N")}\n'),
+        "`.format(**{…})` spread INLINE": (
+            '    getattr(sdk, "{k}".format(**{"k": "_tortoise_fts_query"}))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`.format(**{**{…}})` NESTED spread INLINE": (
+            '    getattr(sdk, "{k}".format(**{**{"k": "_tortoise_fts_query"}}))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`.format_map({…})` BOUND to a name": (
+            '    _N = "{k}".format_map({"k": "_tortoise_fts_query"})\n'
+            f'    {reach.format(name="_N")}\n'),
+        "`.format_map({…})` INLINE": (
+            '    getattr(sdk, "{k}".format_map({"k": "_tortoise_fts_query"}))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
     }
     for label, body in rows.items():
         assert _pin_refuses(_pin_source(body)), (
@@ -5500,6 +5634,21 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a string-keyed store into an ordinary CONTAINER is not a callee rebind — treating "
         "it as one would drop `write`/`print` from the allow-lists and RED the recording "
         "direction; only a NAMESPACE receiver carries a module-level bind")
+
+    # ⛔ THE SIXTH CONTROL — A MAPPING IS ONLY A REACH WHEN IT HOLDS THE NAME (#14326 round
+    # 15, MEASURED `refuses=False` before AND after the `**`/`format_map` arms). Resolving a
+    # display must red the templated READ, not every templated string: a label table, and a
+    # NAME-HELD mapping (which the resolution deliberately does not follow), both stay green.
+    label_displays = ('    _sdk = "{k}".format_map({"k": "tortoise.sdk"})\n'
+                      '    print(f"note {_sdk}")\n'
+                      '    _lbl = "{k}".format(**{"k": "tortoise.other"})\n'
+                      '    print(f"note {_lbl}")\n'
+                      '    _MAP = {"k": "tortoise.legacy"}\n'
+                      '    _old = "{k}".format_map(_MAP)\n'
+                      '    print(f"note {_old}")\n')
+    assert not _pin_refuses(_pin_source(label_displays)), (
+        "a display whose values are ordinary labels is a FALSE RED — the `**` and "
+        "`format_map` arms must red the templated READ, not every templated string")
 
     # ⛔ THE `setdefault` DEFAULT IS A VALUE, NOT A KEY (#14326 review cycle 3, measured):
     # `setdefault(key, default)` takes ONE key positionally, so a static string in the SECOND
