@@ -49724,10 +49724,10 @@ class TortoiseSDK:
         pass fires at most once. It is additionally skipped entirely when the
         composition adds nothing (``_entity_key_dense_query`` returns ``None``).
 
-        Merge contract — identical to the sparse half's: the expanded run comes
-        first, the pass-1-only ids follow in their original order. No id is ever
-        DROPPED (that is what "additive" means here, exactly as in A4), and the
-        candidate SET only grows.
+        Merge contract — no id is ever DROPPED (that is what "additive" means
+        here, exactly as in A4), and the candidate SET only grows. The ORDER is
+        the fusion in the paragraph below, NOT the rank concatenation this pass
+        used to apply: "additive" here is a claim about the set, about nothing else.
 
         ⛔ The ORDER, stated because "additive" is read as more than it means:
         the merge is `expansion_merge.fuse_expansion_pass` (#14344), i.e. this

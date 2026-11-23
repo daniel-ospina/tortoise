@@ -56,16 +56,16 @@ construction, so evidence the first pass had already reached survived only where
 happened to repeat it. Under the fusion it is **1.26 at k=5 and 3.59 at k=10**. That is the defect
 this change removes, stated as a count rather than as a ranking theory.
 
-The third column is the displacement made visible, and it is measured over the whole merged leg so it
+The fifth column is the displacement made visible, and it is measured over the whole merged leg so it
 cannot saturate: under the concatenation pass 1's **own top row** sat at position ~12 — every row the
 expansion returned was above it — and under the fusion it sits at ~2. (An earlier revision of this
 doc reported a "did pass-1's top row fall out of the head" boolean instead; that reads `0.0` for
 BOTH arms by construction, because each rule's merged head is dominated by whatever that rule puts
 first, so it measured nothing and was replaced.)
 
-**Read the fourth column before claiming a win.** Fusing the merge roughly triples how much of the
-first pass's evidence survives the page, and roughly halves how many *new* candidates reach the same
-page. The concatenation was not "better recall": it filled the head with the expansion's rows **by
+**Read the second and fourth columns together before claiming a win.** Fusing the merge roughly
+triples how much of the first pass's evidence survives the page (second column), and roughly halves
+how many *new* candidates reach the same page (fourth). The concatenation was not "better recall": it filled the head with the expansion's rows **by
 construction** (with `pass1=10, expanded=10, k=10` the head was simply the expansion), which is the
 same displacement read from the other end — and it is why the pass-1-only count above is a flat zero
 for that rule rather than merely smaller.

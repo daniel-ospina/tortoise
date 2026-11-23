@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from .search_engine import rrf_fusion
 
+
 def fuse_expansion_pass(
     first_pass: list[tuple[str, float]],
     second_pass: list[tuple[str, float]],

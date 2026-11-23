@@ -62,7 +62,10 @@ if sys.version_info < (3, 12):  # noqa: UP036 — deliberate RUNTIME guard
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.expansion_merge import fuse_expansion_pass  # noqa: E402
+# Deliberately NO inline suppression on this import: ruff does not flag it, so
+# the E402 directive this file used to carry was reported UNUSED by RUF100 —
+# which is why `agent-infra-ci / lint` was red on this PR's earlier head.
+from tortoise.expansion_merge import fuse_expansion_pass
 
 DEFAULT_OUT = Path("docs/evidence/14344-expansion-fusion/merge-rule-measurement.json")
 SEED = 14344
@@ -107,7 +110,7 @@ def _pools(rng: random.Random, n_pass1: int, n_expanded: int,
     carried only to keep the shapes honest."""
     ids = [f"id{i:03d}" for i in range(n_pass1 + n_expanded)]
     rng.shuffle(ids)
-    shared_n = int(round(min(n_pass1, n_expanded) * shared_fraction))
+    shared_n = round(min(n_pass1, n_expanded) * shared_fraction)
     shared = ids[:shared_n]
     pass1_ids = shared + ids[shared_n:shared_n + (n_pass1 - shared_n)]
     rest = ids[shared_n + (n_pass1 - shared_n):]

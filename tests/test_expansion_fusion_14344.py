@@ -175,3 +175,38 @@ def test_deterministic_pure_function_of_the_two_lists():
     first = _ids(fuse_expansion_pass(pass1, expanded))
     for _ in range(3):
         assert _ids(fuse_expansion_pass(list(pass1), list(expanded))) == first
+
+
+# ── The docstrings are part of the change: #14344 exists BECAUSE the two halves
+#    hand-rolled the same merge and drifted from their own prose. ──
+def _half_docstrings() -> dict:
+    """Both halves' docstrings, read from SOURCE — no SDK import, no DB, so this
+    stays a property of the ``core`` surface file it lives in."""
+    import ast
+
+    src = (Path(__file__).resolve().parent.parent / "tortoise" / "sdk.py").read_text()
+    found = {}
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "_entity_key_expansion_pass", "_entity_key_dense_pass"):
+            found[node.name] = " ".join((ast.get_docstring(node) or "").split())
+    return found
+
+
+def test_both_halves_describe_the_fusion_never_the_removed_concatenation():
+    """The two halves must state the rule that SHIPS. Each names the fusion, and
+    neither still asserts the concatenation's order — the dense half said "the
+    expanded run comes first, the pass-1-only ids follow in their original
+    order" three lines above the paragraph that negates it, and "identical to
+    the sparse half's" was false in the other direction too (#14344 review)."""
+    docs = _half_docstrings()
+    assert set(docs) == {"_entity_key_expansion_pass", "_entity_key_dense_pass"}
+    stale = (
+        "identical to the sparse half's",
+        "the expanded run comes first",
+        "pass-1-only ids follow in their original order",
+    )
+    for name, doc in docs.items():
+        assert "fuse_expansion_pass" in doc, f"{name} does not name the fusion"
+        for phrase in stale:
+            assert phrase not in doc, f"{name} still states the removed merge: {phrase!r}"
