@@ -13757,9 +13757,12 @@ def test_the_head_total_guard_is_not_vacuous(tmp_path):
 #: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
 #: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head
 #: above — re-derive them with that verb rather than trusting them", and the same block
-#: had already gone stale twice before this guard (#11298 review cycle 5, #14015) — four
-#: times, counting #14296 and the #14434 re-pack this guard CAUGHT at its own landing,
-#: which is what this guard is for. A promise in prose is not a
+#: had already gone stale twice before this guard existed (#11298 review cycle 5,
+#: #14015), three times counting #14296 — and it has been caught going stale again since
+#: (#14434's and #14220's registrations each re-packed the bins), which is what this
+#: guard is for. ⛔ The count is deliberately not carried forward as a number: it moves
+#: with every landing, and a figure that must be re-derived is exactly what this guard
+#: exists to stop trusting. A promise in prose is not a
 #: guard, so the sentence is graded against the live emission here instead.
 #:
 #: Shard names are read in BOTH spellings this map uses — an explicit list (`f, h`)
