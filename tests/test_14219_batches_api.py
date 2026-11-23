@@ -1779,3 +1779,64 @@ def test_a_runner_call_that_spent_is_billed_even_when_the_row_moved_on(
     assert charged == [730], (
         "our runner call spent 730 tokens; the ledger was left short — the ONE "
         "budget then reads used less than it is")
+
+
+# ── round 8: the failure throttle anchors at the failure, and one bad batch
+#    must not pin the rotation ─────────────────────────────────────────────
+def test_a_slow_failing_scan_still_throttles(store, monkeypatch):
+    """NB2: a >30 s failing scan used to re-arm on every read.
+
+    The throttle was anchored at `now` captured BEFORE the scan, so a failure that
+    takes longer than the retain interval had already expired its own throttle by
+    the time it was written — every request then paid a full failing scan, which
+    is the opposite of what the arm exists for.
+    """
+    monkeypatch.setattr(ha, "_BATCH_SCAN", {})
+    monkeypatch.setattr(ha, "_BATCH_RETAIN_FAILURE_S", 30.0)
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
+        "ceiling": 2, "submit": staticmethod(lambda fn, *a, **k: True)})())
+    scans: list[int] = []
+
+    def _explode(_org):
+        scans.append(1)
+        raise RuntimeError("the graph is loaded")
+
+    monkeypatch.setattr(ha, "_batch_store_for", _explode)
+    for _ in range(5):
+        ha._recover_org_batches({"org_id": ORG_ID})
+    assert len(scans) == 1, (
+        f"{len(scans)} scans for 5 reads — a slow failure must still throttle")
+
+
+def test_one_unreadable_batch_does_not_pin_the_rotation(store, monkeypatch):
+    """NB3: a batch whose own read raises must be SKIPPED, not pin the window.
+
+    Retaining the offset on failure meant that batch was retried for ever and
+    every batch behind it was never inspected by any scan — non-terminal for ever.
+    """
+    monkeypatch.setattr(ha, "_BATCH_SCAN", {})
+    monkeypatch.setattr(ha, "_BATCH_RESCAN_S", 0)
+    monkeypatch.setattr(ha, "_BATCH_RECOVER_LIMIT", 2)
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
+        "ceiling": 2, "submit": staticmethod(lambda fn, *a, **k: True)})())
+    coord = bi.BatchCoordinator(store)
+    ids = [coord.submit(ORG_ID, [f"/d/{n}.md"])[0].batch_id for n in range(6)]
+    poisoned = ids[0]
+    real_get = store.get_batch
+
+    def _get(org_id, batch_id):
+        if batch_id == poisoned:
+            raise RuntimeError("corrupt estimate_json")
+        return real_get(org_id, batch_id)
+
+    monkeypatch.setattr(store, "get_batch", _get)
+
+    seen: set[str] = set()
+    for _ in range(6):
+        seen.update(ha._recover_org_batches({"org_id": ORG_ID}))
+
+    assert set(ids[1:]) <= seen, (
+        f"{sorted(set(ids[1:]) - seen)} were never inspected because one batch's "
+        "read raises")
