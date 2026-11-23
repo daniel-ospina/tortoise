@@ -3853,8 +3853,9 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     arms below deliberately removed (#12039, review cycle 4):
 
       * the census **keeps** reporting an error while ``ps`` itself answers — `_CENSUS_ERROR_STREAK`
-        CONSECUTIVE samples, so ONE lost ``ps`` under load is not the census (that is the box,
-        #5049 rule 1, and it does not red a required shard);
+        CONSECUTIVE samples **spanning** `_CENSUS_ERROR_MIN_SPAN_S` of the poll, measured from the
+        streak's own start, so ONE lost ``ps`` under load is not the census and neither is a short
+        burst (that is the box, #5049 rule 1, and it does not red a required shard);
       * a clean exit means the fixture never ran its command (``rc >= 0``);
       * a CRASH signal (SIGSEGV/SIGABRT/…) means the interpreter under it died.
 
@@ -3966,6 +3967,12 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
             deadline = time.time() + 10.0
             poll_started = time.time()
             err_streak = 0
+            # When the CURRENT streak began. ⛔ The span must be measured from here, NOT from
+            # `poll_started` (#12039 review round 6, P1): a poll that ran healthily for 2 s and
+            # then lost two `ps` calls 0.1 s apart is a 0.2 s burst — the load class — and a
+            # `poll_started`-relative rule would have called it "spanning at least 2 s" and
+            # redded a required shard. The reset below clears it with the streak.
+            streak_started = 0.0
             pids: list[int] = []
             while True:
                 procs, err = fs.pi_processes()
@@ -3983,7 +3990,8 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     # can lose a single `ps`. So:
                     #   box cannot answer at all  → skip (unchanged);
                     #   one isolated error        → keep polling (the load class);
-                    #   _CENSUS_ERROR_STREAK consecutive errors on a box whose `ps` answers → FAIL.
+                    #   _CENSUS_ERROR_STREAK consecutive errors SPANNING _CENSUS_ERROR_MIN_SPAN_S
+                    #                             on a box whose `ps` answers → FAIL.
                     # ⛔ THE FIXTURE'S OWN DEATH IS CLASSIFIED FIRST (#12039 review round 5,
                     # P1). Asking the census before this made the outside-signal skip arm
                     # unreachable while the census was erroring: a child the BOX killed
@@ -3995,9 +4003,11 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     if _child_exited(proc):
                         break
                     err_streak += 1
+                    if err_streak == 1:
+                        streak_started = time.time()
                     if (
                         err_streak >= _CENSUS_ERROR_STREAK
-                        and (time.time() - poll_started) >= _CENSUS_ERROR_MIN_SPAN_S
+                        and (time.time() - streak_started) >= _CENSUS_ERROR_MIN_SPAN_S
                     ):
                         # The verdict is due NOW, so the `ps` control runs at most once per
                         # poll instead of once per erroring sample (review round 5, P2: the
@@ -4007,13 +4017,15 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                         raise HarnessDefect(
                             f"{_HARNESS_PREFIX}: the census reported an error on "
                             f"{err_streak} consecutive samples spanning at least "
-                            f"{_CENSUS_ERROR_MIN_SPAN_S:g}s on a box whose `ps` answers: "
+                            f"{_CENSUS_ERROR_MIN_SPAN_S:g}s (measured from the streak's own "
+                            f"start) on a box whose `ps` answers: "
                             f"{err!r} — `ps -p {os.getpid()} -o command=` answered, so the "
                             f"census's own invocation is what failed, which is this test's "
                             f"subject")
                     time.sleep(0.1)
                     continue
                 err_streak = 0
+                streak_started = 0.0
                 pids = [p["pid"] for p in procs]
                 # ⛔ A DEAD CHILD ENDS THE POLL (#12039 review finding 4a). Liveness was
                 # consulted only AFTER the 10 s deadline burned, so on a box where the child
@@ -4242,6 +4254,14 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
             "persistent", True, -9, "skip", "INCONCLUSIVE [#5049]",
             "a fixture the BOX killed is classified by its own arm, whatever the census did",
         ),
+        (
+            "late_burst", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "errors that START late must span their OWN interval, not the poll's age",
+        ),
+        (
+            "alternating", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "intermittent errors must not accumulate: the streak (and its span) reset on success",
+        ),
     ],
 )
 def test_long_path_census_error_is_the_census_only_when_it_persists(
@@ -4276,7 +4296,15 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
 
     def _census():
         calls["n"] += 1
-        if census_kind == "persistent" or calls["n"] == 1:
+        if census_kind == "persistent":
+            return [], err
+        if census_kind == "alternating":
+            return ([], err) if calls["n"] % 2 == 1 else ([], None)
+        if census_kind == "late_burst":
+            # Healthy for > _CENSUS_ERROR_MIN_SPAN_S of simulated poll time, then exactly two
+            # errors 0.1 s apart: a 0.2 s burst, so it must NOT be the census.
+            return ([], err) if calls["n"] in (22, 23) else ([], None)
+        if calls["n"] == 1:
             return [], err
         return [], None
 
@@ -4330,6 +4358,11 @@ def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
     doc = test_pi_processes_sees_a_real_long_path_lane.__doc__ or ""
     # The third FAIL arm, named by the constant that decides it — and the STREAK is the point:
     # one lost `ps` under load is the box (#5049 rule 1), not the census.
+    assert "_CENSUS_ERROR_MIN_SPAN_S" in doc, (
+        "the header must name the SPAN, not only the streak: a reader who re-derives the arm from "
+        "a streak-only sentence writes `streak >= 2`, which fires in 0.2 s and reinstates the "
+        "load-red this arm exists to remove (review round 6, P2)"
+    )
     assert "_CENSUS_ERROR_STREAK" in doc, (
         "the header stopped naming the census-error FAIL arm, so a reader re-deriving the skip "
         "rule from it can reinstate `pytest.skip(...)` on any census error (#12039)")
