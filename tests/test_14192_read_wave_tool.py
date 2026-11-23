@@ -2529,6 +2529,22 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
     `[_result_id(r) for r in results]` hands each ELEMENT to a call, and treating a
     comprehension target as an alias of the collection would red the tool the pin exists
     to protect (measured before adding the arm).
+
+    ⛔ THREE BIND FORMS `_str_constants` ALREADY RESOLVED WERE MISSING ON THIS AXIS (#14326
+    round 19, MEASURED GREEN at `9b48318eedc3` against the pin's own predicate): a `match`
+    CAPTURE, a parameter DEFAULT, and a `with` TARGET. Each binds a name to a statically
+    visible value with no `Assign` node, so the `AugAssign` store arm was fed a receiver that
+    never resolved and
+
+        match sys.modules:
+            case _x: _x |= {"tortoise.sdk": _Mirror}      # GREEN end-to-end
+        def _f(_registry=sys.modules):
+            _registry |= {"tortoise.sdk": _Mirror}       # GREEN end-to-end
+
+    reached the deferred import while the pin passed — the same store as the RED
+    `sys.modules |= …` row, one bind form over. The subject/default/context expression is the
+    source in every case, which is the over-approximation this axis already makes for a NAME
+    iterable; a `match` pattern LITERAL still binds nothing (`_str_constants`' own rule).
     """
     binds: list[tuple[ast.AST, ast.AST]] = []
     for node in ast.walk(tree):
@@ -2540,6 +2556,43 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
         elif loops and isinstance(node, (ast.For, ast.AsyncFor)):
             for source in _loop_target_sources(node.iter):
                 binds.append((node.target, source))
+            continue
+        # ⛔ A PARAMETER DEFAULT IS A STATIC BIND ON THIS AXIS TOO (#14326 round 19).
+        # `_str_constants` has resolved this form since #14326 review P6; this arm — the one
+        # that feeds the `AugAssign` store — did not, so a registry store through a default
+        # was GREEN end-to-end.
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            positional = [*node.args.posonlyargs, *node.args.args]
+            first = len(positional) - len(node.args.defaults)
+            for index, default in enumerate(node.args.defaults):
+                binds.append((ast.Name(id=positional[first + index].arg,
+                                       ctx=ast.Store()), default))
+            for index, kdefault in enumerate(node.args.kw_defaults):
+                if kdefault is not None:
+                    binds.append((ast.Name(id=node.args.kwonlyargs[index].arg,
+                                           ctx=ast.Store()), kdefault))
+            continue
+        # ⛔ …AND SO IS A `match` CAPTURE (#14326 round 19). Same subject-only rule as
+        # `_str_constants`: a capture binds a PART of the subject, so the SUBJECT is the
+        # source and a pattern LITERAL never binds a name.
+        elif isinstance(node, ast.Match):
+            for case in node.cases:
+                for capture in ast.walk(case.pattern):
+                    name = getattr(capture, "name", None) or getattr(capture, "rest", None)
+                    if name is None:
+                        continue
+                    binds.append((ast.Name(id=name, ctx=ast.Store()), node.subject))
+            continue
+        # ⛔ …AND A `with` TARGET (#14326 round 19): `with sys.modules as _x:` binds `_x`
+        # with no `Assign` node, the third spelling of the same bind. The target binds what
+        # `__enter__` RETURNS, which is not statically knowable in general, so binding it to
+        # the CONTEXT EXPRESSION is the over-approximation — and it is the only one that
+        # closes the shape, because a call there (`with _cm(sys.modules) as _x:`) binds an
+        # unknown value and stays GREEN, correctly.
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    binds.append((item.optional_vars, item.context_expr))
             continue
         else:
             continue
@@ -5264,6 +5317,21 @@ def test_an_accumulation_over_several_ITERATIONS_is_the_DECLARED_residual() -> N
         # vacuously — round-5 review P2), and the READ NAME must not be among its values.
         assert "_S" in consts, f"{label}: `_S` did not resolve at all — vacuous row"
         assert "_tortoise_fts_query" not in consts["_S"], label
+    # ⛔ THE `AsyncFor` APPLIED COUNT IS ITS OWN ROW (#14326 round 19, MEASURED at
+    # `9b48318eedc3`: `_S` resolved to `{'_tortoise', '_tortoise_fts', '_tortoise_query'}` —
+    # the READ NAME ABSENT, so a lever over `_S` passes). Every row in `cases` above is wrapped
+    # in a plain `def run(…)`, where `async for` is a SyntaxError, so the `async` half of the
+    # sentence at the bind arm carried NO row while the sentence claimed one — the same
+    # stale-claim class this round corrected one member of and left standing for this one.
+    async_consts = _str_constants(ast.parse(
+        "async def run():\n"
+        '    _S = "_tortoise"\n'
+        '    async for _p in ("_fts", "_query"):\n'
+        "        _S = _S + _p\n"))
+    assert "_S" in async_consts, "`_S` did not resolve for an `async for` — vacuous row"
+    assert "_tortoise_fts_query" not in async_consts["_S"], (
+        "an `async for` applied count is the DECLARED residual — if it starts resolving, "
+        "delete the residual note instead of leaving it contradicting the code")
     # ⛔ AND THE `while` ROW MEASURES THE APPLIED COUNT, not just the read name: a loop that
     # appends `_fts` can only build `_tortoise` / `_tortoise_fts` / `_tortoise_fts_fts`, so
     # "the read name is absent" is trivially true there whatever the count. The value that
@@ -7709,6 +7777,19 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'for _x in (*(sys.modules,),):\n    _x |= {"tortoise.sdk": _Mirror}\n',
         "import registry via a `for` target over a `**` dict spread":
             'for _x in {**{sys.modules: 1}}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        # ⛔ THREE BIND FORMS WITH NO `Assign` NODE (#14326 round 19, MEASURED GREEN at
+        # `9b48318eedc3`). `_str_constants` already resolved all three; `_aliases_of` did not,
+        # so the `AugAssign` store arm received a receiver that never resolved and the exact
+        # store these rows carry reached the deferred import while the pin passed. One row
+        # per form, because each is a separate arm and a clause no row can red is the defect
+        # this table deletes clauses for.
+        "import registry via a `match` CAPTURE":
+            'match sys.modules:\n    case _x:\n        _x |= {"tortoise.sdk": _Mirror}\n',
+        "import registry via a parameter DEFAULT":
+            'def _f(_registry=sys.modules):\n'
+            '    _registry |= {"tortoise.sdk": _Mirror}\n',
+        "import registry via a `with` TARGET":
+            'with sys.modules as _x:\n    _x |= {"tortoise.sdk": _Mirror}\n',
     }
     for name, lever in aug_levers.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
@@ -7782,6 +7863,15 @@ def test_the_ALIAS_axis_iterable_residuals_are_NAMED_and_pinned_GREEN() -> None:
             'for _x in {**{sys.modules: 1}}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
         "STARRED NAME (the alias fixpoint, not the literal arm)":
             '_R = sys.modules\nfor _x in (*_R,):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        # ⛔ THE `else` HALVES ARE CLAUSES TOO (#14326 round 19, MEASURED: replacing
+        # `expanded.append(element.value)` with `element`, or deleting `keys.append(value)`,
+        # left the whole file at 41 passed while `(*sys.modules,)` / `{**sys.modules}` flipped
+        # RED -> GREEN). The `STARRED NAME` row above cannot red the first half —
+        # `_names_in(Starred)` still sees `_R` — so each half needs its own row.
+        "STARRED registry ATTRIBUTE":
+            'for _x in (*sys.modules,):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "`**` spread of a registry ATTRIBUTE":
+            'for _x in {**sys.modules}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
     }
     for name, lever in closed.items():
         assert reds(lever), (name, lever)
