@@ -279,6 +279,18 @@ assert 0 < _FIXPOINT_MAX_PASSES <= 64, (
 #: argument as `_FIXPOINT_MAX_PASSES` applies: an unbounded product is a timeout, not a red.
 _PRODUCT_MAX_COMBINATIONS = 4096
 
+#: ⛔ A PASS BUDGET BOUNDS PASSES, NOT WORK — measured, and this is the second half of the
+#: guard (#14326 round 14). `_a = "xx"; _b = _a * 2; _a = _b * 2` is all-static, has no
+#: `+=`, and DOUBLES a string every pass: at `_FIXPOINT_MAX_PASSES = 64` it raised
+#: `MemoryError` (3 GB `ulimit -v`, one probe) instead of `_ResolutionDidNotConverge`,
+#: because pass 40 is a 1 TB string and the budget is never reached. A kill is not a red
+#: either, so the resolver caps the PRODUCT too: a name whose statically possible values
+#: exceed these bounds makes it REFUSE. Real spellings are nowhere near them — the three
+#: files the pin parses hold 2, 7 and 4 passes' worth of small literals — and a read name is
+#: never 8 kB long.
+_VALUE_MAX_CHARS_PER_NAME = 8192
+_VALUE_MAX_PER_NAME = 512
+
 
 def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     """Every statically POSSIBLE string literal each name may hold, anywhere in the file.
@@ -394,16 +406,31 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
                    and isinstance(node.ctx, ast.Load) for node in ast.walk(value))
 
     binds: list[tuple[ast.AST, ast.AST]] = []
-    augments: list[tuple[ast.Name, ast.AST]] = []
-    staged: list[tuple[ast.Name, ast.AST]] = []
+    #: ONE list for every bind that must be applied EXACTLY ONCE, carrying its SOURCE
+    #: POSITION. `+=` and a self-referential `=` are the same accumulation written two ways,
+    #: and a file may mix them in either order, so they are applied in one pass sorted by
+    #: position (#14326 round 14). Applying them in two phases was a FAIL-OPEN, measured:
+    #: `_S = "_tortoise"; _S += "_fts"; _S = _S + "_query"` resolved to
+    #: `{'…','_tortoise_query','_tortoise_fts','_tortoise_query_fts'}` — the string the code
+    #: actually builds (`_tortoise_fts_query`) was ABSENT, and a third `kind="statement"`
+    #: reach was refused=False, i.e. the pin passed while the lever shipped. Order is the
+    #: semantics: staging is an over-approximation only if it runs in the order the runtime
+    #: does.
+    accruals: list[tuple[int, int, str, ast.Name, ast.AST]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                (staged if _self_referential(target, node.value) else binds).append(
-                    (target, node.value))
+                if _self_referential(target, node.value):
+                    accruals.append(
+                        (node.lineno, node.col_offset, "expr", target, node.value))
+                else:
+                    binds.append((target, node.value))
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-            (staged if _self_referential(node.target, node.value) else binds).append(
-                (node.target, node.value))
+            if _self_referential(node.target, node.value):
+                accruals.append((node.lineno, node.col_offset, "expr",
+                                 node.target, node.value))
+            else:
+                binds.append((node.target, node.value))
         # ⛔ AN AUGMENTED BIND IS A BIND (#14326 review at `a29f3cd8`, MEASURED GREEN at
         # `80d2ab52`): `_N = "_tortoise_"; _N += "fts_query"` then
         # `getattr(sdk, _N)(…, kind="statement")` left the pin GREEN (mentions 2, calls 2,
@@ -414,7 +441,8 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         # feed the accumulation its own output forever (see the staging note below).
         elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
                 and isinstance(node.op, ast.Add)):
-            augments.append((node.target, node.value))
+            accruals.append((node.lineno, node.col_offset, "aug",
+                             node.target, node.value))
         # ⛔ A `for`/COMPREHENSION TARGET IS A BIND TOO (#14279 review F1): the spelling
         # carries no `Assign` node at all, so no assignment arm above could ever see it.
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
@@ -594,12 +622,28 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
             return [name for element in target.elts for name in _store_names(element)]
         return []
 
+    def _check_budget(name: str, have: set[str]) -> None:
+        """Refuse when a name's statically possible values outgrow the product budget.
+
+        ⛔ THIS IS WHAT MAKES THE DIVERGENCE A RED (#14326 round 14, MEASURED): without it
+        `_a = "xx"; _b = _a * 2; _a = _b * 2` runs to `MemoryError`, which is a killed
+        shard — neither green nor red — rather than a failed test.
+        """
+        if len(have) > _VALUE_MAX_PER_NAME or sum(map(len, have)) > _VALUE_MAX_CHARS_PER_NAME:
+            raise _ResolutionDidNotConverge(
+                f"`{name}` has more statically possible values than the resolver will hold "
+                f"(> {_VALUE_MAX_PER_NAME} spellings or > {_VALUE_MAX_CHARS_PER_NAME} "
+                "characters total). A bind that grows without a finite product is a MUTUAL "
+                "accumulation, and the pin cannot certify it — so it REFUSES rather than "
+                "allocate its way to a kill.")
+
     def _bind(target: ast.AST, value: ast.AST) -> bool:
         """Add every possible value of `value` to `target`; True when the map GREW."""
         if isinstance(target, ast.Name):
             have = out.setdefault(target.id, set())
             before = len(have)
             have |= _values(value)
+            _check_budget(target.id, have)
             return len(have) != before
         # ⛔ AN UNPACKED LITERAL PAIRS ELEMENT-WISE (`(_N,) = ("…",)`), so the target shape
         # and the value shape are walked together — the flat form treated the tuple VALUE as
@@ -640,6 +684,7 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
                     have = out.setdefault(name.id, set())
                     before = len(have)
                     have |= values
+                    _check_budget(name.id, have)
                     grew = len(have) != before or grew
             return grew
         return False
@@ -682,22 +727,25 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     # Over-approximate on purpose: the earlier values stay in the set, which is this map's
     # declared fail-closed polarity (a later bind can only ADD candidates), and an INERT use
     # of the name stays green because the `Name` arm still requires an executable position.
-    for target, value in staged:
-        acc = out.get(target.id)
-        if acc is None:
-            acc = out[target.id] = set()
-        acc |= _values(value)
-    for target, value in augments:
-        # ⛔ NOT `out.setdefault(...).update({...})` (#14326): that shape is one row of
-        # `tools/sdk_privatise.py`'s untyped-receiver RESIDUE, and adding one moved the
-        # repo-wide pin 11864 -> 11865, turning `surface-guard` red on a diff that touches
-        # no production code. The subscript form accumulates identically without growing
-        # that residue, so the gate keeps its absolute pin.
-        _acc = out.get(target.id)
+    # ⛔ ONE PASS, IN SOURCE ORDER (#14326 round 14). Every bind whose value can depend on
+    # the map is applied exactly ONCE — that is what bounds an accumulation — but the ORDER
+    # between `+=` and a self-referential `=` is the code's own order, because the product
+    # differs by it: measured, the two-phase form dropped the string the source actually
+    # builds and the pin went GREEN on a lever-carrying third reach. `_values` already
+    # computes the product against the map as it stands for BOTH spellings, so the only
+    # difference between them here is that `+=` names only the RHS while `=` carries the
+    # whole expression.
+    for _lineno, _col, kind, _target, _value in sorted(
+            accruals, key=lambda item: (item[0], item[1])):
+        _acc = out.get(_target.id)
         if _acc is None:
-            _acc = out[target.id] = set()
-        _acc |= {base + suffix for base in out.get(target.id, ())
-                 for suffix in _values(value)}
+            _acc = out[_target.id] = set()
+        if kind == "aug":
+            _bases = set(_acc)
+            _acc |= {base + suffix for base in _bases for suffix in _values(_value)}
+        else:
+            _acc |= _values(_value)
+        _check_budget(_target.id, _acc)
     _fixpoint()
     return {name: frozenset(values) for name, values in out.items() if values}
 
@@ -740,6 +788,14 @@ def _repetitions(strings: frozenset[str], counts: frozenset[int]) -> frozenset[s
     """
     if not strings or not counts:
         return frozenset()
+    # ⛔ ONE `*` CAN ALLOCATE THE WHOLE BUDGET (#14326 round 14): `_s * 100000000` is a
+    # single token, so a cap applied only per pass sees nothing to stop. Refuse before the
+    # product is built, not after.
+    if any(len(s) * max(counts) > _VALUE_MAX_CHARS_PER_NAME for s in strings):
+        raise _ResolutionDidNotConverge(
+            f"a static repetition would build a string past "
+            f"_VALUE_MAX_CHARS_PER_NAME={_VALUE_MAX_CHARS_PER_NAME}: the pin cannot census "
+            "a value that size, so it REFUSES rather than allocate it.")
     return frozenset(s * n for s in strings for n in counts)
 
 
@@ -4688,6 +4744,17 @@ def test_a_SELF_REFERENTIAL_bind_TERMINATES_and_still_reaches() -> None:
         'def f():\n    _s = "_tortoise"\n    _s = _s + "_fts_query"\n'))
     assert "_tortoise_fts_query" in consts["_s"]
 
+    # ⛔ AND THE ORDER BETWEEN `+=` AND A SELF-REFERENTIAL `=` IS THE SEMANTICS (#14326
+    # round 14, MEASURED as a FAIL-OPEN in the two-phase apply): with `+=` staged before
+    # every `=`, the product of `_S = _S + "_query"` was taken against `{'_tortoise'}` only,
+    # so the string the code actually BUILDS — `'_tortoise_fts_query'` — was ABSENT from the
+    # set (`{'_tortoise','_tortoise_query','_tortoise_fts','_tortoise_query_fts'}`), and a
+    # third `kind="statement"` reach was `refuses=False`. One pass, sorted by source
+    # position, is what makes the over-approximation still contain the truth.
+    mixed = _str_constants(ast.parse(
+        'def f():\n    _S = "_tortoise"\n    _S += "_fts"\n    _S = _S + "_query"\n'))
+    assert "_tortoise_fts_query" in mixed["_S"]
+
     reach = ('    _s = "_tortoise"\n    _s = _s + "_fts_query"\n'
              '    getattr(sdk, _s)(query=queries[0]["query"], limit=10, kind="statement")\n')
     assert _pin_refuses(_pin_source(reach)) is True
@@ -4695,17 +4762,35 @@ def test_a_SELF_REFERENTIAL_bind_TERMINATES_and_still_reaches() -> None:
     assert _pin_refuses(_pin_source(inert)) is False
 
 
+@pytest.mark.timeout(20)
 def test_a_BIND_CYCLE_REFUSES_instead_of_spinning() -> None:
     """Two names accumulating through each other have no finite product — refuse.
 
     ⛔ A MUTUAL accumulation is NOT the per-target case above (neither bind loads its OWN
     target), so staging cannot see it and the fixpoint budget is the only guard. The
-    `pytest.raises` is not decoration: without the budget this test HANGS rather than
-    failing, and a hung pin reports neither green nor red to the shard that runs it.
+    `pytest.mark.timeout` is load-bearing and `pytest.raises` alone is NOT enough (#14326
+    round 14, review P2): with the budget deleted this test HANGS rather than failing, so
+    without a per-item bound its own regression reads as a shard timeout — the non-verdict
+    the budget exists to remove.
     """
     with pytest.raises(_ResolutionDidNotConverge):
         _str_constants(ast.parse(
             'def run():\n    _a = "x"\n    _b = _a + "y"\n    _a = _b + "z"\n'))
+
+
+@pytest.mark.timeout(20)
+def test_a_MUTUAL_PRODUCT_REFUSES_before_it_allocates() -> None:
+    """A PASS budget bounds passes, not WORK — the product budget is what makes this a red.
+
+    ⛔ MEASURED (#14326 round 14): `_a = "xx"; _b = _a * 2; _a = _b * 2` is three
+    statements, all-static, no `+=` — and it DOUBLES a string every pass, so with only
+    `_FIXPOINT_MAX_PASSES = 64` it raised `MemoryError` under a 3 GB `ulimit -v`: pass 40 is
+    a 1 TB string and the pass budget is never reached. A killed shard answers neither green
+    nor red, which is why the resolver caps a name's PRODUCT as well.
+    """
+    with pytest.raises(_ResolutionDidNotConverge):
+        _str_constants(ast.parse(
+            'def run():\n    _a = "xx"\n    _b = _a * 2\n    _a = _b * 2\n'))
 
 
 def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
@@ -4842,6 +4927,13 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
                                      f'    for _N in _S:\n        {reach.format(name="_N")}\n'),
         "re-bind AFTER the reach": (f'    _N = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n'
                                     '    _N = "done"\n'),
+        # ⛔ `+=` THEN A SELF-REFERENTIAL `=` (#14326 round 14). This row is the fail-open
+        # the two-phase apply produced: with every `+=` staged BEFORE every `=`, the product
+        # of `_S = _S + "_query"` never saw `_tortoise_fts`, so the name the code actually
+        # builds was missing from the set and this reach was refused=False (measured).
+        "`+=` THEN a self-referential `=`": (
+            '    _S = "_tortoise"\n    _S += "_fts"\n    _S = _S + "_query"\n'
+            f'    {reach.format(name="_S")}\n'),
         # ⛔ A SELF-REFERENTIAL `+` BIND IS THE SAME REACH WRITTEN AS AN ACCUMULATION
         # (#14326 P1). Measured at the head this was found on, this row did not pass and did
         # not fail — `_str_constants` never returned, so the shard TIMED OUT. The resolver now
