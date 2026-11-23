@@ -30,9 +30,10 @@
   },
   "s1_second_send": {
    "cause": "S1's narrative cap is 1500 tokens; a story that hits it escalates and re-sends the SAME prompt, so the document is paid for twice",
-   "documents_with_two_s1_calls": 68.0,
+   "documents_taking_two_s1_calls": 34,
    "quality_risk": "a longer narrative is more content, not less \u2014 but it also enlarges the story both later stages re-read, so the net is a measurement, not arithmetic; the story's own growth is NOT sizeable offline",
-   "saved_per_doc_if_one_call": 4651.9
+   "saved_per_doc_if_one_call": 4651.9,
+   "share_pct": 68.0
   }
  },
  "median_doc_tokens": 5211.0,

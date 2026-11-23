@@ -91,7 +91,7 @@ Median document 5,211 tokens · 3.98 calls/document (s1 1.68, s2 1.16, s4 1.14).
 | graph search results (S4) | 129 | 0.3 % | empty (`sdk=None`) — a **floor**; a populated graph adds candidates |
 | **composition total** | **42,509** | 100 % | |
 | *fitted constant (`#14295`)* | *45,503* | — | |
-| **unattributed** | **2,994** | **6.6 %** | the fit's intercept is an OLS line through 50 points, and one of them is far outside the others: the 127,914-token document is 9.3 % of the corpus's prompt tokens but 29.7 % of its *document* tokens, and it is a **high-leverage** point — drop it and the intercept falls 45,503 → 30,156 (R² 0.715 → 0.523). So the fit's intercept sits ABOVE the composition, and 2,994 is what an OLS line does at `T=0` where the composition is a measurement at the median. This bundle does not close that gap by pro-rating it — an unexplained remainder is a finding, and the finding here is that fit and composition agree to 6.6 %. |
+| **unattributed** | **2,994** | **6.6 % of the fitted constant** | the fit's intercept is an OLS line through 50 points, and one of them is far outside the others: the 127,914-token document is 9.3 % of the corpus's prompt tokens but 29.7 % of its *document* tokens, and it is a **high-leverage** point — drop it and the intercept falls 45,503 → 30,156 (R² 0.715 → 0.523). So the fit's intercept sits ABOVE the composition, and 2,994 is what an OLS line does at `T=0` where the composition is a measurement at the median. This bundle does not close that gap by pro-rating it — an unexplained remainder is a finding, and the finding here is that fit and composition agree to 6.6 %. ⚠️ **This row's share is OF THE 45,503 FIT, not of the 42,509 column above it** — it is the only row on a different denominator, so the column does not sum to 100 % and is not meant to: 2,994 / 42,509 would be 7.0 %, and the honest pairing is the fit's own. |
 
 **The document itself is not in that table.** It is the fit's *slope*: S1 sends the whole
 document text once **per call**, and 34 of 50 documents take a **second** S1 call
@@ -242,12 +242,21 @@ uv run python tools/extractor_cost_measure.py compose \
     --out docs/evidence/14343-amplify/compose-after.json
 
 # 2. before → after on the SAME corpus. ⛔ The ARM IS A SETTING, NOT A LABEL:
-#    `run --arms before,after` sets TORTOISE_S4_EMBED_JSON=compact for the
-#    `after` rows and pins it OFF for the `before` rows, in-process, and records
-#    `s4_embed_json` on every row so a mislabelled measurement cannot hide.
-#    (Until review cycle 9 it wrote nothing and measured the same render twice,
-#    returning a −0 delta with no banner.) The resume key is (arm, kind, id), so
-#    a separate `--arms after` invocation appends to the same file correctly.
+#    `run --arms before,after` installs TORTOISE_S4_EMBED_JSON=compact for the
+#    `after` batch and pins it OFF for the `before` batch, and every row records
+#    `s4_embed_json` — the layout that row's render RESOLVED — so a mislabelled
+#    measurement cannot hide; a row whose observation disagrees with its batch is
+#    written FAILED rather than attributed to an arm.
+#    ⚠️ The flag is PROCESS-GLOBAL (`os.environ`), so the arms run as SEQUENTIAL
+#    BATCHES, not interleaved: the value is installed once per batch, before any
+#    worker thread starts, and restored after the batch joins. That matters at
+#    the default `--workers 6` — an install wrapped around the single call would
+#    let a `before` thread trip over an `after` thread, which is a race rather
+#    than an arm. (Until review cycle 9 nothing was installed at all and the same
+#    render was measured twice, returning a −0 delta with no banner; cycle 10
+#    moved the install out of the per-call path for the reason above.)
+#    The resume key is (arm, kind, id), so a separate `--arms after` invocation
+#    appends to the same file correctly.
 uv run python tools/extractor_cost_measure.py run --docs 50 --arms before,after \
     --out docs/evidence/14343-amplify/measurements.jsonl
 uv run python tools/extractor_cost_measure.py decompose \

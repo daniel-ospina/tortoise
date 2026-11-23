@@ -314,6 +314,74 @@ def _existing_rows(path: Path) -> set[tuple[str, str, str]]:
     return done
 
 
+_TOGGLE = "TORTOISE_S4_EMBED_JSON"
+
+#: What each measurement ARM asks that lever to be. An arm absent from this map
+#: is not a lever arm (``cold``/``warm`` size the cache ladder), so it inherits
+#: the ambient value.
+_ARM_LAYOUT = {"after": "compact", "before": "indent"}
+
+
+def _embed_mode() -> str:
+    """The serialization `render_s4_prompt` will really use — production's own
+    resolution, not a copy of its rule.
+
+    ⛔ RECORDED PER ROW, AND RECORDED BY READING THE ENVIRONMENT — never by
+    re-deriving it from the arm label. A value computed as
+    ``"compact" if arm == "after" else "indent"`` is a function of the label, so
+    it can never disagree with it and can never catch a mislabelled run — which
+    is the one thing the field exists to make visible (review cycle 10, P2).
+
+    The resolution itself is delegated to ``extractor_v2._embed_json_mode``,
+    which derives it from the kwargs the render passes to ``json.dumps``. A
+    hand-written copy of that rule here (``.strip().lower() == "compact"``) is a
+    SECOND parser of the same predicate: it agrees today and is free to drift
+    the first time the toggle grows a spelling, and the drift would show up as a
+    row that records a layout the render did not take.
+    """
+    from tortoise.extractor_v2 import _embed_json_mode
+    return _embed_json_mode()
+
+
+def _install_arm(arm: str) -> None:
+    """Arm the lever for a whole BATCH.
+
+    ``after`` arms compact; ``before`` pins it off; any other arm name (the
+    ``cold``/``warm`` cache arms) leaves the ambient value alone, because those
+    arms size the cache ladder rather than this lever.
+    """
+    if arm == "after":
+        os.environ[_TOGGLE] = "compact"
+    elif arm == "before":
+        os.environ.pop(_TOGGLE, None)
+
+
+def _assert_the_arm_is_what_rendered(arm: str, observed: str, *,
+                                     at_exit: str | None = None) -> None:
+    """Refuse a row whose render did not carry its arm's setting.
+
+    ⛔ Review cycle 10 called the corrupted row "indistinguishable from a good
+    one": recording the OBSERVED layout makes it visible in the artifact, but a
+    row that was still written as a good measurement of that arm is evidence a
+    reader has to distrust rather than evidence the harness refused. So the two
+    ways an observation can disagree — a lever that moved under the measurement,
+    or a batch that did not install what its arm asked for — RAISE, and the
+    caller's own failure path records the row as FAILED.
+    """
+    if at_exit is not None and at_exit != observed:
+        raise RuntimeError(
+            f"{_TOGGLE} resolved to {observed!r} at entry and {at_exit!r} at "
+            f"exit — the lever moved mid-measurement, so neither layout "
+            f"describes this item's whole pipeline run and the row cannot be "
+            f"labelled")
+    expected = _ARM_LAYOUT.get(arm)
+    if expected is not None and observed != expected:
+        raise RuntimeError(
+            f"the {arm!r} arm requests {expected!r} but the render resolved "
+            f"{observed!r} — the lever moved under the measurement, so this "
+            f"row cannot be attributed to an arm")
+
+
 def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
                     workers: int, seed: int, arms: tuple[str, ...],
                     arm_gap_s: float, long_split: bool,
@@ -339,13 +407,14 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
             os.fsync(fh.fileno())
 
     def _job(item: dict, kind: str, arm: str) -> dict:
-        # ⛔ THE ARM IS A SETTING, NOT A LABEL. It was a label only: nothing on
-        # the measurement path wrote `os.environ`, so `--arms before,after`
-        # measured the SAME render twice in one process and the before→after
-        # delta came back 0 — a false pass with no banner, in the one command
-        # the bundle documents as finishing the job (review cycle 9, P2).
-        # `TORTOISE_S4_EMBED_JSON` is the lever this harness exists to size, so
-        # `after` ARMS it here and `before` pins it off for the call.
+        # ⛔ THE ARM IS A SETTING, NOT A LABEL — but the setting is installed by
+        # the BATCH, not by this function (see the `by_arm` loop below). It was
+        # a label only: nothing on the measurement path wrote `os.environ`, so
+        # `--arms before,after` measured the SAME render twice in one process and
+        # the before→after delta came back 0 — a false pass with no banner, in
+        # the one command the bundle documents as finishing the job (review
+        # cycle 9, P2). `TORTOISE_S4_EMBED_JSON` is the lever this harness exists
+        # to size, so `after` ARMS it and `before` pins it off.
         model = _build_model()   # one per call: the adapter carries per-call
                                  # state (last_*), which races under workers>1
         if kind == "doc":
@@ -353,23 +422,18 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
                              "content": item["text"]}]
         else:
             conversation = item["turns"]
-        saved = os.environ.get("TORTOISE_S4_EMBED_JSON")
-        try:
-            if arm == "after":
-                os.environ["TORTOISE_S4_EMBED_JSON"] = "compact"
-            elif arm == "before":
-                os.environ.pop("TORTOISE_S4_EMBED_JSON", None)
-            rec = measure_one(model, conversation,
-                              session_date="2026-11-21T00:00:00+00:00")
-        finally:
-            if saved is None:
-                os.environ.pop("TORTOISE_S4_EMBED_JSON", None)
-            else:
-                os.environ["TORTOISE_S4_EMBED_JSON"] = saved
+        mode_before = _embed_mode()      # sampled BEFORE the pipeline: S4 renders
+                                        # late, so the label must bracket the run
+        rec = measure_one(model, conversation,
+                          session_date="2026-11-21T00:00:00+00:00")
         rec["arm"] = arm
-        #: the flag the arm actually ran under — a reader must be able to tell
-        #: a real post-change measurement from a mislabelled one.
-        rec["s4_embed_json"] = "compact" if arm == "after" else "indent"
+        #: the serialization the render ACTUALLY used — sampled at entry and at
+        #: exit, so a mislabelled row is VISIBLE instead of self-consistent and a
+        #: lever that moved under the measurement is REFUSED instead of written
+        #: as a good row.
+        rec["s4_embed_json"] = mode_before
+        _assert_the_arm_is_what_rendered(arm, mode_before,
+                                         at_exit=_embed_mode())
         rec["kind"] = kind
         rec["id"] = item["path"]
         rec["item_tokens"] = item["tokens"]
@@ -397,27 +461,65 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
     print(f"running {total} measurements at {workers} workers "
           f"(arms: {', '.join(arms)})", flush=True)
     finished = 0
-    with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_job, item, kind, arm): (item, kind, arm)
-                   for item, kind, arm in jobs}
-        for fut in cf.as_completed(futures):
-            item, kind, arm = futures[fut]
-            finished += 1
-            try:
-                rec = fut.result()
-            except Exception as exc:
-                # a 360-call measurement; the failure is recorded as a row so
-                # the report can state how many items did not measure.
-                rec = {"arm": arm, "kind": kind, "id": item["path"],
-                       "item_tokens": item["tokens"], "failed": True,
-                       "error": f"{type(exc).__name__}: {exc}"}
-                _emit(rec)
-            print(f"  [{finished}/{total}] {arm:4} {kind:7} "
-                  f"{rec['id'][-58:]:58} "
-                  f"in={rec.get('prompt_tokens', 0):>7} "
-                  f"out={rec.get('completion_tokens', 0):>5} "
-                  f"hit={rec.get('cache_hit_tokens', 0):>7} "
-                  f"{'FAILED' if rec.get('failed') else ''}", flush=True)
+    first_batch = True
+    # ⛔ ARMS RUN AS SEQUENTIAL BATCHES — NEVER INTERLEAVED (review cycle 10, P2).
+    # `os.environ` is PROCESS-GLOBAL and every worker thread shares it, so the
+    # first cut of this fix — installing the flag per JOB, around the single
+    # `measure_one` call — let an `after` row and a `before` row overwrite each
+    # other between a thread's install and its measure. At the documented
+    # `--arms before,after` and the DEFAULT `--workers 6`, that is a race rather
+    # than an arm, and it reproduces the very false pass the fix was meant to
+    # remove (a before→after delta that is an artefact of thread scheduling).
+    # Installing the value ONCE per batch, before any thread starts, and
+    # restoring it only after the batch has joined, makes it constant for every
+    # call in that batch.
+    by_arm: dict[str, list[tuple[dict, str]]] = {}
+    for item, kind, arm in jobs:
+        by_arm.setdefault(arm, []).append((item, kind))
+    for batch_arm, batch_jobs in by_arm.items():
+        #: ⛔ `--arm-gap-s` IS HONOURED HERE (review cycle 11, P3). It was
+        #: documented as "a pause between arms (a provider's prefix cache is
+        #: time-bounded)" but was bound to a parameter nothing ever read — an
+        #: option that promised a pause it never took, so a caller asking for
+        #: 300 s to defeat prefix-cache carry-over silently got a back-to-back
+        #: replay and a delta that included the cache warm-up. The pause belongs
+        #: between BATCHES, which is exactly where the arms now meet.
+        if not first_batch and arm_gap_s > 0:
+            print(f"arm gap: pausing {arm_gap_s:g}s before {batch_arm!r}",
+                  flush=True)
+            time.sleep(arm_gap_s)
+        first_batch = False
+        saved_embed = os.environ.get(_TOGGLE)
+        try:
+            _install_arm(batch_arm)
+            with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_job, item, kind, batch_arm):
+                           (item, kind, batch_arm)
+                           for item, kind in batch_jobs}
+                for fut in cf.as_completed(futures):
+                    item, kind, arm = futures[fut]
+                    finished += 1
+                    try:
+                        rec = fut.result()
+                    except Exception as exc:
+                        # a 360-call measurement; the failure is recorded as a
+                        # row so the report can state how many items did not
+                        # measure.
+                        rec = {"arm": arm, "kind": kind, "id": item["path"],
+                               "item_tokens": item["tokens"], "failed": True,
+                               "error": f"{type(exc).__name__}: {exc}"}
+                        _emit(rec)
+                    print(f"  [{finished}/{total}] {arm:4} {kind:7} "
+                          f"{rec['id'][-58:]:58} "
+                          f"in={rec.get('prompt_tokens', 0):>7} "
+                          f"out={rec.get('completion_tokens', 0):>5} "
+                          f"hit={rec.get('cache_hit_tokens', 0):>7} "
+                          f"{'FAILED' if rec.get('failed') else ''}", flush=True)
+        finally:
+            if saved_embed is None:
+                os.environ.pop(_TOGGLE, None)
+            else:
+                os.environ[_TOGGLE] = saved_embed
 
     if long_split:
         _measure_long_split(out, docs, arms, _emit, split_max_turns
@@ -456,10 +558,29 @@ def _measure_long_split(out: Path, docs: list[dict], arms: tuple[str, ...],
         turns.append("\n\n".join(paras[lo:hi]))
     for arm in arms:
         model = _build_model()
-        rec = measure_one(model,
-                          [{"role": "user", "content": t} for t in turns],
-                          session_date="2026-11-21T00:00:00+00:00")
+        # Same lever, same contract as the batch loop in `run_measurement`: the
+        # arm is a SETTING. This block is serial, so install/restore around the
+        # single call is race-free — it is written this way so the two paths
+        # cannot disagree about what an arm means.
+        saved_embed = os.environ.get(_TOGGLE)
+        try:
+            _install_arm(arm)
+            mode_before = _embed_mode()
+            rec = measure_one(model,
+                              [{"role": "user", "content": t} for t in turns],
+                              session_date="2026-11-21T00:00:00+00:00")
+            mode_at_exit = _embed_mode()
+        finally:
+            if saved_embed is None:
+                os.environ.pop(_TOGGLE, None)
+            else:
+                os.environ[_TOGGLE] = saved_embed
         rec["arm"] = arm
+        rec["s4_embed_json"] = mode_before
+        #: the same refusal the batch loop makes — the two paths must not
+        #: disagree about what an arm MEANS, only about how they install it.
+        _assert_the_arm_is_what_rendered(arm, mode_before,
+                                         at_exit=mode_at_exit)
         rec["kind"] = "doc_split"
         rec["id"] = f"{longest['path']}#{len(turns)}turns"
         rec["item_tokens"] = longest["tokens"]
@@ -2098,10 +2219,12 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     s4_sys = sum(statics["s4"].values())
     clause = statics["envelope"]["clause"]
     #: how often S1 makes a SECOND call for the same document (the narrative
-    #: cap is hit, so the escalation re-sends the identical prompt).
-    two_call_share = (sum(1 for r in docs
-                          if (r["stages"].get("s1") or {}).get("calls", 0) > 1)
-                      / len(docs))
+    #: cap is hit, so the escalation re-sends the identical prompt). ONE
+    #: predicate, counted once: `document_term` publishes the COUNT and
+    #: `levers_offline` the SHARE, and a second `sum(...)` could drift from it.
+    n_two_call = sum(1 for r in docs
+                     if (r["stages"].get("s1") or {}).get("calls", 0) > 1)
+    two_call_share = n_two_call / len(docs)
 
     # The two dynamic regions, solved from the measured per-call prompts. The
     # story is S1's own emission seen by the next stage; the embed list is
@@ -2221,15 +2344,14 @@ def decompose(rows: list[dict], *, arm: str = "cold",
             "s1_calls_x_median_doc": round(c1 * t_med, 1),
             "fitted_slope_x_median_doc": round(in_fit["slope"] * t_med, 1),
             "documents": len(docs),
-            "documents_taking_two_s1_calls": sum(
-                1 for r in docs
-                if (r["stages"].get("s1") or {}).get("calls", 0) > 1),
+            "documents_taking_two_s1_calls": n_two_call,
             "note": ("S1 sends the WHOLE document once per call, and a "
                      "majority of documents take a second S1 call, so the "
                      "document is paid for ~2x"),
         },
         "levers_offline": _offline_levers(statics, c1, c2, c4, t_med,
-                                          two_call_share, oc2),
+                                          two_call_share, oc2,
+                                          n_two_call=n_two_call),
         "serialization": serialization_lever(receipts) if receipts else {},
     }
 
@@ -2261,7 +2383,8 @@ def _output_tail(docs: list[dict]) -> dict:
 
 
 def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
-                    t_med: float, two_call_share: float, oc2: float) -> dict:
+                    t_med: float, two_call_share: float, oc2: float,
+                    *, n_two_call: int) -> dict:
     """The size of each candidate lever, measured WITHOUT a provider call.
 
     A lever that cannot be sized cannot be chosen between, and a lever's size
@@ -2294,7 +2417,14 @@ def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
         "cause": (f"S1's narrative cap is {X._S1_MAX_TOKENS} tokens; a story "
                   "that hits it escalates and re-sends the SAME prompt, so "
                   "the document is paid for twice"),
-        "documents_with_two_s1_calls": round(100.0 * two_call_share, 1),
+        # ⛔ COUNT AND SHARE ARE SEPARATE, CORRECTLY-NAMED KEYS (review cycle
+        # 11, P3). This was `documents_with_two_s1_calls: round(100.0 * share,
+        # 1)` — a PERCENTAGE under a COUNT-shaped name, published in the same
+        # artifact as `document_term.documents_taking_two_s1_calls`, which is
+        # the count of the same quantity. So the bundle asserted that 68 of a
+        # 50-document corpus took two S1 calls.
+        "documents_taking_two_s1_calls": n_two_call,
+        "share_pct": round(100.0 * two_call_share, 1),
         "saved_per_doc_if_one_call": round(
             two_call_share * (t_med + sum(statics["s1"].values())), 1),
         "quality_risk": ("a longer narrative is more content, not less — but "
@@ -2450,18 +2580,50 @@ def render_decompose(dec: dict) -> str:
                  f"**{solved['embed_list_tokens']:,.0f}** tokens — "
                  f"{solved['embed_over_emission']}× S2's own emission.")
     lines.append("")
+    # ⛔ THE TWO SOLVED ROWS ARE A UNIT DIFFERENCE, and leaving it unnamed is
+    # what lets a reader take them for a single tokenizer's numbers. `_per_call`
+    # returns the PROVIDER's own reported `prompt_tokens` (per call, minus the
+    # SOURCE-TRANSCRIPT tail), while `s2_sys`/`s4_sys`/`clause` are
+    # `tiktoken cl100k_base` on a local render — so `story` and `embed` mix two
+    # tokenizers, and the residual they feed (`unattributed`) absorbs the
+    # complement. The bundle measures that gap itself in §3
+    # (provider / offline render = 1.063, 1.035, 1.017 on three S1 prompts), so
+    # the disclosure names the rows that carry it rather than presenting the
+    # fit-vs-composition agreement as tokenizer-free.
+    lines.append(
+        "⚠️ **The two solved rows span TWO tokenizers.** `story` and `embed` "
+        "are `provider prompt_tokens − cl100k static render`: the per-call "
+        "prompt count is the provider's own reported usage "
+        "(`last_prompt_tokens`), while the static being removed is "
+        "`tiktoken cl100k_base` on a local render. The bundle measures that "
+        "gap directly in §3 (measured / offline render = 1.063, 1.035, 1.017 "
+        "on three S1 prompts), so these two rows carry it and `unattributed` "
+        "absorbs its complement — the fit-vs-composition agreement reported "
+        "below is therefore not a tokenizer-free comparison.")
+    lines.append("")
     out = dec.get("output") or {}
     if out:
         lines.append("### The output constant, decomposed")
         lines.append("")
         lines.append("| stage | completion tokens/doc | share of output |")
         lines.append("|---|---|---|")
-        for stage in ("s1", "s2", "s4"):
-            tokens = out.get(f"{stage}_tokens_per_doc", 0)
+        # ⛔ THE PRINTED ROWS AND THE PRINTED TOTAL MUST SUM. The total used to
+        # be formatted from the UNROUNDED sum while each row was formatted from
+        # its own unrounded value, so banker's rounding made the column read
+        # 2,798 + 11,677 + 3,354 = 17,830 — an off-by-one in the one table whose
+        # stated rule is "a table that does not sum is not evidence" (review
+        # cycle 9, P3). The total is now the SUM OF THE PRINTED ROWS, so the
+        # column reconciles by construction rather than by luck. The shares keep
+        # the unrounded total as their denominator, which is why they still sum
+        # to 100.0%.
+        stage_rows = [(stage, out.get(f"{stage}_tokens_per_doc", 0))
+                      for stage in ("s1", "s2", "s4")]
+        printed_total = sum(round(tokens) for _, tokens in stage_rows)
+        for stage, tokens in stage_rows:
             share = (100.0 * tokens / out["total_per_doc"]) \
                 if out.get("total_per_doc") else 0.0
-            lines.append(f"| {stage} | {tokens:,.0f} | {share:.1f}% |")
-        lines.append(f"| **composition total** | **{out['total_per_doc']:,.0f}** "
+            lines.append(f"| {stage} | {round(tokens):,} | {share:.1f}% |")
+        lines.append(f"| **composition total** | **{printed_total:,}** "
                      f"| 100.0% |")
         lines.append(f"| *fitted constant (this arm's own intercept)* | "
                      f"{out['fitted_constant']:,} | — |")
@@ -2525,7 +2687,8 @@ def render_decompose(dec: dict) -> str:
         if "saved_per_doc_if_one_call" in s1l:
             lines.append(
                 f"| S1 truncation double-send "
-                f"({s1l['documents_with_two_s1_calls']}% of documents take 2 "
+                f"({s1l['documents_taking_two_s1_calls']} documents, "
+                f"{s1l['share_pct']}% of the corpus take 2 "
                 f"S1 calls) | −{s1l['saved_per_doc_if_one_call']:,.0f} | NO — "
                 f"{s1l['quality_risk']} |")
         lines.append("")

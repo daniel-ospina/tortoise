@@ -43,6 +43,8 @@ The document itself is NOT in that table: it is the fit's slope, 8,754 tokens/do
 
 Solved dynamic regions: the S1 story is **2,110** tokens as the later stages see it, and S2's embed list is re-serialized into S4's prompt at **12,412** tokens — 1.23× S2's own emission.
 
+⚠️ **The two solved rows span TWO tokenizers.** `story` and `embed` are `provider prompt_tokens − cl100k static render`: the per-call prompt count is the provider's own reported usage (`last_prompt_tokens`), while the static being removed is `tiktoken cl100k_base` on a local render. The bundle measures that gap directly in §3 (measured / offline render = 1.063, 1.035, 1.017 on three S1 prompts), so these two rows carry it and `unattributed` absorbs its complement — the fit-vs-composition agreement reported below is therefore not a tokenizer-free comparison.
+
 ### The output constant, decomposed
 
 | stage | completion tokens/doc | share of output |
@@ -50,7 +52,7 @@ Solved dynamic regions: the S1 story is **2,110** tokens as the later stages see
 | s1 | 2,798 | 15.7% |
 | s2 | 11,677 | 65.5% |
 | s4 | 3,354 | 18.8% |
-| **composition total** | **17,830** | 100.0% |
+| **composition total** | **17,829** | 100.0% |
 | *fitted constant (this arm's own intercept)* | 22,802 | — |
 | **unattributed** | 4,972 | — |
 
@@ -88,4 +90,4 @@ Measured on **7 real sessions / 14 emissions / 580 items** from `tests/eval/writ
 | lever | size (tokens/doc) | quality-neutral? |
 |---|---|---|
 | compact master render (2,335 vs 3,187 tokens/call) | −1,960 | NO — compact mode story-filters the pack kinds, so a document that misses every trigger word drops to the all-packs fallback and a document that hits one drops the others — not quality-neutral |
-| S1 truncation double-send (68.0% of documents take 2 S1 calls) | −4,652 | NO — a longer narrative is more content, not less — but it also enlarges the story both later stages re-read, so the net is a measurement, not arithmetic; the story's own growth is NOT sizeable offline |
+| S1 truncation double-send (34 documents, 68.0% of the corpus take 2 S1 calls) | −4,652 | NO — a longer narrative is more content, not less — but it also enlarges the story both later stages re-read, so the net is a measurement, not arithmetic; the story's own growth is NOT sizeable offline |
