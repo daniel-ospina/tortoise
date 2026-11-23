@@ -6641,6 +6641,33 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
                 "wearing the shipped class's name satisfies the receiver clause while every "
                 "page it returns can be rewritten (measured: a `__getattr__` that sorts each "
                 "page left the pin GREEN before this clause)")
+        elif isinstance(node, ast.AugAssign):
+            # ⛔ THE SAME STORE, ONE STATEMENT KIND OVER (#14326 review P1, MEASURED GREEN
+            # end-to-end at `346c11d6`):
+            #
+            #     _d = _tsdk.__dict__
+            #     _d |= {"TortoiseSDK": _Mirror}      # `run()`'s deferred import resolves
+            #                                         # to the mirror; pin 35 passed
+            #
+            # Both halves were ALREADY resolved by the machinery above — `_d` lands in
+            # `namespaces` (`_aliases_of` over `_is_namespace_expr`) and the `Dict` key is a
+            # constant — so the ONLY thing blocking the red was that this arm's sibling
+            # enumerates `(Assign, AnnAssign, NamedExpr)` and `AugAssign` carries `.target`
+            # SINGULAR, not `.targets`. The asymmetry is in-file, not a boundary: five other
+            # guards here enumerate `AugAssign` as a bind form, and an enumeration that took
+            # every form EXCEPT it is the exact defect `_str_constants` records.
+            target = node.target
+            receiver = (isinstance(target, ast.Attribute) and target.attr == "__dict__") or \
+                (isinstance(target, ast.Name) and target.id in namespaces) or \
+                _is_module_registry(target)
+            if receiver:
+                by_key = set(_mapping_keys_of(node.value, consts)) & {_SDK_CONSTRUCTOR}
+                if by_key:
+                    out.append(
+                        f"line {node.lineno} AUGMENTS `{ast.unparse(target)}` with "
+                        f"`{_SDK_CONSTRUCTOR}` — `|=` on a namespace mapping is the same "
+                        "store as an attribute write, and `run()`'s deferred import "
+                        "resolves it at CALL time (measured GREEN before this arm)")
         elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
@@ -6946,6 +6973,21 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     labels = (shipped + "_LABELS = {}\n"
                        '_LABELS.update({"TortoiseSDK": "tortoise.sdk"})\n')
     assert ctor_findings(labels) == []               # a label table stores nothing
+
+    # ⛔ `|=` ON A NAMESPACE ALIAS (#14326 review P1, MEASURED GREEN end-to-end at
+    # `346c11d6`: the deferred import resolved the mirror and the pin stayed at 35 passed).
+    # Both halves were already resolved by the machinery above — only the STATEMENT KIND was
+    # missing, because `AugAssign` carries `.target` singular. Same class as the `.update`
+    # arm's missing kwarg spelling: one statement/method over, and the store still lands.
+    for aug in ('_d = _t.__dict__\n_d |= {"TortoiseSDK": _Mirror}\n',
+                '_d = _t.__dict__\n_d |= dict(TortoiseSDK=_Mirror)\n'):
+        got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + aug)
+        assert got and any("AUGMENTS" in g for g in got), (aug, got)
+
+    # …and the false-red control: `|=` on an ORDINARY container stores a label, not a
+    # binding, so the receiver scope is what keeps this green (measured `35 passed`).
+    plain_aug = (shipped + '_ctr = {}\n_ctr |= {"TortoiseSDK": "label"}\n')
+    assert ctor_findings(plain_aug) == []
 
     # ⛔ THE `asname` HALF IS ITS OWN CLAUSE (#14326 review P2, measured: deleting it left
     # 31 passed, because the `subclass` row above satisfies the arm's FIRST disjunct).
