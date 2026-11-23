@@ -464,10 +464,16 @@ def test_the_committed_artifact_states_what_it_does_not_deliver():
     assert "stays **OFF**" in text
     data = json.loads(_ARTIFACT_JSON.read_text(encoding="utf-8"))
     assert "#7949" in data["not_delivered"]
-    assert data["offline"] is True and data["provider_calls"] == 0
+    #: ⛔ NOT `data["offline"] is True` / `provider_calls == 0`: both are
+    #: LITERALS in the verb's return dict, so asserting them pins a constant the
+    #: generator always writes and cannot falsify any behaviour — the same
+    #: vacuous-pin class the end-to-end test documents. What IS falsifiable here
+    #: is the observation the recorded run left behind: a run that fetched the
+    #: BPE ranks reds on these two lines.
     assert data["encoder_cache"]["network_used"] is False, (
         "the recorded run fetched the BPE ranks — it is not the offline run the "
         "artifact claims; re-run on a warm cache and re-record")
+    assert data["encoder_cache"]["fetched"] == []
     assert data["encoder_cache"]["fetched"] == [], (
         "the artifact names a fetched blob, so `network_used` must not be False")
     # the posture is DERIVED and the layout is RECORDED, not asserted as prose

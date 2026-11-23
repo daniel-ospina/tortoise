@@ -3209,11 +3209,13 @@ def render_embed_json_measurement(m: dict) -> str:
         "|---|---|---|---|---|---|---|",
     ]
     #: Per-item figures, DERIVED from this run's own cells (never typed in): the
-    #: two layouts differ by the indentation, and compact lands BELOW S2's own
-    #: emission because the model's JSON is not compact either. Stated this way
-    #: because the earlier wording ("the copy S4 re-reads is the emission plus
-    #: whitespace") is contradicted by these very numbers — the compact copy is
-    #: 90.2 tokens/item against a 100.9-token emission.
+    #: two layouts differ by the indentation, and the compact copy lands BELOW
+    #: S2's own emission. ⛔ The gap between compact and the emission is NOT
+    #: attributed: these counts cannot tell formatting from content the receipt's
+    #: parsed `embed_list` does not carry, so the sentence states the comparison
+    #: and says what it cannot conclude. (An earlier wording attributed it to "the
+    #: pipeline's own whitespace" and then to "the model's JSON is not compact";
+    #: both were causal claims this verb cannot observe.)
     items = agg["items"] or 1
     per_item_indent = agg["indented_tokens"] / items
     per_item_compact = agg["compact_tokens"] / items
@@ -3234,12 +3236,13 @@ def render_embed_json_measurement(m: dict) -> str:
         "serialization, not of one session. Per item that is "
         f"`{per_item_indent:,.1f}` tokens in `indent=1` against "
         f"`{per_item_compact:,.1f}` compact, so the `{per_item_gap:,.1f}`-token "
-        "difference between the two layouts IS the indentation. ⛔ Neither "
-        "layout is S2's emission plus whitespace: S2 emits "
-        f"`{agg['tokens_per_item']}` completion tokens per item, and the compact "
-        "copy is BELOW that — the model's own JSON is not compact either — so "
-        "the gap measured here is the indentation, not a re-rendering of the "
-        "emission's content.", "",
+        "difference between the two layouts IS the indentation. The compact copy "
+        "is also BELOW S2's own emission of "
+        f"`{agg['tokens_per_item']}` completion tokens per item; ⛔ those counts "
+        "do NOT say why (the gap may be formatting, or content the receipt's "
+        "parsed list does not carry), and nothing here removes it — the saved "
+        "`"
+        f"{agg['saved_tokens']:,}` tokens are the indentation alone.", "",
         "### Tokens per document, before → after", "",
         "The arithmetic, in the order it is applied:", "",
         f"1. the re-sent embed region is **solved** from the corpus per S4 "
