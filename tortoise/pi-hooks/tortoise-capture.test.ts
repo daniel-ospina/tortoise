@@ -6841,11 +6841,26 @@ test("a REFUSED append records NOTHING about the append it could not do (#14347 
   // `[<"the write APPENDED 1 new turn(s)">, <spool_saturated refusal>]` for a
   // write that never happened.
   //
+  // ⛔ The fixture is genuinely OVER the ceiling. With one `chmod(0o000)` entry
+  // alone at `maxEntries: 1` the spool is exactly AT it, and a REPLACEMENT adds
+  // no entry — so after the cycle-5 finding-1 fix that write is correctly
+  // ADMITTED and this row could no longer reach the refusal whose ledger it is
+  // about. The readable entry beside it is what puts the count over.
+  //
   // MUTATION THAT REDS THIS: emit the append record inside the `unusablePrior`
   // arm (above the admission guard) -> the detail claims an append the write did
   // not perform.
   const spool = tmpSpool();
   mkdirSync(join(spool, "entries"), { recursive: true });
+  const other = "sess-other";
+  writeFileSync(
+    join(spool, "entries", `${entryKey(other)}.meta.json`),
+    JSON.stringify({ version: 1, session_id: other }),
+  );
+  writeFileSync(
+    join(spool, "entries", `${entryKey(other)}.turns.jsonl`),
+    [{ role: "user" as const, content: "x" }].map((t) => `${JSON.stringify(t)}\n`).join(""),
+  );
   const sid = "sess-w";
   const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
   const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
@@ -6855,12 +6870,16 @@ test("a REFUSED append records NOTHING about the append it could not do (#14347 
   chmodSync(metaPath, 0o000);
   let res;
   try {
-    const bounds = { maxEntries: 1, maxTotalBytes: 1000, maxEntryBytes: 1 << 20 };
+    const bounds = { maxEntries: 1, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
     res = writeSpoolEntry(spool, snapshot(sid, [...stored, { role: "assistant", content: "new" }]), bounds);
   } finally {
     if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
   }
-  assert.equal(res.written, false, "one unreadable entry at maxEntries=1 is full");
+  assert.equal(
+    res.written,
+    false,
+    "one readable + one unreadable entry at maxEntries=1 is over the ceiling",
+  );
   assert.equal(res.discards.at(-1)?.reason, DISCARD_SPOOL_SATURATED);
   assert.equal(
     res.discards.some((d) => (d.detail ?? "").includes("APPENDED")),
@@ -7088,4 +7107,127 @@ test("the cheap listing DECLINES when a log has no meta (#14347 cyc4 P1)", () =>
   );
   const listing = cheapSpoolScan(ordinary)!;
   assert.equal(listing.names, 1, "one meta, one name");
+});
+
+
+/** Seed one spool entry directly on disk (`readable: false` chmods the meta). */
+function seedSpoolEntry(
+  spool: string,
+  sid: string,
+  opts: { readable: boolean; filed?: boolean; stamp?: string; payload?: string },
+): { metaPath: string; logPath: string } {
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  const metaPath = join(dir, `${entryKey(sid)}.meta.json`);
+  const logPath = join(dir, `${entryKey(sid)}.turns.jsonl`);
+  const markers = opts.filed
+    ? { capture_key: "K", filed_key: "K", capture_lane: "hook", filed_lane: "hook" }
+    : { capture_key: "U" };
+  writeFileSync(
+    metaPath,
+    JSON.stringify({
+      version: 1,
+      session_id: sid,
+      ...markers,
+      created_at: opts.stamp ?? "2026-01-01T00:00:00Z",
+      updated_at: opts.stamp ?? "2026-01-01T00:00:00Z",
+    }),
+  );
+  writeFileSync(logPath, `${JSON.stringify({ role: "user", content: opts.payload ?? "x" })}\n`);
+  if (!opts.readable) {
+    chmodSync(metaPath, 0o000);
+    try {
+      readFileSync(metaPath);
+      chmodSync(metaPath, 0o600);
+      assert.fail("chmod(0o000) does not deny this runner's user (root): the premise cannot be built");
+    } catch (err) {
+      if (err instanceof assert.AssertionError) throw err;
+    }
+  }
+  return { metaPath, logPath };
+}
+
+test("a replacement AT the count ceiling is ADMITTED (#14347 cyc5 P1)", () => {
+  // The count answer is the POST-WRITE entry count, in both directions. At
+  // `maxEntries: 2` with one readable and one `chmod(0o000)`-unreadable entry,
+  // `parsedCount` is already 2 — so a GROWTH of the unreadable entry adds no
+  // entry and must be admitted. It was refused, permanently, by an
+  // `addsEntry: prior === undefined` operand written when `parsedCount` was
+  // `metas.length` alone: the count term started carrying the unreadable class
+  // in the same commit, so the same entry was counted by both operands and the
+  // write path over-counted by one. Measured on the Python twin (same code):
+  // same spool, same snapshot, only the meta's readability differing —
+  // unreadable ⇒ `written: false ['spool_saturated']`; readable ⇒
+  // `written: true ['spool_count_exceeded']`. The asymmetry IS the defect.
+  //
+  // ⚠️ The health line is deliberately NOT the oracle: with no write in hand it
+  // has no projection, so it takes the STRICT arm and answers "would a NEW
+  // capture be refused?" — a different question from "does THIS replacement
+  // cross the ceiling?".
+  //
+  // MUTATION THAT REDS THIS: pass `addsEntry: prior === undefined` ->
+  // `parsedCount + 1 = 3 > maxEntries = 2` -> the growth is REFUSED.
+  const spool = tmpSpool();
+  seedSpoolEntry(spool, "sess-ok", { readable: true });
+  const { metaPath: lockedMeta } = seedSpoolEntry(spool, "sess-locked", { readable: false });
+
+  const bounds = { maxEntries: 2, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+  let res;
+  try {
+    res = writeSpoolEntry(spool, snapshot("sess-locked"), bounds);
+  } finally {
+    if (existsSync(lockedMeta)) chmodSync(lockedMeta, 0o600);
+  }
+
+  assert.equal(
+    res.written,
+    true,
+    `a replacement at the ceiling crosses nothing and must be admitted: ${JSON.stringify(res.discards)}`,
+  );
+});
+
+test("prune SPENDS a filed entry for a count overage it can see (#14347 cyc5 P2)", () => {
+  // `saturatedForMetas` counts `metas.length + unreadableCount`, but the
+  // eviction loop counted `metas.length` alone, so with K retained-unreadable
+  // entries the spool settled at `maxEntries + K`: every admitted write spent
+  // one filed entry and the predicate's own ceiling was never reached.
+  // Measured on the Python twin (same code), pre-fix (3 filed + 1
+  // `chmod(0o000)`, `maxEntries: 3`): `pruneSpool → []`, and the write admitted
+  // with `spool_count_exceeded` while the post-write count was STILL 4.
+  //
+  // `spoolSaturated` is correctly false here — it answers "nothing EVICTABLE",
+  // and there are three filed entries — so prune is the only surface that can
+  // relieve it, which is exactly why its count term has to see the class.
+  //
+  // MUTATION THAT REDS THIS: `let count = metas.length` -> prune returns `[]`
+  // and nothing is reclaimed.
+  const spool = tmpSpool();
+  for (let i = 0; i < 3; i += 1) {
+    seedSpoolEntry(spool, `sess-f${i}`, {
+      readable: true,
+      filed: true,
+      stamp: `2026-01-01T00:00:0${i}Z`,
+    });
+  }
+  const { metaPath: lockedMeta } = seedSpoolEntry(spool, "sess-u", { readable: false });
+
+  const bounds = { maxEntries: 3, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+  let discards;
+  try {
+    assert.equal(
+      spoolSaturated(spool, bounds),
+      false,
+      "the premise: 3 filed entries ARE evictable, so this is not 'saturated', it is prune's job",
+    );
+    discards = pruneSpool(spool, "sess-new", bounds);
+  } finally {
+    if (existsSync(lockedMeta)) chmodSync(lockedMeta, 0o600);
+  }
+
+  assert.deepEqual(
+    discards.map((d) => d.reason),
+    [DISCARD_COUNT_EXCEEDED],
+    `one filed entry must be spent to reach the ceiling: ${JSON.stringify(discards)}`,
+  );
+  assert.equal(existsSync(lockedMeta), true, "the unreadable entry is never the thing evicted");
 });

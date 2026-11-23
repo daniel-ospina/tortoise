@@ -1,4 +1,4 @@
-// tortoise-hook-version: 29
+// tortoise-hook-version: 30
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -2789,12 +2789,24 @@ export function writeSpoolEntry(
       // or not its meta was readable. `undefined` here counted the entry twice
       // and inflated the count term by one for a write that adds no entry.
       replacesSessionId,
-      // …but a REPLACEMENT is not the same as ALREADY COUNTED (#14347 review,
-      // cycle 2, finding 4): `saturatedForMetas` counts `metas.length`, and an
-      // entry whose meta is unreadable is in neither that list nor its byte sum.
-      // `prior === undefined` ⇒ this session is NOT in `metas.length` ⇒ it ADDS
-      // one, whether it is fresh or an unreadable entry being resynced.
-      addsEntry: prior === undefined,
+      // …and a REPLACEMENT adds no COUNT either — the count term now CARRIES
+      // the classes that used to be invisible to it (#14347 review, cycle 5,
+      // finding 1). The cycle-2 F4 operand was `prior === undefined`, written
+      // when `saturatedForMetas` counted `metas.length` alone: back then an
+      // entry whose meta could not be read was in NEITHER that list NOR
+      // anything else, so it had to be added by hand. `parsedCount` became
+      // `metas.length + unreadableCount` in the same commit, so the same entry
+      // is now counted by BOTH operands and the write path over-counts by one:
+      // a spool holding one readable plus one read-refused entry at
+      // `maxEntries: 2` reported `draining` and refused the refused entry's own
+      // growth — permanently, because the refusal stamp replays and the
+      // projection only grows.
+      //
+      // The correct question is the POST-WRITE entry count, and it is the same
+      // question whether or not the meta was readable: an entry already on disk
+      // is already in one of the counted classes, so it adds 0; only a session
+      // that is not there at all adds 1.
+      addsEntry: !entryOnDisk,
       // The bytes this write is about to quarantine are in neither
       // `entryBytes` nor the replaced entry's size (#14347 review, cycle 2,
       // finding 3), so without this an admitted resync could land the spool over
@@ -3049,7 +3061,7 @@ export function pruneSpool(
       return compareAge(a.meta, b.meta);
     });
 
-  let count = metas.length;
+  let count = metas.length + unreadable.length;
   let total =
     metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
     // #12483: the retained-unreadable class is on disk and can never be evicted
@@ -3057,6 +3069,17 @@ export function pruneSpool(
     // eviction loop spends the filed class trying to reach a ceiling it cannot.
     unreadableEntryBytes(dir, unreadable) +
     orphans.reduce((sum, path) => sum + fileSize(path), 0);
+  // ⛔ THE COUNT TERM MUST NAME THE SAME POPULATION AS THE PREDICATE THAT SET
+  // THE CEILING (#14347 review, cycle 5, finding 2). `saturatedForMetas` counts
+  // `metas.length + unreadableCount`; `count` here was `metas.length` alone, so
+  // with K retained-unreadable/stray entries the spool settled at
+  // `maxEntries + K` — every admitted write spent one filed entry and the
+  // predicate's own ceiling was never reached. Measured on the Python twin:
+  // 3 filed + 1 chmod-000 entry at `maxEntries: 3` → `pruneSpool` returned `[]`,
+  // the predicate said not-saturated, and the write was admitted with
+  // `spool_count_exceeded` while the post-write count was STILL 4. The
+  // unreadable class is not evictable (the loop only ever spends filed
+  // entries), so it belongs in the ceiling test and never in the decrement.
   const orphanBytes = orphans.reduce((sum, path) => sum + fileSize(path), 0);
   const evictableBytes =
     ranked.reduce((sum, r) => sum + (entryFiled(r.meta) ? r.bytes : 0), 0) + orphanBytes;

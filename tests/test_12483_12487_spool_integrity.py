@@ -691,21 +691,32 @@ def test_the_COUNT_ceiling_counts_retained_unreadable_entries(tmp_path):
 
 
 def test_the_writer_and_the_health_line_AGREE_at_the_count_ceiling(tmp_path):
-    """`entry_on_disk` is the BYTE answer; the COUNT answer is `prior is None`.
+    """The count answer is the POST-WRITE entry count, in both directions.
 
-    The unusable entry is absent from ``len(metas)``, so suppressing the count
-    `+1` for it (the F2 fix, over-applied) admitted a write the health line
-    called SATURATED. The two readers must not disagree about one directory.
+    At ``max_entries=2`` with one readable and one ``chmod(0o000)``-unreadable
+    entry, ``parsed_count`` is already 2 — so a GROWTH of the unreadable entry
+    adds no entry and must be ADMITTED. It was refused, permanently, by an
+    ``adds_entry=(prior is None)`` operand written when ``parsed_count`` was
+    ``len(metas)`` alone: the count term started carrying the unreadable class
+    in the same commit, so the same entry was counted by both operands and the
+    write path over-counted by one. Both readers must answer about one
+    directory.
 
-    MUTATION THAT REDS THIS: pass ``adds_entry=(prior is not None)`` (the F2 fix
-    applied to the count term too) -> ``parsed_count`` is exactly
-    ``max_entries`` (one readable meta + one unreadable one), so suppressing the
-    ``+1`` makes ``2 <= 2`` and the write is ADMITTED while the health line says
-    SATURATED. ⛔ The ceiling is 2, not 1, deliberately: at 1 the fixture is
-    already over the ceiling with or without the mutation, so the pinned
-    regression was caught only by the sibling
-    ``test_a_REFUSED_append_records_NOTHING_about_the_append_it_could_not_do``
-    and this test could not discriminate (cycle-4 P3).
+    Control (measured): the same spool and the same snapshot, only the meta's
+    readability differing — unreadable ⇒ ``written: False
+    ['spool_saturated']``; readable ⇒ ``written: True
+    ['spool_count_exceeded']``. The asymmetry IS the defect.
+
+    MUTATION THAT REDS THIS: pass ``adds_entry=(prior is None)`` ->
+    ``parsed_count + 1 = 3 > max_entries = 2`` -> the growth is REFUSED while
+    the health line calls the spool relievable.
+
+    ⚠️ The health line is deliberately NOT used as the oracle here: with no
+    write in hand it has no projection, so it takes the STRICT arm
+    (``parsed_count >= max_entries``) and answers "would a NEW capture be
+    refused?" — a different question from "does THIS replacement cross the
+    ceiling?". The two are not a disagreement; the writer answers the one it was
+    asked.
     """
     _write_meta(tmp_path, "sess-ok", capture_lane="hook")
     _write_turns(tmp_path, "sess-ok", TURNS)
@@ -714,15 +725,76 @@ def test_the_writer_and_the_health_line_AGREE_at_the_count_ceiling(tmp_path):
     bounds = Bounds(max_entries=2)
     _lock(locked)
     try:
-        line = capture_health_line(tmp_path, bounds=bounds).line
-        assert "SATURATED" in line, f"the premise: the health line is saturated: {line}"
+        res = write_spool_entry(tmp_path, _snapshot("sess-locked"), bounds)
+    finally:
+        _unlock(locked)
+
+    assert res["written"] is True, (
+        "a replacement at the ceiling crosses nothing and must be admitted")
+
+
+def test_a_replacement_OVER_the_count_ceiling_is_refused(tmp_path):
+    """…and the same write one entry over is refused, so the agreement above is
+    not an unconditional admit.
+
+    MUTATION THAT REDS THIS: pass ``adds_entry=False`` unconditionally (or drop
+    the count term entirely) -> the write is ADMITTED at
+    ``parsed_count = 3 > max_entries = 2``.
+    """
+    for sid in ("sess-a", "sess-b"):
+        _write_meta(tmp_path, sid, capture_lane="hook")
+        _write_turns(tmp_path, sid, TURNS)
+    locked = _write_meta(tmp_path, "sess-locked")
+    _write_turns(tmp_path, "sess-locked", TURNS)
+    bounds = Bounds(max_entries=2)
+    _lock(locked)
+    try:
         res = write_spool_entry(tmp_path, _snapshot("sess-locked"), bounds)
     finally:
         _unlock(locked)
 
     assert res["written"] is False, (
-        "the writer must not admit what the health line calls saturated")
+        "with no filed entry to evict, a replacement over the ceiling is refused")
     assert res["discards"][-1]["reason"] == "spool_saturated"
+
+
+def test_prune_spends_a_filed_entry_for_a_count_overage_it_can_see(tmp_path):
+    """``prune_spool``'s count term must name the population the CEILING was
+    measured against.
+
+    ``_saturated_for_metas`` counts ``len(metas) + unreadable_count``, but the
+    eviction loop counted ``len(metas)`` alone, so with K retained-unreadable
+    entries the spool settled at ``max_entries + K``: every admitted write spent
+    one filed entry and the predicate's own ceiling was never reached. Measured
+    pre-fix (3 filed + 1 ``chmod(0o000)``, ``max_entries=3``): ``prune_spool →
+    []``, and the write admitted with ``spool_count_exceeded`` while the
+    post-write count was STILL 4.
+
+    ``spool_saturated`` is correctly False here — it answers "nothing
+    EVICTABLE", and there are three filed entries — so prune is the only surface
+    that can relieve it, which is exactly why its count term has to see the
+    class.
+
+    MUTATION THAT REDS THIS: use ``len(metas)`` for ``count`` -> prune returns
+    ``[]`` and nothing is reclaimed.
+    """
+    for i in range(3):
+        _filed_entry(tmp_path, f"sess-f{i}", f"2026-01-01T00:00:0{i}Z")
+    locked = _write_meta(tmp_path, "sess-u")
+    _write_turns(tmp_path, "sess-u", TURNS)
+    bounds = Bounds(max_entries=3)
+    _lock(locked)
+    try:
+        assert spool_saturated(tmp_path, bounds) is False, (
+            "the premise: 3 filed entries ARE evictable, so this is not"
+            " 'saturated', it is prune's job")
+        discards = prune_spool(tmp_path, keep_session_id="sess-new", bounds=bounds)
+    finally:
+        _unlock(locked)
+
+    assert [d["reason"] for d in discards] == ["spool_count_exceeded"], (
+        f"one filed entry must be spent to reach the ceiling: {discards}")
+    assert locked.exists(), "the unreadable entry is never the thing evicted"
 
 
 def test_a_resync_that_could_not_KEEP_its_orphan_is_refused_BEFORE_the_rename(tmp_path):
@@ -849,22 +921,32 @@ def test_a_REFUSED_append_records_NOTHING_about_the_append_it_could_not_do(tmp_p
     ``[<"the write APPENDED 1 new turn(s)">, <spool_saturated refusal>]`` for a
     write that never happened.
 
+    ⛔ The fixture is genuinely OVER the ceiling. With one ``chmod(0o000)`` entry
+    alone at ``max_entries=1`` the spool is exactly AT it, and a REPLACEMENT adds
+    no entry — so after the cycle-5 finding-1 fix that write is correctly
+    ADMITTED and this row could no longer reach the refusal whose ledger it is
+    about. The readable entry beside it is what puts the count over.
+
     MUTATION THAT REDS THIS: emit the append record inside the ``unusable`` arm
     (above the admission guard) -> the detail claims an append the write did not
     perform.
     """
+    _write_meta(tmp_path, "sess-other", capture_lane="hook")
+    _write_turns(tmp_path, "sess-other", TURNS)
     locked = _write_meta(tmp_path, "sess-w")
     stored = [{"role": "user", "content": f"turn-{i}"} for i in range(6)]
     log = _write_turns(tmp_path, "sess-w", stored)
     _lock(locked)
     try:
-        bounds = Bounds(max_entries=1, max_total_bytes=1000, max_entry_bytes=1 << 20)
+        bounds = Bounds(max_entries=1, max_total_bytes=1 << 20,
+                        max_entry_bytes=1 << 20)
         grown = [*stored, {"role": "assistant", "content": "new"}]
         res = write_spool_entry(tmp_path, _snapshot("sess-w", turns=grown), bounds)
     finally:
         _unlock(locked)
 
-    assert res["written"] is False, "one unreadable entry at max_entries=1 is full"
+    assert res["written"] is False, (
+        "one readable + one unreadable entry at max_entries=1 is over the ceiling")
     assert res["discards"][-1]["reason"] == "spool_saturated"
     details = [d.get("detail", "") for d in res["discards"]]
     assert not any("APPENDED" in d for d in details), (

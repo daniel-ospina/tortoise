@@ -2601,17 +2601,27 @@ def write_spool_entry(
         # projected entry instead of the delta), which refused growths the health
         # line called healthy.
         replaces_session_id=replaces_session_id,
-        # …but a REPLACEMENT is not the same as ALREADY COUNTED (#14347 review,
-        # cycle 2, finding 4). `_saturated_for_metas` counts entries by
-        # `len(metas)`, and an entry whose meta cannot be read is in NEITHER that
-        # list nor its byte sum — so suppressing the count `+1` for it admitted
-        # a write the health line called SATURATED (measured at
-        # `max_entries=1` with one readable + one read-refused entry). The count
-        # term follows the PARSED list, the byte term follows OCCUPANCY; they
-        # are two different questions and they have two different answers:
-        # `prior is None` ⇒ this session is NOT in `len(metas)` ⇒ it ADDS one,
-        # whether it is a fresh session or an unreadable one being resynced.
-        adds_entry=(prior is None),
+        # …and a REPLACEMENT adds no COUNT either — the count term now CARRIES
+        # the classes that used to be invisible to it (#14347 review, cycle 5,
+        # finding 1). The cycle-2 F4 operand was `prior is None`, written when
+        # `_saturated_for_metas` counted `len(metas)` alone: back then an entry
+        # whose meta could not be read was in NEITHER that list NOR anything
+        # else, so it had to be added by hand. `parsed_count` became
+        # `len(metas) + unreadable_count` in the same commit, so the same entry
+        # is now counted by BOTH operands and the write path over-counts by one:
+        # a spool holding one readable plus one read-refused entry at
+        # `max_entries=2` reported `draining` and refused the refused entry's own
+        # growth — permanently, because `_refused_at_current_state` replays the
+        # stamp and the projection only grows. Measured: same spool, same
+        # snapshot, only the meta's readability differing → unreadable ⇒
+        # `written: False ['spool_saturated']`, readable ⇒ `written: True
+        # ['spool_count_exceeded']` (prune evicted the filed entry).
+        #
+        # The correct question is the POST-WRITE entry count, and it is the same
+        # question whether or not the meta was readable: an entry already on disk
+        # is already in one of the counted classes, so it adds 0; only a session
+        # that is not there at all adds 1.
+        adds_entry=(not entry_on_disk),
         # ⛔ THE BYTES THIS WRITE IS ABOUT TO QUARANTINE ARE NOT IN THE
         # PROJECTION (#14347 review, cycle 2, finding 3). The resync renames the
         # stored log to `.orphan` AFTER this decision, so those bytes appear in
@@ -3165,12 +3175,23 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
         (m for m in metas if m.get("session_id") != keep_session_id),
         key=lambda m: (0 if _entry_is_filed(m) else 1, *_age_key(m)),
     )
-    count = len(metas)
+    count = len(metas) + len(unreadable)
     total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
     # #12483: the retained-unreadable class is on disk and can never be evicted
     # (see `_unreadable_entry_bytes`), so it counts here too — otherwise the
     # eviction loop spends the filed class trying to reach a ceiling it cannot.
     total += _unreadable_entry_bytes(root, unreadable)
+    # ⛔ THE COUNT TERM MUST NAME THE SAME POPULATION AS THE PREDICATE THAT SET
+    # THE CEILING (#14347 review, cycle 5, finding 2). `_saturated_for_metas`
+    # counts `len(metas) + unreadable_count`; `count` here was `len(metas)`
+    # alone, so with K retained-unreadable/stray entries the spool settled at
+    # `max_entries + K` — every admitted write spent one filed entry and the
+    # predicate's own ceiling was never reached. Measured: 3 filed + 1
+    # chmod-000 entry at `max_entries=3` → `prune_spool` returned `[]`, the
+    # predicate said not-saturated, and the write was admitted with
+    # `spool_count_exceeded` while the post-write count was STILL 4. The
+    # unreadable class is not evictable (the loop only ever spends filed
+    # entries), so it belongs in the ceiling test and never in the decrement.
     total += sum(_file_size(path) for path in orphans)
     # ⛔ DO NOT SPEND THE FILED CLASS FOR ROOM THAT CAN NEVER BE MADE (#12483).
     # The PERMANENT classes — an undelivered entry (never evicted) and a

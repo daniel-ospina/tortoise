@@ -4711,7 +4711,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 29}
+                             "pi": 30}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4824,7 +4824,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     artifact, move the generation, update this pair — all three in one commit").
     What is never rewritten is a SHIPPED entry in ``_GENERATION_DIGESTS``.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 29
+    assert hook_install.read_hook_version(_PI_SRC) == 30
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4915,7 +4915,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: behaviour is untouched) because `contract_version_for('pi')` grades the pair
 #: as ONE contract.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    29, "669165f0d337c419174a35db24b4a2ba984a31965a4694057eeef7de54860b4d")
+    30, "5334a2cd9f0e3919dbd1165ab995312b74220e07dc84d534900f435e44e92858")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5021,6 +5021,22 @@ _GENERATION_DIGESTS = {
     # Neither 28 nor 29 has SHIPPED, and a new byte set always gets a NEW entry
     # rather than a rewrite.
     29: "669165f0d337c419174a35db24b4a2ba984a31965a4694057eeef7de54860b4d",
+    # Generation 30 (#14347 review, cycle 5, findings 1+2): the COUNT term of the
+    # admission fast path named two different populations in two places. The
+    # writer's `addsEntry` operand was `prior === undefined`, written when
+    # `parsedCount` was `metas.length` alone; `parsedCount` later became
+    # `metas.length + unreadableCount`, so an unreadable entry was counted twice
+    # and its own growth was refused PERMANENTLY (the refusal stamp replays and
+    # the projection only grows) on a spool the health line called relievable.
+    # `pruneSpool`'s `count` was still `metas.length` while the ceiling was set
+    # from `parsedCount`, so with K retained-unreadable entries the spool settled
+    # at `maxEntries + K` and every admitted write spent one filed entry without
+    # reaching the ceiling. Both are behaviour changes on shipped bytes: a
+    # generation-29 copy still over-counts the replacement and still settles over
+    # its own count ceiling, so it must read STALE ("reinstall"), never
+    # `modified-artifact` ("local edit"). Neither 29 nor 30 has SHIPPED, and a
+    # new byte set always gets a NEW entry rather than a rewrite.
+    30: "5334a2cd9f0e3919dbd1165ab995312b74220e07dc84d534900f435e44e92858",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -5236,13 +5252,16 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # Generation 29 (#14347 review, cycle 4, P1): header only, same reason — one
     # seam, one contract number.
     29: "09d28db7e084f4f90cb245d434fa94842071759f826cbd747b0b8eca06212975",
+    # Generation 30 (#14347 review, cycle 5, findings 1+2): header only, same
+    # reason — one seam, one contract number.
+    30: "ada4cece48443ed9a47aab3cf77b7739ff1e1b4fc7a305eeba4fbc84871fc477",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    29, "09d28db7e084f4f90cb245d434fa94842071759f826cbd747b0b8eca06212975")
+    30, "ada4cece48443ed9a47aab3cf77b7739ff1e1b4fc7a305eeba4fbc84871fc477")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():
