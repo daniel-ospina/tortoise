@@ -13724,6 +13724,15 @@ _EMISSION_CLAUSE_RE = re.compile(
     r"(?: shards?)? at (?P<est>\d+\.\d) s \((?P<names>[a-z][a-z,\s\u2013\u2014-]*)\)")
 _EMISSION_CEIL_RE = re.compile(r"`ceil\((?P<est>\d+\.\d)/60 x 2\)` = (?P<minutes>\d+) m")
 _EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
+#: A shard-figure sentence the CLAUSE parser above cannot read: a seconds figure
+#: immediately followed by a shard-name list opener. `_EMISSION_CLAUSE_RE` needs one
+#: decimal place and a closing `)`, so a block can state a figure this guard never
+#: grades — measured 2026-11-23 on the rebase this guard was cut onto: `main`'s cut of
+#: this paragraph spelled "ALL ELEVEN shards at 835.8-835.9 s (a-k; two runs" (a RANGE of
+#: seconds and a semicolon in the name list, so no clause match), the rebase kept BOTH
+#: parents' sentences, and the readable clause was graded while that one was invisible.
+#: A figure nobody reads is the same no-op-gate class as a pattern that matches nothing.
+_EMISSION_UNREAD_SENTENCE_RE = re.compile(r"\d\.\d+\s*s\s*\([a-z]")
 
 
 def _emission_names(phrase: str) -> set[str]:
@@ -13742,14 +13751,14 @@ def _emission_names(phrase: str) -> set[str]:
     return names
 
 
-def _emission_block_claims(
-        manifest_text: str) -> tuple[dict[float, set[str]], float, int] | None:
-    """Read the `fast_shards` header block's stated emission.
+def _emission_block_header(manifest_text: str) -> str:
+    """The `fast_shards` block, bounded at the key and joined into one string.
 
-    Returns `{est_seconds -> shard names}`, the `ceil(...)` operand and the minutes it
-    states; `None` when the block (the text above the `fast_shards:` key) states none.
-    The subject is bounded to that header so a shard-count sentence elsewhere in the
-    1.18 MB map cannot be mistaken for this block's claim.
+    The subject is bounded to the header so a shard-count sentence elsewhere in the
+    1.18 MB map cannot be mistaken for this block's claim, and comment line breaks are
+    PRESENTATION — a sentence wraps at will — so the block is joined before reading it;
+    otherwise a figure that happens to land on the next line makes a claim unread,
+    which is the no-op-gate class this guard's own message names.
     """
     key = re.search(r"^fast_shards:", manifest_text, re.MULTILINE)
     assert key is not None, (
@@ -13757,11 +13766,17 @@ def _emission_block_claims(
         "file rather than the block this guard claims to read — fail closed here instead of "
         "silently widening the subject a renamed key would hand it.")
     header = manifest_text[:key.start()]
-    # Comment line breaks are PRESENTATION — a sentence wraps at will — so join the block
-    # into one string before reading it; otherwise a figure that happens to land on the
-    # next line makes a claim unread, which is the no-op-gate class this guard's own
-    # message names.
-    header = re.sub(r"\n\s*#\s?", " ", header)
+    return re.sub(r"\n\s*#\s?", " ", header)
+
+
+def _emission_block_claims(
+        manifest_text: str) -> tuple[dict[float, set[str]], float, int] | None:
+    """Read the `fast_shards` header block's stated emission.
+
+    Returns `{est_seconds -> shard names}`, the `ceil(...)` operand and the minutes it
+    states; `None` when the block (the text above the `fast_shards:` key) states none.
+    """
+    header = _emission_block_header(manifest_text)
     groups: dict[float, set[str]] = {}
     for m in _EMISSION_CLAUSE_RE.finditer(header):
         names = _emission_names(m.group("names"))
@@ -13831,6 +13846,21 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         f"`ceil({ceil_est}/60 x 2)` = {ceil_minutes} m, emitted worst "
         f"{max(live_groups)} s at {live_minutes} m. The block claims the two agree "
         "by construction rather than by a hand re-read; this is that check.")
+    # ⛔ A shard-figure sentence the clause parser cannot read is a figure NO row grades —
+    # and this block states one exactly when a rebase splices two parents' re-derivations
+    # together. Measured 2026-11-23 on the rebase this guard was cut onto: both parents had
+    # rewritten this paragraph, git kept BOTH spellings, and the readable clause was graded
+    # while the stale one was invisible. An unread figure is the same no-op-gate class as a
+    # pattern that matches nothing, so the count of sentences is graded too, not only the
+    # clauses that happen to parse.
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    unread = _EMISSION_UNREAD_SENTENCE_RE.findall(header)
+    assert len(unread) == len(_EMISSION_CLAUSE_RE.findall(header)), (
+        "the `fast_shards` header states a shard-figure sentence the clause parser "
+        f"cannot read ({unread}), so that figure is graded by NOTHING while its "
+        "neighbours are graded by this test — re-spell it as `N shards at S.S s "
+        "(names)`, or delete it. A rebase that splices two re-derivations is how it "
+        "gets there.")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
@@ -13926,6 +13956,22 @@ def test_the_emission_block_guard_is_not_vacuous():
         "the RANGE spelling this block used at `4ff7964acc`/`29a2da4c9c` is unread — an arm "
         "that only reads explicit lists turns the map's other spelling into an unread claim: "
         f"{ranged}")
+    # A SHARD FIGURE the clause parser cannot read is invisible to the row above — and this
+    # is not hypothetical: it is the shape the rebase onto `origin/main` actually produced at
+    # `b766b779af`, where the block held this branch's readable clause AND a stale one that
+    # spelled a RANGE of seconds with a semicolon in its name list. The readable clause was
+    # graded, the stale one was graded by nothing, so the guard could sit GREEN over a block
+    # stating two different emissions.
+    spliced = _emission_block_header(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s "
+        "(f, g, i),\n"
+        "# `ceil(836.4/60 x 2)` = 28 m — and packs ALL ELEVEN shards at 835.8-835.9 s "
+        "(a-k; two runs,\n"
+        "\nfast_shards: 11\n")
+    assert len(_EMISSION_UNREAD_SENTENCE_RE.findall(spliced)) > len(
+        _EMISSION_CLAUSE_RE.findall(spliced)), (
+        "a spliced block's unreadable shard-figure sentence went undetected — that is the "
+        f"fail-open this arm exists for: {spliced}")
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
