@@ -12514,9 +12514,11 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # NAMESPACE ALIAS's `__dict__`, INLINE", `vars(<namespace alias>)`, `getattr(<namespace
         # alias>, …)`), so the declared residual carries the same three. ⛔ BOUNDARY: an alias
         # of an ALIAS (`_d2 = _dc`, then `_d2.__dict__.get("get")(…)`) is this same class one
-        # bind further and is deliberately NOT rowed — the table pins the two levels the
-        # closure rows themselves distinguish, and a row per depth is the spelling list this
-        # file refuses to grow.
+        # bind further and is deliberately NOT rowed — the table pins the THREE levels the
+        # closure rows themselves distinguish (the module literal `dict`, the module alias
+        # `_dc = dict`, and the NAMESPACE bound to a name, `_n = dict.__dict__`), and a row per
+        # depth beyond those is the spelling list this file refuses to grow. It said "two"
+        # while the closure rows carried three and the third was unrowed (#14395 round-4 P2).
         "`_dc.__dict__.get(\"get\")(m, \"exec\")` — via the module's ALIAS (`_dc = dict`)": (
             'import builtins', '_dc = dict',
             '_dc.__dict__.get("get")(builtins.__dict__, "exec")'
@@ -12547,6 +12549,29 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
             'import builtins',
             'dict.__dict__.__getitem__("get")(builtins.__dict__, "exec")'
             f'("results = {read}")'),
+        # ⛔ THE SAME COMPOSITION VIA THE COPY MODULE'S `import … as` ALIAS (#14395 round-4 P2):
+        # the comment above MEASURED the class GREEN "for the literal receiver and the `import …
+        # as` alias alike" while the table encoded only the literal — the same claim-beyond-the-
+        # row asymmetry the paragraph above deletes. MEASURED GREEN (`refused=False`) and LIVE
+        # (`_d["exec"]` really runs) at this head.
+        "`_g = <copy namespace>.get; _f = _g(\"copy\")` — via the module's IMPORT ALIAS (`_z`)": (
+            'import builtins, copy as _z', '_g = _z.__dict__.get', '_f = _g("copy")',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        # ⛔ AND THE NAMESPACE-BOUND RECEIVERS OF THAT SAME TWO-STEP COMPOSITION (#14395 round-4
+        # P2). The BOUNDARY sentences above named "the levels the closure rows distinguish" but
+        # counted two where those rows carry THREE, and the third — a NAMESPACE bound to a name,
+        # `_n = dict.__dict__`, the level the REFUSED rows above treat as its own receiver — was
+        # unrowed. MEASURED GREEN (`refused=False`) and LIVE (`_n.get("get")(m, "exec")` really
+        # runs) at this head, one row per receiver spelling the closure rows carry.
+        "`_n = dict.__dict__` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
+            'import builtins', '_n = dict.__dict__',
+            f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
+        "`_n = vars(dict)` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
+            'import builtins', '_n = vars(dict)',
+            f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
+        "`_n = getattr(dict, \"__dict__\")` then `_n.get(\"get\")(m, \"exec\")` — namespace BOUND": (
+            'import builtins', '_n = getattr(dict, "__dict__")',
+            f'_n.get("get")(builtins.__dict__, "exec")("results = {read}")'),
     }
     for label, lines in declared_residual.items():
         assert not refused(*lines), (
