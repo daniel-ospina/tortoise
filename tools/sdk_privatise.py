@@ -1486,10 +1486,10 @@ SWEEP_NAMES = 66
 #: tree whose covering suites are green: a tree that does not PARSE reads a different tree, which is
 #: the class this block already records one layer out. `--check` exits 0 on the pair below with
 #: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11872, "1f07a0b7bcf05138")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
-SWEEP_RESIDUE = (11872, "1f07a0b7bcf05138")
 _SDKISH = re.compile(r"(?i)(?:^|_)sdk\d*(?:_|$)")
 
 

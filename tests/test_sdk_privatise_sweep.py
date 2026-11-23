@@ -409,7 +409,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1379 lines at this head, measured through THIS
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1376 lines at this head, measured through THIS
     function's own walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`, so a
     prose edit that moves the run REDS naming both numbers instead of quietly publishing a stale
     figure, which is what the sentence this one replaces asked a reader to do by hand; re-derive it
