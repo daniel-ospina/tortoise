@@ -53,7 +53,7 @@ This **reproduces the bundle's §4a figures exactly** (77,561 / 52,346 / 25,215 
 1,801), which is the point of re-running it: the instrument and the record agree. The cells
 are that function's own return value (`serialization_lever(receipts)` on the branch head),
 not a re-implementation — its `saved_pct` is the rounded `32.5`, and the exact ratio
-`25,215 / 77,561 = 32.5094 %` is what §2 applies to a per-document region.
+`25,215 / 77,561 = 32.5099 %` is what §2 applies to a per-document region.
 
 `tests/test_14343_embed_list_serialization.py` pins the payload bytes the cells above were
 measured on (278,874 → 224,109 characters) and pins the parsed-object equivalence on **every**
@@ -76,11 +76,11 @@ nothing else in the prompt moves, by construction.
 | output tokens / median document | 16,338 | 16,338 | 0 (not measured — see ⚠️) |
 | **tokens / median document** | **64,799** | **60,199** | **−4,600 (−7.10 %)** |
 
-⚠️ **Two estimators, both stated.** 4,600 is `32.5094 % × 14,149`; the bundle's §4a prints
-**4,598** because it applies the rounded `32.5 %`. They are the same quantity and the 2-token
-gap is rounding, not a disagreement — stated so a reader comparing the two tables does not
-read one as rot. Per **call** rather than per document the same lever is **4,035**
-(`32.5094 % × 12,412`) — a different row, not a different answer.
+⚠️ **Two estimators, both stated.** 4,600 is `32.5099 % × 14,149` (`4,599.8`); the bundle's
+§4a prints **4,598** because it applies the rounded `32.5 %`. They are the same quantity and
+the 2-token gap is rounding, not a disagreement — stated so a reader comparing the two
+tables does not read one as rot. Per **call** rather than per document the same lever is
+**4,035** (`32.5099 % × 12,412` = `4,035.1`) — a different row, not a different answer.
 
 ⚠️ The output column is unchanged **by construction** (the same prompt content, a smaller
 render), and it has **not been measured**. What S4 *emits* given the two layouts is exactly

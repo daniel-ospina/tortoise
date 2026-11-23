@@ -134,6 +134,23 @@ def _expand(keys_once: dict) -> dict:
     return out
 
 
+def _expand_null_padded(render: dict) -> dict:
+    """Inverse of the NAIVE arm: `{cols, rows}` null-filled, every cell kept.
+
+    Deliberately not :func:`_expand`: that one drops the sentinel cells, which is what a
+    correct render allows. This one keeps `None`, because the naive arm has no way to tell
+    an absent key from a `null` value — the conflation §3b's trap 2 names.
+    """
+    out: dict = {}
+    for name, val in render.items():
+        if isinstance(val, dict) and set(val) == {"cols", "rows"}:
+            out[name] = [{k: row[i] for i, k in enumerate(val["cols"])}
+                         for row in val["rows"]]
+        else:
+            out[name] = val
+    return out
+
+
 @pytest.fixture(scope="module")
 def emissions() -> list[tuple[str, str, dict]]:
     rows = _emissions()
@@ -339,6 +356,12 @@ def test_a_keys_once_render_is_lossless_only_with_the_union_of_keys(emissions):
     but per emission it is not reliably smaller — it keeps every record's keys and only
     drops the fields past `items[0]`, so the direction depends on the list. What is always
     true is that it is WRONG, which is what this asserts.
+
+    The naive arm is rendered EXACTLY as §3b measures it (`cols = list(items[0].keys())`,
+    every row null-filled with `it.get(k)`, no sentinel), so the 44,993 cell has a producer
+    in this file rather than only a description in the record. It is expanded back before
+    the comparison because the render itself is a `{cols, rows}` shape that differs from the
+    emission by construction — the comparison has to be against the DATA, not the wrapper.
     """
     lost_fields: set[str] = set()
     lossy = 0
@@ -349,11 +372,16 @@ def test_a_keys_once_render_is_lossless_only_with_the_union_of_keys(emissions):
         for name, items in embed.items():
             if isinstance(items, list) and items and all(isinstance(x, dict) for x in items):
                 cols = list(items[0].keys())
-                naive[name] = [{k: it[k] for k in cols if k in it} for it in items]
+                # ⛔ §3b's naive arm: `items[0]`'s keys, rest null-filled. Expanded back it
+                # CANNOT recover a field `items[0]` never carried (the drop), and it turns a
+                # genuinely ABSENT key into `None` (the conflation trap 2 is about) — both
+                # are losses the correct render must not have.
+                naive[name] = {"cols": cols,
+                               "rows": [[it.get(k) for k in cols] for it in items]}
                 lost_fields.update(k for it in items for k in it if k not in cols)
             else:
                 naive[name] = items
-        if naive != embed:
+        if _expand_null_padded(naive) != embed:
             lossy += 1
     # Per emission the naive render is lossless exactly when `items[0]` happens to carry
     # the union — which is why it passes review. It is the aggregate that is wrong.
