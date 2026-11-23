@@ -266,16 +266,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `:Document`; `grep -nF 'D10: a document is a ``:Source``, not a'` returns the line ABOVE the
     # `:Document` one, which is how the +35-instead-of-+36 arithmetic was introduced and never caught).
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
-    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "tortoise/sdk.py:37547", "tortoise/sdk.py", 37547, "``:Document`` node)."),
-    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37589` in `_file_human_approval`", "tortoise/sdk.py", 37589, "``:Document`` node)."),
+    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "tortoise/sdk.py:37835", "tortoise/sdk.py", 37835, "``:Document`` node)."),
+    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37877` in `_file_human_approval`", "tortoise/sdk.py", 37877, "``:Document`` node)."),
     # ⛔ The same sentence's OPENING values were pinned by nothing, and a merge resurrected the +21-era
     # siblings over main's corrected ones (`(opening :37548` = a kwarg line, `(opening :37588` = the other
     # docstring) while the two graded headlines stayed right — green pins over a wrong sentence (#14038
     # review, cycle 2). Pinned as the `def` lines they claim to be, and the `:Source` line between them
-    # (`:37546` carries `D10: a document is a ``:Source``, not a` — the line ABOVE `:37547`).
-    (_SUBSTRATE, "(opening `:37527`", _SDK, 37527, "def record_decision"),
-    (_SUBSTRATE, "`:37546` is the `:Source` line", _SDK, 37546, "D10: a document is a ``:Source``, not a"),
-    (_SUBSTRATE, "(opening `:37567`)**)", _SDK, 37567, "def _file_human_approval"),
+    # (`:37834` carries `D10: a document is a ``:Source``, not a` — the line ABOVE `:37835`).
+    (_SUBSTRATE, "(opening `:37815`", _SDK, 37815, "def record_decision"),
+    (_SUBSTRATE, "`:37834` is the `:Source` line", _SDK, 37834, "D10: a document is a ``:Source``, not a"),
+    (_SUBSTRATE, "(opening `:37855`)**)", _SDK, 37855, "def _file_human_approval"),
     # ⛔ And the capability-placement heal pair: the two `hosted_api.py` addresses were re-pointed by
     # DELTA in the merge (+114) onto the operator-stamp statement and a comment line, while the fragment
     # the row quotes (`coalesce(n.is_episodic,false) <> true`) lives 37 lines lower. Pinned by content —
@@ -284,14 +284,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "hosted_api.py:21458", "tortoise/hosted_api.py", 21458, "_stamp_capture_provenance("),
     # ⛔ The four addresses the `#14038` cycle-3 pass RE-DERIVED BY CONTENT after the −21 fold had left
     # them pointing at a comment and a receipt builder — and, pinned here, the reason they cannot drift
-    # back silently: `:21128` was a comment (the calls are `21433`/`43794`/`43902`), `hosted_api.py`'s
+    # back silently: `:21128` was a comment (the calls are `21434`/`43794`/`43902`), `hosted_api.py`'s
     # `:22529` was inside a receipt builder (the call is `:23062`), and `sdk.py:18872` was a blank `#`
-    # with `:18769` a comment (the extractor PAYLOAD read is `:21393`, `pt` bound at `:21321`).
+    # with `:18769` a comment (the extractor PAYLOAD read is `:21394`, `pt` bound at `:21322`).
     # (`:62585`/`:62605` are re-pointed and pinned by the row-2d pass above; not duplicated here.)
     (_AUDIT, "hosted_api.py:23062", "tortoise/hosted_api.py", 23062, "sdk._find_point_by_content("),
-    (_AUDIT, "sdk.py:21433", _SDK, 21433, "hit_id = self._find_point_by_content("),
-    (_AUDIT, "sdk.py:21393", _SDK, 21393, '_mention_records = pt.get("mentions")'),
-    (_AUDIT, "`:21321`", _SDK, 21321, 'for pt in payload.get("points", []) or []:'),
+    (_AUDIT, "sdk.py:21434", _SDK, 21434, "hit_id = self._find_point_by_content("),
+    (_AUDIT, "sdk.py:21394", _SDK, 21394, '_mention_records = pt.get("mentions")'),
+    (_AUDIT, "`:21322`", _SDK, 21322, 'for pt in payload.get("points", []) or []:'),
     # ⛔ ROW 2d's OWN pass (#14038, cycle 6). Five of the nine addresses this row carried were stale at
     # `28ba95d64d` — measured line by line, `:32395` was the comment `# confidence/weight (they are plain
     # direct-edge attributes).`, `:43479` was `_find_point_by_content`'s docstring prose, `:43416` was
@@ -302,13 +302,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # population arms are all blind here (`_resolved_pairs` counts only `path.py:NNNN` and two-code-span
     # spellings, so these bare `:NNNN` continuations move the 345/227/215/167 figures by nothing —
     # measured identical before and after the edit — and a line number is only graded by opening it).
-    # ⛔ `sdk.py:32759` was CORRECT all along: a hand-off table on this PR told lanes to move it to
-    # `:32776`, which is the sibling `any_hash` map INSIDE the same function, not the first map. Pinned
+    # ⛔ `sdk.py:32803` was CORRECT all along: a hand-off table on this PR told lanes to move it to
+    # `:32820`, which is the sibling `any_hash` map INSIDE the same function, not the first map. Pinned
     # so the false-correction shape that table took cannot take it again.
-    (_AUDIT, "sdk.py:32759", _SDK, 32759, '"MATCH (n:Point {content_hash:$ch}) WHERE "'),
-    (_AUDIT, "`:32776`", _SDK, 32776, '"MATCH (n:Point {content_hash:$ch}) WHERE "'),
-    (_AUDIT, "`:43860`", _SDK, 43860, 'f"MATCH (n:Point {{content_hash:$ch}}) WHERE "'),
-    (_AUDIT, "`:43797`", _SDK, 43797, "def _find_point_by_content("),
+    (_AUDIT, "sdk.py:32803", _SDK, 32803, '"MATCH (n:Point {content_hash:$ch}) WHERE "'),
+    (_AUDIT, "`:32820`", _SDK, 32820, '"MATCH (n:Point {content_hash:$ch}) WHERE "'),
+    (_AUDIT, "`:44148`", _SDK, 44148, 'f"MATCH (n:Point {{content_hash:$ch}}) WHERE "'),
+    (_AUDIT, "`:44085`", _SDK, 44085, "def _find_point_by_content("),
     (_AUDIT, "`:32908-32909`", _SDK, 32909, '"RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "'),
     (_AUDIT, "`:32947`", _SDK, 32947, '"RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "'),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
@@ -562,18 +562,18 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21451-21453'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21458'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23062'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21433'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21393'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21321`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:32759'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32776`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:43860`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:43797`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21434'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21394'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21322`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:32803'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32820`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:44148`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:44085`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32908-32909`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32947`'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37527`'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37546` is the `:Source` line'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37567`)**)'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37815`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37834` is the `:Source` line'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37855`)**)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:667`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:844`'): 2,
@@ -613,7 +613,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # `grep -o '`:11597`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 4.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11597`'): 4,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5720`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8522`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8522`'): 2,
     # The four bare `sdk.py` `:Tag` siblings the header paragraph enumerates, one occurrence each —
     # the §2.5 spellings are the one-token keys `sdk.py:31420` etc. and are a different key.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31595`'): 1,
@@ -637,8 +637,8 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7226'): 2,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3508'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3506`'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37547'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37589` in `_file_human_approval`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37835'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37877` in `_file_human_approval`'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2945'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'search_engine.py:2787'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:5074'): 1,
@@ -3516,8 +3516,8 @@ def test_every_pinned_row_grades_a_line_inside_the_address_its_token_names() -> 
 
     MEASURED, and shipped in the reviewed tree: two rows pinned a STALE address while grading the
     CORRECT line — `("`:31496`", `sdk.py`, `31595`)` for the §2.5 `:Tag` header entry and
-    `("`:37534` in `_file_human_approval`", `sdk.py`, `37547`)` in the substrate map. Both arms were
-    green: `_resolve`'s content arm opened `31595` / `37547` (where the fragment is), and its token
+    `("`:37534` in `_file_human_approval`", `sdk.py`, `37835`)` in the substrate map. Both arms were
+    green: `_resolve`'s content arm opened `31595` / `37835` (where the fragment is), and its token
     arm only asks whether the token string occurs SOMEWHERE in the document (it did). So the
     document could name an address 55 lines above the statement it describes — the `#13290` class this
     file exists to stop — with nothing red, and the four `:31496`-family rows were in fact added BY a
@@ -3542,8 +3542,8 @@ def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
     assert problems, "a token naming `:31496` must not be allowed to grade line 31595"
     assert "31496" in problems[0] and "31595" in problems[0], problems[0]
     # The substrate-map row the same review found, in its shipped form.
-    shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37547, "``:Document`` node).")
-    assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37547 must red"
+    shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37835, "``:Document`` node).")
+    assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37835 must red"
     # A range token is accepted on any line INSIDE the range it names (the anchor convention).
     inside = (_AUDIT, "`:7599-7602`", _SE, 7602, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
     assert not _rows_outside_their_token((inside,)), "a line inside the named range must pass"
@@ -3584,7 +3584,7 @@ def test_a_row_whose_token_names_no_address_is_reported_not_skipped() -> None:
     file exists to catch, in prose (the `#14038` cycle-5 review's finding, applied to the count's own
     text rather than to a figure). The arm scans whatever `_PINS ∪ _MAIN_SET_MISSED` holds.
     """
-    unaddressed = (_AUDIT, "`_file_human_approval`", _SDK, 37547, "``:Document`` node).")
+    unaddressed = (_AUDIT, "`_file_human_approval`", _SDK, 37835, "``:Document`` node).")
     assert _rows_outside_their_token((unaddressed,)), (
         "a row whose token names no address must be REPORTED, not skipped"
     )
@@ -3728,7 +3728,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # dropped these five rows while keeping their occurrence counts (measured: the merge's own conflict
     # resolution took the older side of this file): five addresses that NOTHING read — the audit's heal
     # scan + its stamp-back (`hosted_api.py:21451-21453` / `:21458`) and the SUBSTRATE sentence's three
-    # OPENING values (`:37527`, `:37546`, `:37567`), which a forward merge had resurrected at +21 while
+    # OPENING values (`:37815`, `:37834`, `:37855`), which a forward merge had resurrected at +21 while
     # the two graded headlines stayed right.
     # 107 -> 109 at the `#14038` fix lane's row-2d pass: the `:Meta` pair (`sdk.py:62020`/`:62040`) was
     # the LAST `+21`-class cite in this document, and it was unobservable to EVERY population arm —
@@ -3739,7 +3739,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # (2d's `_find_point_by_content` callers, 14's payload-`mentions` read and its `pt` binding) are
     # re-pointed by content and pinned — four rows, each anchored on the line its row claims.
     # 113 -> 119 at row 2d's own pass: the row's five remaining stale addresses were re-pointed by
-    # CONTENT and pinned, plus `sdk.py:32759` — which was already correct and which a hand-off table on
+    # CONTENT and pinned, plus `sdk.py:32803` — which was already correct and which a hand-off table on
     # this PR told lanes to MOVE, i.e. the false-correction shape pinned rather than repeated. The
     # population arms are invariant under this edit (measured: 345/227/215/167 and 229/217/157/169
     # identical before and after), which is why only opening the lines can grade it.
