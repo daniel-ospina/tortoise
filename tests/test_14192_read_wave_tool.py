@@ -2207,6 +2207,27 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
             and "__builtins__" in _string_keys_of(node.slice, consts)
             and _is_namespace_expr(node.value)):
         return True
+    # ⛔ AND THE `.get(…)` / `getattr(…)` FETCH OF THAT SAME KEY (#14326 review cycle 24, EACH
+    # MEASURED GREEN **and LIVE**: `globals().get("__builtins__")["exec"](<read>)`, its `.pop` /
+    # `.setdefault` / `locals()` / `vars()` / alias / bound-`.get` twins, and
+    # `getattr(globals(), "__builtins__")["exec"](<read>)` — while the SUBSCRIPT spelling above
+    # is a REFUSED row, and the STORE half of the `.get` shape was already closed in
+    # `_is_namespace_expr`). `_is_namespace_expr` already answers `True` on these exact nodes;
+    # what was missing is that THIS predicate never asked it, so the mapping identity stopped
+    # at the subscript spelling. ⛔ NOT a blanket `_is_namespace_expr(node)`: that would call
+    # `vars(cfg)` the builtins mapping and red working code — the KEY is what makes the
+    # receiver this mapping.
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _BUILTINS_MAPPING_READS and node.args
+            and "__builtins__" in _string_keys_of(node.args[0], consts)
+            and _is_namespace_expr(node.func.value)):
+        return True
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and (node.func.id == "getattr" or node.func.id in launderers)
+            and len(node.args) >= 2
+            and "__builtins__" in _string_keys_of(node.args[1], consts)
+            and _is_namespace_expr(node.args[0])):
+        return True
     return ((isinstance(node, ast.Name) and node.id in dict_names)
             or _is_builtins_dict_of(node, names, launderers, consts))
 
@@ -8117,6 +8138,15 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    globals().get("__builtins__").update({"print": getattr})\n'
             '    print(sdk, "_tortoise_fts_query")'
             '("results = sdk._tortoise_fts_query(query=q)", kind="statement")\n'),
+        # ⛔ AND THE `.get` / `getattr` FETCH OF THE SAME KEY ON THE READ SIDE (#14326 review
+        # cycle 24, EACH MEASURED GREEN **and LIVE**): the fetch hands out the identical mapping
+        # the subscript does, and `_is_namespace_expr` already resolved it for the STORE half.
+        "a KEYED READ out of `globals().get(…)`": (
+            '    globals().get("__builtins__")["exec"]'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a KEYED READ out of `getattr(globals(), …)`": (
+            '    getattr(globals(), "__builtins__")["exec"]'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a KEYED READ out of `globals()`": (
             '    globals()["__builtins__"]["exec"]'
             '("results = sdk._tortoise_fts_query(query=q)")\n'),
