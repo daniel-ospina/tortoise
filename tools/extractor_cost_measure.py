@@ -41,6 +41,13 @@ Usage::
     uv run python tools/extractor_cost_measure.py report \\
         --out docs/evidence/14277-extractor-cost/measurements.jsonl
 
+    # the S4 embed-list saving, OFFLINE — no provider key, no spend (#14371):
+    # per emission before -> after, per document before -> after with the
+    # arithmetic, and what the saving buys at the given allowance levels
+    uv run python tools/extractor_cost_measure.py embed-json \\
+        --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \\
+        --evidence docs/evidence/14277-extractor-cost/measurements.jsonl
+
 LIMITS — stated because an unstated limit reads as a result:
 
 1. **One document is one user turn.** There is no document-ingest lane yet
@@ -90,6 +97,7 @@ import statistics
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -2815,6 +2823,599 @@ def render_serialization_lever(lev: dict) -> str:
     return "\n".join(lines)
 
 
+# ── #14371: the same lever, measured OFFLINE — no provider key, no run ──
+#
+# `decompose` already computes the serialization ratio, but as ONE section of a
+# report whose other sections read the #14295 corpus, and the per-document
+# figure was published only as prose in `docs/evidence/14343-amplify/`. The
+# token half of the lever is arithmetic — `json.dumps(..., indent=1)` versus
+# compact separators over the SAME objects — so it must be reproducible on a box
+# with NO provider key. That is what this verb is: one command, the receipts and
+# the corpus, no network beyond tiktoken's own local BPE cache.
+#
+# ⛔ It measures the TOKEN half ONLY. What the layout does to what the model
+# EMITS is the `#7949` capstone's question and is not answered here; the verb
+# says so in its own output rather than leaving a reader to infer a green bar.
+
+#: The token allowances `#14275` CONFIRMED as a cost level. ⛔ They are INPUTS,
+#: not outputs: this verb reports what a saving buys AT each level and never
+#: derives, prices, or proposes one — the level is the owner's (`#14275`).
+#: Counts are FLOORS via `affordable_count`, the repo's one capacity convention.
+_ALLOWANCES: tuple[tuple[str, int], ...] = (
+    ("solo", 3_000_000), ("pro", 4_000_000), ("team", 24_000_000))
+
+#: The ambient switches that move the STATIC render the embed region is SOLVED
+#: against (`docs/evidence/14343-amplify/README.md`'s reproduce block; all five
+#: are pinned by `tests/test_extractor_cost_measure.py`). A measurement taken
+#: with any of them set is a DIFFERENT decomposition, so `embed_json_measurement`
+#: refuses instead of publishing a number that is not comparable to the recorded
+#: 12,412 — the false pass this guard exists to prevent.
+_POSTURE_SWITCHES: tuple[str, ...] = (
+    "TORTOISE_S4_DELTA", "TORTOISE_EXTRACTOR_PROMPT",
+    "TORTOISE_CLASSIFY_LATER", "TORTOISE_REFERENTIALITY")
+
+#: A PATH knob rather than a flag, which is why reading the flag list missed it.
+#: It is production-equivalent only when it resolves to the in-tree `packs/`.
+_POSTURE_PACKS_DIR = "TORTOISE_PACKS_DIR"
+
+
+def _posture_problems() -> list[str]:
+    """Ambient switches that would move the render this solve is written for.
+
+    ⛔ GRADED BY RESOLUTION, through the PIPELINE'S OWN predicates — never by
+    "the variable is set". The two failures that symmetry avoids are opposite
+    and both silent:
+
+    * a FALSE BLOCK — `TORTOISE_S4_DELTA=1`, `TORTOISE_S4_DELTA=garbage`
+      (which resolves to the shipped default), `TORTOISE_EXTRACTOR_PROMPT=
+      verbose`, and `TORTOISE_PACKS_DIR` aimed at the in-tree `packs/` all
+      render EXACTLY the recorded prompt, so refusing them would refuse a
+      correct measurement. Measured in this repo's own suite: `tests/conftest.py`
+      exports `TORTOISE_S4_DELTA=0` for determinism, and a presence test read
+      that as a broken posture on every run.
+    * a FALSE PASS — `TORTOISE_S4_DELTA=0` (the legacy complete-list contract)
+      and `=no`/`=off` DO move the S4 template render, so a presence-with-any-
+      value test would wave through a different decomposition.
+
+    One normalization rule, borrowed from the code that consumes the value, so
+    this guard cannot disagree with the render it is guarding.
+    """
+    from tortoise import extractor_v2 as X
+    from tortoise import referentiality
+
+    out: list[str] = []
+    if not X._s4_delta_enabled():
+        out.append("`TORTOISE_S4_DELTA=<falsy>` (the legacy complete-list "
+                   "contract — the S4 template render differs; unset it, "
+                   "which is the shipped delta default)")
+    if X._classify_later_enabled():
+        out.append("`TORTOISE_CLASSIFY_LATER` armed (S2/S4 switch to the "
+                   "core-only master render)")
+    if (os.environ.get("TORTOISE_EXTRACTOR_PROMPT", "").strip()
+            == "compact"):
+        out.append("`TORTOISE_EXTRACTOR_PROMPT=compact` (a different master "
+                   "render)")
+    if referentiality.enabled():
+        out.append("`TORTOISE_REFERENTIALITY` armed (moves `output_contract` "
+                   "and the S1 story)")
+    packs = (os.environ.get(_POSTURE_PACKS_DIR) or "").strip()
+    if packs:
+        # ⛔ GRADED BY THE PIPELINE'S OWN RESOLUTION, not by path equality. A
+        # set-but-broken value (missing / not-a-dir / no loadable manifest) is
+        # DISCARDED by `env_packs_dir()` and the in-tree catalog is used, so
+        # refusing it would be a false block — and the fleet makes that the
+        # normal case (a worktree reaped under an exported variable). Verified:
+        # `TORTOISE_PACKS_DIR=/nonexistent` → `env_packs_dir()` is None →
+        # `default_packs_dir()` is the in-tree `packs/`.
+        from tortoise import pack_registry as _packs
+        resolved_env = _packs.env_packs_dir()
+        if resolved_env is not None:
+            # `_skip_env=True`: `default_packs_dir()`'s OWN first leg is the env
+            # value, so comparing against it would make this check vacuous — the
+            # recorded vocabulary is whatever the NON-env legs resolve to
+            # (packaged catalog, else the repo root's `packs/`).
+            default = _packs.default_packs_dir(_skip_env=True)
+            if resolved_env.expanduser().resolve() != default.expanduser().resolve():
+                out.append(
+                    f"`{_POSTURE_PACKS_DIR}={packs}` (a DIFFERENT packs tree "
+                    f"than the in-tree catalog — the kind vocabulary cannot "
+                    f"be proved identical to the one the corpus was scored "
+                    f"with)")
+    return out
+
+
+def _posture_observed() -> dict[str, str]:
+    """What each posture switch ACTUALLY resolved to — recorded, not asserted.
+
+    The artifact used to carry a literal `posture: production` string. A label
+    that is not derived from a read is not evidence, and it cannot say which
+    layout the measured prompt would have taken — so this reads every switch
+    the guard grades, plus the layout seam itself.
+    """
+    observed = {key: (os.environ.get(key) or "<unset>")
+                for key in (*_POSTURE_SWITCHES, _POSTURE_PACKS_DIR)}
+    try:
+        observed["TORTOISE_S4_EMBED_JSON"] = _embed_mode()
+    except Exception as exc:  # pragma: no cover - a broken seam is reported
+        observed["TORTOISE_S4_EMBED_JSON"] = f"<unreadable: {exc}>"
+    return observed
+
+
+def _tiktoken_cache_dir() -> str:
+    """The encoder cache dir, resolved EXACTLY as `tiktoken.load` resolves it.
+
+    ⛔ Presence, not truthiness, and `DATA_GYM_CACHE_DIR` is a real second
+    location — `tiktoken.load.read_file_cached` checks `"TIKTOKEN_CACHE_DIR" in
+    os.environ`, then `"DATA_GYM_CACHE_DIR" in os.environ`, then the temp dir,
+    and treats an EMPTY value as "caching disabled" (fetch on every call,
+    write nothing). A snapshot of one guessed directory answers a different
+    question from the one this verb claims to answer.
+    """
+    if "TIKTOKEN_CACHE_DIR" in os.environ:
+        return os.environ["TIKTOKEN_CACHE_DIR"]
+    if "DATA_GYM_CACHE_DIR" in os.environ:
+        return os.environ["DATA_GYM_CACHE_DIR"]
+    import tempfile
+    return str(Path(tempfile.gettempdir()) / "data-gym-cache")
+
+
+@contextmanager
+def _observe_encoder_fetches():
+    """POSITIVE evidence of a network fetch: wrap tiktoken's OWN reader.
+
+    A before/after directory snapshot cannot establish "no fetch": tiktoken
+    resolves the cache by PRESENCE of `TIKTOKEN_CACHE_DIR`/`DATA_GYM_CACHE_DIR`
+    (an empty value disables caching and fetches on every call while writing
+    NOTHING), and a snapshot of the wrong directory reports `no fetch` most
+    confidently exactly when it is wrong. So the observation is the call
+    itself: `read_file_cached` reaches `read_file` only on a cache MISS, and
+    this records every such call while still delegating to the real reader.
+
+    Yields the list the wrapper appends to (blob URLs).
+    """
+    import tiktoken.load as _load
+    original = _load.read_file
+    fetched: list[str] = []
+
+    def _spy(blobpath, *args, **kwargs):
+        fetched.append(str(blobpath))
+        return original(blobpath, *args, **kwargs)
+
+    _load.read_file = _spy
+    try:
+        yield fetched
+    finally:
+        _load.read_file = original
+
+
+def _today() -> str:
+    """The regeneration date, in one place so the payload and a render agree."""
+    import datetime
+    return datetime.date.today().isoformat()
+
+
+def per_document_arithmetic(*, ratio: float, region_per_call: float,
+                           s4_calls: float, before_in: float,
+                           before_out: float) -> dict:
+    """The saving's per-document arithmetic, as a PURE function of its inputs.
+
+    ⛔ Extracted so the published cells can be re-derived WITHOUT a tokenizer.
+    Before this, every assertion on `saved_per_doc` / the share / the region
+    multiplication lived inside the `cl100k_base`-cache `skipif`, and ephemeral
+    CI runners' caches are always cold — so `saved_per_doc = ratio *
+    region_per_CALL` (dropping the calls-per-document factor) shipped green.
+    The inputs below are all published in the artifact's own JSON
+    (`aggregate.saved_ratio_exact`, `per_document.embed_region_per_s4_call`,
+    `corpus.s4_calls_per_doc`, `corpus.median_document_in/out`), so a cold box
+    recomputes exactly what the verb computed and a drifted formula reds.
+
+    The three factors are independent on purpose:
+
+    * `region_per_doc = region_per_call * s4_calls` — the region is re-sent once
+      per S4 CALL, so a document pays it once per call;
+    * `saved_per_doc = ratio * region_per_doc` — the share applies to the whole
+      per-document region, not to one call's;
+    * `after = before - saved_per_doc`, with `before` measured (in + out), never
+      assumed.
+    """
+    region_per_doc = region_per_call * s4_calls
+    saved_per_call = ratio * region_per_call
+    saved_per_doc = ratio * region_per_doc
+    before = before_in + before_out
+    after = before - saved_per_doc
+    return {
+        "embed_region_per_s4_call": region_per_call,
+        "s4_calls_per_doc": s4_calls,
+        "embed_region_per_doc": round(region_per_doc, 1),
+        "saved_per_call": round(saved_per_call, 1),
+        "saved_per_doc": round(saved_per_doc, 1),
+        "before_in": before_in, "before_out": before_out,
+        "before_total": before,
+        "after_in": round(before_in - saved_per_doc, 1),
+        "after_total": after,
+        "saved_pct": round(100.0 * saved_per_doc / before, 2),
+    }
+
+
+def allowance_plan(before: float, after: float) -> list[dict]:
+    """The documents-per-month cells, from the two per-document totals.
+
+    Pure for the same reason as `per_document_arithmetic`: a cold box can
+    recompute these from the artifact's own `before_total` / `after_total`, so
+    a mutation of `affordable_count` (floor → round) reds instead of being
+    validated by the recorded cells it can no longer produce.
+    """
+    return [{"tier": tier, "allowance": allowance,
+             "documents_before": affordable_count(allowance, before),
+             "documents_after": affordable_count(allowance, after)}
+            for tier, allowance in _ALLOWANCES]
+
+
+def embed_json_measurement(receipts: Path, evidence: Path, *,
+                           arm: str = "cold") -> dict:
+    """#14371: tokens before → after for the S4 embed-list layout, OFFLINE.
+
+    Two independent sources, and the arithmetic between them is printed rather
+    than left implicit:
+
+    * the RECEIPTS carry the real S2 emissions, so both serializations are
+      counted on the same objects (`serialization_lever`, the instrument
+      `#14343` used — not a second harness);
+    * the CORPUS (`#14295`'s `measurements.jsonl`) supplies the call structure
+      (S4 calls/document) and the median document's in/out columns, and
+      `decompose` SOLVES the re-sent embed region per S4 call.
+
+    No provider call is made and no key is read. `decompose` re-renders the
+    static prompt regions, which is why a non-production ambient posture is
+    refused: the solved region is only comparable to the recorded figure under
+    the posture the corpus was scored in.
+    """
+    problems = _posture_problems()
+    if problems:
+        print(
+            "refusing to measure: the ambient extractor posture is not the "
+            "production one this corpus was scored under — "
+            + ", ".join(problems)
+            + ". Each of these moves the static render the embed region is "
+            "SOLVED against, so the per-document figure would not be "
+            "comparable to the recorded 12,412. Unset them and re-run "
+            "(`docs/evidence/14343-amplify/README.md`, reproduce block).",
+            file=sys.stderr)
+        raise SystemExit(2)
+
+    #: ⛔ ONE ARM OR NO ARTIFACT, AND REFUSED BEFORE THE TOKENIZER RUNS.
+    #: `cost_table` prices the COLD arm whenever the corpus carries one (it
+    #: must — its `hit_ratio` comes from the same arm), so `--arm warm` would
+    #: publish a hybrid: warm's call structure and solved region beside cold's
+    #: medians, under a label naming only one of them. Measured before this
+    #: guard: `--arm warm` moved the team cell 398 → 397 on a quantity belonging
+    #: to neither arm. The check sits ABOVE the observation window because the
+    #: refusal must cost no tokenizer work — the same ordering the posture guard
+    #: keeps, and the reason a `warm` run on a cold box used to attempt a fetch
+    #: before discovering it was being refused. `report_from_rows` does not
+    #: tokenize (verified), so nothing is measured outside the window.
+    rows = load_rows(evidence)
+    costs = (report_from_rows(rows).get("costs") or {})
+    median_row = (costs.get("rows") or [None])[0]
+    if not median_row:
+        raise SystemExit(f"no usable `{arm}` median document in {evidence}")
+    if costs.get("arm") != arm:
+        print(
+            f"refusing to mix arms: `--arm {arm}` was asked for, but the "
+            f"median document resolves from the `{costs.get('arm')}` arm "
+            f"(`cost_table` prices the arm its cache ratio comes from). The "
+            f"per-document figure would be `{arm}`'s call structure with "
+            f"`{costs.get('arm')}`'s medians. Re-run with "
+            f"`--arm {costs.get('arm')}`.",
+            file=sys.stderr)
+        raise SystemExit(2)
+    cache_dir = _tiktoken_cache_dir()
+    with _observe_encoder_fetches() as fetched:
+        lev = serialization_lever(receipts)
+        if not lev:
+            raise SystemExit(
+                f"no usable write-path receipts in {receipts} — the verb's "
+                "entire subject is the real S2 emissions they carry")
+        dec = decompose(rows, arm=arm, receipts=None)
+
+    #: ⛔ EXACT ratio, not the rounded 32.5: the published bundle applies the
+    #: rounded share and prints 4,598, this applies the exact one and prints
+    #: 4,600. Same quantity, and the evidence file states the 2-token gap so a
+    #: reader comparing the two does not read one of them as rot.
+    ratio = lev["saved_tokens"] / lev["indented_tokens"]
+    region_per_call = float(dec["solved"]["embed_list_tokens"])
+    s4_calls = float(dec["calls_per_doc"]["s4"])
+    doc = per_document_arithmetic(
+        ratio=ratio, region_per_call=region_per_call, s4_calls=s4_calls,
+        before_in=float(median_row["measured_in"]),
+        before_out=float(median_row["measured_out"]))
+    buys = allowance_plan(doc["before_total"], doc["after_total"])
+    shares = [(r["indented_tokens"] - r["compact_tokens"]) / r["indented_tokens"]
+              for r in lev["rows"] if r["indented_tokens"]]
+    return {
+        "lever": "TORTOISE_S4_EMBED_JSON",
+        #: The REGENERATION date, carried IN the payload so the committed
+        #: artifact's markdown is exactly `render(json.load(json))` on any day,
+        #: not only on the day it was written. A generator that stamped
+        #: `today()` at render time made the document's own "regenerate with the
+        #: command at the foot" false the next morning, which is the difference
+        #: between a re-derivable artifact and a plausible one.
+        "created": _today(),
+        "offline": True,
+        "provider_calls": 0,
+        "tokenizer": "cl100k_base",
+        "encoder_cache": {
+            "cache_dir": (cache_dir or "<disabled: TIKTOKEN_CACHE_DIR is "
+                           "empty, so tiktoken fetches on every call and "
+                           "writes nothing>"),
+            "caching_disabled": cache_dir == "",
+            #: POSITIVE evidence: the blob URLs tiktoken's own reader was
+            #: called for. Empty = nothing was fetched during this run.
+            "fetched": list(fetched),
+            "network_used": bool(fetched),
+        },
+        #: DERIVED from the guard and from a read of the seam — never a literal.
+        "posture": {
+            "verdict": "production" if not problems else "NON-PRODUCTION",
+            "problems": list(problems),
+            "observed": _posture_observed(),
+        },
+        "receipts": str(receipts),
+        "evidence": str(evidence),
+        "arm": arm,
+        #: the corpus's call structure and medians — the inputs to the solve
+        "corpus": {
+            "documents": dec["documents"],
+            "median_doc_tokens": dec["median_doc_tokens"],
+            "s4_calls_per_doc": s4_calls,
+            "median_document_in": doc["before_in"],
+            "median_document_out": doc["before_out"],
+            "median_document_total": doc["before_total"],
+        },
+        "per_emission": lev["rows"],
+        "aggregate": {
+            "receipts": lev["receipts"], "emissions": lev["emissions"],
+            "items": lev["items"],
+            "indented_tokens": lev["indented_tokens"],
+            "compact_tokens": lev["compact_tokens"],
+            "saved_tokens": lev["saved_tokens"],
+            "saved_pct": lev["saved_pct"],
+            "saved_ratio_exact": ratio,
+            "saved_per_emission": lev["saved_per_emission"],
+            "tokens_per_item": lev["tokens_per_item"],
+            "per_emission_share_min_pct": round(100.0 * min(shares), 2),
+            "per_emission_share_max_pct": round(100.0 * max(shares), 2),
+        },
+        "per_document": {
+            **doc,
+            #: EVERY term of the solve `decompose` performs, so the artifact can
+            #: print a subtraction a reader can re-derive. The embed region is
+            #: NOT just `prompt − static`: S1's re-sent story and the #10311
+            #: untrusted-data envelope are subtracted too, each charged to its
+            #: own row (`decompose`, and this bundle's §1).
+            "solve": {
+                "s4_prompt_tokens_per_call": round(
+                    float(dec["per_call"]["s4"]["prompt"]), 1),
+                "s4_static_render_per_call": sum(dec["statics"]["s4"].values()),
+                "story_re_sent_per_call": dec["solved"]["story_tokens"],
+                "untrusted_envelope_per_call": dec["statics"]["envelope"][
+                    "clause"],
+                "embed_region_per_call": region_per_call,
+            },
+        },
+        "documents_per_month": buys,
+        "not_delivered": (
+            "the #7949 quality re-run (E1 volume / E2 correctness / E3 "
+            "provenance / E4 operator edges): what the layout does to what "
+            "the model EMITS is unmeasured here, so the lever stays DISARMED"),
+    }
+
+
+def render_embed_json_measurement(m: dict) -> str:
+    """The measurement as a document: cells, then the arithmetic behind them.
+
+    ⛔ A PURE function of `m`: `finalize_markdown(render(json.load(json)))` is
+    the committed `.md`, byte for byte, on ANY day — the date is read from the
+    payload (`created`), not from the clock, so the artifact's own "regenerate
+    with the command at the foot" holds for a reader who only has the JSON.
+    """
+    lev, agg = m["per_document"], m["aggregate"]
+    corpus = m["corpus"]
+    lines = [
+        "---",
+        'title: "#14371 — the S4 embed-list saving, measured offline"',
+        "type: evidence",
+        "domain: platform",
+        "doc_status: final",
+        # ⛔ GENERATED FILE, and the frontmatter says so: a reader must not
+        # hand-edit a measurement (the test that pins these cells would then
+        # pin prose). `created` is the REGENERATION date, carried in the payload
+        # for the reason in the docstring.
+        f"created: {m.get('created') or _today()}",
+        "subjects.team: epistemic-team",
+        'aboutSubjects: "extractor v2 S4 prompt embed-list serialization; '
+        'TORTOISE_S4_EMBED_JSON"',
+        'aboutObjects: "#14371, #14343, #14365, #14295, #14277, #14275, #7949"',
+        "---",
+        "",
+        "<!-- GENERATED by `tools/extractor_cost_measure.py embed-json`. Do not "
+        "hand-edit: regenerate with the command at the foot of this file, or "
+        "the pinned cells red against the run they no longer describe. -->",
+        "",
+        "## The S4 embed-list saving, measured offline (#14371)", "",
+        "⛔ **OFFLINE — zero provider calls, zero spend, no key read.** Both "
+        f"layouts are `json.dumps` over the SAME objects, counted with "
+        f"`{m['tokenizer']}`; the encoder cache was "
+        + ("**FETCHED during this run** (network used)"
+           if m["encoder_cache"]["network_used"]
+           else "**warm — tiktoken's own reader was never called**")
+        + f" (cache dir `{m['encoder_cache']['cache_dir']}`). A regeneration on a "
+        "box whose encoder cache is COLD fetches the ~1.6 MB of BPE ranks once "
+        "and records `FETCHED` for ITS OWN run — that changes this line and no "
+        "cell, so a difference here is the field working, not a disagreement.", "",
+        f"Corpus: `{m['receipts']}` ({agg['receipts']} sessions / "
+        f"{agg['emissions']} emissions / {agg['items']:,} items). Vertex: "
+        f"`{m['evidence']}` arm `{m['arm']}`. Posture: "
+        f"**{m['posture']['verdict']}** (every switch read, not asserted: "
+        + ", ".join(f"{k}={v}" for k, v in m["posture"]["observed"].items())
+        + ")", "",
+        "The layout seam resolved to "
+        f"**`{m['posture']['observed'].get('TORTOISE_S4_EMBED_JSON')}`** — "
+        "this measurement counts BOTH layouts over the same objects, so its "
+        "numbers do not depend on that setting; it is recorded because an "
+        "armed shell must not produce an artifact indistinguishable from a "
+        "disarmed one.", "",
+        "### The tokens the lever removes, per emission", "",
+        "| session | arm | items | `indent=1` | compact | saved | saved % |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    #: Per-item figures, DERIVED from this run's own cells (never typed in): the
+    #: two layouts differ by the indentation, and the compact copy lands BELOW
+    #: S2's own emission. ⛔ The gap between compact and the emission is NOT
+    #: attributed: these counts cannot tell formatting from content the receipt's
+    #: parsed `embed_list` does not carry, so the sentence states the comparison
+    #: and says what it cannot conclude. (An earlier wording attributed it to "the
+    #: pipeline's own whitespace" and then to "the model's JSON is not compact";
+    #: both were causal claims this verb cannot observe.)
+    items = agg["items"] or 1
+    #: ⛔ The printed difference is taken from the DISPLAYED (1 dp) operands, not
+    #: from the unrounded ones: a reader who re-derives the sentence must get the
+    #: printed number (133.7 − 90.3 = 43.4), and 133.7259 − 90.2517 = 43.4741
+    #: displayed at 1 dp would print 43.5 — an equation that does not evaluate as
+    #: written, which in an artifact whose point is re-derivability reads as rot.
+    per_item_indent = round(agg["indented_tokens"] / items, 1)
+    per_item_compact = round(agg["compact_tokens"] / items, 1)
+    per_item_gap = round(per_item_indent - per_item_compact, 1)
+    for r in m["per_emission"]:
+        saved = r["indented_tokens"] - r["compact_tokens"]
+        share = 100.0 * saved / r["indented_tokens"] if r["indented_tokens"] else 0.0
+        lines.append(f"| {r['session']} | {r['arm']} | {r['items']} | "
+                     f"{r['indented_tokens']:,} | {r['compact_tokens']:,} | "
+                     f"{saved:,} | {share:.1f} |")
+    lines += [
+        f"| **total** | {agg['emissions']} emissions | {agg['items']:,} | "
+        f"**{agg['indented_tokens']:,}** | **{agg['compact_tokens']:,}** | "
+        f"**{agg['saved_tokens']:,}** | **{agg['saved_pct']}** |", "",
+        f"**{agg['saved_per_emission']:,} tokens per emission**, and the share "
+        f"spans {agg['per_emission_share_min_pct']}%–"
+        f"{agg['per_emission_share_max_pct']}% across them — a property of the "
+        "serialization, not of one session. Per item that is "
+        f"`{per_item_indent:,.1f}` tokens in `indent=1` against "
+        f"`{per_item_compact:,.1f}` compact, so the `{per_item_gap:,.1f}`-token "
+        "difference between the two layouts IS the indentation. The compact copy "
+        "is also BELOW S2's own emission of "
+        f"`{agg['tokens_per_item']}` completion tokens per item; ⛔ those counts "
+        "do NOT say why (the gap may be formatting, or content the receipt's "
+        "parsed list does not carry), and nothing here removes it — the saved "
+        "`"
+        f"{agg['saved_tokens']:,}` tokens are the indentation alone.", "",
+        "### Tokens per document, before → after", "",
+        "The arithmetic, in the order it is applied:", "",
+        f"1. the re-sent embed region is **solved** from the corpus per S4 "
+        f"call: `{lev['solve']['s4_prompt_tokens_per_call']:,.1f}` (provider "
+        f"`prompt_tokens` per call) − "
+        f"`{lev['solve']['s4_static_render_per_call']:,}` (the S4 static "
+        f"render) − `{lev['solve']['story_re_sent_per_call']:,.1f}` (S1's story, "
+        f"re-sent) − `{lev['solve']['untrusted_envelope_per_call']}` (the "
+        f"#10311 untrusted-data envelope) = "
+        f"**{lev['solve']['embed_region_per_call']:,.1f}** tokens — the bundle "
+        f"prints `12,412`, the same solve at whole-token precision. Every term "
+        f"is subtracted because each is charged to its OWN row in the "
+        f"decomposition; omitting the last two gives "
+        f"{lev['solve']['s4_prompt_tokens_per_call'] - lev['solve']['s4_static_render_per_call']:,.1f}"
+        ", which is not this region.",
+        f"2. S4 takes **{lev['s4_calls_per_doc']}** calls per document "
+        f"({corpus['documents']} documents), so the region is "
+        f"`{lev['embed_region_per_s4_call']:,.1f} × {lev['s4_calls_per_doc']}` "
+        f"= **{lev['embed_region_per_doc']:,.1f} tokens/document**;",
+        f"3. the measured share — `{agg['saved_tokens']:,} / "
+        f"{agg['indented_tokens']:,}` = {100.0 * agg['saved_ratio_exact']:.4f}% "
+        f"— applied to that region: `{agg['saved_ratio_exact']:.6f} × "
+        f"{lev['embed_region_per_doc']:,.1f}` = **{lev['saved_per_doc']:,.1f} "
+        f"tokens/document** ({lev['saved_per_call']:,.1f} per call);",
+        f"4. the median document is `{lev['before_in']:,.0f} in + "
+        f"{lev['before_out']:,.0f} out` = **{lev['before_total']:,.0f} "
+        f"tokens**, so after = `{lev['before_total']:,.0f} − "
+        f"{lev['saved_per_doc']:,.1f}` = **{lev['after_total']:,.1f}** "
+        f"(**−{lev['saved_pct']}%**).", "",
+        "| | before | after (`compact`) | Δ |", "|---|---|---|---|",
+        f"| input tokens / median document | {lev['before_in']:,.0f} | "
+        f"{lev['after_in']:,.1f} | −{lev['saved_per_doc']:,.1f} |",
+        f"| output tokens / median document | {lev['before_out']:,.0f} | "
+        f"{lev['before_out']:,.0f} | 0 (not measured — see ⛔) |",
+        f"| **tokens / median document** | **{lev['before_total']:,.0f}** | "
+        f"**{lev['after_total']:,.1f}** | "
+        f"**−{lev['saved_per_doc']:,.1f} (−{lev['saved_pct']}%)** |", "",
+        "⚠️ The output column is unchanged **by construction** (the prompt's "
+        "content is identical, its layout smaller) and it is **not measured**: "
+        "what S4 emits given either layout is exactly the `#7949` capstone's "
+        "question.", "",
+        "### What the saving would buy — at the allowance levels as given", "",
+        "⛔ The levels below are **inputs** (`#14275`, owner), not re-derived "
+        "here; every count is a **floor** (`affordable_count`), because a "
+        "capacity cell that cannot be bought at its tier is wrong in the "
+        "direction that flatters us.", "",
+        "| tier | allowance | documents/month before | after | the floor, shown |",
+        "|---|---|---|---|---|",
+    ]
+    #: Same rule as the per-item sentence: the equations multiply the unit AT THE
+    #: PRECISION IT IS DISPLAYED (1 dp), so each line evaluates exactly as printed.
+    #: The counts themselves stay the floors of the EXACT unit (`affordable_count`
+    #: in the verb) — this is the display, not the computation, and the margin to
+    #: the next document is >30k tokens in every tier, so rounding cannot flip one.
+    displayed_unit = round(lev["after_total"], 1)
+    for b in m["documents_per_month"]:
+        n = b["documents_after"]
+        lines.append(
+            f"| {b['tier']} | {b['allowance']:,} | {b['documents_before']} | "
+            f"**{n}** | `{n} × {displayed_unit:,.1f} = "
+            f"{n * displayed_unit:,.1f} ≤ {b['allowance']:,}`; "
+            f"`{n + 1} × {displayed_unit:,.1f} = "
+            f"{(n + 1) * displayed_unit:,.1f}` overruns |")
+    #: ⛔ DERIVED, never asserted: the earlier wording claimed the next document
+    #: "overruns by >30k tokens in every tier", which the table right above it
+    #: refutes (solo overruns by 9,955.0, team by 19,440.9). The bound is the
+    #: smallest margin over the three tiers, measured from the same displayed
+    #: unit the rows multiply.
+    min_overrun = min((n + 1) * displayed_unit - b["allowance"]
+                      for b, n in ((b, b["documents_after"])
+                                   for b in m["documents_per_month"]))
+    lines += [
+        "",
+        "The unit above is printed, and multiplied, at 1 dp; the counts are the "
+        "floors of the exact unit, and the next document overruns by at least "
+        f"`{min_overrun:,.1f}` tokens, so the display precision cannot flip a "
+        "cell.",
+        "",
+        f"That is **{m['documents_per_month'][0]['documents_after'] - m['documents_per_month'][0]['documents_before']:+d} / "
+        f"{m['documents_per_month'][1]['documents_after'] - m['documents_per_month'][1]['documents_before']:+d} / "
+        f"{m['documents_per_month'][2]['documents_after'] - m['documents_per_month'][2]['documents_before']:+d}** "
+        "documents a month (solo / pro / team) — the size of the lever, not a "
+        "pricing proposal.", "",
+        "### What this measurement does NOT deliver", "",
+        "⛔ The quality re-run on `#7949` is **NOT delivered here**. What the "
+        "layout does to what the model EMITS (E1 volume / E2 correctness / E3 "
+        "provenance / E4 operator edges) is unmeasured, so "
+        "`TORTOISE_S4_EMBED_JSON=compact` stays **OFF**. Arming takes the "
+        "variable AND the `DOOR_PINNED_OFF` preregistration pin withdrawn in "
+        "the same change (`#14343` §5.2) — a capstone scored with the variable "
+        "exported still measures the `indent` render.", "",
+        "### Reproduce", "",
+        "```bash",
+        "uv run python tools/extractor_cost_measure.py embed-json \\",
+        "    --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \\",
+        "    --evidence docs/evidence/14277-extractor-cost/measurements.jsonl \\",
+        "    --out docs/evidence/14343-amplify/embed-json-offline.md \\",
+        "    --json-out docs/evidence/14343-amplify/embed-json-offline.json",
+        "```",
+        "",
+        "Without the two `--out` flags the command prints this document to "
+        "stdout and writes nothing — that is a READ, not a regeneration.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def render_decompose(dec: dict) -> str:
     lines = ["## The input constant, decomposed (#14343)", ""]
     lines.append(f"arm `{dec['arm']}` · {dec['documents']} documents · median "
@@ -3062,7 +3663,44 @@ def main(argv: list[str] | None = None) -> int:
                           "decomposition without it is a false pass, not a "
                           "shorter report")
 
+    ej = sub.add_parser(
+        "embed-json",
+        help="#14371 — the S4 embed-list serialization saving, measured "
+             "OFFLINE (no provider call, no key, no spend)")
+    ej.add_argument("--receipts", required=True, type=Path,
+                    help="dir of write-path `*.arms.json` receipts carrying "
+                         "the real S2 emissions both layouts are counted on")
+    ej.add_argument("--evidence", required=True, type=Path,
+                    help="the `measurements.jsonl` supplying the call "
+                         "structure and the median document's in/out columns")
+    ej.add_argument("--arm", default="cold",
+                    help="the corpus arm to read (default `cold`). A mismatch with "
+                         "the arm the median document resolves from is "
+                         "REFUSED rather than mixed")
+    ej.add_argument("--out", type=Path, help="write the markdown here")
+    ej.add_argument("--json-out", type=Path)
+
     args = ap.parse_args(argv)
+    if args.cmd == "embed-json":
+        measured = embed_json_measurement(args.receipts, args.evidence,
+                                          arm=args.arm)
+        text = finalize_markdown(render_embed_json_measurement(measured))
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(text, encoding="utf-8")
+        if args.json_out:
+            args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            #: ⛔ NO `sort_keys`: the payload's own insertion order is what the
+            #: renderer prints (the posture switches most visibly), so sorting
+            #: here made the committed `.md` un-re-renderable from the committed
+            #: `.json` while every NUMBER still matched — the artifact's stated
+            #: provenance silently became false. Serialize the object the
+            #: document was rendered from, in the order it was rendered.
+            args.json_out.write_text(
+                json.dumps(measured, indent=1),
+                encoding="utf-8")
+        sys.stdout.write(text)
+        return 0
     if args.cmd == "run":
         if args.corpus_only:
             for row in pick_corpus(limit=args.docs, seed=args.seed):
