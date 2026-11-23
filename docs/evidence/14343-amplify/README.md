@@ -90,6 +90,16 @@ document text once **per call**, and 34 of 50 documents take a **second** S1 cal
 | s4 | 3,354 | 18.8 % | 1.14 |
 | **total** | **17,830** | 100 % | |
 
+**S4's output is bimodal on a document corpus, and the tail is the constant.** Per call the
+median is 2,942 completion tokens — the shipped delta contract (#1789) holding — but **13 of 50
+documents (26 %) emit more than 6,000, up to 24,000**, and the mean (5,532) is 1.9× the median.
+That tail is why `#14295` reported 7,102 output tokens per S4 call while the median is 2,942:
+it is not "S4 costs 7k", it is "S4 costs 3k on three quarters of documents and 10–24k on the
+other quarter", and a quarter of documents is where the output constant comes from. `#1789`
+measured the delta contract's *aggregate* saving on 26-turn sessions; this is the same
+contract on **documents**, and it is not uniformly complying. That is a finding of this bundle,
+not a lever: it is a re-emission of the embed list, which is the `#7949` channel.
+
 `#14295`'s per-stage *input* fits say the same thing from the other side: S1 is
 `1,909 + 2.056 × T` (R²=0.995, the only stage that reads the text), S2 is
 `14,916 + 0.006 × T` (R²=0.000), S4 is `28,678 + 0.097 × T` (R²=0.009).
