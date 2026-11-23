@@ -3240,3 +3240,70 @@ def test_a_def_range_pin_ends_on_the_docstring_its_prose_names() -> None:
         "no `def`-anchored range pin was graded — the arm is vacuous, which is how the END of "
         "`:7605-7619` stayed unread."
     )
+
+
+def test_a_row_that_claims_the_COUNT_leg_pins_a_line_that_aggregates() -> None:
+    """A row whose sentence says `COUNT` must pin the line that COUNTS — not the fragment both legs share.
+
+    ⛔ WHY (`#14269` review at `e587f2c8100d`, P2-1). `_PINS` grades a row's fragment AT the row's line,
+    so a fragment that is byte-identical at two sites cannot tell them apart: re-point the row at the
+    OTHER one and the file stays green. §2.1's operator-`COUNT` row was exactly that case at the
+    reviewed head — `MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)` sat at the `crit` leg and at the
+    `family` leg, and re-pointing the document plus every companion table from one to the other, all
+    consistently as a first-match re-derivation does, left `34 passed`. The R1 risk this PR states ("a
+    first-match re-derivation would grade the wrong query and look right") had no arm.
+
+    ⛔ THE DISCRIMINATOR IS DERIVED FROM THE DOCUMENT'S OWN WORD. The row calls this line the
+    operator-expansion leg's **`COUNT`**, so the line it pins has to be the one whose own text
+    aggregates — the `RETURN op.id, type(r2) AS et, count(other)` line on this tree (which is how
+    `main`'s `#14278` fixed the row: by pinning the unique `RETURN` instead of the shared `MATCH`).
+    Nothing is typed here: the population comes from `_PINS` rows whose document sentence says
+    `COUNT`, and the aggregate comes from the pinned line itself.
+
+    ⛔ AND WHERE THE FRAGMENT IS STILL AMBIGUOUS, the pinned leg must be the ONLY aggregating one —
+    the sibling-leg check below. That is the general form of the defect; it simply does not fire on
+    this head, because the row no longer pins a shared fragment.
+
+    ⛔ SCOPE, stated because it is load-bearing (and MEASURED): the population is the `_PINS` rows
+    whose document sentence names `path:line` as the FIRST cell of a table row AND says `COUNT`.
+    Matching on the token alone is not enough — `search_engine.py:7226` and `` `expand_ops` preview
+    at `:7190` `` are both spelled on the SAME sentence, so the preview row would be graded as if it
+    claimed the count; and one other document uses the word `COUNT` in prose on a row that has no
+    cell for its line at all. The cell form is the document's own way of saying "this row is about
+    this line".
+
+    NOT VACUOUS, measured on this tree: re-pointing the row AND its pin to the sibling leg whose text
+    is the shared `MATCH` (`:7224`, keeping the document's `COUNT` sentence) reds this arm on the
+    aggregate, and deleting the document's `COUNT` word instead makes the population empty and reds
+    the closure assertion — so neither half of the arm is unreachable.
+    """
+    graded = 0
+    for doc, token, src_path, line, fragment in _PINS:
+        doc_path = REPO / doc
+        src_file = REPO / src_path
+        if not doc_path.exists() or not src_file.exists():
+            continue
+        cell = f"| `{src_path}:{line}` |"
+        claims = [ln for ln in doc_path.read_text(encoding="utf-8").splitlines() if token in ln]
+        if not any(cell in ln and "COUNT" in ln for ln in claims):
+            continue
+        graded += 1
+        src = src_file.read_text(encoding="utf-8").splitlines()
+        pinned = src[line - 1] if 0 < line <= len(src) else ""
+        assert "count(" in pinned, (
+            f"{token!r} pins {src_path}:{line}, and the document's row calls that line the operator "
+            f"leg's `COUNT` — but the pinned line is {pinned.strip()[:90]!r}, which aggregates nothing. "
+            "A fragment shared by two legs cannot identify one of them; pin the line whose own text "
+            "counts (the `RETURN … count(other)` leg), not the `MATCH` both legs share."
+        )
+        hits = [n for n, text in enumerate(src, 1) if fragment in text]
+        counting = [n for n in hits if "count(" in src[n - 1]]
+        assert counting == [line], (
+            f"{token!r} pins {src_path}:{line} by the fragment {fragment!r}, which occurs at {hits} and "
+            f"whose aggregating legs are {counting}. When a row claims the COUNT leg, exactly one of "
+            "the fragment's sites may aggregate and it must be the pinned one."
+        )
+    assert graded, (
+        "no `COUNT`-claiming row was graded — the arm is vacuous, which is how the "
+        "`:7113`/`:7224` pair became interchangeable with nothing red."
+    )
