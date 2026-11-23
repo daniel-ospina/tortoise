@@ -43,6 +43,14 @@ def _clean_env(monkeypatch):
               "OPENROUTER_API_KEY", "VENICE_API_KEY",
               "TORTOISE_EXTRACT_MODEL", "TORTOISE_JSON_MODE",
               "TORTOISE_EXTRACTOR_MAX_TOKENS",
+              # The escalation RUNG budget, not just the base cap: the ``s1_*``
+              # tests below pin the literal 32000, and ``_extractor_escalation_
+              # tokens`` reads this knob from the environment at call time (any
+              # in-range 16000..64000 value used AS-IS) — an ambient value would
+              # red them for a reason that is not the diff. Precedent:
+              # ``tests/test_extractor_v2.py::test_extractor_escalation_tokens_
+              # env_semantics`` delenv's it around the same assertion.
+              "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
               "TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN",
               # ``test_reader_lane_wire_body_is_not_suppressed`` is the one test
               # here that goes through ``resolve_reader_provider``, which reads
@@ -545,6 +553,53 @@ def test_base_collapse_with_a_failed_escalation_stays_reasoning_collapse():
     assert v2._classify_error(ei.value) == "reasoning_collapse", ei.value
 
 
+def test_s1_stats_less_form_cannot_ship_a_held_collapse():
+    """#14357 review round 2 (P2) — the drop decision must read ``_collapse``,
+    not the finish signal it just declined to trust.
+
+    ``run_s1(model, transcript)`` (no ``stats``) is a documented call form, and
+    without ``stats`` ``finish`` is re-derived from
+    ``getattr(model, "last_finish_reason")`` on the CALLER thread — the
+    cross-thread read ``_call_once``'s F4 comment (#1780) rules out, since a
+    shared adapter attr is overwritten by another worker under ``--workers>1``.
+    ``_collapse`` is already authoritative (``_complete`` raises only when the
+    base came back empty at ``finish_reason="length"``), so re-deriving from
+    the attribute shipped ``""``: no error, no census entry, no escalation
+    episode. S1 has no parse ladder, so an empty narrative IS a valid return —
+    nothing downstream catches it, which is exactly the fail-open #14357 closes.
+
+    The property makes the race deterministic: the FIRST read is ``_call_once``'s
+    in-thread capture (the one that raises the collapse), every later read is
+    the value a concurrent worker has already overwritten.
+    """
+    class _S1CollapseLosesTheRace:
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def __init__(self):
+            self.budgets: list[int] = []
+            self._finish_reads = 0
+
+        @property
+        def last_finish_reason(self):
+            self._finish_reads += 1
+            # read 1 == `_call_once`'s in-thread capture, right after the BASE
+            # call; every later read == the caller-thread re-derivation.
+            return "length" if self._finish_reads == 1 else "stop"
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.budgets.append(max_tokens)
+            if (max_tokens or 0) >= 32000:
+                self.last_completion_tokens = 20
+                return "a recovered narrative"
+            return ""  # the collapse: no content at all, finish=length
+
+    m = _S1CollapseLosesTheRace()
+    out = v2.run_s1(m, "user: we decided X")  # the stats-less form
+    assert m.budgets[:2] == [1500, 32000], m.budgets
+    assert out == "a recovered narrative", out
+
+
 def test_collapsed_extraction_yields_no_document_and_is_recorded(monkeypatch):
     """End to end: a collapsed S1 is a RECORDED failure that extracts nothing.
 
@@ -566,3 +621,136 @@ def test_collapsed_extraction_yields_no_document_and_is_recorded(monkeypatch):
     assert any("S1 chunk failed" in e for e in out["errors"])
     assert out["embed_list"] == {}
     assert out["stats"]["llm"]["truncated"] == 1
+
+
+def test_s1_base_collapse_still_runs_the_escalation_rung():
+    """#14412 — the S1 ladder keeps its one-shot escalation, exactly like S2/S4.
+
+    ``_complete``'s #14357 yield guard raises on empty content at
+    ``finish_reason="length"``. ``_complete_parsed`` (S2/S4) HOLDS that raise
+    so its #2134 rung still runs; ``run_s1`` — the SECOND ladder, capped at
+    1500 output tokens, the exact budget of the recorded pilot #1549 collapse
+    — did not. The raise therefore fired BEFORE ``run_s1`` read
+    ``finish == "length"``, the 32K rung never ran, and the chunk was dropped
+    as a ``reasoning_collapse`` failure.
+
+    Measured before this fix, on an adapter that returns ``""`` at 1500 and a
+    narrative at 32000: ``_ReasoningCollapse`` raised, ``budgets == [1500]``.
+    """
+    class _BaseCollapsesEscRecovers:
+        last_finish_reason = "length"
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def __init__(self):
+            self.budgets: list[int] = []
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.budgets.append(max_tokens)
+            if (max_tokens or 0) >= 32000:
+                self.last_finish_reason = "stop"
+                self.last_completion_tokens = 12
+                return "the recovered narrative"
+            self.last_finish_reason = "length"
+            self.last_completion_tokens = 1500
+            return ""  # the collapse, at the 1500 S1 cap
+
+    m = _BaseCollapsesEscRecovers()
+    stats: dict = {}
+    out = v2.run_s1(m, "1: user: we decided X", stats=stats)
+    # base at the S1 cap, then exactly ONE escalated call at the 32K default.
+    assert m.budgets == [1500, 32000], m.budgets
+    assert out == "the recovered narrative", out
+    assert stats["recovery"]["escalated"] == 1, stats.get("recovery")
+    assert stats["recovery"]["escalated_recovered"] == 1, stats.get("recovery")
+
+
+def test_s1_collapse_at_both_budgets_stays_reasoning_collapse():
+    """#14412 — the S1 rung restores recovery; it does not resurrect the fail-open.
+
+    A base that collapses AND an escalated call that then collapses (or dies
+    of an unrelated transient) has nothing retained to keep. Returning the
+    held ``""`` would make a chunk that produced no content a SILENT empty
+    contribution — the outcome #14357 exists to prevent — so the class
+    survives whatever killed the escalation, exactly as it does on
+    ``_complete_parsed``'s abort arm (pinned by
+    ``test_base_collapse_with_a_failed_escalation_stays_reasoning_collapse``).
+
+    Both arms assert ``budgets == [1500, 32000]``: the rung is SPENT before the
+    class is decided, which is what the hold exists for.
+    """
+    class _CollapseThenFail:
+        last_finish_reason = "length"
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def __init__(self, escalation_error=None):
+            self.budgets: list[int] = []
+            self._escalation_error = escalation_error
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.budgets.append(max_tokens)
+            self.last_finish_reason = "length"
+            if (max_tokens or 0) >= 32000 and self._escalation_error is not None:
+                raise self._escalation_error
+            return ""
+
+    for exc in (None, RuntimeError("503 Service Unavailable")):
+        m = _CollapseThenFail(exc)
+        with pytest.raises(v2._ReasoningCollapse) as ei:
+            v2.run_s1(m, "1: user: we decided X", stats={})
+        assert m.budgets == [1500, 32000], m.budgets
+        assert v2._classify_error(ei.value) == "reasoning_collapse", ei.value
+
+
+def test_s1_empty_escalated_reply_is_not_a_recovery():
+    """#14412 review round 2 (P1) — an EMPTY escalated reply is not a recovery.
+
+    ``_complete``'s yield guard raises only on ``length`` + EMPTY, so an
+    escalated call that returns ``""`` at ``finish_reason="stop"`` (or on an
+    adapter that reports no finish reason) arrives as an ordinary return. Pre
+    #14357 that arm was unreachable from a collapsed base — the base raise
+    fired first — so holding the collapse made it reachable, and left unguarded
+    it filed ``""`` as ``escalated_recovered``: the chunk joined the compiled
+    story with ``failed_chunks == 0``, no ``error_census`` class, and
+    ``compile_stories`` split ``""`` into zero sentences. A zero-content chunk
+    certified as SUCCESS is the fail-open #14357 exists to close.
+
+    Both arms are pinned here: the ladder-level raise, and the record-level
+    outcome the issue's acceptance half names (``failed_chunks`` + census).
+    """
+    class _BaseCollapsesEscEmptyStop:
+        last_finish_reason = "length"
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def __init__(self):
+            self.budgets: list[int] = []
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.budgets.append(max_tokens)
+            if (max_tokens or 0) >= 32000:
+                # NOT a collapse by _complete's rule (finish is not "length"),
+                # so the yield guard does not fire and the arm is reached.
+                self.last_finish_reason = "stop"
+                self.last_completion_tokens = 0
+                return ""
+            self.last_finish_reason = "length"
+            self.last_completion_tokens = 1500
+            return ""
+
+    m = _BaseCollapsesEscEmptyStop()
+    with pytest.raises(v2._ReasoningCollapse) as ei:
+        v2.run_s1(m, "1: user: we decided X", stats={})
+    assert m.budgets == [1500, 32000], m.budgets
+    assert v2._classify_error(ei.value) == "reasoning_collapse", ei.value
+
+    # …and the record-level half: the chunk is a RECORDED failure, so the eval
+    # gate vetoes instead of certifying a run whose facts vanished.
+    out = v2.extract_session_v2(_BaseCollapsesEscEmptyStop(), [
+        {"role": "user", "content": "we decided X"},
+        {"role": "assistant", "content": "the plan is durable"},
+    ])
+    assert out["error_census"]["reasoning_collapse"] == 1
+    assert any("S1 chunk failed" in e for e in out["errors"])
+    assert out["embed_list"] == {}

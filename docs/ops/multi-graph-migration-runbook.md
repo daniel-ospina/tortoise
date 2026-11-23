@@ -287,7 +287,7 @@ option 1 below).
 | 6 | `supabase_control.graph_metadata` (`:3939`) | the dashboard's default row: name, `stable_id`, namespace | the row for name/id, **the column** for namespace |
 | 7 | `backup_sweep.enumerate_org_graphs` (`:558`) → #6 | which namespace the "default" backup slot dumps | follows #6 |
 | 8 | the `"default"` sentinel consumers (the default-graph delete guard `:4390`/`:4420`, `sdk.py`, `backup_sweep`, the dashboard; >8 sites) | "is this the default graph" | derived from `kind`, via #6 |
-| 9 | `ensure_default_graph_row` (`:4046`) / `_mint_default_graph_row_best_effort` (`:4249`) | who WRITES the default row | creation/provisioning only |
+| 9 | `ensure_default_graph_row` (`:4318`) / `_mint_default_graph_row_best_effort` (`:4521`) | who WRITES the default row | creation/provisioning only |
 | 10 | `set_graph_name` (`:4484`) / `set_graph_recording` (`:4609`) | rename / recording override on the default | read the `kind='default'` row |
 | 11 | `20261028000001` §3 (§2 above) | the default row's namespace must equal `organizations.graph_name` | the column |
 | 12 | `hosted_api._sweep_events` (`:1496`) — the boot + hourly event-retention purge | **which graph's events get expired / overflow-capped** | `_make_sdk(namespace=org["org_id"])` — **the derivation**; the row and the column are both ignored (its registry-mode pre-filter, `:1493`, keys on the same `org_{org_id}` literal). Under a promotion the NEW default's events are never purged or capped: `TORTOISE_EVENT_MAX_PER_TEAM` silently unenforced |
@@ -402,7 +402,7 @@ promotion = swap `kind` + move
    that SDK call".** A `sdk.org_create` org that **also** carries an
    `organizations` row gets a default row minted on its first credential miss, and
    `ensure_default_graph_row` takes that row's namespace from the **column**
-   (`supabase_control.py:4151` read, `:4168` insert) — which for that lane is
+   (`supabase_control.py:4421` read, `:4440` insert) — which for that lane is
    `org_{name}` (the user's chosen name, `sdk.py:35415`) while `org_id` is a ULID
    (`:35454`, passed to `_graph_create` at `:35550`). The row then names
    `org_{name}` while the derivation produces `org_{<ULID>}`, so **that org IS
