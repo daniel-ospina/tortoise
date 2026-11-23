@@ -424,18 +424,19 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
 
     "_create_edge": "tortoise_create_edge",
     # ⛔ #14169 (#11609 P7) and #11609 lane P7 each added a `_quota_gated(sdk.link_entities, …)`
-    # wrap site to the `tortoise_link_entities` container — the relation-decided arm and the
-    # operator arm (which wraps `_quota_gated(sdk._create_operator, …)`, `_create_operator` being
-    # mapped above) — and neither re-keyed this map, so the forward arm ("unmapped
-    # _quota_gated wrap sites") redded `main` while the door's own write classification stayed
-    # green: exactly the drift this map exists to catch, caught. The key is the WRAP SITE's
-    # method; the label is the live door, which `_ms.WRITE_TOOL_NAMES` already classifies as a
-    # write. The wrapper is load-bearing rather than decoration (`mcp_server.py` says so at the
-    # wrap: `sdk.link_entities` reaches the same node/edge writers and is NOT gated inside the
-    # SDK), which is exactly why the site must be DECLARED here rather than waved through: an
-    # entry is what makes the door's write classification checkable. ⛔ ONE entry, both
-    # attributions — a second identical key is an F601 lint red (and Python silently keeps the
-    # last one, so the duplicate carried no runtime meaning either).
+    # wrap site — respectively the relation-decided arm of `tortoise_link_entities` and, in
+    # the same container, its operator arm wrapping `_quota_gated(sdk._create_operator, …)`
+    # (`_create_operator` is mapped above) — and neither re-keyed this map, so the forward
+    # arm ("unmapped _quota_gated wrap sites") redded `main` while the door's own write
+    # classification stayed green: exactly the drift this map exists to catch, caught. The
+    # key is the WRAP SITE's method; the label is the live door, which `_ms.WRITE_TOOL_NAMES`
+    # already classifies as a write. The relation-decided wrapper is load-bearing rather than
+    # decoration (`mcp_server.py` says so at the wrap: `sdk.link_entities` reaches the same
+    # node/edge writers and is NOT gated inside the SDK), which is exactly why the site must
+    # be DECLARED here rather than waved through: an entry is what makes the door's write
+    # classification checkable. ONE entry, both attributions — a second identical key is an
+    # F601 lint red (it auto-merged from the two sides adding the same key at different
+    # offsets) and carries no extra runtime meaning.
     "link_entities": "tortoise_link_entities",
     "_ingest": "tortoise_ingest",
     "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door

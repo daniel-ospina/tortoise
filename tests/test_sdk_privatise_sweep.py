@@ -409,7 +409,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1557 lines at this head, measured through THIS
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1383 lines at this head, measured through THIS
     function's own walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`, so a
     prose edit that moves the run REDS naming both numbers instead of quietly publishing a stale
     figure, which is what the sentence this one replaces asked a reader to do by hand; re-derive it
@@ -424,9 +424,7 @@ def _residue_block() -> str:
     PR #14283's zero-net re-pin rewrites to 1328 (main's 1327 plus the net `+1` those two
     rewrites make INSIDE this run — the 12-line block it adds sits BELOW the pin, so it is not in
     this count); #14284's own merge of `main` `38f2ab7fc594` then
-    KEPT both sides again and re-read 1363 on ITS tree; this pair-merge (`origin/main`
-    `7244b4d1a923` into `integration/pair-14140-14220`) keeps both sides again and re-reads
-    **1557** on THIS tree, because the pin-reconcile blocks of BOTH parents are kept in the run. Every one of those is a reading of the tree
+    KEPT both sides again and re-read 1363 on ITS tree. Every one of those is a reading of the tree
     it NAMES, and this pair-merge keeps both sides at every step for that reason, so the figure
     above is RE-MEASURED on THIS merged tree rather than inherited from either side — which the
     next reflow repeats), AND THE ARMS GRADE ALL OF IT
