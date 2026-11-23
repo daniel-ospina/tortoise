@@ -13755,11 +13755,11 @@ def test_the_head_total_guard_is_not_vacuous(tmp_path):
 
 #: The `fast_shards` header block is the ONE place in the manifest that restates
 #: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
-#: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at this head —
-#: re-derive them with that verb rather than trusting them", and the same block had
-#: already gone stale twice before that promise was written (#11298 review cycle 5,
-#: #14015). A promise in prose is not a guard, so the sentence is graded against the
-#: live emission here instead.
+#: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head
+#: above — re-derive them with that verb rather than trusting them", and the same block
+#: had already gone stale twice before that promise was written (#11298 review cycle 5,
+#: #14015) — three times, counting #14296, which is what this guard is for. A promise in
+#: prose is not a guard, so the sentence is graded against the live emission here instead.
 #:
 #: Shard names are read in BOTH spellings this map uses — an explicit list (`f, h`)
 #: and a range (`a–e`) — and the count may be a word (`nine`) as the surrounding prose
@@ -13772,7 +13772,8 @@ _EMISSION_COUNT_WORDS = {
 _EMISSION_CLAUSE_RE = re.compile(
     r"(?P<n>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
     r"(?: shards?)? at (?P<est>\d+\.\d) s \((?P<names>[a-z][a-z,\s\u2013\u2014-]*)\)")
-_EMISSION_CEIL_RE = re.compile(r"`ceil\((?P<est>\d+\.\d)/60 x 2\)` = (?P<minutes>\d+) m")
+_EMISSION_CEIL_RE = re.compile(
+    r"`ceil\((?P<est>\d+\.\d)/60 x (?P<headroom>\d+(?:\.\d+)?)\)` = (?P<minutes>\d+) m")
 _EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
 #: A shard-figure sentence the CLAUSE parser above cannot read: a seconds figure
 #: immediately followed by a shard-name list opener. `_EMISSION_CLAUSE_RE` needs one
@@ -13851,10 +13852,32 @@ def _emission_block_claims(
         # type is one more member of the `tools/sdk_privatise.py` residue pin, and a
         # test is not a reason to move a pinned count.
         groups[est] = groups[est] | names
-    ceil_match = _EMISSION_CEIL_RE.search(header)
-    if not groups or ceil_match is None:
+    ceil_matches = _EMISSION_CEIL_RE.findall(header)
+    if not groups or not ceil_matches:
         return None
-    return groups, float(ceil_match.group("est")), int(ceil_match.group("minutes"))
+    # The multiplier is `ci_selection.WATCHDOG_HEADROOM`, not a literal this guard owns. Read
+    # from the code so a change there REDS here with an accurate reason instead of returning
+    # `None` (which the caller reports as "states no emission the guard can read" — fail-closed,
+    # but it would send the next reader looking for a missing sentence rather than a moved
+    # constant).
+    headrooms = {h for _est, h, _minutes in ceil_matches}
+    assert headrooms == {f"{cs.WATCHDOG_HEADROOM:g}"}, (
+        f"the block derives its watchdog with headroom {sorted(headrooms)}, but the code uses "
+        f"`ci_selection.WATCHDOG_HEADROOM` = {cs.WATCHDOG_HEADROOM:g} — the `ceil(...)` operand "
+        "no longer states the code's own multiplier, so the figures beside it are not the ones "
+        "anything computes. Update the sentence, or the constant moved and the block is stale.")
+    if len(ceil_matches) > 1:
+        # A SECOND `ceil(...)` clause is a repeat, not a second statement of one fact — the same
+        # doctrine as `<est X stated twice>` for the partition clauses, and here it needs its own
+        # arm because `.search()` used to take the FIRST match: measured 2026-11-23, a block
+        # stating both `ceil(836.4/60 x 2)` = 28 m and `= 29 m` read as `(836.4, 28)` and BOTH
+        # guard rows stayed green while the block visibly claimed two different minutes. That is
+        # exactly the shape a rebase produces (two sides of one paragraph interleaved), so the
+        # repeat is marked and the partition comparison reds.
+        groups = {est: names | {f"<ceil stated {len(ceil_matches)} times>"}
+                  for est, names in groups.items()}
+    est_str, _headroom, minutes_str = ceil_matches[0]
+    return groups, float(est_str), int(minutes_str)
 
 
 def _live_fast_shard_emission() -> tuple[dict[float, set[str]], int]:
@@ -13993,6 +14016,29 @@ def test_the_emission_block_guard_is_not_vacuous():
     assert "<est 835.7 stated twice>" in superset_repeat[0][835.7], (
         "a SUPERSET restated at the same est was absorbed — the repeat marker must fire on "
         f"ANY second clause at one est, not only on a subset: {superset_repeat[0][835.7]}")
+    # A SECOND `ceil(...)` clause is that same repeat one line over — and it was UNGRADED while the
+    # reader used `.search()`: measured 2026-11-23, a block stating both `ceil(836.4/60 x 2)` = 28 m
+    # and `= 29 m` returned `(836.4, 28)` and BOTH guard rows stayed green, so the block visibly
+    # claimed two different minutes and nothing redded. That is precisely the shape a rebase
+    # produces when it interleaves the two sides of one paragraph, so it needs its own witness.
+    duplicate_ceil = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n# `ceil(836.4/60 x 2)` = 29 m\n\nfast_shards: 11\n")
+    assert duplicate_ceil is not None
+    live_groups_now, _live_minutes_now = _live_fast_shard_emission()
+    assert duplicate_ceil[0] != live_groups_now, (
+        "a block stating its watchdog derivation TWICE was read as one statement — the duplicate "
+        f"must enter the partition so the guard reds: {duplicate_ceil[0]}")
+    assert "<ceil stated 2 times>" in next(iter(duplicate_ceil[0].values())), (
+        "the duplicate `ceil(...)` marker did not fire — `.findall` should mark a repeat the way "
+        f"`<est X stated twice>` does: {duplicate_ceil[0]}")
+    # …and the multiplier is the CODE's constant, not a literal this guard owns. A block deriving
+    # with a different headroom does not state what `ci_selection.WATCHDOG_HEADROOM` computes, so
+    # it reds with that reason rather than reading as "no emission stated".
+    with pytest.raises(AssertionError, match="WATCHDOG_HEADROOM"):
+        _emission_block_claims(
+            "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+            "# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
     # The RANGE spelling this block ITSELF used at `4ff7964acc` (`a–e, g, i–k`) and
     # `29a2da4c9c` (`a–e, i, j`) — an arm no other fixture reaches, because every other
     # sample spells its names out. Without this, `_EMISSION_RANGE_RE` and the `span`
