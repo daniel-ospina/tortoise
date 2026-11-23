@@ -432,7 +432,10 @@ def _abuse_subject(org_id: str, rule: object) -> str:
     ``ABUSE_ENFORCEMENT_FAULT`` to avoid. A caller with no rule keeps the org
     alone (the operator-suspension path).
     """
-    name = rule if isinstance(rule, str) and rule.strip() else ""
+    name = rule.strip() if isinstance(rule, str) else ""
+    # STRIPPED, not just validated: "point_create " and "point_create" would
+    # otherwise be two create-once points for ONE rule — the #2844 alias class this
+    # scoped subject exists to remove.
     return f"{org_id}:{name}" if name else org_id
 
 

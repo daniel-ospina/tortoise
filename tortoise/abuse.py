@@ -270,6 +270,12 @@ _MAX_PENDING_EPISODE_RESOLVES = 4096
 #: is spent inside one cooldown. Each retry costs the same incident reads as the
 #: first attempt, so an unbounded retry is a read tax on the request path.
 _EPISODE_RESOLVE_RETRY_TTL_S = 90_000.0
+#: NOTE the coupling with `ALERT_RECOVERY_STREAK` (`incident_kinds.resolve_streak_for`):
+#: the recovery window needs that many clean observations, and this retry now offers
+#: one per `_EPISODE_RESOLVE_RETRY_BACKOFF_S`, i.e. <=25 inside the TTL. An operator
+#: who raises the streak past ~24 makes the window unreachable by the automatic
+#: retry and the incident falls to the manual close — deliberate, and named here
+#: rather than discovered as a "permanent incident".
 #: Minimum spacing between retries of a pending episode-end close (#14407), on par
 #: with the store's default `close_cooldown_min` (60 min): a retry inside the
 #: cooldown is refused AFTER it has already paid a store read.
@@ -1894,6 +1900,7 @@ class AbuseEngine:
         # it costs nothing on the hot path and cannot undo the R2-read reduction.
         if resolved:
             self._pending_episode_resolves.pop((org_id, rule), None)
+            self._last_resolve_attempt.pop((org_id, rule), None)
         else:
             self._remember_pending_resolve(org_id, rule)
 
@@ -1947,6 +1954,7 @@ class AbuseEngine:
         first = self._pending_episode_resolves.get(key)
         if first is not None and (now - first).total_seconds() > _EPISODE_RESOLVE_RETRY_TTL_S:
             self._pending_episode_resolves.pop(key, None)
+            self._last_resolve_attempt.pop(key, None)
             logger.warning(
                 "abuse episode end: %s/%s still not resolved after %ds — giving up "
                 "on the automatic close; close the incident by hand (the runbook "
@@ -1961,6 +1969,7 @@ class AbuseEngine:
                     "dropping ALL retry hints; the incidents stay OPEN and need a "
                     "manual close", len(self._pending_episode_resolves))
                 self._pending_episode_resolves.clear()
+                self._last_resolve_attempt.clear()
                 self._pending_episode_resolves[key] = now
 
     def _release_notify(self, org_id: str, rule: str, stage: str) -> None:

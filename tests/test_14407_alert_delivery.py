@@ -494,13 +494,17 @@ def test_a_retry_never_resolves_on_an_unreadable_window(monkeypatch):
 
     monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
     engine = AbuseEngine(_FlakyStore())
-    now = datetime.now(timezone.utc)  # noqa: UP017
+    clock = [datetime.now(timezone.utc)]  # noqa: UP017
+    monkeypatch.setattr("tortoise.abuse._utcnow", lambda: clock[0])
 
-    engine._evaluate("org-a", "point_create", 500, 3600, now)   # close raises → pending
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])  # raises → pending
     first = len(resolved)
     assert first == 2, resolved
 
-    engine._evaluate("org-a", "point_create", 500, 3600, now)   # read RAISES
+    # Past the retry backoff, so the retry branch ACTUALLY RUNS — otherwise this
+    # test is vacuous (the backoff alone would keep `resolved` unchanged).
+    clock[0] = clock[0] + timedelta(seconds=3601)
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])  # read RAISES
     assert len(resolved) == first, (
         "an UNREADABLE window closed the incident — a false all-clear "
         f"({resolved})")
@@ -640,15 +644,22 @@ def test_a_cooldown_refusal_does_not_consume_the_retry_budget(monkeypatch):
 
     monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
     engine = AbuseEngine(_FlagOnceStore())
-    now = datetime.now(timezone.utc)  # noqa: UP017
+    clock = [datetime.now(timezone.utc)]  # noqa: UP017
+    monkeypatch.setattr("tortoise.abuse._utcnow", lambda: clock[0])
 
-    engine._evaluate("org-a", "point_create", 500, 3600, now)      # real failure
-    for _ in range(30):                                            # cooldown refusals
-        engine._evaluate("org-a", "point_create", 500, 3600, now)
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])  # real failure
+    # 24 hourly retries — every one REFUSED by the store's cooldown. A call-count
+    # budget would be spent here (the store refuses for `close_cooldown_min`, but
+    # the retry fires on every clean evaluation), dropping the entry just as the
+    # cooldown expires.
+    for _ in range(24):
+        clock[0] = clock[0] + timedelta(seconds=3601)
+        engine._evaluate("org-a", "point_create", 500, 3600, clock[0])
 
     assert ("org-a", "point_create") in engine._pending_episode_resolves, (
         "the retry entry was dropped during the store's own cooldown — the "
         "incident is stranded OPEN once the cooldown expires")
+    assert len(calls) > 2, f"the retry never actually ran ({calls})"
 
 
 def test_two_rules_cannot_both_claim_one_migrated_issue():
@@ -870,6 +881,71 @@ def test_an_unreadable_issue_number_does_not_arm_a_silent_window(monkeypatch):
     assert sent == [], "the unattributed text would assert an absence we cannot see"
     assert notify._delivery == {}, (
         "the window was armed with nothing sent — a silent 24h for the class")
+
+
+def test_a_suppressed_outcome_does_not_spend_the_delivery_window(monkeypatch):
+    """An operator suppression must not become a mute when it is lifted.
+
+    The delivery window is armed BEFORE the outcome is classified, and
+    `SUPPRESSED` sends nothing — so leaving the window armed means the first
+    detection after the suppression is lifted is swallowed for the rest of the
+    window (up to 24h): the "#4872: never a mute" direction. The same arm covers a
+    future `OpenOutcome` member, which would otherwise be a total mute with no log.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    sent: list[str] = []
+
+    class _Store:
+        def __init__(self, outcome):
+            self.outcome = outcome
+
+        def open_incident_state(self, *a, **kw):
+            return self.outcome
+
+        def incident_record(self, *a, **kw):
+            return {"issue_number": 11}
+
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+
+    # 1. an operator has paused the kind
+    notify.reset_abuse_delivery_for_tests()
+    monkeypatch.setattr(notify, "_abuse_alert_store",
+                        lambda: (_Store(OpenOutcome.SUPPRESSED), ""))
+    for _ in range(3):
+        notify.notify_abuse("abuse_flag", {"org_id": "org-a"},
+                            {"rule": "point_create", "count": 900})
+
+    assert sent == [], "a suppressed kind must not be sent"
+    assert notify._delivery == {}, (
+        "the window was spent while suppressed — lifting the suppression would be "
+        "silent for the rest of it")
+
+    # 2. suppression lifted: the first detection must DELIVER immediately
+    monkeypatch.setattr(notify, "_abuse_alert_store",
+                        lambda: (_Store(OpenOutcome.DEDUP), ""))
+    notify.notify_abuse("abuse_flag", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 900})
+    assert len(sent) == 1, f"the first post-suppression detection was swallowed ({sent})"
+
+    # 3. a future outcome member that is neither DEDUP nor FILED behaves the same
+    notify.reset_abuse_delivery_for_tests()
+    sent.clear()
+
+    # an outcome value that is neither member (what a new `OpenOutcome` entry, or a
+    # store double that returns something unexpected, looks like here)
+    monkeypatch.setattr(notify, "_abuse_alert_store",
+                        lambda: (_Store("deferred-not-yet-classified"), ""))
+    notify.notify_abuse("abuse_flag", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 900})
+    assert sent == []
+    assert notify._delivery == {}, "an unclassified outcome must not spend the window"
+    notify.reset_abuse_delivery_for_tests()
 
 
 def test_an_anonymous_digest_does_not_claim_a_dashboard_row(

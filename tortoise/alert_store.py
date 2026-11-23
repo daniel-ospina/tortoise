@@ -556,6 +556,14 @@ class AlertStore:
             # per-ISSUE claim object, created once atomically: only the migrator
             # that creates it may move the sentinel (and no lock is needed, so no
             # R2 round trip is held under one).
+            #
+            # DECLARED RESIDUAL: the claim has no expiry — `create_if_not_exists`
+            # has no conditional-expiry primitive — so a migrator killed between the
+            # claim and its rollback/success (OOM or SIGKILL on the abuse pool is a
+            # real event) leaves the claim behind and that issue can never be
+            # migrated again. The harm is the documented fallback, never a mute: the
+            # caller files under the scoped key (a visible duplicate) while the
+            # legacy incident stays OPEN for the runbook's manual close.
             claim_key = f"ops/alerts/.migrating/{kind}/{number}.json"
             try:
                 won = self._storage.create_if_not_exists(
