@@ -268,12 +268,13 @@ def _residue_block() -> str:
     while this lane's read 1197, and the per-line difference between the two LIVES is exactly what
     a merged run is — so the figure above is RE-MEASURED here rather than inherited from either
     side, and the next reflow repeats that; THIS BRANCH's own review-round prose then took the run
-    from `main`'s 1327 to 1355 on the merged tree (1346 at the rebase onto `origin/main`
-    `cc936d47dba1`, and the review-round prose corrections since added the rest — no per-round
-    arithmetic is restated here, because that sum is exactly the figure the walk already grades),
-    measured through
-    this walk ON THAT TREE rather than inherited from either side — the same rule, applied once
-    more), AND THE ARMS GRADE ALL OF IT
+    from `main`'s 1327 to 1355 on THIS tree, measured through this walk ON THAT TREE rather than
+    inherited from either side — the same rule, applied once more. ⛔ AND NO INTERMEDIATE
+    PER-REVISION FIGURE IS QUOTED: an earlier cut anchored `1346` to "the rebase onto `origin/main`
+    `cc936d47dba1`", and that anchor does not hold — the rebase TARGET reads 1327, the rebase's own
+    result reads 1344, and 1346 belongs to the next commit. A figure anchored to an EVENT instead
+    of to a REVISION is precisely the drift this block exists to stop, and only the GRADED figure
+    is checkable by a reader, so only it is stated), AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
