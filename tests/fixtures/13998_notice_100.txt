@@ -1,0 +1,27 @@
+Hi Dana,
+
+Your workspace is using 100% of the fast-search capacity included in your plan.
+
+Short version: nothing is lost or deleted. Everything you've saved stays searchable. What changes is how quickly some older items come back.
+
+[ Add capacity ]
+<mailto:support@premiselabs.co?subject=Add%20capacity%20to%20my%20Tortoise%20workspace>
+
+---
+
+Why it works this way
+
+Tortoise keeps your data in a Postgres database. That's inexpensive, so we can store everything you give us without charging you for it twice.
+
+On top of that we run a graph database. It mirrors a slice of your data and makes search faster and better at following connections — finding things by meaning, and tracing how they relate to each other.
+
+That graph is expensive to run, so we reserve it for what matters most: your highest-value and most frequently searched items. Everything else stays in Postgres.
+
+What you'll notice
+
+Search keeps working across everything. Items outside the fast layer are fetched when you search for them, so they can take a moment longer.
+
+If you want everything in the fast layer, you can add capacity at any time.
+
+[ How Tortoise stores and searches your data → ]
+<https://premiselabs.co/tortoise/docs#storage>

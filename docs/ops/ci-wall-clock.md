@@ -293,21 +293,27 @@ because the pack as a whole moved to `720.0` (720.0 × 2.0 / 60 = 24.00, which `
 ceils to **24**; 720.6 lands at 24.02, which ceils to **25**). ⛔ An earlier cut of this sentence claimed
 the subtraction had stopped separating the pair and withdrew the `24 m` arm on that basis — that
 reading does NOT reproduce at the head it named and is itself withdrawn here. ⛔ **AND THE PAIR STOPS
-SEPARATING AFTER THE MERGE WITH `main` `b4da1f5c01`, WHICH IS THE FINDING WORTH KEEPING**: the pool now
-reads **25 m** at **720.7**, and with the same three removed it STILL reads **25 m** at **720.2** —
-because the 24/25 boundary is EXACTLY `est_seconds` 720.0 (`shard_watchdog_minutes` is
-`ceil(est / 60 × 2.0)`, so 720.0 → 24.00 → **24** and 720.2 → 24.0067 → **25**), and `main`'s pack moved
-the three-removed arm 0.2 s above that cliff. Two lanes measured this same pair opposite ways within
-an hour for exactly that reason, so the durable fact is NOT which minute a given tree emits: it is
-that these three suites move the ceiling by ~0.5 s around a 720.0 s cliff (`720.7 − 720.2` at the
-merged tree; their declared 6.0 s over the 11 shards is ~0.55 s/shard), so any conclusion quoted
+SEPARATING AFTER THE MERGE WITH `main` `b4da1f5c01`, WHICH IS THE FINDING WORTH KEEPING**: at the
+commit that folds it (`8674087341`) the pool reads **25 m** at **720.8-720.9**, and with the same three
+removed it STILL reads **25 m** at **720.3-720.4** — because the 24/25 boundary is EXACTLY
+`est_seconds` 720.0 (`shard_watchdog_minutes` is `ceil(est / 60 × 2.0)`, so 720.0 → 24.00 → **24** and
+720.3 → 24.01 → **25**), and `main`'s pack moved the three-removed arm 0.3-0.4 s above that cliff. ⛔
+The `720.7` / `720.2` an earlier cut of this sentence quoted HERE are real, but they belong to the
+PRE-merge head `ccb98b3623` (**720.6-720.7** with the three present, **720.1-720.2** with them
+removed) — one tree's emission carried under another tree's sha is the exact defect this section
+records, so both trees are named and each figure is the one measured AT it. Two lanes measured this
+same pair opposite ways within an hour for exactly that reason, so the durable fact is NOT which
+minute a given tree emits: it is that these three suites move the ceiling by ~0.5-0.6 s around a
+720.0 s cliff (max-to-max `720.9 − 720.4` = 0.5, max-to-min `720.9 − 720.3` = 0.6 at the merge;
+`720.7 − 720.2` and `720.7 − 720.1` at the pre-merge head; their declared 6.0 s over the 11 shards
+is ~0.55 s/shard), so any conclusion quoted
 here MUST name the head it was measured at and re-derive BOTH arms with the verb. ⛔ THE FIX IS NOT TO
 LOWER A WEIGHT: **at `f56aac204ca6`** the three entered at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
 their `durations:` rows **there**, so removing or shrinking those rows changed nothing (measured: dropping
 all three `durations:` rows still emitted **721.3** on THAT resolution
 (see the `0467ba32` re-cut below) — so lowering or dropping
-those rows moved NOTHING **at that head**, which is the point of the sentence). ⛔ The premise is
+those rows moved NOTHING **at that head**, which is the point of the sentence). ⛔ **THE MERGE THAT CARRIES `#13998`'S OWN REGISTRATION IS A FURTHER TREE, AND IT RE-PACKS NOTHING**, so the figure is read off THAT tree rather than inherited from the pre-sweep one: `tests/test_13998_capacity_notice.py` enters at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (it has no `durations:` row; `--emit-push-matrix` lists it in shard `c`), and that merged tree (`1457f7905d`) emits **eight shards at 836.4 s** (a, b, c, d, e, h, j, k) **and three at 836.3 s** (f, g, i) — `ceil(836.4/60 x 2)` = **28 m**, i.e. this branch's registration does not move the term the 2026-11-23 sweep set. ⚠️ Re-measured 2026-11-23 (tortoise#14405) because this paragraph previously carried `835.8-835.9 s on all eleven shards` for the same tree, which that tree does not emit: that figure was read off a DIFFERENT tree and named this one, the exact defect class this section exists to record. ⛔ The `721.6 s` / `25 m` and the four-at-`721.3`-seven-at-`721.2` split an earlier cut of this paragraph quoted belong to the PRE-sweep merge with `origin/main` `588cf7ae` (and to `10e51693f1` / `c0b929403aa9` respectively); they are named here as HISTORY and not carried as this head's term — one tree's emission under another tree's sha is the exact defect class this section exists to record. ⛔ The premise is
 scoped to that head ON PURPOSE: the 2026-11-23 sweep has since lowered two of the three to `0.1`
 (`test_14012_resident_pin.py`, `test_14012_outside_view.py`; only `test_14012_resident_cli.py`
 is still `2.0`), so **at `a7baa98d053d`** dropping all three DOES move the worst — `835.7 s →
@@ -410,6 +416,17 @@ save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the three. 
 carry also counted a `~/.cache/pip` save #11063 stood down (`python-ci.yml:2942-2946` is
 `actions/cache/restore@`), and it still carries an ungated `actions/cache@v4` POST on `~/.cache/huggingface`
 (`python-ci.yml:2985-2987`) that uploads on a MISS, so its SUM needs a measurement: `15 → 50` is VOID.
+⛔ The command this § invites names a **durable** commit, and that is deliberate: the follow-up, and
+the pre-merge merge tree this paragraph's split was emitted at, are commits on this PR's own branch,
+and this repo squash-merges with `delete_branch_on_merge`, so a cite naming their shas stops resolving
+the moment the branch lands — a RED on the required `docs` job for every PR afterwards, not a missing
+footnote. The citation is therefore the durable re-derivation arm ALONE — an ancestor of `main` whose
+command prints nothing (`git show --stat 10e51693f1 -- docs/ops/ci-wall-clock.md` is empty) — and it
+says only that: re-deriving never reads a diff. The branch-side emission belongs to the tree the
+sentence above names; it is NOT this cite's tree, and reading it as such is the same
+one-tree's-numbers-under-another-tree's-sha error this paragraph exists to record. Nothing grades the
+emitted number (`grep -rn '721\.' tests/ tools/` finds no pin), so re-derive it with
+`--emit-push-matrix` at the sha the sentence names.
 
 **`ci.yml` — five of the seven required contexts had no cap at all**
 

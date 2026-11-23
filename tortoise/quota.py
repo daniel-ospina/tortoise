@@ -773,11 +773,15 @@ def resolve_org_limits(org_id: str) -> dict:
         raise QuotaCheckError("resolve_org_limits requires a org_id")
     from tortoise.supabase_control import (  # noqa: I001
         _QUOTA_SELECT,
-        _ORG_ADDITIVE_0015_TIER,
-        _ORG_ADDITIVE_2040_TIER,
-        _ORG_ADDITIVE_BILLING_TIER,
-        _ORG_ADDITIVE_DKL_TIER,
-        _ORG_ADDITIVE_IMPORT_TIER,
+        # #13998: ONE ordered ladder, imported rather than re-spelled here
+        # (`_ORG_ADDITIVE_TIERS` in supabase_control, newest migration first). It
+        # carries BOTH columns that ride `_QUOTA_SELECT` beyond the base set —
+        # the #13998 capacity-notice mark and #2406's onboarding marker — so a
+        # schema one migration behind degrades just the new column instead of
+        # 400ing every rung down to the terminal base-only read (#1832's class).
+        # Pinned by
+        # `tests/test_13998_capacity_notice.py::test_every_quota_select_ladder_uses_the_one_shared_tuple`.
+        _ORG_ADDITIVE_TIERS,
         _orgs_row_fail_soft,
         get_control_plane, is_supabase_enabled,
     )
@@ -794,11 +798,7 @@ def resolve_org_limits(org_id: str) -> dict:
         # #1832 class).
         row = _orgs_row_fail_soft(
             get_control_plane(), org_id, select=_QUOTA_SELECT,
-            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                            _ORG_ADDITIVE_IMPORT_TIER,
-                            _ORG_ADDITIVE_DKL_TIER,
-                            _ORG_ADDITIVE_0015_TIER,
-                            _ORG_ADDITIVE_BILLING_TIER],
+            additive_tiers=list(_ORG_ADDITIVE_TIERS),
         )
         if row is None:
             raise OrgNotFoundError(

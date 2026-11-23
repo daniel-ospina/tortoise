@@ -3261,6 +3261,12 @@ _LIVENESS_TASK_ATTRS = (
     # sweep task would either stop every retry or double-deliver — and neither
     # shows up anywhere except as "the subscriber never got the event".
     "_webhook_sweep_task",
+    # #13998: the scheduled capacity-notice pass. Process-lifetime and periodic
+    # like the rest, and its LOSS is silent by construction: the notices have no
+    # write-triggered path (a threshold is crossed between writes), so an
+    # orphaned or never-started sweep means no notice is ever sent and nothing
+    # else in the system notices.
+    "_capacity_notice_task",
 )
 
 
@@ -3972,6 +3978,28 @@ async def _lifespan(app):
                 "webhook retry sweep not started — a failed delivery whose "
                 "backoff elapses while its tenant is idle will NOT be retried "
                 "until that tenant's next dream cycle: %s", exc, exc_info=True)
+
+        # ── #13998: the scheduled capacity-notice pass (80 %/100 % of the fast
+        # search window). Its OWN try, for the reason stated above: a bad
+        # interval here must disable only these notices. Armed as a background
+        # task, never awaited before the bind (#2953).
+        try:
+            from tortoise import capacity_notice as _capacity_notice
+
+            _notice_interval = _capacity_notice.sweep_interval_s()
+            # INFO, not DEBUG: the knob and the cadence are the only way an
+            # operator can tell "sweeping, nothing due" from "never armed" —
+            # the pass is otherwise invisible when it has nothing to send.
+            _logger.info(
+                "capacity notice sweep armed: interval=%ss enabled=%s",
+                _notice_interval, _capacity_notice.notices_enabled())
+            app.state._capacity_notice_task = \
+                asyncio.get_event_loop().create_task(
+                    _capacity_notice_sweep_loop(_notice_interval))
+        except Exception as exc:
+            _logger.error(
+                "capacity notice sweep not started — no 80 %/100 % working-set "
+                "notice will be sent by this process: %s", exc, exc_info=True)
 
         # ── #2850: the DB probe refresher — keeps /health's ``db`` field
         # honest without the request path doing any I/O at all.
@@ -4964,6 +4992,97 @@ async def _webhook_retry_sweep_loop(interval: float) -> None:
     while True:
         await asyncio.sleep(interval)
         await _guarded_step("webhook retry sweep", _webhook_retry_sweep_pass)
+
+
+# ── #13998: the scheduled capacity-notice pass ──────────────────────────────
+async def _capacity_notice_sweep_pass() -> dict:
+    """ONE pass: evaluate every account's gauge, send at most one notice each.
+
+    The decision logic (threshold, copy, ledger, send) lives in
+    ``tortoise/capacity_notice.py`` so it is unit-testable without a server; this
+    wrapper contributes only the two facts that are the SERVER's: the kill switch
+    and the hosted/registry mode.
+
+    ⛔ REGISTRY/SELFHOST MODE: ``organizations`` does not exist there, so the
+    pass does nothing rather than reading a control plane that is not configured
+    (the onboarding endpoint's own guard, same reason).
+    """
+    import logging
+
+    from tortoise import capacity_notice as _capacity_notice
+    from tortoise.supabase_control import is_supabase_enabled
+
+    _log = logging.getLogger("tortoise.api")
+    if not _capacity_notice.notices_enabled():
+        return {"enabled": False}
+    if not is_supabase_enabled():
+        return {"enabled": True, "skipped": "registry-mode"}
+    summary = await _capacity_notice.sweep_pass()
+    if summary.get("error"):
+        _log.warning("capacity notice sweep: %s — no notices this pass",
+                     summary["error"])
+    return summary
+
+
+async def _capacity_notice_sweep_loop(interval: float,
+                                     first_delay: float | None = None) -> None:
+    """#13998: the periodic runner — a pass at BOOT, then every ``interval``.
+
+    A threshold is crossed BETWEEN writes, so there is no request to hang the
+    notice on: without this loop the copy exists and no customer ever receives
+    it. ``interval`` is a parameter (not a captured closure) so a test can drive
+    the loop, and each pass goes through ``_guarded_step`` (#5381) so a raising
+    pass cannot end the ``while True`` — the failure mode that would silently
+    stop notifying for the process's lifetime.
+
+    ⛔ THE BOOT RUNG IS THE REAL TRIGGER, NOT A NICETY (#14038 review, P1). An
+    earlier form slept FIRST, which reads as harmless until the deploy cadence is
+    measured: `deploy-hosted.yml` replaces the machine on every `tortoise/**`
+    push to `main`, and over the 30 days to 2026-11-20 there were **619 runs =
+    20.6/day** with a MEDIAN gap of **0.48 h** and a longest run of **83**
+    consecutive gaps under 6 h (`gh run list --workflow deploy-hosted.yml`;
+    `main`'s `tortoise/**` commits over the same window, n=615, is **20.5/day** (the same n/30
+    denominator, so 619/30 vs 615/30 — agreeing in SHAPE, not at one rate), 0.47 h, run 82) — so a sleep-first 6 h timer is reset before
+    it expires and the notice is delivered days late or never, while the boot log
+    said "armed". ⛔ An earlier cut of this paragraph said "0.19 h … 90" and no
+    population reproduces it; 0.19 h is nearer `main`'s ALL-COMMIT median
+    (0.08 h, n=1,594), which is not the trigger, because most commits touch
+    nothing `deploy-hosted.yml` deploys.
+
+    The repo's own convention for a sweep that must cover a window regardless of
+    uptime is this one (`#2953`'s boot sweeps run at boot AND on the periodic
+    interval).
+
+    The cost of a boot pass is one complete enumeration plus, per account not
+    already at the top mark, THREE control-plane reads (the account row via
+    ``read_account``, the allowance via ``quota.resolve_org_limits``, and the
+    gauge via ``allowance_gate.read_dimension``), plus a pre-send mark re-read and
+    the ``claim_notice`` PATCH when it actually sends. ⛔ AND A DUE ACCOUNT WHOSE
+    TWO CONTACT COLUMNS CARRY NO ADDRESS ALSO PAYS THE OWNER RUNG — two MORE
+    blocking calls (`supabase_control.owner_email`: the owner membership read and
+    the GoTrue admin GET) — so the true bound for that population is five, not
+    three, and it is per DUE ACCOUNT per pass rather than per SENT notice
+    (`capacity_notice._notice_recipient` states the arithmetic; an earlier cut of
+    this paragraph stopped at the three). ⛔ An earlier cut said "one
+    point read per account", which the next clause of that same sentence already
+    contradicts ("short-circuits BEFORE the gauge is read" — the gauge read is
+    one of the three). An account whose ledger
+    mark is already at the top threshold short-circuits before the gauge is read
+    (``notify_account``). ``first_delay`` is a 150–300 s SPREAD, not a sub-second
+    jitter (#14038 review, P3): the formula is ``min(interval, 300) * (0.5 + pid/2000)``,
+    so the first pass fires 150–300 s AFTER boot — the pid term only breaks the tie
+    between processes that booted together, and "so a boot storm does not fire N
+    passes in the same second" described a spread this code never produced. The boot
+    rung's value is unaffected (minutes still beat a deploy gap whose median is
+    ~0.48 h), but a reader re-pricing the trigger has to know the real delay.
+    """
+    if first_delay is None:
+        first_delay = min(interval, 300.0) * (0.5 + (os.getpid() % 1000) / 2000.0)
+    if first_delay > 0:
+        await asyncio.sleep(first_delay)
+    while True:
+        await _guarded_step("capacity notice sweep", _capacity_notice_sweep_pass)
+        await asyncio.sleep(interval)
 
 
 def _precompute_why_blocks(sdk: TortoiseSDK, dream_result: dict | None) -> dict | None:
@@ -8559,12 +8678,18 @@ def _record_health() -> dict:
     #
     #   ``write_failed``      the record was unreachable or the projection
     #                         refused the row — a REPLAY heals it.
-    #   ``journal_collision`` the position row holds a record this write does not
-    #                         continue — a different record, or (with no `ts` to compare) a
-    #                         payload whose derivation moved (#9318): a REPLAY DOES NOT HEAL
+    #   ``journal_collision`` the position row cannot be indexed by this write —
+    #                         a different record type, a different capture time,
+    #                         identities this write's payload CONTRADICTS, or (for
+    #                         a write with no `ts` to compare) a payload whose
+    #                         derivation moved (#9318): a
+    #                         REPLAY DOES NOT HEAL
     #                         IT, it re-raises. Remedy = journal identity in the key (#12894).
-    #                         Same-capture drift is not this counter (#12904) — and neither,
-    #                         silently, is a DIFFERENT record there (`.JournalPositionCollision`).
+    #                         Same-capture drift is not this counter (#12904) — but a
+    #                         same-capture pair whose payloads name CONTRADICTING
+    #                         identities IS, and immediately (an equal instant is a
+    #                         coordinate, not identity — a second record there, or this
+    #                         record re-keyed; `.JournalPositionCollision`).
     #   ``no_tenant``         armed with no tenant in scope; heal the tenant
     #                         resolution, then replay.
     #   ``malformed_dsn``     the value is configured but unusable — fix the
@@ -10097,11 +10222,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         request.query_params.get("org_id"),
         memberships=memberships) or memberships[0]["org_id"]
     from tortoise.supabase_control import (
-        _ORG_ADDITIVE_0015_TIER,
-        _ORG_ADDITIVE_2040_TIER,
-        _ORG_ADDITIVE_BILLING_TIER,
-        _ORG_ADDITIVE_DKL_TIER,
-        _ORG_ADDITIVE_IMPORT_TIER,
+        _ORG_ADDITIVE_TIERS,
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
         default_graph_for_credential,
@@ -10109,17 +10230,21 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     row = await _cp_offload(
         lambda: _orgs_row_fail_soft(
             cp, org_id, select=_QUOTA_SELECT,
-            # #1832: the FULL additive ladder (newest migration tier dropped
-            # FIRST — 2040 marker, then import tier), same as resolve_api_key /
-            # recover_team_key. The #1230 import ledger + points-cap columns
-            # (last_import_sha256/max_points, migration 20260817000001) ride
-            # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
-            # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
-            # /v1/sessions, /v1/onboarding/state.
-            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                            _ORG_ADDITIVE_IMPORT_TIER, _ORG_ADDITIVE_DKL_TIER,
-                            _ORG_ADDITIVE_0015_TIER,
-                            _ORG_ADDITIVE_BILLING_TIER]),
+            # #1832: the FULL additive ladder, newest migration tier dropped
+            # FIRST, same as resolve_api_key / recover_team_key. The #1230 import
+            # ledger + points-cap columns (last_import_sha256/max_points,
+            # 20260817000001), the #2040 marker, the #2406 onboarding marker and
+            # the #13998 capacity-notice mark all ride _QUOTA_SELECT; omitting a
+            # tier made EVERY ladder attempt 400 (PGRST204) → terminal raise →
+            # HTTP 500 on /v1/team, /v1/team/keys, /v1/sessions,
+            # /v1/onboarding/state.
+            # ⛔ #13998 review (BLOCKING): this call site was one of the two whose
+            # hand-spelled list missed the mark's tier, turning a schema one
+            # migration behind into a session-management 500. Since #14038 the
+            # ladder is the ONE shared tuple, so a new additive column cannot be
+            # half-wired again — pinned by
+            # `tests/test_13998_capacity_notice.py::test_every_quota_select_ladder_uses_the_one_shared_tuple`.
+            additive_tiers=list(_ORG_ADDITIVE_TIERS)),
         op="orgs_row_fail_soft")
     if row is None:
         raise HTTPException(status_code=403, detail="Organization not found")
@@ -17823,11 +17948,11 @@ async def send_onboarding_offer_email_endpoint(request: Request):
                 op="set_org_onboarding_email_sent")
             if not stamped:
                 # Another process stamped concurrently (cross-replica race) —
-                # the provider Idempotency-Key collapsed the duplicate send;
-                # outcome is still exactly-once.
+                # the provider Idempotency-Key collapsed the duplicate send
+                # inside its 24 h window; after that window a replay sends again.
                 _logger.warning(
-                    "onboarding email: sent for team %s but marker already "
-                    "set by a concurrent sender (provider deduped)", org_id)
+                    "onboarding email: sent for team %s; a concurrent sender "
+                    "stamped the marker (the SEND was deduped, 24 h window)", org_id)
             return {"status": "sent",
                     "message_id": result.get("message_id")}
         # Sender-side skip/failure: marker UNSET — the edge-fn retry (or a
@@ -36930,9 +37055,10 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         get_control_plane, is_supabase_enabled,
         recover_org_key, SignupTokenRecoveryError,
         _orgs_row_fail_soft, _QUOTA_SELECT,
-        _ORG_ADDITIVE_2040_TIER, _ORG_ADDITIVE_IMPORT_TIER,
-        _ORG_ADDITIVE_DKL_TIER,
-        _ORG_ADDITIVE_0015_TIER, _ORG_ADDITIVE_BILLING_TIER,
+        # #13998 review (BLOCKING): `storage_notice_pct` rides _QUOTA_SELECT, so
+        # its tier must be in this ladder or the terminal base-only rung still
+        # selects the missing column — a 500 on the recovery emergency path.
+        _ORG_ADDITIVE_TIERS,
     )
 
     # [SECOND-MODEL-GATE] P2: normalize user-entered case BEFORE the format
@@ -36957,17 +37083,16 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         row = await _cp_offload(
             lambda: _orgs_row_fail_soft(
                 cp, org_id, select=_QUOTA_SELECT,
-                # #1709 fixer P2.6: the FULL additive ladder (same as
-                # resolve_api_key — newest migration tier dropped FIRST, incl.
-                # the #2040 marker tier) — the recovery emergency path must not
-                # 500 on migration skew (a schema one migration behind the
-                # newest additive drops that tier to safe defaults instead of
-                # raising).
-                additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                                _ORG_ADDITIVE_IMPORT_TIER,
-                                _ORG_ADDITIVE_DKL_TIER,
-                                _ORG_ADDITIVE_0015_TIER,
-                                _ORG_ADDITIVE_BILLING_TIER]),
+                # #1709 fixer P2.6: the FULL additive ladder — newest migration
+                # tier dropped FIRST, incl. the #2040 marker tier — so the
+                # recovery emergency path must not 500 on migration skew.
+                # ⛔ #13998 review (BLOCKING): the mark's tier is part of that
+                # ladder for the same reason (it rides _QUOTA_SELECT), and this
+                # was the other call site whose hand-spelled list omitted it —
+                # a key-recovery lockout from one migration of drift. Since
+                # #14038 the ladder is the ONE shared tuple, so the omission
+                # cannot recur here.
+                additive_tiers=list(_ORG_ADDITIVE_TIERS)),
             op="orgs_row_fail_soft")
         if row is None or row.get("deleted_at") is not None:
             # soft-deleted org → uniform 422 (indistinguishable from
@@ -52254,7 +52379,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 205 tracked files (748 distinct
+# ABSOLUTE line number from 205 tracked files (752 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
