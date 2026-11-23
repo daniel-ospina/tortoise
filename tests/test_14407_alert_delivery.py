@@ -1008,16 +1008,21 @@ def test_a_completed_migration_releases_its_claim_too():
         "the claim object outlived its own COMPLETED migration — one leaked "
         f"object per migrated issue: {storage.list('ops/alerts/.migrating/')}")
 
-    # A restore brings the legacy object back beside the scoped key. The
-    # migration must not be blocked by a claim nobody owns any more: it takes the
-    # "nothing of ours was created" branch and RELEASES its claim, so a later
-    # attempt is still possible.
+    # A restore brings the legacy object back beside the scoped key; the scoped key
+    # then goes away (its own episode end closes + deletes it, `resolve_incident`).
+    # The issue must be migratable AGAIN — a leaked claim makes that impossible,
+    # which is the "permanent #2844 alias" these branches exist to prevent. This is
+    # the DISCRIMINATING assertion: on the pre-fix code the claim from the first
+    # (successful) migration is still `create_if_not_exists`-owned, so this call
+    # returns False and the legacy sentinel stays stranded.
     storage.upload("ops/alerts/abuse_review_needed/org-a.json", b'{"issue_number": 7}')
+    storage.delete("ops/alerts/abuse_review_needed/org-a:point_create.json")
     assert store.migrate_incident_subject(
-        "abuse_review_needed", "org-a:point_create", "org-a") is False
+        "abuse_review_needed", "org-a:point_create", "org-a") is True, (
+        "the issue could not be migrated a second time — its claim never left")
     assert storage.list("ops/alerts/.migrating/") == [], (
-        "a refused migration left a claim behind, so issue 7 can never be "
-        f"migrated again: {storage.list('ops/alerts/.migrating/')}")
+        "the second migration left a claim behind: "
+        f"{storage.list('ops/alerts/.migrating/')}")
     assert store.incident_record("abuse_review_needed", "org-a:point_create").get(
         "issue_number") == 7, "the scoped sentinel must still be the live one"
 
@@ -1601,6 +1606,44 @@ def test_an_incident_that_raised_after_filing_is_not_called_absent(
     assert len(sent) == 1, sent
     assert "#4242" in sent[0], sent[0]
     assert "no incident was filed" not in sent[0], sent[0]
+    notify.reset_abuse_delivery_for_tests()
+
+
+def test_a_read_back_that_also_fails_is_not_called_absent(monkeypatch):
+    """A failed WRITE and a failed READ must not add up to "no incident was filed".
+
+    `open_incident_state` can raise AFTER it filed and pushed, and the two failures
+    are CORRELATED — an R2 outage fails the trailing write first, then the read-back
+    that would have found the issue. The pre-fix fall-through rendered
+    "no incident was filed" in exactly that state, which is a false statement to a
+    human about an open incident: the same class this change removes, one level
+    deeper than `number_known` covers. Whether an incident is on record is UNKNOWN,
+    and the message must say so.
+    """
+    import tortoise.notify as notify
+
+    class _Store:
+        def open_incident_state(self, kind, subject="", detail=None, writer=None):
+            raise RuntimeError("trailing write failed after filing")
+
+        def incident_record(self, kind, subject=""):
+            raise RuntimeError("R2 read failed")
+
+    sent: list[str] = []
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    notify.notify_abuse("abuse_review_needed", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 900})
+
+    assert len(sent) == 1, sent
+    assert "no incident was filed" not in sent[0], sent[0]
+    assert "UNKNOWN" in sent[0], sent[0]
     notify.reset_abuse_delivery_for_tests()
 
 
