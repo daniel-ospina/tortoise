@@ -29,7 +29,7 @@ multisets per type, and the verdict is:
 ⛔ **`covered` IS THE HARDER ANSWER TO REACH, ON PURPOSE.** Three things that
 would otherwise read as coverage are named deficits: a type the record carries
 under a DIFFERENT name (the hard-delete lane writes `PointRetracted` to the store
-and `EntityMutated` to the journal, `sdk.py:3801`) is reported as
+and `EntityMutated` to the journal, `sdk.py:3831`) is reported as
 ``mapped_types`` and makes the verdict ``not_covered``, because its row coverage
 is not comparable — the two payloads are different shapes; an EMPTY feed on
 either side produces **no verdict at all** (exit 2), never a vacuous ``covered``;

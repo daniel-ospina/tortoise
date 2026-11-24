@@ -219,11 +219,11 @@ its text is in git history) refused to assume it and named the question. Here is
 answer, with the refutations executed rather than argued:
 
 1. **A payload-only emit writes NO journal record at all.** `_emit_event` returns before the JSONL
-   half when it carries no `point`, no `id`, and no `turns` (`sdk.py:16226`, the `return None` under the
-   comment at `:16224`, contract restated in
+   half when it carries no `point`, no `id`, and no `turns` (`sdk.py:16259`, the `return None` under the
+   comment at `:16257`, contract restated in
    `event_store.append_event`'s own docstring: *"a payload-only emit writes one with no JSONL record
    at all"*). This is not hypothetical: the turn hard-delete lane calls exactly that shape —
-   `sdk._emit_event("PointRetracted", _deleted_point_payload(tid))` (`sdk.py:3801`) — and the
+   `sdk._emit_event("PointRetracted", _deleted_point_payload(tid))` (`sdk.py:3831`) — and the
    surrounding comment states the split as a contract, *"Two stores, one meaning each"*.
    **Executed pin:** `tests/test_13094_graphevent_home.py::
    test_a_payload_only_emit_writes_the_store_and_no_journal_record` emits one, asserts the store holds
@@ -360,16 +360,18 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 **#13094 changed no product code. No graph write changed. No record read changed. Nothing deleted.**
 That is MEASURED, not restated, because the line counts move with every rebase. At THIS branch's head
 the tree carries four changed `tortoise/*.py` files and the same command prints `27` — `#13094`'s
-alone prints `0`, and the other three are the product work of the PRs this branch was rebased onto:
-`#13722`'s stamp-chain submission (4 non-comment lines in `tortoise/hosted_api.py`) and `#14483`'s
-landing (`13` in `tortoise/embed_worker.py`, `10` in `tortoise/embed_writer_register.py`);
-`tortoise/activation_scorecard.py` is all-comment. None of that is a drift in this record, and none
-of it is reachable by `#13094`'s own claim — which is what the re-runnable form below scopes:
+alone prints `0`, and the other three files are the product work of TWO PRs, only one of which is
+folded in here: `#13722`'s own stamp-chain submission (4 non-comment lines in
+`tortoise/hosted_api.py`), and `#14483`'s landing, which this branch carries because the `test (c)`
+reds it repairs are `main`'s own (`13` in `tortoise/embed_worker.py`, `10` in
+`tortoise/embed_writer_register.py`); `tortoise/activation_scorecard.py` is all-comment. None of that
+is a drift in this record, and none of it is reachable by `#13094`'s own claim — which is what the
+re-runnable form below scopes:
 `git diff origin/main -- 'tortoise/*.py' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' | grep -vc '#'`
 prints `0` at this PR's own head (`#13094`'s), so no changed body line in ITS diff is anything but a
 comment. ⛔ THAT IS A CLAIM ABOUT THIS PR, NOT ABOUT THE TREE: the command diffs against whatever
 `origin/main` is NOW, so a LATER PR's own product change under `tortoise/*.py` legitimately makes it
-print a non-zero count here — that is the `27` above, three PRs' behavioural work and not a drift in
+print a non-zero count here — that is the `27` above, TWO PRs' behavioural work and not a drift in
 this record — and the graded figures below are re-derived by `--refresh` rather than by this
 sentence. The one figure here that NO `--refresh` row and no test grades is the `27` itself, which is
 why it names the PRs it comes from instead of standing alone. Each block carries a
