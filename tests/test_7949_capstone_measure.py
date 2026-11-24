@@ -7474,8 +7474,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # function postInstallProbe(' tortoise/pi-hooks/tortoise-capture.ts`): `:1100`/`:1092` is
         # what the tuple below pins — re-derived BY CONTENT in `#14428`, the ROW, not this prose.
         # The `:1007`/`:999` pair above is this pin's own head-bound record of `6916a6cd89`
-        # and is RED here, measured: main's tortoise-capture.ts carries +23 lines above
-        # both `def`s that neither of that row's two sides moved.
+        # and is RED here, measured: main's tortoise-capture.ts carries +93 lines above
+        # both `def`s that neither of that row's two sides moved (`+23` was `1007`->`1030`).
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("1100", "export function postCapture("),
             ("1092", "export function postInstallProbe("),
