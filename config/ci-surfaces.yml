@@ -15,16 +15,21 @@ version: 1
 # `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
 # S is chosen by that formula on the committed map. What is deliberately NOT
 # restated here is the S-choice ARITHMETIC — it moves with every re-cut, which is
-# how this block went stale twice. Three tests are authoritative, and every one of
-# them recomputes from the map rather than trusting a quoted number: the
-# balance-band test (`test_real_workflow_halves_are_consistent`), the lane-parity
-# superset test below, and the emission guard
+# how this block has gone stale. Three tests are authoritative, and TWO of
+# them recompute from the map rather than trusting a quoted number: the balance-band
+# test (`test_real_workflow_halves_are_consistent`, whose weights come from
+# `m["durations"]`) and the emission guard
 # (`test_the_fast_shards_header_block_states_the_measured_emission`), which grades
 # the per-shard `--emit-push-matrix` sentence further down in this block against
 # the LIVE emission, so the figures in it are a graded claim and not merely prose.
+# The third, the lane-parity superset test below, does NOT read the map — it pins the
+# label POLARITY (`shard_labels(2)` ⊂ `shard_labels(9)`), which is what the merge rail
+# subtracts main's published job names against.
 #
 # S=11 is also what the lane-parity contract permits: main publishes
-# `test (a)`…`test (j)` and a PR may only ADD to that set, never remove from it
+# `test (a)`…`test (k)` — `fast_shards: 11` below, and `.github/workflows/python-ci.yml`
+# names the job `test (${{ matrix.half }})`, so eleven halves are eleven published
+# names — and a PR may only ADD to that set, never remove from it
 # (`test_shard_labels_are_a_superset_when_s_changes` pins the polarity; the
 # merge rail refuses a removal). #11602 raised S 9 -> 10 because the 2026-11-09
 # sweep took the worst committed shard to 32 m, which put the `test` job's SUM
@@ -46,7 +51,7 @@ version: 1
 # 2026-11-16 durations sweep re-packed the same 11 shards to a 23 m worst-shard watchdog,
 # #12926's own 10.0 s row moved that emission to 24 m (arm-2 SUM 55.64 m, x 1.5 = 83.5 m,
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
-# is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.
+# is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
 # `b2d1e9086a`, plus this PR's two `core`-registered rows — `tests/test_14371_offline_embed_json.py`
@@ -73,7 +78,8 @@ version: 1
 # `tests/test_ci_selection.py::test_the_fast_shards_header_block_states_the_measured_emission`
 # compares the per-shard sentence above against the live emission (and its own `ceil(...)` operand
 # against the emitted watchdog), so a carried figure reds a required leg instead of shipping, which
-# is how this block went stale three times before (#14296). ⛔ The cap was NOT
+# is how this block went stale before this guard existed (#11298 review
+# cycle 5, #14015, #14296). ⛔ The cap was NOT
 # moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
 # from the pre-suite terms (those are measurements and file facts).
