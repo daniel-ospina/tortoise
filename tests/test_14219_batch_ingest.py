@@ -2245,8 +2245,18 @@ def test_the_graph_store_speaks_real_cypher():
     # userinfo at all.
     db = FalkorDB(host=parsed.hostname, port=parsed.port,
                   password=unquote(parsed.password) if parsed.password else None)
-    graph_name = parsed.path.strip("/") or "tortoise"
-    graph = db.select_graph(f"{graph_name}_batch_store_probe")
+    # ⛔ PER-TEST-UNIQUE NAME + JOURNAL, not the fixed `<graph>_batch_store_probe`
+    # (#11217 / cycle-6 P1-3, cycle-8 P2-2 — caught by
+    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
+    # on shard `b`, measured). A raw client bypasses `_assert_test_graph` AND the
+    # per-test wipe scope, so a FIXED name is DETACHed by every concurrent session
+    # and a fixed "test-prefixed" name passes the prefix check vacuously; the
+    # journal is what makes the session-end sweep GRAPH.DELETE it, so the leak is
+    # closed rather than renamed. Same shape as `tests/test_search_engine.py:595`.
+    graph_name = f"tortoise_test_batch_store_probe_{os.urandom(4).hex()}"
+    from tests._embedded import _journal_append
+    _journal_append(graph_name)
+    graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
 
     def _query(cypher, params=None, timeout=None):
@@ -2410,8 +2420,13 @@ def test_a_foreign_org_cannot_reach_a_batch():
     # anything about tenants.
     db = FalkorDB(host=parsed.hostname, port=parsed.port,
                   password=unquote(parsed.password) if parsed.password else None)
-    graph = db.select_graph(
-        f"{parsed.path.strip('/') or 'tortoise'}_batch_tenant_probe")
+    # ⛔ PER-TEST-UNIQUE NAME + JOURNAL — the sibling arm's note applies verbatim
+    # (#11217 / cycle-8 P2-2): a fixed raw-DETACH name is a shared graph, not a
+    # private one, and only the journal lets the session sweep reclaim it.
+    graph_name = f"tortoise_test_batch_tenant_probe_{os.urandom(4).hex()}"
+    from tests._embedded import _journal_append
+    _journal_append(graph_name)
+    graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
 
     def _query(cypher, params=None, timeout=None):
