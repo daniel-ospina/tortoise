@@ -6003,8 +6003,11 @@ class _ManifestShapeError(RuntimeError):
 #: #14482's orphan sweep (2026-11-24, "delete the 81 names the volume cut
 #: orphaned"). ⚠️ Two events, two dates: dating the CUT alone points a reader at
 #: `8c373f59a1`, where the table is still DEFINED, which is the same
-#: not-verifiable-at-the-point-of-reading failure the CALL reference below removes
-#: (#14493 review, P2). The CALL is named instead of a direction for that same
+#: not-verifiable-at-the-point-of-reading failure the named CALL removes (#14493
+#: review, P2 — and the reason this clause says "the named CALL" rather than
+#: pointing: the revision this one replaces said "the CALL reference BELOW" about a
+#: reference in the sentence ABOVE it, which is cycle 1's direction defect re-minted).
+#: The CALL is named instead of a direction for that same
 #: reason: it sits ABOVE this block, so the earlier "the sweep below" sent a reader
 #: looking the wrong way — and a reader who found no sweep below would conclude
 #: `_BUNDLE_SOURCES` is unconsumed, which is the "both were CUT" error this sentence
