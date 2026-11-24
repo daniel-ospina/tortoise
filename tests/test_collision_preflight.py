@@ -858,12 +858,16 @@ def _stop_fake_lane(proc: subprocess.Popen) -> None:
     # ⛔ ONLY SIGNAL A GROUP WE STILL OWN (#14506 review, P2). A caller may have REAPED the
     # lane before tearing down — `test_the_teardown_does_not_signal_a_group_it_no_longer_owns`
     # does exactly that with its own `proc.wait()`, and any future caller that waits first
-    # would too (cycle 5: this comment named `_wait_for_pi_cwd`, which no longer reaps —
-    # `_peek_child_status` reads the status with `WNOWAIT` precisely so it does not). By then
-    # `pgid` is a FREED pid, so an unconditional `killpg` can signal whatever group now holds
-    # that number, and on a runner shared with the fleet that is another lane's work. A
-    # `returncode` is only set once the child has been REAPED (i.e. its pid is free); while
-    # it is `None` the pid is still ours (a zombie holds it).
+    # would too. By then `pgid` is a FREED pid, so an unconditional `killpg` can signal
+    # whatever group now holds that number, and on a runner shared with the fleet that is
+    # another lane's work. A `returncode` is only set once the child has been REAPED (i.e.
+    # its pid is free); while it is `None` the pid is still ours (a zombie holds it).
+    #
+    # WHO REAPS TODAY: `_wait_for_pi_cwd` does NOT, where `waitid`/`WNOWAIT` exist —
+    # `_peek_child_status` reads the status without reaping precisely so the group is still
+    # ours at teardown. ⛔ On a platform without them that helper falls back to `poll()`, which
+    # DOES reap, and this guard is then the only thing standing between a freed pid and an
+    # unrelated group — so the guard is load-bearing on BOTH paths, for different reasons.
     if proc.returncode is not None:
         _drain_lane_stderr(proc.pid)
         return
@@ -10628,12 +10632,15 @@ class CollisionPreflightTest(unittest.TestCase):
         caller's `finally: _stop_fake_lane(proc)` can no longer kill it and the lane's `sleep`
         is orphaned into the temp dir `tearDown` deletes.
 
-        Deterministic shape only, so this pin runs on EVERY platform: a normal exit
-        (`sleep 0` runs out). The signalled death takes the other `si_code` branch and needs
-        `/proc` to construct, so it is its own skipped arm below. ⛔ The `returncode`
-        assertion is also why this arm must stay deterministic: on a platform where
-        `_peek_child_status` takes its documented `poll()` fallback, `returncode` would be set
-        by construction and this arm would red for the wrong reason.
+        Deterministic shape only, so the RC half of this pin runs on every platform: a normal
+        exit (`sleep 0` runs out). The signalled death takes the other `si_code` branch and
+        needs `/proc` to construct, so it is its own skipped arm below.
+
+        ⛔ THE "NOT REAPED" HALF IS PLATFORM-CONDITIONAL, AND THE ARM MUST SAY SO (#14506
+        review, cycle 7). `_peek_child_status` falls back to `poll()`, which REAPS — so
+        `returncode` is set by construction there, and asserting it unconditionally
+        false-redded on macOS with Python < 3.13, where `os.waitid` does not exist. That
+        platform is not hypothetical: it is the floor `requires-python = ">=3.12"` names.
         """
         proc = _fake_lane(self.tmp, seconds=0)
         try:
@@ -10643,9 +10650,11 @@ class CollisionPreflightTest(unittest.TestCase):
                 rc = _peek_child_status(proc)
                 time.sleep(0.01)
             self.assertEqual(rc, 0, "a lane that ran out its `sleep 0` exits 0")
-            self.assertIsNone(proc.returncode,
-                              "the status was read by REAPING it — `poll()` frees the pid "
-                              "and the group with it")
+            if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+                self.assertIsNone(
+                    proc.returncode,
+                    "the status was read by REAPING it — `poll()` frees the pid and the "
+                    "group with it")
         finally:
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
@@ -10673,9 +10682,13 @@ class CollisionPreflightTest(unittest.TestCase):
             self.assertEqual(rc, -signal.SIGTERM,
                              "a signalled death reports the negative signal, exactly as "
                              "`poll()` would")
-            self.assertIsNone(proc.returncode,
-                              "the status was read by REAPING it — `poll()` frees the pid "
-                              "and the group with it")
+            # ⛔ PLATFORM-CONDITIONAL, like its sibling (#14506 review, cycle 7): the
+            # `poll()` fallback reaps by construction, so `returncode` is set there.
+            if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+                self.assertIsNone(
+                    proc.returncode,
+                    "the status was read by REAPING it — `poll()` frees the pid and the "
+                    "group with it")
         finally:
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
@@ -10686,12 +10699,13 @@ class CollisionPreflightTest(unittest.TestCase):
 
         A caller may REAP a lane itself before tearing it down — this arm's own `proc.wait()`
         below is the remaining example, and any future caller that waits first would do the
-        same (`_wait_for_pi_cwd` does NOT: `_peek_child_status` reads the status with
-        `WNOWAIT` precisely so the group is still ours). By then the pid is FREE, so an
-        unconditional `killpg` could signal whatever group now holds that number — on a runner
-        shared with the fleet, another lane's work. Deleting the guard left the whole suite
-        green, which is the "claimed and pinned by nothing" class this commit opened for the
-        group reap.
+        same. (`_wait_for_pi_cwd` does NOT, where `waitid`/`WNOWAIT` exist: `_peek_child_status`
+        reads the status without reaping precisely so the group is still ours. ⛔ Its `poll()`
+        fallback DOES reap — see the guard's own comment — which is why the guard matters on
+        both paths.) By then the pid is FREE, so an unconditional `killpg` could signal
+        whatever group now holds that number — on a runner shared with the fleet, another
+        lane's work. Deleting the guard left the whole suite green, which is the "claimed and
+        pinned by nothing" class this commit opened for the group reap.
 
         ⛔ THE STATE IS CONSTRUCTED, NOT ASSUMED (#14506 review, cycle 4). Terminating the
         shell before it has forked `sleep` leaves NO member in the group (measured 0/120,
