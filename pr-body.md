@@ -125,7 +125,11 @@ by re-running. The number is re-derived whenever a round changes it; a carried c
 wrong figure in this record four times, which is why the sentence states the collection MODEL beside
 the total.
 
-Two existing cases needed a stated reason, and neither is weakened:
+Two existing cases carry a stated reason, and neither is weakened. ⛔ BOTH landed
+with #14423, which is already on `origin/main` (`da82ece4226b`) — they are named
+here because this PR's contract relies on them, NOT as adaptations this diff makes:
+`git diff origin/main...HEAD -- tortoise/pi-hooks/tortoise-capture.test.ts` contains
+neither case, and its only deleted line is the now-unused `lstatSync` import.
 
 * **#12603's confirm-read race** now races a **targeted** filing, because a whole-spool peer is excluded by the claim — and a targeted filing (`session capture`, the shutdown flush) is the only racer left, and a real one.
 * **#2100's quota case** let a never-answering POST hang across a later process, which now correctly reads `heldByClaim`; it releases the wedged pass first and additionally asserts the claim is released — a new invariant.
@@ -441,7 +445,7 @@ them all. That is the shape that reads green everywhere and blocks installs ever
 | **P3** "cycle 11 F5" — cycle 11's digest finding is `F1` (`F5` is cycle 13's label set) | **fixed**. |
 | **P3** the Tests block labelled the install-contract pins "generation 33" at a head whose pins are 34 | **fixed**. |
 | **P3** the Residuals bullet stated the generation freeze as though a gate enforced it, when the round had measured that nothing did | **fixed**: the bullet says what was measured, names the new row as the gate, and now carries the post-row counts too (see the bullet above). This is the row whose absence made the Cycle-21 header's "5 P3" untrue; the header now counts five plus the measured one. |
-| **P3 (correction to this record's own history)** the commit `4a49c877` claimed `grep -rn 'cycle-19' tests/ tortoise/ pr-body.md` "returns nothing in this PR's files". It overstates, and is corrected here rather than by rewriting history: that grep returns many hits on those paths (unrelated, pre-existing files), and WITHIN this PR's files it returns exactly **TWO LINES** — one in code, `tests/test_14350_drain_convergence.py:2488`, a CORRECT cycle-19 P3 citation (the `null`-carry-forward arm, whose row is cycle 19's third), and one in `pr-body.md`, which is this row's own three quotations of the pattern. | **recorded**: no code change. The only hyphenated `cycle-19` CITATION left in this PR's files is the legitimate one (this row's own quotations of the pattern aside), and the two `test_capture_install.py` citations that WERE wrong now read cycle 20. |
+| **P3 (correction to this record's own history)** the commit `4a49c877` claimed `grep -rn 'cycle-19' tests/ tortoise/ pr-body.md` "returns nothing in this PR's files". It overstates, and is corrected here rather than by rewriting history: that grep returns many hits on those paths (unrelated, pre-existing files), and WITHIN this PR's files it returns exactly **TWO LINES** — one in code, `tests/test_14350_drain_convergence.py:2540`, a CORRECT cycle-19 P3 citation (the `null`-carry-forward arm, whose row is cycle 19's third), and one in `pr-body.md`, which is this row's own three quotations of the pattern. | **recorded**: no code change. The only hyphenated `cycle-19` CITATION left in this PR's files is the legitimate one (this row's own quotations of the pattern aside), and the two `test_capture_install.py` citations that WERE wrong now read cycle 20. |
 | **P3** an installed-artifact note claimed "ELEVEN re-cuts / TWELVE distinct forms" beside a command yielding neither | **fixed by RUNNING it**, and the range is now stated so it reproduces: at `1474ec7b`, **22 distinct forms over 57 commits** from `6a72cfd661` (`git rev-list --count 6a72cfd661..1474ec7bf58d`). ⛔ The base is NOT described as the merge base — `git merge-base origin/main HEAD` is `2f380536`, one commit later, and the two ranges give different counts (21/56). |
 
 **Cycle 22** (a fresh-context reviewer at `1a0c29c3`) — 1 **P2**, and unlike cycles 11-21 it is a
@@ -452,6 +456,20 @@ was fixed (a finding is a claim, not a fact): the clear's final `unlink` re-rais
 |---|---|
 | **P2** `_clear_unusable_claim_path` answered `REFUSED` — "the path cannot be cleared" — when the obstruction had ALREADY been moved aside and only the disposal of that ASIDE copy failed. The claim path was FREE at that moment, so `acquire` raised `DrainClaimUnavailable`, whose handler stat'ed the empty path and ran the WHOLE PASS UNCLAIMED with the false durable reason "the spool root cannot hold a claim" — the two-drainer window this PR exists to close, plus a `status.json` fact that is not true and an operator line (`NO drain exclusion (…)`) on a perfectly writable root. Present on BOTH legs (`drain_claim.py`, the `except OSError` after the quarantine `unlink`; `tortoise-capture.ts`, `catch { return "refused" }`), and the function's own contract for `REFUSED` ("it is still not a claim and we could not remove it") was measurably false in this arm: the object WAS removed. | **fixed on both legs**: a failed disposal of the aside copy now WARNS with the cause and answers `DONE`/`done` — the measured answer, because the `rename` vacated the path and the leftover `*.tmp-clear-*` is collected by the same mtime sweep the comment above the rename already names (bounded, not permanent). `_CLEAR_REFUSED`'s contract is tightened to say it means THE CLAIM PATH could not be cleared. The Pi leg gains an `unlink` seam so the failure is reachable in a test (the same reason `rename`/`link` are seams there). One new row per leg; **both verified RED** under the exact mutant (`return _CLEAR_REFUSED` / `return "refused"` in the disposal arm — Python `1 failed`, Pi `fail 1`), and the trees restored `sha256`-identical. The new rows move the counts: `85`/`785`/`328`. |
 | **P3 ×3** the figures the previous head shipped did not survive re-measurement: `783 passed` (the row `1474ec7b` added was never folded in), `7 CROSS-LEG` beside two "four"s (the file spawns `node` from FIVE tests), and a citation to `capture_spool.py:4366-4375` for a handler that lives at `4412-4473` | **fixed by MEASURING, not by arithmetic**: the family was re-run (`785 passed`, recorded in `WORKTREE-REPORT.md` by the tool that parses it), the cross-leg count was counted from the spawn sites (`grep -nE "subprocess\.run\(" …`), and the handler's range was read from `grep -n "except DrainClaimUnavailable"`. |
+
+**Cycle 23** (a fresh-context reviewer at `9864698e` — the head after cycle 22's P2 fix) — 3 **P3**,
+and all three were CITATIONS THE CYCLE-22 COMMIT ITSELF INVALIDATED. That is the honest description:
+the reviewer re-verified every substantive claim of cycle 22 (the `DONE`/`done` answer on both legs,
+the digests, all three counts, the census pin, the durability policy, and that each new row reds under
+its named mutant) and found the mechanism clean; what it caught was line numbers moved by the fix's
+own +17 and +51 lines. Recorded rather than minimised, because it is the second time this round's own
+commit created this class.
+
+| finding | disposition |
+|---|---|
+| **P3** the Residuals bullet's six `markRaced()` line numbers were the PARENT head's — the fix's `+17` lines in `clearUnusableClaimPath` moved all six, so a reader following the pointer found `parsed = undefined;` and two closing braces | **fixed by re-reading them off the tree**: `grep -n "markRaced()" tortoise/pi-hooks/tortoise-capture.ts` → `5870, 5889, 5903, 5908, 5913, 5922`. |
+| **P3** the cycle-21 row's `tests/test_14350_drain_convergence.py:2488` (the ONE legitimate `cycle-19` citation that row exists to certify) moved to `:2540` when the fix inserted 51 lines above it | **fixed**: the citation now reads `:2540`, verified with `grep -n "cycle-19"` on that file. |
+| **P3** the Tests block said "Two existing cases needed a stated reason", presenting #12603's and #2100's adaptations as this PR's work — BOTH landed with #14423, which is already on `origin/main` (`da82ece4226b`) | **fixed by dating the attribution**: the sentence says both landed with #14423 and names them because this contract RELIES on them, not as adaptations this diff makes — checkable, because `git diff origin/main...HEAD -- tortoise/pi-hooks/tortoise-capture.test.ts` contains neither case and its only deleted line is the now-unused `lstatSync` import. |
 
 ## Residuals, stated
 
@@ -512,7 +530,7 @@ was fixed (a finding is a claim, not a fact): the clear's final `unlink` re-rais
   is what serialises UNTARGETED passes.
 * **`acquireDrainClaim`'s `state.raced` flag: the `gone`/`done` arm HAS a forcing row;
   the rest are staged at the seam only.** The flag is set at **six** sites
-  (`markRaced()` at `tortoise-capture.ts:5853, 5872, 5886, 5891, 5896, 5905`) and
+  (`markRaced()` at `tortoise-capture.ts:5870, 5889, 5903, 5908, 5913, 5922`) and
   consumed by one `if` in `flushSpool`. The `gone`/`done` retry — the arm that used to
   leave no record and run the whole pass UNCLAIMED — is forced end-to-end by
   *"the gone/done retry IS a lost race, and marks it"* (it drives `acquireDrainClaim`
