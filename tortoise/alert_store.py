@@ -447,10 +447,23 @@ class AlertStore:
     def _telegram_text(self, kind: str, org_id: str, detail: dict, issue_number: int | None) -> str:
         org = f" ({org_id})" if org_id else ""
         issue = f" — issue #{issue_number}" if issue_number else ""
-        # #3293: same boundary rule as ``_body``. No detail is carried TODAY —
-        # the scrub is here so a future caller that adds one cannot publish it
-        # unredacted through this sink.
-        return redact_for_publication(f"🚨 DR alert: {kind}{org}{issue}")
+        # #14407: a caller may carry a SHORT, message-free context token into the
+        # human text (``detail["context"]`` — e.g. ``rule=point_create count=600``
+        # for an abuse incident). Before this, an alert routed through the store
+        # lost the one line a triager needs, so callers kept a second, per-
+        # detection push path alive to preserve it — the split that produced the
+        # unattributable alerts this issue is about. The vocabulary is the
+        # CALLER's obligation (a closed token set, never free text); this seam
+        # only guarantees the same publication boundary as every other sink.
+        context = detail.get("context")
+        context = f" — {context}" if isinstance(context, str) and context.strip() else ""
+        # #3293: same boundary rule as ``_body``. A detail IS carried today —
+        # the caller's short ``context`` token above — and it is carried INTO the
+        # scrub below, so a caller that puts something publication-unsafe in that
+        # token is redacted here rather than published. The obligation not to put
+        # free text there is the CALLER's (a closed vocabulary); this sink
+        # guarantees the boundary, not the vocabulary.
+        return redact_for_publication(f"🚨 DR alert: {kind}{org}{context}{issue}")
 
     # ── incident lifecycle ──────────────────────────────────────────────────
     def suppression_active(self, kind: str) -> bool:
@@ -485,6 +498,158 @@ class AlertStore:
         record — a single-key read would report a live incident as absent.
         """
         return bool(self._alias_states(kind, org_id))
+
+    def migrate_incident_subject(self, kind: str, new_subject: str,
+                                 legacy_subject: str) -> bool:
+        """Re-key a LIVE incident's dedup sentinel to a new subject (#14407).
+
+        Abuse subjects became rule-scoped in #14407, so a pre-#14407 sentinel
+        filed under the bare ``{org}`` spelling is invisible to the new
+        ``{org}:{rule}`` key and the first recurrence would file a SECOND issue
+        for one condition — the #2844 alias defect (two spellings, two
+        create-once points, a resolve that strands one). One such incident is
+        MEASURED on record (#10576), so this is a migration step.
+
+        Adoption MOVES THE KEY, not the deduped thing: the scoped sentinel takes
+        over the legacy incident's ``issue_number`` — so the scoped key becomes
+        the one dedup linearisation point that every later
+        ``open_incident_state`` and ``resolve_incident_state`` uses — and the
+        legacy object is released WITHOUT closing its issue, which is live and
+        continues under the new key. Moving the SUBJECT instead (what this call
+        replaces) re-created the cross-rule coupling the scoped key exists to
+        remove: a shared subject lets the first rule to fire own the record for
+        the other rule's whole lifecycle, so one rule's clean window could close
+        the other's incident.
+
+        Never raises and never blocks the caller: returns ``False`` when there
+        is nothing to move (no legacy object, no issue number, or the scoped key
+        already holds one). The caller's fallback is to file under the scoped key
+        — a duplicate issue is visible, a silently stranded sentinel is not.
+        """
+        try:
+            legacy_key = self._key(kind, legacy_subject)
+            new_key = self._key(kind, new_subject)
+            if new_key == legacy_key:
+                return False
+            legacy = _read_json(self._storage, legacy_key)
+            number = legacy.get("issue_number")
+            if not number:
+                return False
+            if _read_json(self._storage, new_key):
+                return False
+            state = dict(legacy)
+            # The subject this sentinel serves is now the scoped one. Both spellings
+            # are written because a sentinel from either writer version must stay
+            # recognisable (see the platform-scoping guard in `_alias_states`).
+            state["org_id"] = new_subject
+            state["team_id"] = new_subject
+            # ONE OWNER, or the legacy issue ends up claimed twice — the #2844
+            # alias class this migration exists to remove, with the harm landing on
+            # exactly the org #10576 describes: two rules of one org can fire
+            # concurrently (the abuse pool is 4 workers; `_claim_notify` serialises
+            # only the SAME rule), and two scoped sentinels naming ONE issue means
+            # one rule's episode end closes the issue the other rule is tracked by
+            # (`_issue_is_live` false → it re-files), i.e. a `✅` for a rule that is
+            # still breaching.
+            #
+            # `create_if_not_exists` on the SCOPED key cannot serialise that: the
+            # racers write DIFFERENT scoped keys from one shared legacy object, and
+            # `delete` is idempotent on both substrates, so a read-then-delete
+            # "claim check" lets both claim. The linearisation point is therefore a
+            # per-ISSUE claim object, created once atomically: only the migrator
+            # that creates it may move the sentinel (and no lock is needed, so no
+            # R2 round trip is held under one).
+            #
+            # DECLARED RESIDUAL: the claim has no expiry — `create_if_not_exists`
+            # has no conditional-expiry primitive — so a migrator killed between the
+            # claim and its rollback/success (OOM or SIGKILL on the abuse pool is a
+            # real event) leaves the claim behind and that issue can never be
+            # migrated again. The harm is the documented fallback, never a mute: the
+            # caller files under the scoped key (a visible duplicate) while the
+            # legacy incident stays OPEN for the runbook's manual close.
+            claim_key = f"ops/alerts/.migrating/{kind}/{number}.json"
+            try:
+                won = self._storage.create_if_not_exists(
+                    claim_key,
+                    json.dumps({"subject": new_subject,
+                                "legacy": legacy_subject}).encode())
+            except Exception as e:  # noqa: BLE001, RUF100 — treat as not-won
+                logger.warning("dedup: could not claim the migration of %s/%s "
+                               "(%s) — the caller files under the new subject",
+                               kind, legacy_subject, e)
+                return False
+            if not won:
+                # Another migrator already owns this issue: nothing to move, and a
+                # scoped sentinel here would be a second claim.
+                return False
+            try:
+                if not self._storage.create_if_not_exists(
+                        new_key, json.dumps(state).encode()):
+                    # Nothing of ours was created here (another writer owns the
+                    # scoped key), so only the CLAIM is released: leaving it would
+                    # permanently block any later migration of this issue number
+                    # and strand the legacy sentinel — a permanent #2844 alias.
+                    self._discard_migration(claim_key, kind, new_subject)
+                    return False
+                try:
+                    self._storage.delete(legacy_key)
+                except Exception as e:  # noqa: BLE001, RUF100
+                    raise RuntimeError(f"legacy release failed: {e}") from e
+                # THE SUCCESS PATH RELEASES THE CLAIM TOO (#14407 review). The claim
+                # has no expiry, so keeping it after a COMPLETED migration would leak
+                # one object per migrated issue AND permanently block any later
+                # migration of that issue number — the same permanent-#2844-alias
+                # state the two branches above were fixed to avoid, reachable the
+                # moment the legacy object reappears (an R2/DR restore brings back the
+                # pre-migration `{org}.json`). A second attempt now finds a scoped key
+                # already present and takes the "nothing of ours" branch above, which
+                # is the correct, idempotent outcome.
+                self._discard_migration(claim_key, kind, new_subject)
+                return True
+            except Exception as e:  # noqa: BLE001, RUF100
+                # ROLL BACK everything this call created. Leaving the scoped key in
+                # place (or the claim behind) would strand the incident under TWO
+                # spellings — the legacy object is the adoption SOURCE, not inert.
+                self._discard_migration(new_key, kind, new_subject)
+                self._discard_migration(claim_key, kind, new_subject)
+                logger.warning(
+                    "dedup: %s/%s could not be moved to %s (%s) — the migration "
+                    "was rolled back; the incident stays under its legacy spelling",
+                    kind, legacy_subject, new_subject, e)
+                return False
+        except Exception as e:  # noqa: BLE001, RUF100 — adoption is best-effort
+            logger.warning(
+                "dedup: %s/%s could not be migrated to %s (%s) — the caller files "
+                "under the new subject", kind, legacy_subject, new_subject, e)
+            return False
+
+    def _discard_migration(self, key: str, kind: str, subject: str) -> None:
+        """Roll back a migration's scoped key (#14407) — best-effort, never raises.
+
+        A migration that cannot release the legacy object must leave ONE claimant,
+        not two: the scoped key is deleted so the incident stays under its legacy
+        spelling until the next attempt.
+        """
+        try:
+            self._storage.delete(key)
+        except Exception as e:  # noqa: BLE001, RUF100
+            logger.warning(
+                "dedup: %s/%s could not be rolled back (%s) — a second claimant "
+                "for that issue may exist; check `open_subjects(%r)`",
+                kind, subject, e, kind)
+
+    def incident_record(self, kind: str, org_id: str = "") -> dict[str, Any]:
+        """The sentinel this store tracks for ``(kind, org_id)``, or ``{}`` (#14407).
+
+        A read-only view for a caller that must REFER to an incident it did not
+        just create — the abuse path needs the issue number on the ``DEDUP``
+        outcome so a bounded re-alarm can name the open incident instead of
+        paging with no reference at all. Returning the same dict the dedup path
+        reads keeps "what is on record" one answer; it is a snapshot, never an
+        authority (nothing here may be written back).
+        """
+        states = self._alias_states(kind, org_id)
+        return states[0][1] if states else {}
 
     def open_incident(self, kind: str, org_id: str = "", detail: dict | None = None,
                       writer: str | None = None) -> bool:

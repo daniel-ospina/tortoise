@@ -485,9 +485,11 @@ SWEEP_NAMES = 66
 #: and was FALSE (raised by review): a rev published with its PARENT's figures is the same "address
 #: that resolves to a different tree" this block exists to catch, caught here in its own words. The
 #: correct pair is the tree's own COMMITTED pin, `git show d523c9be8c:tools/sdk_privatise.py | grep
-#: '^SWEEP_RESIDUE'`, which is what this block's falsifier arm grades
+#: '^SWEEP_RESIDUE'`. ⛔ NOT GRADED ANY MORE: the falsifier arm that read this pair
 #: (`tests/test_sdk_privatise_sweep.py`,
-#: `test_a_revs_published_own_pin_is_the_pin_that_rev_commits`). ⛔ NOT "the arm below": the arms
+#: `test_a_revs_published_own_pin_is_the_pin_that_rev_commits`) was CUT in the B8
+#: test-bureaucracy cut (2026-11-23), so the pair below is a record a reader checks by hand.
+#: ⛔ NOT "the arm below": the arms
 #: live in that test file, not under this block, so a relative pointer here would be the same
 #: self-falsifying offset this paragraph removes elsewhere (an earlier draft of THIS clause said
 #: "the arm below" and was wrong in the first place). Nothing here rests on the measurement; the
@@ -1392,12 +1394,14 @@ SWEEP_NAMES = 66
 #: keep the pairs TRUE, never to leave them ungraded (review of PR 14183: the ungraded spelling WAS
 #: the P2, and this block is the record of both attempts).
 #: ⛔ AND THE HAZARD THAT MADE THE NARROWING LOOK NECESSARY, recorded because it is real and it
-#: bites: `_BACKTICKED_REV_RE` matches ANY backticked hex token, so the 16-character DIGEST
-#: `891187f5a4636487` is itself a candidate rev, and the binding rule is "the NEAREST backticked
-#: token before the claim". That is why this sentence names `8889f1140105` immediately before the
-#: word `commits`: written the other way round the claim binds to whatever hex sits closest — the
-#: defect that reddened `test_a_revs_published_own_pin_is_the_pin_that_rev_commits` in the first
-#: re-cut. Re-word the ORDER, never the map.
+#: bit: the clause-attribution matcher (the `_BACKTICKED_REV_RE` regex, itself CUT with the B8
+#: cut, 2026-11-23) matched ANY backticked hex token, so the 16-character DIGEST
+#: `891187f5a4636487` was itself a candidate rev, and the binding rule was "the NEAREST
+#: backticked token before the claim". That is why this sentence names `8889f1140105` immediately
+#: before the word `commits`: written the other way round the claim binds to whatever hex sits
+#: closest — the defect that once reddened that (now CUT, B8 2026-11-23) pair arm in the first
+#: re-cut. Re-word the ORDER, never the map — nothing grades the order now, so it is the writer's
+#: rule.
 #: (Two lanes restored this block concurrently, which is why the rule is stated once, above.)
 #: ⛔ AND THE GROUND RULE FOR EVERY BLOCK IN THIS RUN: all blocks above are KEPT, because each is a
 #: true measurement of the tree it NAMES — including the ones no tree on this branch prints any more,
@@ -1561,11 +1565,12 @@ SWEEP_NAMES = 66
 #: `(11858, "a1552662bf07a10b")`. `10e51693f1` — the squash that committed that stale pair. Its own
 #: pin is `(11858, "a1552662bf07a10b")` too, and by then the row set had already moved under it, so
 #: the pair was committed to a tree it was not a reading of. ⛔ AND THE INTERVAL COMES AFTER THE
-#: CLAUSE, NEVER BETWEEN THE REV AND IT (#14282 review cycle 5, P3): `_own_pin_claims` attributes a
-#: clause to the nearest backticked hex token BEFORE it, so writing `... 705 s BEFORE
-#: `5e83c2a2f6`` here — between this rev and its own clause — attributed the clause to
-#: `5e83c2a2f6` and left `10e51693f1`'s map entry graded by NOTHING (measured: deleting that key
-#: left every arm green). By committer time it is 64 s after `94d75667dc` (stated with its own
+#: CLAUSE, NEVER BETWEEN THE REV AND IT (#14282 review cycle 5, P3): a clause belongs to the nearest
+#: backticked hex token BEFORE it, so writing `... 705 s BEFORE
+#: `5e83c2a2f6`` here — between this rev and its own clause — silently reassigns the clause to
+#: `5e83c2a2f6` and leaves `10e51693f1` reading as though its pair were never stated. (That
+#: mis-attribution used to be a RED; its arm went in the B8 cut, so the placement rule is now the
+#: writer's to observe.) By committer time it is 64 s after `94d75667dc` (stated with its own
 #: evidence above) and 705 s BEFORE `5e83c2a2f6`, so the bare "64 s later" an earlier cut wrote
 #: named the wrong antecedent.
 #: `efe5605e976a` — this branch's PRE-REBASE head, named as what it is and NOT as a relative
@@ -1583,8 +1588,9 @@ SWEEP_NAMES = 66
 #: +3 is attributed by a per-rev call-SITE measurement rather than by arithmetic. Both are
 #: LOAD-BEARING, which is why neither side may be dropped by the merge: the revs named below
 #: (`10e51693f166`, `0351fe856942`) are exactly the `OWN_PINS` entries #14258 added, and its
-#: `commits (N, "digest")` claim spelling is graded by an assertion it added to
-#: `test_a_revs_published_own_pin_is_the_pin_that_rev_commits`. Merged rather than chosen,
+#: `commits (N, "digest")` claim spelling was graded by an assertion it added to the pair arm —
+#: which the B8 test-bureaucracy cut (2026-11-23) removed, so that spelling is UNGRADED now.
+#: Merged rather than chosen,
 #: because resolving a conflict between two CORRECT records by deleting one is how a measured
 #: fact becomes folklore.
 #:
@@ -1918,6 +1924,68 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
 #: legitimised by the re-cut; the pair below is `--repin`'s own output on THIS tree, never arithmetic
 #: on the last pin, and `--check` exits 0 on it.
+#: ⛔ MERGED `origin/main` `43182ac0` (× `bbe54363`) INTO THIS BRANCH (`#14414`, the abuse
+#: alert-delivery PR) AND RE-CUT ON THE RESOLVED TREE — both sides' blocks above are KEPT, this
+#: file's standing ground rule. The pin arrived ALREADY STALE, and that half is MEASURED rather
+#: than inferred: `--repin` in a detached worktree at `origin/main` `43182ac0` prints
+#: `(11901, "953c70c05b55923b")` on `main`'s OWN tree, i.e. `main` carries `11898` and derives
+#: `11901` — so every open PR is graded against a number `main` does not read (the
+#: `#14062`/`#14394` recurrence the block above records once already).
+#: THE TWO CONTRIBUTIONS ARE MEASURED SEPARATELY, never differenced into the pin:
+#:   * `main`'s +3 is ONE file — `tests/test_7879_record_chain.py`, added by `#14434` after the
+#:     pin was cut: `projection.g.query` +2 (a fake control plane's own accessor) and
+#:     `env.update` +1 (a test double's environment) — ordinary-word receivers of exactly the
+#:     kind this pin exists to DECLARE rather than rewrite;
+#:   * THIS branch's +8, measured per file by running `edits_for` over `origin/main`'s blob and
+#:     the branch's for every file the two differ in: `tests/test_14407_alert_delivery.py`
+#:     `storage.delete` +4 and `super().delete` +2 (the migration tests drive `AlertStore`'s
+#:     delete-to-move legs through a `MemoryStorage` subclass, and the fourth row is the failed
+#:     write/read test a peer lane landed in `d45e2362` while this merge ran), and
+#:     `tortoise/alert_store.py` `self._storage.delete` +2 (the migration's legacy-object release
+#:     and its rollback).
+#: Neither side legitimises a typed reference: every added row is an untyped receiver, and
+#: `typed references still pointing at a public name: 0` on this tree.
+#: `11901 + 8 = 11909` is the CROSS-CHECK of those two measurements, never the source — the pair
+#: below is `--repin`'s own output on THIS resolved tree, and `--check` exits 0 on it. ⛔ The merge
+#: that brought the peer lane's two commits (`439db940`, `d45e2362`) re-measured BOTH halves rather
+#: than adding one row to the last reading: it prints the same `main` tree figure and this branch's
+#: +8, because a peer's test is a new blob on the branch side, not a new `main`.
+#: ⛔ MERGED `origin/main` `953c299c` (× `da82ece4`, `387daa31`) INTO THIS BRANCH AND RE-CUT ON THE
+#: RESOLVED TREE — both sides' blocks above are KEPT, this file's standing ground rule. Here the
+#: drift is the OPPOSITE direction from the `43182ac0` fold: `main` has ALREADY re-cut its own pin
+#: to `(11901, "953c70c05b55923b")` (the `#14350` D1 lane, `#14423`, cut it on its own merged tree),
+#: so this side has no stale pin to repair — what moved is the TREE the two sides resolve to, and
+#: the pair below is `--repin`'s own output on it, never arithmetic on either parent's pin.
+#: ⛔ THE PAIR DID NOT MOVE ON THIS FOLD, and that is measured rather than assumed: `--repin` on the
+#: resolved tree prints the SAME `(11909, "55c8de942f8d2747")` the `43182ac0` fold recorded, even
+#: though `#14423` added `tests/test_14350_drain_convergence.py` to the pool in `da82ece4` —
+#: because that same commit re-cut `main`'s pin ON ITS OWN MERGED TREE instead of leaving a step of
+#: drift, so its rows are already inside the `11901` `main` now carries and the two sides fold onto
+#: a tree whose reading is unchanged while the tree itself moved. ⛔ The +4 an earlier draft of this
+#: block predicted from the new test file is NOT there, and the prediction is recorded rather than
+#: quietly dropped: the number came from `#14423`'s own re-cut, not from a row this branch added.
+#: `11909 − 8 = 11901` is the CROSS-CHECK of that reading against `main`'s own pin, never the
+#: source. `--check` exits 0 on this tree with
+#: `typed references still pointing at a public name: 0`.
+#: ⛔ MERGED `origin/main` `f635f9e000` (× `fb3b326f`) INTO THIS BRANCH AND RE-CUT AGAIN ON THE
+#: RESOLVED TREE — both sides' blocks above are KEPT, this file's standing ground rule, and this is
+#: the fold that finally DID move the pair: `--repin` prints **(11910, "93429504f32ddc7c")**, +1 row
+#: over the `11909` the two folds above measured. The +1 is `main`'s, measured rather than
+#: inferred from the fold shape: NOTHING on this branch's side changed between the two readings
+#: (`git diff` over the branch's own files is empty across it), so the row arrived with `#14428`
+#: (the capability-census deletion) / `#14446` (`test_7879_record_chain.py`) and not from this
+#: branch. ⛔ ROW-LEVEL ATTRIBUTION OF THE +1 IS NOT CLAIMED, on the same ground the block above
+#: already gives for its own `+3`: the committed pin stores a COUNT and a DIGEST, never the row set.
+#: `--check` exits 0 on the new pair with
+#: `typed references still pointing at a public name: 0`.
+#:
+#: ⛔ AND A LATER FOLD MOVED IT AGAIN, so the paragraph above is HISTORY with its own
+#: tree's reading, not this one's: folding the peer lane's head brought main's `#:`
+#: blocks and main's own rows, and `--repin` on the resolved tree prints
+#: **(11914, "4732a51728684cca")** — +4 over the `11910` above, +5 over the `11909`
+#: before it. The arithmetic is stated only as a CROSS-CHECK against those two
+#: measurements, never as the source; each figure is `--repin`'s own output on its own
+#: tree, and the pair below is the only one this commit publishes.
 #: ⛔ RE-CUT DOWN BY TWO, AND THIS ONE REPAIRS `main` ITSELF — not a branch's residual. `#14446`'
 #: (`tests/test_7879_record_chain.py`) squash-merged at `f635f9e000`, and on `origin/main` `989765162f`
 #: the pin this paragraph precedes read **(11901, "953c70c05b55923b")** while that tree DERIVES
@@ -1953,7 +2021,7 @@ SWEEP_NAMES = 66
 #:     and its own tree is 4 rows above the number it committed. Open roots are `#14294` / `#14308`;
 #:     `surface-guard` is not in `DEFERRABLE_LEGS`, so the red travels into the REQUIRED
 #:     `python-ci-gate` for EVERY open PR — it is repaired here for that reason, not absorbed.
-#:   * the RESOLVED merge tree derives **11902 / `f904d86c`**, i.e. one row under `main`'s, and the −1
+#:   * THAT LANE'S RESOLVED merge tree derives **11902 / `f904d86c`**, i.e. one row under `main`'s, and the −1
 #:     is attributed ROW BY ROW rather than waved through: `--report --base 28ca66878d… --top 5000`
 #:     was run on BOTH trees (`origin/main`'s and this one), row sets sorted and diffed, EXACTLY ONE
 #:     row differs — `window.update` **1 → 0**. That row lived in the helper `_wall_clock_cap_claims`
@@ -1961,9 +2029,9 @@ SWEEP_NAMES = 66
 #:     861 → 860, and no shape is added or absorbed in either direction.
 #: ⛔ The one vanishing row is a DELETION this PR declares; the direction the pin exists to catch is a
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
-#: so no typed call site is legitimised by the re-cut. The pair below is `--repin`'s own output on THIS
-#: tree, never arithmetic on the last pin; `--check` exits 0 on it.
-SWEEP_RESIDUE = (11902, "f904d86cb6ad82f6")
+#: so no typed call site is legitimised by the re-cut. ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S — the
+#: pair below is `--repin`'s output HERE **(11910, "adc8229295339239")**; `--check` exits 0 on it.
+SWEEP_RESIDUE = (11910, "adc8229295339239")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

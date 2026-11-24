@@ -252,11 +252,11 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1853 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `953c299c9b` merged into the branch,
-    which KEPT both sides' prose blocks: the pre-merge branch read 1774 and `main` 1796, so the
-    figure is re-derived here rather than carried from either side — and GRADED, see
-    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1921 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
+    which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
+    and `main` 1833, so the figure is re-derived here rather than carried from either side — and
+    GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
@@ -284,10 +284,26 @@ def _residue_block() -> str:
     this walk rather than inherited from either side,
     — and the `#12039` residue re-cut below (`SWEEP_RESIDUE` `11896` → `11898`, stale ON ARRIVAL on
     `main`) appended 24 `#:` lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED
-    on this tree rather than carried forward from the fold's own reading, which is what the graded
-    figure exists to force - and the `#14395` fix lane's re-pin paragraph took it to 1774 on its
-    own tree, while the merge of `origin/main` `953c299c9b` (which KEPT both sides' `#:` prose)
-    re-read 1808 above, re-walked by this function and never adjusted to a carried figure:
+    on this tree at 1765 (1741 + the 24 the re-cut declares) rather than carried forward from the
+    fold's own reading, which is what the graded figure exists to force,
+    — and the `#14414` residue re-cut below (`SWEEP_RESIDUE` `11898` → `11908`) appended 21 `#:`
+    lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED on this tree at 1786
+    (1765 + those 21) rather than inherited from the fold's reading, and the peer lane's two
+    commits merged after it (`439db940`, `d45e2362`) moved the pin once more, so the figure is
+    RE-MEASURED again at 1791 rather than adjusted by arithmetic on the last reading,
+    — and the `#14414` fold of `origin/main` `953c299c` (the `#14350` D1 re-cut, `#14423`, whose own
+    re-pin block is `#:` prose like every other fold's) kept both sides' blocks again, so the figure
+    is RE-MEASURED by this walk on the resolved file at 1851 rather than inherited from either side,
+    and the `SWEEP_RESIDUE` pair itself did NOT move on that fold (measured with `--repin`, not
+    differenced from either parent's pin), — and a LATER fold of `origin/main` `f635f9e000` kept
+    both sides' blocks once more and took the run to 1862, which is ALSO the figure re-measured by
+    this walk on the resolved file; only on that later fold did the pair move (+1, `11910`; a subsequent fold of the peer head took it to `11914`), so the
+    two folds are not interchangeable and neither figure is inherited from the other:
+    — and `#14395`'s read-wave re-pin arrived on `main` in the same window and changed NOTHING in
+    this file: `git log f635f9e000..989765162fbc -- tools/sdk_privatise.py` is empty and
+    `grep -c 14395` on `origin/main`'s copy is 0, so it contributes no `#:` line to the walked
+    run and no figure above contains it. The 1862 reading is this function's own walk of the
+    RESOLVED file, never an adjustment of a carried figure:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
