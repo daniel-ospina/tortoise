@@ -638,6 +638,34 @@ def test_a_whitespace_bearing_name_round_trips_through_the_title_grammar():
         )
 
 
+def test_a_name_that_contains_the_title_suffix_still_round_trips():
+    """The grammar's `$` anchor is what makes a NON-GREEDY capture safe, so pin it.
+
+    The comment above `_TITLE_RE` states the group is non-greedy "so a name that
+    itself CONTAINS the suffix still round-trips". That property does not come from
+    the non-greediness at all — a shortest-match group is free to stop early — it
+    comes from the ESCAPED SUFFIX being anchored with `$`, which forces the match to
+    run to the end of the line. Removing that anchor (or turning the pattern into a
+    `search` over a longer string) would break exactly this class while leaving every
+    underscore-shaped name green, so the class gets its own row rather than living as
+    prose a reader has to trust. `read_fly_secret_names` accepts such a name: it
+    requires only a non-empty string.
+    """
+    suffix = "is undeclared — the deploy gate refuses every run until it is declared (#4126)"
+    for name in (
+        f"BEFORE {suffix}",
+        f"BEFORE {suffix} AFTER",
+        f"{suffix} {suffix}",
+    ):
+        title = _tool("--title", name).stdout.strip()
+        proc = _tool("--filter-owned-titles", stdin=title + "\n")
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.splitlines() == [name], (
+            f"{name!r} was filed under a title the sweep reads back as "
+            f"{proc.stdout!r} — that issue could never be resolved"
+        )
+
+
 def test_the_workflow_owns_the_grammar_in_exactly_one_place():
     """No title literal in the shell: a grammar spelled twice drifts."""
     text = WORKFLOW_FILE.read_text()
@@ -1005,6 +1033,40 @@ def test_a_clean_tick_on_a_non_default_ref_resolves_nothing(tmp_path):
     )
     assert "NOT THE DEFAULT BRANCH" in out, out
     assert len(h.filed_titles()) == 1
+
+
+def test_the_clean_arms_two_gates_are_WIRED_and_precede_the_sweep():
+    """The behavioural rows above supply the gates themselves, so they cannot see the WIRING.
+
+    `_Harness.run` hands the shipped step `FILE_ISSUES` / `REF` / `DEFAULT_BRANCH`
+    directly, exactly as Actions would — which means deleting either env entry from
+    the workflow leaves both rows GREEN while production reads an empty value and
+    falls back to the permissive default. The `REF`/`DEFAULT_BRANCH` line is the one
+    that matters most: an absent `DEFAULT_BRANCH` is the fail-closed branch, but an
+    absent `REF` entry with `DEFAULT_BRANCH` present would silently… nothing here
+    asserts that from behaviour, so it is asserted statically — and a guard placed
+    BELOW the sweep is not a guard at all, so the ordering is pinned too.
+    """
+    env = _report_step_env()
+    assert "github.ref" in env, (
+        "the resolve sweep is not told which ref the reading came from — the ledger "
+        f"records the DEFAULT branch, and a dispatched run reads another tree: {env}"
+    )
+    assert "github.event.repository.default_branch" in env, (
+        f"the sweep cannot compare against the default branch, so its gate reads ^$: {env}"
+    )
+    run = _report_step()
+    # `.find()` rather than `.index()`: a deleted guard must RED with a message that
+    # names it, not raise `ValueError: substring not found`.
+    dry_run_guard = run.find('if [ "${FILE_ISSUES:-true}" != "true" ]')
+    ref_guard = run.find('if [ -z "${DEFAULT_BRANCH:-}" ]')
+    sweep = run.find("auto-file-issue.sh resolve")
+    assert dry_run_guard != -1, "the CLEAN arm no longer honours the dry-run input"
+    assert ref_guard != -1, "the CLEAN arm no longer checks which branch it read"
+    assert sweep != -1, "the resolve sweep is gone — would the ledger ever close (#8841)?"
+    assert dry_run_guard < sweep and ref_guard < sweep, (
+        "a ledger-closing guard sits BELOW the sweep, so it guards nothing"
+    )
 
 
 # ── (h) THE COLOUR CONTRACT, THE READING'S IDENTITY, AND THE PINNED COMMAND ──
