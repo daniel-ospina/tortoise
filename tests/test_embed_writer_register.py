@@ -506,9 +506,13 @@ def test_the_exported_ROUTE_seams_are_the_ones_the_class_claims_are_used():
     reason must NAME at least one exported seam. What this CANNOT see — because a reason usually
     cites more than one seam, so `any(...)` stays satisfied when a co-named seam is dropped — is the
     FALSE-HOLD direction (a writer whose body reached only the dropped seam stops being credited).
-    That direction is pinned where it is observable, in `tests/test_dod_5090_probe.py::
-    test_a_seam_REMOVED_from_the_export_holds_the_declarations_that_need_it`, so this test's claim
-    is the weaker one it actually asserts.
+    ⛔ THAT DIRECTION IS NOW PINNED BY NOTHING. It used to be observable through
+    `tests/test_dod_5090_probe.py::test_a_seam_REMOVED_from_the_export_holds_the_declarations_that_need_it`,
+    which went with the #14544 B-arm cut (PR #14544 review F2): `monkeypatch`ing `probe.route_calls`
+    to drop a seam must still HOLD the row, and no test asserts that now. Recorded here so a reader
+    does not infer coverage from this file — restoring that arm is the fix, and it needs the
+    `_row_one_fixture` / `_gated_writer` / `_declared` / `_registered_population` helpers that were
+    cut with it.
     """
     seams = register.RECOGNISED_PRODUCER_SEAMS
     assert seams, "an empty seam set would corroborate every route claim"
