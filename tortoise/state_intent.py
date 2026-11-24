@@ -147,20 +147,6 @@ _ENDING_WORDS = (
     r"|ended"
 )
 
-#: The trailing adverbs a state question may carry WITHOUT narrowing it — a
-#: vague time reference, which names no boundary and is therefore not a
-#: constraint dropped in silence: the ended read is ordered by the row's own
-#: ``endedAt`` newest-first (a row carrying none sorts last), so "recently"
-#: discards nothing a window would have had to apply. Kept deliberately tiny: an
-#: explicit window ("in Q3", "this quarter", "since March") IS a narrowing, and
-#: the shapes that are tail-anchored refuse it rather than serve the whole
-#: population as if it had been applied (`what has ended in Q3`). ⛔ ONE SHAPE IS
-#: NOT TAIL-ANCHORED — ``do_support`` — so a window after `did we <verb>` is NOT
-#: refused (`what did we archive last quarter` is a pinned SELECTED row): the
-#: population is served newest-first and the caller reads the rows' own
-#: ``endedAt``. Stated because the claim would otherwise be false.
-_VAGUE_TIME_TAIL = r"recently|lately"
-
 #: A RELATIVE-CLAUSE marker. ``is_predicate``'s subject NP is a word run, and a
 #: word run alone admits a SHORT relative clause whose own finite verb then reads
 #: as the question's predicate (`is the report that legal archived`, `is the
@@ -303,18 +289,33 @@ _ENDING_BASE = (
 #: that is plainly about state but is not in a shape fell through to the
 #: ordinary relevance read, so the caller got a confident answer to a DIFFERENT
 #: question and nothing said the state route had not engaged — silence that is
-#: indistinguishable from "nothing has ended". `what has ended recently`,
-#: `is the onboarding flow retired?` and `list what we retired` were the three
-#: measured misses, and each now has a shape below (``wh_whole_question``'s
-#: adverb tail, ``is_predicate``, ``list_what``). The widening stays narrow for
-#: the reason the precision rounds established: each new shape fixes the
-#: GRAMMATICAL ROLE of the ending word (a predicated participle ending the
-#: question, or a `what we <verb>` set clause), never a word that happens to be
-#: present. #14033's four content questions still do not route, and they are
-#: pinned as the falsifier in ``tests/test_14033_state_cue_gap.py``:
+#: indistinguishable from "nothing has ended". TWO of the three measured misses
+#: now have a shape below — `is the onboarding flow retired?` (``is_predicate``)
+#: and `list what we retired` (``list_what``). The third,
+#: `what has ended recently`, deliberately still does NOT, for the reason the
+#: bullet below states. The widening stays narrow for the reason the precision
+#: rounds established: each new shape fixes the GRAMMATICAL ROLE of the ending
+#: word (a predicated participle ending the question, or a `what we <verb>` set
+#: clause), never a word that happens to be PRESENT. #14033's four content
+#: questions still do not route, and they are pinned as the falsifier in
+#: ``tests/test_14033_state_cue_gap.py``:
 #: `have any customers cancelled this month`, `which features are deprecated in
 #: v3`, `do we archive customer emails`, `which claims were retracted by legal`.
 #:
+#: * "what has ended recently" / "what ended recently" — a trailing vague
+#:   adverb. #14033 names it as a measured miss and it still does NOT route, on
+#:   purpose: the SERVED `tortoise_search` description (`tortoise/mcp_server.py`)
+#:   states that this exact string is a RELEVANCE read, so admitting it here
+#:   would make the shipped contract WRONG about a phrasing it names — which is
+#:   #14033's own acceptance item #3, not a way to satisfy it. Honouring it needs
+#:   the description re-cut in the SAME change, and that description is a frozen
+#:   baseline cell (an owner-gated surface edit, #4282). The adverb would in fact
+#:   be harmless for the POPULATION — the ended read is ordered by the row's own
+#:   ``endedAt`` newest-first (a row carrying none sorts last), so nothing a
+#:   caller said is narrowed away — which is why this is deferred rather than
+#:   refused: it is the DESCRIPTION that binds, not the population.
+#:   `what ended` and `what has been withdrawn` are the route until the re-cut
+#:   lands.
 #: * "what commitments do we have" / "what are the commitments" — a commitment
 #:   noun that does not END the question or is not preceded by a set determiner;
 #:   "current commitments", "our commitments" and "what are we committed to" do
@@ -339,12 +340,14 @@ _ENDING_BASE = (
 #:   SELECTED row), so a window there is not refused: the population is served
 #:   newest-first and the caller reads each row's own ``endedAt``. That is a
 #:   stated boundary, not a claim that every shape refuses a window.
-#:   ⛔ #14033 admits a VAGUE adverb and still refuses an actual WINDOW wherever
-#:   the shape is tail-anchored: "recently" and "lately" name no boundary, and
-#:   the read is ordered by ``endedAt`` newest-first, so nothing the caller said
-#:   is discarded — while "in Q3" and "this quarter" are a narrowing the
-#:   population cannot apply, so those keep the relevance read (`what has ended
-#:   in Q3`, `list what we retired last quarter`).
+#:   ⛔ AND WHERE THE SHAPE IS TAIL-ANCHORED THE TAIL ADMITS NO TOKEN AT ALL — a
+#:   VAGUE ADVERB INCLUDED (`what has ended recently`, `list what we retired last
+#:   quarter`). The adverb is deferred on the CONTRACT, not on precision:
+#:   "recently" names no boundary, and the ended read is ordered by the row's
+#:   own ``endedAt`` newest-first (a row carrying none sorts last), so it would
+#:   discard nothing — but the served `tortoise_search` description names that
+#:   exact string a RELEVANCE read, so admitting it here needs the description
+#:   re-cut in the SAME change (owner-gated, #4282). See the adverb bullet above.
 #: * "which of our withdrawn claims affected pricing" — #14033's own fourth table
 #:   row, and it KEEPS the relevance read on purpose: ``withdrawn`` there
 #:   MODIFIES ``claims``, which is the same attributive slot as the pinned
@@ -366,15 +369,20 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # question, anchored at both ends, so a trailing constraint ("what is the
     # archived pricing document") and a wh-word in a subordinate clause cannot
     # reach it.
-    # ⛔ AND A TRAILING VAGUE ADVERB IS STILL THE WHOLE QUESTION (#14033). The
-    # tail admits `recently` / `lately` and nothing else, because those name no
-    # boundary the population read could apply and each row carries its own
-    # `endedAt` — so `what has ended recently` routes while `what has ended in
-    # Q3` and `what was retired this quarter`, which ARE narrowings, do not.
+    # ⛔ AND THE TAIL ADMITS NO TRAILING TOKEN AT ALL (#14033). A vague adverb
+    # would be harmless for the POPULATION — `recently` names no boundary, and
+    # the read is ordered by ``endedAt`` newest-first (a row carrying none sorts
+    # last) — but the served
+    # `tortoise_search` description names `what has ended recently` as a
+    # RELEVANCE read, so a route here would ship a contract that is WRONG about a
+    # phrasing it names. The description is a frozen baseline cell (an
+    # owner-gated re-cut, #4282), so the two move together or not at all; this
+    # shape keeps its tail anchor until then (`what has ended in Q3` and
+    # `what was retired this quarter` are narrowings and refuse on the same
+    # anchor).
     ("wh_whole_question", re.compile(
         rf"^what\s+(?:(?:is|are|was|were|has|have|had)\s+)?(?:been\s+)?"
-        rf"(?:{_ENDING_WORDS})"
-        rf"(?:\s+(?:{_VAGUE_TIME_TAIL}))?\s*[?.!]*$")),
+        rf"(?:{_ENDING_WORDS})\s*[?.!]*$")),
     # "which claims were archived?" / "which of our endpoints is deprecated?" /
     # "which commitments were withdrawn?" — the wh-word's own predicate.
     # ⛔ THE HEAD NOUN IS ADJACENT TO THE AUXILIARY. The window used to be a free

@@ -19,8 +19,19 @@ result is indistinguishable from an honest "nothing has ended".
 WHAT IS PINNED HERE, and it is the two directions at once — widening a cue set is
 only safe if it costs no precision:
 
-* **the three phrasings #14033 names reach the ended population**, each through
-  a NAMED shape, so the row says which words selected the population;
+* **the two phrasings #14033 names that can move WITHOUT a surface re-cut reach
+  the ended population** — `is the onboarding flow retired?` and
+  `list what we retired` — each through a NAMED shape, so the row says which
+  words selected the population;
+* **`what has ended recently` deliberately still does NOT route**, and this file
+  pins that too: the SERVED `tortoise_search` description
+  (`tortoise/mcp_server.py`) names that exact string as a RELEVANCE read, so
+  routing it here would make the shipped contract wrong about a phrasing it
+  names — #14033's own acceptance item #3. The adverb is harmless to the
+  POPULATION (the ended read is ordered by `endedAt` newest-first, so nothing a
+  caller said is narrowed away), so this is deferred
+  rather than refused: it moves together with the description, which is a frozen
+  baseline cell and an owner-gated surface edit (#4282);
 * **the four content questions #14033 names must NOT route** — a policy question,
   an attributive participle, and a constrained question are all content lookups,
   and a detector that hijacks them answers a different question than the one
@@ -35,10 +46,13 @@ only safe if it costs no precision:
   `which archived report has the Q3 numbers`. Routing a modifier is how the
   round-2/4/5 hijacks came back; the caller's way to the population is the
   unqualified form or ``ended_scope=True``;
-* **a constraint is still not dropped in silence** — `what has ended recently`
-  routes because a vague adverb adds no window the population could have
-  applied, while `what has ended in Q3` still does not, because `in Q3` is a
-  narrowing and the population read cannot honour it.
+* **a constraint is still not dropped in silence** — `what has ended in Q3`,
+  `what was retired this quarter` and `list what we retired last quarter` keep
+  the relevance read, because `in Q3` / `this quarter` are narrowings the
+  population read cannot honour. The same tail anchor refuses the adverb, but
+  the two are pinned in SEPARATE tests because they refuse for different
+  reasons and will move at different times: a window is refused on the merits,
+  the adverb is deferred on the contract.
 
 The population itself is not re-tested here: `tests/test_13557_13558_reachable_reads.py`
 owns the set semantics (live graph). This file is the ROUTING table, offline and
@@ -54,15 +68,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-#: #14033's three unfired phrasings, and the shape each must reach the ended
-#: population through. The shape name is part of the pin: it is what the reply
+#: #14033's phrasings that now reach the ended population, and the shape each
+#: must reach it through. The shape name is part of the pin: it is what the reply
 #: would cite as "which words selected the population".
+#: ⛔ Only TWO of the issue's three: `what has ended recently` is pinned as still
+#: refused, in `test_the_adverb_tail_stays_out_until_the_description_moves_with_it`.
 NOW_ROUTING = [
-    # a trailing vague adverb — "recently"/"lately" names no window the
-    # population read could apply, so it does not narrow anything away.
-    ("what has ended recently", "wh_whole_question"),
-    ("what ended recently", "wh_whole_question"),
-    ("what has been withdrawn lately", "wh_whole_question"),
     # a yes/no question about ONE record — "is X retired" is a state question
     # whose predicate IS the ending, and the population answers it WITH the
     # record's own status word (``ended.py`` serves how each record ended).
@@ -145,21 +156,71 @@ def test_the_widening_does_not_admit_the_attributive_participle():
     assert detect_state_question("which claims were withdrawn").population == ENDED
 
 
-def test_a_constraint_is_still_not_dropped_in_silence():
-    """The adverb is admitted; an actual WINDOW is not.
+def test_the_adverb_tail_stays_out_until_the_description_moves_with_it():
+    """`what has ended recently` is DEFERRED, not forgotten, and this is the pin.
 
-    `what has ended recently` routes because `recently` names no boundary the
-    population read could apply — the rows carry their own `endedAt`, so nothing
-    the caller said is discarded. `in Q3` IS a boundary, and a population read
-    cannot honour it, so it keeps the relevance read rather than being served as
-    if the narrowing had been applied.
+    #14033 names it as one of the three measured misses, and this change does not
+    fix that one. The reason is not precision — `recently` names no boundary and
+    the read is ordered by `endedAt` newest-first (a row carrying none sorts
+    last), so the population read would honour it — it is the CONTRACT: the
+    served `tortoise_search` description
+    (`tortoise/mcp_server.py`) states that `what has ended recently` is a
+    RELEVANCE read, so routing it here would make the shipped description wrong
+    about a phrasing it names, which is #14033's acceptance item #3 rather than
+    a way to satisfy it. That description is a frozen baseline cell (an
+    owner-gated surface re-cut, #4282), so the two move in one change or not at
+    all.
+
+    ⛔ This test reds if the adverb tail is admitted WITHOUT the re-cut — that is
+    the whole point. Whoever lands the re-cut deletes these rows and moves them
+    into ``NOW_ROUTING`` with shape `wh_whole_question`, and the diff then shows
+    both halves of the change together.
     """
     from tortoise.state_intent import ENDED, detect_state_question
 
-    assert detect_state_question("what has ended recently").population == ENDED
-    assert detect_state_question("what has ended in Q3").population is None
-    assert detect_state_question("what was retired this quarter").population is None
-    assert detect_state_question("list what we retired last quarter").population is None
+    for adverb_tailed in (
+        "what has ended recently",
+        "what ended recently",
+        "what has been withdrawn lately",
+    ):
+        got = detect_state_question(adverb_tailed)
+        assert got.population is None, (
+            f"{adverb_tailed!r} now routes to {got.population!r} (shape "
+            f"{got.shape!r}) while the SERVED tortoise_search description still "
+            f"names it a relevance read — that ships a contract that is wrong "
+            f"about a phrasing it names (#14033 acceptance #3). Admit it only "
+            f"together with the owner-gated description re-cut (#4282).")
+
+    # …and the unqualified forms are the advertised route, so the deferral above
+    # is a boundary and not a dead end.
+    assert detect_state_question("what ended").population == ENDED
+    assert detect_state_question("what has been withdrawn").population == ENDED
+
+
+def test_a_constraint_is_still_not_dropped_in_silence():
+    """An appended WINDOW keeps the relevance read, and so does any tail token.
+
+    `in Q3` and `this quarter` are narrowings a population read cannot apply, so
+    serving the whole ended set as if the narrowing had been honoured would drop
+    what the caller said — the mirror defect of the fallthrough this change
+    fixes. It is the same tail anchor that keeps the adverb out (see
+    `test_the_adverb_tail_stays_out_until_the_description_moves_with_it`), which
+    is why the two are pinned separately: they refuse for different reasons and
+    will move at different times.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    for narrowed in (
+        "what has ended in Q3",
+        "what was retired this quarter",
+        "list what we retired last quarter",
+        "is our pricing decision withdrawn in Q3",
+    ):
+        got = detect_state_question(narrowed)
+        assert got.population is None, (
+            f"{narrowed!r} routed to {got.population!r} (shape {got.shape!r}) — "
+            f"a window is a narrowing the population read cannot apply, so "
+            f"routing drops what the caller asked for")
 
 
 def test_the_two_guards_inside_is_predicate_are_each_load_bearing():
