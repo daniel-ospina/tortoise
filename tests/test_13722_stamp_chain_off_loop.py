@@ -552,6 +552,14 @@ def _bound_names(tree: ast.Module) -> frozenset[str]:
     names today (AST scan: zero), which is precisely why the hole would survive a
     refactor; the bound set is threaded into `_literal_truth` instead of relying on
     that census staying true.
+
+    ⛔ WHAT IS PINNED, AND WHAT IS NOT — the earlier form of this sentence claimed
+    "every name this module BINDS" while five of the arms below had no fixture, so
+    deleting them stayed GREEN. Pinned by a row each: a parameter, a statement-level
+    `Name(Store)`, a nested `def`, an `import … as`, a `match` capture. NOT pinned,
+    and graded only in the over-block direction (a false RED, never a false pass):
+    `*args`/`**kwargs`/keyword-only parameters, a class name, an `except … as`, a
+    `MatchMapping` rest, and PEP-695 type parameters.
     """
     names: set[str] = set()
     for node in ast.walk(tree):
@@ -1543,6 +1551,15 @@ def live(value):
         ("1 if _x else 1", True),
         ("0 if _x else 1", None),
         ("not {*()}", True),
+        # ⛔ THE ALWAYS-TRUE POLARITY of `BoolOp`/`IfExp`, which only the bare
+        # `True`/`False` rows above measured: deleting that polarity left the whole
+        # suite GREEN (`117 passed`) while `if True or _flag: pass / else: <submit>`
+        # reported nothing, i.e. a submission in the dead `else` of an always-true
+        # guard went unreported. `and` needs ALL operands true, `or` needs ANY, and
+        # an `if`-expression takes the branch its test decides.
+        ("True and True", True),
+        ("True or _flag", True),
+        ("_x if False else True", True),
         # Undecidable — the caller must NOT read these as a polarity.
         ("_x", None),
     ],
@@ -1814,6 +1831,25 @@ def test_the_arms_agree_on_what_a_reference_is() -> None:
     # submits to `_run_off_loop`", the false RED its own comment says is impossible.
     # Measured: RED on the revert, GREEN shipped.
     assert _off_loop_submissions(legal) == [(2, _OFF_LOOP_POOL, "_stamp_chain", True)]
+
+    # ⛔ AND WHAT MAKES A SUBMISSION LEGAL — its POOL and its AWAIT. Dropping either
+    # test from `_submitted_names` left the suite GREEN (`117 passed`), and then a
+    # SECOND run of the chain on the wrong pool — or a fire-and-forget one beside a
+    # correct submission — was graded "submitted": the partial wedge arm 4 exists
+    # to refuse came back invisibly, because arms 1/2 only judge a submission when
+    # it is the only one.
+    wrong_pool = _tree([
+        "async def g():",
+        f"    await {_OFF_LOOP}({_OFF_LOOP_POOL}, _stamp_chain)",
+        f"    await {_OFF_LOOP}(_SOME_OTHER_POOL, _stamp_chain)",
+    ])
+    assert [n.lineno for n in _submitted_names(wrong_pool)] == [2]
+    not_awaited = _tree([
+        "async def g():",
+        f"    await {_OFF_LOOP}({_OFF_LOOP_POOL}, _stamp_chain)",
+        f"    {_OFF_LOOP}({_OFF_LOOP_POOL}, _stamp_chain)",
+    ])
+    assert [n.lineno for n in _submitted_names(not_awaited)] == [2]
 
 
 def test_the_submission_callee_spelling_is_declared_not_silently_widened() -> None:
@@ -2175,6 +2211,13 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
         # false-diagnosis class `_bound_names` exists to remove. Measured: RED on the
         # deletion, GREEN shipped.
         (["def f():", "    set = _factory", "    if set():", "        g()"], []),
+        # ⛔ AND TWO MORE BINDING FORMS the store row cannot reach — a nested `def`
+        # and an import alias. Each was unpinned: deleting its arm in `_bound_names`
+        # left the suite GREEN (`117 passed`) and made `if set():` inside it read
+        # always-false on a body the binding decides.
+        (["def f():", "    def set():", "        return True", "    if set():",
+          "        g()"], []),
+        (["def f():", "    import os.path as set", "    if set():", "        g()"], []),
         (["def f():", "    if list():", "        g()"], ["list()"]),
         # ⛔ AND A `match` CAPTURE BINDS WITH NO `ast.Name(Store)` NODE (review P2,
         # measured): `case _ as set:` left `set` unbound, so `if set():` inside that
@@ -2182,8 +2225,21 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
         # `case _:` control keeps the genuine builtin graded.
         (["def f(x):", "    match x:", "        case _ as set:", "            if set():",
           "                g()"], []),
-        (["def f(x):", "    match x:", "        case _:", "            if set():",
-          "                g()"], ["set()"]),
+        # ⛔ A CALL IN THE GUARD EXPRESSION ITSELF, which none of the rows above
+        # could measure: they all put the call in a BODY, so deleting `walk(test,
+        # guards)` from the `If`/`IfExp` arm, `walk(subject, guards)` from `Match`,
+        # or `walk(iter, guards)` from `For` left the suite GREEN (`117 passed`
+        # each) — and a submission whose ONLY occurrence sits in a dead-guarded
+        # header was then reported reachable, the #13722 silent-loss state.
+        (["def f():", "    if ():", "        if g():", "            pass"], ["()"]),
+        (["def f():", "    if ():", "        for _ in (g(),):", "            pass"],
+         ["()"]),
+        (["def f():", "    if ():", "        match g():", "            case _:",
+          "                pass"], ["()"]),
+        # ⛔ AND A KEYWORD ARGUMENT IS AN ARGUMENT: `dict(k=1)` is truthy, so its
+        # body RUNS. The Call arm tested `args` only; ignoring `keywords` graded it
+        # always-false and redded a live body (over-block).
+        (["def f():", "    if dict(k=1):", "        g()"], []),
     ],
 )
 def test_a_loop_header_or_comprehension_clause_is_graded_as_a_guard(
