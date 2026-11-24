@@ -1972,7 +1972,43 @@ SWEEP_NAMES = 66
 #: already gives for its own `+3`: the committed pin stores a COUNT and a DIGEST, never the row set.
 #: `--check` exits 0 on the new pair with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11910, "93429504f32ddc7c")
+#: ⛔ RE-CUT DOWN BY TWO, AND THIS ONE REPAIRS `main` ITSELF — not a branch's residual. `#14446`'
+#: (`tests/test_7879_record_chain.py`) squash-merged at `f635f9e000`, and on `origin/main` `989765162f`
+#: the pin this paragraph precedes read **(11901, "953c70c05b55923b")** while that tree DERIVES
+#: **(11902, "3a694c6f3ff4e36f")**. So `--check` exited 1 on `main`'s OWN tree, and because
+#: `surface-guard` is not deferrable that red travelled into the REQUIRED `python-ci-gate` for every
+#: open PR — the fleet-wide landing block `#14308` describes, not one PR's inconvenience.
+#: BOTH DIRECTIONS OF THE DELTA ARE ATTRIBUTED ROW BY ROW HERE, which the `#14350` blocks above twice
+#: state they could not do: they hold a count and a digest, never the rows. Measured with this tool's
+#: own `edits_for` on both versions of the one drifted file (`git diff --stat` names no other):
+#:   on `main`:  `env.update` 1, `reached.update` 3, `projection.g.query` 0  = 4
+#:   this head:  `env.update` 1                                             = 1
+#: `#14446`'s item 4 replaced two raw `projection.g.query(...)` Cypher calls with the typed
+#: `_label_vector_count` / `_delete_entity_by_id` API (the `#13610` aggregate and the `#3299`/`#3860`
+#: label-scoped delete), a genuine SHRINK of −2; its new `_imported_modules` collector added
+#: `reached.update` ×3, a genuine +3. Net +1 is the red.
+#: ⛔ THE +3 IS FIXED HERE, NOT DECLARED — the tool's own "fix or declare the new shape" arm — and the
+#: choice is measured, not assumed: the collector now accumulates with `|=` set comprehensions, which
+#: carry no meaning `set.update(...)` did not. Declaring it would have re-pinned `main` UP for drift
+#: that is avoidable in three characters of this change's own new code, in a PR whose subject is that
+#: a guard was too narrow. A PEER's `.update` receiver is STILL declared, never rewritten away (the
+#: `declared_markers.update` and `#13998` test-double precedents above); what decides it is that
+#: `reached` is this change's OWN local `set[str]`, not someone else's code being edited to suit a
+#: counter. The −2 is NOT undone: the typed rewrite is the change's point, and the census follows it.
+#: The pair below is `--repin`'s own output on THIS tree with both edits applied, never arithmetic on
+#: the last pin; `--check` exits 0 on it with `typed references still pointing at a public name: 0`.
+#: ⛔ MERGED `origin/main` `148dece3` (× `67f5bed0`, the peer lane's reminder fix) INTO THIS BRANCH AND
+#: RE-CUT ON THE RESOLVED TREE — both sides' blocks above are KEPT, this file's standing ground rule.
+#: The two sides had re-pinned in OPPOSITE directions around the same `#14446`/`#14461` commits: this
+#: branch read 11910 on its own fold tree, while `main` re-cut DOWN to 11899 after FIXING `#14446`'s
+#: `reached.update` +3 with `|=` set comprehensions instead of declaring it — a CODE change, kept here,
+#: so the count cannot be recovered by arithmetic on either parent's pin. `--repin` on THIS resolved
+#: tree prints **(11911, "5f91ee836978c431")**, +12 over `main`'s 11899 — the delta is MEASURED, not
+#: differenced: ⛔ ROW-LEVEL ATTRIBUTION IS NOT CLAIMED here, on the same ground the `#14350` blocks
+#: above give twice (the committed pin stores a COUNT and a DIGEST, never the row set). The pair below
+#: is `--repin`'s own output on THIS resolved tree, never arithmetic on the last pin; `--check` exits 0
+#: on it with `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11911, "5f91ee836978c431")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
