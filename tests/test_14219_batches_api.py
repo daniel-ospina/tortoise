@@ -2069,3 +2069,42 @@ def test_a_vanished_item_row_is_not_resurrected_by_a_settlement(store):
     assert landed is False, "a write that landed on no row must not report landed"
     assert store.get_item(ORG_ID, batch.batch_id, row.item_id) is None, (
         "the settlement MERGE-recreated a row whose batch was discarded")
+
+
+def test_a_text_item_may_name_a_url_as_its_identity(client, monkeypatch):
+    """⛔ ROUND-8 REVIEW P2: the URL refusal must not refuse a TEXT upload.
+
+    For a text item `ref` is only the item's identity as the customer knows it
+    ("echoed back verbatim"), and it is never resolved as a path: the runner uses
+    `item.staged_path or item.ref`, and a text item always has a staged path. So
+    `{"ref": "https://acme.example/contract.pdf", "text": "…"}` — the natural way
+    to upload a document and name its source — was refused 422 by a message whose
+    own remedy is "a path … **or carry its text**", which the request does.
+
+    ⛔ The staging root is stubbed, because WITHOUT one the handler answers 503
+    before the URL check and this test would pass over code it never reached —
+    measured: the first cut asserted only `!= 422` and stayed GREEN under the
+    mutation that restores the unconditional refusal.
+    """
+    monkeypatch.setattr(ha, "_batch_org_root",
+                        lambda org_id, create=False: "/tmp/batch-org-root")
+
+    def _stage(org_id, ref, text, batch_id):  # pragma: no cover - seam shape
+        return f"/tmp/batch-org-root/_batches/{batch_id}/{ref}"
+
+    with contextlib.suppress(AttributeError):
+        monkeypatch.setattr(ha, "_stage_inline_text", _stage, raising=False)
+
+    r = client.post("/v1/batches", json={"items": [
+        {"ref": "https://acme.example/contract.pdf", "text": "hello"}]})
+    assert r.status_code != 422, (
+        "a text item that names its source as a URL was refused as a URL item: "
+        f"{r.status_code} {r.text[:200]}")
+
+
+def test_a_path_item_that_names_a_url_is_still_refused(client):
+    """The refusal the previous test must not weaken: NO text, so the ref IS a path."""
+    r = client.post("/v1/batches", json={"items": [
+        {"ref": "https://acme.example/contract.pdf"}]})
+    assert r.status_code == 422
+    assert r.json()["detail"]["error_code"] == "BATCH_REF_URL_NOT_SUPPORTED"
