@@ -257,3 +257,44 @@ def test_both_halves_describe_the_fusion_never_the_removed_concatenation():
         assert "fuse_expansion_pass" in doc, f"{name} does not name the fusion"
         for phrase in stale:
             assert phrase not in doc, f"{name} still states the removed merge: {phrase!r}"
+
+
+def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
+    """#14396 review (P2-1): "an id both passes carry OUTRANKS either pass alone"
+    is a guarantee this fusion does not give, and it was stated in four places.
+
+    ``rrf_fusion`` scores a shared id ``1/(61+h1) + 1/(61+h2)`` (0-based ranks)
+    against an expansion-only id at 0-based rank 0's single ``1/61``, so two
+    terms win only while BOTH 1-based ranks are <= 61; at 62 in both the two
+    terms TIE a lone rank-1 and ``(-score, id)`` decides by spelling, and past
+    that the better single-list rank wins outright. ``DEFAULT_POOL_SIZE`` is 120
+    (``tortoise/retrieval.py``), so ranks past 61 are ordinary in the shipping
+    default — not a corner.
+
+    The prose is load-bearing here: it is what tells a reader how the lever
+    behaves, and the lever's adoption is the sealed A/B's decision (§3, #2516),
+    so an unbounded "agreement dominates" is how the A/B's expectation gets
+    mis-designed. This row is the non-vacuity proof for the fix: both carriers
+    stated the unbounded claim before it.
+    """
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    carriers = {
+        "tortoise/expansion_merge.fuse_expansion_pass": " ".join(
+            (expansion_merge.fuse_expansion_pass.__doc__ or "").split()),
+        "sdk._entity_key_dense_pass": _half_docstrings()["_entity_key_dense_pass"],
+        "docs/evidence/14344-expansion-fusion/README.md": " ".join(
+            (root / "docs" / "evidence" / "14344-expansion-fusion"
+             / "README.md").read_text().split()),
+    }
+    unbounded = "outranks either pass alone"
+    bound = re.compile(r"(<=|\u2264)\s*61")
+    for where, text in carriers.items():
+        assert unbounded not in text, (
+            f"{where} still states {unbounded!r} — two terms beat a single-list "
+            "rank only while BOTH 1-based ranks are <= 61; at 62 in both they "
+            "tie and past that the better single-list rank wins")
+        assert bound.search(text), (
+            f"{where} states the two-term advantage without its bound — the "
+            "`<= 61 in BOTH lists` clause is what makes the claim true")

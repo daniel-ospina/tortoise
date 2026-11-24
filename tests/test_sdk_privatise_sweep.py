@@ -258,7 +258,8 @@ def _residue_block() -> str:
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch and
     `main` each published their OWN tree's reading, so the figure is re-derived here rather
     than carried from either side — and GRADED, see
-    moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
+    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that moves the run REDS naming
+    both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
     prose commits grew it to 1066 while this sentence still said 985, which was true at
@@ -310,9 +311,6 @@ def _residue_block() -> str:
     and moved the pin once more (`11902` → **11906**, `main`'s own — measured identical on `main`'s
     own tree — so this branch contributes no row), and the figure above is re-derived rather than
     carried: **1882** = 1873 + this fold's own 9 `#:` lines.
-    `main`) appended 24 `#:` lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED
-    on this tree at 1765 (1741 + the 24 the re-cut declares) rather than carried forward from the
-    fold's own reading, which is what the graded figure exists to force,
     — and the `#14414` residue re-cut below (`SWEEP_RESIDUE` `11898` → `11908`) appended 21 `#:`
     lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED on this tree at 1786
     (1765 + those 21) rather than inherited from the fold's reading, and the peer lane's two
