@@ -364,7 +364,7 @@ class TestTheDiagnosticNamesTheAxis:
                     status="live")["id"]
                 sdk._set_point_baseline(src, 8.0, 2.0)
                 _q(sdk, setter, {"id": src})
-                _tgt, _belief_, skipped = _wire_and_run(sdk, src)
+                _tgt, _b, skipped = _wire_and_run(sdk, src)
                 assert [s["reason"] for s in skipped] == [
                     "source_stripped"], (name, skipped)
                 # `inputs[0]` is the idx-0 SOURCE — the slot that stripped.
@@ -435,7 +435,7 @@ class TestTheWriteDoorsStateTheirPosture:
                 "statement", f"wt-{uuid.uuid4().hex[:6]}", status="live")["id"]
             # ACCEPTED on every axis — the stated posture, on both axes.
             sdk._create_operator("IMPL", src, [tgt], direction="unidirectional")
-            _tgt, belief, skipped = _wire_and_run(sdk, src)
+            _tgt, belief, _skipped = _wire_and_run(sdk, src)
             assert belief[1] == belief[2], (
                 "the door accepted the edge but the READ must still strip it "
                 f"({shape}): {belief}")
@@ -481,7 +481,6 @@ def test_ep_imports_the_shared_answer_and_spells_no_filter():
     census convention, extended to this module)."""
     source = Path("tortoise/ep.py").read_text(encoding="utf-8")
     assert "ending_axes" in source
-    assert not live.__name__ == ""  # keep the import live for re-export checks
     assert "is_terminal_status" in dir(live) and "ending_axes" in dir(live)
     for hand_written in ("status in TERMINAL_EXCLUDED_STATUSES",
                          "TERMINAL_EXCLUDED_STATUSES or bool(outdated)"):
