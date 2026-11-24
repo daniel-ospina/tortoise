@@ -163,19 +163,25 @@ def test_a_constraint_is_still_not_dropped_in_silence():
 
 
 def test_the_two_guards_inside_is_predicate_are_each_load_bearing():
-    """Both halves of `is_predicate` have a pinned falsifier.
+    """All three guards of `is_predicate` have a pinned falsifier.
 
     ⛔ A pin has to be able to reach the guard it pins. The `what is the payment
     terms clause given the contract was archived` row of ``NOT_SELECTED`` is
     refused by the START anchor (`^is`), so it cannot detect the tail anchor or
-    the NP bound at all; the strings below are the ones that go red when either
+    the NP bound at all; the strings below are the ones that go red when a guard
     is removed:
 
     * dropping the tail anchor routes `is the report archived in S3` — a lookup
       whose ending is not the whole predicate;
     * widening the NP bound routes `is the payment terms clause given the
       contract was archived` and `is the policy when a booking is cancelled` —
-      subordinate clauses carrying their own finite verb.
+      subordinate clauses carrying their own finite verb;
+    * relaxing the START anchor (`^is` → `(?:^|\\b)is`) routes the two NESTED
+      clauses at the end of this loop — measured, with that one edit, nothing
+      else in this file moves. That anchor was the clause with no falsifier
+      (PR #14491 review, round 3): the shape is a yes/no question that OPENS the
+      query, and a subordinate `… is the report archived` is the same indirect
+      question class `which vendor said our commitments were archived` refuses.
     """
     from tortoise.state_intent import detect_state_question
 
@@ -184,6 +190,8 @@ def test_the_two_guards_inside_is_predicate_are_each_load_bearing():
         "is the payment terms clause given the contract was archived",
         "is the policy when a booking is cancelled",
         "is the onboarding flow retired this quarter",
+        "the question is the report archived",
+        "the question is the onboarding flow retired",
     ):
         got = detect_state_question(narrowed_or_subordinate)
         assert got.population is None, (
@@ -194,13 +202,30 @@ def test_the_two_guards_inside_is_predicate_are_each_load_bearing():
 
 
 def test_the_imperative_lookup_for_one_record_is_still_refused():
-    """`list what we <verb>` is a set request; `show me the retired X` is not."""
+    """The imperative frame is a lookup; only the `what we <verb>` clause is a set.
+
+    ⛔ WHAT THESE ROWS PIN, stated exactly (PR #14491 review, P1/P3): they are
+    BOUNDARY pins, not coverage of ``list_what``'s discriminator. Every row here
+    refuses because no shape in :data:`_ENDING_SHAPES` admits a bare imperative
+    naming a record — `^list …` reaches nothing (`list_what` requires the
+    `what we <verb>` clause) and `show me …` reaches nothing at all — so no
+    mutant of THIS diff reds them. They are the falsifier against the widening
+    that would admit the imperative mood itself (dropping `what we` and relaxing
+    the tail anchor), which is the hijack #13558 measured: an imperative naming
+    ONE record would then be answered with the whole ended population.
+
+    ``list_what``'s own two guards are pinned where they can be reached:
+    removing the shape reds the ``NOW_ROUTING`` rows, and dropping its tail
+    anchor reds `list what we retired last quarter` in
+    :func:`test_a_constraint_is_still_not_dropped_in_silence`.
+    """
     from tortoise.state_intent import detect_state_question
 
     for one_record in (
         "show me the retired onboarding flow",
         "the retired onboarding flow",
         "onboarding flow retired",
+        "list the retired onboarding flow",
         "list our commitments",
     ):
         got = detect_state_question(one_record)
