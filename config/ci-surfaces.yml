@@ -42,17 +42,18 @@ version: 1
 #
 # #11576 raised S 10 -> 11 for the SAME reason, one merge later: main's
 # `test_embed_decision_step_11086.py` and this branch's
-# `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, the
-# union packs a worst shard at 840.2 s where either side alone packed 840.0 s,
-# and `shard_watchdog_minutes()` rounds 840.2/60 x 2.0 up to 29 m — 0.2 s of
-# packing crosses a whole watchdog minute. At 29 m the arm-2 SUM is 60.64 m,
-# x 1.5 = 90.96 m against the 90 m cap (RED, where BOTH parents pass). At S=11
-# the map as #11576 shipped it packed the worst shard at 782.0 s -> 27 m, i.e. 58.64 x 1.5 =
-# 87.96 m: 2.04 m of real headroom rather than the 0.54 m S=10 was clearing by. (The
-# 2026-11-16 durations sweep re-packed the same 11 shards to a 23 m worst-shard watchdog,
-# #12926's own 10.0 s row moved that emission to 24 m (arm-2 SUM 55.64 m, x 1.5 = 83.5 m,
-# 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
-# is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
+# `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, and the union packs a
+# worst-shard figure heavier than either side alone packs it — `shard_watchdog_minutes()` rounds that
+# figure up, so a fraction of a second of extra packing crosses a whole watchdog minute. At that
+# minute the arm-2 SUM exceeds the 90 m cap while BOTH parents pass; at S=11 the re-packed pool
+# clears it again with real headroom. ⛔ Those directional readings are NOT restated here as
+# figures: the seconds this paragraph used to quote were measured on OTHER trees (one of them
+# belonged to no tree that carried the minute it was paired with) and the 24 -> 25 m step was
+# attributed to the wrong landing, so a figure here would be a carried number under an attribution
+# that does not hold. The figures live in the commits that measured them; what is kept is the
+# direction, which is what justifies the number: the 2026-11-16 sweep packed the eleven shards to
+# 23 m, #12926's own `10.0 s` row moved that to 24 m, a later landing moved it to 25 m, and the
+# 2026-11-23 sweep took it to the 28 m this block grades.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
 # `b665cbd61986` folded in over `#14472`'s merge base, after the `#14419` B7 cut took the
