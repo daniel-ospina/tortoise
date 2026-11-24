@@ -1339,6 +1339,174 @@ def test_the_check_refuses_when_the_baseline_is_missing(tmp_path, monkeypatch, c
     assert "::error::" in out and "missing" in out, out
 
 
+def test_the_check_REFUSES_a_baseline_that_carries_a_key_TWICE(tmp_path, monkeypatch, capsys):
+    """A forward merge can leave a top-level key TWICE; YAML silently last-winses it.
+
+    #14033 review P1, measured ON THIS FILE: `cut_at_commit:` sat on two adjacent lines
+    (this branch's cut and `main`'s), `yaml.safe_load` kept the last one, so the artifact
+    READ as one value while the diff showed two — and `check` exited 0. The file's own
+    header has a `⛔ ONE ROW ONLY` paragraph describing exactly that hazard and nothing
+    enforcing it, which is the false-PASS shape these gates exist to refuse: a gate
+    reporting OK on evidence it never actually read.
+
+    ⛔ AND THE REPAIR PATH MUST STILL READ IT. `cut` rewrites the artifact from the
+    declaration and emits a single key, so it is the only command that can repair a
+    duplicated file — a refusal here that also applied to `cut` would leave the file
+    unrepairable by the tool that owns it.
+    """
+    sm = _load_manifest_tool()
+    text = MANIFEST.read_text(encoding="utf-8")
+    marker = "cut_at_commit: "
+    assert text.count("\n" + marker) == 1, (
+        "this test needs the artifact to carry `cut_at_commit:` exactly once to start "
+        "from")
+    duplicated = text.replace(
+        "\n" + marker,
+        "\n" + marker + "1b0db0489408e1e817688f83cef0d7c1ee33be5d\n" + marker,
+        1,
+    )
+    path = tmp_path / "duplicated.yml"
+    path.write_text(duplicated, encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+
+    assert sm.cmd_check(argparse.Namespace()) == 1, (
+        "a duplicated top-level key was not refused — YAML last-winses it, so the check "
+        "is then reporting on a value the diff contradicts")
+    out = capsys.readouterr().out
+    assert "::error::" in out and "duplicate key" in out, out
+
+    # ⛔ THE SECOND DRIVER GRADES THE SAME ARTIFACT (#14033 review P2). tools/surface-guard.py
+    # reads the frozen baseline itself — it is PINNED TO THE BASE REF and therefore keeps its
+    # OWN copy of the refusal rather than importing tools/surface_manifest.py (a module it
+    # imported would be PR-authored; see test_the_pinned_gate_imports_only_its_allow_listed_
+    # modules). That duplication is what let the first fix land on one copy only: the guard
+    # still read with `yaml.safe_load` and printed "The manifest CLAIMS an approval" off
+    # whichever `approval_status:` line came LAST in a file that carries the key twice. The
+    # net that keeps the copies in step is this arm — drive BOTH drivers at the same artifact.
+    guard = _run("tools/surface-guard.py", "--manifest", str(path))
+    assert guard.returncode == 1, (
+        "tools/surface-guard.py read a baseline carrying a duplicate top-level key and "
+        "reported on one of them — it then grades a value the artifact contradicts "
+        f"(rc={guard.returncode}, out={guard.stdout!r}, err={guard.stderr!r})")
+    assert "duplicate key" in guard.stdout, (
+        f"the guard refused, but not for the duplicate key: {guard.stdout!r}")
+
+    # the repair path still opens it, or nobody can fix it
+    doc = sm._read_manifest(check_provenance=False)
+    assert doc.get("cut_at_commit"), doc.get("cut_at_commit")
+
+
+def test_the_duplicate_key_loader_DOES_still_accept_a_merge_key(tmp_path):
+    """The duplicate check must not refuse YAML the file is allowed to use (P3, r25).
+
+    Measured before the fix, in this worktree: the pre-scan walked `node.value` BEFORE
+    `flatten_mapping`, so a legitimate `<<: *anchor` reached `construct_object` as the
+    raw `tag:yaml.org,2002:merge` tag and died with *"could not determine a constructor
+    for the tag 'tag:yaml.org,2002:merge'"* — a refusal that names PyYAML rather than a
+    duplicate, on a file that has no duplicate at all. Merge keys are the natural way to
+    de-duplicate 39 near-identical rows, so the first lane to try it would be refused by
+    every gating reader for a reason that is not true.
+
+    ⛔ AND FLATTENING FIRST WOULD BE THE MIRROR FAULT, also measured: `flatten_mapping`
+    REPLACES `<<: *base` with the merged pairs, so the ordinary `<<: *base` plus an
+    explicit OVERRIDE of one key reads as a duplicate and is refused — the YAML spec says
+    the explicit key wins. So both halves are pinned here: the merge loads, the override
+    resolves the YAML way, and a real duplicate is still refused.
+    """
+    sm = _load_manifest_tool()
+    loader = sm._NoDuplicateKeyLoader
+
+    merged = yaml.load(
+        "base: &b {x: 1, y: 9}\ntop:\n  <<: *b\n  x: 2\n", Loader=loader)
+    assert merged["top"] == {"x": 2, "y": 9}, (
+        "a merge key was refused or the explicit override did not win — the check now "
+        f"rejects YAML the spec allows: {merged!r}")
+
+    with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key 'a'"):
+        yaml.load("a: 1\na: 2\n", Loader=loader)
+
+    # ⛔ AND THE PINNED GUARD'S OWN COPY MUST AGREE (#14033 review P2, measured). The
+    # guard is base-ref pinned, so it carries a SECOND copy of this loader rather than
+    # importing `tools/surface_manifest.py`; the first cut of that copy omitted the
+    # merge-tag skip added here, and the two gates then DISAGREED on a file with no
+    # duplicate at all — measured on a manifest carrying `<<: *base` plus an explicit
+    # override: the derivation read it, the guard exited 1 with
+    # "could not determine a constructor for the tag 'tag:yaml.org,2002:merge'". A unit
+    # arm over `sm._NoDuplicateKeyLoader` cannot catch that, so drive the REAL guard on
+    # the REAL artifact: a merge-keyed baseline must pass exactly like the plain one.
+    probe = MANIFEST.read_text(encoding="utf-8") + _MERGE_PROBE_BLOCK
+    merge_path = tmp_path / "merge-key.yml"
+    merge_path.write_text(probe, encoding="utf-8")
+    guard = _run("tools/surface-guard.py", "--manifest", str(merge_path))
+    assert guard.returncode == 0, (
+        "the pinned guard refused a manifest that uses a merge key, which the derivation "
+        f"reads — the two copies of the duplicate-check have diverged: {guard.stdout!r} "
+        f"{guard.stderr!r}")
+    assert "tag:yaml.org,2002:merge" not in (guard.stdout + guard.stderr), (
+        "the guard died on the merge tag instead of reading it: "
+        f"{guard.stdout!r} {guard.stderr!r}")
+
+
+#: A merge key plus an explicit override of one merged key (YAML: the explicit key
+#: wins). Appended to the committed baseline so the artifact stays a real manifest —
+#: the guard's own reader must get past the `<<:` tag to grade anything at all.
+_MERGE_PROBE_BLOCK = """
+_parity_probe: &parity_probe
+  probe_key: 1
+  other_key: 2
+_parity_probe_merged:
+  <<: *parity_probe
+  probe_key: 9
+"""
+
+#: A mapping with `<<:` TWICE — the shape the merge-tag skip used to wave through. PyYAML
+#: applies the second merge over the first, so the file says two things and the loader reads
+#: one: the same false PASS the duplicate-key refusal exists to refuse, one tag over.
+_DUPLICATE_MERGE_KEY_BLOCK = """
+_dup_merge_a: &dup_merge_a
+  probe_key: 1
+_dup_merge_b: &dup_merge_b
+  other_key: 2
+_dup_merge_resolved:
+  <<: *dup_merge_a
+  <<: *dup_merge_b
+"""
+
+
+def test_a_SECOND_merge_key_in_one_mapping_is_a_duplicate_and_BOTH_drivers_refuse_it(tmp_path):
+    """Round-28 review, P2 — measured: the merge-tag skip excluded `<<:` from the COUNT.
+
+    Skipping the merge tag from the duplicate SCAN is right (constructing it dies, and
+    flattening first turns a legal override into a false duplicate). Skipping it from the
+    COUNT is a false PASS: `yaml` loads `{<<: *a, <<: *b}` as `*b`'s keys, so a manifest
+    whose text carries two merges is graded as though it carried one — measured on the
+    committed baseline with one extra merge, `surface-guard.py --manifest` exited 0 and
+    printed an OK line while the file contradicted itself. YAML's merge rule allows at
+    most ONE merge key per mapping, so a second one is a duplicate.
+
+    ⛔ ASSERTED ON BOTH DRIVERS: the guard is base-ref pinned and keeps its OWN copy, and
+    that duplication is exactly what let the previous round's fix land on one copy only.
+    """
+    sm = _load_manifest_tool()
+
+    with pytest.raises(yaml.constructor.ConstructorError, match="duplicate merge key"):
+        yaml.load(
+            "a: &a {x: 1}\nb: &b {y: 2}\ntop:\n  <<: *a\n  <<: *b\n",
+            Loader=sm._NoDuplicateKeyLoader,
+        )
+
+    probe = MANIFEST.read_text(encoding="utf-8") + _DUPLICATE_MERGE_KEY_BLOCK
+    path = tmp_path / "dup-merge.yml"
+    path.write_text(probe, encoding="utf-8")
+    guard = _run("tools/surface-guard.py", "--manifest", str(path))
+    assert guard.returncode == 1, (
+        "the pinned guard graded a manifest that carries `<<:` TWICE — YAML applies the "
+        f"second merge over the first, so the gate reports on a value the file contradicts: "
+        f"{guard.stdout!r}")
+    assert "duplicate merge key" in guard.stdout, (
+        f"the guard refused for the wrong reason: {guard.stdout!r}")
+
+
 def test_the_check_refuses_when_the_ordering_table_is_missing(tmp_path, monkeypatch, capsys):
     sm = _load_manifest_tool()
     monkeypatch.setattr(sm, "ORDER_FILE", tmp_path / "no-order.yml")
@@ -2843,6 +3011,109 @@ def test_the_2350_precision_fields_are_rendered():
         ("sdk:get_historical_knowledge", "indeterminate_end_ids"),
     ):
         assert f"| `{response}` | `{field}` |" in text, (response, field)
+
+
+def test_the_14033_state_question_field_is_recorded():
+    """#14033's new hosted `/v1/search` key must be RECORDED, not left to the reviewing half.
+
+    ``hosted_api.search`` publishes ``state_question`` on every body where the read
+    path recognised a state cue it could not apply — a new field on a PUBLIC HTTP
+    response, always on in that case. ``check`` anchors the rows that ARE recorded
+    but cannot see a field nobody recorded (nothing inspects response bodies at
+    runtime — CONTRIBUTING.md, "Be precise about the half the machine cannot
+    check"), and ``response_fields`` is non-derivable, so a green ``check`` proved
+    nothing about it: the review found 84 rows and not one naming this field. Fails
+    on the pre-fix manifest, whose block carries no ``state_question`` row at all.
+
+    The two properties pinned separately are the ones a reader relies on: the field
+    is anchored where every other hosted `/v1/search` marker is anchored
+    (``tortoise_search``, the precedent ``status`` / ``residency`` / ``truncated``
+    set), and its absence clause does NOT over-promise byte-identity for content
+    searches — a content query that NAMES an ending (`which features are
+    deprecated in v3`) carries the notice, so a blanket "absent on content reads"
+    would be the same wrong promise the hosted comment already had to repair.
+    """
+    rows = [rf for rf in _manifest()["response_fields"]
+            if rf.get("field") == "state_question"]
+    assert rows, (
+        "the `state_question` field the hosted GET /v1/search body emits is not "
+        "recorded in config/surface-manifest.yml::response_fields")
+    assert [rf["response"] for rf in rows] == ["tortoise_search"], (
+        "`state_question` must be anchored to `tortoise_search`, the ONE anchor the "
+        "hosted /v1/search markers use (status, residency, truncated), got "
+        f"{[rf['response'] for rf in rows]!r}")
+    row = rows[0]
+    for key in ("emitted_when", "unchanged_when_off"):
+        assert row.get(key, "").strip(), (
+            f"the `state_question` row leaves `{key}` empty — an unstated absence "
+            f"clause is read as a promise the code does not keep")
+    from tortoise.state_intent import MISSED_ROUTE_REASONS
+
+    assert "MISSED_ROUTE_REASONS" in row["emitted_when"], (
+        "the row must point at the CLOSED set by name (tortoise/state_intent.py "
+        "MISSED_ROUTE_REASONS), or a reader cannot tell an enumeration from prose")
+    # ⛔ THE ENUMERATION ITSELF, built FROM the constant — not "the row mentions each
+    # live value", which explanatory prose satisfies (the row's `shape` and `family`
+    # also appear in sentences). A per-value substring check stays green on a row that
+    # CLAIMS AN UNDECLARED value, and on a constant that shrinks while the row keeps
+    # the old set (#14033 review, P3); pinning the `= a|b` form the row uses makes the
+    # two able to disagree in neither direction.
+    #
+    # The enumeration is PARSED out of the row and compared as a TUPLE, because every
+    # substring spelling of it is permissive: `"= shape|family" in row` also holds for a
+    # row that added `|superseded`, and a constant that shrank to `("shape",)` still
+    # matches the un-shrunk row. Only the parsed comparison reds in both directions.
+    match = re.search(r"MISSED_ROUTE_REASONS`?\s*=\s*([a-z|]+)", row["emitted_when"])
+    assert match, (
+        "the row never ENUMERATES the closed `reason` set (`MISSED_ROUTE_REASONS` = "
+        "a|b) — naming the constant is not the same as stating its values")
+    recorded = tuple(v for v in match.group(1).split("|") if v)
+    assert recorded == tuple(MISSED_ROUTE_REASONS), (
+        f"the row enumerates `reason` as {recorded!r} but tortoise/state_intent.py's "
+        f"MISSED_ROUTE_REASONS is {tuple(MISSED_ROUTE_REASONS)!r} — a caller cannot "
+        "know which notices it has to handle (an UNDECLARED value and a SHRUNK constant "
+        "both red here, which no substring check does)")
+    assert "which features are deprecated in v3" in row["unchanged_when_off"], (
+        "the absence clause must keep the MEASURED exception by naming it — a "
+        "CONTENT query that NAMES an ending (`which features are deprecated in "
+        "v3`) DOES carry the notice, so a blanket byte-identity claim for content "
+        "searches is a promise the code breaks")
+    # ⛔ AND THE PAYLOAD'S CENTRAL PROPERTY, which no other pin sees (#14033 review,
+    # P3): rewriting the documented payload to `{routed: true, population, cue}` and
+    # re-rendering left every gate GREEN — the row still exists, is still anchored, still
+    # enumerates `reason`, and the rendered text is verbatim from the manifest, so a row
+    # that INVERTS the notice's whole meaning (`routed: false` is the contract) was
+    # invisible. The key set is pinned too, because a payload that drops `hint` or `cue`
+    # is a different promise to the caller than the one `missed_route_payload` returns.
+    documented = row["emitted_when"]
+    assert "`{routed: false," in documented, (
+        "the row does not document `routed: false` as the payload's shape — `routed: "
+        "false` IS the contract (the notice reports a cue that did NOT route); a row "
+        "that says `true`, or drops the key, describes a different response")
+    from tortoise.state_intent import StateQuestion, missed_route_payload
+    probe = missed_route_payload(
+        StateQuestion(population="ended", cue="c",
+                      signal="wh_whole_question", signal_cue="what ended"))
+    assert probe is not None, "the probe produced no payload — the key set below is unchecked"
+    for key in probe:
+        assert key in documented, (
+            f"the row never documents the `{key}` key that `missed_route_payload` "
+            f"returns for every notice — a caller cannot know the payload's shape "
+            f"(recorded: {documented[:80]!r}…)")
+
+
+def test_the_14033_state_question_field_is_rendered():
+    """The record must reach the list the owner reviews (#14033 review P1).
+
+    A row that lives only in the YAML is not a record either: the generated table
+    is what the surface report shows. Fails on the pre-fix artifact, which renders
+    no `state_question` row.
+    """
+    text = RENDERED.read_text(encoding="utf-8")
+    assert "| `tortoise_search` | `state_question` |" in text, (
+        "the `state_question` response field is recorded but not RENDERED into "
+        "docs/product/mcp-sdk-surface.md — re-run "
+        "`python tools/surface_manifest.py render` rather than editing the document")
 
 
 def test_the_8171_alias_doors_record_the_advisory():

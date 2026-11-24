@@ -27,6 +27,12 @@ from typing import Any, Callable, Optional  # noqa: UP035
 
 from mcp.types import ToolAnnotations
 
+# #14033: the caller-facing predictability block is owned by the recogniser module
+# (`tortoise/state_intent.py`), which is stdlib-only — so this import cannot cycle.
+# The SERVED text and the test read the same string; see `ROUTING_NOTE`'s own note
+# on why it is not served from a docstring.
+from tortoise.state_intent import ROUTING_NOTE
+
 
 @dataclass(frozen=True)
 class RestSpec:
@@ -514,7 +520,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Hybrid semantic search — FTS + vector + structural RRF fusion with EP "
                     "confidence annotation. Use when matching by MEANING (natural-language "
                     "query); for exact structural/filter queries use tortoise_query. "
-                    "Full-scan mode: omit query, set kind → all Points of kind.",
+                    "Full-scan mode: omit query, set kind → all Points of kind.\n\n"
+                    # #14033: the predictability block is part of the SERVED description.
+                    # It used to live only in `tortoise_search.__doc__`, which FastMCP
+                    # never serves when an explicit `description=` is supplied — so the
+                    # defect the issue names stayed live on every MCP surface while a
+                    # test reading the docstring passed. Owned in `state_intent`.
+                    + ROUTING_NOTE,
         risk="read",
         http_policy=True,
         sdk_method="_tortoise_fts_query",

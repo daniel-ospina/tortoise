@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 1b0db0489408e1e817688f83cef0d7c1ee33be5d
+cut_at_commit: 0467ba329d7320f38e8caa9d4e428f1f470f7c3e
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -341,6 +341,34 @@ response_fields:
     it is a marker and not an empty result; under it `status` is never `empty` (§17.3; the truth fetch is #7953,
     not built)'
   unchanged_when_off: yes — results, count and status stay byte-identical and the key is absent
+- response: tortoise_search
+  field: state_question
+  emitted_when: '#14033 — the hosted `GET /v1/search` body ONLY, and only when the recogniser saw an ENDING-shaped
+    cue it could NOT apply: `{routed: false, population, reason, cue, hint}`, where `reason` is `shape` (the recogniser
+    SAW an ending cue and did not apply it — for example an appended qualifier the population cannot apply, an attributive
+    ending word, a modified `which` head noun, an over-long copula subject, or an unguarded `existence` expression;
+    the earlier gloss "a cue that is not the question''s own predicate" was FALSE for `which_modified_noun`, `is_copula_long_subject`
+    and `existence_unguarded`, all measured at `reason: shape`), `cue` is the whole-word signal it matched, and
+    `hint` is the served remedy. ⛔ `reason` is a CLOSED two-value set (`MISSED_ROUTE_REASONS` = shape|family) but
+    only `shape` is REACHABLE on this response: the hosted route takes no `entity_type` (`hosted_api.py` `search(q,
+    limit, org)`), `_tortoise_fts_query` defaults it to `point`, and `point` IS a lifecycle family — so `family`
+    (the ended population has no arm for that entity_type) is produced only where a caller NAMES a non-lifecycle
+    family, i.e. on the PRIVATE SDK sink below, and never on /v1/search. WHY IT EXISTS: without it a DECLINED state
+    question is byte-identical to an honest "nothing has ended", which is the defect #14033 closes. ⛔ NOT on the
+    MCP tool reply (`tortoise_search` takes no sink, and its description says so) and NOT on any PUBLIC SDK method
+    — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(...)` `read_status_out` sink instead.
+    ⛔ AND THE SELF-HOSTED `GET /v1/search` CARRIES NOTHING EITHER, which is DECLARED rather than left to be discovered:
+    it takes the same path (`tortoise/selfhost_api.py`) and the recogniser runs inside the same SDK call, so it
+    REFUSES a state question exactly as the hosted route does — but it passes no sink and its reply is the bare
+    row list, so there the declined question is again byte-identical to "nothing has ended". Serving the field there
+    would change a public response shape (a list), so it is out of scope for #14033 and recorded here instead; the
+    served `ROUTING_NOTE` says the same thing to the caller. Recorded here because CONTRIBUTING''s carve-out is
+    about what `check` FAILS on, not about what goes unrecorded: `response_fields` is in `NON_DERIVABLE_DOC_KEYS`,
+    so an absent row is invisible to every gate.'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT unless the recogniser declined a state cue, so every
+    ordinary search response stays byte-identical. ⛔ NOT reserved to state reads: a CONTENT query that NAMES an
+    ending (`which features are deprecated in v3`) is declined too, so it DOES carry the notice, with `routed: false`
+    — and must, because that reply would otherwise read as "nothing is deprecated"'
 - response: tortoise_search
   field: claim_class
   emitted_when: '#2351 (epic #2349 E-derived) — the claim''s asserted/derived class, emitted ONLY when the CALLER
@@ -1577,7 +1605,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
-  served_from: tortoise/mcp_server.py:f788896e1ec6f6c0
+  served_from: tortoise/mcp_server.py:6bcf8b42aada92a1
   served_attributes: a54ebe88150f0091
   family: memory
   family_rank: 1
@@ -1590,7 +1618,46 @@ rows:
   canonical: null
   job: 'Hybrid semantic search — FTS + vector + structural RRF fusion with EP confidence annotation. Use when matching
     by MEANING (natural-language query); for exact structural/filter queries use tortoise_query. Full-scan mode:
-    omit query, set kind → all Points of kind.'
+    omit query, set kind → all Points of kind. ⛔ WHICH PHRASINGS ROUTE, SO YOU CAN PREDICT IT (#14033). The cue
+    is the question''s own PREDICATE, anchored to its grammatical role — never an ending word that happens to sit
+    near a wh-word — so the boundary is readable off the wording. Of the phrasings this read is asked about: ROUTES
+    — answered from the ended population, each row with how it ended: `has anything we relied on been withdrawn`
+    (has/have + quantifier + been) `what ended` (the whole question is the ending) `what has ended recently` (a
+    RECENCY adverb only: it names no window the read must apply, and every row carries `endedAt`) `is the onboarding
+    flow retired?` (yes/no, subject = the record) `list what we retired` (imperative over `what we …`, i.e. a request
+    for a SET) DOES NOT ROUTE — you get the relevance rows, and ONLY the rows change: `which of our withdrawn claims
+    affected pricing` (the ending word MODIFIES `claims`; the question''s own predicate is `affected pricing`, which
+    the population cannot answer) ⛔ SO A STATE QUESTION THAT DOES NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL SEARCH.
+    There is no second attempt and no fallback: you get the rows the words match, which may be empty or unrelated,
+    and an EMPTY answer here is NOT evidence that nothing has ended. This tool takes NO argument that forces the
+    ended read — the SHAPE is the only way in, so the way to be explicit is to ask a form from the ROUTES list above.
+    ⛔ AND A RETRIEVAL ARGUMENT THAT CHANGES THE READ SILENCES THE REPORT, which is the other half of that boundary:
+    a NON-DEFAULT retrieval argument asks for a FILTERED relevance read, and the cue report is raised inside the
+    same guard that decides routing — so with any of them supplied you get that filtered read and NO report, and
+    a state question you filtered looks exactly like an honest empty again. (A value equal to the default — `threshold=0`,
+    `min_confidence=0`, `order_by="relevance"` — is not a filter and does not silence it.) ⛔ THE CLOSED LIST IS
+    THE AUTHORITY, NOT THIS SENTENCE: `_retrieval_knobs` in `tortoise/sdk.py`, and a name given here — a non-default
+    `threshold`, `min_confidence`, `order_by`, `relationship_filter`, `traversal_path`, `pool_size`, `time_aware`
+    — is an EXAMPLE of it, never the set. Three arguments sit outside it and they change WHICH rows a read returns
+    rather than asking for a filtered read, because the POPULATION applies them — `kind`, `entity_type`, `limit`
+    — so none silences the notice. ⛔ AND ONE ARGUMENT SITS OUTSIDE THE LIST AND DOES SILENCE IT — ⚠️ ON THE PRIVATE
+    `TortoiseSDK._tortoise_fts_query` ONLY, because THIS tool takes neither of the two names below, so passing one
+    here is a TypeError and not a choice you have: `include_terminal=True` picks a scope the caller has already
+    chosen, so the cue is not seen-and-unapplied and no notice is owed. ⛔ `ended_scope=` IS NOT A SECOND ONE: beside
+    a question it is REFUSED with a ValueError (#13558), so it cannot suppress the report — it declines the call.
+    The filter and the population are different answers: send the question ALONE to get the population or the report.
+    (The hosted `GET /v1/search` route below takes only the question and `limit`, neither of which is a routing
+    argument, so it is not silenced.) ⛔ THIS TOOL CANNOT REPORT the cue it saw and could not apply — its reply is
+    the row list and it takes no sink — so an MCP caller who needs that report must use the HOSTED deployment''s
+    `GET /v1/search` route, whose response body carries `state_question` (`{routed: false, population, reason, cue,
+    hint}`), which is the only CUSTOMER-facing channel: no PUBLIC SDK method exposes it either — the same payload
+    rides the PRIVATE `TortoiseSDK._tortoise_fts_query(..., read_status_out=...)` sink (under `read_status_out["state_question"]`),
+    so an integration that calls the SDK directly must name that private method deliberately. ⛔ AND THE HOSTING
+    MATTERS rather than being a detail of the path: the SELF-HOSTED `GET /v1/search` (the same path, `selfhost_api.py`)
+    recognises the cue too — routing happens inside the SDK call — but it passes NO sink and answers with the bare
+    row list, so on a self-hosted deployment a declined state question is still indistinguishable from "nothing
+    has ended"; the private SDK sink above is the only way to read it there — and what that sink buys is the distinction
+    between "the route declined my state question" and "the graph says nothing has ended".'
   dependency: declares TortoiseSDK._tortoise_fts_query (resolves)
   lifecycle: active
   used_by: never called, eval-harness, tooling, docs

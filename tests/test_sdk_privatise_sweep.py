@@ -2312,3 +2312,91 @@ def test_the_parent_pair_attribution_is_only_ever_quoted_as_falsified():
             "an UNREFUTED `same pair as the parent` claim is the round-14 defect: the pair one "
             "rev commits is not its parent's, so the claim is only honest where the block itself "
             "calls it wrong")
+
+
+# ── the two prose defects a conflict SPLICE left in the block (PR #14140 review) ─────────
+#
+# Resolving this constant's conflict by hand left two comment-only defects in the block, both
+# invisible to every arm above: (1) a line that merely re-stated the TAIL of the sentence above it
+# — the surviving half of a spliced sentence, `#: references still pointing at a public name: 0`.`
+# under the sentence it completes; (2) an ABSOLUTE claim about the conflict,
+# `⛔ NEITHER SIDE'S PAIR IS THIS TREE'S`, that was false of its own merge tree because the
+# branch's side already carried exactly the pair `--repin` printed there.
+#
+# ⛔ These are the defect class the block POLICES IN ITS OWN WORDS and nothing could see: it is
+# comments, so no executable arm reads it, and both defects are grammatical, not numeric — every
+# figure in the block stayed correct. The SPLICE arm is keyed on the SHAPE (a `#:` line that
+# re-states text already above it), because a merge can splice ANY sentence in half, not only
+# this one; the CLAIM arm is keyed on the absolute side-denial, mirroring
+# `test_the_parent_pair_attribution_is_only_ever_quoted_as_falsified`'s falsified-quote rule.
+_SIDE_PAIR_DENIAL = re.compile(r"(?i)neither\s+side'?s\s+pair\s+is\b")
+
+#: A fragment shorter than this is not evidence of a splice — the block legitimately repeats short
+#: words and quoted tokens (`⛔`, `` `--repin` ``, an address) across adjacent lines.
+_SPLICE_MIN_CHARS = 20
+
+
+def _spliced_fragments(block: str) -> list[tuple[str, str]]:
+    """`(tail_of_the_prose_above, fragment)` for every `#:` line that REPEATS the text above it.
+
+    ⛔ THE COMPARISON IS AGAINST THE WHOLE PROSE ABOVE, NOT THE PREVIOUS LINE (measured on the
+    defect this arm replaces): the duplicated sentence was itself WRAPPED, so the orphaned half
+    (`references still pointing at a public name: 0`.`) is a suffix of the JOINED flow and of no
+    single line. A line-to-line comparison saw nothing and left this arm green on the pre-fix
+    block — the vacuous detector its own non-vacuity clause is there to catch.
+    """
+    out: list[tuple[str, str]] = []
+    flow = ""
+    for raw in block.splitlines():
+        line = raw[2:].strip() if raw.startswith("#:") else ""
+        if line and len(line) >= _SPLICE_MIN_CHARS and flow.endswith(line):
+            out.append((flow[-len(line):], line))
+        flow = f"{flow} {line}".strip()
+    return out
+
+
+def test_no_residue_block_line_is_a_spliced_repeat_of_the_line_above_it():
+    """Defect 1: the `#:` run above the pin must not carry a conflict splice's orphaned tail.
+
+    NON-VACUITY, both directions: a synthetic splice REDS the arm, and the real block's verdict is
+    that it holds none — so deleting the arm's subject from the block is not a way to pass it.
+    """
+    block = _residue_block()
+    assert block.count("\n") > 100, "the residue block is missing or truncated"
+    assert _spliced_fragments(block) == [], (
+        "a `#:` line re-states the tail of the prose above it — the shape a conflict splice "
+        f"leaves behind: {_spliced_fragments(block)!r}")
+    spliced = block + (
+        "\n#: own output on this tree. `--check` exits 0 with `typed references still pointing at "
+        "a public name: 0`.\n#: typed references still pointing at a public name: 0`.")
+    assert _spliced_fragments(spliced), (
+        "the arm does not SEE a synthetic splice, so its green on the real block means nothing")
+
+
+def _unrefuted_side_pair_denials(block: str) -> list[str]:
+    """The `NEITHER SIDE'S PAIR IS …` claims the block states as LIVE, i.e. does not refute."""
+    return [hit.group(0) for hit in _SIDE_PAIR_DENIAL.finditer(block)
+            if not _refuted(block, hit.start())]
+
+
+def test_the_absolute_side_pair_denial_is_only_ever_quoted_as_falsified():
+    """Defect 2: `NEITHER SIDE'S PAIR IS THIS TREE'S` is only honest where the block refutes it.
+
+    It was FALSE of the merge tree it was written on — the branch's side of that conflict already
+    carried exactly the pair `--repin` printed there — so it is a draft the block may only record
+    as wrong, never a live claim, because as a live claim it tells the next lane that NO parent's
+    pair can be the merged tree's, which is what made the sentence false in the first place.
+
+    NON-VACUITY comes from an injected defect, not from the block having to KEEP the bad sentence:
+    the fix is free to delete it outright (that is what the re-cut did), and an arm that demands
+    the draft be preserved would red the correct edit and reward keeping the falsehood.
+    """
+    block = _residue_block()
+    assert block.count("\n") > 100, "the residue block is missing or truncated"
+    assert _unrefuted_side_pair_denials(block) == [], (
+        "the block states an absolute `NEITHER SIDE'S PAIR IS …` denial LIVE: "
+        f"{_unrefuted_side_pair_denials(block)!r} — one side's pair DID coincide with a merged "
+        "tree's, so the absolute form is false unless the block calls it wrong")
+    injected = block + "\n#: ⛔ NEITHER SIDE'S PAIR IS THIS TREE'S: the branch carried it."
+    assert _unrefuted_side_pair_denials(injected), (
+        "the arm does not SEE an injected denial, so its green on the real block means nothing")

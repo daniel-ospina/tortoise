@@ -960,6 +960,76 @@ def cut_commit_resolves(sha: str) -> bool | None:
         return None
     return False
 
+class _NoDuplicateKeyLoader(yaml.SafeLoader):  # type: ignore[misc]
+    """A SafeLoader that REFUSES a duplicate mapping key instead of last-winsing it.
+
+    #14033 review P1, measured: a forward merge left `config/surface-manifest.yml` with
+    `cut_at_commit:` TWICE — this branch's line and `main`'s — and `yaml.safe_load`
+    silently kept the last one. The file therefore READ as one value while the diff
+    showed two, and the header's own `⛔ ONE ROW ONLY` paragraph documented the hazard
+    without anything enforcing it: `check` exited 0 on the duplicated file. This is the
+    false-PASS shape the gates in this repo exist to refuse (a gate reporting OK on an
+    artifact it never actually read), so the reader refuses rather than documents.
+    """
+
+    def construct_mapping(self, node, deep=False):
+        # ⛔ SKIP THE MERGE TAG, DO NOT FLATTEN BEFORE THE SCAN (round-25 review, P3).
+        # `<<:` is not a constructor: handing this pre-scan the raw merge tag makes
+        # `construct_object` die with "could not determine a constructor for the tag
+        # 'tag:yaml.org,2002:merge'" — a diagnosis that names PyYAML instead of the
+        # problem, on a file with no duplicate at all, and merge keys are the natural
+        # way to de-duplicate 39 near-identical rows.
+        # ⛔ AND FLATTENING FIRST WOULD BE A FALSE BLOCK TOO, measured: `flatten_mapping`
+        # REPLACES `<<: *base` with the merged pairs, so the standard `<<: *base` plus an
+        # explicit OVERRIDE of one key reads as a duplicate and is refused. YAML says an
+        # explicit key beats a merged one, so the scan runs over the pairs the file
+        # actually WROTE (merge tags excluded) and the parent constructor then flattens
+        # for itself, which is what supplies the merged values.
+        seen: set = set()
+        merge_seen = False
+        for key_node, _value_node in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                # ⛔ SKIPPED FROM THE SCAN, NOT FROM THE COUNT (round-28 review, P2,
+                # measured). Excluding the merge KEY from the duplicate scan entirely made
+                # a map with `<<:` TWICE load as one merge — PyYAML applies them
+                # sequentially and the later one overwrites the earlier, so
+                # `top: {<<: *a, <<: *b}` read as `*b`'s keys while the file said two
+                # things. That is the SAME false PASS this loader exists to refuse, one tag
+                # over, and a forward merge produces it as readily as a duplicated
+                # `cut_at_commit:`. YAML's merge rule allows at most ONE merge key per
+                # mapping, so a second one is a duplicate and is REFUSED; the merge
+                # VALUE is still never constructed here (that is what avoids the
+                # `tag:yaml.org,2002:merge` constructor death and the false block on an
+                # explicit override).
+                if merge_seen:
+                    raise yaml.constructor.ConstructorError(
+                        None, None,
+                        f"duplicate merge key '<<' (line {key_node.start_mark.line + 1}): "
+                        f"a mapping may carry at most ONE merge key, and a second one is "
+                        f"silently overwritten by whatever it merges — delete one of them",
+                        key_node.start_mark,
+                    )
+                merge_seen = True
+                continue
+            try:
+                key = self.construct_object(key_node, deep=deep)
+                hash(key)
+            except TypeError:          # an unhashable key is PyYAML's to refuse
+                continue
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    None, None,
+                    f"duplicate key {key!r} (line {key_node.start_mark.line + 1}): a "
+                    f"forward merge can leave a top-level key TWICE and a YAML loader "
+                    f"silently last-winses it, so the file reads as ONE value while "
+                    f"the diff shows two — delete one of them (see the file's own "
+                    f"`ONE ROW ONLY` header note)",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 def _read_manifest(path: Path | None = None, *, check_provenance: bool = True) -> dict:
     """Read the frozen baseline, or refuse. Never returns a partial document.
 
@@ -970,7 +1040,10 @@ def _read_manifest(path: Path | None = None, *, check_provenance: bool = True) -
 
     `check_provenance=False` is for `cut` ONLY: a re-cut is the REPAIR path for a
     `cut_at_commit` that resolves to nothing, so refusing to read the baseline there
-    would refuse the only way to fix it. Every gating reader keeps the default.
+    would refuse the only way to fix it. Every gating reader keeps the default. The same
+    split governs the DUPLICATE-KEY refusal below: a file a forward merge left with
+    `cut_at_commit:` twice must stay readable by the one command that rewrites it into a
+    single key, and must be REFUSED by everything that reports on it.
     """
     if path is None:
         path = MANIFEST_FILE
@@ -981,7 +1054,12 @@ def _read_manifest(path: Path | None = None, *, check_provenance: bool = True) -
             "must not report success."
         )
     try:
-        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        # Gating readers refuse a duplicated key; `cut` (the repair path) reads with the
+        # plain loader and rewrites the file with a single key — refusing here would
+        # make the one command that can repair the file unable to open it.
+        loader = _NoDuplicateKeyLoader if check_provenance else yaml.SafeLoader
+        doc = yaml.load(text, Loader=loader)  # a SafeLoader subclass, never `unsafe`
     except Exception as exc:  # any read/parse failure is a refusal
         raise SurfaceEvidenceUnreadable(f"could not read {path}: {exc}") from exc
     if not isinstance(doc, dict) or not isinstance(doc.get("rows"), list):
