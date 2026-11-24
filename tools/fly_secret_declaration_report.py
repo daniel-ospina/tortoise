@@ -210,13 +210,21 @@ def staged_names(gate: ModuleType, workflow_text: str) -> set[str]:
         else referenced
     )
     assigned, unconditional, live, _sources = gate.payload_partition(blocks, present)
-    if not assigned and not unconditional:
-        # The gate refuses this too (it cannot certify an empty payload). Here it
-        # would render as "nothing is stageable", i.e. a clean-looking answer to a
-        # question that was never answered.
+    # ⛔ THE GATE'S CONDITION, VERBATIM — `not assigned`, with no extra `and`. A
+    # payload whose assignments are ALL `-z`-guarded (the shape `payload_partition`'s
+    # own docstring names) leaves `assigned` empty while `unconditional` is not, so
+    # the gate refuses the deploy (exit 2) and a guard written
+    # `not assigned and not unconditional` reported CLEAN for that same tree — a green
+    # reading for a repo whose every deploy is refused, i.e. exactly the window
+    # #14574 exists to close (reproduced against the real gate by the #14585 review;
+    # `test_an_all_guarded_payload_is_exit_2_exactly_as_the_gate_refuses_it` pins both
+    # verdicts). `unconditional` stays an additive term of the returned set
+    # (`assigned | unconditional | live`) — never a licence to skip the refusal.
+    if not assigned:
         raise ValueError(
             "the deploy payload assigns nothing when every GitHub secret is present "
-            "— a payload this tool cannot read is not a payload with no secrets"
+            "— the deploy's own gate refuses this state (exit 2), so a payload this "
+            "tool could not read is not a payload with no secrets"
         )
     return set(assigned) | set(unconditional) | set(live)
 
