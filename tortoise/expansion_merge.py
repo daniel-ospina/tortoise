@@ -56,12 +56,19 @@ def fuse_expansion_pass(
     + 1)`` over a 0-BASED rank, ``k=60`` for equal-weighted legs — so
 
       * an id both passes carry earns both terms, and that is an ADVANTAGE, not
-        dominance. Two terms beat any single-list rank only while the shared id
-        sits at 1-based rank <= 61 in BOTH lists: at 62 in both its two terms
-        TIE a lone rank-1 (``2/122 == 1/61``) and ``rrf_fusion``'s ``(-score,
-        id)`` order decides by spelling rather than evidence, and past that a
-        better single-list rank wins outright. Behind that bound the entity
-        context AGREES with the query, which is exactly the signal the
+        dominance. Two terms beat a single-list rank only RELATIVELY: with the
+        shared id at 0-based rank ``h`` in BOTH lists and the single-term
+        candidate at 0-based rank ``r``, ``2/(61+h)`` beats ``1/(61+r)`` while
+        ``h < 61 + 2r`` — against a lone rank-1 (``r = 0``) that is exactly
+        ``h <= 60``, i.e. 1-based rank <= 61 in both lists, where at 1-based 62
+        in both the two terms TIE a lone rank-1 (``2/122 == 1/61``) and
+        ``rrf_fusion``'s ``(-score, id)`` order decides by spelling rather than
+        evidence. ⛔ THE ``<= 61`` FORM IS THE LONE-RANK-1 CASE, NOT A UNIVERSAL
+        BOUND: against a single-term candidate further down the page two terms
+        keep winning from OUTSIDE it (at ``r = 3`` they win through ``h = 66``),
+        so the honest statement is the relative ``h < 61 + 2r`` and the ``<= 61``
+        figure is what it reduces to against rank 1. Where the two terms do win,
+        the entity context AGREES with the query, which is exactly the signal the
         expansion exists to supply — and ``DEFAULT_POOL_SIZE`` is 120, so ranks
         past 61 are ordinary in the shipping default, not a corner;
       * an id only one pass carries is ranked by its own reciprocal rank, so a
@@ -76,10 +83,13 @@ def fuse_expansion_pass(
     candidate in both passes still lands below it. What changes is the
     BOUND: pass-1 evidence can no longer be displaced by the expansion's
     LENGTH — only by a candidate that out-ranks it in the expanded run, or by
-    an id BOTH passes carry, whose two terms pass an incumbent that out-ranks
-    it in the expanded run ONLY inside that <=61-in-both bound (at 62 in both
-    they tie and the tiebreak decides; past it the incumbent keeps the lead,
-    which is the half of the sentence this one replaces got wrong).
+    an id BOTH passes carry whose two terms clear THAT INCUMBENT's own single
+    term (``h < 61 + 2r`` against the incumbent's 0-based rank ``r``; against a
+    lone rank-1, ``r = 0``, that is the ``<= 61`` case, and further down the page
+    it is not — at ``r = 3`` a shared id at ``h = 63`` passes the incumbent while
+    out-ranking it in NEITHER pass), and on an exact tie ``rrf_fusion``'s
+    ``(-score, id)`` tiebreak decides, which is the id's order and not its
+    evidence.
 
     Scores are carried from the pass that produced the id (``second_pass``
     wins a collision, the order the previous concatenation used), NOT the RRF

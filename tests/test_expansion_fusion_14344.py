@@ -264,18 +264,25 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     is a guarantee this fusion does not give, and it was stated in four places.
 
     ``rrf_fusion`` scores a shared id ``1/(61+h1) + 1/(61+h2)`` (0-based ranks)
-    against an expansion-only id at 0-based rank 0's single ``1/61``, so two
-    terms win only while BOTH 1-based ranks are <= 61; at 62 in both the two
-    terms TIE a lone rank-1 and ``(-score, id)`` decides by spelling, and past
-    that the better single-list rank wins outright. ``DEFAULT_POOL_SIZE`` is 120
-    (``tortoise/retrieval.py``), so ranks past 61 are ordinary in the shipping
-    default — not a corner.
+    against a single-term candidate at 0-based rank ``r``'s ``1/(61+r)``, so the
+    comparison is decided by ``h < 61 + 2r`` — a RELATIVE bound. Against a lone
+    rank-1 (``r = 0``) it reduces to ``h <= 60``, i.e. 1-based rank <= 61 in both
+    lists, where at 62 in both the two terms TIE a lone rank-1 and ``(-score, id)``
+    decides by spelling. ``DEFAULT_POOL_SIZE`` is 120 (``tortoise/retrieval.py``),
+    so ranks past 61 are ordinary in the shipping default — not a corner.
 
-    The prose is load-bearing here: it is what tells a reader how the lever
-    behaves, and the lever's adoption is the sealed A/B's decision (§3, #2516),
-    so an unbounded "agreement dominates" is how the A/B's expectation gets
-    mis-designed. This row is the non-vacuity proof for the fix: both carriers
-    stated the unbounded claim before it.
+    ⛔ THE FIRST FIX FOR THIS FINDING SHIPPED A FALSE GENERALIZATION AND THIS ARM
+    GRADED IT AS REQUIRED TEXT (#14396 review, round 18, P2): it required the
+    ``<= 61`` clause and nothing else, so all three carriers said two terms beat
+    "any single-list rank" inside that window. They do not — `2/(61+63)` beats
+    `1/(61+3)`, so a shared id at 1-based 64 passes a single-term candidate at
+    1-based 4 while out-ranking it in NEITHER list. Both halves are graded here:
+    the relative form must be stated (``61 + 2r``) AND the ``<= 61`` form must
+    survive as what it is, the lone-rank-1 case.
+
+    Non-vacuity (measured, not asserted): on the pre-fix bytes at `6e616a16`
+    every carrier states the ``<= 61`` half and none states ``61 + 2r``, so this
+    arm REDS there naming the carrier — the shape a docstring regression takes.
     """
     import re
 
@@ -289,15 +296,96 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
              / "README.md").read_text().split()),
     }
     unbounded = "outranks either pass alone"
-    bound = re.compile(r"(<=|\u2264)\s*61")
+    lone_rank_one = re.compile(r"(<=|\u2264)\s*61")
+    relative = re.compile(r"61\s*\+\s*2r")
     for where, text in carriers.items():
         assert unbounded not in text, (
             f"{where} still states {unbounded!r} — two terms beat a single-list "
-            "rank only while BOTH 1-based ranks are <= 61; at 62 in both they "
-            "tie and past that the better single-list rank wins")
-        assert bound.search(text), (
-            f"{where} states the two-term advantage without its bound — the "
-            "`<= 61 in BOTH lists` clause is what makes the claim true")
+            "rank only while h < 61 + 2r (0-based); the <= 61 window is the "
+            "lone-rank-1 case")
+        assert relative.search(text), (
+            f"{where} states the two-term advantage without its RELATIVE bound — "
+            "`h < 61 + 2r` is what makes the claim true; the `<= 61 in BOTH "
+            "lists` clause alone is the lone-rank-1 special case and was graded "
+            "here as if it were universal (#14396 review, round 18, P2)")
+        assert lone_rank_one.search(text), (
+            f"{where} dropped the lone-rank-1 case — at 1-based 62 in both "
+            "lists the two terms TIE a lone rank-1, which is the half a reader "
+            "needs to see beside the relative bound")
+
+
+def test_the_two_term_bound_is_relative_to_the_rank_it_is_compared_against():
+    """The arithmetic behind ``h < 61 + 2r``, pinned against the fusion itself.
+
+    The prose row above grades that the RELATIVE bound is *stated*; this one grades
+    that it is *true*, so a formula change cannot leave the three docstrings telling
+    a reader something the engine no longer does. ``rrf_fusion`` sums
+    ``w / (k + rank + 1)`` over a 0-BASED ``rank`` with ``k = 60``, so a shared id at
+    0-based rank ``h`` in BOTH lists scores ``2/(61+h)`` against a single-term
+    candidate at 0-based rank ``r``'s ``1/(61+r)``:
+
+      * ``h < 61 + 2r`` — the two terms win;
+      * ``h == 61 + 2r`` — EXACT tie, decided by ``(-score, id)``;
+      * ``h > 61 + 2r`` — the single-term candidate wins.
+
+    ⛔ THE ``r = 3`` ROWS ARE THE POINT: ``h = 63`` is OUTSIDE the <= 61 window and
+    still beats a single-term candidate, and it out-ranks that candidate in NEITHER
+    list — the case the universal "<= 61" sentence denied (#14396 review, P2).
+
+    Non-vacuity: the ``h = 63`` row REDS on any implementation that made membership
+    dominate by a fixed window (it asserts the shared id LEADS), and the ``h = 67``
+    row REDS on one that let membership dominate unconditionally (it asserts the
+    candidate LEADS). The tie row pins the boundary to the engine's own arithmetic
+    rather than to a remembered fraction.
+    """
+    def _pair_at(h, r):
+        # ``shared`` at 0-based rank ``h`` in BOTH lists; ``newcomer`` at 0-based
+        # rank ``r`` of the expansion and nowhere else — exactly ONE term.
+        assert r < h, "the fixture needs the newcomer above the shared id"
+        pass1 = [(f"a{i}", 1.0 - i / 100000.0) for i in range(h)] + [("shared", 0.5)]
+        expanded = (
+            [(f"c{i}", 1.0 - i / 100000.0) for i in range(r)]
+            + [("newcomer", 9.0)]
+            + [(f"b{i}", 1.0 - i / 100000.0) for i in range(h - 1 - r)]
+            + [("shared", 0.4)])
+        # The fixture is a MEASUREMENT, not a comment: assert the ranks it claims.
+        assert _ids(pass1).index("shared") == h
+        assert _ids(expanded).index("shared") == h
+        assert _ids(expanded).index("newcomer") == r
+        assert "newcomer" not in _ids(pass1)
+        return pass1, expanded
+
+    for h, r in (
+            (60, 0),   # the <= 61 case: two terms win
+            (63, 3),   # OUTSIDE the window, and the shared id out-ranks NOTHING
+            (66, 3),   # h == 61 + 2r - 1: the last h where the two terms win
+            (62, 1),   # h == 61 + 2r - 1 at r = 1
+    ):
+        assert h < 61 + 2 * r, (h, r)
+        pass1, expanded = _pair_at(h, r)
+        ids = _ids(fuse_expansion_pass(pass1, expanded))
+        assert ids.index("shared") < ids.index("newcomer"), (
+            f"h={h}, r={r}: h < 61 + 2r, so the two terms must LEAD — got {ids}")
+
+    for h, r in (
+            (61, 0),   # 1-based 62 vs a lone rank-1: the exact TIE
+            (63, 1),   # h == 61 + 2r at r = 1
+            (67, 3),   # h == 61 + 2r at r = 3
+    ):
+        pass1, expanded = _pair_at(h, r)
+        fused = rrf_fusion([pass1, expanded], 60)
+        assert fused["shared"] == fused["newcomer"], (
+            f"h={h}, r={r}: h == 61 + 2r must TIE exactly, which is what the prose "
+            f"says — shared={fused['shared']!r} newcomer={fused['newcomer']!r}")
+
+    pass1, expanded = _pair_at(68, 3)   # 68 > 61 + 6: past the tie, the candidate leads
+    fused = rrf_fusion([pass1, expanded], 60)
+    assert fused["newcomer"] > fused["shared"], (
+        "past h = 61 + 2r the single-term candidate must lead outright; a two-term "
+        "id does NOT outrank either pass alone")
+    ids = _ids(fuse_expansion_pass(pass1, expanded))
+    assert ids.index("newcomer") < ids.index("shared"), (
+        f"past the relative bound the better single-list rank wins — got {ids}")
 
 
 def test_the_two_term_advantage_is_bounded_at_1based_61():

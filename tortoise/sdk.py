@@ -49834,16 +49834,21 @@ class TortoiseSDK:
         own `rrf_fusion` over both passes, replacing the rank concatenation
         (`expanded + pass-1-only`) it used to be. An id BOTH passes carry earns both
         terms — the entity context AGREEING with the query is the signal the expansion
-        exists to supply — but that is an ADVANTAGE, not a dominance guarantee: two
-        terms beat a single-list rank only while the shared id sits at 1-based rank
-        <= 61 in BOTH lists. At 62 in both the terms TIE a lone rank-1 and
-        `(-score, id)` decides by spelling; past that the better single-list rank
-        wins (`DEFAULT_POOL_SIZE` is 120, so those ranks occur). A pass-1 id can move
+        exists to supply — but that is an ADVANTAGE, not a dominance guarantee, and the
+        advantage is RELATIVE rather than a fixed window: with the shared id at 0-based
+        rank `h` in BOTH lists and the single-term candidate at 0-based rank `r`,
+        `2/(61+h)` beats `1/(61+r)` while `h < 61 + 2r`. Against a lone rank-1
+        (`r = 0`) that is exactly 1-based rank <= 61 in both lists, where at 1-based 62
+        in both the terms TIE a lone rank-1 and `(-score, id)` decides by spelling;
+        against a single-term candidate further down the page two terms keep winning
+        from OUTSIDE that window (at `r = 3` through `h = 66`) — ⛔ so `<= 61 in BOTH
+        lists` is the LONE-RANK-1 case and not a universal bound. A pass-1 id can move
         down only when a candidate out-ranks it in the composed run, when one ties it
-        and wins the id tiebreak (#2952), or by a shared id inside that bound — never
-        because the expansion had more rows. Order is NOT preserved: a re-ranked dense
-        leg is the mechanism, not a side effect, and on a lever that ships OFF it stays
-        a decision to be measured, not asserted.
+        and wins the id tiebreak (#2952), or by a shared id whose two terms clear that
+        incumbent's OWN single term (`h < 61 + 2r` against its 0-based rank `r`) —
+        never because the expansion had more rows. Order is NOT preserved: a re-ranked
+        dense leg is the mechanism, not a side effect, and on a lever that ships OFF it
+        stays a decision to be measured, not asserted.
 
         Fail-open (mirrors A4 #2070 / the sparse half): no embedder, a failed encode
         or query, or an empty result returns ``None`` and the caller keeps the
