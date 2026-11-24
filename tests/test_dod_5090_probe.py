@@ -1523,32 +1523,18 @@ def test_the_instrument_is_selected_by_its_own_subjects():
 
     A falsifier that never executes is not a falsifier (review P1).
 
-    Registration alone is CLASSIFICATION (#4348): it satisfies
-    `ci_selection.py --integrity` but does not make a diff SELECT this file. Each
-    subject below must select it, or the pins this instrument exists to install
-    never run on the change that can break them. Two named-surface matches
-    REPLACE the `core` fallback (#2938), which is why the file is registered in
-    `eval` as well as `core` (`tortoise/embeddings.py` — the seam — selects
-    `eval`), and why `tools/dod_5090_probe.py` needs a `CORE_ALSO` entry (a
-    `tools/`-only diff is swallowed by NON_PYTHON_PREFIXES before the fallback
-    runs, so it selected 70 unrelated files and not this one).
-
-    ⛔ `#11444`: `tortoise/embed_writer_register.py` is now a SUBJECT of this
-    file's own scoring — row 1 reads it — so it must SELECT this file too. It
-    currently selects through the `core` fallback (it matches no named
-    SOURCE_PATTERNS entry, which `ci-surfaces.yml` records at its
-    `test_embed_writer_register.py` row); pinned here so a future named match
-    that REPLACES the fallback cannot silently stop selecting the instrument
-    whose row now depends on it. Taken from `#11463`'s tree when this PR was kept
-    over it in the `#11444` dedupe, so its one unique guard is not lost.
+    ⛔ The `core` row is GONE on purpose (see `config/ci-surfaces.yml`, where its
+    comment used to be): `core` is the fallback surface, so that row ran this
+    file's document/status-word scorecard on nearly every PR. What survives is the
+    `eval` registration below, whose subject is the one this file's remaining
+    arms guard — `tortoise/embeddings.py`, the `encode_for_row` seam. A subject
+    that only selected through the `core` fallback no longer selects this file,
+    and that is the intended consequence of taking it off the every-PR path.
     """
     import ci_selection
 
     manifest = ci_selection.load_manifest()
-    for subject in ("tortoise/embed_gate.py", "tortoise/value_gate.py",
-                    "tortoise/embeddings.py", "tortoise/search_engine.py",
-                    "tortoise/security.py", "tools/dod_5090_probe.py",
-                    "tortoise/embed_writer_register.py"):
+    for subject in ("tortoise/embeddings.py",):
         selected = ci_selection.select([subject], "pull_request", manifest)
         assert "test_dod_5090_probe.py" in selected["test_files"], (
             f"a {subject}-only diff does not select this file — its falsifiers "

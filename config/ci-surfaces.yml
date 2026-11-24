@@ -4284,19 +4284,14 @@ surfaces:
   - test_9287_invisible_kind_write_door.py
   - test_ci_cancel_guard.py
   - test_closes_landing.py
-  # #10465 (review P1): the read-only instrument that scores `#5090`'s four DoD
-  # bullets, and its falsifiers. `core` is where its subjects live —
-  # `tortoise/embed_gate.py`, `tortoise/value_gate.py` and
-  # `tortoise/search_engine.py` all select `core`, so the §12.2a predicate counts,
-  # the drift-red path and the three-mechanism probe run on the diffs that could
-  # break them. ⚠️ NOT the whole fix on its own: `tortoise/embeddings.py` (the
-  # `encode_for_row` seam) selects `eval`, and a named-surface match REPLACES the
-  # `core` fallback (#2938) — so the file is DUAL-REGISTERED in `eval` below, and
-  # `tools/dod_5090_probe.py` itself is a `CORE_ALSO` entry in
-  # `tools/ci_selection.py` (a `tools/`-only diff is swallowed by
-  # NON_PYTHON_PREFIXES before the `core` fallback runs). Pinned by
-  # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
-  - test_dod_5090_probe.py
+  # ⛔ DELIBERATELY NOT REGISTERED HERE. `tests/test_dod_5090_probe.py` was a
+  # `core` row: `core` is the fallback a diff reaches when it matches no named
+  # surface, so that row ran a document/status-word scorecard on essentially EVERY
+  # PR — the bureaucracy that made CI unusable. Its B arms are cut in the follow-up
+  # commit of this same change (AGENTS.md §Product Over Process); what remains is
+  # still registered in `eval` below, beside its one surviving subject
+  # (`tortoise/embeddings.py`, the `encode_for_row` seam). Re-adding it here
+  # re-inflates the every-PR gate.
   # #13108/#13121: the dense-leg probe (`tools/dense_leg_probe_13108.py`) is the
   # INSTRUMENT `#13108` reopens `STORAGE-ARCHITECTURE.md` §14.3 V3 on, so the
   # numbers it publishes are the evidence — and the PR that added it shipped them
