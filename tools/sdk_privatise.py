@@ -2241,9 +2241,9 @@ SWEEP_NAMES = 66
 #: REPORTS rather than refuses. `typed references still pointing at a public name: 0` on this tree,
 #: so no typed call site is legitimised by this re-cut. ⛔ THAT TREE IS `main`'s, NOT THIS ONE'S.
 #: ⛔ RE-CUT ONCE MORE ON `main`'s BEHALF, AND
-#: BOTH TREES WERE MEASURED RATHER THAN THE DELTA ASSUMED. `main` pins (11911, "3e92044bab08cc3d")
-#: while its OWN tree derives (11912, "73827c80583e139f"): `--check` exits 1 in a PRISTINE detached
-#: worktree at `2cccf90f4dd4` (`git status --porcelain` empty, `git ls-files --others` 0), so the
+#: BOTH TREES WERE MEASURED RATHER THAN THE DELTA ASSUMED. at `2cccf90f4dd4`, `main` pinned (11911,
+#: "3e92044bab08cc3d") while that tree derives (11912, "73827c80583e139f"): `--check` exits 1 in a
+#: PRISTINE detached worktree there (`git status --porcelain` empty, `git ls-files --others` 0), so the
 #: required `surface-guard` leg was red ON `main` and every open PR inherited that red — the #14062
 #: class, again, and repaired here for that reason rather than absorbed.
 #: ⛔ THIS PR ADDS NO ROW, AND THAT IS THE MEASUREMENT, NOT A CLAIM: `--repin` on THIS merge tree
