@@ -38,8 +38,10 @@ different decisions and had drifted apart:
   ``abuse_suspended`` has no rule episode, so no episode end ever re-arms its
   window. So a window is what a message
   SPENDS, and where releases fire often enough the effective bound is per
-  EPISODE, not per window. The engine closes the incident and re-arms delivery
-  at episode end.
+  EPISODE, not per window. At episode end the engine closes the RULE-episode
+  kinds' incidents — once their recovery window is satisfied — and re-arms their
+  delivery wherever that close's gate permits; ``abuse_suspended`` witnesses
+  neither.
 * :data:`ABUSE_ACTIVITY_KINDS` — a MEASUREMENT (#10156's ACTIVITY register). It
   files nothing **by design**, and every message says so; delivery is a bounded
   digest rather than one message per detector window.
