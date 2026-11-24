@@ -1831,6 +1831,41 @@ def test_an_unmeasured_usage_read_is_reported_not_read_as_zero(client,
     assert r.json()["estimate"]["usage_measured"] is False
 
 
+# ── the two interval knobs are FLOORED, not silently clamped (#14415 CI) ───
+def test_a_non_positive_batch_interval_falls_back_to_its_default():
+    """⛔ `TORTOISE_BATCH_RETRY_S=0` used to reach `time.sleep(0)` verbatim.
+
+    A 0 s interval does not tighten the retire thread, it SPINS it (a full
+    drain per loop, no wait), and `-1` never arrived at all because
+    `_int_env`'s `isdigit()` gate returned the default. The local `max(5, ...)`
+    / `max(30, ...)` clamps then substituted a value the operator never chose,
+    silently — the fail-open shape `_window_env` exists to remove, which is why
+    `tests/test_abuse.py::TestWindowFloor::test_no_window_is_read_with_int_env`
+    scans every `_S`-suffixed knob for it.
+
+    That scan is a STATIC one (it grades the call shape); this observes the
+    READ. Both constants are bound at IMPORT time, so it runs in a fresh
+    interpreter: re-importing a 53k-line module in-process would re-create its
+    executors. Mutant evidence (measured on this tree): restoring `_int_env` at
+    either site observes `5 30` — the clamp — and reds this pin.
+    """
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from tortoise import hosted_api as ha;"
+         "print(ha._BATCH_RETRY_INTERVAL_S, ha._BATCH_RESCAN_S)"],
+        env={**os.environ, "TORTOISE_BATCH_RETRY_S": "0",
+             "TORTOISE_BATCH_RESCAN_S": "0"},
+        capture_output=True, text=True, timeout=300, check=False)
+    assert out.returncode == 0, out.stderr[-2000:]
+    lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+    assert lines and lines[-1].split() == ["60", "900"], (
+        "a non-positive interval must fall back to its DEFAULT, not to a "
+        f"silent clamp; got {lines!r}")
+
+
 # ── #14415 review round 5: the reclaim window's two holes, pinned ─────────
 def test_a_restart_defers_a_fresh_claim_instead_of_discarding_it(store,
                                                                 monkeypatch):
