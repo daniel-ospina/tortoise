@@ -371,7 +371,14 @@ def test_the_jsonb_reader_reads_nothing_on_a_warm_process(fs_ops, monkeypatch):
 
     FALSIFIER (executed): restore `_JSONB_CACHE_TTL_SECONDS = 5.0` and its
     `time.monotonic` memo — the warm loop reds with `read_text:`/`open:` per
-    migration. Remove the memoisation entirely and the poison reds it.
+    migration.
+    ⛔ "Remove the memoisation entirely and the poison reds it" was FALSE and is
+    removed (#4625 review): the resident `jsonb_columns()` parses the entry's
+    memoised SQL and never calls `_jsonb_columns_for_dir`, so dropping its memo
+    re-parses in memory and touches no file. The pin for THAT property is
+    `tests/test_9548_record_search_keys_shape.py::test_the_jsonb_map_is_not_reparsed_per_parameter`,
+    which reds on a per-parameter re-parse (executed there); this pin's subject is
+    the filesystem count only.
     """
     rp._release_schema_cache()
     rp._jsonb_cache_clear()
@@ -654,10 +661,14 @@ def test_the_two_parse_paths_agree_on_the_real_tree():
     contract, one layer down. Pinned here so a future divergence REDS instead of
     shipping.
 
-    FALSIFIER (executed): strip comments AFTER joining rather than per file, in a
-    `/tmp` copy, and this test still passes (the two are equivalent today) — what
-    it reds on is a real semantic change to either path, e.g. dropping the
-    `ALTER … ALTER COLUMN … TYPE` shape from `_declared_types_from_chunks`.
+    ⚠️ WHAT THIS PIN CANNOT SEE, stated so nobody trusts it further than it goes:
+    both sides run the SAME parser (:func:`_declared_types_from_chunks`), so a
+    semantic change INSIDE that parser moves both sides identically and this pin
+    stays green (verified: deleting the `ALTER … ALTER COLUMN … TYPE` loop leaves
+    it passing). Catching that is `tests/test_11075_record_declared_type_contract.py`'s
+    job (13 failures on the same mutation). What this pin grades is the
+    CHUNKING — per-file vs one joined chunk, including where comments are stripped
+    — which is the only way the two callers can diverge.
     """
     tree = _real_migrations()
     per_file = rp._declared_types_for_dir(tree)

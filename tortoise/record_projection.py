@@ -2961,8 +2961,16 @@ def column_types(migrations_dir: Path | None = None) -> dict[str, dict[str, str]
     type has now refused its producer's value twice (#9264 `jsonb` ← integer,
     #10593 `jsonb` ← the graph's flat string), both times dropping the row while
     the journal stayed intact and `/health` read `ok: true`. This function is
-    what a pin compares the writer's BOUND VALUE against, and it answers from
-    the same parse the writer's own `jsonb` encoding uses.
+    what a pin compares the writer's BOUND VALUE against. ⛔ It does NOT answer
+    from the same parse the writer's `jsonb` encoding uses on the default path:
+    this one RE-READS the directory per call, while the writer's map comes from the
+    resident entry's memoised SQL. Both run the SAME parser
+    (:func:`_declared_types_from_chunks`), so the ANSWERS cannot differ for one
+    tree state — but on a process whose entry is already resolved, an edit is
+    visible here and not there until `_release_schema_cache()` (measured: append
+    `ALTER TABLE … ADD COLUMN delta_probe jsonb` and this reports it while the
+    encoder does not). That is the documented trade, and it is where a contract pin
+    and the encoder can part company.
     Parsed, never restated — a hand-copied type table is a second declaration of
     the schema, and the second declaration is the one that goes stale. The three
     shapes (CREATE TABLE, ADD COLUMN, ALTER COLUMN … TYPE) and the widened
@@ -3076,8 +3084,8 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     to be deliberately uncached "so a migration edit can never be read stale" —
     correct about the risk, wrong about the price. The price was measured when the
     door called it once per JOURNAL RECORD: every record re-read and
-    re-regex-parsed all twenty migration files (`record_writer` priced it at
-    "~4 ms of plan materialization"). ⚠️ Both frequencies are true and they are the
+    re-regex-parsed the migration files — FIFTEEN of them at that head, twenty now
+    (`record_writer` priced it at "~4 ms of plan materialization"). ⚠️ Both frequencies are true and they are the
     SAME call: one `replay_plan` is one batch, and the door calls it once per plan
     (before the record loop), so the pre-#9558 cost was paid once per BATCH — what
     #9558 removed was the per-RECORD read, and what #4625 removed is the re-read at
@@ -3102,7 +3110,10 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     the map, measures 0.460–0.583 ms at that population)
     versus the read+parse+regex 1.582–1.651 ms it replaces. For the resident
     schema the refresh is a VERB (`_release_schema_cache()`), not a per-batch
-    `stat`: #4625 measured that even the cheap pass runs on the serving thread.
+    `stat`: #4625 measured that the WRITE PATH paid filesystem work on the serving
+    thread (the TTL arm re-reading twenty `.sql` files); the fingerprint/stat pass
+    was on that path too and is what the resident entry removes, but ⛔ do not
+    attribute the 52.406 s stack to it — that chain never reached it.
 
     ⚠️ The returned dict is a fresh copy on every call, exactly as before: a
     caller that edits the map it was handed mutates its own copy, never the
@@ -3208,8 +3219,10 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
     :func:`table_columns` and with the same invalidation (#9558 / R10, #4625):
     `replay_plan` calls this next to `table_columns` once per batch, so an
     uncached parse here is the other half of the per-batch migration read, and a
-    per-call `stat` to revalidate it is the cost #4625 measured on the serving
-    thread. The copy-on-return rule is the same too.
+    per-call `stat` to revalidate it is one of the filesystem costs #4625 took off
+    the serving thread (the one its production stack actually caught was the TTL
+    arm's re-read; the `stat` pass is removed for the same reason, not because it
+    appears in that stack). The copy-on-return rule is the same too.
 
     ⛔ AN EMPTY READ IS NOT MEMOISED — the same rule, and the same reason, as
     :func:`_entry_sql_state` (#4625 review): `{}` is not `None`, so a parse of an
