@@ -1914,7 +1914,7 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
 #: legitimised by the re-cut; the pair below is `--repin`'s own output on THIS tree, never arithmetic
 #: on the last pin, and `--check` exits 0 on it.
-#: Re-pinned by `--repin` on THIS tree, never by arithmetic on the last pair: `(11913, "7f983a0f90145874")`.
+#: Re-pinned by `--repin` on THIS tree, never by arithmetic on the last pair: `(11912, "5283703bcbc10cd4")` — `main`'s #14419 B7 cut deleted 62 durations-map arithmetic tests, which took ONE untyped receiver row with them, so the pin moves DOWN by one and the digest with it.
 #: The last two re-cuts are attributable and worth knowing: 11896 -> 11900 was this PR's own batch
 #: surface at `4b7be98fb38b`; 11900 -> 11908 is the 402-copy tests added on the recut, whose new
 #: `ha.` / `est.` / `detail` attribute reads are untyped receivers the sweep deliberately leaves alone.
@@ -1935,7 +1935,7 @@ SWEEP_NAMES = 66
 #: `origin/feat/14219-batches`'s `edd9c68585b7`, are in the tree this record is written on), so the
 #: attribution above describes ONE of the two folds and the pair below is `--repin`'s own output on
 #: the RESOLVED tree — never either parent's, and never the sum of the two.
-SWEEP_RESIDUE = (11913, "7f983a0f90145874")
+SWEEP_RESIDUE = (11912, "5283703bcbc10cd4")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

@@ -7051,7 +7051,9 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 #     # never ran cannot appear in an artifact), so this is the LOCAL wall of …
 #
 # which reddened `test_no_durations_row_keeps_half_a_parenthesis` on the required
-# legs (run 41395489623, job 125131177056).
+# legs (run 41395489623, job 125131177056) while that pin existed — it went with
+# the durations-map arithmetic cut, and the join it guarded is now pinned by
+# `test_a_cut_on_a_wrapped_note_does_not_orphan_a_parenthesis` below.
 _WRAPPED_NOTE_MANIFEST = """\
 surfaces:
   core:
@@ -8217,7 +8219,10 @@ def test_the_unmeasured_markers_qualifier_goes_with_the_marker() -> None:
     assert ci_timing._restate_unmeasured_marker(
         "  # unmeasured by CI — #10025: some rationale") == \
         (f"  # {ci_timing._CARRIED_FORWARD} — #10025: some rationale")
-    # the guard's own spelling (`_UNMEASURED_ON_CI_RE`) is the other two prepositions
+    # the guard's own spelling (`tools/ci_timing.py`'s `_UNMEASURED_LEAD_RE`, whose
+    # qualifier alternation is `(?:on|in|by)`; the arm that named it,
+    # `test_no_durations_row_claims_it_is_unmeasured_on_ci_beside_a_ci_reading`,
+    # went with the durations-map arithmetic cut) is the other two prepositions
     for qualifier in ("on", "in"):
         assert ci_timing._strip_unmeasured_marker(
             f"  # unmeasured {qualifier} CI — #1: why") == "  # #1: why"
