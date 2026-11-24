@@ -9229,6 +9229,10 @@ def _emission_block_header(manifest_text: str) -> str:
 #: load-bearing either way: UNMASKED the block states 0 repeats too (measured), because `main`'s
 #: #14415 cut the 2 × 13-word quoted pair that once made it bite. It is kept because that pair is a
 #: shape a future fold can re-introduce, and the `quoted` fixture below grades the rule directly.
+#: ⛔ AND THE MASK IS NOW BOUNDED, which is the fail-closed half of the same rule: only a span of at
+#: most `_QUOTED_SPAN_MAX_WORDS` words is masked, so a REGION swallowed by a mis-pairing is graded
+#: like any other prose instead of hidden (see the constant — an even quote count does not make the
+#: PAIRING trustworthy).
 #:
 #: ⛔ 10 IS MEASURED, NOT CHOSEN — and the measurement is the guard's own false negative, taken on
 #: the block that the spliced fold carried: it stated ONE instruction verbatim twice ("never carry
@@ -9263,8 +9267,9 @@ _SPLICE_SHINGLE_WORDS = 10
 #: much may differ (a figure, a shard letter, a count), `_SPLICE_DIVERGENCE_RESYNC_WORDS` is how much
 #: must AGREE again afterwards (the discriminator — two IDENTICAL copies placed side by side also
 #: diverge once the first copy ends, but do not re-agree), and `_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS`
-#: bounds the read on the ~1,900-word block this head carries (measured: 1,936 words; the spliced
-#: fold's block was ~2,950). jscpd's clone taxonomy draws the same line: divergent
+#: bounds the read on the ~2,000-word block this head carries (measured: 1,948 words at the folded
+#: head; the spliced fold `45dd35ba9a`'s block was 3,043). jscpd's clone taxonomy draws the same
+#: line: divergent
 #: copies are reported as separate EXACT clones, and merging across a gap is opt-in there
 #: (`--max-gap-lines`), reported as a `similar` clone WITH its similarity score.
 #:
@@ -9284,6 +9289,15 @@ _SPLICE_DIVERGENCE_MAX_GAP_WORDS = 3
 _SPLICE_DIVERGENCE_RESYNC_WORDS = 6
 _SPLICE_DIVERGENCE_LOOKAHEAD_WORDS = 80
 _QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
+#: ⛔ A quoted span is masked only up to this many words — and the bound is a FAIL-CLOSED
+#: discriminator, not a tidy-up. The mask's whole purpose is the block's own quoted RETRACTION, which
+#: is a sentence; every legitimate quoted span on this block is <= 14 words (6 spans, 40 words of
+#: 1,948 measured). A MIS-PAIRED span is not a sentence: when parity survives but the pairing shifts
+#: (a fold duplicating TWO quote-bearing lines keeps the count even while moving which quote pairs
+#: with which), the mask swallows a REGION — measured 57 words on this block. Leaving a span longer
+#: than the bound VISIBLE means that region is graded like any other prose, so a splice inside it is
+#: reported instead of hidden; masking it would be the false PASS the parity check cannot see.
+_QUOTED_SPAN_MAX_WORDS = 40
 
 
 def _splice_shingle_positions(header: str) -> tuple[str, dict[str, list[int]]]:
@@ -9318,7 +9332,13 @@ def _splice_shingle_positions(header: str) -> tuple[str, dict[str, list[int]]]:
             "`merge=union` fold duplicated a line that OPENS a quoted clause, which re-pairs every "
             "quote after it and makes the masked spans meaningless. Re-derive the block with "
             "`--emit-push-matrix`; do not de-splice around it.")
-    masked = _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
+
+    def _mask(m: re.Match[str]) -> str:
+        if len(m.group(0).split()) > _QUOTED_SPAN_MAX_WORDS:
+            return m.group(0)
+        return '"' + " " * (len(m.group(0)) - 2) + '"'
+
+    masked = _QUOTED_SPAN_RE.sub(_mask, header)
     flat = re.sub(r"\s+", " ", masked).strip()
     words = flat.split()
     window = _SPLICE_SHINGLE_WORDS
@@ -9590,8 +9610,8 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     # ⛔ NON-VACUITY ON THE REAL BLOCK, not only on the fixtures: a header with fewer words than the
     # repeated-span window makes `_repeated_header_spans` return `[]` for ANY content, so the guard
     # below would be decoration on the one file it exists to grade. This block is ~1,900 words at
-    # this head (measured: 1,936; the spliced fold's was ~2,950), so the floor is roughly 19x below
-    # it — not a tuned value.
+    # this head (measured: 1,948 at the folded head; the spliced fold `45dd35ba9a` carried 3,043), so
+    # the floor is roughly 19x below it — not a tuned value.
     assert len(header.split()) > _SPLICE_SHINGLE_WORDS * 10, (
         f"the `fast_shards` header block is {len(header.split())} words — too short for a "
         f"{_SPLICE_SHINGLE_WORDS}-word repeated-span window to grade anything, so the arm below "
@@ -9741,6 +9761,21 @@ fast_shards: 11
     assert _repeated_header_spans(balanced), (
         "a spliced block whose quotes are BALANCED must still be reported — otherwise the parity "
         "check has become a way for a spliced header to pass")
+    # ⛔ EVEN PARITY IS NOT ENOUGH, and this is graded rather than asserted. Parity counts quotes, not
+    # PAIRING: a fold that duplicates TWO quote-bearing lines keeps the count even while moving which
+    # quote pairs with which, so the mask swallows a REGION and the shingles that would prove a splice
+    # never exist. Measured on the block this arm guards: such an inversion produced a 57-word
+    # "quoted span" (every legitimate span here is <= 14 words) and made the guard report `[]` over a
+    # clause stated twice. `_QUOTED_SPAN_MAX_WORDS` closes it by leaving a LONG span visible; this
+    # fixture is the shape that would reopen it — a splice INSIDE a region the mask would otherwise
+    # swallow, with parity even so no raise fires.
+    big = " ".join(header.split()[len(header.split()) // 2:][:_QUOTED_SPAN_MAX_WORDS + 20])
+    assert len(big.split()) > _QUOTED_SPAN_MAX_WORDS, "the probe region must exceed the bound"
+    swallowed = header.replace(big, big + " " + big, 1).replace(big, '"' + big + '"', 1)
+    assert swallowed.count('"') % 2 == 0, "the probe must leave quote parity EVEN"
+    assert _repeated_header_spans(swallowed), (
+        "a splice inside a region a mis-pairing would mask was NOT reported — the mask has become "
+        "a way for a spliced header to pass with its quote count even, which no parity check can catch")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
