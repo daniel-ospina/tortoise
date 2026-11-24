@@ -2805,10 +2805,18 @@ def test_on_a_post_merge_tree_the_dead_ratchet_is_STATED(monkeypatch, tmp_path, 
     monkeypatch.setattr(privatise, "baseline_rows", lambda *a, **k: (Counter(), {}, {}))
     monkeypatch.setattr(privatise, "SWEEP_RESIDUE", (0, "0" * 16))
     # The REAL `_is_own_base()` is graded: only `git` is stubbed, so the comparison it makes is
-    # the one that runs on `main` — `HEAD == <the resolved baseline>`.
-    monkeypatch.setattr(
-        privatise, "_git",
-        lambda *a: ("c" * 40) if tuple(a) == ("rev-parse", "HEAD") else "")
+    # the one that runs on `main` — `HEAD == <the resolved baseline>`. ⛔ The stub RESOLVES, because
+    # that is what `git rev-parse --verify <rev>^{commit}` does: a stub that answers "" for every
+    # rev would make the notice unreachable for spellings like `origin/main` (the defect this
+    # compares against was fixed by resolving, and a stub that cannot resolve hides it).
+    def fake_git(*a):
+        if tuple(a) == ("rev-parse", "HEAD"):
+            return "c" * 40
+        if tuple(a[:2]) == ("rev-parse", "--verify"):
+            return a[2].removesuffix("^{commit}")
+        return ""
+
+    monkeypatch.setattr(privatise, "_git", fake_git)
     monkeypatch.setattr(
         privatise, "baseline_rev",
         lambda explicit=None: ("c" * 40, "the merge base with origin/main"))
@@ -3268,3 +3276,20 @@ def test_py_files_asks_both_git_reads_to_fail_loudly(monkeypatch):
     assert len(seen) == 2, f"py_files must run exactly two git reads: {seen}"
     assert all(kwargs.get("check") is True for _args, kwargs in seen), (
         f"every git read must be check=True, or a failed one measures nothing: {seen}")
+
+
+def test_the_dead_ratchet_notice_survives_every_spelling_of_its_own_base():
+    """⛔ `_is_own_base` must RESOLVE the rev, or the disclosure it gates is skipped by spelling.
+
+    `git rev-parse HEAD` returns a 40-hex sha, so comparing it against the caller's text answers
+    False for `--baseline origin/main`, `--baseline HEAD` and an abbreviated sha — the invocations
+    the flag itself invites — and `--check` then reports "equal to the baseline, so nothing was
+    added" from a tree compared with ITSELF, with the `⛔ the baseline IS this commit …` notice and
+    the recorded-pin delta both skipped.
+    """
+    head = privatise._git("rev-parse", "HEAD").strip()
+    for spelling in ("HEAD", head, head[:12]):
+        assert privatise._is_own_base(spelling) is True, (
+            f"`{spelling}` names this commit; the notice must fire")
+    assert privatise._is_own_base("HEAD~5") is False, "an older rev is NOT this commit"
+    assert privatise._is_own_base("no-such-rev") is False, "an unresolvable rev is not a crash"
