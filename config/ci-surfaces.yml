@@ -77,10 +77,9 @@ version: 1
 # (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
 # `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 825.8 = 2.0344), so the two agree
 # by construction rather than by a hand re-read. Never carry this 825.8/825.7.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE, and the move is THIS PR's: measured with the verb on
-# each tree's own map, `main` alone packs its own split at its own sha — quoted there WITHOUT name
-# lists on purpose, because a name list would parse as a second clause and red the guard — so no
-# parent's figure may be carried here, and none is. ⛔ AND THIS BRANCH'S OWN ROW IS PART OF THE
+# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE, and the move is THIS PR's: `main` packs its own split at
+# its own sha, as the reading two paragraphs up shows, so the figures here are this tree's and not a
+# parent's. ⛔ AND THIS BRANCH'S OWN ROW IS PART OF THE
 # DELTA: this PR (#14344) adds exactly ONE fast-file registration of its own,
 # `tests/test_expansion_fusion_14344.py`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (the #3400/#4348
 # trap: a file a PR ADDS cannot carry a junit reading yet) — so the partition stated above is the
