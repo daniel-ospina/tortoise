@@ -1943,7 +1943,15 @@ SWEEP_NAMES = 66
 #: counter. The −2 is NOT undone: the typed rewrite is the change's point, and the census follows it.
 #: The pair below is `--repin`'s own output on THIS tree with both edits applied, never arithmetic on
 #: the last pin; `--check` exits 0 on it with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11899, "543a559f66bc5e86")
+#: ⛔ RE-CUT ONCE MORE by the #14284 RE-CUT (`origin/main` `148dece3197`), and the +4 over the pair
+#: this block's narrative lands on is NOT this re-cut's: `main`'s OWN tree at that base observes
+#: `(11903, 'df4f73cd9d41cdd1')` against the `(11899, "543a559f66bc5e86")` it COMMITS, so `--check`
+#: already exited 1 there — measured with the SAME tool's `--check` on the base tree, exactly the
+#: base-drift class the `(11843, "6aed5368ffa10513")` block above records, and repaired here rather
+#: than inherited. The re-cut carries the PR's content only (main took it in `024387f533`), so there
+#: are no rows to attribute row-by-row: the pair below is `--repin`'s own output on the RESOLVED
+#: tree, not arithmetic across the parents (main pins 11899, the branch 11872).
+SWEEP_RESIDUE = (11903, "df4f73cd9d41cdd1")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
