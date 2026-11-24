@@ -9926,14 +9926,6 @@ def test_the_14357_pins_run_on_the_diffs_they_guard_14362():
             f"(`{surface}`) or the file was renamed (#14362)")
 
 
-# ⛔ `_CLAUSE` is the window the surviving claim arms share: `.` and `;` bound it, and a `.`
-# followed by a digit does NOT (#12962 rebase review, P1 — the DECIMAL POINT of a figure used
-# to end the "sentence", so the most natural weight note returned `[]` while the claim was on
-# the page). The flat-default / UN-OVERSTATE family that gave this window its name was CUT in
-# the B7 test-volume cut, 2026-11-23.
-_CLAUSE = r"(?:[^.;]|\.(?=\d))*?"
-
-
 #: The `fast_shards` header block is the ONE place in the manifest that restates
 #: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
 #: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head
