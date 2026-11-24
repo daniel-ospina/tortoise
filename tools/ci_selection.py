@@ -6323,11 +6323,11 @@ def resolve_shard_routing(value: str | None) -> str:
 # so shipping `runs-on: [self-hosted, fold]` as the default would have produced
 # exactly that hang on every fold.
 #
-# So the decision lives HERE, in Python, where it is unit-tested (#10897's test
-# (d)), and the declaration `CI_FOLD_RUNNER_LABELS` is the operator switch:
-#   * unset / not a fold            -> every row keeps its own `runner`, byte-identical to main;
-#   * a fold + a VALID declaration  -> every row carries the declared label array;
-#   * a fold + an INVALID one       -> falls back to the row's own `runner` and says so on stderr.
+# So the decision lives HERE, in Python — TESTABLE, but UNGRADED since the B7 cut
+# (2026-11-23) took the fold-seam arms: inerting the resolver reds nothing (measured
+# 0 of 793). `CI_FOLD_RUNNER_LABELS` is the operator switch:
+#   * unset / not a fold -> every row keeps its own `runner`, byte-identical to main;
+#   * VALID -> every row carries the declared array;  * INVALID -> fall back and warn on stderr.
 # ⛔ A MALFORMED setting can only lose the priority, never the job. A WELL-FORMED
 # one naming a class no runner carries is the operator's deliberate assertion and
 # IS sufficient to hang the fold — `parse_fold_runner` checks the SHAPE of the
