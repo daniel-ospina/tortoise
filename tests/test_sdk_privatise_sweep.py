@@ -3191,3 +3191,37 @@ def test_the_sdk_class_body_is_read_from_the_same_bytes_as_the_blob(tmp_path, mo
     assert [d[3] for d in e.defs] == ["_update"], (
         "the blob's `def update` must be an EDIT, enumerated from the bytes it was parsed from — "
         f"reading the body off disk found the working tree's `renamed` instead: {e.defs}")
+
+
+def test_a_zero_file_walk_is_refused_not_passed(tmp_path, monkeypatch, capsys):
+    """⛔ A FAILED `git ls-files` MEASURES NOTHING, and a ratchet passes any shrink.
+
+    Under the equality pin an empty walk was RED by construction (`(0, digest) != pin`). A ratchet
+    passes `0 now vs 0 on the baseline`, so the measurement itself has to be refused — and
+    `py_files()` must fail loudly on a git error rather than returning `[]`.
+    """
+    _stub_walk(monkeypatch, tmp_path, [], names=(("update", "_update"),))
+    monkeypatch.setattr(privatise, "baseline_rev", lambda explicit=None: ("deadbeefcafe", "fixture"))
+    monkeypatch.setattr(
+        privatise, "baseline_rows", lambda rev, rmap, measured, sites=None: (Counter(), {}, {}))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 1, "a zero-file walk must red, never grade `0 vs 0` as a pass"
+    assert "measured no Python files" in capsys.readouterr().err
+
+
+def test_an_empty_baseline_string_is_a_refusal_not_an_absent_flag(tmp_path, monkeypatch, capsys):
+    """`--baseline "$REV"` with `REV` unset expands to an EMPTY string, which must still refuse.
+
+    Truthiness (`if explicit:`) cannot tell that from "the flag was not given", so the run would
+    answer about the merge base instead — at exit 0.
+    """
+    rev, why = privatise.baseline_rev("")
+    assert rev is None, f"an empty --baseline must not resolve to a tree: {(rev, why)}"
+    assert "does not name a commit" in why, why
+
+    (tmp_path / "growth.py").write_text(
+        "def probe(reg):\n    reg.update({'a': 1})\n", encoding="utf-8")
+    _stub_walk(monkeypatch, tmp_path, [tmp_path / "growth.py"], names=(("update", "_update"),))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check", "--baseline", ""])
+    assert privatise.main() == 2, "an EMPTY named baseline must refuse with exit 2"
+    assert "CANNOT ANSWER" in capsys.readouterr().err

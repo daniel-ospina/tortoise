@@ -2294,12 +2294,17 @@ def rename_map(rev: str | None = None) -> list[Entry]:
 
 
 def py_files() -> list[Path]:
+    # ⛔ `check=True`: a FAILED `git ls-files` (dubious-ownership refusal, a `GIT_INDEX_FILE`
+    # temp index, a corrupt index) used to return `""` and this walk would then measure NO files.
+    # With a total-count ratchet that reads as `0 now vs 0` — a PASS — so a lost measurement must
+    # be an ERROR, never an empty population. (The equality pin this change replaced could not be
+    # fooled that way; a ratchet has to refuse it explicitly.)
     tracked = subprocess.run(
-        ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True
+        ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout.split()
     untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard", "*.py"],
-        cwd=ROOT, capture_output=True, text=True,
+        cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout.split()
     out = []
     for f in tracked + untracked:
@@ -2354,7 +2359,11 @@ def baseline_rev(explicit: str | None = None) -> tuple[str | None, str]:
     (which is LOOSER, not stricter: the pin is frozen, so growth between this tree's count and
     the pin passes, and the caller prints that).
     """
-    if explicit:
+    if explicit is not None:
+        # ⛔ `is not None`, not truthiness: `--baseline "$BASE_REV"` with the variable UNSET yields
+        # an EMPTY string, which must be the documented refusal rather than "the flag was absent".
+        # Otherwise the run silently answers about the merge base, at exit 0, which is the exact
+        # substitution the refusal exists to prevent.
         try:
             _git("rev-parse", "--verify", f"{explicit}^{{commit}}")
         except subprocess.CalledProcessError:
@@ -3145,7 +3154,9 @@ def main() -> int:
         after_residue: Counter = Counter()
         per_file: dict[str, Counter] = {}
         per_file_sites: dict[str, dict[str, list[int]]] = {}
+        walked = 0
         for p in py_files():
+            walked += 1
             e2 = edits_for(p, rmap)
             after += len(e2.attrs) + len(e2.defs) + len(e2.strings)
             after_residue.update(e2.residue)
@@ -3174,11 +3185,22 @@ def main() -> int:
             )
             return 1
         base_rev, why = baseline_rev(args.baseline)
-        if base_rev is None and args.baseline:
-            # A baseline the caller NAMED and we cannot resolve is a refusal, not a fallback: the
-            # run would otherwise answer a different question than the one it was asked.
+        if base_rev is None and args.baseline is not None:
+            # A baseline the caller NAMED (even as an EMPTY string) and we cannot resolve is a
+            # refusal, not a fallback: the run would answer a different question than it was asked.
             print(f"CANNOT ANSWER: {why}. Nothing was graded.", file=sys.stderr)
             return 2
+        if walked == 0:
+            # ⛔ A ZERO-FILE WALK IS NOT A CLEAN TREE. A `git ls-files` that failed (or a working
+            # tree that is not the one this gate is about) leaves the count at 0, and a ratchet
+            # PASSES any shrink by construction — so the measurement itself has to be refused.
+            print(
+                "CANNOT ANSWER: the walk measured no Python files at all, so a 0-row count is "
+                "not a clean tree — `git ls-files` failed, or this is not the tree the gate is "
+                "about. Nothing was graded.",
+                file=sys.stderr,
+            )
+            return 1
         if base_rev is None:
             # DEGRADED: with no `origin/main` there is no tree to measure, so the recorded pin is
             # the only ceiling available. ⛔ That is LOOSER than the ratchet, not stricter — it
