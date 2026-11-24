@@ -6004,14 +6004,14 @@ class _ManifestShapeError(RuntimeError):
 #: orphaned"). ⚠️ Two events, two dates: dating the CUT alone points a reader at
 #: `8c373f59a1`, where the table is still DEFINED — the same
 #: not-verifiable-at-the-point-of-reading failure the named CALL removes. The CALL
-#: is named rather than pointed at (#14493 review, P2) because it sits ABOVE this
-#: block: the revision this one replaces said "the CALL reference BELOW" about a
-#: reference ABOVE it — cycle 1's direction defect, re-minted — and "the sweep
-#: below" sends a reader the wrong way, so one who finds no sweep concludes
-#: `_BUNDLE_SOURCES` is unconsumed, which is the "both were CUT" error this sentence
-#: exists to remove. No linter reads prose (ruff's F841 is function-scope only, and
-#: no rule resolves comment line references), so nothing but this note's own
-#: accuracy keeps it true.
+#: is named rather than pointed at with a direction word (#14493 review, P2): it
+#: sits ABOVE this block, so "below" would send a reader the wrong way, and one who
+#: then found no sweep would conclude `_BUNDLE_SOURCES` is unconsumed — the "both
+#: were CUT" error this sentence exists to remove. ⛔ No claim in this note points
+#: at an earlier revision of the note itself: those commits do not survive the squash
+#: merge, so a reader cannot check one. No linter reads prose (ruff's F841 is
+#: function-scope only, and no rule resolves comment line references), so nothing
+#: but this note's own accuracy keeps it true.
 #: Every number below was verified by READING, which is why
 #: four of them were still wrong when the commit that re-derived them landed.
 _EPIC_CITE_DOCS = {
