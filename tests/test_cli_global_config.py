@@ -236,6 +236,73 @@ class TestCreatePointRetrySafety:
         # is made. Mutation: restore an angle-bracket placeholder and this REDs.
         assert "<" not in out
 
+    def test_the_success_hint_does_not_print_a_url_credential(self, tmp_path, capsys):
+        """The success path prints `api_url` into the transcript, so it must mask
+        it exactly as the doctor row does.
+
+        ⛔ WHY THIS PIN EXISTS: the masking is a SECURITY control, not formatting.
+        `api_url` is store-supplied — and `_resolve_config_path` passes it through
+        VERBATIM, while `./.tortoise` is repo-controllable — so a store holding
+        `https://user:pw@host` would otherwise put that credential into a
+        transcript the user pastes into a ticket. The SAME class is pinned twice on
+        the doctor row (`test_the_hosted_row_does_not_print_a_url_credential`,
+        `test_control_bytes_in_the_hosted_row_cannot_forge_a_graph_row`); the
+        success path had no equivalent at all.
+
+        Measured before this pin: reverting the interpolation to
+        `_printable(api_url or '')` left EVERY test green (173 passed), so a future
+        "simplify the f-string" could delete the mask silently.
+
+        Mutation: drop `_mask_display_target(...)` from the hint and this REDs
+        (observed).
+        """
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o700)
+        store = d / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_url": "https://svc:s3cr3t@api.premiselabs.co",
+        }))
+        store.chmod(0o600)
+
+        with mock.patch("urllib.request.urlopen", return_value=_ok({"id": "p1"})):
+            assert main(["create-point", "hello world"]) == 0
+        out = capsys.readouterr().out
+
+        # The credential must not reach the transcript...
+        assert "s3cr3t" not in out
+        assert "svc:" not in out
+        # ...the userinfo is masked, and the host stays usable so the instruction
+        # is still runnable rather than redacted into uselessness.
+        assert "https://:***@api.premiselabs.co/v1/search" in out
+
+    def test_the_success_hint_does_not_let_a_url_forge_a_line(self, tmp_path, capsys):
+        """`_printable` is the line-forgery guard on the same interpolation.
+
+        A store `api_url` containing a newline would otherwise emit a second,
+        attacker-authored line into the transcript — the class the doctor row pins
+        as `test_control_bytes_in_the_hosted_row_cannot_forge_a_graph_row`.
+
+        Mutation: drop `_printable(...)` at the hint and this REDs (observed).
+        """
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o700)
+        store = d / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_url": "https://a.example.test\n  FORGED-LINE",
+        }))
+        store.chmod(0o600)
+
+        with mock.patch("urllib.request.urlopen", return_value=_ok({"id": "p1"})):
+            assert main(["create-point", "hello world"]) == 0
+        out = capsys.readouterr().out
+
+        # No physical transcript line may start with the forged payload.
+        assert not any(ln.strip().startswith("FORGED-LINE") for ln in out.splitlines())
+
     def test_a_trailing_slash_api_url_does_not_produce_a_double_slash(
             self, tmp_path, capsys):
         """D5: `_resolve_config_path` returns `TORTOISE_API_URL` VERBATIM, so a
