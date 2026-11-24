@@ -1169,7 +1169,8 @@ def test_a_claim_re_entered_from_extracting_counts_towards_the_ceiling(store,
         return real_put_item(org_id, item)
 
     def failing_terminal_write_if_state(org_id, item, expected,
-                                        expected_attempts=None):
+                                        expected_attempts=None,
+                                        token_delta=None):
         if item.state in (bi.BatchItemState.INDEXED,):
             raise RuntimeError("put_item_if_state timeout")
         return real_put_item_if_state(org_id, item, expected)

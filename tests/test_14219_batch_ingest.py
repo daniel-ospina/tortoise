@@ -1128,7 +1128,8 @@ def test_a_cancel_between_the_read_and_the_claim_does_not_run_the_runner():
     real_cas = store.put_item_if_state
     fired = {"done": False}
 
-    def cancelling_cas(org_id, item, expected, expected_attempts=None):
+    def cancelling_cas(org_id, item, expected, expected_attempts=None,
+                       token_delta=None):
         if (not fired["done"] and expected is BatchItemState.QUEUED
                 and item.state is BatchItemState.EXTRACTING):
             fired["done"] = True
@@ -1349,7 +1350,8 @@ def test_two_reclaimers_cannot_both_win_the_same_stale_row(monkeypatch):
     real_cas = store.put_item_if_state
     fired = {"done": False}
 
-    def racing_cas(org_id, item, expected, expected_attempts=None):
+    def racing_cas(org_id, item, expected, expected_attempts=None,
+                   token_delta=None):
         if (not fired["done"] and expected is BatchItemState.QUEUED
                 and item.state is BatchItemState.EXTRACTING):
             fired["done"] = True
@@ -1937,3 +1939,190 @@ def test_a_foreign_org_cannot_reach_a_batch():
     finally:
         graph.query("MATCH (n) DETACH DELETE n")
         graph.delete()
+
+
+def test_a_settle_write_failure_still_bills_the_spend_it_made():
+    """⛔ ROUND-7 REVIEW P2: a bookkeeping failure is not a lost spend.
+
+    `BATCH_QUERY_TIMEOUT_MS`'s comment promises that a bookkeeping write which
+    cannot finish inside the bound "FAILS the item (visible)". It did not: the
+    exception left `run_item`, `_drain_batch`'s per-item handler only logged it, no
+    `charge_in/charge_out` was ever set, so `record_item_spend` was never called
+    and `_report_unmetered` never fired — the runner had already spent, and the
+    spend landed on neither the row, the ledger, nor the operator surface while the
+    row stayed `extracting` for a later reclaim to run again.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+    from tortoise import batch_ingest as batch_ingest_module
+
+    charged: list[int] = []
+    real_record = batch_ingest_module.record_item_spend
+
+    def record(org_id, *, tokens_in=0, tokens_out=0, **kwargs):
+        charged.append(int(tokens_in) + int(tokens_out))
+        return real_record(org_id, tokens_in=tokens_in, tokens_out=tokens_out,
+                           **kwargs)
+
+    real_cas = store.put_item_if_state
+
+    def failing_settle(org_id, item, expected, **kwargs):
+        if item.state is BatchItemState.INDEXED:
+            raise RuntimeError("put_item_if_state timeout")
+        return real_cas(org_id, item, expected, **kwargs)
+
+    store.put_item_if_state = failing_settle
+    batch_ingest_module.record_item_spend = record
+    try:
+        out = coord.run_item(
+            ORG, store.get_item(ORG, batch.batch_id, items[0].item_id),
+            lambda i: ItemOutcome(BatchItemState.INDEXED, tokens_in=700))
+        if out.charge_in or out.charge_out:
+            batch_ingest_module.record_item_spend(
+                ORG, tokens_in=out.charge_in, tokens_out=out.charge_out)
+    finally:
+        store.put_item_if_state = real_cas
+        batch_ingest_module.record_item_spend = real_record
+
+    assert charged == [700], (
+        "a settle write that failed dropped a real spend from the ledger — the "
+        f"runner's 700 tokens were billed as {charged}")
+
+
+def test_two_settles_to_the_same_state_both_accumulate_tokens():
+    """⛔ ROUND-7 REVIEW P2: the settle write must ADD, not write back a total.
+
+    The settle path's compare is on STATE, so a runner reporting a retryable
+    `extracting` over a row already `extracting` matches it — and `_advance_landed`
+    rebases onto the row it READ. Two writers that both read before either writes
+    therefore each compute `read + 100` and the second write OVERWRITES the first:
+    200 spent and 200 billed, receipt `100`. The peer's write is made to land
+    INSIDE our read→write window here, which is the only arrangement where the two
+    implementations differ (sequentially the second call simply reads the first's
+    result and accumulates either way — measured green under the mutation).
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+    stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
+
+    real_cas = store.put_item_if_state
+    peer = {"done": False}
+
+    def peer_writes_first(org_id, item, expected, **kwargs):
+        if not peer["done"] and item.state is BatchItemState.EXTRACTING:
+            peer["done"] = True
+            # A peer's settle lands between THIS call's read and its write.
+            coord._advance_landed(
+                ORG, stale, BatchItemState.EXTRACTING, tokens_in=100,
+                expected=BatchItemState.EXTRACTING)
+        return real_cas(org_id, item, expected, **kwargs)
+
+    store.put_item_if_state = peer_writes_first
+    try:
+        _, landed = coord._advance_landed(
+            ORG, stale, BatchItemState.EXTRACTING, tokens_in=100,
+            expected=BatchItemState.EXTRACTING)
+    finally:
+        store.put_item_if_state = real_cas
+
+    assert peer["done"] and landed, (
+        "both settles must land for this test to prove anything")
+    row = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    assert row.tokens_in == 200, (
+        "the second settle wrote its own read+delta over the first: 200 tokens "
+        f"spent, the row records {row.tokens_in}")
+
+
+def test_a_status_poll_settle_cannot_rewrite_a_cancel_stamp():
+    """⛔ ROUND-7 REVIEW P2: `settle()`'s derived-cancel compare must exclude CANCELLED.
+
+    Including it made the compare MATCH the row a `cancel()` had just written:
+    `settle()` reads the batch as `running`, the cancel lands its own `put_batch`
+    (`cancelled_at=T`, `cancel_reason="cancelled by the customer"`), and the
+    derived write then replaced BOTH with `self._now()` and the first item's
+    reason. `cancelled_at` is the audit half of a billing-visible act, so the field
+    that says who asked and when was rewritten by a derivation.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+    # The items are already stopped, so `settle()` will take its derived-cancel
+    # arm — and the BATCH row is still `accepted`, so its copy carries no stamp.
+    row = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    row.state = BatchItemState.CANCELLED
+    row.reason = "cancelled by the customer"
+    store.put_item(ORG, row)
+
+    stamp = "2026-01-01T00:00:09+00:00"
+    real_cas = store.put_batch_if_state
+    fired = {"done": False}
+
+    def cancel_lands_first(batch_row, expected):
+        if not fired["done"]:
+            fired["done"] = True
+            # The cancel's own write, INSIDE settle's read→write window.
+            real = store.get_batch(ORG, batch_row.batch_id)
+            real.state = BatchState.CANCELLED
+            real.cancelled_at = stamp
+            real.cancel_reason = "cancelled by the customer"
+            store.put_batch(real)
+        return real_cas(batch_row, expected)
+
+    store.put_batch_if_state = cancel_lands_first
+    try:
+        coord.settle(ORG, batch.batch_id)
+    finally:
+        store.put_batch_if_state = real_cas
+
+    after = store.get_batch(ORG, batch.batch_id)
+    assert fired["done"], "the interleaving never fired — the test proves nothing"
+    assert after.cancelled_at == stamp, (
+        "a status poll's derived write rewrote the cancel's own audit stamp: "
+        f"{stamp} -> {after.cancelled_at!r}")
+    assert after.cancel_reason == "cancelled by the customer"
+
+
+def test_a_cancel_stops_the_queued_set_in_one_statement():
+    """⛔ ROUND-7 REVIEW P2: the cancel loop was two round trips PER ITEM.
+
+    `cancel()` walked the list and each iteration cost `get_item` +
+    `put_item_if_state`. At the documented maximum batch (1 000 items) that is
+    ~2 000 sequential statements inside one request on a two-worker executor: a
+    504 over a cancel that keeps writing, with the customer's next status read
+    queued behind it. The `queued` class is now stopped by ONE set-based
+    compare-and-set; only a STALE claim still takes the per-item path.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    refs = [f"/d/{i}.md" for i in range(50)]
+    batch, items = coord.submit(ORG, refs)
+
+    per_item: list[str] = []
+    real_cas = store.put_item_if_state
+
+    def counting_cas(org_id, item, expected, **kwargs):
+        per_item.append(item.item_id)
+        return real_cas(org_id, item, expected, **kwargs)
+
+    set_based: list[int] = []
+    real_bulk = store.cancel_queued_items
+
+    def counting_bulk(org_id, batch_id, **kwargs):
+        set_based.append(1)
+        return real_bulk(org_id, batch_id, **kwargs)
+
+    store.put_item_if_state = counting_cas
+    store.cancel_queued_items = counting_bulk
+    try:
+        _, after = coord.cancel(ORG, batch.batch_id, reason="stopped")
+    finally:
+        store.put_item_if_state = real_cas
+        store.cancel_queued_items = real_bulk
+
+    assert len(set_based) == 1, "the queued set was not stopped by one statement"
+    assert per_item == [], (
+        f"the cancel still took {len(per_item)} per-item round trips")
+    assert all(i.state is BatchItemState.CANCELLED for i in after)
