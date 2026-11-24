@@ -252,7 +252,18 @@ _NP_STOP = (
     # is answered with the polarity-INVERTED population). ⛔ `to` alone stops every
     # infinitive spelling; `being` is the progressive, and it is a separate token
     # because no infinitive marker sits in front of it.
-    r"|not|never|neither|nor|longer"
+    # ⛔ `n't` IS A MEMBER AND IT IS NOT INERT (corrected by measurement on the
+    # head that removed it as dead): `_NP_WORD` is `[a-z0-9][a-z0-9'-]*`, so a
+    # word-run element may begin with `n` and carry the apostrophe, and
+    # `is the plan n't archived` routed to `ended`/`is_predicate` once `n't` was
+    # dropped. The lookahead fires at exactly a WORD START, which is where the
+    # run's next element begins. What the start anchor closes is the CONTRACTED
+    # COPULA spelling (`isn't the plan cancelled`), which never reaches this
+    # shape at all — a different string, and not a reason to drop the token. A
+    # standalone `n't` is not a spelling a caller produces, but the token costs
+    # no recall and its row is pinned, so the negation class stays closed rather
+    # than narrowed by an argument that does not hold.
+    r"|not|never|neither|nor|longer|n't"
     r"|to|being"
     r"|or"
     # ⛔ AND AT A CLAUSE LINKER / ADJUNCT MARKER, which is the same defect one
@@ -262,14 +273,6 @@ _NP_STOP = (
     # archived`, and `is the policy unless bookings were cancelled` (whose own
     # finite verb `were` sat inside the run). Measured on the head that already
     # carried the negation/futurity/disjunction list: all three still routed.
-    # ⛔ `n't` WAS a member of that line and is removed here as INERT, measured:
-    # `_NP_WORD` is `[a-z0-9][a-z0-9'-]*`, so no token can BEGIN with `n't` and the
-    # lookahead can never fire at a word start, while a contracted copula
-    # (`isn't the plan cancelled`) never reaches this shape at all — the start
-    # anchor is `^(?:is|are|was|were)\s+`. Dropping it moves no row in this file or
-    # in `test_13557_13558_reachable_reads.py`. A guard that cannot fire is not a
-    # guard, and it hides the fact that the class it appears to close is closed by
-    # the anchor.
     r"|unless|once|if|before|after|until|while|because|although|though"
     r"|each|every|both|either|another|several|many|most|few|none)\b)"
 )

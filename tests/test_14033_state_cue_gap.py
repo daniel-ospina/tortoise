@@ -272,11 +272,12 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       to an adjunct clause and the question's predicate is `safe` / `accurate` /
       the policy's applicability, so the run would swallow it;
     * the PREDICATE-MODIFIER stop is the sixth guard, and its falsifier is the
-      TWENTY-TWO measured rows of
+      TWENTY-THREE measured rows of
       :func:`test_a_modified_predicate_is_not_the_question_asked` (the count is
       the tuple's own length, not the review's twelve and not the round-8
-      nineteen: eleven NEGATED — seven plain, four correlative/`no longer`/
-      `any longer` — seven FUTURE, three PROGRESSIVE and one DISJUNCTIVE) —
+      nineteen: twelve NEGATED — seven plain, four correlative/`no longer`/
+      `any longer`, one standalone `n't` — seven FUTURE, three PROGRESSIVE and
+      one DISJUNCTIVE) —
       dropping the `not|never|…|or` line routes that class, which answers the
       question with the POLARITY-INVERTED (or a not-yet-existing, or an
       in-flight) population;
@@ -401,6 +402,11 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     "is the plan neither deprecated nor retired",
     "is the ticket still not archived",
     "is the plan any longer cancelled",
+    # a standalone `n't` token, which `_NP_WORD` accepts because a word-run
+    # element may begin with `n` — the guard is live, not inert (see the
+    # module's `_NP_STOP` note; the CONTRACTED copula `isn't the plan cancelled`
+    # is refused by the start anchor instead, which is a different string)
+    "is the plan n't archived",
     # futurity / intent — the ending has not happened, so the ended population
     # cannot answer it (the second row is the NP-bound boundary pin above)
     "is the v2 api to be retired",
