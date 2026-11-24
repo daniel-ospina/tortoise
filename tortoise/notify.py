@@ -96,8 +96,10 @@ _BILLING_SEND_FAILED_KIND = KIND_BILLING_SEND_FAILED
 
 #: #14407 — the abuse classes whose human alert is a property of the
 #: INCIDENT, not of the detection. Each one files (or reuses) a durable,
-#: assignable incident, and the Telegram message is emitted by the store's
-#: create-once path — so ONE incident is ONE message for its whole lifecycle.
+#: assignable incident, and its messages come from the store's create-once path:
+#: ONE opening push for the episode, at most ONE re-alarm per
+#: ``_INCIDENT_DELIVERY_WINDOW_S`` while it stays open (the message NAMES the
+#: issue), and one ✅ close at episode end — never one message per detection.
 #: Pre-#14407 the push was emitted per DETECTION here and ``abuse_flag`` filed
 #: nothing at all, which is how an alert arriving in the owner's chat could be
 #: attributed by no issue, no runbook and no search.

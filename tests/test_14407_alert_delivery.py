@@ -1408,8 +1408,9 @@ def test_a_clean_window_with_no_episode_does_no_store_work(monkeypatch):
 
     Pre-fix `ended` meant "the clean-window read did not raise", so every clean
     evaluation — the overwhelmingly common case, twice per point create — ran the
-    episode-end resolution: 2 incident kinds × 2 subject spellings =
-    up to 8 `resolve_incident_state` calls, each one an R2 `get_object` round
+    episode-end resolution: 2 incident kinds × 1 rule-scoped subject (the
+    bare-spelling arm is gone since `439db940711c`) = up to 4
+    `resolve_incident_state` calls, each one an R2 `get_object` round
     trip through `_read_json`, on the 4-worker abuse pool. The pre-#14407 path
     spent zero network calls here.
     """

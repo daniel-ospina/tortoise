@@ -2057,9 +2057,12 @@ class AbuseEngine:
             # INCIDENT-side work (`_end_alert_episode`). The clean window is the
             # overwhelmingly common evaluation — an org under its threshold — and
             # for it there is no episode at all; firing that work on that branch
-            # anyway cost up to 8 R2 GETs per `record_point_create`
-            # (2 rules × 2 incident kinds × 2 subject spellings,
-            # `resolve_incident_state` → `_read_json` → `storage.download`), on the
+            # anyway cost up to 4 `resolve_incident_state` calls per
+            # `record_point_create` (2 rules × 2 incident kinds × ONE subject —
+            # `resolve_abuse_episode` resolves only the rule-scoped spelling since
+            # `439db940711c` removed the bare-spelling arm; the figure was 8 while
+            # that second spelling was also resolved), each a `_read_json` →
+            # `storage.download` round trip, on the
             # 4-worker abuse pool whose documented cost profile is "microseconds of
             # accounting" (`monitoring.py` CONTROL_PLANE_ABUSE_*). Zero pre-#14407.
             # The IN-PROCESS claim release below is NOT part of that gate: it is a
@@ -2082,7 +2085,7 @@ class AbuseEngine:
                 # The ENGINE claim is released whenever the clean-window read/write
                 # SUCCEEDED — NOT only when a flag episode was observed to end.
                 # `_release_notify` is a dict `pop` under a lock (no I/O), so the
-                # `flagged` gate below — whose whole motive is up to 8 R2 GETs per
+                # `flagged` gate below — whose whole motive is up to 4 store reads per
                 # clean window — does not apply to it. Gating it on `flagged` muted
                 # a re-breach after an episode was cleared OUT OF BAND
                 # (`abuse_unsuspend`, a manual `flag_clear`): that flag_clear makes
