@@ -9765,6 +9765,22 @@ def _durations_row_comment(name: str) -> str:
     return m.group(1) if m else ""
 
 
+#: A row's ADOPTED-SWEEP BASIS, in the shape `tools/ci_timing.py --refresh-durations`
+#: appends: the sample label, the date it sampled and the run it read, optionally
+#: followed by the previous value. END-ANCHORED on the note, because the refresher
+#: emits the basis as the note's tail — and because an unanchored `ci-timing junit`
+#: search accepts a note that merely PROMISES a future sweep, which is where a
+#: hand-picked weight hides (measured: `0.3` with "… a hand-picked local reading;
+#: ci-timing junit-census+top-15 will replace it from the first sweep" stayed GREEN
+#: over the previous spelling — #13722 review cycle 6, P2). The label shape is
+#: `tools/ci_timing.py::_SAMPLE_LABEL_RE`'s; it is restated here rather than imported
+#: because that constant is private to the refresher and this pin must not move with
+#: its internals, and because the two assertions below grade this spelling itself.
+_ADOPTED_SWEEP_BASIS_RE = re.compile(
+    r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2} \(run [^)]*\)"
+    r"(?:;[ \t]*was [0-9]+(?:\.[0-9]+)?)?[ \t]*$")
+
+
 def test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722():
     """#13722 review finding: a file a PR ADDS takes the flat default, not a local weight.
 
@@ -9795,8 +9811,10 @@ def test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722():
     red on a correct refresh — and the cheapest way to green it is to put an unmeasured
     `2.0` back into a shard-layout input, i.e. the very defect this pin exists for. So
     a non-default figure is accepted when the row states an adopted-sweep tail
-    (`ci-timing junit-census…`), which is exactly how every measured row in the map
-    records where its reading came from, and nothing else is.
+    (`ci-timing junit-census…` in the refresher's own `… <date> (run …); was N` shape),
+    which is how the `durations` refresher records its readings, and nothing else is —
+    a note that only MENTIONS the refresher is not a basis, and the two assertions below
+    grade that distinction so this escape cannot widen into a hole.
     """
     from tools.ci_selection import DEFAULT_FAST_WEIGHT, load_manifest
     name = "test_13722_stamp_chain_off_loop.py"
@@ -9808,15 +9826,31 @@ def test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722():
     assert name in real, (
         f"#13722 put {name} in a fast surface but ships no `durations:` row, so it "
         "packs at the flat default with nothing recording what the weight covers")
-    assert real[name] == DEFAULT_FAST_WEIGHT or re.search(
-        r"ci-timing\s+junit", _durations_row_comment(name)), (
+    assert real[name] == DEFAULT_FAST_WEIGHT or _ADOPTED_SWEEP_BASIS_RE.search(
+        _durations_row_comment(name)), (
         f"{name} carries {real[name]!r} s, not the flat `DEFAULT_FAST_WEIGHT` "
         f"({DEFAULT_FAST_WEIGHT!r} s) — a file a PR ADDS cannot carry a junit reading "
         "yet (#3400/#4348), so any other figure without an adopted-sweep tail is a "
-        "hand-picked shard-layout input, and the packer re-packs every bin around it "
+        f"hand-picked shard-layout input, and the packer re-packs every bin around it "
         "(moving the graded `fast_shards` partition this map states). The two escapes "
-        f"are the flat default and a `ci-timing junit-census…` tail; the row says: "
+        "are the flat default and an adopted-sweep BASIS in the refresher's own "
+        "`ci-timing junit-census+top-15 <date> (run …)` tail shape; a note that merely "
+        f"promises a future sweep is not one. The row says: "
         f"{_durations_row_comment(name)[:160]!r}")
+    # ⛔ AND THE ESCAPE IS GRADED, not trusted (#13722 review cycle 6, P2): a note that
+    # only MENTIONS the refresher — the shape a hand weight hides behind — must not
+    # pass, and the refresher's own tail must not be refused (a correct refresh is not
+    # a defect, and the cheapest green for a false red is an unmeasured default).
+    assert not _ADOPTED_SWEEP_BASIS_RE.search(
+        "a hand-picked local reading; ci-timing junit-census+top-15 will replace it "
+        "from the first sweep"), (
+        "the adopted-sweep escape accepts a note that merely PROMISES a sweep, so a "
+        "hand-picked weight can ride behind the promise — the defect this pin exists for")
+    assert _ADOPTED_SWEEP_BASIS_RE.search(
+        "ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0"), (
+        "the adopted-sweep escape rejects the refresher's OWN basis tail, so a correctly "
+        "refreshed reading would red this pin and the cheapest green is an unmeasured "
+        "`DEFAULT_FAST_WEIGHT`")
     holed = {k: v for k, v in real.items() if k != name}
     assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
         "dropping THIS row from the live map must name exactly this file as rowless; "
