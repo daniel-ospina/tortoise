@@ -4206,8 +4206,41 @@ def _subject_element(markup: str, compound: str,
     return _element_carrying_class(markup, classes[-1])
 
 
+#: One pseudo-class or pseudo-element token, WITH its parenthesised argument
+#: when it has one (`:nth-child(2)`, `::before`, `:not(.popular)`).
+_CSS_PSEUDO_TOKEN = re.compile(r"::?[\w-]+(?:\([^)]*\))?")
+
+#: The NEGATION form, whose argument says what the rule does NOT select.
+_CSS_NOT_PSEUDO = re.compile(r":not\(([^)]*)\)", re.IGNORECASE)
+
+#: The pseudo-classes whose ARGUMENT is a selector list, so the classes inside it
+#: are part of what the rule names (`:is(.pricing-card.popular)` selects the
+#: popular card). Every other pseudo narrows or decorates without naming one.
+_CSS_IS_PSEUDO = re.compile(r":(?:is|where)\(([^)]*)\)", re.IGNORECASE)
+
+
+def _css_class_fragment(selector: str) -> str:
+    """`selector` with its pseudo-classes reduced to what they say about CLASSES.
+
+    `:not(…)` is the CALLER's to disprove first — its argument says what the rule
+    does NOT select, so it must be resolved before this runs, never folded in.
+    """
+    unwrapped = _CSS_IS_PSEUDO.sub(r" \1 ", selector)
+    return _CSS_PSEUDO_TOKEN.sub(" ", unwrapped)
+
+
+#: One class token, so a TAG-qualified compound (`div.pricing-card`) yields the
+#: class it names rather than a bare `div` in the class position.
+_CSS_CLASS_TOKEN = re.compile(r"\.([\w-]+)")
+
+
+def _css_classes(selector: str) -> set[str]:
+    """The class names a selector fragment NAMES (`.a.b` → `{a, b}`)."""
+    return set(_CSS_CLASS_TOKEN.findall(selector))
+
+
 def _compound_selects_every_subject(rightmost: str, compound: str) -> bool:
-    """Does this class-only RIGHTMOST rule select EVERY element of `compound`?
+    """Does this RIGHTMOST rule select EVERY element of `compound`?
 
     ⛔ `_css_rightmost_selects` compares the class TEXT, so `.pricing-card`
     does not match the compound `.pricing-card.popular` — and
@@ -4223,14 +4256,68 @@ def _compound_selects_every_subject(rightmost: str, compound: str) -> bool:
     the caller keeps the specificity ordering — a base rule cannot out-rank the
     popular card's own rule, so a correct page is unaffected (verified: the
     clean page still reads base 1.0 / popular 2.0 / extra 1.0).
+
+    ⛔ AND A PSEUDO-CLASS IS NOT A LICENCE TO GIVE UP (#14406 review round 23,
+    measured). Bailing on any `:` threw away the whole class-only question, and
+    the two other reach readers both miss the same selectors —
+    `_css_rightmost_selects` because the COMPOUND text is not a substring of
+    them, `_css_compound_matches_element` because it refuses class-named
+    compounds. So `.popular:nth-child(2) { border-bottom-width: 3px }` selected
+    the popular card in a browser (same (0,2,0) as its own border rule, later in
+    source) and was invisible to BOTH operands: the reader derived extra_px 1,
+    the browser applied 2, and every row of
+    `TestProductTeamsPricingCardCtaBaseline` stayed GREEN over a page whose
+    popular CTA sits 1px off the shared baseline — the #13645 item 6
+    signature, the same fail-open the class-only bug produced.
+
+    A pseudo-class this reader cannot evaluate is treated the way
+    `_css_compound_matches_element` treats one: it MAY match, so the rule counts
+    (fail CLOSED — over-reaching reds a correct page a maintainer can see,
+    while the other direction hides an override). One form IS disprovable:
+    `:not(.x)` where `x` is a class the subject carries cannot select it, and
+    counting it would false-RED a correct page.
     """
-    if not (rightmost.startswith(".") and compound.startswith(".")):
+    if not compound.startswith("."):
         return False
-    if "[" in rightmost or "#" in rightmost or ":" in rightmost:
+    if "[" in rightmost or "#" in rightmost:
         return False
-    rule = {name for name in rightmost.lstrip(".").split(".") if name}
-    subject = {name for name in compound.lstrip(".").split(".") if name}
+    subject = _css_classes(compound)
+    for exclusion in _CSS_NOT_PSEUDO.finditer(rightmost):
+        if _css_classes(exclusion.group(1)) & subject:
+            return False
+    rule = _css_classes(_css_class_fragment(
+        _CSS_NOT_PSEUDO.sub(" ", rightmost)))
     return bool(rule) and rule <= subject
+
+
+def _compound_requires_a_foreign_class(rightmost: str, compound: str) -> bool:
+    """Does `rightmost` REQUIRE a class that `compound`'s element lacks?
+
+    The precise form of the `skip_popular` test, which was the string
+    `".popular" in part` (#14406 review round 23, measured). That text test is
+    wrong in BOTH directions on the property the compensation exists because
+    of, and it put the two operands of one relation in different worlds again:
+
+    * FALSE OPEN — `.pricing-card:not(.popular) { border-bottom-width: 0 }`
+      sets the three SIBLING cards' border and says nothing about the popular
+      card's, so a browser applies extra 2px; the part names `.popular`, so it
+      was dropped from the base operand, the reader kept the shipped 1px and
+      every row stayed GREEN over a 2px split.
+    * FALSE OFF (`section.popular .pricing-card { padding-bottom: … }`) is the
+      mirror: an ANCESTOR naming `.popular` skipped the whole part, although
+      the rule reaches every card in the grid — so a real edit stayed invisible.
+
+    Classes the rule NAMES are what select the element; `:not(…)` names what it
+    excludes, so those are removed before the comparison. A part with no class
+    at all (`div.pricing-card`, `#pricing-grid`) is not foreign and stays.
+    """
+    if not compound.startswith("."):
+        return False
+    if "[" in rightmost or "#" in rightmost:
+        return False
+    required = _css_classes(_css_class_fragment(
+        _CSS_NOT_PSEUDO.sub(" ", rightmost)))
+    return bool(required) and not required <= _css_classes(compound)
 
 
 def _element_carrying_class(markup: str, cls: str,
@@ -12512,7 +12599,15 @@ def _border_end_width_cascade(css: str, compound: str,
                     and _css_compound_matches_element(rightmost, element)) and not (
                     _compound_selects_every_subject(rightmost, compound)):
                 continue
-            if skip_popular and ".popular" in part:
+            # The BASE operand skips the rules that REQUIRE a class its three
+            # sibling cards do not carry (`.pricing-card.popular`) — which is
+            # what `skip_popular` means, NOT “the text `.popular` appears
+            # anywhere in the part”. The text test is fail-OPEN for
+            # `.pricing-card:not(.popular)` and fail-OFF for an ancestor that
+            # names `.popular`; `_compound_requires_a_foreign_class` carries the
+            # measured table (#14406 review round 23).
+            if skip_popular and _compound_requires_a_foreign_class(
+                    rightmost, compound):
                 continue
             specificity = _css_specificity(part) or (9, 9, 9)
             for decl_index, decl in enumerate(_css_blanked(body).split(";")):
@@ -14198,6 +14293,72 @@ class TestCssDesktopReachAndSpecificity:
                 f"shipped 1px compensation still holds; the reader derives "
                 f"{got:g} instead of {expected:g} — a FALSE RED on a page that "
                 "renders as designed")
+
+    def test_a_pseudo_class_or_an_exclusion_does_not_hide_the_border_reach(self):
+        """The relation's two operands must read the SAME rule set — pseudos too.
+
+        The class-set reach reader (`_compound_selects_every_subject`) bailed on
+        any `:`, and the two other reach readers miss those selectors as well:
+        `_css_rightmost_selects` because the COMPOUND's text is not a substring
+        of them, `_css_compound_matches_element` because it refuses class-named
+        compounds. A rule that reached the popular card *only* through such a
+        selector was therefore invisible to BOTH operands, so the relation kept
+        reading the shipped 1px while a browser applied more.
+
+        Measured at `1b64dd9364` (#14406 review round 23) — one rule appended to
+        the tracked page, `_popular_border_extra_px` evaluated:
+
+            .popular:nth-child(2) { border-bottom-width: 3px }        browser 2, read 1
+            .pricing-card:not(.popular) { border-bottom-width: 0 }     browser 2, read 1
+            #pricing-section div.pricing-card { border-bottom-width: 3px }
+                                                                     browser 0, read -1
+
+        The first two are fail-OPEN — the row stays GREEN over a page whose
+        popular CTA sits 1px off the shared baseline (#13645 item 6) — and the
+        third is the mirror false RED on a page that renders as designed. The
+        base operand's own exclusion is the sharpest: `.pricing-card
+        :not(.popular)` sets the THREE SIBLINGS' border and says nothing about
+        the popular card's, and the old `skip_popular` test was the string
+        `.popular in part`, so the part was dropped from the base operand.
+        """
+        # `expected` is what CSS applies to the page; `before` is what the reader
+        # derived BEFORE round 23's fix, so this row is non-vacuous by
+        # construction (each of the three fails on the pre-fix helper).
+        for mutant, expected, before in (
+                (".popular:nth-child(2) { border-bottom-width: 3px }", 2.0, 1.0),
+                (".pricing-card:not(.popular) { border-bottom-width: 0 }",
+                 2.0, 1.0),
+                ("#pricing-section div.pricing-card "
+                 "{ border-bottom-width: 3px }", 0.0, -1.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(mutant))
+            assert got == expected, (
+                f"appending `{mutant}` makes the browser apply {expected:g}px "
+                f"more block-end border on the popular card than on its three "
+                f"siblings, so the compensation relation needs {expected:g}; "
+                f"the reader derives {got:g} (it read {before:g} before round "
+                "23's fix) and the CTA baseline rows stay GREEN over a page "
+                "whose CTAs are off the shared baseline (#14406 review round "
+                "23)")
+
+        # NO OVER-REACH: a rule that names a class the base cards do NOT carry
+        # still belongs to the popular operand alone, and an exclusion naming a
+        # class nobody carries selects EVERY card — so it zeroes both operands
+        # and the relation reports 0. That last one reds the relation's own
+        # `extra_px > 0` guard with the right message instead of reporting the
+        # popular card's untouched 2px.
+        for quiet, expected in (
+                (".pricing-card.popular:nth-child(2) "
+                 "{ border-bottom-width: 3px }", 2.0),
+                ("div.pricing-card.popular { border-bottom-width: 3px }", 2.0),
+                (".pricing-card:not(.featured) { border-bottom-width: 0 }", 0.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(quiet))
+            assert got == expected, (
+                f"`{quiet}` resolves to {expected:g}px extra on a browser; the "
+                f"reader derives {got:g} — a FALSE RED on a page that renders "
+                "as designed, which is the failure mode a maintainer deletes "
+                "the guard over (#14406 review round 23)")
 
     def test_a_max_width_block_at_or_above_the_desktop_floor_is_reached(self):
         """`@media (max-width: 1440px)` applies at 1440 — so the guard must see it.
