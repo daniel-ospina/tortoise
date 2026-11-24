@@ -29,8 +29,10 @@ different decisions and had drifted apart:
   incident lifecycle, so the store's create-once path files the issue AND emits
   the episode's first push, and the message names the issue. While the episode
   stays OPEN it re-alarms at most once per
-  :data:`_INCIDENT_DELIVERY_WINDOW_S`, naming the same issue; the engine closes
-  the incident and re-arms delivery at episode end.
+  :data:`_INCIDENT_DELIVERY_WINDOW_S`, naming the same issue when the incident
+  carries one (a placeholder or a post-close tombstone has no number, and the
+  message says so instead); the engine closes the incident and re-arms delivery
+  at episode end.
 * :data:`ABUSE_ACTIVITY_KINDS` — a MEASUREMENT (#10156's ACTIVITY register). It
   files nothing **by design**, and every message says so; delivery is a bounded
   digest rather than one message per detector window.
@@ -98,8 +100,9 @@ _BILLING_SEND_FAILED_KIND = KIND_BILLING_SEND_FAILED
 #: INCIDENT, not of the detection. Each one files (or reuses) a durable,
 #: assignable incident, and its messages come from the store's create-once path:
 #: ONE opening push for the episode, at most ONE re-alarm per
-#: ``_INCIDENT_DELIVERY_WINDOW_S`` while it stays open (the message NAMES the
-#: issue), and one ✅ close at episode end — never one message per detection.
+#: ``_INCIDENT_DELIVERY_WINDOW_S`` while it stays open (naming the issue WHEN the
+#: incident carries one — otherwise it says the number could not be read), and
+#: one ✅ close at episode end — never one message per detection.
 #: Pre-#14407 the push was emitted per DETECTION here and ``abuse_flag`` filed
 #: nothing at all, which is how an alert arriving in the owner's chat could be
 #: attributed by no issue, no runbook and no search.
