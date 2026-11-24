@@ -598,16 +598,20 @@ def _enforce_delivery_cap(now: float) -> None:
 
 
 def release_abuse_delivery(kind: str, subject: str) -> None:
-    """Re-arm delivery for a ``(kind, subject)`` — the EPISODE ended (#14407).
+    """Re-arm the DELIVERY window for a ``(kind, subject)`` (#14407).
 
-    The bound is the episode, never a wall-clock cooldown: a genuinely new
-    episode must alert at once, and only the engine knows a rule's window went
-    clean (``AbuseEngine._evaluate``). Without this release a long-lived fallback
-    window would mute the second episode — the direction a security signal must
-    never fail in (#4872).
+    The bound is the WINDOW, not the episode: a continuously breaching subject
+    re-alarms at most once per ``_INCIDENT_DELIVERY_WINDOW_S``, and any release
+    ends that window so the next message goes out at once. Only the engine knows
+    a rule's window went clean (``AbuseEngine._evaluate``), so without the
+    episode-end release a long-lived fallback window would mute the second
+    episode — the direction a security signal must never fail in (#4872).
 
     Released on the episode end the engine OBSERVES (the clean window that
-    persisted ``flag_clear``, plus its bounded retry). An episode cleared out of
+    persisted ``flag_clear``, plus its bounded retry) — and, kind-agnostically, by
+    the per-outcome releases (a failed close, a deferred filing, a lifted
+    suppression, a failed send), which is why a flapping rule can page once per
+    crossing. An episode cleared out of
     band — the ``abuse_unsuspend`` SQL function, a manual ``flag_clear`` — is not
     observed, so its window stays armed and a new episode inside it is folded;
     the reminder at the window's end still fires and names the open issue. That
@@ -1008,10 +1012,14 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
             except Exception:  # noqa: BLE001, RUF100 — NEVER raise from the alert path
                 number_known = False
             if outcome is OpenOutcome.DEDUP and deliver:
-                # A persistent breach must not go silent: an episode that stays
-                # open re-alarms at most once per window, and the message NAMES
-                # the incident so the human can see it is the same one — the
-                # pre-fix code pushed every window with no reference at all.
+                # A persistent breach must not go silent: an episode whose
+                # delivery window still HOLDS re-alarms at most once per window,
+                # and the message NAMES the incident so the human can see it is
+                # the same one — the pre-fix code pushed every window with no
+                # reference at all. The window is the LEDGER's, not the episode's:
+                # a release that is not an episode end (a failed close, a cooldown
+                # back-off, a failed send) re-arms it, so a flapping rule can page
+                # once per crossing.
                 ref = (f"issue #{number}" if number
                        else ("an open incident whose issue number could not be "
                              "read just now" if not number_known

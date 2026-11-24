@@ -169,8 +169,16 @@ def test_the_incident_subject_is_rule_scoped(delivered):
     assert "key_create" in delivered.filed[1][0]
 
 
-def test_an_open_episode_re_alarms_at_most_once_per_window(delivered, monkeypatch):
+def test_a_HELD_window_re_alarms_at_most_once_per_24h(delivered, monkeypatch):
     """A persistent breach must not page every window, and must not go silent.
+
+    Named for what it exercises: NO release fires here, so the window stays
+    ARMED for the whole test. The retired name (``…open_episode…``) stated the
+    bound as a property of the OPEN EPISODE — which
+    ``test_a_reminder_scopes_its_bound_to_a_HELD_window_not_to_the_open_episode``
+    falsifies ~100 lines below: with the episode still open, a failed close
+    releases the ledger and TWO reminders land with no clock advance at all.
+    Both names described one bound and disagreed, and nothing reddened.
 
     Measured shape (#10576): ONE org stayed over its R1 threshold for 21 days
     behind ONE open issue, while the pre-fix code re-claimed the alert hourly —
