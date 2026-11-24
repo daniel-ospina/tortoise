@@ -12146,7 +12146,9 @@ def test_no_leg_decides_on_a_host_global_manifest_or_junit():
 #
 # The work is MEASURED, not asserted: Actions API on the 60 newest completed
 # python-ci.yml runs, `started_at`→`completed_at` on the pytest step
-# (2026-09-30T02:17Z..12:52Z, #3239). `_MEASURED_PYTEST_MAX_MIN` is that tap;
+# (2026-09-30T02:17Z..12:52Z, #3239). `_MEASURED_PYTEST_MAX_MIN` records that tap as
+# PROVENANCE only — the assertion below reads the committed map's per-shard watchdog,
+# never these numbers, so editing them moves nothing (they are the record, not the pin);
 # the carve-out test also re-derives a floor from the committed `durations`
 # map, so the bound cannot silently rot as the carve-out set grows.
 #
@@ -12256,7 +12258,7 @@ def test_every_bounded_pytest_job_caps_above_its_watchdog():
     # ORDER arm exists to prevent. The ratio IS the bound (`cap <= 3x`), so it is
     # asserted here rather than left to the deleted arm's prose — RESTORED after the
     # fold's trim dropped it again (2026-11-24, review P1).
-    assert carve_cap <= 3 * worst, (
+    assert carve_cap <= _CAP_CEILING_FACTOR * worst, (
         f"the carve-out's cap ({carve_cap}m) must stay within 3x its largest "
         f"per-shard watchdog ({worst}m) — ORDER alone does not bound it, and "
         f"GitHub's 360m default satisfies ORDER while holding the concurrency "
