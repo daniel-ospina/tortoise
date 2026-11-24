@@ -38,7 +38,11 @@ this one would also need a real Postgres). It asserts, for EVERY
 3. the containing function is a SYNC `def`, because `_run_off_loop` runs `fn`
    synchronously inside the worker (`monitoring.confine_context`) — handed an
    `async def` it returns an unawaited coroutine object and NOTHING runs: no
-   record, no append, no warning, no exception, and a green pin.
+   record, no append, no warning, no exception, and a green pin; and
+4. the containing function is referenced **only as that submission's callable**
+   — any other reference (an inline `_stamp_chain()`, a
+   `_CAPTURE_EXECUTOR.submit(_stamp_chain)`) is a second way to run the chain
+   and reds, however many submissions also exist elsewhere in the module.
 
 ⛔ NESTING IS NOT THE PROPERTY, and a first cut of this file asserted it: the
 chain already lives in `_report_capture`, a nested `async def`, and nesting a
@@ -48,7 +52,20 @@ loop). That assertion was falsified against `origin/main` before it landed.
 WHAT WOULD RED IT. Reverting the chain to the loop (the pre-#13722 shape, no
 submission at all) reds 1; a submission to a different pool reds 1; dropping the
 `await` (`asyncio.ensure_future`, a bare un-awaited `_run_off_loop(...)`) reds 2;
-turning the containing function into a coroutine function reds 3.
+turning the containing function into a coroutine function reds 3; and any second
+reference to the chain — an inline `_stamp_chain()` beside a surviving (even
+unreachable) submission, an extra inline call next to the real one, or
+`_CAPTURE_EXECUTOR.submit(_stamp_chain)` — reds 4.
+
+⛔ WHY ARM 4 EXISTS AT ALL (review finding, measured on `/tmp` mutants): arms 1
+and 2 asked whether an awaited submission **of that name** exists ANYWHERE, which
+is satisfied by a submission on a dead branch or an unreachable path. Three
+mutants that put the chain back on the loop therefore stayed GREEN — a leftover
+`if … and False: await _run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)` above an
+inline `_stamp_chain()`, the intended submission plus an extra inline call (run
+twice, once on the loop), and `_CAPTURE_EXECUTOR.submit(_stamp_chain)` beside the
+intended submission. Arm 4 closes that: it grades every REFERENCE to the chain,
+not the existence of some submission.
 
 ⛔ THE ARMS ARE ASSERTED IN THAT ORDER, and the order is load-bearing. Property 3
 is checked LAST on purpose: the PRE-#13722 chain lives in `_report_capture`, a
@@ -165,6 +182,46 @@ def _off_loop_submissions(
     return out
 
 
+def _off_loop_references(tree: ast.Module, name: str) -> list[tuple[int, bool]]:
+    """Every REFERENCE to `name` in the module: (line, is_the_submitted_one).
+
+    ⛔ The legal reference is a bare `ast.Name` that IS the second positional
+    argument of an awaited `_run_off_loop(_CAPTURE_EXECUTOR, name)` — nothing else.
+    `name(…)` is an inline run on the caller's thread; `_CAPTURE_EXECUTOR.submit(
+    name)` is the same fire-and-forget defect under another helper (it skips
+    `_run_off_loop`'s `confine_context` snapshot and is never awaited). Both are
+    the #13722 wedge regardless of how many submissions also exist elsewhere in
+    the module, so this grades EVERY reference rather than only calls.
+    """
+    awaited = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)
+    }
+    submitted: set[int] = set()
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == _OFF_LOOP
+            and id(node) in awaited
+        ):
+            continue
+        args = list(node.args)
+        if (
+            len(args) > 1
+            and isinstance(args[0], ast.Name)
+            and args[0].id == _OFF_LOOP_POOL
+            and isinstance(args[1], ast.Name)
+        ):
+            submitted.add(id(args[1]))
+    return sorted(
+        (node.lineno, id(node) in submitted)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == name
+    )
+
+
 def test_every_stamp_call_runs_off_the_loop() -> None:
     """`_stamp_capture_provenance` must be called from a leg submitted off-loop.
 
@@ -276,6 +333,36 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         f"{_OFF_LOOP} runs its callable SYNCHRONOUSLY in the worker, so an "
         "async one is never awaited and the chain silently does NOT run "
         "(#13722)")
+
+    # ⛔ EVERY REFERENCE MUST BE THE SUBMITTED ONE (review finding, P2, measured
+    # on `/tmp` mutants). The arms above ask whether an awaited submission OF THAT
+    # NAME exists SOMEWHERE — `submitted`/`awaited` are sets of `(pool, fn)` pairs,
+    # so a submission on a dead branch (`if … and False: await _run_off_loop(…)`)
+    # or on an unreachable path satisfies them while the chain runs inline. Three
+    # mutants stayed GREEN against the three arms above: leftover submission +
+    # inline `_stamp_chain()`, the intended submission PLUS an inline call (run
+    # twice, once on the loop), and `_CAPTURE_EXECUTOR.submit(_stamp_chain)`
+    # beside the intended submission (off this thread, but un-awaited and outside
+    # `confine_context`).
+    #
+    # This arm needs no dataflow: the only legal reference to an owner in this
+    # module is the bare `ast.Name` in `_run_off_loop(_CAPTURE_EXECUTOR, owner)`,
+    # so every other reference it finds is a second way to run the chain and reds.
+    # All three mutants above red here; the shipped tree has exactly one reference
+    # per owner, at the submission.
+    stray = {
+        owner: [line for line, submitted_here in _off_loop_references(tree, owner)
+                if not submitted_here]
+        for owner in sorted(owners)
+    }
+    stray = {owner: lines for owner, lines in stray.items() if lines}
+    assert not stray, (
+        f"{_STAMP_DOOR}'s chain is referenced OUTSIDE its off-loop submission at "
+        f"{stray} (owner: lines) — it runs on the caller's thread there, i.e. on "
+        "the uvicorn event loop, which is the 53 s `loop_blocks` wedge #13722 "
+        f"removes. A surviving {_OFF_LOOP}({_OFF_LOOP_POOL}, …) submission "
+        "elsewhere does not make that path off-loop: pass the function to the "
+        "awaited submission and delete every other reference (#13722)")
 
 
 if __name__ == "__main__":  # pragma: no cover
