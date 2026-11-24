@@ -397,9 +397,11 @@ version of this row merged them and attributed the WRONG finding to the WRONG he
 
 **Cycle 19** (a fresh-context reviewer whose export was at `23ac4a97d1fd` — relabelled from "18" here so the log stays monotone: the confirmation pair is Cycle 18, recorded ABOVE this row) — 1 **P1**,
 1 **P2**, 2 **P3**. ⚠️ THAT HEAD WAS STALE, and the figures are dated rather than present tense:
-15 commits behind the head the round was written against (`23ac4a97d1fd..ffad4ae6`), 31 behind
-`bcb52e1d` where the row was authored, and 32 behind THIS shipping head
-(`git rev-list --count 23ac4a97d1fd..HEAD`) — the reviewer's worktree was stale and its own footer
+15 commits behind the head the round was written against (`git rev-list --count
+23ac4a97d1fd..ffad4ae6`) and 31 behind `bcb52e1d`, where this row was authored (`…23ac4a97d1fd..bcb52e1d`).
+⛔ NO `..HEAD` FIGURE, deliberately: a count to the live head rots on the very next commit —
+this sentence already shipped as "32 behind THIS shipping head" and was 33 by the time it landed.
+A number is quoted here only with the head it belongs to. The reviewer's worktree was stale and its own footer
 records a live fixer lane in the same tree, so each finding is re-verified against THIS tree below,
 and the P3 it reported as already closed is confirmed closed at the commit it names.
 
