@@ -22033,6 +22033,13 @@ _CUT_CLAIM_FILES = (
     # recurrence 2 of the four this pin's comment names (the Step-4 ledger whose
     # `test_split_*` verdicts are still the record of what `#14419` cut)
     "docs/plans/2026-08-18-1473-tier2-duration.md",
+    # ⛔ TWO RECORDS OUTSIDE THE SOURCE SET, found false by a review round and added
+    # here: a comment and two docstrings that each called a RESTORED arm (or the whole
+    # restored fold-seam cluster) a B7 casualty. The first list stopped at the four
+    # source records, so none of them was graded — the same "a record nothing grades"
+    # defect this pin exists for, one level up.
+    "tests/test_ci_timing.py",
+    "tests/test_capstone_preregistration_9075.py",
 )
 
 
