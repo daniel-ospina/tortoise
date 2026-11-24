@@ -2337,8 +2337,10 @@ def _balance_cut_parens(text: str) -> str:
 # not trust the figure, because a refresh re-emits notes and moves it: the map
 # held 1236 rows at `7e6d1d8da`). The guard that judged the written map joined a
 # row's tail with its continuations before it judged a note
-# (`tests/test_ci_selection.py::_durations_row_comments`, CUT in the B7 test cut,
-# 2026-11-23 — `_row_continuation_lines` is the surviving reader).
+# (`tests/test_ci_selection.py::_durations_row_comments`, cut by `#14439`'s re-cut on
+# 2026-11-23 — NOT by the B7 cut, which landed before that snapshot and left it in
+# place — and RESTORED by `#14481`, so it is the LIVE reader again and
+# `_row_continuation_lines` must mirror it).
 #
 # ⛔ …but “under a row” is NOT “belongs to that row”, and the difference is the
 # whole of `_row_continuation_lines`' third condition. See its docstring: this
@@ -2409,8 +2411,8 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
 
     2. A blank line does not end a note and any other non-comment line does. This
        mirrors the READER that judged a written map
-       (`tests/test_ci_selection.py::_durations_row_comments`, CUT in the B7 test
-       cut, 2026-11-23): a writer reasoning about a different span than the guard is
+       (`tests/test_ci_selection.py::_durations_row_comments`, cut by `#14439`'s re-cut
+       on 2026-11-23 and restored by `#14481`, so it is live again at this head): a
        how a cut came to orphan a parenthesis the guard was counting.
 
     3. ⛔ The block must actually CONTINUE the row's sentence — its first line must
@@ -2439,8 +2441,10 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        **36 rows lost their block, 349 lines were folded into row lines**. The text
        survives but the ATTRIBUTION does not, and two MERGE-GATING guards read prose
        off whichever row line it sits on (`_durations_rows_claiming_the_flat_default`,
-       `_durations_rows_stating_a_stale_watchdog_floor` — BOTH CUT in the B7 test cut,
-       2026-11-23, so this is now a by-hand hazard) — a swallowed block carrying
+       cut by `#14439`'s re-cut and RESTORED by `#14481`, so it grades again — and
+       `_durations_rows_stating_a_stale_watchdog_floor`, which the B7 cut removed and
+       nothing has restored, so THAT half is still a by-hand hazard) — a swallowed
+       block carrying
        one of those claim shapes is judged against the wrong row's value, i.e. a
        false red or a false green in a required leg.
 
@@ -2497,7 +2501,8 @@ def _joined_note_tail(fragment: str, continuation_lines: list[str]) -> str:
 #
 #   tests/test_tool_risk_tiers.py::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it
 #   (the `test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value`
-#   arm was cut in the B7 test-bureaucracy cut, 2026-11-23)
+#   arm was cut by `#14439`'s re-cut on 2026-11-23 — not by the B7 cut — and restored
+#   by `#14481`, so it grades this again at this head)
 #
 # The map's own rule for it is stated above `durations:` — "a row's comment is kept
 # only while the value AND its stated basis are unchanged" — and the 2026-10-26

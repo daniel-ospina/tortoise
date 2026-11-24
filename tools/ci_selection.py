@@ -225,7 +225,7 @@ SLOW_LEG_CAPPED_WALL_TARGET_MIN = 20.0
 # i.e. the pin was passing on 0.04 of margin. That sweep then MEASURED
 # `test_calibration.py` at 390.0 s (it had carried the flat 2.0 s default, so no
 # sweep had ever weighed it), which puts 15m at 2.31× and red the shard-scaling
-# pin — CUT in the B7 test-bureaucracy cut (2026-11-23), which removed the
+# pin — cut by `#14439`'s re-cut (2026-11-23), which removed the
 # durations-map arithmetic from `tests/test_ci_selection.py`, and RESTORED by
 # #14481 with the rest of that arithmetic. The floor is PINNED again:
 # `test_watchdog_is_per_shard_and_scales_with_the_shard` asserts
@@ -2051,7 +2051,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # ship is a RECORD VECTOR OVERWRITTEN, which no later run can undo. Pinned by
              # tests/test_13685_entity_vector_backfill.py::test_a_tools_only_diff_selects_this_pin.
              # (The second `test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`
-             # citation was cut with the B7 durations-map arithmetic on 2026-11-23;
+             # citation was cut with `#14439`'s re-cut on 2026-11-23;
              # #14481 restored that arm with the rest of the file, so at this head it
              # exists again — this parenthetical records the cut, not an absence.)
              "tools/entity_vector_backfill.py",
@@ -5971,7 +5971,7 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
     `ceil(30.62 * 2) = 62` is clamped to the 55-minute ceiling — an EFFECTIVE
     1.80x — which the ceiling's own comment treated as "the validated budget"
     rather than as a breach, and which the shard-scaling pin asserted without
-    ever computing the margin (that pin was CUT in the B7 test-bureaucracy cut,
+    ever computing the margin (that pin was cut by `#14439`'s re-cut on
     2026-11-23, and restored by #14481 — where it DOES compute the margin, as
     `small * 60 / largest > 2.5` over the live map; this function is the check
     that grades the emitted budget in production).
@@ -6329,7 +6329,7 @@ def resolve_shard_routing(value: str | None) -> str:
 # exactly that hang on every fold.
 #
 # So the decision lives HERE, in Python — TESTABLE and GRADED: the #14439 merge's
-# B7 cut (2026-11-23) took the fold-seam arms, and #14481 restored them, so inerting
+# re-cut (2026-11-23) took the fold-seam arms, and #14481 restored them, so inerting
 # the resolver reds `test_a_declared_fold_class_routes_every_row_of_a_fold`
 # (`tests/test_ci_selection.py`), which asserts the declared array reaches every row.
 # `CI_FOLD_RUNNER_LABELS` is the operator switch:
@@ -6395,8 +6395,8 @@ def resolve_fold_runner(
     ⛔ `matrix_runner` is returned UNCHANGED rather than re-serialised: the
     non-fold path must stay byte-identical to main's, so a lane diffing the
     emitted matrix sees no change at all (its pin, `test_the_fold_runner_seam_is_
-    inert_by_default`, was CUT in the B7 cut, 2026-11-23 — the FOLD-SEAM cluster,
-    not the durations arithmetic — and restored by #14481, so the identity return
+    inert_by_default`, was cut by `#14439`'s re-cut on 2026-11-23 — the FOLD-SEAM
+    cluster, not the durations arithmetic — and restored by #14481, so the identity return
     below is graded again).
 
     ⛔ `warn=False` exists because this runs PER ROW: the caller resolves the
