@@ -238,26 +238,30 @@ class TestCreatePointRetrySafety:
 
     def test_the_success_hint_masks_the_url_user_as_well_as_the_password(
             self, tmp_path, capsys):
-        """STRICTLY STRONGER than `test_the_success_hint_never_prints_a_url_credential`.
+        """STRONGER than `test_the_success_hint_never_prints_a_url_credential` on
+        two axes it leaves open — and WEAKER on a third, so it does not replace it.
 
-        That test (added by `f7d769fb66e6`) asserts only `"…password" not in out`,
-        i.e. it is satisfied by masking the PASSWORD while leaving the USERNAME in
-        the transcript. Measured: masking only the password (`:pw@` → `:***@`, user
-        kept) leaves that test GREEN and reds this one (at "svc:").
+        That test (added by `f7d769fb66e6`) asserts TWO things: `"…password" not in
+        out` AND `"/v1/search?q=" in out` (the path must survive — a `***`-redacted
+        URL satisfies it, so it does not cover the host). What it leaves open:
+          * the USER half — measured: masking only the password (`:pw@` → `:***@`,
+            user kept) leaves that test GREEN (30 passed) and reds this one at
+            `"svc:"`;
+          * the HOST — an over-broad `***/v1/search?q=WORD` redaction reds this one
+            at the full-literal assert below, while the sibling stays green because
+            its path assertion is still satisfied.
+        What it covers and this one does NOT: the `?q=WORD` query form — dropping it
+        reds that test and leaves this one green (also covered at
+        `test_a_successful_create_names_where_to_search`). Keep both.
 
-        This pin therefore covers the two things it does not:
-          * the USER half of the userinfo is masked too; and
-          * the mask is not OVER-broad — the host and path must survive, because a
-            "fix" that redacts the URL into uselessness breaks the instruction the
-            hint exists to carry (mutant: `***/v1/search?q=WORD` reds this).
-
-        ⛔ CORRECTION, recorded rather than re-worded: an earlier version of this
-        docstring claimed the success path had *no* equivalent witness and cited a
-        `173 passed` measurement. Both were false at this head — that figure was
-        taken over `45beda518b42..65d4028a3d`, BEFORE `f7d769fb66e6` added the
-        password-class test, and was never re-taken. The witness existed; what was
-        missing was the USERNAME half and the not-over-broad half, which is all
-        this test claims.
+        ⛔ CORRECTION, recorded rather than re-worded out of sight: an earlier
+        version of this docstring claimed the success path had *no* equivalent
+        witness and cited a `173 passed` measurement. That was false at its own
+        parent — the figure was taken over `45beda518b42..65d4028a3d`, BEFORE
+        `f7d769fb66e6` added the sibling test, and was never re-taken. A second
+        version then called this test "strictly stronger", which is also false
+        (mutant: drop `?q=WORD` reds the sibling and leaves this one green). The
+        three claims above are the measured ones.
 
         Why it still matters: `api_url` is store-supplied and
         `_resolve_config_path` passes it through verbatim, while `./.tortoise` is
