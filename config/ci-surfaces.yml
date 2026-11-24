@@ -71,7 +71,7 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `88cd00a068`, whose #14371, #14186, #14434, #13998, #14350, #14423, #14429 and #14446 `core` rows
+# `da4b76a5851c`, whose #14371, #14186, #14434, #13998, #14350, #14423, #14429 and #14446 `core` rows
 # are all in the map, plus #14407's own dual registration of
 # `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) the verb packs five shards at 837.7 s (a, c, d, e, k) and six at
@@ -132,6 +132,14 @@ version: 1
 # registers no fast file of its own) the reading was nine/two at a 0.1 s split — HISTORY, not a
 # claim: the graded clause is stated ONCE in the paragraph above, and a second one is exactly
 # what the guard reads as `<est … stated twice>`. The registrations this block's own reading
+# MERGES INTO, never carried from the branch that first wrote it. This paragraph USED to carry a
+# SECOND full restatement of the emission — a nine/two split derived on `main` at `e6b3cf2908b`
+# (seven landings past the `88cd00a068` head the block then named). On the #14414 fold that split
+# was re-derived ONCE, in the paragraph above, and a second spelling here is exactly what the guard
+# grades as `<est … stated twice>` / `<ceil stated 2 times>`: two parents' re-derivations spliced by
+# git. So the partition and its `ceil(...)` are deliberately NOT repeated in this paragraph; the
+# paragraph above is the block's ONE emission claim and it is the one the guard reads. The
+# registrations this block's own reading
 # counts are the ones `main` has landed at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's
 # `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`, #14220's
 # `tests/test_14186_embedder_seam_batching.py`, #14423's `tests/test_14350_drain_convergence.py`,
