@@ -80,15 +80,35 @@ version: 1
 # map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added, 0 removed,
 # against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue counts; at
 # THAT head B8 dropped `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
+# the ONE split stated below is `main`'s reading too. ⛔ THIS BRANCH'S OWN READING WAS HERE and is
+# DELETED, not merged: it said one shard at 838.1 s and ten at 838.2 s, which was true of the previous
+# fold and is not true of this one — the `merge=union` driver (#5373) kept both parents' clauses, so
+# the block briefly claimed two partitions. Re-derived below with the verb.
+# On THIS merged tree (`main` at
+# `af40c97ca312` folded in) the verb packs six shards at 825.1 s
+# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so
+# `ceil(825.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.04`, so the two
+# agree by construction rather than by a hand re-read. Re-derive it on the tree after the next fold;
+# never carry this 825.1/825.0. ⛔ The CAUSAL story this sentence used to carry is DELETED because it
+# is false at this tree: it said removing `tests/test_dod_5090_probe.py` from the `core` surface took
+# that file's weight out of the pool — but the file is registered on the `eval` surface, so
+# `fast_pool()` still carries it and dropping a `core` row would not move the bin. The FIGURES above
+# were re-derived with the verb, and the verb is the only thing that made them true.
+#
+# `8c373f59a15ba` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
+# durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
+# 0 removed), the #7949 capstone prose, and the privatise residue counts; at THAT head B8 dropped
+# `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
 # ⛔ THIS PR neither carries nor re-cuts that file: `git diff origin/main HEAD --
-# tests/test_sdk_privatise_sweep.py` is EMPTY at this head (the file is byte-identical to `main`'s,
-# and every commit `--full-history` lists for it in `origin/main..HEAD` is a MERGE of `main`), so
-# the arm at this head is `main`'s (restored there after the cut) and the extent it publishes is
-# graded by the arm itself — re-derive it there, never carry it here. ⛔ NO extent FIGURE is stated
-# in this block: the one that may be trusted is the one `_residue_block`'s docstring publishes,
-# graded against its own walk by
-# `tests/test_sdk_privatise_sweep.py::test_the_extent_figure_is_the_walks_own_count` (post-merge
-# review of #14459, P3: this sentence used to read as a measurement of "the resolved tree" while
+# tests/test_sdk_privatise_sweep.py` is EMPTY at this head, so the arm is `main`'s and the extent it
+# publishes is graded by the arm itself. ⛔ The live clause that stood here — "because THIS PR
+# re-cuts that file's pin, its fold KEEPS the branch's copy of it" — was re-spliced back by the
+# `merge=union` fold (#5373) AFTER being deleted, which is why it is deleted again here and why the
+# paragraph below records it as retracted. ⛔ NO extent FIGURE is stated: the one that may be
+# trusted is the one `_residue_block`'s docstring publishes, graded against its
+# own walk by `tests/test_sdk_privatise_sweep.py::test_the_extent_figure_is_the_walks_own_count`
+# (post-merge review of #14459, P3: this sentence read as a measurement of "the resolved tree" while
 # describing a run that had already moved — nothing in this file grades an extent, so a figure here
 # can only be history). ⛔ THREE earlier revisions of this paragraph were false here, and they are
 # recorded rather than quietly dropped: one credited `da4b76a5851c` (a #13526 quota-report commit,
@@ -128,6 +148,8 @@ version: 1
 # at 28 m, which is again why the graded claim is the set and not the minute. ⛔ Stated at the sha it
 # was MEASURED at and not as a claim about this head: later folds moved it again (this head emits the
 # six/five graded above), which is why the rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
+# was MEASURED at and not as a claim about this head: later folds moved it again, which is why the
+# rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: a file a PR ADDS cannot carry a junit reading yet),
 # NOT the hand-picked sub-default weight the row first carried — an unmeasured figure re-packs the
 # bins and so moves THIS graded claim on a number no run measured, which is the deviation the
@@ -145,6 +167,7 @@ version: 1
 # (`WATCHDOG_HEADROOM`), NOT the printed `watchdog_headroom:` ratio beside them — so the ratio is
 # re-read by hand whenever the seconds move. It moves: `2.01` at 837.9 s (1680 / 837.9 = 2.0050),
 # and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0361). A carried ratio in a graded sentence is
+# and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0362). A carried ratio in a graded sentence is
 # exactly the defect this block exists to prevent, one level below what it grades.
 #
 # ⛔ ONE CLAUSE, NOT A LEDGER — AND THE CLAUSE IS GRADED, NOT TRUSTED. The split is 0.1 s wide and
