@@ -237,7 +237,7 @@ _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 #: retired`, `is the US footprint archived`), and the head-noun slot is not a
 #: place a zero relative's subject can stand.
 #:
-#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are five:
+#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are six:
 #:
 #: * a zero relative whose subject is a BARE NOUN (`is the claim finance
 #:   retracted`) is lexically identical to a two-word head noun plus a predicate
@@ -266,6 +266,16 @@ _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 #:   shape that could go either way does not fire. The cost is not new either:
 #:   `is_predicate` did not exist on the base module, which refused the same
 #:   string. It is disclosed here so a later round does not present it as a find.
+#: * AND THE APPROXIMATIVE NEGATORS ARE CLOSED ONLY WITHIN ONE WORD of the
+#:   ending. The arm below is positional (see its note), and its lookahead allows
+#:   a single intervening word, so `is the plan hardly cancelled` refuses while
+#:   `is the plan hardly at all cancelled` and `is the plan hardly ever been
+#:   cancelled` still reach the CANCELLED population — the polarity-inverted
+#:   answer. Widening the lookahead to two words is NOT the fix: it would refuse
+#:   `is the old barely visible notice archived`, which is a real state question
+#:   whose negator modifies a noun. So the trade is taken and stated: the
+#:   positional guard needs the negator adjacent to the predicate, and a caller
+#:   who inserts an adverbial (`at all`, `ever`) keeps the relevance read;
 
 _NP_STOP = (
     r"(?!(?:that|which|who|whom|whose|where|when"
@@ -285,15 +295,19 @@ _NP_STOP = (
     # ⛔ THEY ARE NOT FLAT STOP WORDS, and flattening them would have been the
     # wrong fix: each is ALSO an ordinary ADJECTIVE modifier INSIDE the NP
     # (`is the barely visible notice archived`, `is the hardly noticeable change
-    # archived`, `is the scarcely used endpoint retired` — all three route
+    # archived`, `is the scarcely used endpoint retired` — all route
     # correctly and are real state questions), so a plain stop word buys the
-    # negated spellings by refusing three unnegated ones. The lookahead stops the
+    # negated spellings by refusing four unnegated ones (the in-RUN spellings, see
+    # `STOP_WORDS_KEEP_THIS_RECALL`: the head-slot spellings above pass even
+    # against a flat word, because `_NP_STOP` never applies to the head slot,
+    # so the in-run ones are the rows that actually pin this). The lookahead stops
+    # the
     # negator only where the ENDING follows it within one word (`… hardly
     # cancelled`, `… hardly been cancelled`) and leaves it in the run everywhere
     # else, so this closure costs NO recall — which is why it is taken here while
     # the other dual-use words (`all|some|any|no`) stay disclosed residuals.
     rf"|(?:hardly|barely|scarcely|rarely|far\s+from|anything\s+but)"
-    rf"(?=\s+(?:{_NP_WORD}\s+)?(?:{_ENDING_WORDS}))"
+    rf"(?=[\s-]+(?:{_NP_WORD}[\s-]+)?(?:{_ENDING_WORDS}))"
     # `being` is the PROGRESSIVE and is a separate token from the infinitive
     # frame below, because no frame marker sits in front of it:
     # `is the plan being cancelled`, `is the report still being archived`.
@@ -313,13 +327,17 @@ _NP_STOP = (
     # archived`, and `is the policy unless bookings were cancelled` (whose own
     # finite verb `were` sat inside the run). Measured on the head that already
     # carried the negation/futurity/disjunction list: all three still routed.
-    # ⛔ THE CONTRACTION IS A SUFFIX, not a token: `_NP_STOP` is a negative
-    # lookahead evaluated at a TOKEN START, so a bare `n't` alternative stopped
-    # only the literal word — `is the plan isn't cancelled`, `is the report wasn't
-    # archived` and `is the ticket hasn't been archived` all routed and were
-    # served the polarity-INVERTED population. `[a-z0-9'-]*n't` matches the token
-    # that carries it.
-    r"|[a-z0-9'-]*n't"
+    # ⛔ THE CONTRACTION IS A SUFFIX, not a token, and the SUFFIX IS NOT ASCII:
+    # `_NP_STOP` is a negative lookahead evaluated at a TOKEN START, so a bare
+    # `n't` alternative stopped only the literal word — `is the plan isn't
+    # cancelled`, `is the report wasn't archived` and `is the ticket hasn't been
+    # archived` all routed and were served the polarity-INVERTED population.
+    # ⛔ AND THE SMART-APOSTROPHE SPELLING IS THE SAME HOLE: `_NP_WORD` admits
+    # U+2019 (see its own note), so an ASCII-only contraction arm let the token
+    # `isn’t` through as an ordinary NP word and `is the plan isn’t cancelled`
+    # still answered with the CANCELLED records (measured, PR #14491 review). The
+    # class is therefore `…n` + EITHER apostrophe + `t`.
+    rf"|[^\W_]*n['’-]t"
     # ⛔ THE APPROXIMATIVE NEGATIONS ARE THE SAME POLARITY CLASS — `hardly
     # archived` / `barely archived` answer the question with the population of
     # records that HAVE ended, which is the inversion the negation stop exists to
