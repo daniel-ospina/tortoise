@@ -9163,8 +9163,9 @@ _PER_FILE_SHARD_LETTER_RE = re.compile(
 #: have exempted exactly the claim that rotted.
 _HISTORICAL_LETTERS_RE = re.compile(
     r"\u26d4 HISTORICAL-LETTERS-BEGIN.*?\u26d4 HISTORICAL-LETTERS-END", re.DOTALL)
-#: How far past an operand its stated minute may sit. The manifest's own prose form —
-#: `rounds 840.2/60 x 2.0 up to 29 m` — puts it 14 characters after the operand.
+#: How far past an operand its stated minute may sit. The `rounds …/60 x 2.0 up to … m` prose
+#: form (the header's own history clause until #14415 folded it away, reproduced by the fixture
+#: below) puts it 14 characters after the operand.
 _DERIVATION_LOOKAHEAD = 60
 
 
@@ -9259,8 +9260,9 @@ def _emission_block_claims(
     # than being redded for a headroom it never used.
     # ⛔ Compare the headroom NUMERICALLY, not as a spelling. `f"{2.0:g}"` is `"2"`, so a string
     # comparison reds a block that writes `x 2.0` — the same multiplier, and the spelling the
-    # manifest's own block uses (`config/ci-surfaces.yml:46`: `shard_watchdog_minutes()` rounds
-    # `840.2/60 x 2.0` up to 29 m). A false block is the one failure this check must not produce.
+    # header's history clause used (`shard_watchdog_minutes()` rounds `… /60 x 2.0` up to `… m`;
+    # the fixture below keeps that form after #14415 folded the clause away). A false block is the
+    # one failure this check must not produce.
     headrooms = {float(h) for _est, h, _minutes in ceil_matches}
     assert headrooms == {float(cs.WATCHDOG_HEADROOM)}, (
         f"the block derives its watchdog with headroom {sorted(headrooms)}, but the code uses "
@@ -9291,9 +9293,10 @@ def _emission_block_claims(
         # block can claim two different watchdog minutes and still read as one.
         #
         # ⛔ Scoped to the GRADED ests — the partition's own operands plus the derived one —
-        # because the header legitimately quotes HISTORY at other operands (the S=10 paragraph's
-        # `840.2/60 x 2.0 up to 29 m`). Measured: an unscoped version reds the real block, which
-        # is the one failure this check must not produce.
+        # because a header may legitimately quote HISTORY at other operands (the S=10 paragraph's
+        # `…/60 x 2.0 up to … m` clause, which #14415 removed from the block and the fixture below
+        # still exercises). Measured: an unscoped version reds a real block carrying one, which is
+        # the one failure this check must not produce.
         graded = {float(est_str)} | {float(est) for est in groups}
         conflicting: dict[float, int] = {}
         for operand in _EMISSION_DERIVATION_RE.finditer(header):
@@ -9513,10 +9516,10 @@ def test_the_emission_block_guard_is_not_vacuous():
         _emission_block_claims(
             "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
             "# `ceil(836.4/60 x 2)` = 28 m\n# 836.3/60 x 2 \u2192 30 m\n\nfast_shards: 11\n")
-    # …and the check is SCOPED to the est the block grades, so the header's historical derivation
-    # at a DIFFERENT operand — the S=10 paragraph's `840.2/60 x 2.0 up to 29 m`, which is prose
-    # about a tree that is not this one — must NOT red. Without this negative the arm could be
-    # satisfied by a pattern that simply rejects the manifest's real block.
+    # …and the check is SCOPED to the est the block grades, so a historical derivation at a
+    # DIFFERENT operand — the `840.2 s` clause the header carried until #14415 folded it away,
+    # which is prose about a tree that is not this one — must NOT red. Without this negative the
+    # arm could be satisfied by a pattern that simply rejects any block carrying history.
     historical = _emission_block_claims(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
         "# `ceil(836.4/60 x 2)` = 28 m\n"
@@ -9533,9 +9536,9 @@ def test_the_emission_block_guard_is_not_vacuous():
             "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
             "# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
     # …but the comparison is NUMERIC, so the same multiplier spelled `2.0` — the spelling the
-    # manifest's own block uses at `config/ci-surfaces.yml:46` (`shard_watchdog_minutes()` rounds
-    # `840.2/60 x 2.0` up to 29 m) — must NOT red. A false block is the one failure that check must
-    # never produce, and a string compare would produce it.
+    # header's history clause used (`shard_watchdog_minutes()` rounds `… /60 x 2.0` up to `… m`)
+    # — must NOT red. A false block is the one failure that check must never produce, and a string
+    # compare would produce it.
     spelled = _emission_block_claims(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
         "# `ceil(836.4/60 x 2.0)` = 28 m\n\nfast_shards: 11\n")
