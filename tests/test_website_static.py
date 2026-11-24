@@ -14349,6 +14349,15 @@ class TestCssDesktopReachAndSpecificity:
                 (".popular:nth-child(2) { border-bottom-width: 3px }", 2.0, 1.0),
                 (".pricing-card:not(.popular) { border-bottom-width: 0 }",
                  2.0, 1.0),
+                # ⛔ `:not(.a.b)` EXCLUDES ONLY AN ELEMENT CARRYING BOTH (#14406
+                # review round 25). Intersecting the argument's class set with
+                # the subject read it as "excludes if EITHER", so this rule was
+                # treated as unreachable for the popular card and the reader
+                # derived 1.0 where a browser applies 0.0 — 1px off, every
+                # CTA-baseline row GREEN. Reverting the loop leaves this case
+                # RED, which is the only thing that pins the fix.
+                (".pricing-card:not(.popular.featured) "
+                 "{ border-bottom-width: 1px }", 0.0, 1.0),
                 ("#pricing-section div.pricing-card "
                  "{ border-bottom-width: 3px }", 0.0, -1.0),
         ):
