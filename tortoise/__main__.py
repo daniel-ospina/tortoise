@@ -6080,7 +6080,14 @@ def _cmd_create_point(args) -> int:
     # same false safety fact the neighbouring `URLError` arm was rewritten to
     # avoid, and `test_an_unreachable_api_does_not_claim_nothing_was_written`
     # exists to keep that claim out of this verb.
-    if not api_url.startswith(("http://", "https://")):
+    # ⛔ THE CHECK MUST BE CASE- AND WHITESPACE-TOLERANT, because the transport is:
+    # `urllib.parse._splittype` lowercases the scheme, so BASE accepted and SENT
+    # `HTTPS://host.example` and `" https://host.example"` (both measured against a
+    # real server, rc 0). An exact `startswith` turned those into a hard refusal
+    # whose message ("not an http(s) URL") asserts the opposite of the truth. Only
+    # the GUARD is normalised — `api_url` itself is not rewritten — so any input
+    # BASE accepted is still accepted and sent as before.
+    if not api_url.strip().lower().startswith(("http://", "https://")):
         print(f"Cannot reach API at "
               f"{_printable(_mask_display_target(api_url))}: not an http(s) "
               f"URL.", file=_sys.stderr)

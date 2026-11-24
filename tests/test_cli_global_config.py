@@ -394,8 +394,10 @@ class TestCreatePointRetrySafety:
         list/dict already tracebacked.
 
         Mutation: drop the `isinstance` coercion → the list/dict rows RED with
-        `AttributeError`; drop the `except ValueError` arm → the int/bool/str rows
-        RED with `ValueError` escaping.
+        `AttributeError`; the int/bool/str rows are now refused by the PRE-FLIGHT,
+        so dropping the `except ValueError` arm no longer reds them (measured —
+        that arm is reached only by a `ValueError` raised AFTER the request was
+        built, e.g. from the redirect handler).
         """
         _seed_global(tmp_path)
         store = tmp_path / ".tortoise" / "credentials.json"
@@ -410,6 +412,60 @@ class TestCreatePointRetrySafety:
         # No traceback may escape, whichever arm answered.
         assert "AttributeError" not in captured.err
         assert "ValueError" not in captured.err
+
+    def test_a_non_url_api_url_is_refused_before_the_request_is_built(
+            self, tmp_path, capsys):
+        """The PRE-FLIGHT is the only spot allowed to say "nothing was sent".
+
+        Without it the non-URL case falls to the hedged `except ValueError` arm,
+        which correctly says the write MAY have landed — true for a redirect-phase
+        failure, but wrong and unactionable here, where no request was ever built.
+
+        ⛔ MEASURED, and why this test exists: deleting the whole pre-flight block
+        left the file GREEN (43 passed) — the parametrized test above passes
+        either way because the hedged arm still prints "Cannot reach API" and
+        returns 1. So the arm's own justification ("nothing has been sent") was
+        unpinned until this assertion was added.
+
+        Mutation: delete the pre-flight block and this REDs on "nothing was sent"
+        (and on `urlopen` being called).
+        """
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({**GLOBAL_CFG, "api_url": 42}))
+        store.chmod(0o600)
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            assert main(["create-point", "hello world"]) == 1
+        # The decisive fact: no request was ever BUILT, let alone sent.
+        assert not urlopen.called
+        err = capsys.readouterr().err
+        assert "nothing was sent" in err
+        assert "does not prove it failed to land" not in err
+
+    @pytest.mark.parametrize("tolerated", [
+        "HTTPS://host.example",      # urllib lowercases the scheme
+        " https://host.example",     # leading space; BASE sent this
+    ])
+    def test_a_url_the_transport_accepts_is_not_refused_by_the_pre_flight(
+            self, tmp_path, capsys, tolerated):
+        """The pre-flight must not refuse what urllib itself accepts.
+
+        `urllib.parse._splittype` lowercases the scheme, and BASE accepted and
+        SENT `HTTPS://host.example` and `" https://host.example"` (measured
+        against a real server, rc 0). An exact `startswith` here turned both into
+        a hard refusal whose message ("not an http(s) URL") was false — a
+        regression introduced WITH the pre-flight.
+
+        Mutation: drop `.strip().lower()` from the guard and this REDs.
+        """
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({**GLOBAL_CFG, "api_url": tolerated}))
+        store.chmod(0o600)
+        with mock.patch("urllib.request.urlopen", return_value=_ok({"id": "p1"})) as urlopen:
+            assert main(["create-point", "hello world"]) == 0
+        assert urlopen.called
+        assert "not an http(s) URL" not in capsys.readouterr().err
 
     def test_a_valueerror_after_the_send_does_not_claim_nothing_was_sent(
             self, tmp_path, capsys):
