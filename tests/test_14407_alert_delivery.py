@@ -1565,8 +1565,9 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
     ``abuse_suspended`` is deliberately EXCLUDED from
     :data:`_EPISODE_INCIDENT_KINDS` (it records an operator decision, not a rule's
     flag window). ⛔ Its window is NOT therefore "never re-armed": the
-    kind-agnostic per-outcome releases (a lifted suppression, a deferred filing)
-    re-arm any kind, measured delivering a second message inside one window — so
+    kind-agnostic per-outcome releases (a lifted suppression, a filing whose
+    issue-number read-back failed) re-arm any kind, measured delivering a second
+    message inside one window — so
     what this test pins is the CLAUSE's scope, not an unbreakable limit.
 
     Pre-fix the same sentence claimed "RE-ARMED by a confirmed episode end … a rule
@@ -1610,8 +1611,9 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
     assert "NO rule episode" in log, log
     # ⛔ "NEVER re-armed early" was the previous pin and it was FALSE (round 7 of the
     # #14487 review): the episode-end release is not the only re-arm site — the
-    # kind-agnostic per-outcome releases (a lifted suppression, a deferred filing)
-    # re-arm this kind too: on the lifted-suppression arm two messages land inside
+    # kind-agnostic per-outcome releases (a lifted suppression, a filing whose
+    # issue-number read-back failed) re-arm this kind too: on the
+    # lifted-suppression arm two messages land inside
     # one window with no episode end anywhere. The pin is on the truthful clause,
     # and the retired absolute is absent.
     assert "NEVER re-armed early" not in log, (
@@ -1639,6 +1641,17 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
     # outage produces.
     assert "FAILED SEND" in log, (
         f"the 'only' list must name the failed-send release it omitted: {log!r}")
+    # The LIST MEMBERS, not only its tail (round 14, P3): deleting
+    # "LIFTED suppression" or the filing member from this clause used to leave the
+    # suite GREEN, so an operator-facing sentence could lose a release site
+    # silently — an "only" set is wrong when it is TRUNCATED, not just when its
+    # last member is missing.
+    assert "LIFTED suppression" in log, (
+        f"the suspension log lost the lifted-suppression release site: {log!r}")
+    assert "issue-number read-back failed" in log, (
+        "the suspension log names a 'deferred filing' as a release site, but the "
+        "release fires on a filing whose number could not be READ BACK, not on "
+        f"a filing that carries no number: {log!r}")
 
     _emit("abuse_flag")
     log = captured["abuse_flag"]
@@ -1646,6 +1659,14 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
         f"a rule-episode kind lost its (true) re-arm clause: {log!r}")
     assert ("NEVER re-armed early" not in log and "NO rule episode" not in log
             and "per-outcome releases" not in log), log
+    # Parity with the suspended arm above: the ENTIRE release list is pinned, so
+    # deleting the whole `, a LIFTED suppression, … or a FAILED SEND` clause —
+    # byte-for-byte the mutant this file already rejects on the SENT surface —
+    # reddens here too instead of passing as a shorter sentence.
+    assert "LIFTED suppression" in log and "FAILED SEND" in log, (
+        f"the rule-episode log lost a kind-agnostic release site: {log!r}")
+    assert "issue-number read-back failed" in log, (
+        f"the rule-episode log still names a bare 'deferred filing': {log!r}")
     notify.reset_abuse_delivery_for_tests()
 
 
@@ -1721,7 +1742,8 @@ def test_the_sent_reminder_credits_a_close_re_arm_only_to_a_kind_that_has_one(
     # holding a suspension reminder looking only at a chat outage and the cap.
     # Measured: before this pair, deleting "LIFTED suppression, a deferred
     # filing" from the suspended clause left the whole suite GREEN.
-    assert "LIFTED suppression" in reminder and "a deferred filing" in reminder, (
+    assert "LIFTED suppression" in reminder and (
+        "issue-number read-back failed" in reminder), (
         f"the sent re-arm set lost a kind-agnostic release site: {reminder!r}")
     assert "cap eviction" in reminder, (
         f"the re-arm set omitted the ledger's own cap eviction: {reminder!r}")
@@ -1736,7 +1758,8 @@ def test_the_sent_reminder_credits_a_close_re_arm_only_to_a_kind_that_has_one(
     # reader. Measured: deleting the whole `, as can a LIFTED suppression, a
     # deferred filing or a FAILED SEND` clause left the suite GREEN — the same
     # vacuity this test exists to close, one arm over.
-    assert "LIFTED suppression" in reminder and "a deferred filing" in reminder, (
+    assert "LIFTED suppression" in reminder and (
+        "issue-number read-back failed" in reminder), (
         f"the sent re-arm set lost a kind-agnostic release site: {reminder!r}")
     assert "FAILED SEND" in reminder, (
         f"the sent re-arm set omitted the release a chat outage produces: {reminder!r}")

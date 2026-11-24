@@ -219,8 +219,8 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #: ``SKIPPED_WINDOW`` for the other — the ledger stays armed).
 #: ``abuse_suspended`` is in neither arm: ``_episode_delivery_kinds()`` excludes it
 #: by policy, so NO EPISODE END re-arms its window. It is still re-armed by the
-#: kind-agnostic per-outcome releases (a LIFTED suppression, a deferred filing, a
-#: failed send) and by the ledger's own cap eviction (``_enforce_delivery_cap``
+#: kind-agnostic per-outcome releases (a LIFTED suppression, a filing whose issue
+#: issue-number read-back failed, a failed send) and by the ledger's own cap eviction (``_enforce_delivery_cap``
 #: drops the soonest-to-expire LIVE keys once the population passes
 #: ``_MAX_DELIVERY_KEYS``), so a second suspension of the same subject inside 24h
 #: is normally folded — but it IS delivered when one of those fires in between (the
@@ -635,8 +635,9 @@ def release_abuse_delivery(kind: str, subject: str) -> None:
     RAISES or is backing off — that leaves ``skipped_window`` false UNLESS another
     episode kind answers ``SKIPPED_WINDOW`` in the same call, the flag being per
     CALL and not per kind, so the gate normally does not hold) — and,
-    kind-agnostically, by the per-outcome releases (a
-    deferred filing, a lifted suppression, a failed send), which is why a
+    kind-agnostically, by the per-outcome releases (a lifted
+    suppression, a filing whose issue-number read-back failed, a failed
+    send), which is why a
     flapping rule can page once per crossing. The failed-close release is NOT in
     that kind-agnostic set: it loops ``_episode_delivery_kinds()``, which excludes
     ``abuse_suspended``. An episode cleared out of
@@ -706,7 +707,8 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
     # runbook row names the legacy path as the manual close.
     subjects = (subject,)
     # The DELIVERY window is re-armed by a CONFIRMED episode end OR by a
-    # kind-agnostic per-outcome release (a lifted suppression, a deferred filing) —
+    # kind-agnostic per-outcome release (a lifted suppression, a filing whose issue
+    # issue-number read-back failed) —
     # but not by an ordinary clean evaluation: see the `skipped_window` gate below. A release on every clean evaluation would
     # undo the episode bound for a rule that hovers at its threshold: each
     # crossing would re-arm the ledger and page a reminder, so the 24h reminder
@@ -1080,14 +1082,14 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                 # way, and the two must not diverge again.
                 re_arm_note = (
                     "a close that FAILS or is backing off (a cooldown) can "
-                    "re-arm it, as can a LIFTED suppression, a deferred filing "
-                    "or a FAILED SEND, so a rule that flaps can page once per "
-                    "crossing"
+                    "re-arm it, as can a LIFTED suppression, a filing whose "
+                    "issue-number read-back failed, or a FAILED SEND, so a "
+                    "rule that flaps can page once per crossing"
                     if kind in _episode_delivery_kinds() else
                     "this kind has NO rule episode, so no episode end ever "
-                    "re-arms it; a LIFTED suppression, a deferred filing, a "
-                    "FAILED SEND or the ledger's own cap eviction can end the "
-                    "window early"
+                    "re-arms it; a LIFTED suppression, a filing whose "
+                    "issue-number read-back failed, a FAILED SEND or the "
+                    "ledger's own cap eviction can end the window early"
                 )
                 bot_token = _env("TELEGRAM_BOT_TOKEN")
                 chat_id = _env("TELEGRAM_CHAT_ID")
@@ -1218,8 +1220,8 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
     # P2). This helper is reached for EVERY member of
     # :data:`ABUSE_INCIDENT_KINDS`, but only a kind in
     # :func:`_episode_delivery_kinds` can be re-armed BY AN EPISODE END (the
-    # kind-agnostic per-outcome releases — a lifted suppression, a deferred filing
-    # — re-arm any kind): ``abuse_suspended`` is
+    # kind-agnostic per-outcome releases — a lifted suppression, a filing whose
+    # issue-number read-back failed — re-arm any kind): ``abuse_suspended`` is
     # deliberately excluded from :data:`_EPISODE_INCIDENT_KINDS` (it records an
     # operator decision, not a rule's flag window), and even for the rule-episode
     # kinds the re-arm is CONDITIONAL ON THE SHAPE — with a store the release is
@@ -1239,8 +1241,8 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
         ", RE-ARMED by a confirmed episode end ON THE NO-INCIDENT-CHANNEL PATH"
         " (with a store, the release is gated on its `SKIPPED_WINDOW` while that"
         " gate applies, so the 24h limit normally holds there — a release that is"
-        " not the episode end, a LIFTED suppression, a deferred filing or a"
-        " FAILED SEND, re-arms"
+        " not the episode end, a LIFTED suppression, a filing whose"
+        " issue-number read-back failed or a FAILED SEND, re-arms"
         " it regardless) — a rule"
         " that FLAPS therefore pages once per episode in that shape, one message"
         " per crossing, which is the pre-#14407 rate (this path's gain is"
@@ -1250,7 +1252,8 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
         ", NOT re-armed by an episode end — this kind has NO rule episode (it"
         " records an operator decision), so no episode end ever re-arms it; it"
         " is bounded by that window like every other outcome, and the generic"
-        " per-outcome releases (a LIFTED suppression, a deferred filing, a"
+        " per-outcome releases (a LIFTED suppression, a filing whose"
+        " issue-number read-back failed, a"
         " FAILED SEND) end the window early — as does the ledger's own cap"
         " eviction, which drops the soonest-to-expire live keys past its maximum"
         " — so a repeat about the same subject inside the window is normally"
