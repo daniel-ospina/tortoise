@@ -1,0 +1,110 @@
+{
+  "corpus": {
+    "copied_entries": 265,
+    "source_before": {
+      "aggregate_sha256": "83ae68c14cf631f2e17e845ed9f37f4a4d2e61380193bd988d6062802a18fad2",
+      "bytes": 1683451,
+      "entries_meta": 265,
+      "entries_turns": 265,
+      "files": 530
+    }
+  },
+  "graph_after_pass_1": {
+    "capture_ok_true": 261,
+    "entities": 0,
+    "extracted_points": 526,
+    "phase_in_flight": 3,
+    "sessions": 264,
+    "turn_points": 2083
+  },
+  "graph_after_pass_2": {
+    "capture_ok_true": 264,
+    "entities": 0,
+    "extracted_points": 528,
+    "phase_in_flight": 0,
+    "sessions": 264,
+    "turn_points": 2085
+  },
+  "graph_settled": {
+    "capture_ok_true": 264,
+    "entities": 0,
+    "extracted_points": 528,
+    "phase_in_flight": 0,
+    "sessions": 264,
+    "turn_points": 2085
+  },
+  "invariant_source_untouched": true,
+  "mode": "head-mock",
+  "observations": {
+    "ack_ms_max": 1175.0,
+    "ack_ms_p50": 706.5,
+    "ack_ms_p95": 915.6,
+    "posts": 264,
+    "posts_per_min": 80.6,
+    "rate_limited": 0,
+    "refusal_bodies": [],
+    "stage_strings": [],
+    "status_counts": {
+      "200": 264
+    }
+  },
+  "passes": [
+    {
+      "exit": 0,
+      "label": "drain-1",
+      "seconds": 197.9,
+      "stderr": "spool drain: cleared terminal state on 0 entries \u2014 retrying\nspool drain: filed 264, deferred 0, skipped 1 (0 waiting on backoff), held back 0, probe refusals 0, terminal 0 (kept, not retried; re-file with 'tortoise session drain --retry-terminal'), discarded 0\nspool drain: outcome unrecorded 264 (8684cfde-29e5-456a-b677-f1824ed2f572, a5074656-ab04-4b9f-8f0d-afec2b58967d, 79cb8069-1e7e-4874-a071-2e8b71b47f87 +261 more)\n",
+      "stdout": ""
+    },
+    {
+      "exit": 0,
+      "label": "drain-2 (replay)",
+      "seconds": 0.19,
+      "stderr": "spool drain: cleared terminal state on 0 entries \u2014 retrying\n",
+      "stdout": ""
+    }
+  ],
+  "settle": {
+    "capture_ok_true": 264,
+    "entities": 0,
+    "extracted_points": 528,
+    "phase_in_flight": 0,
+    "reached_zero": true,
+    "seconds": 2.0,
+    "sessions": 264,
+    "turn_points": 2085
+  },
+  "source_after": {
+    "aggregate_sha256": "83ae68c14cf631f2e17e845ed9f37f4a4d2e61380193bd988d6062802a18fad2",
+    "bytes": 1683451,
+    "entries_meta": 265,
+    "entries_turns": 265,
+    "files": 530
+  },
+  "spool_after_pass_1": {
+    "attempts_gt_0": 0,
+    "attempts_max": 0,
+    "attempts_min": 0,
+    "attempts_p50": 0,
+    "backoff_max_seconds": 0,
+    "backoff_p50_seconds": 0,
+    "backoff_waiting": 0,
+    "entries": 265,
+    "filed_key_present": 265,
+    "terminal_failure": 0,
+    "terminal_reasons": {}
+  },
+  "spool_after_pass_2": {
+    "attempts_gt_0": 0,
+    "attempts_max": 0,
+    "attempts_min": 0,
+    "attempts_p50": 0,
+    "backoff_max_seconds": 0,
+    "backoff_p50_seconds": 0,
+    "backoff_waiting": 0,
+    "entries": 265,
+    "filed_key_present": 265,
+    "terminal_failure": 0,
+    "terminal_reasons": {}
+  }
+}
