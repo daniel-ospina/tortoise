@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1954 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2011 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -317,7 +317,16 @@ def _residue_block() -> str:
     naming both numbers instead of shipping the stale one. The MERGE with `origin/main` then
     moved it again — `main`'s `seen.update(kwargs)` row took the pin UP to `11909` and the block
     gained prose stating that attribution — and the LATEST fold re-derived the pair at `11910`
-    on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk:
+    on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk,
+    — and the `#14308` record block below (the `seen.update` row DECLARED rather than rewritten, the
+    withdrawn rewrite arm recorded, and the `seen.update` attribution corrected from `#14491` to
+    `#14506` by `git log -S`) appended its `#:` lines to `tools/sdk_privatise.py` WITHOUT moving the
+    pair, and that block's own review rounds then marked the wrong address in place (the sentence a
+    reader greps), corrected two citations in it, and fixed seven other findings IN IT — its `|=`
+    mechanism, a `merged`/`tree` word, a pre-rebase figure, a GC-able anchor, a direction word, a
+    false "not theirs" contrast against two peer branches that in fact carry the same pair, and a
+    `-3` delta that measures -1 — so the figure above is RE-MEASURED by this walk on the rebased file at 2011 rather than adjusted
+    by arithmetic from the fold's 1954 reading,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,

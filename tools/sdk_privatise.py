@@ -2052,11 +2052,16 @@ SWEEP_NAMES = 66
 #: ⛔ AND THE NEXT FOLD OF `origin/main` RE-DERIVED IT AGAIN RATHER THAN INHERITING EITHER SIDE, because
 #: the fold's own tree is a THIRD tree: this merge brings main's durable `claim_unavailable` self-heal,
 #: whose `recorded.update(keep)` in `tortoise/capture_spool.py` is one new untyped `.update(`
-#: receiver, and `--repin` on THIS resolved tree prints **(11910, "3216395d35345904")**. The -3
-#: between that and main's committed 11911 is attributed ROW BY ROW, not waved through:
+#: receiver, and `--repin` on THIS resolved tree prints **(11910, "3216395d35345904")**. The -1
+#: between that and main's committed 11911 is attributed ROW BY ROW, not waved through — and ⛔ this
+#: read `-3` until a review measured it: `--check` on a detached `6a02515d14` prints 11910 / exit 0
+#: while `2cccf90f4dd4` derives 11912 against its committed 11911, so the delta is -1 against the pin
+#: and -2 against main's OWN TREE, which is the equation the two bullets below state:
 #:   * `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1 is
 #:     `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which arrived
-#:     with `#14491`'s rewrite and which that re-pin did not count. So `--check` exits 1 on `main`
+#:     with `#14491`'s rewrite (⛔ WRONG ADDRESS — the `#14308` record below corrects it to `#14506`,
+#:     measured; the refutation is marked HERE because this is the sentence a reader greps) and which
+#:     that re-pin did not count. So `--check` exits 1 on `main`
 #:     ITSELF right now (the `#14062` recurrence the blocks above record a sixth time); this branch
 #:     inherits main's row set, not main's number.
 #:   * `#4625`'s own -2 is the pair of `_JSONB_CACHE.update({...})` rows the retired 5 s `jsonb` TTL
@@ -2064,6 +2069,58 @@ SWEEP_NAMES = 66
 #:     (`--report --top 5000` on both trees, 862 shape-carrying lines either side, one differing line).
 #: 11912 - 2 = 11910, and the pair below is `--repin`'s own output on THIS tree, never arithmetic; a
 #: pin that FALLS cannot hide a new untyped reference, which is the direction this arm exists to catch.
+#: ── `#14308`: THE ROW IS DECLARED, THE REWRITE ARM IS WITHDRAWN, AND ONE ATTRIBUTION ABOVE IS WRONG ─
+#: `#14491` is NOT where `seen.update(kwargs)` came from, and the sentence above says it is. MEASURED,
+#: not argued: `git log -S'seen.update(kwargs)' -- tests/test_collision_preflight.py` returns EXACTLY ONE
+#: commit, `7d9e7b99c4` (`#14506`), while `git show --stat 07a483ab38 -- tests/test_collision_preflight.py`
+#: is EMPTY — `#14491` never touched the file — and `git blame` on the line's own subject agrees. The
+#: attribution is corrected here rather than left standing, because naming the commit that went
+#: unpinned is this block's whole subject, and a wrong address is what sends the next lane to the
+#: wrong diff. The row's identity is unaffected: `seen.update(kwargs)` at
+#: `tests/test_collision_preflight.py:10584`, over the test-local `seen: dict[str, object] = {}` at
+#: `:10580`, inside the `spy()` `Popen` double.
+#: ⛔ IT IS DECLARED, NEVER REWRITTEN — this file's own recorded decision, stated one block above:
+#: "A PEER's `.update` receiver is STILL declared, never rewritten away … not someone else's code being
+#: edited to suit a counter" (`:2014-2017`). `seen` is a MERGED peer's test-local accumulator that this
+#: change does not otherwise touch, and the matching precedent is `#13998`'s `row.update` on `_org_row`
+#: (`:560`) — a local DICT accumulator in a helper, DECLARED rather than rewritten. The census's own
+#: failure text offers two arms, "fix or declare the new shape" (`:2776`); for a PEER's receiver only
+#: the second is available, and choosing the first is how a census gets satisfied by editing its
+#: subject.
+#: ⛔ THE REWRITE ARM WAS TRIED ON THIS PR'S EARLIER HEAD AND IS WITHDRAWN — recorded here so the next
+#: lane does not rediscover it as a cheap green. That head replaced the one call with a
+#: `for key, value in kwargs.items(): seen[key] = value` loop, and ON THE TREE IT WAS MEASURED ON —
+#: `main` `2cccf90f4dd4`, whose own pin was 11911 — it returned the derivation to 11911 and made
+#: `--check` exit 0, which is exactly why it looked like a fix. ⛔ THAT FIGURE DOES NOT CARRY TO THIS
+#: BASE, and the block stated it without naming its tree until a review caught it: on the REBASED base
+#: `6a02515d14` the pin is 11910 and the same loop READS 11909 and exits 1, because removing a
+#: counted row from a tree pinned at 11910 leaves 11909 — so on this head the loop is ruled out
+#: MECHANICALLY as well as by the decision above, and no reader is invited to re-try it expecting
+#: green. ⛔ NEITHER READING IS A SHA TO TRUST: the withdrawn arm's own commit was replayed during this
+#: PR's rebase and is now held by NO ref, so it will be garbage-collected. RECONSTRUCT them instead —
+#: in `tests/test_collision_preflight.py`'s `spy()`, replace the single `seen.update(kwargs)` with
+#: `for key, value in kwargs.items():` / `seen[key] = value` and run `--check` on the tree you chose:
+#: `main` `2cccf90f4dd4` then reads 11911 / exit 0, and the rebased base `6a02515d14` reads 11909 /
+#: exit 1. Both figures were measured that way by this lane, on throwaway worktrees, not read off a
+#: commit message. The arm is forbidden either way: its author edits a peer's
+#: test double to suit a counter. `seen |= kwargs` does not work either, and not
+#: for style — augmented assignment makes `seen` LOCAL to `spy`, so the `|=` itself raises
+#: `UnboundLocalError` on the READ of the name (`dict.__ior__` mutates in place only once the name
+#: already resolves), and the raise propagates out of the fake-lane call before the
+#: `self.assertTrue(seen.get(...))` below it is ever reached — the enclosing `seen` stays `{}` rather
+#: than being updated, which is the part that would have looked like success under a `try`. Neither
+#: spelling belongs in a change whose subject is the pin.
+#: ⛔ ON THIS REBASED HEAD THE PAIR DOES NOT MOVE, AND THAT IS MEASURED RATHER THAN ASSUMED. `#4625`'s
+#: own fold above re-derived this pin at 11910, and `--check` exits 0 on `origin/main` `6a02515d14` —
+#: so main's own `#14308` red is ALREADY repaired there and the `seen.update` row is absorbed inside
+#: that number. This record therefore carries the ARM and the withdrawn rewrite, not a re-cut: this
+#: branch's only edits to the walked file are `#:` prose, so its row set is main's, and the pair below
+#: is RE-MEASURED here by `--check` rather than inherited from either side. A peer's pair is never
+#: carried as prose either — `#14530` and `#14531` name their own, and each is re-derived on ITS OWN
+#: tree. ⛔ ON THIS HEAD THOSE READINGS COINCIDE, and that is measured rather than assumed: both peer
+#: BRANCHES carry `SWEEP_RESIDUE = (11910, "3216395d35345904")`, the same pair as below, because all
+#: three trees agree row for row — so the number below is this tree's own reading and the agreement is
+#: an IDENTITY, never a copy of theirs.
 SWEEP_RESIDUE = (11910, "3216395d35345904")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
