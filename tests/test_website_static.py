@@ -12264,8 +12264,18 @@ def _css_border_end_width(prop: str, value: str) -> float | None:
     absent from `BORDER_END_WIDTH_PROPS`, so `border-block-width: 3px` was
     invisible and the row compared the compensation to itself. Its 1/2 values
     are `(start, end)`, like `border-block`.
+
+    ⛔ AND A `none`/`hidden` STYLE ZEROES THE WIDTH EVEN WHEN A LENGTH IS
+    STATED (CSS Backgrounds and Borders 3 — a side's USED border width is 0
+    when its style is `none` or `hidden`, whatever the width property says), so
+    `border-bottom: 4px none #f00` is a 0px border, not a 4px one.
     """
     tokens = _css_tokens(_without_important(value))
+    if any(t.lower() in _BORDER_NONE_STYLES for t in tokens):
+        # `none`/`hidden` state a width of zero and OVERRIDE a stated length.
+        # Unlike `thin`, whose px width this file cannot convert, so it stays
+        # None below and the caller fails rather than guesses.
+        return 0.0
     lengths: list[float] = []
     for token in tokens:
         match = _BORDER_WIDTH_PX.fullmatch(token)
@@ -12274,11 +12284,6 @@ def _css_border_end_width(prop: str, value: str) -> float | None:
         elif _BARE_ZERO_LENGTH.fullmatch(token) and float(token) == 0.0:
             lengths.append(0.0)
     if not lengths:
-        # `border: none` / `border: hidden` state no length, but they do state a
-        # width of zero — unlike `border: thin`, whose px width this file cannot
-        # read, so it stays None and the caller fails rather than guesses.
-        if any(t.lower() in _BORDER_NONE_STYLES for t in tokens):
-            return 0.0
         return None
     if prop in ("border", "border-width"):
         chosen = lengths[2] if len(lengths) >= 3 else lengths[0]
@@ -13730,6 +13735,8 @@ class TestCssDesktopReachAndSpecificity:
                 ("border", "none", 0.0),
                 ("border", "hidden", 0.0),
                 ("border", "0 solid #f00", 0.0),
+                ("border", "4px none #f00", 0.0),
+                ("border-bottom", "4px hidden", 0.0),
                 ("border-width", "1px 2px 0", 0.0),
                 ("border-block-width", "2px 3px", 3.0),
                 ("border-block-width", "4px", 4.0),
@@ -13759,6 +13766,7 @@ class TestCssDesktopReachAndSpecificity:
                 (".pricing-card.popular { border-block-width: 3px }", 2.0),
                 (".pricing-card.popular { border-block-width: 2px 3px }", 2.0),
                 (".pricing-card.popular { border-bottom: 1px solid #f00 }", 0.0),
+                (".pricing-card.popular { border-bottom: 4px none #f00 }", -1.0),
         ):
             got = _popular_border_extra_px(self._page_with(mutant))
             assert got == expected, (
