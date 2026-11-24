@@ -52,7 +52,7 @@ version: 1
 # 2026-11-16 sweep and the two rows that followed it.)
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
-# `main` at `af40c97ca312`, and the pool it emits is the union of BOTH parents' registrations —
+# `main` at `e627ca89375c`, and the pool it emits is the union of BOTH parents' registrations —
 # ⛔ AND THIS BRANCH'S OWN ROW IS THE DIFFERENCE: `tests/test_4625_schema_reads_off_write_path.py`
 # and `tests/test_14033_state_cue_gap.py` are `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, while
 # THIS PR adds exactly ONE fast-file registration of its own —
@@ -68,12 +68,12 @@ version: 1
 # fold and is not true of this one — the `merge=union` driver (#5373) kept both parents' clauses, so
 # the block briefly claimed two partitions. Re-derived below with the verb.
 # On THIS merged tree (`main` at
-# `14b8322eb271` folded in) the verb packs four shards at 825.3 s
-# (e, f, g, h) and seven at 825.2 s (a, b, c, d, i, j, k), so
-# `ceil(825.3/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.04` (1680 / 825.3 =
-# 2.0356), so the two agree by construction rather than by a hand re-read. Re-derive it on the tree
-# after the next fold; never carry this 825.3/825.2. ⛔ The CAUSAL story this sentence used to carry is DELETED because it
+# `e627ca89375c` folded in) the verb packs nine shards at 825.8 s
+# (a, b, e, f, g, h, i, j, k) and two at 825.7 s (c, d), so
+# `ceil(825.8/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 825.8 =
+# 2.0344), so the two agree by construction rather than by a hand re-read. Re-derive it on the tree
+# after the next fold; never carry this 825.8/825.7. ⛔ The CAUSAL story this sentence used to carry is DELETED because it
 # is false at this tree: it said removing `tests/test_dod_5090_probe.py` from the `core` surface took
 # that file's weight out of the pool — but the file is registered on the `eval` surface, so
 # `fast_pool()` still carries it and dropping a `core` row would not move the bin. The FIGURES above
@@ -104,7 +104,7 @@ version: 1
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
-# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `af40c97ca312`
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `e627ca89375c`
 # and adds exactly ONE fast-file registration of its own — `tests/test_expansion_fusion_14344.py`,
 # the single row the earlier cuts of this block attributed to the wrong files (review of this PR,
 # P3); every other registration counted here is `main`'s. ⛔ A restatement here would be graded as a second claim;
@@ -140,7 +140,7 @@ version: 1
 # ⛔ ONE RESIDUAL, NAMED: the guard grades the partition and the `ceil(...)` MULTIPLIER
 # (`WATCHDOG_HEADROOM`), NOT the printed `watchdog_headroom:` ratio beside them — so the ratio is
 # re-read by hand whenever the seconds move. It moves: `2.01` at 837.9 s (1680 / 837.9 = 2.0050),
-# and `2.04` at this head's 825.3 s (1680 / 825.3 = 2.0356). A carried ratio in a graded sentence is
+# and `2.03` at this head's 825.8 s (1680 / 825.8 = 2.0344). A carried ratio in a graded sentence is
 # exactly the defect this block exists to prevent, one level below what it grades.
 # `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, and the union packs a
 # worst-shard figure heavier than either side alone packs it — `shard_watchdog_minutes()` rounds that
@@ -159,14 +159,15 @@ version: 1
 # `10f0107689b9` folded in over `#14565`'s merge base, after the `#14419` B7 cut took the
 # durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool, plus
 # this PR's OWN row in `fast_pool()` (`tests/test_14559_reaper_schedule.py`, `core`, at the flat
-# 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs eleven shards at 825.6 s
-# (a, b, c, d, e, f, g, h, i, j, k), so `ceil(825.6/60 x 2)` = 28 m governs (a shard's job-level
-# wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE, and the move is THIS PR's: measured with the verb on
-# each tree's own map, `main` `10f0107689b9` alone packs nine shards at 825.4 s and two at 825.5 s —
-# quoted WITHOUT name lists on purpose, because a name list would parse as a second clause and red
-# the guard — so no parent's figure may be carried here, and none is. The delta is measurable and
+# 2.0 s `DEFAULT_FAST_WEIGHT`) — the block states ONE graded emission, and it is the clause set
+# ABOVE, re-derived on this PR's resolved tree; this paragraph is the PROVENANCE of that pool, not a
+# second reading of it. ⛔ IT STATES NO FIGURE ON PURPOSE (its own pre-fold text published eleven
+# shards at one weight, which is a reading of `10f0107689b9` and not of this tree): two graded clause
+# sets in one block is the two-partitions defect this header records, and the emission guard reds on
+# exactly that. Measured with the verb on each tree's own map, `main` `10f0107689b9` alone packs
+# nine shards at 825.4 s and two at 825.5 s — quoted WITHOUT name lists on purpose, because a name
+# list would parse as a second clause and red the guard — so no parent's figure may be carried
+# here, and none is. The delta is measurable and
 # small: `fast_pool()` holds 1330 files at this head against 1329 on `main`, and the ONE addition is
 # this PR's `tests/test_14559_reaper_schedule.py`. ⛔ `#14415`'s two rows
 # (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`) are `main`'s at this head,
