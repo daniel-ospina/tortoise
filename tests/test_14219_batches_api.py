@@ -2293,3 +2293,45 @@ def test_inline_text_with_no_storage_is_refused_before_the_ack_gate(client,
         "a body that cannot be staged was answered "
         f"{r.status_code} instead of being refused for its own reason: "
         f"{r.text[:200]}")
+
+
+def test_a_mixed_cancel_says_a_document_is_still_running_and_being_charged(
+        client, store):
+    """#14415 round 21 (MEDIUM): the two cancel facts are not exclusive.
+
+    `cancel()` stops the `queued` set and stamps the batch `cancelled` while an
+    item that had already been claimed keeps running — and `cancelled` is a
+    TERMINAL batch state, so the payload also said `complete: true` beside
+    `counts.pending: 1`. Measured before the fix: a client that stops polling on
+    `complete` never saw that document's `indexed` status nor the charge for it,
+    and the sentence it read never mentioned the document at all.
+    """
+    r = client.post("/v1/batches", json={"items": [
+        {"ref": "/d/todo.md"}, {"ref": "/d/live.md"}]})
+    batch_id = r.json()["batch_id"]
+    coord = bi.BatchCoordinator(store)
+    by_ref = {i.ref: i for i in store.items(ORG_ID, batch_id)}
+    # A LIVE claim: `attempt=True` stamps it now, so it is inside the reclaim
+    # window and the cancel is not allowed to call it dead.
+    coord.advance(ORG_ID, by_ref["/d/live.md"], bi.BatchItemState.EXTRACTING,
+                  attempt=True)
+
+    body = client.post(f"/v1/batches/{batch_id}/cancel").json()
+
+    assert body["status"] == "cancelled"
+    assert body["counts"]["cancelled"] == 1          # the queued one was stopped
+    assert body["counts"]["pending"] == 1            # the in-flight one may move
+    assert body["complete"] is False, (
+        "`complete` said the batch was done while a document could still be "
+        "indexed and charged")
+    assert "being processed" in body["message"], (
+        f"the cancel copy never mentions the in-flight document: {body['message']}")
+    assert "charged" in body["message"]
+
+    # …and once that document lands, the honest answer flips to complete.
+    coord.advance(ORG_ID, store.get_item(ORG_ID, batch_id,
+                                         by_ref["/d/live.md"].item_id),
+                  bi.BatchItemState.INDEXED, tokens_in=1, tokens_out=1)
+    after = client.get(f"/v1/batches/{batch_id}").json()
+    assert after["complete"] is True
+    assert after["counts"]["pending"] == 0

@@ -3322,3 +3322,115 @@ def test_the_create_if_absent_reports_creation_only_for_this_call():
 
     assert GraphBatchStore(_Empty("__mine__")).put_batch_if_absent(batch) is False, (
         "an empty RETURN was read as 'I created it' — the verdict fails open")
+
+
+# ── round 21: a minted id can lose its create, and to OUR OWN recovery scan ──
+class _AdoptingStore(InMemoryBatchStore):
+    """A store whose `put_items` is followed by the recovery scan's adoption.
+
+    This is the measured interleaving, not a hypothetical: `submit()` writes the
+    ITEM rows before the batch row (deliberately), `pending_batches()` UNIONs the
+    item arm, and `_resume_batch` adopts item rows whose batch row is absent by
+    calling `put_batch_if_absent` — so the RECOVERY SCAN can take the create from
+    the acceptance that wrote those very rows.
+    """
+
+    def put_items(self, org_id, items):
+        super().put_items(org_id, items)
+        # The adoption builds its stamp from `orphan_items[0].updated_at`, which
+        # is the stamp the acceptance put on the rows it just wrote.
+        super().put_batch(Batch(batch_id=items[0].batch_id, org_id=org_id,
+                                state=BatchState.RESUMING,
+                                created_at=items[0].updated_at,
+                                updated_at=items[0].updated_at))
+
+
+def test_a_minted_submission_survives_its_own_recovery_scan_adopting_it():
+    """#14415 round 21 (HIGH): a lost create on a MINTED id is not a conflict.
+
+    The comment at the failing arm said a lost create was "only possible for a
+    caller-supplied one". It is not: the recovery scan adopts the item rows this
+    acceptance had written a statement earlier. The `_BatchIdConflict` it raised
+    is a `ValueError`, which `create_batch` renders as **503 "nothing was
+    accepted; retry"** — over rows a drain had already been told to run. Measured
+    before the fix: the customer is told nothing landed, the documents index and
+    charge anyway, and the retry opens a SECOND batch over the same content.
+    """
+    store = _AdoptingStore()
+    coord = BatchCoordinator(store)
+    estimate = {"items": 2, "estimate_tokens": 129_598}
+    batch, items = coord.submit(ORG, ["/d/a.md", "/d/b.md"], estimate=estimate)
+
+    # No conflict, and the RECORD is ours: the estimate the ACK is required to
+    # carry (owner #14275 §4) must survive the adoption, not be blanked by it.
+    assert batch.state is BatchState.ACCEPTED
+    assert batch.estimate == estimate
+    recorded = store.get_batch(ORG, batch.batch_id)
+    assert recorded is not None, "the acceptance reported a batch with no row"
+    assert recorded.estimate == estimate, (
+        "the estimate was lost to the recovery scan's empty adoption — the ACK "
+        "then carries arithmetic the record does not")
+    assert [i.item_id for i in store.items(ORG, batch.batch_id)] == [
+        i.item_id for i in items]
+
+
+def test_a_caller_supplied_id_that_was_adopted_is_still_a_conflict():
+    """The takeover is scoped to MINTED ids — a caller's clash stays a refusal.
+
+    Two submissions carrying the same caller-supplied id are the #14498 race, and
+    the loser must not adopt the winner's row on the strength of this fix.
+    """
+    store = _AdoptingStore()
+    coord = BatchCoordinator(store)
+    coord.submit(ORG, ["/d/a.md"], batch_id="dup-1")
+    with pytest.raises(ValueError, match="already exists"):
+        coord.submit(ORG, ["/d/b.md"], batch_id="dup-1")
+
+
+# ── round 21: the retry ceiling must bound a PRE-CLAIM fault too ─────────────
+class _FlakyReadStore(InMemoryBatchStore):
+    """`get_item` raises for one row until it has raised `faults` times."""
+
+    def __init__(self, faults: int = 1) -> None:
+        super().__init__()
+        self.faults = faults
+        self.raises = 0
+
+    def get_item(self, org_id, batch_id, item_id):
+        if self.raises < self.faults:
+            self.raises += 1
+            raise RuntimeError("graph probe timeout")
+        return super().get_item(org_id, batch_id, item_id)
+
+
+def test_a_pre_claim_read_fault_is_counted_and_reaches_the_retry_ceiling():
+    """#14415 round 21 (MEDIUM): `BATCH_MAX_ATTEMPTS` bounded nothing here.
+
+    `attempts` is written by one statement — the claim CAS — which a fault BEFORE
+    the claim never reaches. `_drain_batch` re-drives while any item is
+    non-terminal and its comment says the ceiling "is what bounds the loop", so
+    the loop was unbounded for exactly the faults it named: measured on the pre-fix
+    code, ten `run_item` calls left `attempts: 0`, `state: queued`, the runner never
+    invoked, and a drain pass burned every retry tick for the process lifetime.
+    """
+    store = _FlakyReadStore(faults=1)
+    coord = BatchCoordinator(store)
+    _, items = coord.submit(ORG, ["/d/a.md"])
+    item = items[0]
+
+    with pytest.raises(RuntimeError):
+        coord.run_item(ORG, item, lambda *a, **k: None)
+
+    assert store.get_item(ORG, item.batch_id, item.item_id).attempts == 1, (
+        "the failed pass was not counted, so no ceiling can ever be reached")
+
+    # Exhaust the remaining passes; the item must end VISIBLY failed, not spin.
+    for _ in range(bi_module.BATCH_MAX_ATTEMPTS + 2):
+        store.raises, store.faults = 0, 1      # one fault per pass, before the claim
+        with pytest.raises(RuntimeError):
+            coord.run_item(ORG, item, lambda *a, **k: None)
+    settled = store.get_item(ORG, item.batch_id, item.item_id)
+    assert settled.state is BatchItemState.FAILED, (
+        "a condition that never clears must settle `failed` visibly, not stay "
+        "`queued` for the life of the process")
+    assert "retry ceiling" in settled.reason

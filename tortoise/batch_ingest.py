@@ -660,7 +660,17 @@ class Batch:
             "corpus_name": self.corpus_name,
             "counts": counts,
             "items_total": len(items),
-            "complete": self.state in TERMINAL_BATCH_STATES,
+            # ⛔ `complete` IS DERIVED FROM THE ROWS, NOT FROM THE LABEL (#14415
+            # review round 21, MEDIUM — measured). `cancelled` is a TERMINAL batch
+            # state, but a mixed cancel legitimately leaves an in-flight item
+            # running to its own terminal state: the row then said
+            # `complete: true` beside `counts.pending: 1`, and a client that stops
+            # polling on `complete` never saw that document's `indexed` status nor
+            # the charge for it. Both facts are true at once — the batch is stopped
+            # AND one document is still finishing — so the payload says both, and
+            # `complete` flips only when no item can still move.
+            "complete": (self.state in TERMINAL_BATCH_STATES
+                         and not counts.get("pending", 0)),
             "cancelled_at": self.cancelled_at,
             "cancel_reason": self.cancel_reason,
             "items": [i.as_dict() for i in items],
@@ -2139,12 +2149,45 @@ class BatchCoordinator:
                       corpus_name=str(corpus_name or ""),
                       estimate=dict(estimate or {}))
         if not self._store.put_batch_if_absent(batch):
-            # Lost the create to a concurrent writer with the same minted id (only
-            # possible for a caller-supplied one). Do not pretend it is ours — and
-            # do NOT discard: `discard(org_id, bid)` removes the batch row AND its
-            # item rows, and `bid` belongs to the WRITER THAT WON. Deleting the
-            # winner's batch to tidy up after the loser is the same destruction the
-            # pre-existing-id check above exists to prevent, one race window later.
+            # Lost the create. Do not pretend it is ours — and do NOT discard:
+            # `discard(org_id, bid)` removes the batch row AND its item rows, and
+            # `bid` belongs to the WRITER THAT WON. Deleting the winner's batch to
+            # tidy up after the loser is the same destruction the pre-existing-id
+            # check above exists to prevent, one race window later.
+            #
+            # ⛔ A **MINTED** ID CAN LOSE THIS CREATE, AND TO OUR OWN RECOVERY SCAN
+            # (#14415 review round 21, HIGH — measured). The comment here used to
+            # say a lost create is "only possible for a caller-supplied one", and
+            # that was false. `pending_batches()` UNIONs the ITEM arm, so a
+            # `_resume_batch` scan running between `put_items` above and this call
+            # sees item rows with no batch row, reads `get_batch -> None` twice,
+            # and ADOPTS them — `put_batch_if_absent(adopted)` writes the row first.
+            # The acceptance then raised `_BatchIdConflict`, which is a `ValueError`,
+            # so `create_batch` answered **503 "nothing was accepted; retry"** over
+            # item rows a drain had ALREADY been told to run: the customer is told
+            # nothing landed, the documents are indexed and charged anyway, and the
+            # retry opens a SECOND batch over the same content (duplicate ingest,
+            # double charge). A lost create is therefore OUR OWN ROWS being adopted,
+            # whether the id was minted or came from the caller: take the row back
+            # and write the record we own — the estimate the ACK is required to
+            # carry (owner §4).
+            #
+            # ⛔ The STAMP is the identity that scopes that takeover, and it is read
+            # off the adoption's own construction: it stamps `created_at` from
+            # `orphan_items[0].updated_at`, i.e. the stamp THIS call put on those
+            # rows. Two submissions racing one caller-supplied id (#14498) carry
+            # DIFFERENT stamps, so a loser sees a mismatch and is still refused —
+            # the takeover can never become a way for a losing writer to claim a
+            # winner's row.
+            current = self._store.get_batch(org_id, bid)
+            if (current is not None
+                    and current.state is BatchState.RESUMING
+                    and current.created_at == stamp):
+                # `put_batch` is the one writer of the record's identity
+                # (`estimate_json`, `corpus_name`) — the same writer the ordinary
+                # acceptance uses, so this takes the row over rather than racing it.
+                self._store.put_batch(batch)
+                return batch, items
             raise _BatchIdConflict(f"batch id {bid!r} was created concurrently")
         return batch, items
 
@@ -2329,7 +2372,18 @@ class BatchCoordinator:
         """
         if item.terminal:
             return item
-        fresh = self._fresh(org_id, item)
+        try:
+            fresh = self._fresh(org_id, item)
+        except Exception as exc:
+            # ⛔ A FAULT BEFORE THE CLAIM IS STILL A FAILED PASS, AND MUST BE
+            # COUNTED (#14415 review round 21, MEDIUM — measured). `attempts` is
+            # incremented ONLY by the claim CAS below, so a read fault that never
+            # reaches it left the row `queued` with `attempts: 0` for ever while
+            # `_drain_batch` re-drove it every `TORTOISE_BATCH_RETRY_S` — the
+            # "`BATCH_MAX_ATTEMPTS` is what bounds the loop" promise in that
+            # module's own comment was inert for exactly the faults it names.
+            self._note_failed_pass(org_id, item, exc)
+            raise
         if fresh.terminal:
             # ⛔ Read the TERMINAL check from the FRESH row, never from the copy
             # the caller passed (#14219 review round 2, NB2): a stale non-terminal
@@ -2633,6 +2687,58 @@ class BatchCoordinator:
     def _fresh(self, org_id: str, item: BatchItem) -> BatchItem:
         stored = self._store.get_item(org_id, item.batch_id, item.item_id)
         return stored if stored is not None else item
+
+    def _note_failed_pass(self, org_id: str, item: BatchItem,
+                          exc: BaseException) -> None:
+        """Count a pass that failed BEFORE it could claim the row. Best effort.
+
+        ⛔ WHY THIS EXISTS (#14415 review round 21, MEDIUM — measured): the retry
+        loop is bounded by `BATCH_MAX_ATTEMPTS`, and `attempts` is written by the
+        CLAIM CAS alone. A fault that happens before the claim — an unreadable
+        row, a graph timeout on the read — therefore incremented nothing, and the
+        item stayed `queued` while `_drain_batch` re-drove the batch on every
+        retry tick for the life of the process. Measured on the pre-fix code with
+        a store whose `get_item` raised for one row: ten `run_item` calls,
+        `attempts: 0`, `state: queued`, runner never invoked, ceiling never
+        reached. That is the inert row the ceiling exists to remove.
+
+        Two details decide correctness:
+
+        * `updated_at` is NOT advanced. A bumped stamp on an `extracting` row is a
+          claim that looks LIVE, which would stop every reclaimer from touching
+          it — the item would be STRANDED instead of retried.
+        * Everything is best effort, and nothing here raises: the fault that got
+          us here was already one exception, and "one item's failure must not
+          abandon the rest" is the drain's contract.
+
+        The ceiling's write is a compare-and-set against `attempts`, so a peer
+        that claimed the row between our read and the write keeps its work: only
+        an exhausted row that nobody else advanced is settled `failed`.
+        """
+        try:
+            row = self._store.get_item(org_id, item.batch_id, item.item_id)
+        except Exception:
+            return
+        if row is None or row.terminal:
+            return
+        bumped = _copy_item(row)
+        bumped.attempts = row.attempts + 1
+        try:
+            landed = self._store.put_item_if_state(
+                org_id, bumped, row.state, expected_attempts=row.attempts)
+        except Exception:
+            return
+        if not landed or bumped.attempts < BATCH_MAX_ATTEMPTS:
+            return
+        try:
+            self.advance(
+                org_id, bumped, BatchItemState.FAILED,
+                reason=(f"could not be advanced in {bumped.attempts} "
+                        f"consecutive passes ({type(exc).__name__}: {exc}) — "
+                        "retry ceiling reached"),
+                expected=row.state, expected_attempts=bumped.attempts)
+        except Exception:
+            return
 
     # -- cancel (owner requirement, brief item 6) ------------------------
     def cancel(self, org_id: str, batch_id: str, *, reason: str = ""

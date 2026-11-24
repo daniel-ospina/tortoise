@@ -17841,9 +17841,28 @@ async def cancel_batch(batch_id: str,
     # charged. The structured fields were honest and any surface rendering this
     # sentence was not, which is the same lie B3 exists to prevent.
     if batch.state is _batch_ingest.BatchState.CANCELLED:
-        body["message"] = (
-            "Cancelled. Work that had not started will not run and is not "
-            "charged; documents already processed are kept.")
+        # ⛔ THE MIXED CASE FIRST (#14415 review round 21, MEDIUM — measured).
+        # `cancel()` stops the `queued` set and stamps the batch `cancelled` while
+        # an item that had already been claimed keeps running — so the arm below
+        # won the branch and the one sentence the customer read never mentioned
+        # the document that was about to be indexed AND charged. That is exactly
+        # the lie the `elif` was written to prevent, reached because the two
+        # conditions are not exclusive: a cancel can stop some work and spend on
+        # other work in the same call.
+        in_flight = [i for i in items
+                     if i.state in (_batch_ingest.BatchItemState.EXTRACTING,
+                                    _batch_ingest.BatchItemState.EMBEDDED)]
+        if in_flight:
+            body["message"] = (
+                "Cancel received. Work that had not started will not run and is "
+                "not charged. "
+                f"{len(in_flight)} document(s) were already being processed when "
+                "the cancel arrived: they will finish, their result is kept, and "
+                "they are charged because their tokens were already spent.")
+        else:
+            body["message"] = (
+                "Cancelled. Work that had not started will not run and is not "
+                "charged; documents already processed are kept.")
     elif any(not i.terminal for i in items):
         # ⛔ NOT every non-cancelled answer is "already finished" (#14415 review
         # round 5, BLOCKING 1). A live claim is the one case where the cancel
@@ -53715,7 +53734,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (727 distinct
+# ABSOLUTE line number from 208 tracked files (728 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
