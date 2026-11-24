@@ -1822,6 +1822,25 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # Every site uses `monkeypatch`, so no lane state leaks. The literals are anchored to
     # these exact values on purpose: a FUTURE, different URI in this file must red until
     # it is triaged here, which is the whole point of the census.
+    #
+    # ⛔ ONE ROW, NOT TWO — `main`'s #14491 (`07a483ab38c7`) swept this same file
+    # independently while this branch was open (this branch's `28a56f3d9254`), and the
+    # fold AUTO-merged the two declarations into a DUPLICATE MAPPING KEY at two
+    # different lines. Python silently resolves a duplicate key to the LAST one, and
+    # ⛔ `--integrity` DOES grade duplicate mapping keys — `duplicate_mapping_key_issues()`
+    # is composed into it FIRST (`tools/ci_selection.py:8348`), added for #5373 and
+    # documented as the check to re-run after every merge, rebase or replayed commit —
+    # but that walk reads the MANIFEST (`config/ci-surfaces.yml`), not a dict literal in
+    # a test module. So THIS land still went uncaught: the branch's row would have been
+    # shadowed with nothing red. Resolved by keeping `main`'s row: its patterns are `^…$`-ANCHORED
+    # (strictly stronger scoping than this branch's unanchored ones) and this site map
+    # is the fuller record.
+    # ⛔ THE ARMS MUST STAY VALUE-SCOPED, NOT `setenv`-SHAPED (#14318): a
+    # `docker://`-only row would leave the two gate sites unauthorised while turning
+    # the gate green, and a row matching any `setenv` in this file would authorise the
+    # next site nobody triaged — the #942 vacuity vector this census exists to catch.
+    # `test_the_spool_rehearsal_row_covers_only_its_triaged_values` pins both
+    # directions, so widening this row to a shape reds.
     "test_spool_drain_rehearsal.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://api\.premiselabs\.co:6379/live-v5"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://localhost:16379/tortoise"\)$',

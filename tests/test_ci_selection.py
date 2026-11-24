@@ -9140,10 +9140,23 @@ _EMISSION_MINUTE_AFTER_RE = re.compile(r"(?P<minutes>\d+)\s*m\b")
 #: while `--emit-push-matrix` packed that file in `k`. The block's rule ("NO PER-FILE SHARD
 #: LETTER IS RECORDED HERE ANY MORE") was prose, so nothing read it; this pattern is what
 #: `test_the_fast_shards_header_block_records_no_per_file_shard_letter` grades it with.
-#: The `(?![A-Za-z0-9_])` guard keeps `per-shard clause` ("shard c" + "lause") out: a
-#: spelling-bound pattern that reads a word as a letter is how a guard reds on its own prose.
+#: ⛔ BROADENED PAST ONE SPELLING (#14481 review, P3). The first cut read only
+#: `<file> … shard <lowercase letter>` and MISSED five spellings, each measured: `shard E`
+#: (uppercase), `shard: e` (colon), `is in the e shard` (word order reversed), any `;` inside
+#: the bridge, and >120 characters of distance. All five would have sat in the block silently.
+#: The bridge is now `[\\s\\S]{0,200}?` (semicolons cross; a sentence boundary is the bound, not
+#: a punctuation mark) and there are TWO arms: word→letter and `in|into|to [the]` → letter →
+#: word. ⛔ The article is why the reverse arm is DETERMINER-anchored: a bare `[a-k] shard`
+#: matches the English "a shard of the suite", and `a` is also a real shard letter — so the
+#: reverse arm reads only the `in the e shard` shape, which is how the claim is written.
+#: The `(?![A-Za-z0-9_])` guard keeps `per-shard clause` ("shard c" + "lause") and
+#: `binary half` ("bin" + "ary") out: a spelling-bound pattern that reads a word as a letter
+#: is how a guard reds on its own prose.
 _PER_FILE_SHARD_LETTER_RE = re.compile(
-    r"test_[A-Za-z0-9_]+[^;]{0,120}?\b(?:shard|bin|half)\s*`?[a-k]`?(?![A-Za-z0-9_])")
+    r"test_[A-Za-z0-9_]+[\s\S]{0,200}?(?:"
+    r"\b(?:shard|bin|half)\b\s*:?\s*`?[a-kA-K]`?(?![A-Za-z0-9_])"
+    r"|\b(?:in|into|to)\s+(?:the\s+)?`?[a-kA-K]`?\s+(?:shard|bin|half)\b"
+    r")")
 #: The ONE span of the header allowed to state letters: a fenced history that names the sha it
 #: was measured at. Fenced rather than inferred from prose ("measured at …") because a
 #: CURRENT-head sentence also cites a sha — it names the `main` fold — so prose inference would
@@ -9662,6 +9675,43 @@ def test_the_per_file_shard_letter_guard_is_not_vacuous():
     assert _PER_FILE_SHARD_LETTER_RE.findall(stale), (
         "the pre-fix survivor letter did not match — the pattern has been narrowed into "
         f"silence, so the sibling guard is decoration: {stale!r}")
+    # ⛔ FIVE SPELLINGS THE FIRST PATTERN MISSED (#14481 review, P3). Each is a real way this
+    # block could state the letter, and each was measured to pass the pre-broadening pattern
+    # silently. Asserting them here is what KEEPS the broadening: a later "tightening" that
+    # re-narrows to one spelling reds this arm instead of silently reopening the hole.
+    for missed in (
+        "shard E",        # uppercase letter
+        "shard: e",       # colon between the word and the letter
+        "in the e shard",  # word order REVERSED (the determiner-anchored arm)
+        "; sits in shard e",  # a `;` inside the bridge (the old `[^;]` excluded it)
+    ):
+        claim = _emission_block_header(
+            f"# `tests/test_14350_drain_convergence.py` {missed} at this head.\n"
+            "\nfast_shards: 11\n")
+        assert _PER_FILE_SHARD_LETTER_RE.findall(claim), (
+            f"a claim spelling {missed!r} was not read — that is the fail-open the "
+            f"broadening closed, reopened: {claim!r}")
+    far = _emission_block_header(
+        "# `tests/test_14350_drain_convergence.py` " + "x" * 130
+        + " sits in shard e.\n\nfast_shards: 11\n")
+    assert _PER_FILE_SHARD_LETTER_RE.findall(far), (
+        "a claim more than 120 characters from the file name was not read — distance is "
+        "not a property of the claim")
+    # ⛔ …and the broadening must NOT read a WORD as a letter, in either direction. These are
+    # the three false positives a wider bridge buys: `per-shard clause` ("shard c" + "lause"),
+    # `binary half` ("bin" + "ary"), and the ENGLISH ARTICLE in "a shard of the suite" — `a`
+    # is a real shard letter, which is exactly why the reverse arm is determiner-anchored
+    # rather than a bare `[a-k] shard`.
+    for safe in (
+        "per-shard clause",
+        "in the binary half of the suite",
+        "is a shard of the suite",
+    ):
+        claim = _emission_block_header(
+            f"# `tests/test_14350_drain_convergence.py` {safe}.\n\nfast_shards: 11\n")
+        assert not _PER_FILE_SHARD_LETTER_RE.findall(claim), (
+            f"the guard read a WORD as a shard letter ({safe!r}) — a pattern that does that "
+            f"reds on its own prose: {claim!r}")
     current_head_sha = _emission_block_header(
         "# ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `6a02515d14ad`\n"
         "# and adds this PR's own registration only (`tests/test_14033_state_cue_gap.py`, which\n"

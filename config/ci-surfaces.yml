@@ -62,6 +62,7 @@ version: 1
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
 # `main` at `533e256f2c`, and the pool it emits is the union of BOTH parents' registrations —
+# `main` at `533e256f2c89`, and the pool it emits is the union of BOTH parents' registrations —
 # ⛔ `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
 # `tests/test_14033_state_cue_gap.py` are BOTH `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, and
 # this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
@@ -77,19 +78,33 @@ version: 1
 # durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
 # 0 removed, against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue
 # counts — at THAT head B8 dropped `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
+# `8c373f59a1` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the durations
+# map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added, 0 removed,
+# against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue counts; at
+# THAT head B8 dropped `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
 # ⛔ THIS PR neither carries nor re-cuts that file: `git diff origin/main HEAD --
 # tests/test_sdk_privatise_sweep.py` is EMPTY at this head (the file is byte-identical to `main`'s,
 # and every commit `--full-history` lists for it in `origin/main..HEAD` is a MERGE of `main`), so
 # the arm at this head is `main`'s (restored there after the cut) and the extent it publishes is
-# graded by the arm itself — re-derive it there, never carry it here. An earlier revision of this
-# paragraph credited `da4b76a5851c` (a #13526 quota-report commit, not this fold) and claimed "this
-# PR re-cuts that file's pin … 1915 → 1921"; both halves were false at this head, so the figures
-# are dropped rather than re-pointed — folded over the #14371, #14186, #14434,
-# #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
+# graded by the arm itself — re-derive it there, never carry it here. ⛔ NO extent FIGURE is stated
+# in this block: the one that may be trusted is the one `_residue_block`'s docstring publishes,
+# graded against its own walk by
+# `tests/test_sdk_privatise_sweep.py::test_the_extent_figure_is_the_walks_own_count` (post-merge
+# review of #14459, P3: this sentence used to read as a measurement of "the resolved tree" while
+# describing a run that had already moved — nothing in this file grades an extent, so a figure here
+# can only be history). ⛔ THREE earlier revisions of this paragraph were false here, and they are
+# recorded rather than quietly dropped: one credited `da4b76a5851c` (a #13526 quota-report commit,
+# NOT this fold); one claimed "this PR re-cuts that file's pin … 1915 → 1921"; and the fix for the
+# second deleted those FIGURES while leaving the causal clause ("because THIS PR re-cuts that file's
+# pin, its fold KEEPS the branch's copy of it") standing — which still asserted the re-cut this
+# block's own refutation denies. That clause is gone now, so the paragraph states ONE provenance.
+# (folded over the #14371, #14186, #14434, #13998, #14350, #14423, #14429 and #14446 `core` rows
+# that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
 # which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `533e256f2c`
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `533e256f2c89`
 # and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
 # is why `main` alone emits this same split. A restatement
 # here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
