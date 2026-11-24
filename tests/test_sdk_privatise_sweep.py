@@ -3110,3 +3110,53 @@ def test_a_deleted_standin_file_is_measured_from_its_blob(tmp_path, monkeypatch)
         f"one untyped receiver: {base}")
     assert "standin.py" not in base_files, (
         f"a def is not a residue row; charging one would grant the ratchet headroom: {base_files}")
+
+
+def _stub_walk(monkeypatch, root, files, names=()):
+    """Point `--check` at a fixture tree: a ROOT, the files to walk, and a rename map.
+
+    ⛔ THIS IS THE WIRING THE RATCHET LIVES IN, and for three cycles nothing graded it: the arms
+    above grade `ratchet_verdict` and `baseline_rows` as functions, so `main()` could always take
+    the degraded pin path (or never refuse a named baseline) with every arm green.
+    """
+    monkeypatch.setattr(privatise, "ROOT", root)
+    monkeypatch.setattr(privatise, "py_files", lambda: list(files))
+    entries = [privatise.Entry(name, private, False) for name, private in names]
+    monkeypatch.setattr(privatise, "rename_map", lambda rev=None: list(entries))
+    monkeypatch.setattr(privatise, "SWEEP_NAMES", len(entries))
+
+
+def test_check_refuses_a_named_baseline_that_does_not_resolve(tmp_path, monkeypatch, capsys):
+    """A baseline the caller NAMED and the tool cannot resolve is a REFUSAL, not the pin."""
+    _stub_walk(monkeypatch, tmp_path, [], names=(("update", "_update"),))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check", "--baseline", "no-such-rev"])
+    assert privatise.main() == 2, "an unresolvable NAMED baseline must refuse (exit 2)"
+    assert "CANNOT ANSWER" in capsys.readouterr().err
+
+
+def test_check_reds_growth_through_main_and_names_the_line(tmp_path, monkeypatch, capsys):
+    """End to end through `main()`: growth is exit 1 and the report carries the `file:line`."""
+    (tmp_path / "growth.py").write_text(
+        "def probe(reg):\n    reg.update({'a': 1})\n", encoding="utf-8")
+    _stub_walk(monkeypatch, tmp_path, [tmp_path / "growth.py"], names=(("update", "_update"),))
+    monkeypatch.setattr(privatise, "baseline_rev", lambda explicit=None: ("deadbeefcafe", "fixture"))
+    monkeypatch.setattr(
+        privatise, "baseline_rows", lambda rev, rmap, measured, sites=None: (Counter(), {}, {}))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 1, "an added untyped receiver must red through `main()`"
+    err = capsys.readouterr().err
+    assert "growth.py" in err and "line 2" in err, f"the report must name the site: {err}"
+
+
+def test_check_refuses_a_file_it_cannot_parse(tmp_path, monkeypatch, capsys):
+    """⛔ A file that stops parsing is ONE `<<syntax-error>>` row instead of its real many, so it
+    LOWERS the count and would mask growth elsewhere. That is a refusal, never a pass."""
+    # ⛔ It must MENTION a swept name: `edits_for` short-circuits (soundly) on a file holding none
+    # of them, so a broken file that never mentions one is not even parsed.
+    (tmp_path / "broken.py").write_text(
+        "def broken(:\n    reg.update(1)\n", encoding="utf-8")
+    _stub_walk(monkeypatch, tmp_path, [tmp_path / "broken.py"], names=(("update", "_update"),))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 1, "an unparseable file must red, not silently reduce the count"
+    err = capsys.readouterr().err
+    assert "CANNOT ANSWER" in err and "broken.py" in err, err

@@ -3020,9 +3020,9 @@ def edits_for(path: Path, rmap: dict[str, str], src: str | None = None) -> FileE
                     defs.append((m.lineno, span[0], span[1], rmap[m.name]))
 
     if in_sdk:
-        for m in class_body().body:
+        for m in class_body(src).body:
             if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name in rmap:
-                span = _def_name_span(SDK_SRC, m, m.name)
+                span = _def_name_span(SDK_SRC, m, m.name, lines)
                 if span is None:
                     raise SystemExit(
                         f"cannot locate the name span for `def {m.name}` at "
@@ -3160,6 +3160,19 @@ def main() -> int:
             return 0
         print(f"typed references still pointing at a public name: {after}")
         print(f"untyped receivers left alone (deliberate, reported): {now}")
+        # ⛔ A FILE THAT DOES NOT PARSE IS NOT A FILE WITH FEWER UNTYPED RECEIVERS. `edits_for`
+        # folds an unparseable file down to ONE `<<syntax-error>>` row, so a file that carried
+        # many residue rows and then broke would LOWER the count and mask any growth elsewhere —
+        # a fail-open introduced by comparing totals rather than requiring equality. Refuse.
+        broken = sorted(p for p, rows in per_file.items() if rows.get("<<syntax-error>>"))
+        if broken:
+            print(
+                "CANNOT ANSWER: the sweep cannot parse " + ", ".join(broken) + " — an unparseable "
+                "file is not a file with fewer untyped receivers, so the count cannot be "
+                "compared with a baseline until it parses again.",
+                file=sys.stderr,
+            )
+            return 1
         base_rev, why = baseline_rev(args.baseline)
         if base_rev is None and args.baseline:
             # A baseline the caller NAMED and we cannot resolve is a refusal, not a fallback: the
