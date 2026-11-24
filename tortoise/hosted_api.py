@@ -17547,9 +17547,19 @@ async def create_batch(body: BatchRequest,
                 "priced against your plan yet — so the figure to confirm is "
                 "the expected spend on this work, not a measured amount.")
         elif est.overage_tokens > 0:
+            # ⛔ The MONEY arm's own low end (#14415 recut review, P2). The overage is
+            # priced at $1.00/1M, so any overage below ~5,000 tokens rounds to
+            # `$0.00`: printing an exact zero beside a REAL token overage is the same
+            # unactionable figure the sibling arms remove, one branch over, and
+            # `about 1 tokens` is how a generated sentence tells a customer it was
+            # never read. State the bound rather than a false zero, and agree with
+            # the count.
+            unit = "token" if est.overage_tokens == 1 else "tokens"
+            money = ("under $0.01" if round(est.overage_usd, 2) == 0.0
+                     else f"about ${est.overage_usd:,.2f}")
             overage_copy = (
-                f" Expected overage: about {est.overage_tokens:,} tokens "
-                f"(about ${est.overage_usd:,.2f}).")
+                f" Expected overage: about {est.overage_tokens:,} {unit} "
+                f"({money}).")
         else:
             overage_copy = (
                 " This batch is large enough to be confirmed before it runs; "

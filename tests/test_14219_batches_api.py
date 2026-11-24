@@ -1467,6 +1467,73 @@ def test_a_published_allowance_that_COVERS_the_batch_is_not_called_an_overage(
     assert "acknowledge_overage" in detail["message"]
 
 
+def test_the_money_arm_of_the_402_never_prints_a_false_zero(client,
+                                                           monkeypatch):
+    """⛔ RECUT REVIEW P2: the arm that prints MONEY is the only untested one.
+
+    The overage is priced at $1.00/1M, so any overage below ~5,000 tokens rounds
+    to `$0.00` — and the two neighbouring arms exist precisely because an exact
+    zero beside a real figure is an instruction nobody can act on. It also said
+    `about 1 tokens`, and a generated sentence with a broken plural is how a
+    customer learns it was never read.
+
+    Both ends are measured here, because the low end is the one the branch above
+    could not reach: an overage of 500 tokens must read `under $0.01`, and an
+    overage of one token must read `1 token`, not `1 tokens`.
+    """
+    from tortoise import metering
+
+    monkeypatch.setattr(metering, "get_capture_usage",
+                        lambda org_id: {"measured": True,
+                                        "capture_tokens_total": 0})
+
+    async def _allowance(tokens):
+        async def _inner(org, resource, **kwargs):
+            return {"max_extraction_tokens": tokens}
+        return _inner
+
+    import asyncio
+
+    # ── low end: 3,045,553 estimated against a 3,045,053 allowance = 500 over.
+    monkeypatch.setattr(ha, "_carry_allowances_off_loop",
+                        asyncio.run(_allowance(3_045_053)))
+    r = client.post("/v1/batches",
+                    json={"items": [{"ref": f"/d/{n}.md"} for n in range(47)]})
+    assert r.status_code == 402, r.text
+    detail = r.json()["detail"]
+    assert detail["estimate"]["overage_tokens"] == 500, detail["estimate"]
+    assert "$0.00" not in detail["message"], (
+        f"a real 500-token overage was priced as an exact zero: "
+        f"{detail['message']}")
+    assert "under $0.01" in detail["message"], detail["message"]
+    assert "about 500 tokens" in detail["message"], detail["message"]
+
+    # ── singular: 3,045,553 against 3,045,552 = exactly one token over.
+    monkeypatch.setattr(ha, "_carry_allowances_off_loop",
+                        asyncio.run(_allowance(3_045_552)))
+    r = client.post("/v1/batches",
+                    json={"items": [{"ref": f"/d/{n}.md"} for n in range(47)]})
+    assert r.status_code == 402, r.text
+    msg = r.json()["detail"]["message"]
+    assert "about 1 token " in msg, msg
+    assert "1 tokens" not in msg, f"the copy pluralised a count of one: {msg}"
+
+    # ── the arm's high end still states the real money.
+    monkeypatch.setattr(metering, "get_capture_usage",
+                        lambda org_id: {"measured": True,
+                                        "capture_tokens_total": 2_900_000})
+    monkeypatch.setattr(ha, "_carry_allowances_off_loop",
+                        asyncio.run(_allowance(3_000_000)))
+    r = client.post("/v1/batches",
+                    json={"items": [{"ref": f"/d/{n}.md"} for n in range(100)]})
+    assert r.status_code == 402, r.text
+    detail = r.json()["detail"]
+    est = detail["estimate"]
+    assert est["overage_tokens"] == 6_379_900, est
+    assert "about 6,379,900 tokens" in detail["message"], detail["message"]
+    assert "about $6.38" in detail["message"], detail["message"]
+
+
 def test_an_unmeasured_usage_read_is_reported_not_read_as_zero(client,
                                                               monkeypatch):
     """NB3: `get_capture_usage` never raises — a fault is a ZERO view.
