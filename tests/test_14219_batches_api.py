@@ -37,8 +37,27 @@ def client(store, monkeypatch):
     # The worker is stubbed: a test must observe that the handler HANDED OFF
     # the work, not race a worker thread doing it.
     dispatched: list[str] = []
-    monkeypatch.setattr(ha._BATCH_WORKER, "submit",
-                        lambda fn, *a, **k: dispatched.append(a[1]) or True)
+
+    def _hand_off(fn, *a, **k):
+        # ⛔ THE ORDER IS ASSERTED AT HAND-OFF TIME, NOT AFTER THE RESPONSE
+        # (#14415 recut review, LOW — measured). Both assertions used to run
+        # after the response over a stub that only recorded `a[1]`, so any order
+        # producing both events before the response satisfied them — including a
+        # dispatch issued from INSIDE `_submit_rows`, between `put_items` and
+        # `put_batch_if_absent`, which is precisely the "a worker sees a batch id
+        # whose row is not yet durable" case the docstring says cannot happen.
+        # Observing the store HERE is the only place that can tell the two
+        # orders apart.
+        bid = a[1]
+        assert store.get_batch(ORG_ID, bid) is not None, (
+            f"the batch row {bid} was not durable when the worker was handed it "
+            "— a worker can now drain a batch the ACK has not recorded")
+        assert store.items(ORG_ID, bid), (
+            f"the item rows for {bid} were not durable at hand-off")
+        dispatched.append(bid)
+        return True
+
+    monkeypatch.setattr(ha._BATCH_WORKER, "submit", _hand_off)
 
     async def _no_allowance(org, resource, **kwargs):
         return {}
@@ -59,7 +78,6 @@ def client(store, monkeypatch):
 
 
 def test_post_batches_accepts_and_returns_an_accepted_receipt(client, store):
-    """The ACK: a batch id, a status url, the estimate and the owner's copy."""
     r = client.post("/v1/batches", json={"items": [
         {"ref": "/docs/a.md"}, {"ref": "/docs/b.md", "name": "b.md"},
     ]})
@@ -85,12 +103,97 @@ def test_post_batches_accepts_and_returns_an_accepted_receipt(client, store):
     assert all(i.state is bi.BatchItemState.QUEUED for i in rows)
 
 
+def test_a_read_only_key_can_read_batches_but_not_create_or_cancel_them(
+        store, monkeypatch):
+    """#14415 recut review (MEDIUM): the WRITE routes' scope gate was unpinned.
+
+    `create_batch` and `cancel_batch` require `graphs:write` and the two GETs
+    require `graphs:read`, which is the correct matrix — but the shared fixture
+    authenticates with `legacy_full_access: True`, and `_require_scope` returns
+    immediately on that flag, so NO batch test ever executed the check. Measured:
+    changing both write routes to `graphs:read` left the whole suite green, i.e.
+    a read-only key could create work and cancel a customer's in-flight batch
+    with nothing in the tree noticing.
+
+    Here the dependency carries a real key (`legacy_full_access: False`), so the
+    scope matrix is what decides — the read routes must stay readable, and the
+    write routes must refuse.
+    """
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha._BATCH_WORKER, "submit", lambda fn, *a, **k: True)
+
+    async def _no_allowance(org, resource, **kwargs):
+        return {}
+
+    monkeypatch.setattr(ha, "_carry_allowances_off_loop", _no_allowance)
+    ha.app.dependency_overrides[ha.get_current_org_gated] = lambda: {
+        "org_id": ORG_ID, "key_id": "key-14219-readonly",
+        "legacy_full_access": False, "scopes": ["graphs:read"],
+        "tier": "free", "max_points": 100000, "max_sessions": None,
+        "graph_id": None,
+    }
+    try:
+        with TestClient(ha.app) as c:
+            post = c.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
+            assert post.status_code == 403, (
+                "a read-only key CREATED a batch — the acceptance route's scope "
+                f"gate is missing or wrong: {post.status_code} {post.text[:200]}")
+            assert post.json()["detail"]["error_code"] == "INSUFFICIENT_SCOPE"
+
+            cancel = c.post("/v1/batches/batch_ffffffffffff/cancel")
+            assert cancel.status_code == 403, (
+                "a read-only key reached the cancel route's body: "
+                f"{cancel.status_code} {cancel.text[:200]}")
+            assert cancel.json()["detail"]["error_code"] == "INSUFFICIENT_SCOPE"
+
+            # …and the READ routes must still be readable: `graphs:read` is the
+            # scope they are declared with, so a gate that refused these would be
+            # the opposite defect.
+            listed = c.get("/v1/batches")
+            assert listed.status_code == 200, listed.text[:200]
+    finally:
+        ha.app.dependency_overrides.pop(ha.get_current_org_gated, None)
+
+
+def test_a_write_key_still_cannot_exceed_its_scope_on_cancel(store, monkeypatch):
+    """The other half: `graphs:write` satisfies read, and cancel is a write."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha._BATCH_WORKER, "submit", lambda fn, *a, **k: True)
+
+    async def _no_allowance(org, resource, **kwargs):
+        return {}
+
+    monkeypatch.setattr(ha, "_carry_allowances_off_loop", _no_allowance)
+    ha.app.dependency_overrides[ha.get_current_org_gated] = lambda: {
+        "org_id": ORG_ID, "key_id": "key-14219-write",
+        "legacy_full_access": False, "scopes": ["graphs:write"],
+        "tier": "free", "max_points": 100000, "max_sessions": None,
+        "graph_id": None,
+    }
+    try:
+        with TestClient(ha.app) as c:
+            post = c.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
+            assert post.status_code == 201, (
+                f"a graphs:write key was refused acceptance: {post.text[:300]}")
+            listed = c.get("/v1/batches")
+            assert listed.status_code == 200, (
+                "write must imply read for the list route: " + listed.text[:200])
+    finally:
+        ha.app.dependency_overrides.pop(ha.get_current_org_gated, None)
+
+
 def test_acceptance_does_no_work_and_hands_off_after_the_rows_land(client, store):
     """Decision (a): the request must not wait for any extraction.
 
     The order is the property: the rows are written BEFORE the worker is
     handed the batch, so a worker can never see a batch id whose items are not
-    yet durable — and the ack never waits for the worker.
+    yet durable — and the ack never waits for the worker. The `client` fixture
+    asserts that ordering AT HAND-OFF TIME (a post-hoc check cannot tell the two
+    orders apart — see its comment).
     """
     r = client.post("/v1/batches", json={"items": [{"ref": "/docs/a.md"}]})
     body = r.json()
@@ -267,6 +370,53 @@ def test_the_route_family_is_batches_never_packs(client):
 def test_an_empty_batch_is_refused_by_the_boundary(client):
     r = client.post("/v1/batches", json={"items": []})
     assert r.status_code == 422
+
+
+def test_a_batch_over_the_item_cap_is_refused_at_the_boundary(client):
+    """#14415 recut review (LOW): `max_length=_BATCH_MAX_ITEMS` had NO test.
+
+    The BYTE bound is thoroughly pinned (the 413 detail, the env override, its
+    reachability) and the LOWER bound is pinned above — but the item COUNT bound
+    was enforced and unobserved, so deleting `max_length=_BATCH_MAX_ITEMS` left
+    the suite green. That matters because the gap is not cosmetic: a path item is
+    ~20 bytes, so inside the 4 MiB body cap one request could create ~200 000
+    item rows and as many runner calls with nothing reddening.
+
+    The cap is asserted as a BOUNDARY — `_BATCH_MAX_ITEMS` accepted, one more
+    refused — so it cannot pass by the route refusing everything.
+    """
+    cap = ha._BATCH_MAX_ITEMS
+    # A batch at the cap is large enough to need the owner's §4 acknowledgement,
+    # which is a DIFFERENT refusal (402) and would mask the count bound.
+    at_cap = client.post("/v1/batches", json={
+        "acknowledge_overage": True,
+        "items": [{"ref": f"/d/{i}.md"} for i in range(cap)]})
+    assert at_cap.status_code == 201, (
+        f"a batch at the cap ({cap}) was refused: "
+        f"{at_cap.status_code} {at_cap.text[:200]}")
+
+    over = client.post("/v1/batches", json={
+        "acknowledge_overage": True,
+        "items": [{"ref": f"/d/{i}.md"} for i in range(cap + 1)]})
+    assert over.status_code == 422, (
+        f"a batch of {cap + 1} items — one over the cap — was answered "
+        f"{over.status_code}, so the count bound is not enforced: "
+        f"{over.text[:200]}")
+
+
+def test_the_item_cap_is_read_from_the_environment(monkeypatch):
+    """The cap is an operator lever, not a literal buried in the model."""
+    import importlib
+
+    monkeypatch.setenv("TORTOISE_BATCH_MAX_ITEMS", "7")
+    reloaded = importlib.reload(ha)
+    try:
+        assert reloaded._BATCH_MAX_ITEMS == 7, (
+            "TORTOISE_BATCH_MAX_ITEMS did not reach the cap: "
+            f"{reloaded._BATCH_MAX_ITEMS}")
+    finally:
+        monkeypatch.delenv("TORTOISE_BATCH_MAX_ITEMS", raising=False)
+        importlib.reload(ha)
 
 
 # ── read-path isolation (brief item 5) ─────────────────────────────────────
