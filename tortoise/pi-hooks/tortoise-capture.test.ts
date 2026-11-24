@@ -8384,6 +8384,128 @@ test("#14350: the clear NEVER deletes an object it did not judge", () => {
     "the peer's claim must be restored BYTE for byte");
 });
 
+test("#14350: the clear HONOURS a landed REGULAR file it could not READ", () => {
+  // `landedRaw` is `undefined` for TWO different facts and only one of them says
+  // "drop it": *not a regular file* (a symlink/FIFO/socket/device — corruption) and
+  // *a regular file whose bytes could not be had* (`EMFILE`, `EIO`, `EACCES` after a
+  // mode drift). The second is a PEER'S CLAIM that arrived in the window, and
+  // `unlink`ing it lets this process win the next `linkSync` — two holders for up to
+  // `ttl/3`, silently (`filelock` GHSA-fq56-3cx3-fjxp). It also inverts the doctrine
+  // `acquireDrainClaim` states below: a regular claim we could not read is HONOURED
+  // and never unlinked (#14480 review, F3).
+  //
+  // MUTATION THAT REDS THIS: treat `undefined` from the read as "not a claim" and
+  // fall through to `unlinkSync(quarantine)` — the answer becomes `done` and the
+  // peer's claim is gone.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  if (typeof process.getuid === "function" && process.getuid() === 0) return; // root reads anything
+  const fifo = join(tmpSpool(), "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  const peerRaw = JSON.stringify({
+    version: 1, token: "peer-token", leg: "pi", pid: process.pid,
+    host: "h", started_at: 0, expires_at: Date.now() + 600_000,
+  });
+  let installed = false;
+  const peerInstallsFirstThenUnreadable = (from: string, to: string): void => {
+    if (from === fifo && !installed) {
+      installed = true;
+      unlinkSync(from);                       // the peer's release lands first …
+      writeFileSync(from, peerRaw);           // … and its claim is in the path
+    }
+    renameSync(from, to);
+    chmodSync(to, 0o000);                     // a transient read error on a good file
+  };
+  const outcome = clearUnusableClaimPath(fifo, peerInstallsFirstThenUnreadable);
+  assert.ok(installed, "the test never reached the removal");
+  assert.equal(outcome, "held",
+    "a regular file we could not read is a possible HOLDER, not junk: " + outcome);
+  assert.ok(existsSync(fifo), "a live claim this call could not judge was unlinked");
+  chmodSync(fifo, 0o600);
+  assert.equal(readFileSync(fifo, "utf8"), peerRaw,
+    "the peer's claim must be back in the path, byte for byte");
+});
+
+test("#14350: a peer claim landing in the clear window is CONTENTION, not an unclaimed pass", () => {
+  // ⛔ THE DISPOSITION, NOT JUST THE PRIMITIVE. The `held` arm of
+  // `acquireDrainClaim` is the whole difference between "somebody holds it, do
+  // nothing" and "run the pass UNCLAIMED beside a live claim" (`flushSpool` takes
+  // the unclaimed arm whenever `state.obstruction` is set, and that arm also stamps
+  // the false reason "…exists and is not a claim record… could not be cleared").
+  // The sibling test above drives `clearUnusableClaimPath` DIRECTLY and asserts its
+  // return value, so reverting the arm (`opts.state.obstruction = path` inside it)
+  // redded NOTHING — rule 1 of the attribution contract, a new guard with no mutant
+  // of its own (#14480 review, F2). The Python twin's
+  // `test_a_peer_claim_landing_in_the_clear_window_is_NOT_an_unclaimed_pass` drives
+  // `acquire` end to end; this is its Pi counterpart.
+  //
+  // MUTATION THAT REDS THIS: add `if (state) state.obstruction = path;` inside the
+  // `held` arm of `acquireDrainClaim`.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  const spool = tmpSpool();
+  const fifo = join(spool, "drain.claim");
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  const peerRaw = JSON.stringify({
+    version: DRAIN_CLAIM_VERSION, token: "peer-token", leg: "pi", pid: process.pid,
+    host: "h", started_at: 0, expires_at: Date.now() + 600_000,
+  });
+  let installed = false;
+  const peerInstallsFirst = (from: string, to: string): void => {
+    if (from === fifo && !installed) {
+      installed = true;
+      unlinkSync(from);                       // the peer's release lands first …
+      writeFileSync(from, peerRaw);           // … and its claim is in the path
+    }
+    renameSync(from, to);
+  };
+  const state: { raced: boolean; obstruction?: string } = { raced: false };
+  const claim = acquireDrainClaim(spool, {
+    leg: "pi",
+    state,
+    clearClaimPath: (p) => clearUnusableClaimPath(p, peerInstallsFirst),
+  });
+  assert.ok(installed, "the test never reached the clear");
+  assert.equal(claim, undefined, "a peer's claim that landed in the window is a HOLDER");
+  assert.equal(state.obstruction, undefined,
+    "CONTENTION is not an unclearable path: reporting it as one runs the pass " +
+      "UNCLAIMED beside a live claim");
+  assert.equal(readFileSync(fifo, "utf8"), peerRaw,
+    "the peer's live claim was deleted by the clear");
+});
+
+test("#14350: the gone/done retry IS a lost race, and marks it", () => {
+  // Every other lost-race arm sets `state.raced`, which makes `flushSpool` fail
+  // CLOSED (treat it as held). The `gone`/`done` arm was the one that did not: two
+  // exhausted attempts that way leave `state` empty, the path empty and no record,
+  // so `flushSpool` reaches the "no claim AND nothing at the path" arm, runs the
+  // WHOLE pass UNCLAIMED, and stamps `claimUnavailable` with the DEFAULT reason —
+  // "the spool root cannot hold a claim" — which is FALSE (the root is fine; the
+  // object moved). The Python leg fails closed in the same state (`acquire` →
+  // `None` → `held_by_claim`) (#14480 review, F4).
+  //
+  // MUTATION THAT REDS THIS: drop `markRaced()` from the `gone`/`done` arm — the
+  // state then reports no race even though both attempts lost one.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "drain.claim"), { recursive: true });
+  const state: { raced: boolean } = { raced: false };
+  const claim = acquireDrainClaim(spool, {
+    leg: "pi",
+    state,
+    clearClaimPath: () => "gone",
+  });
+  assert.equal(claim, undefined, "both attempts lost the object, so no claim is held");
+  assert.equal(state.raced, true,
+    "the retry lost a race; reading it as 'this root cannot hold a claim' runs the " +
+      "pass unclaimed under a reason that was never measured");
+});
+
 test("#14350: a HEALTHY pass clears the recorded claim fact (no one-way latch)", async () => {
   // The other direction, and the reason the field cannot simply be kept: a durable
   // marker nobody clears teaches an operator to ignore the line.

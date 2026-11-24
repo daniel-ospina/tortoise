@@ -1675,6 +1675,73 @@ def test_the_clear_NEVER_deletes_an_object_it_did_not_judge(tmp_path):
         "the peer's claim must be restored BYTE for byte")
 
 
+def test_the_clear_HONOURS_a_landed_REGULAR_file_it_could_not_READ(tmp_path):
+    """`landed` is `None` for TWO different facts, and only one of them says
+    "drop it": *not a regular file* (a symlink/FIFO/socket/device — corruption) and
+    *a regular file whose bytes could not be had* (`EMFILE`, `EIO`, `EACCES` after a
+    mode drift).
+
+    The second is a PEER'S CLAIM that arrived in the window. `unlink`ing it lets
+    this process win the next `link`, so two holders coexist for up to `ttl/3` —
+    silently, which is exactly the class the `filelock` advisory
+    GHSA-fq56-3cx3-fjxp describes. It also inverts the doctrine `acquire` states
+    forty lines above: a regular file we could not read is HONOURED and never
+    unlinked (#14480 review, F3).
+
+    The interleave is the real one (a peer installs a valid claim in the removal
+    window); only the READ of the quarantined object is made to fail, which is the
+    transient-error case that cannot be provoked portably on a live box.
+
+    MUTATION THAT REDS THIS: treat `None` from `_read_raw` as "not a claim" and fall
+    through to `os.unlink(quarantine)` — the outcome becomes `_CLEAR_DONE` and the
+    peer's claim is gone.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = root / "drain.claim"
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)                  # the peer's release lands first …
+            Path(src).write_text(peer_raw)  # … and its claim is in the path
+        return real_rename(src, dst, *a, **kw)
+
+    real_read_raw = drain_claim._read_raw
+
+    def unreadable_in_quarantine(target):
+        # A transient failure on a perfectly good REGULAR file — never evidence
+        # that the file is junk.
+        if ".tmp-clear-" in Path(target).name:
+            return None
+        return real_read_raw(target)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(drain_claim, "_read_raw", unreadable_in_quarantine)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the removal"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "a regular file we could not read is a possible HOLDER, not junk — got "
+        + repr(outcome))
+    assert fifo.exists(), "a live claim this call could not judge was unlinked"
+    assert fifo.read_text() == peer_raw, (
+        "the peer's claim must be back in the path, byte for byte")
+
+
 def test_a_peer_claim_landing_in_the_clear_window_is_NOT_an_unclaimed_pass(tmp_path):
     """⛔ THE DIAGNOSIS, NOT JUST THE ANSWER (F2). `acquire` used to answer
     `REFUSED` when the object changed under the clear, which raised
@@ -2096,6 +2163,12 @@ def test_TWO_winners_is_a_FINDING_not_a_no_verdict():
     TWO winners is the defect this harness exists to measure. Folding it into "no
     verdict" would silence the measurement in exactly the case it was built for.
 
+    ⛔ THE SHAPE THIS BUILDS IS REACHABLE NOW, and that is pinned by its own row:
+    `test_the_CLAIM_RACE_BARRIER_reports_TWO_winners_as_a_FINDING` drives the real
+    `_claim_race` and gets `bounded: true, winners: 2+` out of it. Before that fix
+    this receipt was unreachable from the producer and only this hand-built witness
+    said it was a FINDING (#14480 review, F1).
+
     MUTATION THAT REDS THIS: make the row `winners != 1` — the harness then reports
     NO VERDICT on the finding it was written to find.
     """
@@ -2132,6 +2205,10 @@ def test_the_measurement_EXITS_ZERO_on_a_real_two_drainer_FINDING(monkeypatch):
     """A two-winner receipt is a FINDING, not a failure of the run: exit 0, with the
     count in the receipt. A gate that refused it would refuse to report the bug.
 
+    ⛔ The receipt is the shape `_claim_race` produces (see
+    `test_the_CLAIM_RACE_BARRIER_reports_TWO_winners_as_a_FINDING`); `measure` is
+    stubbed only so the exit code can be read without spawning a real race.
+
     MUTATION THAT REDS THIS: make `_no_verdict` fire on `winners != 1`.
     """
     import tools.measure_drain_convergence as M
@@ -2139,3 +2216,45 @@ def test_the_measurement_EXITS_ZERO_on_a_real_two_drainer_FINDING(monkeypatch):
     monkeypatch.setattr(M, "measure", lambda *a, **k: _receipt(
         supported=False, bounded=True, winners=2, barren=0, processes=10))
     assert M.main(["--scenario", "baseline"]) == 0
+
+
+def test_the_CLAIM_RACE_BARRIER_reports_TWO_winners_as_a_FINDING():
+    """⛔ THE ROW THE TOOL DID NOT HAVE: a receipt `_claim_race` ACTUALLY PRODUCES
+    when more than one process holds the claim.
+
+    The witness above pins `_no_verdict` on a hand-built receipt, and the barrier
+    used to make that receipt UNREACHABLE: the hold waited for `processes - 1`
+    `done` markers while a winner only wrote its own AFTER releasing, so with `k`
+    winners the marker population topped out at `processes - k`. Every winner then
+    blocked to the 60 s deadline, `bounded` became False, and the two-drainer
+    FINDING the harness exists to report came out as *"NO VERDICT — re-run on a
+    quieter box"* (exit 2). Two tests certified a shape the producer could not emit
+    (#14480 review, F1).
+
+    So this drives the real `_claim_race` — real subprocesses, real barrier, real
+    receipt — with the CLAIM PROTOCOL stubbed to admit every contender. That is the
+    defect being measured, reproduced at the seam: the barrier must survive it and
+    the receipt must be a FINDING, not a no-verdict.
+
+    MUTATION THAT REDS THIS: restore the hold to `processes - 1` and move the
+    winner's marker back after `c.release()` — `bounded` flips to False (after a
+    60 s stall) and `_no_verdict` then reports no verdict.
+    """
+    import tools.measure_drain_convergence as M
+
+    receipt = M._claim_race(3, acquire_setup=(
+        "class _AlwaysWins:\n"
+        "    def release(self):\n"
+        "        pass\n"
+        "def acquire(root, leg=None):\n"
+        "    return _AlwaysWins()\n"
+    ))
+    assert receipt["winners"] == 3, receipt
+    assert receipt["barren"] == 0, receipt
+    assert receipt["bounded"] is True, (
+        "the barrier must not wait on winners: every peer had finished attempting, "
+        "so nothing straggled — " + repr(receipt))
+    assert receipt["supported"] is False, receipt
+    assert M._no_verdict(receipt) is False, (
+        "a real two-drainer race is the FINDING this harness was built for, not a "
+        "no-verdict — " + repr(receipt))

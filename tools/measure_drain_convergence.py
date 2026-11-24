@@ -129,12 +129,18 @@ class CeilingServer:
                 self.in_flight -= 1
 
 
-def _claim_race(processes: int) -> dict:
+def _claim_race(processes: int, *, acquire_setup: str | None = None) -> dict:
     """How many of N concurrent PROCESSES take the spool's claim? Must be 1.
 
     Skipped (``null``) on a tree that has no ``tortoise.drain_claim`` — i.e. the
     BEFORE measurement — because the honest answer there is "there is no claim",
     not "0 winners".
+
+    ``acquire_setup`` is a TEST SEAM: it replaces the one line that imports the real
+    ``acquire``, so a test can drive a protocol that ADMITS two holders — the
+    condition the barrier below must survive rather than deadlock on. It has no
+    production caller (#14480 review, F1: the two-winner receipt the tool's own
+    tests built was unreachable from here, so nothing proved the barrier allowed it).
     """
     if not (REPO_ROOT / "tortoise" / "drain_claim.py").is_file():
         return {"supported": False, "winners": None}
@@ -158,6 +164,18 @@ def _claim_race(processes: int) -> dict:
     # only meaningful over a population that provably overlapped (#14423 cycle-7
     # review, P2). Each process touches its own arrival marker BEFORE it attempts,
     # so `all-present` means every attempt happened while the winner held.
+    #
+    # ⛔ AND THE HOLD IS RELEASED BY "EVERY PEER HAS FINISHED ATTEMPTING", EACH PEER'S
+    # OWN MARKER INCLUDED — not by "processes - 1 other markers". The earlier barrier
+    # waited for `processes - 1`, on the assumption that a winner's marker only lands
+    # AFTER it releases; with TWO winners the marker population therefore topped out
+    # at `processes - 2`, every winner blocked until the 60 s deadline, `bounded`
+    # became False, and the run reported NO VERDICT (exit 2, "re-run on a quieter
+    # box") for exactly the two-drainer finding this harness exists to produce
+    # (#14480 review, F1). Marking the ATTEMPT as finished (won or lost) before the
+    # hold makes the barrier a count of attempts, which is the fact the hold needs,
+    # and makes a two-winner receipt reachable AND a FINDING.
+    acquire_setup = acquire_setup or "from tortoise.drain_claim import acquire\n"
     script = (
         f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r})\n"
         "import os, time\n"
@@ -170,26 +188,28 @@ def _claim_race(processes: int) -> dict:
         "deadline = time.monotonic() + 60.0\n"
         "while len(list(arrivals.iterdir())) < " + str(processes) + ":\n"
         "    if time.monotonic() > deadline:\n"
+        "        (done / me).write_bytes(b'x')  # I will never attempt: do not block a winner\n"
         "        print('BARREN')\n"
         "        raise SystemExit(3)\n"
         "    time.sleep(0.005)\n"
-        "from tortoise.drain_claim import acquire\n"
+        + acquire_setup +
         "c = acquire(root, leg='measure')\n"
+        # BEFORE the hold, and for EVERY outcome: what the hold needs to know is that
+        # this peer will never touch the claim again, not that it lost.
+        "(done / me).write_bytes(b'x')\n"
         "if c is None:\n"
-        "    (done / me).write_bytes(b'x')\n"
         "    print('LOST')\n"
         "    raise SystemExit(0)\n"
         "print('WON', flush=True)\n"
         "# hold until every peer has FINISHED its attempt\n"
         "bounded = True\n"
-        "while len(list(done.iterdir())) < " + str(processes - 1) + ":\n"
+        "while len(list(done.iterdir())) < " + str(processes) + ":\n"
         "    if time.monotonic() > deadline:\n"
         "        bounded = False\n"
         "        break\n"
         "    time.sleep(0.005)\n"
         "print('RELEASED', bounded, flush=True)\n"
         "c.release()\n"
-        "(done / me).write_bytes(b'x')\n"
     )
     procs = [subprocess.Popen([sys.executable, "-c", script],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,

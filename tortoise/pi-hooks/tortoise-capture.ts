@@ -5432,6 +5432,38 @@ export function disposeQuarantine(
 }
 
 /**
+ * Put a quarantined object BACK, never replacing a newer one.
+ *
+ * `linkSync` is the create-if-absent arbiter, so a claim a peer installs while this
+ * object sits in quarantine SURVIVES at the path and only the quarantined copy is
+ * dropped; `renameSync` would replace it, the "both processes win" hazard
+ * `takedownClaim` exists to avoid.
+ *
+ * This is the disposal for the one object neither leg can judge: a REGULAR file at
+ * the claim path whose bytes could not be read. It is a possible holder (the
+ * doctrine is "an unprovable read is ALIVE"), so it is honoured rather than
+ * deleted — see the call site in `clearUnusableClaimPath` (#14480 review, F3).
+ * Mirrors `drain_claim._restore_quarantine`.
+ */
+export function restoreQuarantine(quarantine: string, path: string): void {
+  try {
+    linkSync(quarantine, path);
+  } catch (err) {
+    // EEXIST is the normal case: a newer object already holds the path, and that
+    // is a holder either way. Anything else is worth naming, because the object we
+    // could not read could not be put back.
+    if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") {
+      warn(
+        `an unreadable drain claim could not be restored at ${path} ` +
+          `(${(err as NodeJS.ErrnoException)?.code ?? String(err)}); it is ` +
+          "honoured as a holder, so this pass must not run beside it",
+      );
+    }
+  }
+  try { unlinkSync(quarantine); } catch { /* best effort */ }
+}
+
+/**
  * Remove something at the claim path that is not a readable claim.
  *
  * A DIRECTORY, a socket or a dangling symlink there is corruption, not a holder:
@@ -5518,9 +5550,11 @@ export function clearUnusableClaimPath(
   } catch (err) {
     return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "gone" : "refused";
   }
+  let landedRegular = false;
   let landedRaw: string | undefined;
   try {
-    landedRaw = lstatSync(quarantine).isFile() ? readFileSync(quarantine, "utf8") : undefined;
+    landedRegular = lstatSync(quarantine).isFile();
+    landedRaw = landedRegular ? readFileSync(quarantine, "utf8") : undefined;
   } catch {
     landedRaw = undefined;
   }
@@ -5530,6 +5564,21 @@ export function clearUnusableClaimPath(
     // and the answer is `held`: there is a holder to honour, which is not the same
     // thing as an unclearable path.
     disposeQuarantine(quarantine, landedRaw, path, "<not a claim we judged>");
+    return "held";
+  }
+  if (landedRegular) {
+    // ⛔ A REGULAR FILE WE COULD NOT READ IS A POSSIBLE HOLDER, NOT JUNK.
+    // `landedRaw` is `undefined` for TWO different facts and only one of them says
+    // "drop it": *not a regular file* (a symlink/FIFO/socket/device — corruption)
+    // and *a regular file whose bytes could not be had* (`EMFILE`, `EIO`, `EACCES`
+    // after a mode drift). The second is a PEER'S CLAIM that arrived in the window;
+    // `unlink`ing it lets this process win the next `linkSync`, so two holders
+    // coexist for up to `ttlMs / 3` — silently. That is the class the `filelock`
+    // advisory GHSA-fq56-3cx3-fjxp describes, and it inverts the doctrine
+    // `acquireDrainClaim` states below: a regular claim we could not read is
+    // HONOURED (`undefined` = somebody holds it) and never unlinked
+    // (#14480 review, F3). The Python twin carries the same branch.
+    restoreQuarantine(quarantine, path);
     return "held";
   }
   try {
@@ -5596,6 +5645,16 @@ export function acquireDrainClaim(
     takedown?: (
       path: string, token: string,
     ) => { quarantine: string; raw: string } | undefined;
+    /** ⛔ TEST SEAM for the OBSTRUCTION CLEAR's window — the same reason `takedown`
+     *  exists above. `clearUnusableClaimPath` takes a `rename` seam already, and a
+     *  test can only stand inside the window that opens between the caller's look
+     *  and the removal by SUPPLYING that seam through `acquireDrainClaim`'s call.
+     *  Without it the primitive can be pinned but the DISPOSITION cannot: the
+     *  `held` arm is the whole difference between "somebody holds it, do nothing"
+     *  and "run the pass UNCLAIMED beside a live claim", and the Python twin's
+     *  end-to-end test (`test_a_peer_claim_landing_in_the_clear_window_is_NOT_an
+     *  _unclaimed_pass`) had no Pi counterpart (#14480 review, F2). */
+    clearClaimPath?: (path: string) => ClaimPathClear;
   },
 ): DrainClaim | undefined {
   const ttlMs = opts.ttlMs ?? DRAIN_CLAIM_TTL_MS;
@@ -5671,7 +5730,7 @@ export function acquireDrainClaim(
         if (mode.isFile()) return undefined;
         // A directory, symlink, FIFO/socket or device: corruption, not a holder.
         // Leaving it would `EEXIST` every future attempt — a permanent block.
-        const cleared = clearUnusableClaimPath(path);
+        const cleared = (opts.clearClaimPath ?? clearUnusableClaimPath)(path);
         if (cleared === "refused") {
           if (opts.state) opts.state.obstruction = path;
           return undefined;
@@ -5684,6 +5743,16 @@ export function acquireDrainClaim(
         }
         // `gone` / `done`: the path changed, so RETRY — the next tick either installs
         // our claim or judges whatever a peer put there.
+        // ⛔ AND IT IS A LOST RACE, so it is MARKED like every other one. This was
+        // the only lost-race arm that did not: two exhausted attempts that way left
+        // `state` empty and the path empty, so `flushSpool` read it as "this root
+        // cannot hold a claim", ran the whole pass UNCLAIMED, and stamped
+        // `claimUnavailable` with the default reason — "the spool root cannot hold
+        // a claim" — which is FALSE (the root is fine; the object moved). The
+        // Python twin fails closed in the same state (`acquire` → `None` →
+        // `held_by_claim`). Reachability is narrow (two consecutive vanishes), which
+        // is why this stayed a P3 rather than a P1 (#14480 review, F4).
+        markRaced();
         continue;
       }
       // ATOMIC TAKEDOWN, then verify in quarantine — see `takedownClaim`.

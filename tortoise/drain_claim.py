@@ -283,6 +283,48 @@ def _read_raw(path: Path) -> bytes | None:
         return None
 
 
+def _lstat_is_regular(path: Path) -> bool:
+    """Whether ``path`` is a REGULAR file, without reading a byte of it.
+
+    :func:`_read_raw` answers ``None`` for a non-regular object AND for a regular
+    file whose read failed, and those two facts must not be collapsed when the
+    question is "may I delete this?" (#14480 review, F3). ``lstat`` still succeeds
+    for a regular file this process cannot read (it needs search permission on the
+    directory, not read permission on the file), so this is the discriminator.
+    """
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _restore_quarantine(quarantine: Path, path: Path) -> None:
+    """Put a quarantined object BACK, never replacing a newer one.
+
+    ``link`` is the create-if-absent arbiter, so a claim a peer installs while
+    this object sits in quarantine SURVIVES at the path and only the quarantined
+    copy is dropped; ``rename`` would replace it, which is the "both processes
+    win" hazard :func:`_takedown` exists to avoid.
+
+    This is the disposal for the one object this module cannot judge: a REGULAR
+    file at the claim path whose bytes could not be read. It is a possible holder
+    (the doctrine is "an unprovable read is ALIVE"), so it is honoured rather
+    than deleted — see the call site in :func:`_clear_unusable_claim_path`.
+    """
+    try:
+        os.link(quarantine, path)
+    except FileExistsError:
+        pass  # a newer object holds the path; that is a holder either way
+    except OSError as exc:
+        print(
+            f"tortoise.drain_claim: an unreadable object at {path} could not be "
+            f"restored ({exc}); it is honoured as a holder, so this pass must not "
+            "run beside it",
+            file=sys.stderr)
+    with contextlib.suppress(OSError):
+        os.unlink(quarantine)
+
+
 def _takedown(path: Path, token: str) -> tuple[Path, bytes] | None:
     """Atomically MOVE the claim aside, so the comparison can be trusted.
 
@@ -745,6 +787,19 @@ def _clear_unusable_claim_path(path: Path) -> str:
         # object) and the answer is HELD: there is a holder to honour, which is not
         # the same thing as an unclearable path.
         _dispose_quarantine(quarantine, landed, path, b"<not a claim we judged>")
+        return _CLEAR_HELD
+    if _lstat_is_regular(quarantine):
+        # ⛔ A REGULAR FILE WE COULD NOT READ IS A POSSIBLE HOLDER, NOT JUNK. `landed`
+        # is `None` for TWO different facts and only one of them says "drop it":
+        # "not a regular file" (a symlink/FIFO/socket/device — corruption, safe to
+        # remove) and "a regular file whose bytes could not be had" (`EMFILE`, `EIO`,
+        # `EACCES` after a mode drift). The second is a peer's claim that arrived in
+        # the window, and `unlink`ing it would let this process win the next `link`,
+        # so two holders coexist for up to `ttl/3` — silently. That is the class the
+        # `filelock` advisory GHSA-fq56-3cx3-fjxp describes, and it inverts the
+        # doctrine `acquire` states 40 lines above: a regular file we could not read
+        # is HONOURED and never unlinked (#14480 review, F3).
+        _restore_quarantine(quarantine, path)
         return _CLEAR_HELD
     try:
         os.unlink(quarantine)
