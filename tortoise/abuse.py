@@ -1903,11 +1903,12 @@ class AbuseEngine:
         #
         # RECORDING the hint is a set lookup with no store read. The RETRY is not
         # free: `_evaluate`'s decision to retry is a set lookup plus
-        # `_resolve_retry_due`, and the retry itself pays MORE than the first attempt:
-        # the retry state implies a sentinel on record, and a sentinel is read twice
-        # (`_alias_states`, then the compare-and-delete re-read) — measured 3 reads
-        # per rule with one sentinel, 4 with both kinds, against 2 on the
-        # no-sentinel branch the `flagged` gate suppresses — which is why it is
+        # `_resolve_retry_due`, and the retry pays the SAME 3–4 store reads per rule as
+        # the first attempt: measured 3 with one incident kind on record and 4 with
+        # both, for the first attempt and the retry alike — a sentinel on record is
+        # read twice (`_alias_states`, then the compare-and-delete re-read after a
+        # SUCCESSFUL close). With no sentinel either call costs 2, and the `flagged`
+        # gate avoids the call entirely (0) — which is why the retry is
         # spaced by `_EPISODE_RESOLVE_RETRY_BACKOFF_S` and bounded by
         # `_EPISODE_RESOLVE_RETRY_TTL_S` rather than run on every clean window.
         if resolved:
@@ -2126,12 +2127,12 @@ class AbuseEngine:
                 # ADR-011's false all-clear). The retry finishes an episode already
                 # known to have ended; it never decides that one did.
                 #
-                # COST, stated honestly: a retry costs MORE than the first attempt —
-                # it only runs when a sentinel is on record, and that sentinel is read
-                # twice (`_alias_states`, then the compare-and-delete re-read):
-                # measured 3 reads per rule with one sentinel and 4 with both kinds,
-                # so a close that keeps failing costs those reads on each clean window
-                # until it succeeds
+                # COST, stated honestly: a retry costs the SAME 3–4 store reads per rule
+                # as the first attempt (measured: 3 with one incident kind on record, 4
+                # with both), so a close that cannot complete costs them on each clean
+                # window until it succeeds. A close that RAISES costs 2, because the
+                # compare-and-delete re-read runs only after a SUCCESSFUL close, and the
+                # `flagged` gate avoids the call altogether (0) when there is no episode
                 # or `_EPISODE_RESOLVE_RETRY_TTL_S` drops the hint. That is bounded
                 # and rare; it is NOT free, and it must not be described as a bare
                 # dict lookup.

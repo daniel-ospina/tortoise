@@ -100,9 +100,11 @@ _BILLING_SEND_FAILED_KIND = KIND_BILLING_SEND_FAILED
 #: INCIDENT, not of the detection. Each one files (or reuses) a durable,
 #: assignable incident, and its messages come from the store's create-once path:
 #: ONE opening push for the episode, at most ONE re-alarm per
-#: ``_INCIDENT_DELIVERY_WINDOW_S`` while it stays open (naming the issue WHEN the
-#: incident carries one — otherwise it says the number could not be read), and
-#: one ✅ close at episode end — never one message per detection.
+#: ``_INCIDENT_DELIVERY_WINDOW_S`` while it stays open — the reminder names the
+#: issue when the sentinel carries one, says `an open incident with no issue
+#: number on record` when it does not, and says the number `could not be read
+#: just now` when the read itself raised — and one ✅ close at episode end,
+#: never one message per detection.
 #: Pre-#14407 the push was emitted per DETECTION here and ``abuse_flag`` filed
 #: nothing at all, which is how an alert arriving in the owner's chat could be
 #: attributed by no issue, no runbook and no search.

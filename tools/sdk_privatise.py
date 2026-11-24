@@ -2008,6 +2008,11 @@ SWEEP_NAMES = 66
 #: above give twice (the committed pin stores a COUNT and a DIGEST, never the row set). The pair below
 #: is `--repin`'s own output on THIS resolved tree, never arithmetic on the last pin; `--check` exits 0
 #: on it with `typed references still pointing at a public name: 0`.
+#: ⛔ FOLDED THE PEER LANE'S OWN RESOLUTION OF THIS SAME COLLISION (`f8d8fcb5`) — it re-cut the pin
+#: to `(11914, "4732a51728684cca")` on a tree that does NOT carry `main` `148dece3`. NEITHER pin is
+#: written: `--repin` on the combined tree prints **(11911, "5f91ee836978c431")** — the SAME pair
+#: this branch read at `b8d27c9c` BEFORE folding those commits, so their two code commits move no
+#: row here; row-level attribution of the 3-row gap to `11914` is NOT claimed, only the measurement.
 SWEEP_RESIDUE = (11911, "5f91ee836978c431")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
