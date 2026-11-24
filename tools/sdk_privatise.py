@@ -1956,8 +1956,9 @@ SWEEP_NAMES = 66
 #:   * the RESOLVED merge tree derives **11902 / `f904d86c`**, i.e. one row under `main`'s, and the −1
 #:     is attributed ROW BY ROW rather than waved through: `--report --base 28ca66878d… --top 5000`
 #:     was run on BOTH trees (`origin/main`'s and this one), row sets sorted and diffed, EXACTLY ONE
-#:     row differs — `window.update` **1 → 0**. That row lived in the helper `_wall_clock_cap_claims`
-#:     (`main:tests/test_ci_selection.py:15998`), which this B7 cut DELETES; the row SHAPE set goes
+#:     row differs — `window.update` **1 → 0**. That row lived in the helper `_wall_clock_cap_claims`,
+#:     which this B7 cut DELETES — the helper at `main:tests/test_ci_selection.py:15985`, its own
+#:     `window.update(` call at `:16021` — the row SHAPE set goes
 #:     861 → 860, and no shape is added or absorbed in either direction.
 #: ⛔ The one vanishing row is a DELETION this PR declares; the direction the pin exists to catch is a
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
