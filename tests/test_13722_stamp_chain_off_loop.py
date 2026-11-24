@@ -291,9 +291,11 @@ def _off_loop_submissions(
 ) -> list[tuple[int, str | None, str | None, bool]]:
     """Every `_run_off_loop(...)` in the module: (line, pool, fn, awaited).
 
-    ⛔ THE CALLEE IS A BARE NAME, and that is DECLARED because it is the ONE site
-    where the resolver stays `ast.Name`-only: the door population and the `fn`
-    ARGUMENT both go through `_callable_name`, which accepts `obj.name` as well,
+    ⛔ THE CALLEE IS A BARE NAME, and that is DECLARED because this is ONE OF TWO
+    sites where the `_run_off_loop` callee stays `ast.Name`-only (this one, and
+    `_submitted_names`, whose population feeds the dead-guard arm): the door
+    population and the `fn` ARGUMENT both go through `_callable_name`, which
+    accepts `obj.name` as well,
     but an attribute-spelled CALLEE (`hosted_api._run_off_loop(…)`) is outside
     this population. Declared rather than widened because widening it would let a
     same-named attribute satisfy "the owner is submitted" for a local `def` that
