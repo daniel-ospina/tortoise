@@ -1797,6 +1797,14 @@ def test_the_arms_agree_on_what_a_reference_is() -> None:
         )
         assert submitted and submitted == reported
 
+    # ⛔ AND THE THIRD `_callable_name` CONSUMER, `_off_loop_submissions`, which
+    # these fixtures reached only through `_off_loop_references`: reverting its
+    # `_callable_name(args[1])` to a Name-only spelling stayed GREEN (`99 passed`)
+    # and turned this LEGAL attribute submission into `fn=None` — i.e. "never
+    # submits to `_run_off_loop`", the false RED its own comment says is impossible.
+    # Measured: RED on the revert, GREEN shipped.
+    assert _off_loop_submissions(legal) == [(2, _OFF_LOOP_POOL, "_stamp_chain", True)]
+
 
 def test_the_submission_callee_spelling_is_declared_not_silently_widened() -> None:
     """The submission CALLEE is a bare name — declared, and pinned in BOTH directions.
@@ -2128,6 +2136,12 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
         # DECLARED gap: pushing the test there reported `['False']` for a body that
         # runs (review P2, measured).
         (["def f():", "    while False:", "        pass", "    else:", "        g()"], []),
+        # ⛔ THE `while` BODY ITSELF, which the row above could not measure: it
+        # expects `[]` whether or not the `while` branch exists, so deleting that
+        # branch from `_dead_guards` stayed GREEN (`99 passed`) while a submission
+        # under `while False:` went unreported — the silent-loss state arm 5 exists
+        # for. Measured: this row reds the deletion (`1 failed`).
+        (["def f():", "    while False:", "        g()"], ["False"]),
         # ⛔ A `match` CASE'S GUARD APPLIES TO THAT CASE'S BODY ONLY, and the
         # one-case fixtures cannot measure the scoping (review P2, measured: leaking
         # the guard onto a later case stayed GREEN).
@@ -2141,6 +2155,13 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
         # so the guard is undecidable rather than always-false (review P2,
         # measured: `[(3, 'list()')]` before `_bound_names`).
         (["def f(list):", "    if list():", "        g()"], []),
+        # ⛔ A STATEMENT-LEVEL BINDING TOO (`Name(Store)`), which had no fixture: the
+        # rows here bound `set` through a parameter or a match capture, so deleting
+        # the store arm stayed GREEN (`99 passed`) — and a module-constant alias
+        # (`set = frozenset(...)`) then redds a guard whose body RUNS, the
+        # false-diagnosis class `_bound_names` exists to remove. Measured: RED on the
+        # deletion, GREEN shipped.
+        (["def f():", "    set = _factory", "    if set():", "        g()"], []),
         (["def f():", "    if list():", "        g()"], ["list()"]),
         # ⛔ AND A `match` CAPTURE BINDS WITH NO `ast.Name(Store)` NODE (review P2,
         # measured): `case _ as set:` left `set` unbound, so `if set():` inside that
