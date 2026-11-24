@@ -4067,14 +4067,26 @@ def _census_env() -> dict[str, str]:
     `executable=sys.executable` — a foreign `argv[0]` in front of the real
     interpreter, which is the only portable way to put an arbitrary name in front
     of a live process (#12039). CPython resolves its install PREFIX from `argv[0]`,
-    so on a RELOCATABLE interpreter (venv, uv-managed, toolcache: what CI runs) the
-    child aborts in `init_fs_encoding` — `Could not find platform independent
-    libraries` / `No module named 'encodings'` — and exits rc=1 in milliseconds.
+    and the child aborts in `init_fs_encoding` — `Could not find platform
+    independent libraries` / `No module named 'encodings'` — and exits rc=1 in
+    milliseconds whenever the prefix that resolution yields carries no stdlib
+    landmark. (A BARE `argv[0]` such as `pi` has a second way in: CPython resolves
+    it on `$PATH` and adopts whatever program of that name it finds as its own
+    executable — `sys._base_executable = '<host>/…/pi'` — the measured root cause
+    of #14506 on the self-hosted runner. This lane's `argv[0]` is a long PATH, so
+    that arm does not reach it.)
     The census then correctly fails to find a process that never lived, and this
     pin's expiry classification reads it as a census gap instead of a dead fixture.
     Measured on `cpython-3.9` (uv-managed): identical spawn rc=1 without the
     variable, rc=0 with it; `/usr/bin/python3` needs neither (compiled-in prefix),
     which is why it passed on some hosts and not others.
+
+    ⛔ "RELOCATABLE" IS NOT THE DISCRIMINATOR, and an earlier revision of this
+    docstring said it was (review of #14459, executed there). A venv over a
+    uv-managed `3.12.14` STARTS under the same foreign `argv[0]` — rc=0, a warning
+    on stderr, no abort — so "CI runs a venv" does not imply the abort, and a lane
+    that tested only the packaging would conclude this variable was unnecessary and
+    delete it, restoring the red. The load-bearing property is the PREFIX.
 
     `PYTHONHOME` is CPython's own named remedy; the lane imports only `time`.
     """
@@ -4093,8 +4105,9 @@ def test_the_census_env_keeps_a_foreign_argv0_interpreter_alive(tmp_path) -> Non
     `tests/test_ci_preview_isolation.py`.
 
     FALSIFIER (executed): drop `PYTHONHOME` from :func:`_census_env` and the
-    behavioural arm reds with `rc=1` (or, on a host whose interpreter is not
-    relocatable, the structural arm reds first — which is the point of having it).
+    behavioural arm reds with `rc=1` — or, on an interpreter whose prefix is
+    compiled in (`/usr/bin/python3`), that arm cannot red at all and the structural
+    arm is the only signal, which is the point of having it.
     """
     assert _census_env()["PYTHONHOME"] == sys.base_prefix, (
         "the census lane's env must carry PYTHONHOME: `executable=` leaves a "
@@ -4280,11 +4293,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                                 executable=sys.executable,
                                 # ⛔ `PYTHONHOME` IS LOAD-BEARING (#14122 root cause, measured
                                 # on #14459) — see `_census_env`, which is also pinned by its own
-                                # test above. Without it the child aborts in `init_fs_encoding`
-                                # on a RELOCATABLE interpreter and exits rc=1 in milliseconds,
-                                # so this test's expiry would classify a DEAD FIXTURE as a census
-                                # gap; `/usr/bin/python3` (compiled-in prefix) needs neither,
-                                # which is why it passed on some hosts.
+                                # test above. Without it, a prefix resolved from this foreign
+                                # `argv[0]` carries no stdlib landmark and the child aborts in
+                                # `init_fs_encoding`, exiting rc=1 in milliseconds — so this
+                                # test's expiry would classify a DEAD FIXTURE as a census gap.
+                                # (`/usr/bin/python3` needs neither: its prefix is compiled in,
+                                # which is why it passed on some hosts. ⛔ NOT "relocatable" —
+                                # that word is refuted in `_census_env`.)
                                 env=_census_env(),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

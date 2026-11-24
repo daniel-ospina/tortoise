@@ -137,11 +137,15 @@ def _decoy_env() -> dict[str, str]:
 
     ⛔ `PYTHONHOME` IS LOAD-BEARING, NOT DEFENSIVE (#14122 root cause, measured on
     #14459). `executable=` decides what RUNS while `argv[0]` stays the decoy's own
-    path, and CPython resolves its install PREFIX from `argv[0]` — so on a
-    RELOCATABLE interpreter (a venv, a uv-managed or toolcache-style python, i.e.
-    what CI runs) the child aborts in `init_fs_encoding`:
-    `Could not find platform independent libraries <prefix>` and
-    `ModuleNotFoundError: No module named 'encodings'`, exit 1, in milliseconds.
+    path, and CPython resolves its install PREFIX from `argv[0]` — so when the
+    prefix that resolution yields carries no stdlib landmark the child aborts in
+    `init_fs_encoding`: `Could not find platform independent libraries <prefix>`
+    and `ModuleNotFoundError: No module named 'encodings'`, exit 1, in
+    milliseconds. (A BARE `argv[0]` has a second way in: CPython resolves it on
+    `$PATH` and adopts whatever program of that name it finds as its own
+    executable — `sys._base_executable = '<host>/…/pi'`, the measured root cause of
+    #14506 on the self-hosted runner. This decoy's `argv[0]` is a path, not a bare
+    name, so that arm does not reach it.)
     Measured in-process on `cpython-3.9` (uv-managed): the identical spawn with
     `executable=sys.executable` and a `/tmp/…/bin/workerd` argv[0] returns rc=1 with
     that message; adding `PYTHONHOME=sys.base_prefix` returns rc=0. `/usr/bin/python3`
@@ -152,6 +156,13 @@ def _decoy_env() -> dict[str, str]:
     `PYTHONHOME` is CPython's own named remedy (it prints the variable in that error).
     It costs the decoy the venv's `site-packages`, which the decoy never uses — it
     imports `ctypes` and `time` from the stdlib only.
+
+    ⛔ "RELOCATABLE" IS NOT THE DISCRIMINATOR, and an earlier revision of this
+    docstring said it was (review of #14459, executed there). A venv over a
+    uv-managed `3.12.14` STARTS under the same foreign `argv[0]` — rc=0, a warning
+    on stderr, no abort. The load-bearing property is the PREFIX, not the
+    interpreter's packaging; the structural assert in the pin below holds the
+    variable in place rather than resting on that diagnostic story.
     """
     return {**os.environ, "PYTHONHOME": sys.base_prefix}
 
@@ -164,8 +175,8 @@ def _spawn(cmd: list[str], cwd: Path, executable: str | None = None,
     program are then two different things, which is the only portable way to put an
     arbitrary name in front of a live process (#12039). ⛔ `env` exists because that
     decoupling is NOT free: CPython derives its prefix from `argv[0]`, so an
-    interpreter spawned under a foreign name needs :func:`_decoy_env` to start at all
-    (#14122).
+    interpreter spawned under a foreign name needs :func:`_decoy_env` to start
+    wherever that prefix has no stdlib landmark (#14122).
 
     ⛔ THE DECOY'S STDERR IS KEPT, NOT DISCARDED (#14122). It used to go to
     `subprocess.DEVNULL`, which made the two very different failures produce the SAME
@@ -787,20 +798,21 @@ def test_the_decoy_interpreter_STARTS_and_survives_the_foreign_argv0(tmp_path: P
     ⛔ WHAT THIS PIN EXISTS FOR, measured on #14459's shard `test (d)` (run
     45367815168). Every mechanism pin in this file stands a decoy up with
     `executable=sys.executable` and `argv[0]` set to the decoy's own path, and
-    CPython derives its install PREFIX from `argv[0]`. On a RELOCATABLE interpreter
-    (venv, uv-managed, toolcache — every CI runner) that spawn dies in
-    `init_fs_encoding` (`Could not find platform independent libraries` /
-    `ModuleNotFoundError: No module named 'encodings'`) in milliseconds, so the
-    decoy only looked alive when the sample happened to win the race. That is why
-    these pins were chronically red on main at ~35% and green locally.
+    CPython derives its install PREFIX from `argv[0]`. When that prefix carries no
+    stdlib landmark the spawn dies in `init_fs_encoding` (`Could not find platform
+    independent libraries` / `ModuleNotFoundError: No module named 'encodings'`) in
+    milliseconds, so the decoy only looked alive when the sample happened to win
+    the race. That is why these pins were chronically red on main at ~35% and green
+    locally. ⛔ The discriminator is the PREFIX, not "relocatable" — a venv over a
+    uv-managed python was measured to start (see :func:`_decoy_env`).
     `_decoy_env()`'s `PYTHONHOME` is the fix; this test is its falsifier.
 
     FALSIFIER (executed): delete `PYTHONHOME` from `_decoy_env()` and this reds on
     `the decoy died` with the child's own stderr quoted — the message the harness
     could not print before #14388 captured it. ⚠️ The structural assertion is
-    deliberate: on a host whose interpreter is NOT relocatable (`/usr/bin/python3`,
-    prefix compiled in) the behavioural arm cannot red at all, so the env rule is
-    also stated directly rather than inferred from timing.
+    deliberate: on an interpreter whose prefix is compiled in (`/usr/bin/python3`)
+    the behavioural arm cannot red at all, so the env rule is also stated directly
+    rather than inferred from timing.
     """
     assert _decoy_env()["PYTHONHOME"] == sys.base_prefix, (
         "the decoy's env must carry PYTHONHOME: `executable=` leaves a FOREIGN "
