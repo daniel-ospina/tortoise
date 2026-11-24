@@ -1797,10 +1797,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ── #14429 (`test_spool_drain_rehearsal.py`) — the spool-drain rehearsal, and why
     #    none of these three spellings can reach a server ────────────────────────────
     # #14429 added seven mutation sites and no rows here, which redded THIS census on
-    # `main` (measured at 84f0d4440f03: `test (b)` failed on this file alone, fail-fast
-    # cancelled ten sibling shards, and `python-ci-gate` reported UNMEASURED — so the
-    # required aggregate was red on every PR whose base carried it, and the predicate
-    # could not excuse it because a cancelled shard certifies nothing). Triaged as
+    # `main` (measured at 84f0d4440f03: `test (b)`'s only failure was
+    # `test_uri_env_mutations_declared.py::test_uri_env_mutations_declared`). The ten
+    # sibling shards were then cancelled by the NEXT push on the PR SUPERSEDING that
+    # run (`concurrency: cancel-in-progress: github.event_name == 'pull_request'`,
+    # python-ci.yml:154) — not by fail-fast: all three matrices set
+    # `fail-fast: false` (python-ci.yml:747, :2209, :3411) and no `fail-fast: true`
+    # exists in this repo. That supersede left the predicate at
+    # `VERDICT: UNMEASURED` and `python-ci-gate` at `failure`, because a cancelled
+    # shard's failure set cannot be measured. Triaged as
     # DELIBERATE_URI, per site:
     #   :389  the production-target REFUSAL probe — the assertion is `SystemExit` plus
     #         "refusing a production target", so the gate READS the value and the
