@@ -7477,8 +7477,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # and is RED here, measured: main's tortoise-capture.ts carries +23 lines above
         # both `def`s that neither of that row's two sides moved.
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("1030", "export function postCapture("),
-            ("1022", "export function postInstallProbe("),
+            ("1100", "export function postCapture("),
+            ("1092", "export function postInstallProbe("),
         ), "pi_hooks"),
         # ⛔ THE SENTENCE'S THIRD FILE (`hosted_api.py`) HAD NO READER EITHER (#12462
         # review round 5), in the very row this PR re-points the other two cites of:
