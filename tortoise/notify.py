@@ -198,9 +198,9 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #: ``abuse_suspended`` is in neither arm: ``_episode_delivery_kinds()`` excludes it
 #: by policy, so NO EPISODE END re-arms its window. It is still re-armed by the
 #: kind-agnostic per-outcome releases (a LIFTED suppression, a deferred filing),
-#: so a second suspension of the same subject inside 24h is NORMALLY folded and
-#: is DELIVERED after one of those releases — measured: a suspension whose
-#: incident read raises, then a second in the same window, sent TWO messages.
+#: so a second suspension of the same subject inside 24h is folded UNLESS one of
+#: those releases fires in between, and then it IS delivered (the lifted-
+#: suppression arm: two messages inside one window, no episode end).
 #:
 #: INCIDENT kinds: the normal path is the store's create-once lifecycle — the
 #: episode's first message is the store's own push, and this window is the
@@ -666,8 +666,9 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
     # removes, and a stale OPEN incident is visible while a wrong ✅ is not. The
     # runbook row names the legacy path as the manual close.
     subjects = (subject,)
-    # The DELIVERY window is re-armed only by a CONFIRMED episode end — see the
-    # `skipped_window` gate below. A release on every clean evaluation would
+    # The DELIVERY window is re-armed by a CONFIRMED episode end OR by a
+    # kind-agnostic per-outcome release (a lifted suppression, a deferred filing) —
+    # but not by an ordinary clean evaluation: see the `skipped_window` gate below. A release on every clean evaluation would
     # undo the episode bound for a rule that hovers at its threshold: each
     # crossing would re-arm the ledger and page a reminder, so the 24h reminder
     # window would degenerate back into one message per crossing.
@@ -1151,7 +1152,9 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
     re_arm = (
         ", RE-ARMED by a confirmed episode end ON THE NO-INCIDENT-CHANNEL PATH"
         " (with a store, the release is gated on its `SKIPPED_WINDOW` while that"
-        " gate applies, so the 24h limit holds there) — a rule"
+        " gate applies, so the 24h limit normally holds there — a release that is"
+        " not the episode end, a LIFTED suppression or a deferred filing, re-arms"
+        " it regardless) — a rule"
         " that FLAPS therefore pages once per episode in that shape, one message"
         " per crossing, which is the pre-#14407 rate (this path's gain is"
         " attribution and the continuous-breach rate, not flapping volume),"

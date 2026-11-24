@@ -1524,9 +1524,9 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
     # ⛔ "NEVER re-armed early" was the previous pin and it was FALSE (round 7 of the
     # #14487 review): the episode-end release is not the only re-arm site — the
     # kind-agnostic per-outcome releases (a lifted suppression, a deferred filing)
-    # re-arm this kind too. Measured: a suspension whose incident read raises,
-    # followed by a second inside the same window, delivers TWO messages. The pin
-    # is on the truthful clause, and the false absolute is absent.
+    # re-arm this kind too: on the lifted-suppression arm two messages land inside
+    # one window with no episode end anywhere. The pin is on the truthful clause,
+    # and the retired absolute is absent.
     assert "NEVER re-armed early" not in log, (
         "the log restates the retired absolute a generic release disproves: "
         f"{log!r}")
