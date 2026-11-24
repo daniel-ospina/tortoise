@@ -3805,7 +3805,14 @@ def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
 #: on purpose: `_door_read_contract()` derives the same set from the door, and this is the
 #: independent statement that reds when the DOOR moves — a derivation checked only against
 #: itself cannot tell "unchanged" from "widened".
-_EXPECTED_DOOR_ARGS = frozenset({"query", "limit", "read_status_out", "_truncation_out"})
+#:
+#: ⛔ `_state_route_out` is RE-DERIVED, not rubber-stamped (#14033's re-cut): it is the
+#: search route's second OUT-SINK, a private `_`-prefixed kwarg the handler passes to
+#: receive the missed-state-cue payload, and nothing about which rows survive `limit`
+#: depends on it — the same class as the door's own `_truncation_out`. It is NOT a lever:
+#: the reader ignores it as an input, so naming it cannot widen what this mirror measures.
+_EXPECTED_DOOR_ARGS = frozenset({"query", "limit", "read_status_out", "_truncation_out",
+                                 "_state_route_out"})
 
 
 def _door_read_contract(
@@ -12340,18 +12347,22 @@ def test_every_door_contract_clause_reds() -> None:
         assert needle in message, (needle, message)
         return message
 
-    anchor = "_truncation_out=trunc_out),"
+    # #14033's re-cut added a SECOND out-sink to the door's read call,
+    # `_state_route_out=state_out` (the missed-state-cue payload — an out-sink, not a
+    # lever; it is in `_EXPECTED_DOOR_ARGS` above), so the anchor this harness mutates is
+    # the LAST keyword the door hands rather than `_truncation_out`'s now-mid-list one.
+    anchor = "_state_route_out=state_out),"
     assert hosted.count(anchor) == 1
 
     # 1. the door itself names a BOOL lever -> `not named_levers`
     raised("the door itself already names",
            hosted_source=hosted.replace(
-               anchor, "_truncation_out=trunc_out, _rerank_candidates=False),", 1))
+               anchor, "_rerank_candidates=False, _state_route_out=state_out),", 1))
 
     # 2. the door names a lever the bool-lever intersection cannot see -> the equality
     raised("re-derive this contract and the harness's",
-           hosted_source=hosted.replace(anchor, "_truncation_out=trunc_out, "
-                                               'kind="statement"),', 1))
+           hosted_source=hosted.replace(anchor, 'kind="statement", '
+                                               "_state_route_out=state_out),", 1))
 
     # 3. a second read call inside `search` (a hoisted `_do_search`, an added arm) -> the
     #    cardinality clause, which is what stops the allow-list being a UNION
