@@ -297,17 +297,17 @@ _NP_STOP = (
     # (`is the barely visible notice archived`, `is the hardly noticeable change
     # archived`, `is the scarcely used endpoint retired` — all route
     # correctly and are real state questions), so a plain stop word buys the
-    # negated spellings by refusing four unnegated ones (the in-RUN spellings, see
-    # `STOP_WORDS_KEEP_THIS_RECALL`: the head-slot spellings above pass even
-    # against a flat word, because `_NP_STOP` never applies to the head slot,
-    # so the in-run ones are the rows that actually pin this). The lookahead stops
-    # the
-    # negator only where the ENDING follows it within one word (`… hardly
-    # cancelled`, `… hardly been cancelled`) and leaves it in the run everywhere
-    # else, so this closure costs NO recall — which is why it is taken here while
-    # the other dual-use words (`all|some|any|no`) stay disclosed residuals.
-    rf"|(?:hardly|barely|scarcely|rarely|far\s+from|anything\s+but)"
-    rf"(?=[\s-]+(?:{_NP_WORD}[\s-]+)?(?:{_ENDING_WORDS}))"
+    # negated spellings by refusing the unnegated ones too (the in-RUN and
+    # negator-plus-adjective spellings pinned in `STOP_WORDS_KEEP_THIS_RECALL`,
+    # which is the table that reds if this guard is flattened). The lookahead stops
+    # the negator only where the ENDING follows it, optionally across an AUXILIARY
+    # (`… hardly cancelled`, `… hardly been cancelled`), and leaves it in the run
+    # everywhere else — including where the next word is an ADJECTIVE
+    # (`is the service hardly used archived`), which a generic one-word window
+    # refused and which is a real state question. That distinction is why the
+    # intervening class is closed rather than `{_NP_WORD}` (PR #14491 review P1).
+    rf"|(?:(?:hardly|barely|scarcely|rarely)(?:-ever)?|far\s+from|anything\s+but)"
+    rf"(?=[\s-]+(?:(?:been|be|being)[\s-]+)?(?:{_ENDING_WORDS}))"
     # `being` is the PROGRESSIVE and is a separate token from the infinitive
     # frame below, because no frame marker sits in front of it:
     # `is the plan being cancelled`, `is the report still being archived`.

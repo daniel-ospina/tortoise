@@ -62,8 +62,8 @@ NOT in the `carve_out:` list — `config/ci-surfaces.yml` registers it as its ow
 `core` surface row (it must be, so that a diff to `tortoise/state_intent.py`
 SELECTS it) — the flag is simply what lets an embedded-only run skip the
 suite-wide DB gate. Without the flag a bare `pytest <this file>` fails that gate
-with one error PER COLLECTED TEST (**84** at this head, not a fixed number and
-not a regression: the count is the population size; epic #1647 P4).
+with errors arriving one PER COLLECTED TEST — the count is the population size,
+not a constant, and it is not a regression (epic #1647 P4).
 """
 from __future__ import annotations
 
@@ -253,14 +253,17 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
     """All six guards of `is_predicate` have a pinned falsifier.
 
     ⛔ A pin has to be able to reach the guard it pins. The
-    `is the payment terms clause given the contract was archived` row of
-    ``NOT_SELECTED`` (``tests/test_13557_13558_reachable_reads.py``) is refused by
-    BOTH the NP stop (`the`) and the three-word bound: measured, dropping
-    `_NP_STOP` alone leaves it refused (`given the contract was` is four words
-    past a bound of three) and widening the bound alone leaves it refused (the
-    stop fires first) — it routes only with BOTH off. So it pins neither guard on
-    its own, and the strings below are the ones that go red when a single guard is
-    removed:
+    `is the payment terms clause given the contract was archived` row of THIS
+    file's `NOT_SELECTED` loop is refused by BOTH the NP stop (`the`) and the
+    three-word bound: measured, dropping `_NP_STOP` alone leaves it refused
+    (`given the contract was` is four words past a bound of three) and widening
+    the bound alone leaves it refused (the stop fires first) — it routes only with
+    BOTH off. So it pins neither guard on its own, and the strings below are the
+    ones that go red when a single guard is removed. ⛔ NOT the similar rows in
+    ``tests/test_13557_13558_reachable_reads.py`` (`what is the payment terms
+    clause given the contract was archived` and its comma twin): those start with
+    `what`, so the `^(?:is|are|was|were)` start anchor refuses them before either
+    guard is reached, and they can pin neither. The falsifiers:
 
     * dropping the tail anchor routes `is the report archived in S3` — a lookup
       whose ending is not the whole predicate;
@@ -282,7 +285,7 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       routes, and so does one with a bare quantifier subject (`is the plan some
       team abandoned`), and so does a TIME SPAN that names no record
       (`is the quarter ended`) — see the module's ``_NP_STOP`` note for all
-      five residuals;
+      six residuals;
     * …and the same stop is what refuses an ADJUNCT: `is the data safe once
       archived`, `is the report still accurate once archived` and
       `is the policy unless bookings were cancelled` — the ending there belongs
@@ -292,8 +295,8 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       FIFTY-TWO measured rows of
       :func:`test_a_modified_predicate_is_not_the_question_asked` — re-measure
       `len(MODIFIED_PREDICATE_STAYS_OUT)` rather than trusting any count in prose
-      (twelve NEGATED, six FUTURE, three PROGRESSIVE, one DISJUNCTIVE, eight
-      CONTRACTION, seven ADJUNCT/LINKER, four `of`-COMPLEMENT, and eleven
+      (twelve NEGATED, seven FUTURE, three PROGRESSIVE, one DISJUNCTIVE, eight
+      CONTRACTION, seven ADJUNCT/LINKER, four `of`-COMPLEMENT, and ten
       APPROXIMATIVE at this head).
       Dropping the stop routes that class, which answers the question with the
       POLARITY-INVERTED (or a not-yet-existing, or an in-flight) population.
@@ -410,10 +413,16 @@ def test_the_imperative_lookup_for_one_record_is_still_refused():
 #:   at once, and one population cannot answer both.
 #:
 #: ⛔ ATTRIBUTION, row by row, because a pin must be able to reach its guard:
-#: every row reds on the pre-fix head EXCEPT `is the plan not going to be
-#: cancelled`, which the NP bound (`{0,3}`) already refused — it is a BOUNDARY
-#: pin for the future class, not a non-vacuity row, and it is named here rather
-#: than left to be re-measured. The rest were all measured leaking.
+#: measured against the pre-fix head (`git show 4aecc782d3^:tortoise/
+#: state_intent.py`), 47 of these 52 route there and FIVE do not:
+#: `is the plan not going to be cancelled` (the NP bound `{0,3}` already refused
+#: it — a BOUNDARY pin, not a non-vacuity row) and the four SMART-APOSTROPHE
+#: contractions, which the pre-fix ASCII token class never matched at all. ⛔ Those
+#: four are non-vacuity pins only against the INTERMEDIATE head that widened
+#: `_NP_WORD` before the `['’-]` contraction arm landed — they are named here
+#: rather than left to look like ordinary rows, and they are the reason the
+#: reconciliation had to fix a hole that existed on neither lane alone.
+#: Every other row was measured leaking.
 MODIFIED_PREDICATE_STAYS_OUT = (
     # negation
     "is the plan not cancelled",
@@ -429,33 +438,32 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     "is the plan neither deprecated nor retired",
     "is the ticket still not archived",
     "is the plan any longer cancelled",
-    # the APPROXIMATIVE negators — they leak to the polarity-INVERTED population
-    # without the POSITIONAL arm in ``_NP_STOP`` (P1: all six routed before it).
-    # ⛔ They cannot be flat stop words: see
-    # :data:`STOP_WORDS_KEEP_THIS_RECALL` for the FOUR real state questions a
-    # flat word would refuse.
+    # the APPROXIMATIVE negators — the same polarity INVERTED answer as `not`, in
+    # the spelling a caller actually writes. ⛔ One tab, not two: this class used
+    # to be documented twice under two review-round labels, which read as two
+    # findings. It is ONE finding, and the guard is POSITIONAL, not a word list —
+    # see :data:`STOP_WORDS_KEEP_THIS_RECALL` for the real state questions a flat
+    # word would refuse.
     "is the plan hardly cancelled",
     "is the plan barely cancelled",
     "is the plan scarcely archived",
+    "is the plan hardly archived",
+    "is the plan barely archived",
+    "is the report rarely withdrawn",
     "is the plan far from cancelled",
     "is the plan anything but cancelled",
     "is the plan hardly been cancelled",
-    # the HYPHENATED spelling, where the separator is `-` not whitespace
+    # the HYPHENATED spelling, where the separator is `-` not whitespace and the
+    # negator is one compound token (`hardly-ever`)
     "is the plan hardly-ever cancelled",
     # a standalone `n't` token, which `_NP_WORD` accepts because a word-run
     # element may begin with `n` — the guard is live, not inert (see the
     # module's `_NP_STOP` note; the CONTRACTED copula `isn't the plan cancelled`
     # is refused by the start anchor instead, which is a different string)
     "is the plan n't archived",
-    # the APPROXIMATIVE negations — the same polarity inversion as `not`, in the
-    # spelling a caller actually writes (`is the plan hardly archived` was served
-    # the CANCELLED population on the head that stopped only the literal negators;
-    # PR #14491 review, P3)
-    "is the plan hardly archived",
-    "is the plan barely archived",
-    "is the report rarely withdrawn",
     # futurity / intent — the ending has not happened, so the ended population
-    # cannot answer it (the second row is the NP-bound boundary pin above)
+    # cannot answer it (the LAST row is the NP-bound boundary pin above, not a
+    # non-vacuity row: the frame arm cannot reach it)
     "is the v2 api to be retired",
     "is the report scheduled to be archived",
     "is the report going to be archived",
@@ -525,6 +533,13 @@ STOP_WORDS_KEEP_THIS_RECALL = (
     "is the legacy scarcely used endpoint retired",
     "is the current hardly used service archived",
     "is the old rarely used endpoint archived",
+    # ⛔ AND THE NEGATOR-PLUS-ADJECTIVE SPELLINGS, which a GENERIC one-word window
+    # refused because it could not tell an auxiliary (`hardly been`) from an
+    # adjective (`hardly used`) — the intervening class is closed for exactly this
+    # (measured, PR #14491 review P1).
+    "is the service hardly used archived",
+    "is the endpoint rarely used archived",
+    "is the plan barely used archived",
     # …and the head-slot spellings, kept because they are the ones a caller
     # actually types. ⛔ These are a RECALL guard, NOT a non-vacuity pin: they also
     # pass under a flat stop word, so they are named here rather than left to be
