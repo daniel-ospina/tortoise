@@ -233,6 +233,57 @@ def test_expansion_keeps_seed_and_reaches_top_window(seeded_sdk):
         "top-5 reader window")
 
 
+def test_sparse_pass_merges_through_the_fusion_rule(seeded_sdk, monkeypatch):
+    """#14344 at the SPARSE call site: ``_entity_key_expansion_pass`` hands its
+    two legs to ``expansion_merge.fuse_expansion_pass`` and returns THAT order.
+
+    ⛔ The dense twin's row (`test_dense_pass_merges_additively_and_never_
+    drops_a_pass1_id`) covers only the dense half, so without this row the
+    PRIMARY lever's call site could be reverted to the rank concatenation
+    silently (measured in review round 11: the revert left all 19 rows green).
+
+    Mutant (measured): restore
+    ``merged = list(expanded); merged.extend(pass-1-only)`` at the sparse
+    return — ``ids[0]`` becomes the expansion's rank-0 id (``newcomer``),
+    which leads by MEMBERSHIP alone under that rule, so this row REDS.
+    """
+    import tortoise.search_engine as _se
+
+    pass1 = [("incumbent", 0.93), ("pass1-second", 0.41)]
+    # The expansion's own rank-0 row is a NEW id, and the shared id sits at its
+    # rank 1 — so the concatenation put ``newcomer`` on top by membership alone.
+    expanded = [("newcomer", 0.99), ("incumbent", 0.44)]
+    calls: list[dict] = []
+
+    def _fake_run_fts_query(_graph, q, **kwargs):
+        calls.append({"query": q, **kwargs})
+        return list(expanded)
+
+    monkeypatch.setattr(_se, "run_fts_query", _fake_run_fts_query)
+    merged = seeded_sdk._entity_key_expansion_pass(
+        QUESTION, list(pass1),
+        aliases=["road bike repairs"],
+        str_limit=60,
+        excluded_statuses=None,
+        leg_trace=None,
+    )
+    assert calls, "the expansion must run through run_fts_query"
+    assert merged is not None, "a non-empty expansion must yield a merged leg"
+    ids = [pid for pid, _s in merged]
+    assert set(ids) == {"incumbent", "newcomer", "pass1-second"}, (
+        "the candidate set is the UNION — no id may be dropped")
+    # THE discriminator: the id BOTH passes carry earns two reciprocal-rank
+    # terms and leads. The concatenation made the expansion's rank-0 row lead.
+    assert ids[0] == "incumbent", (
+        "the sparse half must merge through the FUSION, not the rank "
+        f"concatenation — got {ids}")
+    # Scores are carried from origin (the single-strategy `threshold` path reads
+    # them), and the expansion wins a collision — the order the old rule used.
+    carried = dict(merged)
+    assert carried["incumbent"] == 0.44
+    assert carried["pass1-second"] == 0.41
+
+
 # ── (b) default OFF: byte-identical no-op ─────────────────────────────────
 
 def test_expansion_disabled_is_default_byte_identical(seeded_sdk):

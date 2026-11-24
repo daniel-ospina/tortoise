@@ -197,9 +197,15 @@ def test_pure_function_of_the_two_lists_and_of_nothing_else():
       (i) the exact ORDER is PINNED, not merely repeated. The two legs here are
           disjoint, so every id earns exactly one term; ids at equal rank tie and
           ``(-score, id)`` puts the ``p`` before the ``x``. That pin reds BOTH the
-          restored concatenation (every ``x`` first) and ``reversed(fused)``, and
-          it is the only assertion in this file that reds if the two lists reach
-          ``rrf_fusion`` in the wrong ORDER;
+          restored concatenation (every ``x`` first) and ``reversed(fused)``.
+          ⛔ It does NOT red on a SWAP of the two lists, and no assertion here
+          can: equal-weight RRF is ``Σ 1/(k+rank+1)``, symmetric in the list
+          index, so list order cannot change the fused order (measured — a
+          ``rrf_fusion([second, first], k)`` mutant leaves all 9 rows GREEN,
+          review round 11 P3). What the two lists DO determine is the SCORE
+          PRECEDENCE for an id both passes carry, and that is pinned by
+          ``test_scores_are_carried_from_origin_not_the_rrf_score`` instead
+          (its ``{**dict(second), **dict(first)}`` mutant reds);
       (ii) the caller's leg lists must come back untouched — a merge that sorts
            or consumes a caller list in place reds here."""
     pass1 = [(f"p{i}", 1.0 - i / 100) for i in range(7)]
