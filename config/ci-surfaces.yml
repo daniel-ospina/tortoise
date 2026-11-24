@@ -138,7 +138,6 @@ version: 1
 # (`WATCHDOG_HEADROOM`), NOT the printed `watchdog_headroom:` ratio beside them — so the ratio is
 # re-read by hand whenever the seconds move. It moves: `2.01` at 837.9 s (1680 / 837.9 = 2.0050),
 # and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0361, rounded to the printed 2.04). A carried ratio in a graded sentence is
-# and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0361). A carried ratio in a graded sentence is
 # exactly the defect this block exists to prevent, one level below what it grades.
 #
 # ⛔ ONE CLAUSE, NOT A LEDGER — AND THE CLAUSE IS GRADED, NOT TRUSTED. The split is 0.1 s wide and
