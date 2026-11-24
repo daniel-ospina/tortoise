@@ -428,7 +428,7 @@ def test_the_capture_in_flight_tunable_is_staged_at_its_versioned_value():
     """#12992: the hosted capture in-flight ceiling is VERSIONED at 16, not 8.
 
     The undeclared Fly secret of this name blocked every `deploy-hosted` run from
-    2026-11-21 to 2026-11-23 (the #4126 defect class). Declaring it is only half
+    2026-11-21T21:34Z to 2026-11-23T23:03Z (the #4126 defect class). Declaring it is only half
     the fix — the deploy must also carry the LIVE value across. `8` is the code
     default, and a deploy that silently reverted to it would re-open the 429 that
     parked 500+ sessions. A REMOVAL of the append is caught by the provenance gate
