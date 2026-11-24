@@ -1021,6 +1021,7 @@ one.
 ---
 
 ## Appendix A — every statement site, by shape
+
 | file:line | fn | shape | role | verdict | statement |
 |---|---|---|---|---|---|
 | `tortoise/__main__.py:777` | `_cmd_reconcile` | plain | read | candidate:SQL-shaped | `UNWIND $ids AS eid MATCH (e:Event {eventId:eid}) RETURN e.eventId` |
