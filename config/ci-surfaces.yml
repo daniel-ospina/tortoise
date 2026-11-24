@@ -71,9 +71,11 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `da4b76a5851c`, whose #14371, #14186, #14434, #13998, #14350, #14423, #14429 and #14446 `core` rows
-# are all in the map, plus #14407's own dual registration of
-# `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
+# `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 deletions shrink the durations map and
+# RETIRE `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite, which is why this PR
+# takes `main`'s copy of that file rather than its own, folded over the #14371, #14186, #14434,
+# #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
+# own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) the verb packs five shards at 837.7 s (a, c, d, e, k) and six at
 # 837.6 s (b, f, g, h, i, j), so
 # `ceil(837.7/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
@@ -95,16 +97,18 @@ version: 1
 # `test_notify`), and that registration is part of the partition stated above — the minute did not
 # move (28 m either way), which is exactly why the SECONDS are the graded claim. Re-run
 # `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or split.
-# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
-# `88cd00a068`, whose #14428 cut B2 down to `tests/test_12184_shifted_cites.py`, whose #14446
-# repaired #7879's record-chain arm, and whose #14429 registered
-# `tests/test_spool_drain_rehearsal.py` `core` with its own flat row, on top of #14350's
-# `tests/test_14350_drain_convergence.py`, #14220's `tests/test_14186_embedder_seam_batching.py`
-# and #14371's `tests/test_14371_offline_embed_json.py` — the last three at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) — see the emission stated ONCE, in the paragraph above. This side's
-# figures are the reading of ITS OWN tree and are superseded on the merged tree, so they are
-# history here and are NOT restated as a claim: a second clause is exactly what the guard
-# grades as `<est … stated twice>`, and it was red on this tree.
+# ⛔ AND THESE PARAGRAPHS ARE HISTORY, NOT A SECOND CLAIM. Every fold of `origin/main` re-derived
+# this emission and left its own reading behind, so the block accumulated five stacked restatements
+# of the same sentence — and a restatement the guard reads as `<est … stated twice>` is how a block
+# ends up claiming two partitions while looking like one. The graded clause is the ONE in the
+# paragraph above, measured on the tree that SHIPS (`main` at `da4b76a5851c`). What is kept here is
+# only what a reader cannot get from that clause: which registrations `main` has landed at the flat
+# 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's `tests/test_14371_offline_embed_json.py`, #14434's
+# `tests/test_7879_record_chain.py`, #14220's `tests/test_14186_embedder_seam_batching.py`, #14423's
+# `tests/test_14350_drain_convergence.py`, #14038's `tests/test_13998_capacity_notice.py` and
+# #14429's `tests/test_spool_drain_rehearsal.py` (listed in shard `k`) — FIVE of them on top of
+# #14038's row, which the 836.4 s baseline below already counts (measured: that row is in shard c at
+# `4993fa08`, so the baseline's total includes it), and why every one of them moves the split.
 #
 # ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
 # figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
@@ -127,27 +131,6 @@ version: 1
 # landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
 # shard `k`) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
 # one main fold from rounding again.
-# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
-# `e6b3cf2908b` — seven landings past the `88cd00a068` head the block last named, and a tree that
-# registers no fast file of its own) the reading was nine/two at a 0.1 s split — HISTORY, not a
-# claim: the graded clause is stated ONCE in the paragraph above, and a second one is exactly
-# what the guard reads as `<est … stated twice>`. The registrations this block's own reading
-# MERGES INTO, never carried from the branch that first wrote it. This paragraph USED to carry a
-# SECOND full restatement of the emission — a nine/two split derived on `main` at `e6b3cf2908b`
-# (seven landings past the `88cd00a068` head the block then named). On the #14414 fold that split
-# was re-derived ONCE, in the paragraph above, and a second spelling here is exactly what the guard
-# grades as `<est … stated twice>` / `<ceil stated 2 times>`: two parents' re-derivations spliced by
-# git. So the partition and its `ceil(...)` are deliberately NOT repeated in this paragraph; the
-# paragraph above is the block's ONE emission claim and it is the one the guard reads. The
-# registrations this block's own reading
-# counts are the ones `main` has landed at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's
-# `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`, #14220's
-# `tests/test_14186_embedder_seam_batching.py`, #14423's `tests/test_14350_drain_convergence.py`,
-# #14038's `tests/test_13998_capacity_notice.py` and #14429's `tests/test_spool_drain_rehearsal.py`
-# (listed in shard `k`) — FIVE of them on top of #14038's row, which the 836.4 s baseline below
-# already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
-# it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
-# only the worst figure: five registrations x 2.0 s is the whole of 9200.1 -> 9210.1.
 # ⛔ The partition moves on every landed registration, and this block's own readings show how fast:
 # the guard's landing (#14405) packed eight bins at 836.4 s and three at 836.3 s, #14409's row moved
 # it to six at 836.6 and five at 836.5, #14434's to four at 836.8 and seven at 836.7 (and `main` sat
