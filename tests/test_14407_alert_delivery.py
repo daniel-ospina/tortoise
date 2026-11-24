@@ -1716,12 +1716,30 @@ def test_the_sent_reminder_credits_a_close_re_arm_only_to_a_kind_that_has_one(
         f"the reminder restates the absolute a generic release disproves: {reminder!r}")
     assert "FAILED SEND" in reminder, (
         f"the re-arm set omitted the release a chat outage produces: {reminder!r}")
+    # Parity with the log pin: the SENT clause names the kind-agnostic release
+    # sites too, and dropping either of these two from it leaves an operator
+    # holding a suspension reminder looking only at a chat outage and the cap.
+    # Measured: before this pair, deleting "LIFTED suppression, a deferred
+    # filing" from the suspended clause left the whole suite GREEN.
+    assert "LIFTED suppression" in reminder and "a deferred filing" in reminder, (
+        f"the sent re-arm set lost a kind-agnostic release site: {reminder!r}")
     assert "cap eviction" in reminder, (
         f"the re-arm set omitted the ledger's own cap eviction: {reminder!r}")
 
     reminder = _reminder("abuse_flag")
     assert "a close that FAILS" in reminder, (
         f"a rule-episode kind lost its (true) close re-arm clause: {reminder!r}")
+    # ⛔ The OTHER half of the clause, unpinned until here: the rule-episode arm
+    # names the same three kind-agnostic sites, and the sibling log test
+    # (`test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one`)
+    # argues at length why an "only" list that omits the failed send misleads its
+    # reader. Measured: deleting the whole `, as can a LIFTED suppression, a
+    # deferred filing or a FAILED SEND` clause left the suite GREEN — the same
+    # vacuity this test exists to close, one arm over.
+    assert "LIFTED suppression" in reminder and "a deferred filing" in reminder, (
+        f"the sent re-arm set lost a kind-agnostic release site: {reminder!r}")
+    assert "FAILED SEND" in reminder, (
+        f"the sent re-arm set omitted the release a chat outage produces: {reminder!r}")
     assert "NO rule episode" not in reminder, reminder
     notify.reset_abuse_delivery_for_tests()
 
