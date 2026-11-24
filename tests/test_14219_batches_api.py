@@ -1307,12 +1307,17 @@ def test_a_failed_acceptance_leaves_NO_rows_for_a_resume_to_adopt(
     customer was told were refused got ingested and paid for, and the retry the
     503 invited ingested them a second time.
     """
-    # The item set is written in ONE statement (#14415 review round 13, P2), so
-    # the failure has to be injected there — the per-item seam is off the path.
-    def _flaky(org_id, items):
+    # ⛔ INJECT THE FAILURE AT THE BATCH ROW, NOT AT THE ITEMS (#14415 review
+    # cycle 2, MEDIUM). The item set is written in ONE `UNWIND` statement now, so
+    # patching `put_items` fails the FIRST write: no item row lands, and
+    # `pending_batches() == []` below is true by construction. MEASURED: with that
+    # seam, deleting `submit`'s `self._store.discard(org_id, bid)` left every test
+    # green. Failing the SECOND write is also the real shape — items landed, the
+    # ACK row did not — so the rollback is pinned where it does work.
+    def _flaky(row):
         raise TimeoutError("the graph did not answer")
 
-    monkeypatch.setattr(store, "put_items", _flaky)
+    monkeypatch.setattr(store, "put_batch", _flaky)
 
     r = client.post("/v1/batches",
                     json={"items": [{"ref": f"/docs/{n}.md"} for n in range(5)]})
