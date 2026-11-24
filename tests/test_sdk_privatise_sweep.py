@@ -3160,3 +3160,34 @@ def test_check_refuses_a_file_it_cannot_parse(tmp_path, monkeypatch, capsys):
     assert privatise.main() == 1, "an unparseable file must red, not silently reduce the count"
     err = capsys.readouterr().err
     assert "CANNOT ANSWER" in err and "broken.py" in err, err
+
+
+def test_the_sdk_class_body_is_read_from_the_same_bytes_as_the_blob(tmp_path, monkeypatch):
+    """`class_body(src)`, not `class_body()`: the body is enumerated from the BLOB too.
+
+    The no-argument form re-reads `SDK_SRC` from DISK, so for the SDK file's own baseline blob the
+    bodies came from the working tree while the spans came from the blob — the same two-sources
+    defect `_def_name_span(..., lines)` closes for the stand-in arm, on the branch that enumerates
+    the SDK's own class. Residue-neutral today (every `def` this file carries is already private),
+    wrong by construction, and it is exactly the read that makes `edits_for`'s `src=` contract
+    unkeepable the moment a public `def` returns.
+
+    ⛔ The arm `e4c5c62` wrote for its own fix; the fix is carried in `e68f4487163`, so its arm is
+    carried too rather than re-invented.
+    """
+    repo = _git_repo(tmp_path / "r")
+    sdk = repo / "sdk.py"
+    blob = "class TortoiseSDK:\n    def update(self, x):\n        return x\n"
+    sdk.write_text(blob, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    monkeypatch.setattr(privatise, "SDK_SRC", sdk)
+    rmap = {"update": "_update"}
+    # the WORKING TREE no longer holds that `def` at all; the blob does.
+    sdk.write_text(
+        "class TortoiseSDK:\n    def renamed(self, x):\n        return x\n", encoding="utf-8")
+
+    e = privatise.edits_for(sdk, rmap, src=blob)
+    assert [d[3] for d in e.defs] == ["_update"], (
+        "the blob's `def update` must be an EDIT, enumerated from the bytes it was parsed from — "
+        f"reading the body off disk found the working tree's `renamed` instead: {e.defs}")
