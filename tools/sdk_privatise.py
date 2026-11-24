@@ -2037,7 +2037,20 @@ SWEEP_NAMES = 66
 #:     861 → 860, and no shape is added or absorbed in either direction.
 #: ⛔ The one vanishing row is a DELETION this PR declares; the direction the pin exists to catch is a
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
-#: so no typed call site is legitimised by the re-cut. ⛔ RE-CUT ONCE MORE ON `main`'s BEHALF, AND
+#: so no typed call site is legitimised by the re-cut.
+#:
+#: ⛔ #14445 RE-CUT IT ON `main`'s BEHALF — a deliberate re-pin, `--repin`'s own output and never
+#: arithmetic on the last one. `main` pinned (11910, "adc8229295339239") while its OWN tree derives
+#: (11911, "4ed42694957a174d") at `59a08fdb8b40`, so the required `surface-guard` leg was red ON
+#: `main` and every open PR inherited that red — the #14062 class this pin has recurred in before.
+#: The new reading is ONE ROW, `seen.update` **101 -> 102**, a COUNT and not a shape: the row sets
+#: were diffed with `--report --base 28ca66878d… --top 5000` on both trees and 860 shapes are on
+#: each. The row arrived with `#14506` on `main`: a `seen: dict[str, object] = {}` accumulator's
+#: `.update(kwargs)` inside a `subprocess.Popen` spy — the ordinary-word receiver class this pin
+#: REPORTS rather than refuses. `typed references still pointing at a public name: 0` on this tree,
+#: so no typed call site is legitimised by this re-cut. ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S.
+#:
+#: ⛔ RE-CUT ONCE MORE ON `main`'s BEHALF, AND
 #: BOTH TREES WERE MEASURED RATHER THAN THE DELTA ASSUMED. `main` pins (11911, "3e92044bab08cc3d")
 #: while its OWN tree derives (11912, "73827c80583e139f"): `--check` exits 1 in a PRISTINE detached
 #: worktree at `2cccf90f4dd4` (`git status --porcelain` empty, `git ls-files --others` 0), so the
