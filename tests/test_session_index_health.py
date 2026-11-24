@@ -261,7 +261,17 @@ def _isolate_uninitialized(monkeypatch, tmp_path):
     from tortoise import config as _config
 
     for var in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "FALKORDB_HOST",
-                "FALKORDB_PORT", "FALKORDB_PASSWORD"):
+                "FALKORDB_PORT", "FALKORDB_PASSWORD",
+                # The hosted-identity leg: since #14424 the pre-init row's TEXT
+                # depends on whether a hosted credential resolved, so an ambient
+                # hosted-shaped key would narrate this test's box rather than the
+                # suite. `tests/conftest.py`'s autouse `_process_global_isolation`
+                # already deletes both (measured: the premise that this file REDs
+                # on a `tt_`-shaped ambient key is FALSE at this head —
+                # `26 passed`), so this is not a repair; it keeps the isolation
+                # self-contained instead of inherited from another file, matching
+                # `tests/test_env_file_divergence.py`'s scrub list.
+                "TORTOISE_API_KEY", "TORTOISE_API_URL"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)

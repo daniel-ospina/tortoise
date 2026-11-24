@@ -1,0 +1,307 @@
+---
+title: "#14424 — the recorded first run: install/key → write → read back → search"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-23
+subjects.team: epistemic-team
+aboutSubjects: "Tortoise first-run onboarding, create-point CLI retry safety, doctor Graph: health row"
+aboutObjects: "#14424, #1643, #3834, #10183, #10656, #11609, #14086, #10893, tortoise/__main__.py, tortoise/hosted_api.py, docs/quickstart-cloud.md"
+---
+
+# #14424 — the recorded first run: install/key → write → read back → search
+
+**Recorded:** 2026-11-23, 21:40–22:00 UTC, on the `cmux` cell (Linux, 8-core), from a
+**clean `HOME`** (`mktemp -d`) **and a fresh tenant** minted during the run
+(org `agent-a6653d`, tier `anon`). Both were used: the clean HOME removes every
+pre-existing credential so `signup` is genuinely a first run, and the tenant is new, so
+every count below starts from zero.
+
+This is the measurement #14424 asks for — a countable onboarding criterion, not prose.
+It records what a new user meets, and for every dead-end whether it was **fixed in the
+same change** or **declared** with what the user sees instead.
+
+---
+
+## 0 · The environment (and what it made untestable)
+
+| | |
+|---|---|
+| **Door walked** | hosted REST (`https://api.premiselabs.co`) + the CLI a user installs, then the SDK door on the same tree |
+| **Deployed build** | version `0.2.0`, commit **`e74cf1d13da7`** (`feat(14012): "keep this resident" …`), image `registry.fly.io/tortoise-y4mjjq:deployment-01M7ZVR15A7FBYYQ6BJA7YVRRS`, `started_at` **2026-11-23T20:46:30Z**, `migrations_head` `20261117000003` |
+| **`origin/main` at the time** | `4993fa083f3f` — prod is **68 commits behind** |
+| **Health at the time** | `status: degraded` · `record.refusing: write_failed` (53 failed writes) · `capture.in_flight 16/16, refusing: true` · `wait_bound_breaches: rest 90, mcp 1` |
+| **Published artefact** | `tortoise-graph==0.2.0` on PyPI, **uploaded 2026-08-08** (3.5 months before this run) |
+| **Local control run** | the same tree at `4993fa083f3f` + this change, embedded graph, fresh `HOME` |
+
+⛔ **What could NOT be tested, and why** — stated up front so no reader over-reads the run:
+
+1. **The document-ingest leg** (`POST /v1/sessions` → extractor). `#14261` (ACK inside the
+   budget, extract behind it) merged 2026-11-23T18:16Z and is **not** in the deployed commit
+   (`git merge-base --is-ancestor b143bca e74cf1d` → false), so ingest behaviour on prod is
+   the pre-ACK one. **Not walked.**
+2. **A *reliable* hosted write → search pair.** The pair completed once the deployment partially
+   recovered (§1.1) — but at 8.7–12.9 s per call against a 10 s budget, so it is a coin-flip, not
+   a state. The first window's failure is recorded verbatim rather than papered over, and the
+   pair is additionally demonstrated deterministically on the SDK door (§2).
+3. **The dashboard signup path** (`tortoise.premiselabs.co/signup`) — it needs a human with
+   an email/social account. The CLI zero-email path was used instead; both are documented entries.
+
+---
+
+## 1 · The walk, with wall clock
+
+Hosted door, clean `HOME`, fresh tenant. Every duration is wall clock around the exact command.
+
+| # | step | command | wall | result |
+|---|---|---|---|---|
+| 0 | install | `uv tool install tortoise-graph` | **3.8 s** | ✅ installs `tortoise`, `tortoise-ingest`, `tortoise-serve` (PyPI `0.2.0`, 2026-08-08) |
+| 1 | first command from the docs | `tortoise --help` | 0.6 s | ❌ **`argument cmd: invalid choice: 'signup'`** — the published CLI has 24 verbs; `signup`, `config`, `recover`, `install`, `hooks`, `volunteer` are absent (dead-end **D1**) |
+| 2 | get a key (workaround: the repo checkout's CLI) | `tortoise signup` | **10.7 s** | ✅ `agent-a6653d`, key + recovery token, saved to `~/.tortoise/credentials.json` (0600); prints its own next step |
+| 3 | "is it working?" | `tortoise doctor` | **26.2 s** | ⚠️ `5 pass, 7 warn, 0 fail` — the `Credentials` + `Hosted` rows **exist** (#11912's work is live); but the `Graph: health` row told a **hosted** user to run `tortoise init` (dead-end **D3**) |
+| 4 | **first write** | `tortoise create-point "The onboarding probe marker is ZQ-14424-ORCHID."` | **10.9 s** | ❌ `504` — *"the server's wait budget … was exceeded … The work may still complete"* (dead-end **D2/D4**) |
+| 4b | retry, exactly as the refusal instructs | same command | **14.8 s** | ❌ `504` again |
+| 5 | **read back** | `GET /v1/points?limit=50` (no CLI verb exists — **D5**) | 9.4 s cold / 3.7 s warm | ✅ `200` — **the org holds 4 Points carrying the marker verbatim**: one per attempt. All four `504`s **committed server-side** |
+| 6 | **first search — the criterion's real moment** | `GET /v1/search?q=ZQ-14424-ORCHID` | **10.6 / 11.9 / 13.5 / 10.7 / 11.0 / 10.7 / 11.4 s** (7 attempts) | ❌ `504` every time. Attribution the server shipped: `stage: retrieval`, `pre_handler 5194.5 ms`, `embed_encode 4559.0 ms`; a later attempt `pre_handler 7919.1 ms` |
+| 7 | the agent door | MCP `initialize` → `https://api.premiselabs.co/mcp/` | **34.9 s** (then failed) | ❌ `httpx.HTTPStatusError: 504` — a fresh agent cannot even connect |
+
+**Total to "search returns the thing I wrote": never reached in the first window**
+(21:40–22:00 UTC), after ~2.5 minutes of compliant retries. The criterion's moment was
+**not demonstrable on the deployed build at that time**.
+
+### 1.1 · It became reachable at ~22:19 UTC — and that is the finding
+
+The deployment partially recovered, and the pair then **did** complete. Both calls straddle
+the server's own 10 s budget, so success is a coin-flip rather than a state:
+
+| call | wall | result |
+|---|---|---|
+| `tortoise create-point "… ZQ-14424-RECORDED-PAIR." --dedup` | **11.04 s** | **`504`** — *and the Point landed anyway* |
+| `GET /v1/search?q=ZQ-14424-RECORDED-PAIR` (attempt 1) | 10.79 s | `504` |
+| `GET /v1/search?q=ZQ-14424-RECORDED-PAIR` (attempt 2) | **8.73 s** | **`200` — the item just written is hit #1** |
+
+```console
+$ tortoise create-point "The onboarding probe marker is ZQ-14424-RECORDED-PAIR." --dedup
+API error (504): {"detail":"The server's wait budget … retry only if repeating the operation is safe."}
+The server advertised Retry-After: 10 s — wait that long before re-sending.
+This failure does NOT mean nothing was written: the work may have completed on the server.
+Re-running is safe with this attempt's --dedup: the server folds identical content onto the
+ existing Point instead of adding another.
+
+$ GET /v1/search?q=ZQ-14424-RECORDED-PAIR&limit=5      -> 200 in 8.73 s, 5 hits
+  hits[0] = {"id": "1a20a803a95-d164196961e7",
+             "content": "The onboarding probe marker is ZQ-14424-RECORDED-PAIR.",
+             "point_kind": "statement", "match_source": "fts", "similarity": 1.0,
+             "scores": {"fts": 1.0, "vector": null, "structural": null, "rrf": 1.0},
+             "status": "live"}
+  hits[1] = {"id": "1a20a7f2e22-…", "content": "…(hosted pair, dedup).", "similarity": 0.125}
+```
+
+**So the criterion IS reachable — at `p(fail) ≈ 0.5` per call, i.e. exactly the shape
+`#14086`/`#10893` describe, not a passing state.** A first-run user does not retry forever;
+the 8.73 s success and the 10.79 s refusal are the same query four seconds apart.
+
+### 1.2 · `--dedup` is host-verified (this closes the gap the first draft declared)
+
+Two writes of **identical content**, both with `--dedup`:
+
+| attempt | wall | status | effect |
+|---|---|---|---|
+| A | 9.24 s | `200` | created `1a20a7f2e22-00af3f274a2f`, `createdAt` **22:20:36.710085** |
+| B (same content) | 10.49 s | `504` | **folded onto A** — the org still holds **1** copy, and A's `updatedAt` became **22:20:58.695485** |
+
+```console
+$ GET /v1/points?limit=100
+count 9   copies of "(hosted pair, dedup)": 1
+  {"id": "1a20a7f2e22-00af3f274a2f",
+   "createdAt": "2026-11-23T22:20:36.710085+00:00",
+   "updatedAt": "2026-11-23T22:20:58.695485+00:00"}
+```
+
+That is the differential the duplicate class needs: **without** `--dedup`, 4 attempts produced
+**4 Points**; **with** it, a `504`'d attempt produced **0 extra Points** and one bumped
+`updatedAt`. The safe retry the hint names is a real affordance, not a suggestion.
+
+---
+
+## 2 · The same tree, SDK door (local control) — the pair, verbatim
+
+`docs/evidence/14424-onboarding/probe_sdk_local.py`, fresh `HOME`, embedded graph
+(`tortoise init` 1.7 s), total probe **1.6 s**:
+
+```text
+create_entity  879.0 ms  -> node.id 1a20a657a39-bc5df918fb63
+get_entity       6.5 ms  -> "The onboarding probe marker is ZQ-14424-ORCHID (local SDK door)."
+search_knowledge 37.0 ms -> 1 hit, id 1a20a657a39-bc5df918fb63,
+                            scores {fts: 2.2085, vector: null, rrf: 2.2085}, match_source "fts"
+```
+
+`read_back_ok: true`, `search_found_it: true`. ⚠️ `vector: null` is the documented
+`#2985` seam: this box's venv has no `sentence-transformers`, so the dense leg is absent and
+the hit is FTS-only. **A keyword hit is not a semantic hit** — the pair is proven, the
+*hybrid* claim is not, on this box.
+
+### The hosted responses, verbatim
+
+First write (attempt 1 and 2 identical except for the duration):
+
+```text
+POST /v1/points -> 504 in 11.96 s        retry-after: 10
+{"detail":"The server's wait budget for this request was exceeded before a response was ready.
+ The work may still complete on the server. Wait for the advertised delay before retrying, and
+ retry only if repeating the operation is safe."}
+```
+
+Read back — **4 copies** of one intended write:
+
+```text
+GET /v1/points?limit=50 -> 200
+1a20a5edcc5-397733efd45b 2026-11-23T21:45:18.789218+00:00 'The onboarding probe marker is ZQ-14424-ORCHID.'
+1a20a5e4caf-b9bd631b4f80 2026-11-23T21:44:41.902945+00:00 'The onboarding probe marker is ZQ-14424-ORCHID.'
+1a20a5de80e-8087d966acaf 2026-11-23T21:44:16.142628+00:00 'The onboarding probe marker is ZQ-14424-ORCHID.'
+1a20a5d6842-fc7f2dc7e352 2026-11-23T21:43:43.426618+00:00 'The onboarding probe marker is ZQ-14424-ORCHID.'
+```
+
+Search: (the first window — every attempt `504`; the recovery is recorded in §1.1)
+
+```text
+GET /v1/search?q=ZQ-14424-ORCHID&limit=5 -> 504 in 10.63 s
+{"detail":"The server's wait budget … retry only if repeating the operation is safe.",
+ "stage":"retrieval",
+ "stages_ms":{"pre_handler":5194.5,"embed_get":0.0,"embed_encode":4559.0}}
+```
+
+---
+
+## 3 · The dead-end audit (AX admission test: what changed / what next / how to override)
+
+A surface may not refuse where the next action is knowable (`docs/ax/ax-principles.md`,
+`#10183`). Each dead-end is classified **fixed here** or **declared** with what the user
+sees instead.
+
+| # | dead-end | which part was missing | status |
+|---|---|---|---|
+| **D1** | The **published** CLI (`tortoise-graph==0.2.0`, 2026-08-08) has no `signup`/`config`/`recover`/`install`/`hooks` — the first command `docs/quickstart-cloud.md` gives. `tortoise --help` → `invalid choice: 'signup'` | **next action** (argparse lists choices, not the fix) | **DECLARED** — releasing is a release decision, not a lane edit. The doc now names the gap and the source-install workaround. What the user sees instead: install from source, or use the dashboard/MCP door |
+| **D2** | `tortoise create-point` on `504`: drops the `Retry-After` header the refusal refers to as *"the advertised delay"*, and says nothing that makes the instructed retry safe — **4 attempts → 4 duplicate Points** | **next action** *and* **override** | **FIXED** (this PR) — the hint prints the advertised delay, says the write may have landed, names the duplicate cost, and names the override: re-run with `--dedup` (server-side content-hash fold, `CreatePointRequest.dedup`, #1643) |
+| **D3** | `tortoise doctor` on a hosted-only box printed *"no Tortoise DB at ~/.tortoise/tortoise.db … Run `tortoise init` to create it"* — a self-hosted action, for a user whose memory lives at `api.premiselabs.co` | **next action** (present but wrong) | **FIXED** (this PR) — with a hosted credential on the default target the row now says the local graph is not this setup, names `tortoise create-point "…"` as the next step, points at the COMMAND (`tortoise doctor` without `--offline`) for whether it will work, and keeps `tortoise init` as the named override |
+| **D4** | Hosted **write**, **read**, **search** and MCP **initialize** all `504` inside the 10 s bound in the first window; every failed write committed; later, the same calls return `200` at 8.7–12.9 s — so the first-run path is **flaky, not broken** | — (not a message defect) | **DECLARED** — a **deploy** gap, not a code gap: prod is 68 commits behind `main`, and two merged performance fixes are undeployed (`8fa0662249` `perf(14185)` *"a write acks, the projection follows"*; `94d75667dc` `perf(14192)` *"post-fusion reads run as one wave"*). ⛔ The 10 s bound is **not** raised (`#3834`) — this is a defect to fix, not a timeout to extend. What the user sees instead: a 504 that now names the delay, the duplicate risk and the safe retry (D2), plus a search door that answers the same query four seconds later |
+| **D5** | **No CLI verb reads back or searches.** `create-point` now ends at a `Next:` line naming `GET /v1/search` (with the header it needs and the store the key is in), the `tortoise_search` MCP tool and `TortoiseSDK.search_knowledge` — but the verb itself still cannot verify or find what it wrote | **next action** | **DECLARED** — a new CLI verb is a surface decision, not a dead-end patch. The success line now names all three doors that DO answer it (this PR), and the SDK/MCP pair is recorded above |
+| **D6** | `docs/quickstart-cloud.md` said `tortoise signup` "saves it to `.tortoise` in the current directory" — it writes `~/.tortoise/credentials.json` (`#1708`). A user following the doc goes looking for a file that is not there, and the wrong claim advertises exactly the working-tree credential `#10656` forbids | **what changed** (wrong location) | **FIXED** (this PR) — the block now shows the measured output, including the recovery token, which the doc omitted entirely |
+
+### Not dead-ends (checked, so they are not re-reported)
+
+- `uv tool install` ends with *"…is not on your PATH"* + `uv tool update-shell` — it names its own fix.
+- `doctor`'s local rows on a hosted box (`Session extraction: no LLM provider key`, `Harnesses: none`) each name the environment variable or command that clears them.
+- `tortoise signup` is idempotent and says so (`Already have a Tortoise Cloud key … reusing it`), and prints its own next step.
+
+### 3.1 · The fixes, verified against the live 504 (not just unit tests)
+
+Run through the real CLI, in a clean `HOME` holding only the fresh credential, against
+prod `e74cf1d13da7`:
+
+```console
+$ tortoise create-point "The onboarding probe marker is ZQ-14424-ORCHID (hint verification)."
+API error (504): {"detail":"The server's wait budget … retry only if repeating the operation is safe."}
+The server advertised Retry-After: 10 s — wait that long before re-sending.
+This failure does NOT mean nothing was written: the work may have completed on the server.
+Re-running WITHOUT --dedup can create a duplicate Point for content that already landed
+(measured: 4 attempts, 4 Points). Re-run with --dedup to make the retry safe.
+        wall 11.5 s
+
+$ tortoise create-point "…same content…" --dedup
+API error (504): {"detail":"The server's wait budget … retry only if repeating the operation is safe."}
+The server advertised Retry-After: 10 s — wait that long before re-sending.
+This failure does NOT mean nothing was written: the work may have completed on the server.
+Re-running is safe with this attempt's --dedup: the server folds identical content onto the
+ existing Point instead of adding another.
+        wall 10.9 s
+```
+
+⚠️ **The two blocks above are the capture recorded at `74b4d326c5` (against prod `e74cf1d13da7`).**
+The refusal wording was TIGHTENED afterwards: the no-`--dedup` warning now reads *"…on the
+HOSTED API, where dedup defaults off (measured: 4 attempts, 4 Points) … On a self-hosted
+server dedup already defaults ON, so the flag is a no-op there"*, because
+`tortoise/selfhost_api.py:35` declares `dedup = True` against hosted's `False` — the old
+sentence was untrue on a self-host target. The observed behaviour in these blocks (a `504`
+that may still commit; `wall` 11.5 s / 10.9 s) is unchanged. Only the wording moved, and
+this note is here so a reproducer is not surprised by text that differs from the record.
+
+**One of those two attempts landed; the other did not.** The org read back 7 Points at
+22:02 UTC — the original 4, the 2 from the hosted probe, and exactly **one** of the two
+above (created 22:02:05). So the `504` → committed relationship is **nondeterministic**,
+which is precisely why the refusal is unactionable without a reconciliation path: the
+caller cannot infer from the status whether the write landed. (The `--dedup` fold itself
+is host-verified separately in §1.2, by the `createdAt`/`updatedAt` differential.)
+
+```console
+$ tortoise doctor --offline      # clean HOME holding ONLY a credential, no local graph
+  ⚠️ Graph: health: not used by this setup — you have a hosted credential (credentials.json,
+     https://api.premiselabs.co), so your memory lives there and a local graph is not required.
+     Your next step is `tortoise create-point "…"` — `tortoise doctor` without `--offline`
+     checks whether that will work. Override: run `tortoise init` only if you ALSO want a
+     local graph.
+  ✅ Credentials: …/.tortoise/credentials.json — tt_…436f (fingerprint fa5dbb0654f2), …
+  ⚠️ Hosted: … not probed (`--offline`); hosted reachability and key validity were NOT tested
+5 pass, 7 warn, 0 fail
+```
+
+⛔ **Why the row names the COMMAND and not a row.** Read the two rows together: the Hosted
+row, in the very mode this bundle runs, declines to give a verdict (`not probed … NOT
+tested`). Two earlier cuts pointed the reader at it anyway — first *"says whether that will
+work"* (false here), then *"shows whether that will work, or why it could not be checked"*,
+which is STILL false in one admitted state: `_doctor_hosted_rows` returns immediately after
+its `Credentials` ❌ arm for an unsendable key, so in that state no `Hosted` row is printed
+at all and the pointer resolves to nothing. Naming the command is true in every state.
+Re-captured from the merged tree with a fresh `HOME` holding only `credentials.json`,
+`--offline` so no request leaves the box.
+
+---
+
+## 4 · Could a new user reproduce this from this evidence alone?
+
+**The SDK pair: yes.** Two commands, no credential, no tenant:
+
+```bash
+export HOME=$(mktemp -d)      # ONE home for BOTH lines — a second `mktemp -d` would be a different DB
+printf 'n\n' | uv run python -m tortoise init   # 'n' answers the "index this repo?" prompt
+uv run python docs/evidence/14424-onboarding/probe_sdk_local.py   # exit 0 == the pair held
+```
+
+⚠️ **`init` prompts.** Run from a repo root it asks
+`Found N markdown files in this repo. Index them into Tortoise? [Y/n]:`. On a non-TTY reproducer
+(piped, CI, `</dev/null`) an unanswered prompt raises `EOFError` and the command exits 1 after
+creating the graph — the pair above still holds, but the first documented command prints a
+stack trace unless the prompt is answered. Bare Enter accepts and starts a background indexer;
+`n` keeps the run to the two commands shown.
+
+**The hosted walk: yes, given a signup budget** (2 anonymous teams/IP/24 h):
+
+```bash
+HOME=$(mktemp -d) ; export HOME
+uv run python -m tortoise signup
+docs/evidence/14424-onboarding/probe_hosted_rest.sh        # prints status + Retry-After + bodies, per step
+```
+
+⚠️ Three facts a reproducer must expect: the durations depend on the **deployed build** (the
+table names the commit, so a run against a newer deploy may pass); the search door is
+**intermittent** — the same query `504`s and then returns `200` four seconds later (§1.1), so a
+single failed attempt is not evidence the pair cannot work; and Step 4's duplicate count depends
+on **how many times the refusal was obeyed** — that is the defect, not a variable to control for.
+
+## 5 · What this does NOT claim
+
+- **No MCP-tool or SDK-method change** (`TOOL_REGISTRY` / `TortoiseSDK` untouched — the mandate
+  on #4282 is unaffected). `create-point` is an existing **CLI** verb; it gains `--dedup` (an
+  opt-in flag) and a failure hint.
+- **`--dedup` IS host-verified** (§1.2): two identical writes, one copy, `createdAt` unchanged
+  and `updatedAt` bumped. The field is `CreatePointRequest.dedup` (`hosted_api.py`), default
+  `False`, forwarded to `sdk._create_point(dedup=…)` — the same content-hash fold the SDK door
+  applies. ⛔ **Name the method: the fold is NOT a default on every SDK door.** `create_entity`'s
+  point/diary path sets `dedup=True` (`sdk.py:58271`), which is the door §2 walks — but
+  `_create_point` pops `dedup` with a **False** default (`sdk.py:17670`), and that divergence is
+  `#11609`. Measured on `create_entity`: re-creating identical content returned the **same**
+  node id.
+- **`#10656`** (relocate `init --api-key`'s working-tree key) and **`#13224`** (subject-create
+  latency) are **not** attempted here — both need their own review and neither is a message fix.
+- **No capture caps** (#4010) and **no second token meter** (#14275) are involved: this run made
+  ~20 requests and wrote 4 Points, all inside the `anon` tier.
