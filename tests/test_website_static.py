@@ -12282,6 +12282,25 @@ BORDER_END_STYLE_PROPS = ("border-style", "border-block-style",
 #: Border-style keywords that mean "no border" and therefore a WIDTH of zero.
 _BORDER_NONE_STYLES = ("none", "hidden")
 
+#: The border SHORTHANDS that set their side's block-END STYLE as well as its
+#: width. `border-width` and the `border-*-width` longhands are NOT here: they
+#: set widths only and say nothing about the style axis.
+_BORDER_STYLE_SHORTHANDS = ("border", "border-block", "border-bottom",
+                            "border-block-end")
+
+#: CSS-wide keywords that RESET a property to its INITIAL value. A shorthand
+#: that resets sets every sub-property it covers, so `border-bottom: initial`
+#: is a `none` STYLE — i.e. a 0px border — not "this rule says nothing".
+_CSS_WIDE_RESET = ("initial", "unset", "revert", "revert-layer")
+
+#: A declaration the cascade MATCHED but could not resolve to a number/style.
+#: A sentinel rather than `None`, because `None` already means "this
+#: declaration states nothing for this axis" and the two must rank differently:
+#: an unresolvable declaration that WINS the cascade makes the whole read
+#: unknown, where a silent one lets an earlier rule's value stand (#14406
+#: review round 23).
+_UNREADABLE = object()
+
 #: Every border-style keyword (CSS Backgrounds and Borders 3 §4.1). A style
 #: token found in a declaration is what the style axis ranks; anything outside
 #: this tuple is not a style (e.g. a colour name or `var(--accent)`).
@@ -12299,10 +12318,52 @@ def _css_border_end_style(prop: str, value: str) -> str | None:
     `border-bottom: 4px none`) states a style for every side it sets, so it is
     an entry on this axis too — otherwise a LATER `border-bottom-style: solid`
     could not restore a border a shorthand removed.
+
+    ⛔ AND AN OMITTED STYLE IN A SHORTHAND IS `none`, not silence: `border: 3px`
+    and `border-bottom: 2px` take the initial value of every sub-property they
+    omit, and `border-style`'s initial value is `none` — so a width-only
+    shorthand REMOVES the border. A CSS-wide reset (`initial`/`unset`/`revert`)
+    lands on the same value, on a shorthand or on the style longhand
+    (#14406 review round 23).
     """
     styles = [t.lower() for t in _css_tokens(_without_important(value))
               if t.lower() in _BORDER_STYLES]
     if not styles:
+        # ⛔ A VALID SHORTHAND THAT STATES A WIDTH AND OMITS THE STYLE RESETS IT
+        # TO `none` (CSS Backgrounds and Borders 3: an omitted sub-property of
+        # a shorthand takes its INITIAL value, and `border-style`'s initial
+        # value is `none`), so `border-bottom: 2px` REMOVES the border while
+        # stating a 2px width. Returning None here read that as "says nothing",
+        # the earlier `solid` survived, and the reader reported a 2px border a
+        # browser does not draw (#14406 review round 23, measured). A shorthand
+        # this reader cannot resolve at all (`border: var(--x)`, `border: thin`)
+        # still returns None and the caller fails rather than guesses.
+        if prop in _BORDER_STYLE_SHORTHANDS:
+            tokens = _css_tokens(_without_important(value))
+            if any(token.lower() in _CSS_WIDE_RESET for token in tokens):
+                return "none"
+            # …and only a shorthand this reader can see is VALID: `border:
+            # 1px 2px 0` and `border-bottom: 2px 3px` are not legal shorthands
+            # at all (the browser DROPS the declaration, so an earlier style
+            # stands), and reading them as `none` would be a removal this
+            # reader invented. `border-block` is the one shorthand whose
+            # short form takes two widths.
+            widths = [token for token in tokens
+                      if _BORDER_WIDTH_PX.fullmatch(token)
+                      or (_BARE_ZERO_LENGTH.fullmatch(token)
+                          and float(token) == 0.0)]
+            if 0 < len(widths) <= (2 if prop == "border-block" else 1):
+                return "none"
+            return None
+        if prop in BORDER_END_STYLE_PROPS and any(
+                token.lower() in _CSS_WIDE_RESET
+                for token in _css_tokens(_without_important(value))):
+            # A CSS-wide reset on the STYLE LONGHAND is `none` for every keyword
+            # here: `border-style` is not inherited, so `initial`, `unset` and
+            # `revert` all land on the initial value. `inherit` is deliberately
+            # NOT in `_CSS_WIDE_RESET` — it takes the parent's style, which this
+            # reader cannot see (#14406 review round 23).
+            return "none"
         return None
     if prop in ("border", "border-style"):
         return styles[2] if len(styles) >= 3 else styles[0]
@@ -12427,9 +12488,18 @@ def _border_end_width_cascade(css: str, compound: str,
     round-21 shape) got both directions wrong: it kept the removal invisible
     when the style was a longhand, and read 0 where a browser draws 2px when a
     shorthand's dead style was later restored.
+
+    ⛔ AND A DECLARATION THAT MATCHES IS NEVER SILENT (#14406 review round 23,
+    measured). Every matched declaration is ranked on its axis; one this reader
+    cannot resolve ranks as `_UNREADABLE` and, if it WINS, makes the read
+    UNKNOWN (`None`, which the caller turns into a failure). Dropping it instead
+    let an EARLIER rule's value stand, which is how `border-bottom-width: thin`
+    (1px in a browser) and `border-bottom: 2px` (a shorthand that RESETS the
+    style to `none`, so no border at all) both read the shipped 1px and left the
+    relation GREEN over a popular CTA off the shared baseline.
     """
-    ranked: list[tuple[tuple, float]] = []
-    styles: list[tuple[tuple, str]] = []
+    ranked: list[tuple[tuple, float | object]] = []
+    styles: list[tuple[tuple, str | object]] = []
     element = _subject_element(css, compound)
     for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
         for part in (p.strip() for p in prelude.split(",")):
@@ -12457,19 +12527,35 @@ def _border_end_width_cascade(css: str, compound: str,
                 # CSS computes a side's style and width independently, so a
                 # `none` style zeroes a width stated in another declaration —
                 # and a later `solid` restores one a shorthand had removed.
+                #
+                # ⛔ AND AN UNRESOLVED DECLARATION IS NOT SILENCE (#14406 review
+                # round 23, measured). Every MATCHED declaration enters its
+                # axis's list, with `_UNREADABLE` as the value when this reader
+                # cannot resolve it, because dropping it let an EARLIER rule's
+                # value stand: `.pricing-card.popular { border-bottom-width:
+                # thin }` (1px in a browser, extra 0) and `… { border-bottom:
+                # 2px }` (style reset to `none`, extra −1) both read the shipped
+                # 1px and left the row GREEN over a popular CTA off the shared
+                # baseline. If the winner is unresolvable the read is UNKNOWN and
+                # the caller fails, which is the direction this file fails in.
                 if prop in BORDER_END_WIDTH_PROPS:
                     width = _css_border_end_length(prop, value)
-                    if width is not None:
-                        ranked.append((rank, width))
-                style = _css_border_end_style(prop, value)
-                if style is not None:
-                    styles.append((rank, style))
+                    ranked.append((rank, width if width is not None
+                                   else _UNREADABLE))
+                if prop in BORDER_END_STYLE_PROPS or (
+                        prop in _BORDER_STYLE_SHORTHANDS):
+                    style = _css_border_end_style(prop, value)
+                    styles.append((rank, style if style is not None
+                                   else _UNREADABLE))
     ranked.sort(key=lambda entry: entry[0])
     styles.sort(key=lambda entry: entry[0])
     style = styles[-1][1] if styles else None
+    if style is _UNREADABLE:
+        return None
     if style in _BORDER_NONE_STYLES:
         return 0.0
-    return ranked[-1][1] if ranked else None
+    width = ranked[-1][1] if ranked else None
+    return None if width is _UNREADABLE else width
 
 
 def _popular_border_extra_px(css: str) -> float:
@@ -13980,6 +14066,138 @@ class TestCssDesktopReachAndSpecificity:
                 f"`{quiet}` declares no border WIDTH, so the shipped 1px "
                 f"compensation is still correct; the reader derives {got:g} "
                 "instead of 1 — a FALSE RED on a page that renders as designed")
+
+    def test_an_unresolved_border_declaration_is_not_read_as_silence(self):
+        """A matched declaration this reader cannot resolve must not be DROPPED.
+
+        Two measured fail-opens at `c692e6e8` (#14406 review round 23), both on
+        the property the compensation exists because of, both leaving the relation
+        at the shipped 1px while a browser applies something else:
+
+            .pricing-card.popular { border-bottom-width: thin }    browser  0, read 1
+            .pricing-card.popular { border-bottom-width: 2em }     browser 31, read 1
+            .pricing-card.popular { border-bottom: 2px }           browser -1, read 1
+            .pricing-card.popular { border: 3px }                  browser -1, read 2
+            .pricing-card.popular { border-bottom: initial }       browser -1, read 1
+            .pricing-card.popular { border-bottom-style: initial } browser -1, read 1
+
+        Root 1: an unresolvable WIDTH was skipped, so an EARLIER rule's width
+        stood — `thin`, `calc()`, `pt`, `em`, `var()` all read as "this rule says
+        nothing about the border" (the same shape round 20 found for `0`/`none`).
+        Root 2: a SHORTHAND that states a width and omits the style RESETS the
+        style to `none` (CSS Backgrounds and Borders 3 — an omitted sub-property
+        takes its initial value), so `border-bottom: 2px` REMOVES the border; the
+        reader contributed no style entry and the earlier `solid` survived.
+
+        The cascade now ranks every MATCHED declaration on its axis and lets the
+        winner decide. A winner this reader cannot resolve makes the read UNKNOWN
+        — the caller fails, this file's fail-closed direction — because guessing
+        a value is what let both roots look GREEN.
+        """
+        shipped = _product_teams_html()
+        assert _popular_border_extra_px(shipped) == 1.0, (
+            "the unmutated page must read 1px, or the rows below cannot tell a "
+            "caught mutant from a page that is already wrong; it reads "
+            f"{_popular_border_extra_px(shipped):g}")
+
+        # Root 2 on the ONE-DECLARATION read: a shorthand that states a width and
+        # no style is a `none` style, i.e. a 0px border.
+        for prop, value, expected in (
+                ("border", "3px", "none"),
+                ("border-bottom", "2px", "none"),
+                ("border-block-end", "2px", "none"),
+                ("border-block", "2px 3px", "none"),
+                ("border-bottom", "initial", "none"),
+                ("border-bottom-style", "initial", "none"),
+                ("border-bottom-style", "unset", "none"),
+        ):
+            assert _css_border_end_style(prop, value) == expected, (
+                f"`{prop}: {value}` leaves the block-end style at {expected!r} "
+                "in a browser (an omitted or reset sub-property takes its "
+                f"initial value); the reader says "
+                f"{_css_border_end_style(prop, value)!r}, so the removal is "
+                "invisible to the relation")
+        assert _css_border_end_width("border-bottom", "2px") == 0.0, (
+            "`border-bottom: 2px` states a 2px width with no style, and no style "
+            "means the used width is 0 — the reader must not hand the cascade a "
+            "2px border a browser does not draw")
+
+        # …and a declaration this reader CANNOT resolve still returns silence
+        # from the single-declaration read: the caller fails rather than guesses
+        # (there is no `thin`→px conversion in this file, by decision).
+        assert _css_border_end_width("border", "thin") is None, (
+            "`border: thin` states a width this file cannot convert to px and no "
+            "style, so the single-declaration read returns None and the caller "
+            "fails rather than guessing a zero")
+        assert _css_border_end_style("border-bottom-style", "inherit") is None, (
+            "`inherit` takes the PARENT's style, which this reader cannot see — "
+            "it must not be modelled as `none`")
+        assert _css_border_end_style("border-width", "3px") is None, (
+            "`border-width` sets widths only and says nothing about the style "
+            "axis, so it must not contribute a `none` style")
+
+        # Root 1 — the relation itself. The expectation is the BROWSER's: the
+        # popular card's block-END border minus its siblings', in px.
+        for mutant, expected in (
+                (".pricing-card.popular { border-bottom: 2px }", -1.0),
+                (".pricing-card.popular { border: 3px }", -1.0),
+                (".pricing-card.popular { border-block: 3px }", -1.0),
+                (".pricing-card.popular { border-block-end: 2px }", -1.0),
+                (".pricing-card.popular { border-bottom: initial }", -1.0),
+                (".pricing-card.popular { border-bottom-style: initial }", -1.0),
+                (".pricing-card.popular { border-style: unset }", -1.0),
+                (".pricing-card { border-bottom: 2px }", 2.0),
+                (".pricing-card { border: 3px }", 2.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(mutant))
+            assert got == expected, (
+                f"appending `{mutant}` makes the browser apply {expected:g}px "
+                f"more block-end border on the popular card than on its three "
+                f"siblings; the reader derives {got:g}, so the CTA baseline "
+                "rows stay GREEN over a page whose popular CTA is off the "
+                "shared baseline (#14406 review round 23)")
+
+        # …and an UNRESOLVABLE width on either operand is UNKNOWN, not stale: the
+        # earlier rule's value is not the answer, so the caller must fail.
+        for mutant in (
+                ".pricing-card.popular { border-bottom-width: thin }",
+                ".pricing-card.popular { border-bottom-width: calc(1px) }",
+                ".pricing-card.popular { border-bottom-width: 1pt }",
+                ".pricing-card.popular { border-bottom-width: 2em }",
+                ".pricing-card.popular { border-bottom-width: var(--w) }",
+                ".pricing-card.popular { border-bottom-style: inherit }",
+                ".pricing-card { border-bottom-width: thin }",
+        ):
+            try:
+                got = _popular_border_extra_px(self._page_with(mutant))
+            except AssertionError:
+                continue
+            raise AssertionError(
+                f"appending `{mutant}` leaves the block-END border width "
+                f"unresolvable to this reader (a keyword, a relative unit, a "
+                f"`calc`/`var`, or an `inherit`), so the read is UNKNOWN and the "
+                f"caller must fail — reading {got:g} is an EARLIER rule's value "
+                "presented as this declaration's, which is how rounds 20-22's "
+                "fail-opens looked (#14406 review round 23)")
+
+        # NO OVER-REACH: a width shorthand says nothing about the style, a
+        # readable shorthand keeps its style, and an unresolvable WIDTH on a card
+        # whose style is readable is still the WIDTH declaration we cannot read.
+        for quiet, expected in (
+                (".pricing-card.popular { border-width: 3px }", 2.0),
+                (".pricing-card.popular { border-bottom: 2px solid #f00 }", 1.0),
+                (".pricing-card.popular { border-bottom: 1px solid #f00 }", 0.0),
+                (".pricing-card.popular { border-bottom: 0.5px solid #f00 }", -0.5),
+                (".pricing-card.popular { border-color: #fff }", 1.0),
+                (".pricing-card.popular { border-bottom-style: solid }", 1.0),
+                (".pricing-card { border-color: #fff }", 1.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(quiet))
+            assert got == expected, (
+                f"`{quiet}` changes no block-end border a browser draws, so the "
+                f"shipped 1px compensation still holds; the reader derives "
+                f"{got:g} instead of {expected:g} — a FALSE RED on a page that "
+                "renders as designed")
 
     def test_a_max_width_block_at_or_above_the_desktop_floor_is_reached(self):
         """`@media (max-width: 1440px)` applies at 1440 — so the guard must see it.
