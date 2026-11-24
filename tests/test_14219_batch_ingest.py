@@ -464,28 +464,42 @@ def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
     before adopting closed the `put_batch` window — but the resume's own
     compare-and-set then ran with that same empty object, and
     `put_batch_if_state` used to `SET b.estimate_json=$estimate,
-    b.corpus_name=$corpus` FROM THE CALLER. So an acceptance landing after the
+    b.corpus_name=$corpus` FROM THE CALLER. An acceptance landing after the
     re-read was MATCHED (`submit()` writes `ACCEPTED`) and then overwritten with
     `{}` — the arithmetic owner §4 requires on the record, gone permanently, and
     `GET /v1/batches` reporting `estimate: {}`.
 
-    The window is injected exactly: `get_batch` reports the row ABSENT for the
-    initial read and the re-read (so the orphan path is genuinely taken), and the
-    acceptance's `put_batch` lands on the SECOND `items()` read — after the
-    adoption wrote, before the state CAS. FAILS on the pre-fix code with
-    `estimate after: {}`.
+    ⛔ THIS TEST WAS VACUOUS ON ITS FIRST CUT AND THE FIX IS WHY IT NOW ISN'T. The
+    resume CAS only runs when the scan actually MOVED something (`if moved:`), so
+    an all-`queued` batch — the obvious fixture — never reaches
+    `put_batch_if_state` at all: instrumented, the first cut measured
+    `{'gets': 2, 'items': 2, 'cas': 0}`, and reinstating the pre-fix CAS left it
+    green. One item is therefore left `EXTRACTING` with an ancient stamp so the
+    requeue makes `moved` true, and `cas >= 1` is ASSERTED — otherwise this test
+    silently becomes a no-op again the next time `_resume_batch` is reordered.
     """
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
     estimate = {"items": 2, "tokens_per_item": 64799,
                 "estimated_tokens": 129598, "included_tokens": None,
                 "overage_tokens": 0, "overage_usd": 0.0}
-    batch, _items = coord.submit(ORG, ["/d/a.md", "/d/b.md"],
-                                 corpus_name="handbook", estimate=estimate)
+    batch, items = coord.submit(ORG, ["/d/a.md", "/d/b.md"],
+                                corpus_name="handbook", estimate=estimate)
+    # A dead claim, old enough that the resume window takes it — this is what
+    # makes the scan call the CAS at all.
+    stale_item = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    stale_item.state = BatchItemState.EXTRACTING
+    stale_item.updated_at = "2020-01-01T00:00:00+00:00"
+    store.put_item(ORG, stale_item)
 
     real_items = store.items
     real_get = store.get_batch
-    state = {"gets": 0, "items": 0}
+    real_cas = store.put_batch_if_state
+    state = {"gets": 0, "items": 0, "cas": 0}
+
+    def counting_cas(b, expected, _real=real_cas):
+        state["cas"] += 1
+        return _real(b, expected)
 
     def stale_get(org_id, batch_id):
         state["gets"] += 1
@@ -502,12 +516,16 @@ def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
             store.put_batch(batch)
         return rows
 
+    store.put_batch_if_state = counting_cas  # type: ignore[method-assign]
     store.get_batch = stale_get  # type: ignore[method-assign]
     store.items = items_then_ack  # type: ignore[method-assign]
     coord.recover(ORG)
 
-    assert state["items"] >= 2 and state["gets"] >= 2, (
+    assert state["gets"] >= 2 and state["items"] >= 2, (
         f"the injected window did not fire — proves nothing: {state}")
+    assert state["cas"] >= 1, (
+        "the resume compare-and-set never ran, so this test cannot see the very "
+        f"write it exists for (the first cut of it was vacuous for this reason): {state}")
     after = real_get(ORG, batch.batch_id)
     assert after is not None
     assert after.estimate == estimate, (
@@ -515,6 +533,25 @@ def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
         f"orphan snapshot — owner §4 requires it on the record: {after.estimate!r}")
     assert after.corpus_name == "handbook", (
         f"the state CAS blanked corpus_name: {after.corpus_name!r}")
+
+
+def test_the_batch_state_cas_does_not_name_the_record_identity():
+    """The statement-text half of the same pin (#14415 recut-2 review, P1).
+
+    The behavioural test above needs `moved` to be true to reach the CAS, which is
+    a fixture property a reordering could silently remove. This one reads the
+    emitted statement instead: a state transition must not SET `estimate_json` or
+    `corpus_name` AT ALL, so re-adding them is red whatever the fixture does.
+    """
+    cas = [c for c, _p in _every_store_statement_pairs()
+           if "MATCH (b:" in c and "WHERE b.state IN" in c]
+    assert cas, "the batch state compare-and-set statement was not emitted"
+    for cypher in cas:
+        assert "estimate_json" not in cypher, (
+            "a batch STATE change writes the estimate from the caller, which is "
+            f"how an orphan-shaped snapshot erased the ACK's arithmetic: {cypher}")
+        assert "corpus_name" not in cypher, (
+            f"a batch STATE change writes the corpus name from the caller: {cypher}")
 
 
 def test_a_restart_settles_what_a_cancelled_batch_left_in_flight():
@@ -1925,9 +1962,17 @@ def test_a_cancel_landing_during_the_resume_scan_is_not_erased():
     store.put_item(ORG, stale)
 
     real_put = store.put_batch_if_state
+    fired = {"done": False}
 
     def _cancel_first(b, expected):
-        BatchCoordinator(store).cancel(ORG, batch.batch_id, reason="customer")
+        # ⛔ FIRE ONCE (#14415 review round 9). `cancel()` is itself a
+        # compare-and-set now, so an unguarded hook re-enters itself through the
+        # cancel's own write: the recursion ends in a swallowed RecursionError and
+        # the row is left `accepted`, which made this test red for a reason that
+        # had nothing to do with the resume scan.
+        if not fired["done"]:
+            fired["done"] = True
+            BatchCoordinator(store).cancel(ORG, batch.batch_id, reason="customer")
         return real_put(b, expected)
 
     store.put_batch_if_state = _cancel_first  # type: ignore[method-assign]
@@ -2421,3 +2466,53 @@ def test_a_non_accumulating_graph_cas_names_no_token_column():
     assert "coalesce(i.tokens_in, 0) + $tin" in cypher, (
         f"an accumulating CAS must ADD, not write a total: {cypher}")
     assert params["tin"] == 700 and params["tout"] == 0
+
+
+def test_a_cancel_cannot_erase_a_settlement_that_landed_first(monkeypatch):
+    """⛔ ROUND-9 REVIEW P2: `cancel()`'s final write was the last unconditional one.
+
+    It was a plain `put_batch` (`MERGE … SET`, no compare), so a `settle()` that
+    derived a TERMINAL state inside `cancel()`'s read→write window was erased for
+    good. Measured: item A `queued` (which the cancel stops) and item B
+    `extracting`; the drain settles B `indexed` with 60 000 tokens and `settle()`
+    writes `partial`; this write stamped `cancelled` with an INVENTED
+    `cancelled_at` over a charged document — and nothing repairs it, because
+    `cancelled` is terminal, `pending_batches()` drops the row and a later
+    `settle()` returns it unchanged.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG, items[0], BatchItemState.INDEXED, tokens_in=60_000)
+    # Item 1 stays `queued`, so the cancel has something to stop and takes its
+    # `stopped` arm.
+
+    real_cas = store.put_batch_if_state
+    fired = {"done": False}
+
+    def settle_lands_first(row, expected):
+        if not fired["done"] and row.state is BatchState.CANCELLED:
+            fired["done"] = True
+            # The drain's `settle()` derives the terminal truth first.
+            real = store.get_batch(ORG, row.batch_id)
+            real.state = BatchState.PARTIAL
+            real.updated_at = "2026-01-01T00:00:05+00:00"
+            store.put_batch(real)
+        return real_cas(row, expected)
+
+    store.put_batch_if_state = settle_lands_first
+    try:
+        out_batch, _ = coord.cancel(ORG, batch.batch_id, reason="customer")
+    finally:
+        store.put_batch_if_state = real_cas
+
+    assert fired["done"], "the interleaving never fired — the test proves nothing"
+    row = store.get_batch(ORG, batch.batch_id)
+    assert row.state is BatchState.PARTIAL, (
+        "the cancel overwrote a settlement that landed first — the status now "
+        f"claims work was stopped over a charged document: {row.state}")
+    assert row.cancelled_at == "", (
+        f"the cancel invented a cancellation stamp over a finished batch: {row.cancelled_at}")
+    assert out_batch.state is BatchState.PARTIAL, (
+        "the returned row must be the truth, not this call's intent")

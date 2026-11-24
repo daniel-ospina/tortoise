@@ -83,13 +83,27 @@ working, not the split failing.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.12+-only construct would otherwise fail first, and it would fail with a
+# traceback instead of this message. The gate that enforces this shape is
+# tests/test_entry_point_python_guard.py, not a style rule. (This guard was
+# MISSING when the tool landed in #14261 — the gate reds on it, which is why it
+# is added here rather than in a follow-up.)
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/acceptance_14232_drain.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/acceptance_14232_drain.py`"
+    )
+
 import argparse
 import contextlib
 import json
 import math
 import os
 import statistics
-import sys
 import time
 from pathlib import Path
 

@@ -14239,11 +14239,34 @@ def test_the_emission_block_guard_is_not_vacuous():
         "that only reads explicit lists turns the map's other spelling into an unread claim: "
         f"{ranged}")
     # A SHARD FIGURE the clause parser cannot read is invisible to the row above — and this
-    # is not hypothetical: it is the shape the rebase onto `origin/main` actually produced,
-    # where the block held this branch's readable clause AND a stale one that
+    # is not hypothetical: it is the shape the rebase onto `origin/main` on 2026-11-23 actually
+    # produced (`_EMISSION_UNREAD_SENTENCE_RE` records the same event above; #14430's body
+    # measures it), where the block held this branch's readable clause AND a stale one that
     # spelled a RANGE of seconds with a semicolon in its name list. The readable clause was
     # graded, the stale one was graded by nothing, so the guard could sit GREEN over a block
     # stating two different emissions.
+    #
+    # ⛔ CITE A SHA THAT RESOLVES. This comment first cited `b766b779af`, which no reader can
+    # resolve: `git cat-file -t b766b779af` -> fatal, `git rev-list --all | grep -c b766b779` -> 0
+    # (it is in no history this clone holds), and it is no advertised TIP on `origin`
+    # (`git ls-remote origin | grep b766b779` -> 0 matches). ⛔ Neither command settles
+    # reachability on its own, and quoting the wrong one is how a sound conclusion gets an
+    # unsound proof: `ls-remote` lists TIPS, so its grep can only show a sha is not a tip — an
+    # ancestor of any tip is fetched by every clone without ever matching that grep (e.g.
+    # `bbe54363ad` is in `origin/main`'s history and greps 0 there), while a bare `cat-file`
+    # measures the BOX, not the citation, because a local-only ref such as `refs/preserved/*`
+    # can hold an object no reader has. It was then rewritten to say the splice
+    # is at "no reachable commit" — which is also false, so the correction repeated the very
+    # defect it was removing. The half that IS citable was measured with this module's own helpers:
+    # `dc42c55baa` (on `integration/14296-on-new-main`) is the RANGE-with-semicolon spelling —
+    # FOUR clauses parse against FIVE shard-figure sentences, so exactly one figure there is graded
+    # by nothing (`_EMISSION_UNREAD_SENTENCE_RE` also matches the tail of every readable clause, so
+    # this arm's two counts agree only when EVERY sentence parses). ⛔ The OTHER half — four groups
+    # spliced out of two parents' readable clauses by `merge=union` — has no sha named here on
+    # purpose: it existed only on this branch's own pre-rebase merge commits, and a rebase leaves no
+    # ref resolving to them, so citing one would be the same uncheckable-sha defect this note
+    # removes. The `spliced` fixture below is a HAND-BUILT string, not a checkout of any commit; the
+    # one commit above is named so the arm is motivated by a shape a reader can go and check.
     spliced = _emission_block_header(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s "
         "(f, g, i),\n"

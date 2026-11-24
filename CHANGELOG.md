@@ -425,3 +425,44 @@ orphaned them when parents were SIGKILL'd. Fixed via three layers:
   data** (startup race — verified empirically). The safe embedded pattern is
   single-writer/multi-reader; route concurrent multi-process writes to
   Docker FalkorDB (`TORTOISE_DB_URI=docker://...`).
+
+## [0.2.1] - 2026-11-24
+
+### Fixed — `tortoise init` works on a clean machine again
+
+0.2.1 fixes `tortoise init` failing on a clean machine
+(`No such file or directory … .tortoise`), which made the documented first
+command unusable in 0.2.0.
+
+On a machine that had never run Tortoise, this sequence failed:
+
+```console
+$ pip install tortoise-graph
+$ tortoise init
+FATAL CONFIG FILE ERROR ... 'dir ~/.tortoise' No such file or directory
+```
+
+The config directory was read before anything created it, so on a fresh
+machine there was nothing to read and the command exited 1. The fix in
+`tortoise/__init__.py` (#2204) expands the path and creates the data directory
+**before** redislite reads its config, so `~/.tortoise` exists by the time it
+is read. That fix is present in this tree; 0.2.1 is the release that ships it.
+
+- **Both distributions move together.** `tortoise-graph` and the thin
+  `tortoise-client` driver are both `0.2.1`, and the `__version__` attributes
+  (`tortoise.__version__`, `tortoise_client.__version__`) match the packaging
+  metadata — a wheel whose `__version__` disagrees with its metadata is a
+  support problem, so the two are bumped in lockstep.
+- **No API change from this PR.** The packaging changes here are the version
+  numbers only: no dependency version moves, and the only code edited is the
+  three `__version__` constants. Nothing is renamed or removed *by the bump
+  itself*.
+- **This is the first release since 0.2.0 (2026-08-08), so read the
+  `[Unreleased]` section above before upgrading.** All of it ships in this
+  wheel, and two entries change behaviour a self-hoster will notice: the
+  tenancy rename (#3543 — `team_id` → `org_id`; the tenant is an organization)
+  and the commit-payload caps (#4051 — a payload carrying more than 500
+  events, sources or provenance refs is refused with a 422 instead of stored).
+- **Not published by this entry.** Publishing (a `v*` tag or a manual
+  `publish-pypi.yml` dispatch) is a separate, deliberate step and is not part
+  of the version bump.

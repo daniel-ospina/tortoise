@@ -252,12 +252,11 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1822 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1825 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `953c299c9b` merged into the branch,
     which KEPT both sides' prose blocks: the pre-merge branch read 1774 and `main` 1796, so the
     figure is re-derived here rather than carried from either side — and GRADED, see
-    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
-    moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
+    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that    moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
     prose commits grew it to 1066 while this sentence still said 985, which was true at
@@ -294,10 +293,10 @@ def _residue_block() -> str:
     — and the `#14395` fix lane's re-pin paragraph took it to 1774 on its own tree, while this
     merge of `origin/main` `953c299c9b` (which KEPT both sides' `#:` prose) re-reads 1808 above,
     re-walked by this function and never adjusted to a carried figure:
-    1822 IS THIS TREE'S READING, and it is again a RE-WALK rather than an adjustment: the fold of
+    1825 IS THIS TREE'S READING, and it is again a RE-WALK rather than an adjustment: the fold of
     `origin/main` `989765162f` appended this lane's own +14 `#:` lines recording the residue re-pin
-    that merge owed, so the run grew by exactly those lines and by nothing else.
-    AND THE ARMS GRADE ALL OF IT
+    that merge owed, and the peer lane's own fold onto the same `main` contributed the rest — so
+    the run is re-measured on the RESOLVED file after BOTH folds, never carried from either.    AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
