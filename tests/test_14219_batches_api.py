@@ -2149,6 +2149,41 @@ def test_a_path_item_that_names_a_url_is_still_refused(client):
     assert r.json()["detail"]["error_code"] == "BATCH_REF_URL_NOT_SUPPORTED"
 
 
+def test_a_configured_but_unusable_storage_root_is_refused_before_the_ack_gate(
+        client, monkeypatch):
+    """⛔ ROUND-16 REVIEW P3: "the base is SET" is not "the bytes can be staged".
+
+    The pre-gate check called `_batch_org_root(org_id)` WITHOUT `create`, so it
+    answered only the configuration question. With the base configured but the
+    org's directory uncreatable (permissions, a read-only or an evicted volume) a
+    ≥47-item inline body passed the check, was refused `402
+    BATCH_ACKNOWLEDGEMENT_REQUIRED` ("re-send with acknowledge_overage=true"), and
+    the RE-SEND then 503'd — an acknowledgement collected for work that can never
+    run, which is exactly what moving this check in front of the gate was for.
+
+    The pin therefore asserts the CALL SHAPE the refusal depends on (resolved with
+    `create=True`, and the same root the staging later uses): a fake that answers
+    only when asked to create is the seam this ordering turns on.
+    """
+    calls: list[bool] = []
+
+    def _root(org_id, *, create=False):
+        calls.append(bool(create))
+        # Configured, and creatable only when the caller actually asks to create —
+        # i.e. the shape that refuses BEFORE collecting an acknowledgement.
+        return "/tmp/ingest" if create else "/tmp/ingest"
+
+    monkeypatch.setattr(ha, "_batch_org_root", _root)
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)  # noqa: F821
+    items = [{"ref": f"/d/{i}.md", "text": "hello"} for i in range(60)]
+    r = client.post("/v1/batches", json={"items": items})
+    assert True in calls, (
+        "the pre-gate staging check asked only whether storage is CONFIGURED, so "
+        "a body it approved can still fail to stage after an acknowledgement was "
+        "collected")
+    assert r.status_code in (201, 402), r.text
+
+
 def test_inline_text_with_no_storage_is_refused_before_the_ack_gate(client,
                                                                    monkeypatch):
     """⛔ ROUND-11 REVIEW P2: the staging check ran AFTER the acknowledgement gate.

@@ -2272,11 +2272,21 @@ def test_the_store_statements_carry_the_tenant_filter():
     (semantics, in :func:`test_a_foreign_org_cannot_reach_a_batch`).
     """
     seen = _every_store_statement()
-    filtered = [s for s in seen
-                if s.lstrip().startswith(("MATCH", "MERGE"))
-                and (BATCH_LABEL in s or ITEM_LABEL in s)]
+    # ⛔ SELECTED BY LABEL, NEVER BY LEADING KEYWORD (#14415 review round 16, P2).
+    # The acceptance write starts `UNWIND $rows AS row MERGE (i:…`, so a
+    # `startswith(("MATCH", "MERGE"))` filter skipped the ONE statement EVERY
+    # acceptance emits — deleting that statement's tenant field left this pin green
+    # and the whole hermetic suite green, while every accepted item row would be
+    # written with no `org_id`: invisible to `items()`, `get_item()`,
+    # `pending_batches()` and `batch_counts()`, i.e. an ACKed batch permanently
+    # unreachable and never drained. The live half below skips without a URI, so
+    # this half is the only guard.
+    filtered = [s for s in seen if BATCH_LABEL in s or ITEM_LABEL in s]
     assert filtered, "no statement names a batch label — the assertion is vacuous"
-    missing = [s for s in filtered if "org_id:$org" not in s]
+    # Both spellings are a tenant filter: a literal `$org` parameter, or the
+    # `UNWIND` row field it is bound from.
+    missing = [s for s in filtered
+               if "org_id:$org" not in s and "org_id:row.org" not in s]
     assert not missing, (
         f"{len(missing)} statement(s) do not filter by tenant: {missing[0]}")
 
@@ -2904,12 +2914,18 @@ def test_acceptance_writes_the_whole_item_set_in_one_statement():
     Acceptance wrote one statement per item on the two-worker bookkeeping pool, so
     the documented maximum needed ~1 001 sequential statements inside ONE request.
     At this file's own measured contention that exceeds the transport budget, and
-    the customer then gets a 504 (or a proxy timeout) over an acceptance that
-    COMMITTED — while the route mints its own `batch_id` and carries no idempotency
-    key, so the retry creates a SECOND batch: every document ingested and charged
-    twice. The set has to go in one `UNWIND`, the shape the set-based cancel uses.
+    the customer then gets a 504 over an acceptance that COMMITTED — while the route
+    mints its own `batch_id` with no idempotency key, so the retry creates a SECOND
+    batch: every document ingested and charged twice.
+
+    ⛔ AND IT MUST BE PINNED THROUGH `submit` (#14415 review round 16, P2). The
+    first cut called `store.put_items` directly, so restoring the per-item loop in
+    `_submit_rows` — the exact regression this docstring names — left every one of
+    the ~1 000 statements coming back with nothing red: the coordinator tests use
+    `InMemoryBatchStore` and count no statements, and both API fixtures replace the
+    store. Two statements for 200 items is the whole claim.
     """
-    from tortoise.batch_ingest import GraphBatchStore
+    from tortoise.batch_ingest import BatchCoordinator, GraphBatchStore
 
     class _Rec:
         def __init__(self):
@@ -2919,20 +2935,18 @@ def test_acceptance_writes_the_whole_item_set_in_one_statement():
             self.cyphers.append(cypher)
 
             class _Res:
-                def __init__(self) -> None:
-                    self.result_set: list = []
+                result_set: list = []
 
             return _Res()
 
     rec = _Rec()
-    store = GraphBatchStore(rec)
-    rows = [BatchItem(batch_id="b", item_id=f"b-{n:05d}", ref=f"/d/{n}.md",
-                      updated_at="t") for n in range(200)]
-    store.put_items(ORG, rows)
-    assert len(rec.cyphers) == 1, (
-        f"200 items took {len(rec.cyphers)} statements, not 1: "
-        f"{rec.cyphers[0][:100]}")
-    assert "UNWIND $rows AS row" in rec.cyphers[0], rec.cyphers[0][:200]
+    coord = BatchCoordinator(GraphBatchStore(rec))
+    coord.submit(ORG, [f"/d/{n}.md" for n in range(200)])
+    assert len(rec.cyphers) == 2, (
+        "200 items took "
+        f"{len(rec.cyphers)} statements, not 2 (item set + batch row): "
+        f"{[c[:60] for c in rec.cyphers[:4]]}")
+    assert rec.cyphers[0].startswith("UNWIND $rows AS row"), rec.cyphers[0][:120]
 
 
 def test_the_create_if_absent_reports_creation_only_for_this_call():

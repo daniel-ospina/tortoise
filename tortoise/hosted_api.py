@@ -17437,7 +17437,7 @@ async def create_batch(body: BatchRequest,
         # ⛔ A ZERO IS A READING ONLY WHEN THE LEDGER WAS READ (#14415 review
         # round 4, P2). `get_capture_usage` NEVER raises (#923/#4051) — it
         # degrades to a zero view and NAMES the fault in `unmeasured_reason`
-        # (metering.py:1295-1303), whose own contract says the caller "must
+        # (metering.py:1283-1284), whose own contract says the caller "must
         # REFUSE". Reading `capture_tokens_total or 0` therefore turned an
         # unreadable ledger into "nothing spent", which UNDERSTATES the overage
         # — the one outcome owner #14275 §4 exists to prevent ("so the overage
@@ -17507,8 +17507,18 @@ async def create_batch(body: BatchRequest,
     # can never run is the same defect the URL check below was moved in front of
     # that gate to close; the 503 test beside it uses a ONE-item body, so the gate
     # never ran and the ordering was unpinned.
-    if any(it.text is not None for it in body.items) and _batch_org_root(
-            org_id) is None:
+    # ⛔ RESOLVED WITH `create=True`, AND REUSED AS `stage_base` (#14415 review
+    # round 16, P3). Without `create` this answered "is `TORTOISE_INGEST_BASE_DIR`
+    # set", not "can the bytes be staged": with the base configured but the org's
+    # directory uncreatable (permissions, a read-only or an evicted volume) a
+    # ≥47-item inline body passed here, was refused `402 BATCH_ACKNOWLEDGEMENT_
+    # REQUIRED` ("re-send with acknowledge_overage=true"), and the re-send then
+    # 503'd — an acknowledgement collected for work that can never run, which is
+    # exactly what moving this check in front of the gate was for.
+    inline_stage_root = (_batch_org_root(org_id, create=True)
+                         if any(it.text is not None for it in body.items)
+                         else None)
+    if any(it.text is not None for it in body.items) and inline_stage_root is None:
         raise HTTPException(
             status_code=503,
             detail="Batch storage is unavailable on this server — send items as "
@@ -17631,9 +17641,10 @@ async def create_batch(body: BatchRequest,
     # Inline text is staged under THIS ORG's root (tenancy bound, above); with
     # no storage configured there is nowhere durable for it, and the layer
     # refuses rather than ACKing bytes it cannot keep.
-    stage_base = (_batch_org_root(org_id, create=any(c is not None
-                                                     for c in contents))
-                  if any(c is not None for c in contents) else None)
+    # Already resolved (and created) in front of the acknowledgement gate, so the
+    # root the check approved IS the root the staging uses — two resolutions could
+    # disagree if the volume changed between them.
+    stage_base = inline_stage_root
 
     def _accept():
         store = _batch_store_for(org)
@@ -53665,7 +53676,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (726 distinct
+# ABSOLUTE line number from 208 tracked files (727 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
