@@ -67,7 +67,9 @@ run-time guard in #14528:
    `b6d7bc716`, measured): CPython 3.12.3 also drops the body for `-0.0`,
    `not True`, `True and False` and `0 if True else 1`. What survives to run time
    is precisely the COLLECTION literals (`[]`, `{}`, `{*()}`) plus a run-time
-   operand (`_x and False`) — which is why the pin grades "always false" instead.
+   operand whose failing operand is a collection (`_x and []` — not `_x and False`,
+   whose body the optimizer DOES drop) — which is why the pin grades "always
+   false" instead.
    Graded, i.e. decided by `_literal_truth`: falsy and empty-collection literals
    (an unpack is decided by its OPERAND, so `{*()}` is empty and `{*{1}}` is not),
    signed numeric literals (`-0.0`), `f''`, a zero-argument builtin constructor
@@ -732,8 +734,10 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
     ⛔ THE CRITERION IS "always false", NOT "CPython folds it away" (the header
     states why), and the shapes graded are the GUARDS a submission can sit under:
     an `if`/`while` test, an `if`-expression's test, a `match` case's `if` guard,
-    a `for`/`async for` iterable, and a comprehension's generator iterables and
-    `if` clauses. The polarity comes from `_literal_truth` and nowhere else.
+    a `for`/`async for` iterable, a comprehension's generator iterables and
+    `if` clauses, and the `else` branch of an always-TRUE `if`/`if`-expression
+    (graded through the NEGATED test). The polarity comes from `_literal_truth` and
+    nowhere else.
 
     ⛔ THAT LIST IS THE WHOLE CLAIM, and it is enumerated rather than summarised
     (review P2 at `343e7ce1`, measured): this docstring used to say "every shape a
@@ -750,6 +754,10 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
     statically-false `if` is exactly the branch that RUNS, and a `for` whose
     iterable is empty still runs its `else` (the else runs when the loop completes
     without `break`), so a submission in either is live and must not be reported.
+    ⛔ THE ONE EXCEPTION IS THE FLIPPED POLARITY, and it is why the enumeration
+    above lists it: when the test is statically TRUE the `else` IS the dead branch,
+    so it is descended — under the NEGATED test, so one predicate decides both
+    directions (`if True: … else: await …` reds; pinned by a row).
     """
     dead: list[tuple[int, str]] = []
     bound = _bound_names(tree)
@@ -2109,12 +2117,15 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
         # unreachable (empty iterable) AND the call sits in the clause, so dropping
         # the clause walk stops the target being visited at all and this row reds.
         (["def f():", "    [x for _ in () if (g(),)]"], ["()"]),
-        # ⛔ AND A CALL IN A `while` TEST OR A `match` CASE GUARD, not in the guarded
-        # body (review P2 at `b6d7bc716`, measured): each of those node types walks
-        # its own test/guard, and deleting either walk left the whole suite green
-        # until these two rows existed (the `if` test walk was already pinned by the
-        # `not True` else rows). The `()` outer guard is what makes the inner call
-        # dead — under a live outer guard there is nothing to report either way.
+        # ⛔ AND A CALL IN AN `if` TEST, A `while` TEST OR A `match` CASE GUARD, not
+        # in the guarded body (review P2 at `b6d7bc716` for `while`/`match`; the
+        # `if` row is the same finding found again at `b16dd8e9` — the `not True`
+        # else rows do NOT pin this walk, they pin the `orelse` negation). Each of
+        # those node types walks its own test/guard, and deleting any of the three
+        # walks left the whole suite green until these rows existed. The `()` outer
+        # guard is what makes the inner call dead — under a live outer guard there
+        # is nothing to report either way.
+        (["def f():", "    if ():", "        if g():", "            pass"], ["()"]),
         (["def f():", "    if ():", "        while g():", "            pass"], ["()"]),
         (["def f():", "    if ():", "        match _x:",
           "            case _ if g():", "                pass"], ["()"]),
