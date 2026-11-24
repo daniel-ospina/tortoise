@@ -27,12 +27,6 @@ version: 1
 #     label POLARITY (`shard_labels(2)` ⊂ `shard_labels(9)`), which is what the
 #     merge rail subtracts `main`'s published job names against.
 #
-# The balance-band test that used to sit beside them
-# (`test_real_workflow_halves_are_consistent`, whose weights come from
-# `m["durations"]`) went with the durations-map arithmetic cut, and the 1.25x band
-# it held is enforced by `--integrity`'s `workflow_halves_issues()` instead (see
-# the SUM paragraph below).
-#
 # S=11 is also what the lane-parity contract permits: main publishes
 # `test (a)`…`test (k)` — `fast_shards: 11` below, and `.github/workflows/python-ci.yml`
 # names the job `test (${{ matrix.half }})`, so eleven halves are eleven published
@@ -84,9 +78,9 @@ version: 1
 # form. A fold that splices two re-derivations in makes the guard read `<est stated twice>` /
 # `<ceil stated 2 times>` — a red that no reader of the prose can see — so the repair is the one
 # stated here: re-derive with `--emit-push-matrix` on the tree you are merging INTO, then keep ONE
-# sentence. ⛔ The figures this block carried for EARLIER trees are NOT restated here, deliberately:
-# restating them is what produced the duplicated spellings, and each fold's own numbers survive in
-# `git log` on the commit that measured them. The MINUTE has stood at 28 m at every reading since
+# sentence. ⛔ The stacked per-fold paragraphs this block used to carry are collapsed rather than
+# re-pointed: restating each fold's numbers inline is what produced the duplicated spellings, and
+# `git log` holds each fold's own figures on the commit that measured them. The MINUTE has stood at 28 m at every reading since
 # the 2026-11-23 sweep, so NO arithmetic on the minute can catch a carried figure — only the
 # `est_seconds` partition can, which is why the sentence above is GRADED rather than trusted.
 #
@@ -135,20 +129,13 @@ version: 1
 # which is why the split is quoted and not only the worst figure — and why the minute, which has NOT
 # moved (28 m at every reading from 825.1 s to 838.2 s), could never be the operand that catches a
 # carried one.
-# The figures above are a
-# SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head — re-derive them
-# with that verb rather than trusting them, and only its HISTORY is kept below (the rule that a
-# restatement is graded as a second claim lives in the "ONE CLAUSE" paragraph, not here).
-# The direction of the readings, as history: the 2026-11-16 durations sweep re-packed the same 11
-# shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,
-# #14015's M5 row to a 25 m worst shard (arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom), and
-# the 2026-11-23 sweep to the 28 m stated above (arm-2 SUM 59.64 m, x 1.5 = 89.5 m, 0.5 m of
-# headroom). Between that sweep and #14423 the twelve landings that touched this manifest each
-# re-split the pool (the other fourteen in the window do not touch it), and #14423's own row was
-# the first perfectly balanced eleven-way reading since the refresh — while `024387f5` emitted a
-# flat 721.6 s on all eleven BEFORE it, so "first at S=11" unscoped is FALSE and is not claimed
-# here. Those numerals are a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the named
-# trees — re-derive them with that verb rather than trusting them.
+# The direction of the readings, as history (the 23 m / 24 m / 25 m chain is the S=11 rationale
+# above, not restated here): the 2026-11-23 sweep took the worst-shard watchdog to the 28 m stated
+# above, and the landings since then that touched this manifest each re-split the pool — #14423's own
+# row was the first perfectly balanced eleven-way reading since the refresh, while `024387f5`
+# emitted a flat 721.6 s on all eleven BEFORE it, so "first at S=11" unscoped is FALSE and is not
+# claimed here. Those numerals are a `tools/ci_selection.py --emit-push-matrix` snapshot at the
+# trees they name — re-derive them with that verb rather than trusting them.
 #
 # The promise is GRADED, not just stated:
 # `tests/test_ci_selection.py::test_the_fast_shards_header_block_states_the_measured_emission`
