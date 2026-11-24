@@ -16756,6 +16756,62 @@ def test_halves_guard_reports_all_zero_map_without_crashing():
     assert any("duration-imbalanced" in i for i in issues), issues
 
 
+def test_halves_ratio_decides_at_the_published_precision():
+    """#6145: this check compared the EXACT ratio and then rendered both operands
+    at 2 dp, so a fire inside (1.25, 1.255) printed "ratio 1.25x, tolerance
+    1.25x" — a diagnosis that reads as compliant while the check refuses, the
+    very contradiction the #6145 change removes next door. The ratio is now
+    decided at the precision it publishes, and the `beyond` block below pins the
+    RENDERED pair as well, so no message can print a value that reads as within
+    tolerance.
+
+    RESTORES a `main` arm — NOT yet on `main`: this arm lived at
+    `test_halves_ratio_decides_at_the_published_precision` on `edd9c68585` and
+    was removed with #14419's squash, whose restore landed after the merge
+    window. It is on this branch as `6bcc1fc7bb` (the same arm was written
+    earlier on the B7 branch as `6afb683573`, which is reachable only from
+    there) — so the subject code
+    (`ratio = float("inf") if lo <= 0 else round(hi / lo, 2)` in
+    `workflow_halves_issues`) has been live on `main` with no killer since.
+    """
+    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, workflow_halves_issues
+    halves = {"a": ["test_api"], "b": ["test_auth", "test_crypto"]}
+    # 1250.4 / 1000 = 1.2504 -> prints 1.25 -> INSIDE tolerance, so it must pass
+    # (under the old exact comparison this fired with a 1.25x-vs-1.25x message).
+    inside = _halves_manifest()
+    inside["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 250.4}
+    assert not any("imbalanced" in i
+                   for i in workflow_halves_issues(inside, halves))
+    # ⛔ THE PUBLISHED PRECISION IS 2 dp, NOT "AT LEAST 2 dp": 1250.9 / 1000 =
+    # 1.2509 renders as `1.25` but is > 1.25 at THREE dp, so an arm that only
+    # sampled 1250.4 would let `round(hi / lo, 3)` survive — and that mutant
+    # fires here printing `ratio 1.25x, tolerance 1.25x`, the exact
+    # self-contradiction this arm exists to forbid. Third sample closes it.
+    finer = _halves_manifest()
+    finer["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                          "test_crypto.py": 250.9}
+    assert not any("imbalanced" in i
+                   for i in workflow_halves_issues(finer, halves))
+    # 1256.0 / 1000 = 1.256 -> prints 1.26 -> still refused.
+    beyond = _halves_manifest()
+    beyond["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 256.0}
+    messages = [i for i in workflow_halves_issues(beyond, halves)
+                if "imbalanced" in i]
+    assert messages
+    # The headline above is about the MESSAGE, not only the decision, so pin the
+    # pair it renders. The target is a render that makes the two values equal or
+    # reversed — e.g. BOTH operands truncated to 1 dp gives "1.2x, tolerance
+    # 1.2x", which passes every decision-side arm above and reads as compliant
+    # while the check refuses. A ratio-only `.1f` render is NOT such a case
+    # (1.256 prints 1.3, still above 1.25), so it is not what this pin targets.
+    rendered = re.search(r"\(ratio ([\d.]+)x, tolerance ([\d.]+)x\)", messages[0])
+    assert rendered, messages[0]
+    assert float(rendered[1]) > float(rendered[2]), messages[0]
+    assert HALF_DURATION_IMBALANCE_RATIO == 1.25
+
+
 def test_duration_issues_flags_non_numeric_value():
     # #3407 review P2: the guards iterated KEYS only, so a hand-edit typo in the
     # now-505-line map passed `--integrity` silently and then crashed
