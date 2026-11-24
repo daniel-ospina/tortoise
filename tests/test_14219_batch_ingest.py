@@ -9,6 +9,7 @@ acceptance, and the docstring says which.
 from __future__ import annotations
 
 import os
+import re
 import threading
 
 import pytest
@@ -19,6 +20,7 @@ from tortoise.batch_ingest import (
     BATCH_ITEMS_IN_FLIGHT,
     BATCH_LABEL,
     BATCH_RECLAIM_AFTER_S,
+    ITEM_LABEL,
     OVERAGE_USD_PER_MILLION_TOKENS,
     PROVIDER_MECHANICS_WORDS,
     SECONDS_PER_DOCUMENT,
@@ -1663,14 +1665,35 @@ def test_every_emitted_statement_is_brace_balanced():
     """
     seen = _every_store_statement()
     assert len(seen) >= 14, f"only {len(seen)} statements reached the store"
-    bad = [s for s in seen if "{{" in s or "}}" in s
-           or s.count("{") != s.count("}")]
+    # ⛔ THREE SHAPES, NOT ONE (#14415 review round 11, LOW). Balanced braces are
+    # not enough: an `f` prefix dropped from `f"WHERE 1=1 {attempts_clause}"`
+    # leaves the braces balanced and emits the literal text `{attempts_clause}`,
+    # which only the ENGINE rejects (`'attempts_clause' not defined`) — and in a
+    # lane with no FalkorDB the engine-dependent test skips, so this guard is the
+    # only protection there. A surviving placeholder is the same class as a
+    # doubled brace: a statement this module did not mean to emit.
+    bad = [s for s in seen
+           if "{{" in s or "}}" in s
+           or s.count("{") != s.count("}")
+           # ⛔ CASE-INSENSITIVE AND DOTTED (#14415 review round 12, LOW): the
+           # first predicate was lower-case only, so `{ITEM_LABEL}` — a spelling
+           # this module does use in other f-strings — would have survived it.
+           # Inert today (every other interpolation sits on a line that also
+           # carries a literal `{`, caught by the arm above), which is exactly
+           # why a guard that over-claims its coverage gets fixed before it is
+           # relied on.
+           or re.search(r"\{[A-Za-z_][A-Za-z0-9_.]*\}", s)]
     assert not bad, (
-        "a statement this module emits is malformed Cypher (unbalanced or "
-        f"doubled braces): {bad[0] if bad else ''}")
+        "a statement this module emits is malformed Cypher (unbalanced, doubled "
+        f"braces, or an un-interpolated placeholder): {bad[0] if bad else ''}")
     assert any("state:$expect}" in s for s in seen), (
         "the compare-and-set statement was not reached — the assertion above "
         "would be vacuous")
+    # The predicate's own reach: it must name an un-interpolated label too, or its
+    # prose ("a surviving {placeholder}") is wider than its coverage.
+    assert re.search(r"\{[A-Za-z_][A-Za-z0-9_.]*\}",
+                     "MATCH (i:Ingest {{x:1}} {{ITEM_LABEL}})"), (
+        "the placeholder predicate does not catch an upper-case label")
 
 
 def test_a_rescan_never_settles_a_fresh_claim_of_a_cancelled_batch():
@@ -1839,6 +1862,78 @@ def test_the_graph_store_speaks_real_cypher():
         assert BatchCoordinator(store).recover(ORG) == []
         store.discard(ORG, batch.batch_id)
         assert store.list_recent_batches(ORG) == []
+    finally:
+        graph.query("MATCH (n) DETACH DELETE n")
+        graph.delete()
+
+
+def test_the_store_statements_carry_the_tenant_filter():
+    """⛔ NOTHING PINNED THE ROW-LEVEL TENANT FILTER (#14415 review round 12).
+
+    Measured by the reviewer: deleting `org_id:$org` from `get_batch`,
+    `put_batch_if_state` and `items` left **139 of 139** batch tests green — the
+    live test used one org, and no hermetic test read the statements. Hosted mode
+    gives each org its own graph, so this filter is defence in depth rather than
+    the only guard (and `_batch_org_root`'s path bound IS pinned) — but the layer
+    where it is implemented had zero protection, so a refactor that dropped it
+    would read another tenant's batch with nothing red.
+
+    Two halves: the statements must NAME the parameter (hermetic, so it holds in a
+    lane with no FalkorDB), and the live engine must refuse a foreign org
+    (semantics, in :func:`test_a_foreign_org_cannot_reach_a_batch`).
+    """
+    seen = _every_store_statement()
+    filtered = [s for s in seen
+                if s.lstrip().startswith(("MATCH", "MERGE"))
+                and (BATCH_LABEL in s or ITEM_LABEL in s)]
+    assert filtered, "no statement names a batch label — the assertion is vacuous"
+    missing = [s for s in filtered if "org_id:$org" not in s]
+    assert not missing, (
+        f"{len(missing)} statement(s) do not filter by tenant: {missing[0]}")
+
+
+def test_a_foreign_org_cannot_reach_a_batch():
+    """The live half of the tenant-filter pin — real engine, two orgs."""
+    from urllib.parse import urlparse
+
+    from _live_utils import _skip_unless_live_uri
+
+    _skip_unless_live_uri()
+    uri = os.environ["TORTOISE_DB_URI"]
+    from falkordb import FalkorDB
+
+    parsed = urlparse(uri.replace("docker://", "http://"))
+    db = FalkorDB(host=parsed.hostname, port=parsed.port,
+                  password=parsed.username or None)
+    graph = db.select_graph(
+        f"{parsed.path.strip('/') or 'tortoise'}_batch_tenant_probe")
+    graph.query("MATCH (n) DETACH DELETE n")
+
+    def _query(cypher, params=None, timeout=None):
+        return graph.query(cypher, params or {}, timeout=timeout)
+
+    try:
+        store = GraphBatchStore(_query)
+        coord = BatchCoordinator(store)
+        owner, foreign = "org-owner", "org-foreign"
+        batch, items = coord.submit(owner, ["/tenant.md"])
+
+        assert store.get_batch(foreign, batch.batch_id) is None
+        assert store.get_item(foreign, batch.batch_id, items[0].item_id) is None
+        assert store.items(foreign, batch.batch_id) == []
+        assert store.pending_batches(foreign) == []
+        assert store.batch_counts(foreign, [batch.batch_id])[batch.batch_id][
+            "total"] == 0
+        for call in (lambda: BatchCoordinator(store).status(
+                         foreign, batch.batch_id),
+                     lambda: BatchCoordinator(store).cancel(
+                         foreign, batch.batch_id)):
+            with pytest.raises(KeyError):
+                call()
+        # …and the owner's row is untouched by any of that.
+        assert store.get_batch(owner, batch.batch_id).state is BatchState.ACCEPTED
+        assert len(store.items(owner, batch.batch_id)) == 1
+        store.discard(owner, batch.batch_id)
     finally:
         graph.query("MATCH (n) DETACH DELETE n")
         graph.delete()
