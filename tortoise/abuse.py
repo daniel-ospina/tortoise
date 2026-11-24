@@ -1903,8 +1903,11 @@ class AbuseEngine:
         #
         # RECORDING the hint is a set lookup with no store read. The RETRY is not
         # free: `_evaluate`'s decision to retry is a set lookup plus
-        # `_resolve_retry_due`, and the retry itself pays the same incident reads as
-        # the first attempt (~2 R2 GETs per rule) — which is exactly why it is
+        # `_resolve_retry_due`, and the retry itself pays MORE than the first attempt:
+        # the retry state implies a sentinel on record, and a sentinel is read twice
+        # (`_alias_states`, then the compare-and-delete re-read) — measured 3 reads
+        # per rule with one sentinel, 4 with both kinds, against 2 on the
+        # no-sentinel branch the `flagged` gate suppresses — which is why it is
         # spaced by `_EPISODE_RESOLVE_RETRY_BACKOFF_S` and bounded by
         # `_EPISODE_RESOLVE_RETRY_TTL_S` rather than run on every clean window.
         if resolved:
@@ -2123,9 +2126,12 @@ class AbuseEngine:
                 # ADR-011's false all-clear). The retry finishes an episode already
                 # known to have ended; it never decides that one did.
                 #
-                # COST, stated honestly: a retry costs the same incident reads as
-                # the first attempt (~2 R2 GETs per rule), so a close that keeps
-                # failing costs those reads on each clean window until it succeeds
+                # COST, stated honestly: a retry costs MORE than the first attempt —
+                # it only runs when a sentinel is on record, and that sentinel is read
+                # twice (`_alias_states`, then the compare-and-delete re-read):
+                # measured 3 reads per rule with one sentinel and 4 with both kinds,
+                # so a close that keeps failing costs those reads on each clean window
+                # until it succeeds
                 # or `_EPISODE_RESOLVE_RETRY_TTL_S` drops the hint. That is bounded
                 # and rare; it is NOT free, and it must not be described as a bare
                 # dict lookup.
