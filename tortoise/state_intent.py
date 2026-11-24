@@ -57,11 +57,25 @@ WHY A QUESTION SHAPE AND NOT A KEYWORD
 --------------------------------------
 A keyword match alone would hijack ordinary content searches: ``search('the
 meeting was cancelled')`` is a lookup for a note, not a request for the ended
-population. So an ending population is selected only by the *aggregative
-question shapes* below — a wh-word or an "anything/which" quantifier carrying an
-ending word — which is exactly the shape a customer uses when they do not know
-which record they are asking about. A query that names a record ("onboarding
-flow retired") keeps the text read it always had.
+population. So an ending population is selected by *question shapes* — most of
+them AGGREGATIVE (a wh-word or an "anything/which" quantifier carrying an ending
+word), which is exactly the shape a customer uses when they do not know which
+record they are asking about — and ⛔ NOT by a keyword, nor by "a word near a
+wh-word", nor by "an ending copula anywhere in the sentence".
+
+⛔ TWO NON-AGGREGATIVE SHAPES ARE ADMITTED, and #14033 is why. This paragraph used
+to say a state question is *only* aggregative, and the list below then measured
+what that claim cost: two of the most obvious ways a customer asks about state
+fell through to the relevance read and were served as a confident answer to a
+different question. They are ``is_predicate`` (`is the onboarding flow retired?`
+— a yes/no question about ONE record the caller NAMES, whose PREDICATE is the
+ending; the ended population answers it from the row's own ``status``) and
+``list_what`` (`list what we retired` — an imperative whose `what we <verb>`
+CLAUSE asks for a SET). So "names a record" is no longer by itself a refusal:
+`is the X retired?` routes because the participle is the question's predicate,
+while `onboarding flow retired` (no predicate to ask about) and `show me the
+retired onboarding flow` (an imperative naming ONE record) keep the text read
+they always had.
 
 ⛔ AND THE WORD MUST BE THE ENDED-STATE FORM: ``ended``, not ``end``;
 ``withdrawn``, not ``withdraw``. The first cut matched the bare verbs and the bare
@@ -134,12 +148,25 @@ _ENDING_WORDS = (
 )
 
 #: The trailing adverbs a state question may carry WITHOUT narrowing it — a
-#: vague time reference, which the population read can honour implicitly (every
-#: ended row carries its own ``endedAt``) and which therefore is not a constraint
-#: dropped in silence. Kept deliberately tiny: an explicit window ("in Q3",
-#: "this quarter", "since March") is a narrowing the population cannot apply and
-#: keeps the relevance read (#14033).
+#: vague time reference, which names no boundary and is therefore not a
+#: constraint dropped in silence: the ended read is ordered by the row's own
+#: ``endedAt`` newest-first (a row carrying none sorts last), so "recently"
+#: discards nothing a window would have had to apply. Kept deliberately tiny: an
+#: explicit window ("in Q3", "this quarter", "since March") IS a narrowing, and
+#: the shapes that are tail-anchored refuse it rather than serve the whole
+#: population as if it had been applied (`what has ended in Q3`). ⛔ ONE SHAPE IS
+#: NOT TAIL-ANCHORED — ``do_support`` — so a window after `did we <verb>` is NOT
+#: refused (`what did we archive last quarter` is a pinned SELECTED row): the
+#: population is served newest-first and the caller reads the rows' own
+#: ``endedAt``. Stated because the claim would otherwise be false.
 _VAGUE_TIME_TAIL = r"recently|lately"
+
+#: A RELATIVE-CLAUSE marker. ``is_predicate``'s subject NP is a word run, and a
+#: word run alone admits a SHORT relative clause whose own finite verb then reads
+#: as the question's predicate (`is the report that legal archived`, `is the
+#: ticket that support cancelled`). A clause cannot be the head noun, so the run
+#: stops at one of these.
+_RELATIVE_MARKER = r"(?!\b(?:that|which|who|whom|whose|where|when)\b)"
 
 #: …and the BASE forms of the same words, which is what do-support selects
 #: ("what did we retire"). A closed list with NO ``end``: "what did we end up
@@ -192,7 +219,19 @@ _ENDING_BASE = (
 #:   middle window is the relative clause and stays.
 #: * ``wh_whole_question`` — the WHOLE question is "what (has been) <participle>":
 #:   "what ended", "what has been withdrawn". Anchored at both ends, so a trailing
-#:   constraint (`what is the archived pricing document`) cannot reach it.
+#:   constraint (`what is the archived pricing document`) cannot reach it. #14033
+#:   admits the VAGUE adverbs `recently`/`lately` at the tail — they name no
+#:   boundary — and still refuses a WINDOW (`what has ended in Q3`).
+#: * ``is_predicate`` — the ending is the PREDICATE of a yes/no question about a
+#:   named record: "is the onboarding flow retired?". #14033's measured miss.
+#:   ⛔ Tail-anchored (the participle must END the question), the subject NP is
+#:   bounded to a determiner plus at most FOUR words, and its word run STOPS at a
+#:   relative-clause marker, so a clause cannot smuggle its own finite verb in:
+#:   `is the report archived in S3`, `is the report that legal archived` and
+#:   `is the policy when a booking is cancelled` all keep the relevance read.
+#: * ``list_what`` — "list what we retired": an imperative whose `what we <verb>`
+#:   CLAUSE asks for the SET. Tail-anchored, so `list what we retired last
+#:   quarter` is refused rather than served with the narrowing dropped.
 #: * ``which_predicate`` — the wh-word's OWN predicate: "which claims were
 #:   archived". Anchored at the start and requiring the auxiliary IMMEDIATELY
 #:   after the wh-phrase's HEAD NOUN, so `which archived report has the Q3
@@ -280,24 +319,31 @@ _ENDING_BASE = (
 #:   noun that does not END the question or is not preceded by a set determiner;
 #:   "current commitments", "our commitments" and "what are we committed to" do
 #:   route.
-#: * "list what we retired" / "show me the retired onboarding flow" — an
-#:   imperative, which was measured as a hijack: `show me the retired onboarding
-#:   flow` is a lookup for ONE record. ⛔ The same frame with a SET noun (`list
-#:   our commitments`, `show me all the commitments`) is the recall the start
-#:   anchor gives up, and it is named here so it is a decision and not a gap.
+#: * "show me the retired onboarding flow" — an IMPERATIVE naming ONE record, which
+#:   was measured as a hijack: it is a lookup, and the population is not its
+#:   answer. ⛔ `list what we retired` WAS LISTED HERE AND IS NOW ROUTED (#14033);
+#:   the discriminator is not the imperative mood but the `what we <verb>` CLAUSE,
+#:   which asks for a SET (§ ``list_what``). The same frame with a SET noun
+#:   (`list our commitments`, `show me all the commitments`) is the recall the
+#:   start anchor gives up, and it is named here so it is a decision and not a
+#:   gap.
 #: * "do we ever archive plans" / "do we archive customer emails" — the
 #:   PRESENT-habitual frame, which `do_support` refuses on purpose (round-5
 #:   review, P1): it asks what we do, not which records ended.
 #: * "have any claims been retracted in Q3" / "has anything been withdrawn by
-#:   legal" — an appended CONSTRAINT, refused by every shape's tail anchor so the
-#:   caller keeps the relevance read instead of having the narrowing dropped.
-#:   ⛔ #14033 admits a VAGUE adverb and still refuses an actual WINDOW, and the
-#:   line between them is what the population read can honour: "recently" and
-#:   "lately" name no boundary, and every returned row carries its own
-#:   ``endedAt``, so nothing the caller said is discarded — while "in Q3" and
-#:   "this quarter" are a narrowing the population cannot apply, so those keep
-#:   the relevance read (`what has ended in Q3`, `list what we retired last
-#:   quarter`).
+#:   legal" — an appended CONSTRAINT, refused by the tail anchor of every shape
+#:   that has one, so the caller keeps the relevance read instead of having the
+#:   narrowing dropped. ⛔ ``do_support`` HAS NO TAIL ANCHOR (it is prefix-anchored
+#:   on `did we <verb>`, and `what did we archive last quarter` is a pinned
+#:   SELECTED row), so a window there is not refused: the population is served
+#:   newest-first and the caller reads each row's own ``endedAt``. That is a
+#:   stated boundary, not a claim that every shape refuses a window.
+#:   ⛔ #14033 admits a VAGUE adverb and still refuses an actual WINDOW wherever
+#:   the shape is tail-anchored: "recently" and "lately" name no boundary, and
+#:   the read is ordered by ``endedAt`` newest-first, so nothing the caller said
+#:   is discarded — while "in Q3" and "this quarter" are a narrowing the
+#:   population cannot apply, so those keep the relevance read (`what has ended
+#:   in Q3`, `list what we retired last quarter`).
 #: * "which of our withdrawn claims affected pricing" — #14033's own fourth table
 #:   row, and it KEEPS the relevance read on purpose: ``withdrawn`` there
 #:   MODIFIES ``claims``, which is the same attributive slot as the pinned
@@ -360,20 +406,26 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("do_support", re.compile(
         rf"^(?:what\s+)?did\s+(?:we|i)\s+(?:{_ENDING_BASE})\b")),
     # "is the onboarding flow retired?" / "is our pricing decision withdrawn"
-    # (#14033). A YES/NO question whose PREDICATE is the ending is a state
+    # (#14033). A YES/NO question whose PREDICATE is the ending is a STATE
+    # question, and the ended population answers it from the row's own `status`:
+    # the caller does not know whether the record ended, and that is exactly what
+    # this population states.
     # ⛔ The participle ENDS the question, which is the same tail anchor every
-    # other shape uses: `is the report archived in S3` keeps the relevance read,
-    # because `in S3` is a narrowing and the ending is not the whole predicate.
-    # And the subject NP is BOUNDED (a determiner plus at most three words) so a
-    # longer clause cannot smuggle its own finite verb in —
+    # tail-anchored shape uses: `is the report archived in S3` keeps the relevance
+    # read, because `in S3` is a narrowing and the ending is not the whole
+    # predicate. And the subject NP is BOUNDED (a determiner plus at most FOUR
+    # words) with a word run that STOPS at a relative-clause marker, so a clause
+    # cannot smuggle its own finite verb in — `is the report that legal archived`,
     # `is the payment terms clause given the contract was archived` and
-    # `is the policy when a booking is cancelled` refuse on this bound. Both
-    # guards are pinned in `tests/test_14033_state_cue_gap.py`; the `what is …`
-    # row of `NOT_SELECTED` cannot exercise either, because `^is` never reaches
-    # it.
+    # `is the policy when a booking is cancelled` all refuse. Every guard is
+    # pinned by a falsifier that reaches it in
+    # `tests/test_14033_state_cue_gap.py`; the `what is …` row of `NOT_SELECTED`
+    # cannot exercise any of them, because `^is` never reaches it.
     ("is_predicate", re.compile(
         rf"^is\s+(?:the|our|your|their|its|my|this|that)\s+"
-        rf"[a-z0-9]+(?:\s+[a-z0-9]+){{0,3}}\s+(?:{_ENDING_WORDS})\s*[?.!]*$")),
+        rf"{_RELATIVE_MARKER}[a-z0-9]+"
+        rf"(?:\s+{_RELATIVE_MARKER}[a-z0-9]+){{0,3}}"
+        rf"\s+(?:{_ENDING_WORDS})\s*[?.!]*$")),
     # "list what we retired" / "list what we archived" (#14033). An IMPERATIVE,
     # which the `scoped_noun`/`show me` boundary refuses — and the discriminator
     # is the `what we <verb>` clause, not the imperative: `show me the retired
@@ -476,9 +528,10 @@ class StateQuestion:
 def detect_state_question(text: str | None) -> StateQuestion:
     """Map a query to the state population it asks about (:data:`POPULATIONS`).
 
-    Deterministic and bounded — one normalisation plus a scan of six compiled
-    patterns, no model call and no IO, so the hot read path pays microseconds
-    and the mapping is unit-testable offline. A ``None``/empty/whitespace query
+    Deterministic and bounded — one normalisation plus a scan of the nine
+    compiled patterns across the two tables, no model call and no IO, so the hot
+    read path pays microseconds and the mapping is unit-testable offline. A
+    ``None``/empty/whitespace query
     yields ``population=None``: full-scan mode and ``ended_scope`` are safe.
 
     ``ENDED`` takes precedence over ``COMMITMENTS`` when BOTH tables match the

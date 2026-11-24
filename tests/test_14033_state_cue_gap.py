@@ -175,7 +175,11 @@ def test_the_two_guards_inside_is_predicate_are_each_load_bearing():
       whose ending is not the whole predicate;
     * widening the NP bound routes `is the payment terms clause given the
       contract was archived` and `is the policy when a booking is cancelled` —
-      subordinate clauses carrying their own finite verb.
+      subordinate clauses carrying their own finite verb;
+    * dropping the relative-clause stop routes `is the report that legal
+      archived` and `is the ticket that support cancelled` — the NP word run
+      would swallow the clause and read its own finite verb as the question's
+      predicate, which is the round-4/5 hijack class inside the word budget.
     """
     from tortoise.state_intent import detect_state_question
 
@@ -184,6 +188,9 @@ def test_the_two_guards_inside_is_predicate_are_each_load_bearing():
         "is the payment terms clause given the contract was archived",
         "is the policy when a booking is cancelled",
         "is the onboarding flow retired this quarter",
+        "is the report that legal archived",
+        "is the ticket that support cancelled",
+        "is the doc which we archived",
     ):
         got = detect_state_question(narrowed_or_subordinate)
         assert got.population is None, (
