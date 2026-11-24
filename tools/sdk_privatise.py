@@ -1652,7 +1652,7 @@ SWEEP_NAMES = 66
 #: ⚠️ THIS PR (#14480) MOVED THE PIN BY ONE FROM ITS OWN LINE — stated because the pin's own note
 #: says a count that moves without a named cause is the drift it exists to catch: the durable
 #: `claim_unavailable` record writes `recorded.update(keep)` in `capture_spool`'s self-heal
-#: (`tortoise/capture_spool.py:4037`, the one new untyped `.update(` receiver in this diff), so
+#: (`tortoise/capture_spool.py:4107`, the one new untyped `.update(` receiver in this diff), so
 #: `--repin` on the tree being merged prints **(11911, "3e92044bab08cc3d")**. Re-derived by RUNNING
 #: the tool on that tree, never by arithmetic on the delta.
 #: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
