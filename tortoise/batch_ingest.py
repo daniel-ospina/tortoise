@@ -705,7 +705,8 @@ class BatchStore(Protocol):
 
     def put_item_if_state(self, org_id: str, item: BatchItem,
                           expected: BatchItemState,
-                          expected_attempts: int | None = None) -> bool:
+                          expected_attempts: int | None = None,
+                          token_delta: tuple[int, int] | None = None) -> bool:
         """COMPARE-AND-SET: write ``item`` only if the stored row is still in
         ``expected``. Returns True when the write landed.
 
@@ -738,6 +739,28 @@ class BatchStore(Protocol):
         ...
 
     def items(self, org_id: str, batch_id: str) -> list[BatchItem]: ...
+
+    def cancel_queued_items(self, org_id: str, batch_id: str, *,
+                            reason: str, updated_at: str) -> int:
+        """CAS a batch's WHOLE `queued` set to `cancelled` in ONE statement.
+
+        ⛔ ONE STATEMENT, NOT ONE PER ITEM (#14415 review round 7, P2). `cancel()`
+        walked the item list, and each iteration cost `advance` a `get_item` plus
+        a `put_item_if_state` — two sequential graph round trips per item, four
+        for a stale claim. A cancel of the documented maximum batch
+        (`_BATCH_MAX_ITEMS`, default 1000) was therefore ~2 000 sequential
+        statements inside ONE request, on an executor with two workers: at the
+        contention this module itself cites (a 1 505 ms DB probe) it cannot answer
+        inside the 10 s transport budget, so the client gets a 504 over a cancel
+        that keeps writing — and the customer's very next status read queues
+        behind it on the second worker, which is exactly what the pool split
+        exists to prevent.
+
+        The compare is still a compare: the statement matches `state = queued`
+        only, so a claim taken after `cancel()` read the batch is not overwritten.
+        Returns how many rows it matched (0 = every row had already moved on).
+        """
+        ...
 
     def get_item(self, org_id: str, batch_id: str, item_id: str
                  ) -> BatchItem | None:
@@ -845,7 +868,8 @@ class InMemoryBatchStore:
 
     def put_item_if_state(self, org_id: str, item: BatchItem,
                           expected: BatchItemState,
-                          expected_attempts: int | None = None) -> bool:
+                          expected_attempts: int | None = None,
+                          token_delta: tuple[int, int] | None = None) -> bool:
         # Atomic by construction: the compare and the write are inside ONE
         # `self._lock` hold, so no other writer can interleave.
         with self._lock:
@@ -858,8 +882,39 @@ class InMemoryBatchStore:
                 # The claim identity moved: a peer re-claimed this row between
                 # our read and here, so this write would run a second runner.
                 return False
-            bucket[item.item_id] = _copy_item(item)
+            if token_delta is None:
+                bucket[item.item_id] = _copy_item(item)
+                return True
+            # ⛔ THE ADDITION HAPPENS HERE, NOT IN THE CALLER (#14415 review
+            # round 7, P2). `item.tokens_in` is the caller's read PLUS its own
+            # delta, so writing it back OVERWRITES whatever a writer that matched
+            # the same compare added in between — and the settle path's compare is
+            # on state alone, which two writers settling to the SAME state both
+            # satisfy. Adding the delta to the row this lock is holding cannot
+            # lose an increment, and the caller's copy is corrected to the row.
+            written = _copy_item(item)
+            written.tokens_in = max(0, current.tokens_in) + max(
+                0, int(token_delta[0]))
+            written.tokens_out = max(0, current.tokens_out) + max(
+                0, int(token_delta[1]))
+            bucket[item.item_id] = written
+            item.tokens_in, item.tokens_out = written.tokens_in, written.tokens_out
             return True
+
+    def cancel_queued_items(self, org_id: str, batch_id: str, *,
+                            reason: str, updated_at: str) -> int:
+        # One lock hold for the whole set: the compare and every write are
+        # indivisible, which is the property the per-item loop only had per item.
+        with self._lock:
+            bucket = self._items.get((org_id, batch_id), {})
+            stopped = 0
+            for row in bucket.values():
+                if row.state is BatchItemState.QUEUED:
+                    row.state = BatchItemState.CANCELLED
+                    row.reason = reason
+                    row.updated_at = updated_at
+                    stopped += 1
+            return stopped
 
     def items(self, org_id: str, batch_id: str) -> list[BatchItem]:
         with self._lock:
@@ -1117,7 +1172,8 @@ class GraphBatchStore:
 
     def put_item_if_state(self, org_id: str, item: BatchItem,
                           expected: BatchItemState,
-                          expected_attempts: int | None = None) -> bool:
+                          expected_attempts: int | None = None,
+                          token_delta: tuple[int, int] | None = None) -> bool:
         """COMPARE-AND-SET in the DATABASE — `MATCH … {state:$expect}` then SET.
 
         ⛔ `MATCH` (not `MERGE`) is the whole point: a row that has moved on no
@@ -1149,8 +1205,19 @@ class GraphBatchStore:
             f"WHERE 1=1 {attempts_clause}"
             "SET i.ref=$ref, i.name=$name, i.staged_path=$staged, "
             "    i.state=$state, i.reason=$reason, "
-            "    i.content_key=$key, i.tokens_in=$tin, i.tokens_out=$tout, "
-            "    i.attempts=$attempts, i.content_changed=$changed, "
+            "    i.content_key=$key, "
+            # ⛔ A RELATIVE WRITE WHEN THIS CALL IS ACCUMULATING SPEND (#14415
+            # review round 7, P2). The absolute form is a read-modify-write, and
+            # the settle path's compare is on STATE alone — two writers that both
+            # settle to the SAME state both match, each writes its own read+delta,
+            # and the second OVERWRITES the first instead of adding (200 spent,
+            # 200 billed, `tokens_spent: 100`). The addition is done by the
+            # database, so both increments apply.
+            + (f"i.tokens_in = coalesce(i.tokens_in, 0) + $tin, "
+               f"i.tokens_out = coalesce(i.tokens_out, 0) + $tout, "
+               if token_delta is not None
+               else "i.tokens_in=$tin, i.tokens_out=$tout, ")
+            + "i.attempts=$attempts, i.content_changed=$changed, "
             "    i.updated_at=$updated "
             "RETURN i.id",
             {"iid": item.item_id, "bid": item.batch_id, "org": org_id,
@@ -1158,8 +1225,10 @@ class GraphBatchStore:
              "ref": item.ref, "name": item.name, "staged": item.staged_path,
              "state": str(item.state),
              "reason": item.reason, "key": item.content_key,
-             "tin": int(item.tokens_in), "tout": int(item.tokens_out),
-             "attempts": int(item.attempts),
+             "tin": int(token_delta[0] if token_delta is not None
+                        else item.tokens_in),
+             "tout": int(token_delta[1] if token_delta is not None
+                         else item.tokens_out),
              "changed": bool(item.content_changed),
              "updated": item.updated_at,
              # Sent only when the pattern above names it, so an unused parameter
@@ -1168,6 +1237,27 @@ class GraphBatchStore:
                 if expected_attempts is not None else {})},
         )
         return bool(rows)
+
+    def cancel_queued_items(self, org_id: str, batch_id: str, *,
+                            reason: str, updated_at: str) -> int:
+        """⛔ `MATCH … SET … RETURN count` — ONE statement for the whole set.
+
+        The compare is the pattern: `state:$expect` matches only rows still
+        `queued`, so a claim taken after `cancel()` read the batch is not
+        overwritten (the property the per-item compare-and-set had, kept without
+        its per-item round trip). No `MERGE`: a SET on a pattern that matches
+        nothing is a no-op, which is what a fully-claimed batch must be.
+        """
+        rows = self._q(
+            f"MATCH (i:{ITEM_LABEL} {{batch_id:$bid, org_id:$org, "
+            f"state:$expect}}) "
+            "SET i.state=$state, i.reason=$reason, i.updated_at=$updated "
+            "RETURN count(i)",
+            {"bid": batch_id, "org": org_id,
+             "expect": str(BatchItemState.QUEUED),
+             "state": str(BatchItemState.CANCELLED),
+             "reason": reason, "updated": updated_at})
+        return int(rows[0][0] or 0) if rows else 0
 
     def items(self, org_id: str, batch_id: str) -> list[BatchItem]:
         rows = self._q(
@@ -1830,10 +1920,22 @@ class BatchCoordinator:
         # document, which is the very measurement this layer's metering docstring
         # narrates as the defect it fixes. `tokens_in/out` are therefore the
         # document's CUMULATIVE spend, which is exactly what the meter sums.
-        if tokens_in is not None:
-            item.tokens_in = max(0, item.tokens_in) + max(0, int(tokens_in))
-        if tokens_out is not None:
-            item.tokens_out = max(0, item.tokens_out) + max(0, int(tokens_out))
+        # ⛔ KEEP THE DELTA, NOT ONLY THE NEW TOTAL (#14415 review round 7, P2).
+        # The row's totals are CUMULATIVE, so `item.tokens_in` = the row's figure
+        # plus this call's spend. That is what the RETURNED copy must carry — and
+        # it is exactly the wrong thing to hand the store: writing it back is a
+        # read-modify-write, and this write's compare is on state alone, which
+        # two writers settling to the SAME state both satisfy (a runner reporting
+        # a retryable `queued` over a row a requeue already left `queued`). Both
+        # would then write `read + 100`, so 200 spent and 200 billed appeared as
+        # `tokens_spent: 100`. The store adds THIS delta to whatever the row holds
+        # when the compare succeeds.
+        token_delta = None
+        if tokens_in is not None or tokens_out is not None:
+            token_delta = (max(0, int(tokens_in or 0)),
+                           max(0, int(tokens_out or 0)))
+            item.tokens_in = max(0, item.tokens_in) + token_delta[0]
+            item.tokens_out = max(0, item.tokens_out) + token_delta[1]
         if content_key is not None:
             item.content_key = content_key
         if content_changed is not None:
@@ -1845,7 +1947,8 @@ class BatchCoordinator:
             self._store.put_item(org_id, item)
             return _sync_item(caller_item, item), True
         if self._store.put_item_if_state(org_id, item, expect,
-                                         expected_attempts=expected_attempts):
+                                         expected_attempts=expected_attempts,
+                                         token_delta=token_delta):
             return _sync_item(caller_item, item), True
         # The row moved between the read above and this write. Report IT — the
         # caller decides whether its own work still applies.
@@ -2055,6 +2158,22 @@ class BatchCoordinator:
             # away, decided the other way.
             return self._bill(org_id, self._fresh(org_id, fresh),
                               outcome.tokens_in, outcome.tokens_out)
+        except Exception:
+            # ⛔ A BOOKKEEPING FAILURE IS NOT A LOST SPEND (#14415 review round 7,
+            # P2). `BATCH_QUERY_TIMEOUT_MS`'s own comment promises that a write
+            # which cannot complete inside the bound "FAILS the item (visible)" —
+            # it did not: the exception left `run_item` entirely, `_drain_batch`'s
+            # per-item handler only LOGGED it, no `charge_in/charge_out` was ever
+            # set so `record_item_spend` was never called and `_report_unmetered`
+            # never fired, and the row stayed `extracting` — where a later stale
+            # reclaim re-claims it and runs the runner AGAIN. Measured against the
+            # promise: the spend landed on neither the row, the ledger, nor the
+            # operator surface. The spend is real (the runner already returned), so
+            # it is billed here, exactly as the two arms above do.
+            _logger.warning("batch item %s: settle write failed, billing the "
+                            "spend that was made", fresh.item_id, exc_info=True)
+            return self._bill(org_id, self._fresh(org_id, fresh),
+                              outcome.tokens_in, outcome.tokens_out)
         if landed:
             # ⛔ THE CHARGE RECORD (#14415 review round 4, BLOCKING 4 / round 5,
             # HIGH). Only a call this process ACTUALLY LANDED may be charged, and
@@ -2180,21 +2299,24 @@ class BatchCoordinator:
             # truth instead of inventing a cancel over it.
             return self.settle(org_id, batch_id), items
         stamp = self._now()
-        stopped = False
+        # ⛔ THE `queued` CLASS IS STOPPED BY ONE STATEMENT, NOT ONE PER ITEM
+        # (#14415 review round 7, P2). The loop below did `get_item` +
+        # `put_item_if_state` per item — ~2 000 sequential round trips for the
+        # documented maximum batch, inside one request, on a two-worker executor:
+        # a 504 over a cancel that kept writing, with the customer's next status
+        # read queued behind it. The SET still matches `state = queued` only, so a
+        # claim taken after this call read the batch is NOT overwritten — the
+        # compare-and-set property the per-item write had, without the round trip.
+        stopped = self._store.cancel_queued_items(
+            org_id, batch_id, reason=(reason or "cancelled by the customer"),
+            updated_at=stamp) > 0
         for item in items:
             if item.state is BatchItemState.QUEUED:
-                # ⛔ COMPARE-AND-SET, or the cancel writes over a claim taken
-                # after this list was read (#14415 review round 4, BLOCKING 1):
-                # the drain would then run an item already reported cancelled,
-                # or — the other direction — a runner that DID run would have its
-                # result overwritten by this stale `queued` copy, so real spend
-                # was reported as never done. Reproduced both ways.
-                halted = self.advance(org_id, item, BatchItemState.CANCELLED,
-                                      reason=(reason or
-                                              "cancelled by the customer"),
-                                      expected=BatchItemState.QUEUED)
-                stopped = stopped or halted.state is BatchItemState.CANCELLED
-            elif (item.state in (BatchItemState.EXTRACTING,
+                # Already stopped above by the set-based write; only a row that
+                # moved on between the read and that write is left, and it is not
+                # ours to relabel.
+                continue
+            if (item.state in (BatchItemState.EXTRACTING,
                                  BatchItemState.EMBEDDED)
                   # ⛔ THE TEST IS THE CLAIM'S AGE, NOT ITS ATTEMPT COUNT (#14415
                   # review round 5, BLOCKING 1). `attempts == 0` is UNREACHABLE in
@@ -2607,9 +2729,22 @@ class BatchCoordinator:
             # that landed between the row read and here already wrote its own
             # `cancelled_at`/`cancel_reason`, and this derived write would replace
             # them with a guessed stamp.
+            #
+            # ⛔ SO `CANCELLED` IS **NOT** IN THE EXPECTED SET (#14415 review
+            # round 7, P2). It was, and that made the compare MATCH the row the
+            # cancel had just written: `settle()` read the batch as `running`,
+            # the cancel landed its item writes and its own `put_batch`
+            # (`cancelled_at = T`, `cancel_reason = "cancelled by the customer"`),
+            # and this derived write then overwrote both with `self._now()` and
+            # the first item's reason. `cancelled_at` is documented as "the audit
+            # half of a billing-visible act", so the field that says WHO asked and
+            # WHEN was being rewritten by a derivation. A row already `cancelled`
+            # needs no derivation — its cancel landed, which is the whole point of
+            # this branch — so the compare excludes it and a lost compare returns
+            # the row untouched.
             if not self._store.put_batch_if_state(
                     batch, (BatchState.ACCEPTED, BatchState.RUNNING,
-                            BatchState.RESUMING, BatchState.CANCELLED)):
+                            BatchState.RESUMING)):
                 return self._store.get_batch(batch.org_id, batch.batch_id) or batch
             return batch
         derived = (BatchState.COMPLETED if ok == len(items)
