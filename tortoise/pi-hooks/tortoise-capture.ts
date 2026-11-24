@@ -5468,8 +5468,10 @@ export function disposeQuarantine(
         return false;
       }
     }
-    // ⛔ FALLING THROUGH IS REACHABLE TWO WAYS, AND ONLY ONE IS A SUCCESSFUL LINK
-    // (review, cycle 16, P3 — the first version of this comment claimed otherwise):
+    // ⛔ FALLING THROUGH IS REACHABLE TWO WAYS, AND ONLY ONE IS A SUCCESSFUL LINK.
+    // ⚠️ Dated rather than round-cited on purpose: the finding was raised by the
+    // confirmation review at `08fd0891`, and a `(review, cycle N, Pn)` tag that names no
+    // row of this record is exactly the dead citation the record itself polices:
     //   • `linkSync` SUCCEEDED — the displaced claim is back at the path, so this copy
     //     is a duplicate and is swept;
     //   • `linkSync` failed EEXIST — a newer claim already holds the path, so this copy
