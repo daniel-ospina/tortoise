@@ -17413,8 +17413,26 @@ async def create_batch(body: BatchRequest,
     try:
         from tortoise.metering import get_capture_usage as _usage_reader
 
-        usage = await _cp_offload(lambda: _usage_reader(org_id),
-                                  op="batch_usage")
+        # ⛔ THE GRAPH LANE, AND A REFUSAL IS UNMEASURED — NEVER A SIGN-IN 503
+        # (#14415 review round 13, P2). This read went through `_cp_offload` with
+        # its defaults, which are FAIL-CLOSED *and* on the `"auth"` pool: a bound
+        # miss, a saturated pool or `_ContextNotReproduced` raised the
+        # repo-standard `control_plane_unavailable` 503 — copy "Sign-in is
+        # temporarily unavailable" — which `create_batch`'s
+        # `except HTTPException: raise` (written for BATCH_ESTIMATE_UNAVAILABLE)
+        # re-raised. So a metering blip refused a legitimate POST with a message
+        # about SIGN-IN, including the case the comment below says must proceed,
+        # and it spent sign-in capacity on a registry read — which
+        # `_cp_offload`'s/#3718's own contract forbids. `_graph_offload` is the
+        # documented lane for a registry read; its bound miss is caught here and
+        # becomes the UNKNOWN the two-case policy already knows how to weigh.
+        try:
+            usage = await _graph_offload(lambda: _usage_reader(org_id),
+                                         op="batch_usage")
+        except Exception:
+            _logger.warning("batch estimate: usage read refused by the offload",
+                            exc_info=True)
+            usage = {"measured": False, "unmeasured_reason": "read_error"}
         used_tokens = int(usage.get("capture_tokens_total") or 0)
         # ⛔ A ZERO IS A READING ONLY WHEN THE LEDGER WAS READ (#14415 review
         # round 4, P2). `get_capture_usage` NEVER raises (#923/#4051) — it
@@ -53647,7 +53665,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (727 distinct
+# ABSOLUTE line number from 208 tracked files (728 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
