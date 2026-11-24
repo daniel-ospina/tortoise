@@ -2113,11 +2113,18 @@ def test_the_claim_policy_agrees_on_every_summary_shape(tmp_path):
         # here carried `""`, which is why five rounds of parity work missed it.
         ("unclaimed, reason is EMPTY", 0, {"unavailable": True, "empty_reason": True},
          True, True),
+        # ⛔ THE FALSE-POSITIVE DIRECTION (review, cycle 13 P2). Every other row
+        # starts from an EXISTING fact, so "carry it forward" could be widened to
+        # "always stamp it" (`elif record is not None:`) with this matrix green — and
+        # a healthy box would then report `NO drain exclusion` forever. This is the
+        # only row with NO prior fact, which is what makes inventing one visible.
+        ("targeted, earned ok, NO prior fact", 3, {"no_prior": True}, True, False),
     ]
     for index, (label, attempted, state, writes, expected) in enumerate(matrix):
         root = tmp_path / f"row-{index}"
         root.mkdir(parents=True)
-        write_capture_status(root, dict(fact))
+        if not state.get("no_prior"):
+            write_capture_status(root, dict(fact))
         summary = FlushSummary(attempted=attempted)
         if state.get("held"):
             summary.claim_unavailable = False
@@ -2177,6 +2184,74 @@ def test_the_measurement_is_NO_VERDICT_when_a_process_never_arrived():
 
     assert M._no_verdict(_receipt(supported=False, bounded=True, winners=1,
                                   barren=1, processes=10)) is True
+
+
+def test_the_measurement_is_NO_VERDICT_when_the_winner_RELEASED_early():
+    """⛔ THE THIRD WAY OF MEASURING NOTHING, and the one no case exercised.
+
+    Every other F2 case passes `bounded=True`, so the `bounded is False` row of
+    `_no_verdict` could be deleted with the suite still green (#14480 review,
+    cycle 13 P2). It is not cosmetic: a `bounded: false, winners: 1, barren: 0`
+    receipt then exits 0 — byte-indistinguishable from a real two-drainer
+    FINDING, which is exactly the fail-open this field exists to close.
+
+    MUTATION THAT REDS THIS: drop the `race.get("bounded") is False` row from
+    `_no_verdict`.
+    """
+    import tools.measure_drain_convergence as M
+
+    assert M._no_verdict(_receipt(supported=False, bounded=False, winners=1,
+                                  barren=0, processes=10)) is True
+
+
+def test_the_measurement_is_NO_VERDICT_when_a_NESTED_race_measured_nothing():
+    """⛔ `--scenario all` puts the claim race only NESTED (`baseline` /
+    `saturated`), so a scan of the TOP-LEVEL receipt alone never sees it.
+
+    Deleting the nested scan left `_no_verdict` permanently `False` in the tool's
+    only multi-race mode — exit 0 on a barren run (#14480 review, cycle 13 P3).
+    The loop is what makes the mode's verdict exist at all.
+
+    MUTATION THAT REDS THIS: delete the `for key in ("baseline", "saturated")`
+    loop from `_no_verdict` (read `receipt["claim_race"]` only).
+    """
+    import tools.measure_drain_convergence as M
+
+    for key in ("baseline", "saturated"):
+        nested = {key: {"claim_race": {"supported": False, "bounded": True,
+                                       "winners": 1, "barren": 2, "processes": 10}}}
+        assert M._no_verdict(nested) is True, key + ": " + repr(nested)
+        # ⛔ And the containment check is BIDIRECTIONAL: a clean nested race is a
+        # real measurement, so the loop must not turn every nested receipt into a
+        # no-verdict — that would make `--scenario all` unreadable instead of safe.
+        clean = {key: {"claim_race": {"supported": True, "bounded": True,
+                                       "winners": 1, "barren": 0, "processes": 10}}}
+        assert M._no_verdict(clean) is False, key + ": " + repr(clean)
+
+
+def test_the_BARREN_counter_reads_each_processes_OWN_stdout():
+    """The `barren` counter is a PRODUCER claim, so it is graded at the producer.
+
+    `barren += out.count("BARREN")` could be disabled with the hand-built
+    receipts still green (a witness that passes `barren=4` proves nothing about
+    the counter) — and the printed receipt would then say `supported: true`
+    while the exit code said 2 (#14480 review, cycle 13 P2). This drives the real
+    `_claim_race` with the arrival barrier stubbed to expire for every process.
+
+    MUTATION THAT REDS THIS: delete the `barren += out.count("BARREN")` line.
+    """
+    import tools.measure_drain_convergence as M
+
+    receipt = M._claim_race(3, acquire_setup=(
+        "def acquire(root, leg=None):\n"
+        "    print('BARREN', flush=True)\n"
+        "    raise SystemExit(0)\n"
+    ))
+    assert receipt["barren"] == 3, receipt
+    assert receipt["winners"] == 0, receipt
+    # `_claim_race` returns the RACE dict; `_no_verdict` reads it under `claim_race`
+    # on a top-level receipt, so wrap it rather than passing the race itself.
+    assert M._no_verdict({"claim_race": receipt}) is True, receipt
 
 
 def test_TWO_winners_is_a_FINDING_not_a_no_verdict():
@@ -2276,6 +2351,6 @@ def test_the_CLAIM_RACE_BARRIER_reports_TWO_winners_as_a_FINDING():
         "the barrier must not wait on winners: every peer had finished attempting, "
         "so nothing straggled — " + repr(receipt))
     assert receipt["supported"] is False, receipt
-    assert M._no_verdict(receipt) is False, (
+    assert M._no_verdict({"claim_race": receipt}) is False, (
         "a real two-drainer race is the FINDING this harness was built for, not a "
         "no-verdict — " + repr(receipt))

@@ -8583,6 +8583,46 @@ test("#14350: a TARGETED pass cannot erase the durable claim fact (F1)", () => {
     "the state half of the record IS this pass's observation");
 });
 
+test("#14350: the TARGETED pass carries the fact END-TO-END (F1)", async () => {
+  // ⛔ THE POLICY IS NOT THE WIRING (review, cycle 13 P2). Every other F1 row on
+  // this leg calls `applyClaimPolicy` directly, so re-introducing the PRE-FIX call
+  // site — `if (summary.claimHeld || next === null) next = applyClaimPolicy(…)`, i.e.
+  // a claim-less pass with an earned record BYPASSES the policy — left the suite
+  // green while the durable fact was erasable again on this leg. The Python twin
+  // drives a real `flush_spool(only_session_id=…)`; this drives the extension.
+  //
+  // The ONLY writer here is the targeted/live pass: a real peer holds the drain
+  // claim, so the general pass is CONTENTION — it takes no claim, attempts nothing
+  // and writes nothing. That is what makes the assertion about the live pass.
+  //
+  // MUTATION THAT REDS THIS: restore the conditional call site above.
+  const spool = tmpSpool();
+  writeCaptureStatus(spool, {
+    version: 1, state: "ok",
+    claim_unavailable: true,
+    claim_unavailable_reason: "stale obstruction",
+    updated_at: new Date().toISOString(),
+  });
+  // Install a REAL claim through the module's own API (a hand-built directory is
+  // not a claim record and would be broken as stale instead of honoured).
+  const peer = acquireDrainClaim(spool, { leg: "peer" });
+  assert.ok(peer, "the fixture must hold a real claim, or the general pass writes");
+  writeSpoolEntry(spool, snapshot("live-carried"));
+  const { fetchImpl } = mockFetch([{ ok: true }]);
+  const pi = mockPi();
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl, spool));
+  await pi.handlers.session_shutdown(
+    { reason: "quit" },
+    mockCtx({ entries: PI_ENTRIES, sessionId: "live-carried" }),
+  );
+  const recorded = readCaptureStatus(spool);
+  assert.equal(recorded?.claim_unavailable, true,
+    "a claim-less pass has no standing to clear the fact, and the call site must "
+      + "apply the policy to see that: " + JSON.stringify(recorded));
+  assert.equal(recorded?.claim_unavailable_reason, "stale obstruction",
+    JSON.stringify(recorded));
+});
+
 test("#14350: a TARGETED pass that earned NO record writes nothing at all (F1)", () => {
   // The other half of the same rule: an empty or backoff-only targeted pass observed
   // nothing, so it must neither clear the fact nor invent a record.
@@ -8614,10 +8654,17 @@ test("#14350: the claim policy agrees between both legs on every summary shape",
   };
   const earned = { version: 1 as const, state: "ok" as const,
                    updated_at: "2026-01-02T00:00:00.000Z" };
-  // [label, earned, summary, writes?, claim_unavailable on the result]
-  const matrix: Array<[string, object | null, object, boolean, boolean | null]> = [
+  // [label, earned, summary, writes?, claim_unavailable on the result, prior?]
+  // ⛔ `prior: false` MEANS THERE IS NO FACT TO CARRY (review, cycle 13 P2). Every
+  // other row starts from an existing fact, so widening "carry it forward" to
+  // "always stamp it" (`if (next)`) was green here — and a healthy box would then
+  // report `NO drain exclusion` forever. It is the false-positive direction, and it
+  // is the only row that can see it.
+  const matrix: Array<[string, object | null, object, boolean, boolean | null,
+    boolean?]> = [
     ["targeted, earned nothing", null, {}, false, null],
     ["targeted, earned ok", earned, {}, true, true],
+    ["targeted, earned ok, NO prior fact", earned, {}, true, false, false],
     ["holder, earned nothing", null, { claimHeld: true }, true, false],
     ["holder, earned ok", earned, { claimHeld: true }, true, false],
     ["unclaimed, earned nothing", null, { claimUnavailable: true }, true, true],
@@ -8632,8 +8679,17 @@ test("#14350: the claim policy agrees between both legs on every summary shape",
     ["unclaimed, reason is EMPTY", null,
       { claimUnavailable: true, claimUnavailableReason: "" }, true, true],
   ];
-  for (const [label, earnedRec, summary, writes, expected] of matrix) {
-    const out = applyClaimPolicy(earnedRec as never, fact, summary as never);
+  for (const [label, earnedRec, summary, writes, expected, prior] of matrix) {
+    // ⛔ A FRESH COPY OF BOTH INPUTS PER ROW (review, cycle 13 P3). One mutable
+    // `earned` object was reused across rows and `applyClaimPolicy` MUTATES its
+    // `next`, so "holder, earned ok" only detected a missing `delete` because the
+    // earlier "targeted, earned ok" row had already stamped the fact onto that shared
+    // object — moved first, it passed with the clearing deleted. Order-dependence
+    // in a matrix is a guard that grades whichever row happened to run earlier.
+    const out = applyClaimPolicy(
+      earnedRec ? { ...earnedRec } : null,
+      prior === false ? undefined : { ...fact },
+      summary as never);
     assert.equal(out !== null, writes, label + " → writes? " + JSON.stringify(out));
     if (writes) {
       assert.equal(Boolean(out?.claim_unavailable), expected,

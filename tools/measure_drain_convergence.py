@@ -34,10 +34,25 @@ What it measures, and why each number is in the receipt:
 * ``high_water`` — the most captures the DRAIN held concurrently. It is the
   ceiling's own measurement: at 1, seven of the server's eight slots stay free
   for the user's live captures (condition 3's half of the story).
-* ``claim_winners`` — from a separate 8-process race: how many drainers acquired
-  the claim. MUST be 1. Threads would do for the drain measurement (the claim is
-  file-based, so it excludes them identically), but the population this protects
-  is PROCESSES, so the exclusion is measured across processes.
+* ``winners`` — from a separate 8-process race: how many drainers acquired the
+  claim. Threads would do for the drain measurement (the claim is file-based, so
+  it excludes them identically), but the population this protects is PROCESSES,
+  so the exclusion is measured across processes. ⛔ THE FIELD IS ``winners``; an
+  earlier revision of this docstring called it ``claim_winners``, a name the
+  receipt never carries, so a reader grepping the output found nothing (#14480
+  review, cycle 13 P3).
+* ``barren`` — how many processes never reached their attempt because their
+  arrival barrier expired. They are ABSENT from the race, not losers.
+* ``bounded`` — whether every process finished its attempt before the winner
+  released. ``False`` means a late starter could legitimately have taken a free
+  claim, so the winner count no longer measures the protocol.
+* ``supported`` — ``bounded and barren == 0 and winners == 1``, i.e. the receipt
+  is a measurement at all. It is NOT the exit code: the VERDICT is
+  ``_no_verdict``, which covers the three ways of measuring nothing —
+  ``bounded is False``, ``barren > 0``, ``winners == 0`` — and ``main`` exits
+  **2** on any of them. ``winners`` 0 is therefore no longer readable as "the
+  exclusion works": it is no verdict, and a REPORTED ``winners`` of 2 or more
+  stays the FINDING this harness exists to produce (exit 0).
 """
 from __future__ import annotations
 
