@@ -55,6 +55,8 @@ import sys
 import threading
 import time
 
+from tortoise.env_truthy import TRUTHY
+
 _logger = logging.getLogger(__name__)
 
 #: How often the parent-liveness check runs when no request is in flight. The
@@ -75,9 +77,17 @@ ENV_WORKER_REQUIRE_PEER = "TORTOISE_EMBED_WORKER_REQUIRE_PEER"
 
 
 def _require_peer() -> bool:
-    """Whether an unverifiable peer must be REFUSED rather than allowed."""
-    return (os.environ.get(ENV_WORKER_REQUIRE_PEER) or "").strip().lower() in {
-        "1", "true", "yes", "on"}
+    """Whether an unverifiable peer must be REFUSED rather than allowed.
+
+    ⛔ THE VOCABULARY IS IMPORTED, NOT RE-DECLARED. This read shipped (#14220) with its own
+    inline `{"1", "true", "yes", "on"}`, making it the FIFTH ad-hoc copy of the
+    truthy/falsy contract and reddening
+    `tests/test_env_truthy.py::test_no_adhoc_vocabulary_literal_outside_the_contract` on
+    `main` — so the required `python-ci-gate` was red for every PR (#14453 / #14463).
+    `TRUTHY` holds exactly those four members, so this is behaviour-identical; the point of
+    `tortoise.env_truthy` is that two code paths parsing the same env var cannot drift.
+    """
+    return (os.environ.get(ENV_WORKER_REQUIRE_PEER) or "").strip().lower() in TRUTHY
 
 
 def _peer_uid(conn: socket.socket) -> int | None:

@@ -21968,7 +21968,20 @@ _CUT_CLAIM_RESTORED_RE = re.compile(
 #: verdict on a live arm was a FALSE PASS while the uppercase control redded. The
 #: phrase is narrowed to `cut by|in|with` on purpose: a bare `\bcut\b` (or `re.I`)
 #: also matches `re-cut` and prose like "a better cut of two", which is not a verdict.
-_CUT_CLAIM_VERDICT_RE = re.compile(r"\bCUT\b|\bcut\s+(?:by|in|with)\b")
+_CUT_CLAIM_VERDICT_RE = re.compile(
+    r"\bCUT\b"
+    #: ⛔ THE LOWERCASE VERDICT IS GUARDED BY A PREFIX LOOKBEHIND, NOT BY ITS FOLLOWING
+    #: WORD. `re-cut` and hyphenated compounds are not verdicts, and neither is "a better
+    #: cut of two" — the two shapes the previous `cut\s+(?:by|in|with)` narrowing existed to
+    #: exclude. But narrowing on the FOLLOWING word also excluded `cut (B7)`, `cut,
+    #: 2026-11-23` and `cut as durations-map arithmetic`, all of which the corpus really
+    #: writes (measured: `docs/plans/2026-08-18-1473-tier2-duration.md:107`, "Three of the
+    #: four were cut as durations-map arithmetic by `#14419`'s B7 cut"), and each of those
+    #: read as NO VERDICT AT ALL — i.e. CLEAN, the same FALSE PASS the lowercase arm was
+    #: added to close. The prefix guard is what keeps `re-cut (` out.
+    r"|(?<![-A-Za-z_])cut\s+(?:by|in|with|as)\b"
+    r"|(?<![-A-Za-z_])cut\s*[\(,]",
+)
 _CUT_CLAIM_NAME_RE = re.compile(r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z]\w*)`")
 #: ⛔ THE WRAP IS PART OF THE NAME, NOT A BREAK IN IT. A long name is often backticked
 #: across a comment's line break — `` `…_and_meet_the_` `` then `` `wall_target` `` — which an
@@ -21999,6 +22012,11 @@ _CUT_CLAIM_WRAPPED_RE = re.compile(
 #: rebuilt inside its own filter. _cut_claim_is_claim therefore keeps any name `live`
 #: defines — unbackticked here for the reason above.
 _CUT_CLAIM_ARM_RE = re.compile(r"^(?:test_\w+|_[A-Za-z]\w*)$")
+#: The one scanned source that is the PIN ITSELF, not a record: its prose and its synthetic
+#: fixtures carry verdicts too, so a non-vacuity floor counted over all sources can be met
+#: while every real record file is unread. See the floor in
+#: `test_no_record_calls_an_arm_CUT_while_that_arm_is_live`.
+_SELF_SCAN_REL = "tests/test_ci_selection.py"
 _CUT_CLAIM_FILES = (
     "tools/ci_timing.py",
     "tools/ci_selection.py",
@@ -22050,6 +22068,14 @@ def _cut_claims() -> list[tuple[str, int, str, bool]]:
 #: defect this PR repairs. `_COMMENT_BULLET_RE` is the statement.
 _COMMENT_BULLET_RE = re.compile(r"\n[ \t]*#+[ \t]*[-*][ \t]")
 _BLOCK_SEPARATORS = ("\n\n", "\n- ", "\n* ")
+#: ⛔ AN INDENTED MARKDOWN BULLET AND AN ORDERED ITEM ARE BLOCKS TOO. `_BLOCK_SEPARATORS`
+#: matches column-0 bullets only, and `_COMMENT_BULLET_RE` requires a `#`, so a plain
+#: indented list — the spelling the docstrings in this file already use — had no separator
+#: at all and one bullet's verdict charged the NEXT bullet's arm: measured,
+#: `    - A — CUT (B7)` / `    - B — **SURVIVES** (never cut)` read B as CUT, a FALSE RED
+#: that reds a record which is right. Latent on this tree (0 contradictions), which is why
+#: it costs nothing to close now and would have red a correct record later.
+_INDENTED_BLOCK_RE = re.compile(r"\n[ \t]+[-*][ \t]|\n[ \t]*[0-9]{1,2}[.)][ \t]")
 
 
 def _claim_block_bounds(text: str, pos: int) -> tuple[int, int]:
@@ -22064,10 +22090,12 @@ def _claim_block_bounds(text: str, pos: int) -> tuple[int, int]:
     starts = [i for i in (text.rfind(sep, 0, pos) for sep in _BLOCK_SEPARATORS)
               if i != -1]
     starts += [m.start() for m in _COMMENT_BULLET_RE.finditer(text, 0, pos)]
+    starts += [m.start() for m in _INDENTED_BLOCK_RE.finditer(text, 0, pos)]
     lo = (max(starts) + 1) if starts else 0
     ends = [i for i in (text.find(sep, pos) for sep in _BLOCK_SEPARATORS)
             if i != -1]
     ends += [m.start() for m in _COMMENT_BULLET_RE.finditer(text, pos)]
+    ends += [m.start() for m in _INDENTED_BLOCK_RE.finditer(text, pos)]
     return lo, (min(ends) if ends else len(text))
 
 
@@ -22078,25 +22106,41 @@ def _arm_names_in(text: str) -> set[str]:
     return {n for n in names if _CUT_CLAIM_ARM_RE.match(n)}
 
 
+#: ⛔ A SENTENCE ENDS AT A FULL STOP OR SEMICOLON FOLLOWED BY ANY WHITESPACE — A LINE
+#: BREAK INCLUDED, and through a `#` comment prefix. Comment prose WRAPS, so the corpus
+#: writes the overwhelming majority of its sentence boundaries as `\n` or `\n# `, not as
+#: `. `. A separator set of `(". ", "; ")` therefore left the name's clause running to the
+#: end of the PARAGRAPH whenever the sentences were wrapped, and a subject-less
+#: collective marker in the NEXT sentence then defused a false "CUT" — measured, the SAME
+#: words flip purely by the break:
+#:   "`X` was CUT by #14419. Forty-two arms were RESTORED by `#14481`."   -> contradicts (caught)
+#:   "`X` was CUT by #14419.\nForty-two arms were RESTORED by `#14481`."  -> defused (MISSED)
+#:   "# `X` was CUT by #14419.\n# Forty-two arms were RESTORED by `#14481`"  -> defused (MISSED)
+#: …and the third spelling is the one every paragraph in the five scanned comment files
+#: uses. The last branch is the plain `A. B` case; a digit after the stop is not a
+#: boundary (`837.7`, `v1.2`, `e.g.` stays a boundary but only NARROWS), and a stop with
+#: nothing after it is not one either, which is what each alternative's whitespace class
+#: states.
+_CLAUSE_SEP_RE = re.compile(r"[.;](?:[ \t]*\n[ \t]*#*[ \t]*|[ \t]+)")
+
+
 def _claim_clause_bounds(text: str, pos: int) -> tuple[int, int]:
     """The CLAUSE holding `pos`: its bullet/paragraph, narrowed at sentence ends.
 
     A bullet or paragraph is the unit a reader sees; a sentence is the unit a verdict
     is WRITTEN in. Splitting at both is what makes the restoration test attributive:
-    a marker in the next bullet, or after a full stop, is a different statement.
+    a marker in the next bullet, or after a sentence end, is a different statement.
     """
     lo, hi = _claim_block_bounds(text, pos)
     block_lo = lo          # ⛔ `cut` is an offset into the BLOCK, so the end bound must be
     clause = text[lo:hi]   # computed against the block start, never the advanced `lo`:
     rel = pos - lo         # mixing them inflated the clause past its own full stop whenever
-    for sep in (". ", "; "):   # the sentence had a preamble, which let an unrelated later
-        cut = clause.rfind(sep, 0, rel)   # "RESTORED by …" defuse the verdict (measured).
-        if cut != -1:
-            lo = max(lo, block_lo + cut + len(sep))
-    for sep in (". ", "; "):
-        cut = clause.find(sep, rel)
-        if cut != -1:
-            hi = min(hi, block_lo + cut + 1)
+    for m in _CLAUSE_SEP_RE.finditer(clause):
+        if m.end() <= rel:     # the sentence had a preamble, which let an unrelated later
+            lo = max(lo, block_lo + m.end())   # "RESTORED by …" defuse the verdict.
+        elif m.start() >= rel:
+            hi = min(hi, block_lo + m.start() + 1)
+            break
     return lo, hi
 
 
@@ -22194,6 +22238,18 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         "(the durations arithmetic this PR restored, and the arms B7 really did "
         "take), so this is the scan going blind — a renamed verdict word or file — "
         f"not a tree with nothing to check. claims={claims!r}")
+    # ⛔ AND THE FLOOR MUST NOT BE SATISFIED BY THIS TEST'S OWN FIXTURES. At this head 28
+    # of the 47 claims the scan reads come from THIS file — the guard's prose and the
+    # synthetic passages below — so `len(claims) >= 2` passes green even when a real record
+    # source is dropped from `_CUT_CLAIM_FILES`, which is exactly the recurrence
+    # `fb21c37aa298` had to fix for the plan ledger. Count the sources the pin exists to
+    # read. Per-file equality was deliberately NOT used: it would red a later PR that
+    # legitimately removes a file's last verdict, which is not a lost source.
+    foreign = [c for c in claims if c[0] != _SELF_SCAN_REL]
+    assert len(foreign) >= 2, (
+        "the CUT-verdict scan read its verdicts only from its OWN fixtures — a record "
+        "source was dropped from `_CUT_CLAIM_FILES` or became unreadable, and the "
+        f"non-vacuity floor would otherwise pass green. claims={claims!r}")
     # ⛔ AND THE WRAP MUST BE READ, not skipped. `origin/main`'s pre-fix
     # `slow_wall_projection` sentence backticked this arm across a line break, and an
     # unbroken-token scan called it clean — the false-PASS this pin exists to forbid.
@@ -22249,6 +22305,13 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         "`test_other` was RESTORED by `#14481`. `test_live` was CUT by #14439.",
         "Forty-two arms were RESTORED by `#14481`. `test_live` was CUT by #14419.",
         "- `test_other` — CUT (B7) and RESTORED by `#14481`.\n- `test_live` — CUT (B7).\n",
+        # ⛔ THE SAME TWO SENTENCES WELDED WHERE THE CORPUS ACTUALLY BREAKS THEM. Comment
+        # prose wraps, so a separator set of `(". ", "; ")` saw no boundary here at all and
+        # let the next sentence's subject-less "Forty-two arms were RESTORED" defuse this
+        # arm's verdict — a FALSE PASS in the corpus's dominant spelling, while the `. `
+        # spelling above caught it. Both spellings are pinned now.
+        "`test_other` was RESTORED by `#14481`.\n`test_live` was CUT by #14419.\n",
+        "# `test_other` was RESTORED by `#14481`.\n# `test_live` was CUT by #14419.\n",
     ):
         got = {n: c for _o, n, c in _cut_claims_in(passage, live2)}
         assert got.get("test_live") is True, (
@@ -22270,6 +22333,23 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
     got = _cut_claims_in("`test_live` was cut by #14439's re-cut.", {"test_live"})
     assert [c for _o, _n, c in got] == [True], (
         f"a lowercase verdict on a live arm must contradict: {got!r}")
+    # ⛔ AND THE SPELLINGS THE CORPUS ACTUALLY WRITES. The previous narrowing
+    # (`cut\s+(?:by|in|with)`) excluded `cut (B7)`, `cut, <date>` and `cut as …`, and every
+    # one of them read as NO VERDICT AT ALL — CLEAN, on a live arm. Each shape is real:
+    # `docs/plans/2026-08-18-1473-tier2-duration.md:107` writes "cut as durations-map
+    # arithmetic".
+    for passage in ("`test_live` cut (B7).",
+                    "`test_live` cut, 2026-11-23.",
+                    "`test_live` cut as durations-map arithmetic."):
+        got = _cut_claims_in(passage, {"test_live"})
+        assert [c for _o, _n, c in got] == [True], (
+            f"a lowercase verdict in this spelling must contradict: {passage!r} -> {got!r}")
+    # …and the PREFIX guard is what keeps the excluded shapes out, so pin that direction
+    # too: widening by the following word would have matched these.
+    for passage in ("`test_live` survives the re-cut (B7).",
+                    "`test_live` is a better cut of two passes."):
+        got = _cut_claims_in(passage, {"test_live"})
+        assert not got, f"this is not a verdict: {passage!r} -> {got!r}"
     # …while prose that merely contains the word is not a verdict.
     got = _cut_claims_in("This is a better cut of two passes; `test_live` is graded.",
                          {"test_live"})
@@ -22282,6 +22362,18 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
     got = {n: c for _o, n, c in _cut_claims_in(indented, {"test_c_arm", "test_d_arm"})}
     assert got == {"test_c_arm": True}, (
         f"an indented `# - ` bullet must bound its verdict: {got!r}")
+    # ⛔ AND A PLAIN INDENTED BULLET / AN ORDERED ITEM IS A BLOCK TOO. Docstrings in this
+    # file indent markdown lists, and neither shape was a separator — `_BLOCK_SEPARATORS`
+    # matches column-0 bullets and `_COMMENT_BULLET_RE` needs a `#` — so one bullet's
+    # verdict charged the next bullet's arm: a FALSE RED that reds a record which is right.
+    for indented_list in (
+        "    - `test_c_arm` — CUT (B7).\n    - `test_d_arm` — **SURVIVES** (never cut).\n",
+        "1. `test_c_arm` — CUT (B7).\n2. `test_d_arm` — **SURVIVES** (never cut).\n",
+    ):
+        got = {n: c for _o, n, c in
+               _cut_claims_in(indented_list, {"test_c_arm", "test_d_arm"})}
+        assert got == {"test_c_arm": True}, (
+            f"an indented/ordered bullet must bound its verdict: {indented_list!r} -> {got!r}")
 
     contradictions = [c for c in claims if c[3]]
     assert not contradictions, (
