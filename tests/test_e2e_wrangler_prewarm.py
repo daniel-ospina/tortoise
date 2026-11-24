@@ -1780,3 +1780,227 @@ def test_the_playwright_action_arm_reds_on_a_no_op_lock_wait() -> None:
     )
     # A missing action is a problem, not an empty offender list.
     assert _playwright_action_offenders({})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The pip wedge (#14407) — the SAME defect class as the npm one above, on the
+# Python side of the same pool runner.
+#
+# `pip install -e .` REPLACES the installed distribution, so it uninstalls the old
+# one first, and it does that by MOVING files aside inside the prefix. A job
+# cancelled between the move-aside and the clean-up leaves pip's `~`-prefixed
+# stash directory AND a `dist-info` that lost its `RECORD`. Every later install in
+# that prefix then dies, and it is not a flake — pip re-reads the same RECORD-less
+# metadata and recomputes the same refusal:
+#
+#   WARNING: Ignoring invalid distribution ~ortoise-graph (…/site-packages)
+#   Found existing installation: tortoise-graph None
+#   error: uninstall-no-record-file
+#   × Cannot uninstall tortoise-graph None
+#   ╰─> The package's contents are unknown: no RECORD file was found for tortoise-graph.
+#
+# MEASURED 2026-11-24T04:09:32Z — the REQUIRED `legal-e2e` job, step
+# `Run pip install -e '.[test]'`, on the pool runner `pi-runner-vm-2`
+# (run 45323932558, job 138208901025), exit 1. The residue lives in the shared
+# `setup-python` tool cache, so it is inherited by every job the scheduler puts on
+# that runner: the red belongs to a state the job did not create, and no retry can
+# clear it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+PIP_WEDGE_SCRIPT = REPO_ROOT / ".github" / "scripts" / "pip-wedge.sh"
+
+#: The purelib the failing job resolved, and the stash directory pip printed —
+#: both quoted from the build that redded, so the fixture below is the measured
+#: shape rather than an imagined one. The bare `~` is the same residue after a
+#: partial move: pip prints `Ignoring invalid distribution ~` for it.
+MEASURED_PIP_PURELIB = (
+    "/home/danielospina/actions-runner-2/_work/_tool/Python/3.12.14/arm64"
+    "/lib/python3.12/site-packages"
+)
+MEASURED_PIP_RESIDUE = f"{MEASURED_PIP_PURELIB}/~ortoise-graph"
+
+#: The two workflows whose red BLOCKS a merge — the required contexts. Every job
+#: in them that installs the repo package heals the prefix first; the other
+#: workflows (manual/perf/blog/timing/prod) are not on the required surface and
+#: are out of this sweep's scope, stated rather than silently skipped.
+PIP_HEAL_WORKFLOWS = ("ci.yml", "python-ci.yml")
+
+
+def _run_pip_wedge(*args: str) -> subprocess.CompletedProcess:
+    assert PIP_WEDGE_SCRIPT.is_file(), (
+        f"the healer the install steps call is missing: {PIP_WEDGE_SCRIPT}"
+    )
+    return subprocess.run(
+        ["bash", str(PIP_WEDGE_SCRIPT), *args], capture_output=True, text=True, timeout=120
+    )
+
+
+def _pip_wedged_prefix(tmp_path: Path, *, record: bool = False) -> Path:
+    """A prefix in the state the failing job found.
+
+    Three entries, and each one is a half of the measured residue:
+      * `~ortoise-graph/` — pip's stash, printed as an "invalid distribution";
+      * `~`               — the same stash after a partial move;
+      * `tortoise_graph-0.2.1.dist-info/` — the distribution, WITHOUT a `RECORD`
+        unless `record=True` (that flag is what separates "pip refuses this" from
+        "pip can uninstall this itself").
+    """
+    prefix = tmp_path / "site-packages"
+    (prefix / "~ortoise-graph" / "lib").mkdir(parents=True)
+    (prefix / "~ortoise-graph" / "lib" / "stale.py").write_text("# residue\n", encoding="utf-8")
+    (prefix / "~" / "lib").mkdir(parents=True)
+    dist_info = prefix / "tortoise_graph-0.2.1.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: tortoise-graph\nVersion: 0.2.1\n", encoding="utf-8"
+    )
+    if record:
+        (dist_info / "RECORD").write_text("", encoding="utf-8")
+    return prefix
+
+
+def test_the_measured_residue_is_the_name_the_healer_globs_for(tmp_path: Path) -> None:
+    """The healer's glob is built on pip's OWN stash naming, and that naming is the
+    MEASUREMENT: the build that redded printed `~ortoise-graph` and a bare `~`, both of
+    which begin with the tilde pip prepends when it moves a distribution aside. A fixture
+    named after anything else would grade the healer against a residue pip never makes.
+    """
+    measured = Path(MEASURED_PIP_RESIDUE)
+    assert measured.parent == Path(MEASURED_PIP_PURELIB)
+    assert measured.name.startswith("~"), measured.name
+    prefix = _pip_wedged_prefix(tmp_path)
+    assert (prefix / measured.name).is_dir(), (
+        f"the fixture does not carry the measured residue name ({measured.name})"
+    )
+
+
+def test_the_pip_healer_clears_the_state_that_blocks_the_next_install(tmp_path: Path) -> None:
+    """Before the heal the prefix carries the residue; after it, it does not."""
+    prefix = _pip_wedged_prefix(tmp_path)
+    blocked = prefix / "tortoise_graph-0.2.1.dist-info"
+    assert blocked.is_dir() and not (blocked / "RECORD").exists(), (
+        "the fixture is not the measured state: a dist-info with a RECORD is one pip "
+        "can uninstall itself"
+    )
+
+    healed = _run_pip_wedge("clear", "--at", str(prefix), "tortoise-graph")
+    assert healed.returncode == 0, healed.stdout + healed.stderr
+    assert f"CLEARED {prefix / '~ortoise-graph'}" in healed.stdout, healed.stdout
+    assert f"CLEARED {prefix / '~'}" in healed.stdout, healed.stdout
+    assert f"CLEARED {blocked} (no RECORD)" in healed.stdout, healed.stdout
+    assert not (prefix / "~ortoise-graph").exists()
+    assert not (prefix / "~").exists()
+    assert not blocked.exists()
+
+
+def test_the_pip_healer_leaves_a_distribution_pip_can_uninstall(tmp_path: Path) -> None:
+    """A `dist-info` WITH a `RECORD` is not residue — deleting it would be wider
+    than the wedge requires, and it is the only difference between the two arms."""
+    prefix = _pip_wedged_prefix(tmp_path, record=True)
+    healed = _run_pip_wedge("clear", "--at", str(prefix), "tortoise-graph")
+    assert healed.returncode == 0, healed.stdout + healed.stderr
+    assert (prefix / "tortoise_graph-0.2.1.dist-info" / "RECORD").is_file()
+    # The stash half is still healed: it is residue whatever the dist-info holds.
+    assert not (prefix / "~ortoise-graph").exists()
+
+
+def test_the_pip_healer_reports_a_clean_prefix_and_touches_nothing(tmp_path: Path) -> None:
+    """No residue is not a failure, and a healthy install is never removed."""
+    prefix = _pip_wedged_prefix(tmp_path, record=True)
+    shutil.rmtree(prefix / "~ortoise-graph")
+    shutil.rmtree(prefix / "~")
+    healed = _run_pip_wedge("clear", "--at", str(prefix), "tortoise-graph")
+    assert healed.returncode == 0, healed.stdout + healed.stderr
+    assert "NO-STALE-STATE" in healed.stdout, healed.stdout
+    assert (prefix / "tortoise_graph-0.2.1.dist-info" / "RECORD").is_file()
+
+
+def test_the_pip_healer_refuses_a_relative_prefix() -> None:
+    """The prefix is the interpreter's OWN purelib; a relative argument would heal
+    whatever directory the cwd happens to sit in."""
+    out = _run_pip_wedge("clear", "--at", "site-packages", "tortoise-graph")
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert "absolute path" in out.stderr, out.stderr
+
+
+def test_the_pip_healer_refuses_an_import_name() -> None:
+    """`tortoise` is the IMPORT name; the dist-info directory is named after the
+    DISTRIBUTION (`tortoise_graph`). Healing the wrong name would report a clean
+    prefix and leave the wedge in place — a false pass."""
+    out = _run_pip_wedge("clear", "--at", "/tmp", "tortoise/graph")
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert "not a distribution name" in out.stderr, out.stderr
+
+
+def test_the_pip_healer_does_not_read_on_when_a_residue_survives(tmp_path: Path) -> None:
+    """A residue it cannot remove is a red with a NAMED cause, never a quiet pass:
+    the next `pip install -e` would fail `uninstall-no-record-file` and blame pip."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the directory mode this arm needs to make rm fail")
+    prefix = _pip_wedged_prefix(tmp_path)
+    prefix.chmod(0o500)  # a directory entry cannot be unlinked from a readonly parent
+    try:
+        out = _run_pip_wedge("clear", "--at", str(prefix), "tortoise-graph")
+    finally:
+        prefix.chmod(0o700)
+    assert out.returncode == 2, out.stdout + out.stderr
+    assert "could not remove" in out.stderr and str(prefix) in out.stderr, out.stderr
+    assert "uninstall-no-record-file" in out.stderr, out.stderr
+    # Neither residue went anywhere: the arm proves a fail-CLOSED report, so nothing
+    # may be half-removed while the exit code still says the prefix is wedged.
+    assert (prefix / "~ortoise-graph").is_dir(), "the fixture did not survive the removal"
+    assert (prefix / "~").is_dir(), "the fixture did not survive the removal"
+
+
+def _executed_heal_and_install(run: str) -> tuple[int | None, int | None]:
+    """Line numbers of the EXECUTED heal and install commands inside one `run:`.
+
+    Comment lines are skipped on purpose: a step whose own commentary mentions
+    `pip install -e` before the heal would otherwise read as an install that ran
+    first, and the arm would red on the prose it is asking for.
+    """
+    heal = install = None
+    for index, line in enumerate(run.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if heal is None and "pip-wedge.sh" in stripped:
+            heal = index
+        if install is None and "pip install -e" in stripped:
+            install = index
+    return heal, install
+
+
+def test_every_repo_package_install_step_heals_the_pip_prefix_first() -> None:
+    """The heal must come BEFORE the install, in every job of the required surface.
+
+    An install that runs first has already failed by the time the heal could run,
+    so the order is the whole property — the same arm the npm healer carries.
+    """
+    healed = 0
+    for name in PIP_HEAL_WORKFLOWS:
+        path = WORKFLOWS / name
+        assert path.is_file(), f"{path} is missing — the sweep is aimed at the wrong tree"
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job_name, job in (doc.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+            for index, step in enumerate(steps):
+                run = _run(step)
+                if "pip install -e" not in run:
+                    continue
+                heal_line, install_line = _executed_heal_and_install(run)
+                inline = heal_line is not None and (
+                    install_line is None or heal_line < install_line
+                )
+                previous = _run(steps[index - 1]) if index else ""
+                assert inline or "pip-wedge.sh" in previous, (
+                    f"{name}:{job_name}: the step installing the package does not heal the "
+                    "runner's pip prefix first — a `~` stash plus a RECORD-less dist-info "
+                    "left by ONE cancelled job makes every later `pip install -e` in that "
+                    "prefix fail `uninstall-no-record-file` (measured 2026-11-24T04:09:32Z, "
+                    "legal-e2e on pi-runner-vm-2)"
+                )
+                healed += 1
+    assert healed, f"no `pip install -e` step in any of {PIP_HEAL_WORKFLOWS} — the sweep is wrong"
