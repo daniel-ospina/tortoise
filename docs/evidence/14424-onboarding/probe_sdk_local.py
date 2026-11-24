@@ -5,8 +5,15 @@ caller runs it from (no extractor, no deploy, no hosted credential):
 
     export HOME=$(mktemp -d)   # ONE home for both lines: a second `mktemp -d`
                                # would point the probe at a DB `init` never made
-    uv run python -m tortoise init          # embedded graph
+    printf 'n\n' | uv run python -m tortoise init   # embedded graph; 'n' answers
+                                                    # the "index this repo?" prompt
     uv run python docs/evidence/14424-onboarding/probe_sdk_local.py
+
+⛔ `init` PROMPTS when run from a repo root (`Found N markdown files in this
+repo. Index them into Tortoise? [Y/n]:`). Left unanswered on a non-TTY stdin it
+raises `EOFError` and exits 1 — the graph is still created, but the first
+command prints a stack trace. `n` declines the indexer; bare Enter accepts and
+starts one in the background. See README §4 for the same note.
 
 Prints one JSON document: per-step wall clock in milliseconds, the created
 node verbatim, the by-id read, and the search hit that names the marker. Exit

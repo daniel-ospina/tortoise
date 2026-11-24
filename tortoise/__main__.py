@@ -6097,7 +6097,15 @@ def _cmd_create_point(args) -> int:
             print(_hint, file=_sys.stderr)
         return 1
     except URLError as e:
-        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        # #14424 review P3: mask the base before printing it. Five lines below,
+        # the success hint this verb rewrites prints it through
+        # `_printable(_mask_display_target(...))` for exactly this reason: a
+        # store `api_url` carrying `user:pass@` (or `?token=`) reached stderr
+        # verbatim on any connect failure of the FIRST-RUN verb. The idiom is
+        # the module's own (`_doctor_hosted_rows`, `:5192`).
+        print(f"Cannot reach API at "
+              f"{_printable(_mask_display_target(api_url))}: {e.reason}",
+              file=_sys.stderr)
         # #14424 review: "nothing was sent" is NOT a fact this error can
         # establish, and the neighbouring HTTPError arm already says so about
         # the same write. `urlopen` raises `URLError` from `h.request(...)` — a
@@ -6130,7 +6138,28 @@ def _cmd_create_point(args) -> int:
               "re-sending, or re-run with `--dedup` to make the retry safe.",
               file=_sys.stderr)
         return 1
+    except _json.JSONDecodeError as e:
+        # #14424 review P3: the server ANSWERED, so this is not the arm above —
+        # the connection did not fail, the body was unreadable (an HTML proxy
+        # page behind a 502, a truncated body). The write still MAY have landed,
+        # so the next action is the same, and the CAUSE is stated apart from it.
+        print(f"Cannot read the API's response as JSON ({e}).", file=_sys.stderr)
+        print("The server answered, so the write MAY have landed. Reconcile "
+              "with `GET /v1/points` before re-sending, or re-run with "
+              "`--dedup` to make the retry safe.", file=_sys.stderr)
+        return 1
 
+    # #14424 review P3: a 2xx this verb cannot READ is not a success, and until
+    # here it was a bare traceback on the first-run verb — `result.get` on a
+    # `[]`/`null` body raises AttributeError and an HTML proxy page raises
+    # JSONDecodeError out of `main()`, which has no backstop (`raise
+    # SystemExit(main())`). `_cmd_org_keys_list` one command up guards the same
+    # shape the same way ("2xx with a non-object body ([]/null) — clean error,
+    # not AttributeError").
+    if not isinstance(result, dict):
+        print(f"Invalid response from API: expected a JSON object, got "
+              f"{type(result).__name__}.", file=_sys.stderr)
+        return 1
     point_id = result.get("id", result.get("point_id", "unknown"))
     print(f"Created point: {point_id}")
     print(f"  Kind: {args.kind or 'statement'}")
