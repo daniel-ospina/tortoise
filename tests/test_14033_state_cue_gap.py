@@ -268,18 +268,22 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       routes, and so does one with a bare quantifier subject (`is the plan some
       team abandoned`), and so does a TIME SPAN that names no record
       (`is the quarter ended`) — see the module's ``_NP_STOP`` note for all
-      four residuals;
+      five residuals;
     * …and the same stop is what refuses an ADJUNCT: `is the data safe once
       archived`, `is the report still accurate once archived` and
       `is the policy unless bookings were cancelled` — the ending there belongs
       to an adjunct clause and the question's predicate is `safe` / `accurate` /
       the policy's applicability, so the run would swallow it;
     * the PREDICATE-MODIFIER stop is the sixth guard, and its falsifier is the
-      twelve measured rows of
-      :func:`test_a_modified_predicate_is_not_the_question_asked` — dropping the
-      `not|never|…|or` line routes the negated / future / disjunctive predicate
-      class, which answers the question with the POLARITY-INVERTED (or a
-      not-yet-existing) population;
+      TWENTY-THREE measured rows of
+      :func:`test_a_modified_predicate_is_not_the_question_asked` (the count is
+      the tuple's own length, not the review's twelve and not the round-8
+      nineteen: twelve NEGATED — seven plain, four correlative/`no longer`/
+      `any longer`, one standalone `n't` — seven FUTURE, three PROGRESSIVE and
+      one DISJUNCTIVE) —
+      dropping the `not|never|…|or` line routes that class, which answers the
+      question with the POLARITY-INVERTED (or a not-yet-existing, or an
+      in-flight) population;
     * relaxing the START anchor (`^(?:is|are|was|were)` →
       `(?:^|\\b)(?:is|are|was|were)`) routes the two NESTED
       clauses at the end of this loop — measured, with that one edit, nothing
@@ -359,11 +363,11 @@ def test_the_imperative_lookup_for_one_record_is_still_refused():
 
 #: A PREDICATE MODIFIER between the head noun and the ending — the slot can only
 #: be modifying the predicate, and every row here was answered with the ended
-#: population before the NP stop carried `not|never|to|be|going|about|due|
-#: scheduled|or|neither|nor|longer` (PR #14491 review, P1/P2 — measured on the
-#: pre-fix head, all routed to `ended`/`is_predicate`).
+#: population before the NP stop carried `not|never|neither|nor|longer|to|being|or`
+#: (PR #14491 review, P1/P2 — measured on the pre-fix head, all routed to
+#: `ended`/`is_predicate`).
 #:
-#: Three classes, one failure each, and none of them is the question asked:
+#: Four classes, one failure each, and none of them is the question asked:
 #:
 #: * NEGATION — `is the plan not cancelled` was served the population of
 #:   **cancelled** records: the polarity-INVERTED answer to the question. That is
@@ -374,6 +378,10 @@ def test_the_imperative_lookup_for_one_record_is_still_refused():
 #:   archive` all stay relevance reads).
 #: * FUTURITY / INTENT — `is the v2 api to be retired` asks about something that
 #:   has NOT ended; the ended population can only answer with records that have.
+#: * PROGRESS — `is the report being archived` is an action in flight. It is the
+#:   one member of the class the round-8 cut left open (`to` stops the infinitives,
+#:   and no infinitive marker sits in front of a progressive), so it has its own
+#:   token and its own rows here.
 #: * DISJUNCTION — `is the ticket still open or cancelled` asks about two states
 #:   at once, and one population cannot answer both.
 #:
@@ -397,6 +405,11 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     "is the plan neither deprecated nor retired",
     "is the ticket still not archived",
     "is the plan any longer cancelled",
+    # a standalone `n't` token, which `_NP_WORD` accepts because a word-run
+    # element may begin with `n` — the guard is live, not inert (see the
+    # module's `_NP_STOP` note; the CONTRACTED copula `isn't the plan cancelled`
+    # is refused by the start anchor instead, which is a different string)
+    "is the plan n't archived",
     # futurity / intent — the ending has not happened, so the ended population
     # cannot answer it (the second row is the NP-bound boundary pin above)
     "is the v2 api to be retired",
@@ -406,6 +419,10 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     "is the ticket due to be archived",
     "is the plan not going to be cancelled",
     "is the plan still to be cancelled",
+    # progress — an action IN FLIGHT, which the ended population cannot represent
+    "is the report being archived",
+    "is the report still being archived",
+    "is the plan being cancelled",
     # disjunction
     "is the ticket still open or cancelled",
     # the CONTRACTION spelling — `n't` is a SUFFIX inside the token, so a bare
@@ -482,14 +499,22 @@ def test_a_modified_predicate_is_not_the_question_asked(query):
 def test_an_affirmative_temporal_modifier_still_routes():
     """The modifier guard is narrower than "any adverb in the slot", measured.
 
-    ⛔ These three rows are the RECALL half of the P1/P2 remedy, and they are
-    why the stop list is `not|never|neither|nor|longer|to|be|going|about|due|
-    scheduled|or` rather than that list plus `yet|still|already` (the shape the
-    review measured). Both close the whole over-admission class; the wider list
-    additionally refuses all three strings below, which ask exactly the question
-    the ended population answers — has this named record already ended. Every
-    row here routes on the pre-fix head too, so this test is a RECALL guard, not
-    a non-vacuity pin: it reds only if someone widens the modifier list.
+    ⛔ These rows are the RECALL half of the P1/P2 remedy, and they are why the
+    stop list is `not|never|neither|nor|longer|to|being|or` rather than that list
+    plus `yet|still|already` (the shape the review measured). Both close the whole
+    over-admission class; the wider list additionally refuses the AFFIRMATIVE
+    strings below, which ask exactly the question the ended population answers —
+    has this named record already ended. Every row here routes on the pre-fix head
+    too, so this test is a RECALL guard, not a non-vacuity pin: it reds only if
+    someone widens the modifier list.
+
+    ⛔ The two COMPOUND-HEAD-NOUN rows are the same argument applied to the
+    futurity tokens: `due` and `going` are ordinary modifiers of the HEAD NOUN in
+    the second slot (`due diligence`, `going concern`), so stopping them refuses a
+    plain state question — while `to` alone already stops every infinitive that
+    can reach the tail anchor, i.e. the extra tokens bought no closure at all.
+    They are pinned here because the round-8 cut carried them; narrowing them is
+    a later round's edit, and this is what reds if someone adds them back.
     """
     from tortoise.state_intent import ENDED, detect_state_question
 
@@ -497,6 +522,11 @@ def test_an_affirmative_temporal_modifier_still_routes():
         "is the claim already archived",
         "is the ticket still archived",
         "is the report already withdrawn",
+        # head-noun modifiers that a blunt futurity list refused for no closure
+        "is the annual due diligence report archived",
+        "is the current going concern note archived",
+        # …and a plain question, so the guard is a boundary and not a dead end
+        "is the plan cancelled",
     ):
         got = detect_state_question(affirmative)
         assert got.population == ENDED, (
@@ -504,3 +534,22 @@ def test_an_affirmative_temporal_modifier_still_routes():
             f"{got.shape!r}) — `already`/`still` modify the AFFIRMATIVE predicate, "
             f"so this is the state question #14033 exists to route; refusing it "
             f"is a recall loss with no precision gain")
+
+
+def test_a_head_noun_joined_by_or_is_the_stated_cost_of_that_guard():
+    """A KNOWN COST, pinned so it cannot drift silently (module ``_NP_STOP``, r5).
+
+    `is the sales or marketing plan archived` is refused, because a coordinator
+    inside the NP is lexically identical to the disjunctive predicate the `or`
+    stop closes — and the precision contract says a shape that could go either way
+    does not fire. ⛔ This pin is not a virtue: if a later change makes the string
+    route, the module's residual list must move in the same diff, which is what
+    this test forces.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    got = detect_state_question("is the sales or marketing plan archived")
+    assert got.population is None, (
+        f"the `or`-joined head noun now routes to {got.population!r} — that may be "
+        f"fine, but the module's ``_NP_STOP`` residual #5 says it does NOT, so the "
+        f"disclosure has to move in the same change")

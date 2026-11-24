@@ -175,9 +175,19 @@ _ENDING_WORDS = (
 #:   polarity-INVERTED answer, which is the #14033 defect class exactly. `no`
 #:   is left in the run by the residual below (it is an ordinary noun modifier),
 #:   so the `no longer` spelling is stopped by its own token rather than by `no`;
-#: * FUTURITY / INTENT (`to`, `be`, `going`, `about`, `due`, `scheduled`) —
+#: * FUTURITY / INTENT (`to`, and the PROGRESSIVE `being`) —
 #:   `is the v2 api to be retired` asks about something that has NOT ended, and
 #:   the ended population can only answer it with records that have;
+#:   `is the report being archived` is an action in flight, which the population
+#:   cannot represent at all. ⛔ THE INFINITIVE IS STOPPED BY `to` ALONE, and the
+#:   narrower list is measured rather than assumed: `be|going|about|due|scheduled`
+#:   were stop words in the round-8 cut, and every one of its futurity rows still
+#:   refuses without them (`to` sits between the head noun and the ending in each),
+#:   while keeping them refuses two ordinary spellings for no closure at all —
+#:   `is the annual due diligence report archived` and `is the current going
+#:   concern note archived`, where `due`/`going` are head-noun modifiers in the
+#:   second slot. `be` on its own had no falsifier at all: every infinitive that
+#:   can reach this tail anchor already carries `to`;
 #: * DISJUNCTION (`or`) — `is the ticket still open or cancelled` asks about two
 #:   states at once, and one population cannot answer both.
 #:
@@ -199,7 +209,7 @@ _ENDING_WORDS = (
 #: retired`, `is the US footprint archived`), and the head-noun slot is not a
 #: place a zero relative's subject can stand.
 #:
-#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are four:
+#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are five:
 #:
 #: * a zero relative whose subject is a BARE NOUN (`is the claim finance
 #:   retracted`) is lexically identical to a two-word head noun plus a predicate
@@ -220,7 +230,14 @@ _ENDING_WORDS = (
 #:   our ended records. No word list separates `quarter` from a record name
 #:   without becoming the same noun→route assignment, so this is disclosed rather
 #:   than closed; the tail anchor still refuses the windowed spellings
-#:   (`is the quarter ended in Q3`).
+#:   (`is the quarter ended in Q3`);
+#: * AND A HEAD NOUN JOINED BY `or` IS REFUSED — `is the sales or marketing plan
+#:   archived` keeps the relevance read. A coordinator INSIDE the NP is lexically
+#:   identical to the disjunctive PREDICATE the `or` stop exists to close
+#:   (`is the plan live or already cancelled`), and the precision contract says a
+#:   shape that could go either way does not fire. The cost is not new either:
+#:   `is_predicate` did not exist on the base module, which refused the same
+#:   string. It is disclosed here so a later round does not present it as a find.
 #:
 #: One word of the subject NP.
 
@@ -240,7 +257,10 @@ _NP_STOP = (
     # above: each one changes what the question asks, and a negated predicate is
     # answered with the polarity-INVERTED population)
     r"|not|never|neither|nor|longer"
-    r"|be"
+    # `being` is the PROGRESSIVE and is a separate token from the infinitive
+    # frame below, because no frame marker sits in front of it:
+    # `is the plan being cancelled`, `is the report still being archived`.
+    r"|be|being"
     # ⛔ FUTURITY/INTENT is a FRAME, not a word list: `to|going|about|due|scheduled`
     # are ordinary noun modifiers elsewhere (`is the go to market plan archived`,
     # `is the past due invoice archived`, `is the point to point integration

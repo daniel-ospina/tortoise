@@ -2208,9 +2208,13 @@ class PackRegistry:
             # kindDefs, and extraction validation)
             #
             # ⛔ ONLY STRINGS — an unhashable element (`objectKinds: [[widget]]`)
-            # passed every container arm and then raised `TypeError: unhashable
-            # type: 'list'` straight out of `_validate`, whose `-> list[str]`
-            # contract forbids it (#8661, the "validator not total" class);
+            # passed every container arm and then raised
+            # `TypeError: unhashable type: 'list'` straight out of `_validate`,
+            # whose `-> list[str]` contract forbids it (#8661, the "validator
+            # not total" class). ⛔ Do NOT re-wrap this sentence onto a line
+            # that BEGINS with `# type:` — mypy reads such a line as a TYPE
+            # COMMENT and rejects `'list'` as invalid syntax (mypy < 2.4), which
+            # reds `mypy tortoise/` on an otherwise clean tree (#14491).
             # `load_all`'s except turned it into
             # `✗ acme: unhashable type: 'list'` — no field, no index (round-14
             # review P2, measured). The element loop above already refuses a
