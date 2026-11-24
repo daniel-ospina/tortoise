@@ -97,10 +97,10 @@ version: 1
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
 # `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
 # nine/two split this branch last derived (837.3/837.2) with the minute unmoved — and #14423's
-# `tests/test_14350_drain_convergence.py` is packed in that same pool. That map is the union of both parents'
-# registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
-# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
-# matters only because it sits one main fold from rounding again. #14407 registered
+# `tests/test_14350_drain_convergence.py` is packed in that same pool. Every fast file counted here is a
+# `main` registration at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (#14038's
+# `tests/test_13998_capacity_notice.py` among them), and the pool matters only because it sits one
+# landings away from rounding the minute up again. #14407 registered
 # `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
 # `test_notify`), and that registration is part of the partition stated above — the minute did not
 # move (28 m either way), which is exactly why the SECONDS are the graded claim. ⛔ #13722's
