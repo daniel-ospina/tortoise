@@ -2060,7 +2060,7 @@ class BatchCoordinator:
             # still right (a deletion is worse and unrecoverable; a reset is visible
             # and resumable), but this path is a KNOWN HAZARD, not a safe one: the
             # real fix is an insert-if-absent item write plus per-attempt staging,
-            # tracked as #14499 rather than smuggled into this PR.
+            # tracked as #14498 rather than smuggled into this PR.
             raise
         except Exception:
             # ⛔ COMPENSATE, or the 503 is a lie (#14219 review round 2,

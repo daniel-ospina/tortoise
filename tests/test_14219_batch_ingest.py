@@ -3034,7 +3034,7 @@ def test_losing_the_create_to_a_concurrent_writer_does_not_discard_the_winner(tm
     `stage_text` (same `<base>/_batches/<bid>/` names) before it learns it lost, so
     the winner's accepted item is still reset to `queued` with `attempts`/`tokens_*`
     zeroed and its staged bytes replaced — re-drained and re-charged. That hazard is
-    real, is NOT undone here, and is tracked as #14499; this pin asserts only that
+    real, is NOT undone here, and is tracked as #14498; this pin asserts only that
     the strictly-worse deletion does not also happen. Do not read it as evidence the
     concurrent path is safe.
     """
