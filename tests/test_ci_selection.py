@@ -12351,6 +12351,38 @@ def _literal_pytest_watchdog(job: dict) -> int | None:
     return None
 
 
+def test_duration_coverage_guard_fires_below_the_floor_and_not_at_it():
+    """#3400: the coverage floor FIRES, and it is INCLUSIVE.
+
+    ⛔ RESTORED ON REVIEW (2026-11-23). The B7 cut deleted this arm with the rest of
+    the durations arithmetic, which left `duration_coverage_issues` with NO falsifier:
+    every surviving caller only asserts that it COMPOSES (tests/test_ci_selection.py
+    `integrity(...) + ... + duration_coverage_issues(m)`), and
+    `tests/test_ci_timing.py` only names it in a validator tuple — so a floor that
+    returned `[]` unconditionally would keep the required `manifest-integrity` leg
+    green. That is the no-op-gate class this batch is not allowed to create, and the
+    only test is whether the deleted arm was the SOLE pin on a live gate. It was.
+    """
+    from tools.ci_selection import DURATION_COVERAGE_MIN, duration_coverage_issues, load_manifest
+
+    assert DURATION_COVERAGE_MIN == 0.90, DURATION_COVERAGE_MIN
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+
+    def _manifest(covered: int) -> dict:
+        return {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+                "durations": {f: 2.0 for f in files[:covered]}}
+
+    assert duration_coverage_issues(_manifest(89)) != [], "89% must fire"
+    assert duration_coverage_issues(_manifest(90)) == [], "90% is at the floor, not below"
+    assert duration_coverage_issues(_manifest(95)) == [], "95% must be silent"
+    # The documented PASS state: a repo that has not adopted durations at all.
+    assert duration_coverage_issues({"surfaces": {"core": files}, "tier1": [],
+                                     "slow_files": []}) == [], (
+        "an ABSENT map is not a coverage failure (#3400's fail-closed-once-populated rule)")
+    # And the real map is above its own floor, so this arm is not asserting a red tree.
+    assert duration_coverage_issues(load_manifest()) == []
+
+
 def test_every_bounded_pytest_job_caps_above_its_watchdog():
     """#3239: a pytest job whose in-step watchdog kills it must ALSO carry an
     outer `timeout-minutes` strictly above that watchdog.
@@ -12395,6 +12427,18 @@ def test_every_bounded_pytest_job_caps_above_its_watchdog():
         f"the carve-out's largest per-shard watchdog ({worst}m) must stay "
         f"BELOW its outer cap ({carve_cap}m), or the runner kills the step "
         f"before it can print its pass/fail counts (#798)")
+    # ⛔ AND THE CAP MAY NOT DWARF THAT WATCHDOG. ORDER alone is satisfied by
+    # GitHub's 360m default: with the ratio arm cut (B7, 2026-11-23) a cap of
+    # 360m would pass every surviving assertion while holding the per-PR
+    # concurrency slot for six hours on a hung shard — the very #3239 state the
+    # ORDER arm exists to prevent. The ratio IS the bound (`cap <= 3x`), so it is
+    # asserted here rather than left to the deleted arm's prose — RESTORED after the
+    # fold's trim dropped it again (2026-11-24, review P1).
+    assert carve_cap <= 3 * worst, (
+        f"the carve-out's cap ({carve_cap}m) must stay within 3x its largest "
+        f"per-shard watchdog ({worst}m) — ORDER alone does not bound it, and "
+        f"GitHub's 360m default satisfies ORDER while holding the concurrency "
+        f"slot for six hours (#3239)")
     # The fast shards' watchdog is per-shard, clamped by the selector at
     # WATCHDOG_CEILING_MIN — so the cap must clear that ceiling, not a literal.
     fast_cap = jobs["test"].get("timeout-minutes")
@@ -12811,7 +12855,10 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     `actions/cache` saves in a POST step, and (#10182) that post step is charged
     against the job's `timeout-minutes` like any other step. This job cannot
     amortize such a save, and no cap it is allowed to carry can: the cap above
-    is pinned at `_CAP_CEILING_FACTOR` x the measured 16.02m pytest step (= 48m
+    is pinned at `_CAP_CEILING_FACTOR` x the LARGEST per-shard watchdog the
+    selector emits (asserted in `test_every_bounded_pytest_job_caps_above_its_
+    watchdog`; the 16.02m measured pytest step below is the provenance of the
+    factor, not the operand the arm now uses) (= 48m
     at the ceiling), while ONE shard already spends its 10m embedder cap + 19m
     floor-clamped watchdog + ~1m setup + the 1m38s `~/.cache/huggingface` POST
     ≈ 31.6m against a 30m cap — and the SAVE has no timeout of its
