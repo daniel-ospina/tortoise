@@ -17496,8 +17496,16 @@ async def create_batch(body: BatchRequest,
     # run, with an estimate for a batch that is structurally invalid; the
     # re-send then 422s. A request that cannot be accepted is refused for THAT
     # reason first.
+    # ⛔ ONLY A PATH ITEM CAN BE REFUSED FOR BEING A URL (#14415 review round 8,
+    # P2). For a TEXT item `ref` is the item's identity as the customer knows it
+    # ("echoed back verbatim"), and it is NEVER resolved as a path: the runner
+    # uses `item.staged_path or item.ref`, and a text item always has a staged
+    # path. So `{"ref": "https://acme.example/contract.pdf", "text": "…"}` — the
+    # natural way to upload a document and name its source — was refused 422 by a
+    # message whose own remedy is "a path … **or carry its text**", which the
+    # request does. A valid body refused, by a self-contradicting refusal.
     bad_refs = [it.ref for it in body.items
-                if _URL_SHAPED.match(str(it.ref or ""))]
+                if it.text is None and _URL_SHAPED.match(str(it.ref or ""))]
     if bad_refs:
         raise HTTPException(
             status_code=422,
@@ -53622,7 +53630,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 206 tracked files (753 distinct
+# ABSOLUTE line number from 206 tracked files (751 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

@@ -883,7 +883,16 @@ class InMemoryBatchStore:
                 # our read and here, so this write would run a second runner.
                 return False
             if token_delta is None:
-                bucket[item.item_id] = _copy_item(item)
+                # ⛔ KEEP THE ROW'S TOKEN COLUMNS (#14415 review round 8, P2).
+                # The caller's copy predates any accumulation that landed since it
+                # read, so writing it back erased that increment — the same defect
+                # the graph store had, and the reason the Protocol now says a
+                # non-accumulating CAS does not touch tokens.
+                kept = _copy_item(item)
+                kept.tokens_in = max(0, current.tokens_in)
+                kept.tokens_out = max(0, current.tokens_out)
+                bucket[item.item_id] = kept
+                item.tokens_in, item.tokens_out = kept.tokens_in, kept.tokens_out
                 return True
             # ⛔ THE ADDITION HAPPENS HERE, NOT IN THE CALLER (#14415 review
             # round 7, P2). `item.tokens_in` is the caller's read PLUS its own
@@ -1221,10 +1230,21 @@ class GraphBatchStore:
             # and the second OVERWRITES the first instead of adding (200 spent,
             # 200 billed, `tokens_spent: 100`). The addition is done by the
             # database, so both increments apply.
+            # ⛔ AND WHEN THIS CALL IS NOT ACCUMULATING, IT WRITES NO TOKEN
+            # COLUMN AT ALL (#14415 review round 8, P2). It used to write the
+            # totals back absolutely, from the caller's own read — a
+            # read-modify-write two round trips wide, and this compare is on
+            # state (plus attempts when named), which `add_item_tokens` changes
+            # NEITHER. So an accumulation landing inside that window was erased:
+            # measured — a cancel read `tokens_in=5`, the drain lost its settle and
+            # `_bill`ed its real 60 000 (`add_item_tokens` → 60 005, state and
+            # attempts untouched), the cancel's CAS still matched, and it wrote
+            # `SET i.tokens_in=5` — 60 000 gone from the row for good, receipt
+            # `5` against a ledger of 60 005. Omitting the column cannot lose an
+            # increment, because the row keeps whatever it holds.
             + ("i.tokens_in = coalesce(i.tokens_in, 0) + $tin, "
                "i.tokens_out = coalesce(i.tokens_out, 0) + $tout, "
-               if token_delta is not None
-               else "i.tokens_in=$tin, i.tokens_out=$tout, ")
+               if token_delta is not None else "")
             + "i.attempts=$attempts, i.content_changed=$changed, "
             "    i.updated_at=$updated "
             "RETURN i.id",
@@ -1233,10 +1253,10 @@ class GraphBatchStore:
              "ref": item.ref, "name": item.name, "staged": item.staged_path,
              "state": str(item.state),
              "reason": item.reason, "key": item.content_key,
-             "tin": int(token_delta[0] if token_delta is not None
-                        else item.tokens_in),
-             "tout": int(token_delta[1] if token_delta is not None
-                         else item.tokens_out),
+             # Sent only when the SET above names them, so an unused parameter
+             # is never handed to the query.
+             **({"tin": int(token_delta[0]), "tout": int(token_delta[1])}
+                if token_delta is not None else {}),
              # ⛔ `attempts` IS NAMED BY THE SET ABOVE, so it must be in the map
              # (#14415 review round 13). The `token_delta` refactor rebuilt this
              # dict and dropped the key, and the statement then failed at the
@@ -1861,14 +1881,15 @@ class BatchCoordinator:
         an error, because the alternative is a batch that wedges on a duplicate
         write it cannot distinguish from a conflict.
 
-        ``expected`` turns the write into a COMPARE-AND-SET (#14415 review round 4,
-        BLOCKING 1): the caller names the state it believes the row is in, the
-        store writes only while that still holds, and **the returned item is the
-        ROW** — so a caller that lost the race gets the other writer's row back
-        rather than its own stale intent. Callers that must not act on a lost
-        write (the drain's claim, a cancel) pass it and compare
-        ``returned.state``. Without it the write is unconditional, which is only
-        safe for a row with a single writer.
+        ``expected`` names the state the caller believes the row is in; when it is
+        omitted the compare falls back to the CALLER's own copy of the state, so
+        **every** write here is a compare-and-set (#14415 review round 8, P3). There
+        is no unconditional arm: a `put_item` fallback used to sit below for the
+        "no row" case, and it was both unreachable (the state compare returns
+        first) and a `MERGE`, which would recreate the row it failed to match —
+        the resurrection the vanished-row arm above exists to remove. **The
+        returned item is the ROW** when the write lands, so a caller that lost the
+        race gets the other writer's row rather than its own stale intent.
 
         ``expected_attempts`` adds the CLAIM IDENTITY to the compare, and the
         CLAIM PATHS MUST PASS IT (#14415 review round 5, BLOCKING 1): a re-claim
@@ -1958,9 +1979,6 @@ class BatchCoordinator:
         if attempt:
             item.attempts += 1
         item.updated_at = self._now()
-        if expect is None:
-            self._store.put_item(org_id, item)
-            return _sync_item(caller_item, item), True
         if self._store.put_item_if_state(org_id, item, expect,
                                          expected_attempts=expected_attempts,
                                          token_delta=token_delta):
@@ -2855,6 +2873,7 @@ def runner_result_to_outcome(per_file: Mapping[str, Any]) -> ItemOutcome:
     | ``skipped`` + ``unchanged`` | ``skipped-duplicate`` |
     | ``skipped`` + ``lock-held`` / anything retryable | ``queued`` (retry; NOT a terminal failure) |
     | ``skipped`` + other | ``skipped-duplicate`` with the indexer's own reason |
+    | ``failed`` + ``retryable`` | ``queued`` (retry; a classified DB write failure) |
     | ``failed`` | ``failed`` with the indexer's reason |
     """
     status = str(per_file.get("status") or "failed")
@@ -2875,6 +2894,28 @@ def runner_result_to_outcome(per_file: Mapping[str, Any]) -> ItemOutcome:
                        "no tokens spent")
         return ItemOutcome(BatchItemState.SKIPPED_DUPLICATE,
                            reason=reason or "skipped by the indexer")
+    # ⛔ A RETRYABLE `failed` IS NOT A TERMINAL FAILURE (#14415 review round 8,
+    # P2). `retryable` was consulted ONLY on the `skipped` arm, but the indexer's
+    # other retryable shape is `{"status": "failed", "retryable": True,
+    # "db_failure": True, "db_reason": …}` (`sdk.py::_index_process_unit` on a
+    # failure `_classify_db_failure` recognises — the class `_INDEX_DB_RETRY_BUDGET`
+    # exists for). It fell through HERE: a transient graph abort settled the item
+    # `failed` for ever, `BATCH_MAX_ATTEMPTS` never applied, the document was
+    # silently not ingested, and the batch reported `partial`. The reason was
+    # "the indexer reported a failure" too, because that shape carries `error` and
+    # `db_reason` and no `reason` key — so the table's own `failed → failed with
+    # the indexer's reason` row was false for exactly it. `QUEUED` is bounded by
+    # the attempt ceiling, which is what a retryable shape wants.
+    if per_file.get("retryable"):
+        db_reason = str(per_file.get("db_reason") or "")
+        detail = ""
+        error = per_file.get("error")
+        if isinstance(error, Mapping):
+            detail = str(error.get("error") or "")
+        return ItemOutcome(
+            BatchItemState.QUEUED,
+            reason=(reason or detail or db_reason
+                    or "the indexer reported a retryable failure"))
     return ItemOutcome(BatchItemState.FAILED,
                        reason=reason or "the indexer reported a failure")
 

@@ -14,6 +14,7 @@ import threading
 
 import pytest
 
+from tortoise import batch_ingest as bi_module
 from tortoise.batch_ingest import (
     ACCEPT_COPY,
     ACKNOWLEDGEMENT_TOKEN_THRESHOLD,
@@ -2238,3 +2239,109 @@ def test_a_cancel_stops_the_queued_set_in_one_statement():
     assert per_item == [], (
         f"the cancel still took {len(per_item)} per-item round trips")
     assert all(i.state is BatchItemState.CANCELLED for i in after)
+
+
+def test_a_non_accumulating_cas_cannot_erase_a_peer_bill(monkeypatch):
+    """⛔ ROUND-8 REVIEW P2: a state CAS must not write token totals at all.
+
+    `put_item_if_state` wrote the caller's read back ABSOLUTELY on every path, and
+    its compare is on state (plus attempts) — which `add_item_tokens` changes
+    neither. So an accumulation landing inside the caller's read→write window was
+    erased: measured, a cancel read `tokens_in=5`, the drain lost its settle and
+    `_bill`ed its real 60 000 (`add_item_tokens` → 60 005), the cancel's CAS still
+    matched and wrote `SET i.tokens_in=5` — 60 000 gone for good, receipt `5`
+    against a ledger of 60 005.
+    """
+    # The claim must be STALE, so `cancel()` takes its stale-claim arm — the one
+    # branch that still compares per item.
+    monkeypatch.setattr(bi_module, "BATCH_RECLAIM_AFTER_S", 0)
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+
+    real_cas = store.put_item_if_state
+    fired = {"billed": False}
+
+    def peer_bills_first(org_id, item, expected, **kwargs):
+        if not fired["billed"] and expected is BatchItemState.EXTRACTING:
+            fired["billed"] = True
+            # The drain's `_bill`: an accumulation that changes NO compared field.
+            store.add_item_tokens(ORG, item.batch_id, item.item_id,
+                                  tokens_in=60_000, updated_at=item.updated_at)
+        return real_cas(org_id, item, expected, **kwargs)
+
+    # A stale claim is voided by `cancel()`: state + attempts compared, no tokens.
+    store.put_item_if_state = peer_bills_first
+    try:
+        coord.cancel(ORG, batch.batch_id, reason="cancelled by the customer")
+    finally:
+        store.put_item_if_state = real_cas
+
+    assert fired["billed"], "the interleaving never fired — the test proves nothing"
+    row = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    assert row.tokens_in == 60_000, (
+        "a state CAS wrote its stale read back over a peer's bill: the ledger "
+        f"charged 60 000 and the row reports {row.tokens_in}")
+
+
+def test_a_retryable_db_failure_is_requeued_not_failed():
+    """⛔ ROUND-8 REVIEW P2: the indexer's retryable `failed` shape settled terminal.
+
+    `retryable` was consulted only on the `skipped` arm. The indexer's other
+    retryable shape is `{"status": "failed", "retryable": True, "db_failure": True,
+    "db_reason": …}` — a classified DB write failure, the class
+    `_INDEX_DB_RETRY_BUDGET` exists for — and it fell through to the terminal arm:
+    a transient graph abort marked the item `failed` for ever,
+    `BATCH_MAX_ATTEMPTS` never applied, the document was silently not ingested, and
+    the batch reported `partial` with the generic "the indexer reported a failure"
+    (that shape carries `error`/`db_reason` and no `reason`).
+    """
+    from tortoise import batch_ingest as batch_ingest_module
+
+    out = batch_ingest_module.runner_result_to_outcome({
+        "status": "failed", "retryable": True, "db_failure": True,
+        "db_reason": "graph-abort",
+        "error": {"file": "/d/a.md", "error": "db write failure (graph-abort): "
+                                              "the graph aborted the write",
+                  "retryable": True, "cause": "db"}})
+    assert out.state is BatchItemState.QUEUED, (
+        f"a transient DB failure settled {out.state} — no retry, document dropped")
+    assert "graph-abort" in out.reason or "db write failure" in out.reason, (
+        f"the reason must name the failure the customer can act on: {out.reason!r}")
+
+    # A genuinely structural failure is still terminal.
+    terminal = batch_ingest_module.runner_result_to_outcome({
+        "status": "failed", "retryable": False,
+        "error": {"error": "not valid UTF-8", "retryable": False}})
+    assert terminal.state is BatchItemState.FAILED
+
+
+def test_a_non_accumulating_graph_cas_names_no_token_column():
+    """⛔ ROUND-8 REVIEW P2, the PRODUCTION half: the statement itself.
+
+    The in-memory store cannot prove the graph one, and the graph form is where
+    the defect cost the row its total: `SET i.tokens_in=$tin` on a state CAS writes
+    the caller's stale read back. A non-accumulating CAS must not NAME the column
+    at all, and an accumulating one must be RELATIVE (`coalesce(...) + $delta`),
+    never absolute.
+    """
+    item = BatchItem(batch_id="batch_1", item_id="batch_1-00000", ref="/d/a.md",
+                     state=BatchItemState.EXTRACTING, tokens_in=9, updated_at="t")
+
+    plain = _Recorder(answers=[[["batch_1-00000"]]])
+    GraphBatchStore(plain).put_item_if_state(
+        ORG, item, BatchItemState.EXTRACTING, expected_attempts=1)
+    cypher, params = plain.statements[-1], plain.params[-1]
+    assert "tokens_in" not in cypher.split("RETURN", 1)[0], (
+        "a non-accumulating CAS names a token column — that is the write-back "
+        f"that erased a peer's bill: {cypher}")
+    assert "tin" not in params and "tout" not in params
+
+    adding = _Recorder(answers=[[["batch_1-00000"]]])
+    GraphBatchStore(adding).put_item_if_state(
+        ORG, item, BatchItemState.EXTRACTING, token_delta=(700, 0))
+    cypher, params = adding.statements[-1], adding.params[-1]
+    assert "coalesce(i.tokens_in, 0) + $tin" in cypher, (
+        f"an accumulating CAS must ADD, not write a total: {cypher}")
+    assert params["tin"] == 700 and params["tout"] == 0
