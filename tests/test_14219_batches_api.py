@@ -404,19 +404,32 @@ def test_a_batch_over_the_item_cap_is_refused_at_the_boundary(client):
         f"{over.text[:200]}")
 
 
-def test_the_item_cap_is_read_from_the_environment(monkeypatch):
-    """The cap is an operator lever, not a literal buried in the model."""
-    import importlib
+def test_the_item_cap_is_read_from_the_environment():
+    """The cap is an operator lever, not a literal buried in the model.
 
-    monkeypatch.setenv("TORTOISE_BATCH_MAX_ITEMS", "7")
-    reloaded = importlib.reload(ha)
-    try:
-        assert reloaded._BATCH_MAX_ITEMS == 7, (
-            "TORTOISE_BATCH_MAX_ITEMS did not reach the cap: "
-            f"{reloaded._BATCH_MAX_ITEMS}")
-    finally:
-        monkeypatch.delenv("TORTOISE_BATCH_MAX_ITEMS", raising=False)
-        importlib.reload(ha)
+    ⛔ RUN IN A SUBPROCESS, NOT BY `importlib.reload` (#14415 recut review).
+    Reloading `hosted_api` in-process would build a SECOND `app` and a second set
+    of route objects while every other test module in this session holds the
+    first one — a cross-test hazard far worse than the unpinned constant it would
+    be checking. A subprocess observes the lever with no shared state at all.
+    """
+    import os as _os
+    import subprocess
+    import sys
+
+    code = (
+        "import tortoise.hosted_api as ha; "
+        "print(ha._BATCH_MAX_ITEMS)"
+    )
+    env = dict(_os.environ, TORTOISE_BATCH_MAX_ITEMS="7")
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env,
+        check=False)
+    assert out.returncode == 0, (
+        "the item cap could not be read in a subprocess: " + out.stderr[-400:])
+    assert out.stdout.strip() == "7", (
+        "TORTOISE_BATCH_MAX_ITEMS did not reach the cap: "
+        f"{out.stdout.strip()!r} (stderr: {out.stderr[-200:]})")
 
 
 # ── read-path isolation (brief item 5) ─────────────────────────────────────
