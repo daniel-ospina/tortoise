@@ -4023,7 +4023,15 @@ def _css_rightmost_selects(rightmost: str, compound: str) -> bool:
             # may match the class, so it counts — fail closed.
             return True
         value = quoted.group(1)
-        if op == "=" and value == name:
+        if op == "=" and name in value.split():
+            # `=` compares the WHOLE attribute value, and a class list is
+            # space-separated — so `[class="pricing-card popular"]` is exactly
+            # the popular card's attribute and must count. Comparing the two
+            # strings for equality instead would miss every multi-class card
+            # (and `[class="pricing-card popular"] { … !important }` would take
+            # the cascade with the guard GREEN), while `[class="btn-secondary"]`
+            # still does NOT reach `.btn` because the class is one word of that
+            # value, not the whole of it (#14406 review round 9).
             return True
         if op == "~=" and value == name:
             return True
@@ -12268,6 +12276,15 @@ class TestCssDesktopReachAndSpecificity:
         assert not _css_rightmost_selects('[classname="btn"]', ".btn"), (
             "`classname` is a different attribute; only `class` carries the "
             "class list")
+        # A class LIST is space-separated, so `=` against a multi-class value is
+        # exactly that element's attribute — the popular card's own markup.
+        assert _css_rightmost_selects('[class="pricing-card popular"]',
+                                      ".pricing-card"), (
+            "`=` compares the WHOLE attribute value and a class list is "
+            "space-separated, so `[class=\"pricing-card popular\"]` IS the "
+            "popular card — with `!important` it takes the cascade, and an "
+            "equality test between the two strings misses it (#14406 review "
+            "round 9)")
 
         # Page-level: the two mutants the pre-fix reader could not see.
         for mutant, prop, compound, pinned in (
