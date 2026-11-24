@@ -737,9 +737,16 @@ def _abuse_message(kind: str, org_id: str, details: dict, *,
         # carried an org (`abuse.py`'s `if org_id` guards; `notify_abuse` maps a
         # missing one to "_"). Telling an anonymous subject that its folded
         # detections "are recorded on the dashboard" would assert an attribution
-        # that does not exist — the defect class this whole change removes.
+        # that does not exist — the defect class this whole change removes. And
+        # telling an ORG-SCOPED subject that the rows are there, unconditionally,
+        # over-claims in the other direction (round 2, P2): the write that would
+        # put them there is best-effort and debug-swallowed — every `record_*`
+        # caller in `abuse.py` logs the failure and continues — so on a
+        # control-plane outage, exactly when detections spike, the digest would
+        # claim evidence that was never written. Hence the caveat in the sentence.
         recorded = (
-            "all of them are recorded on the dashboard alert list"
+            "all of them are recorded on the dashboard alert list "
+            "(best-effort: a failed row write is logged, never retried)"
             if org_id and org_id != "_"
             else "they are NOT recorded on the dashboard (the detection carried "
                  "no org scope, so there is no row to write)")

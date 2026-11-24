@@ -396,7 +396,24 @@ def test_a_rule_flapping_at_its_threshold_files_one_incident(delivered):
 
 
 def test_a_new_episode_re_fires_exactly_once(delivered):
-    """Pre-fix: 3 + 4 = 7 messages. A fix that muted would send 3."""
+    """The store path's END-TO-END bound: alert, close, alert — 3, not 7.
+
+    Pre-fix this walk sent 3 + 4 = 7 messages; a fix that MUTED would send 3 or
+    fewer at the first assertion below, so the arm discriminates the mute
+    direction on the store path.
+
+    ⛔ IT DOES NOT DISCRIMINATE THE LEDGER RELEASE, and saying so here is the fix
+    for an over-claiming docstring (round 2, P2 — the reviewer proved this arm
+    stays GREEN with `release_abuse_delivery` replaced by a no-op): in the store
+    path the second episode's page is the store's create-once FILED push, not the
+    ledger, so the push COUNT cannot see a release that did not happen. The same
+    masking is why the no-channel sibling below exists: there the ledger is the
+    only delivery, and `assert len(sent) == 2` reds without the release. The
+    property is carried by
+    `test_episode_end_re_arms_abuse_flag_where_the_ledger_is_the_only_delivery`;
+    this arm carries the end-to-end shape (one issue, one close, no duplicate
+    filing) and is kept for that, not for the release.
+    """
     import tortoise.notify as notify
 
     for _ in range(3):
@@ -1328,6 +1345,11 @@ def test_a_folded_digest_with_an_org_says_its_detections_are_recorded(
     assert "2 further" in folded_line, folded_line
     assert "all of them are recorded on the dashboard alert list" in folded_line, \
         folded_line
+    # Round 2, P2: the sentence may not state the dashboard row as a guarantee —
+    # every `record_*` caller is best-effort (`abuse.py` logs the failure and
+    # continues), so on a control-plane outage the claim would be false exactly
+    # when it matters. The caveat is pinned, not just present in the prose.
+    assert "best-effort" in folded_line, folded_line
     assert "they are NOT recorded on the dashboard" not in folded_line, folded_line
 
 
