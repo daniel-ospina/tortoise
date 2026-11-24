@@ -1784,6 +1784,26 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_measure_4211_session_hierarchy.py::
              # test_a_receipt_only_diff_selects_this_pin.
              "docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json",
+             # #14062 review (PR #14445, F2): the privatisation RESIDUE instrument. Same
+             # silent-drop class as the rows above, and MEASURED before this entry:
+             # `--changed-files tools/sdk_privatise.py` -> `surfaces: []`, `full: false`,
+             # 106 test files with `test_sdk_privatise_sweep.py` ABSENT. So the suite's
+             # 21 PROSE arms — the arms that grade the residue block's published figures
+             # against the block's own walk, the `OWN_PINS` addresses, the refspecs —
+             # never ran on the one diff class able to stale them: a re-cut of
+             # `SWEEP_RESIDUE` and its `#:` record. 19 of the 21 are object-free, so they
+             # run in the sharded `test` job; the other two need git objects (a
+             # `fetch-depth: 1` checkout): a fetchable refspec and each `OWN_PINS` rev's
+             # own tree. Counted from the suite's own AST rather than quoted from prose.
+             # The
+             # required `surface-guard` job cannot see it either (it runs `--check`, the
+             # `(rows, digest)` pair, never the prose). That is how a re-cut shipped
+             # `11896`-era prose with a `11901` pin, and how #14445 itself first shipped
+             # a stale extent figure (1765) that only the NEXT `core`-selecting PR would
+             # have red on rows no later author wrote. With the entry: `surfaces=['core']`
+             # and the suite is selected. Pinned by
+             # tests/test_sdk_privatise_sweep.py::test_a_tool_only_diff_selects_this_pin.
+             "tools/sdk_privatise.py",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
              # /docs formula guard lives there), and a SOURCE_PATTERNS match
              # REPLACES the `core` fallback (#2938) — so without this entry the
