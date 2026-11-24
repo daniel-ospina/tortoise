@@ -14234,11 +14234,16 @@ def test_the_emission_block_guard_is_not_vacuous():
     # graded, the stale one was graded by nothing, so the guard could sit GREEN over a block
     # stating two different emissions.
     #
-    # ⛔ CITE A SHA THAT RESOLVES. This comment first cited `b766b779af`, which NO REF ON `origin`
-    # resolves — `git ls-remote origin | grep b766b779` -> 0 matches, so every fresh clone gets
-    # `git cat-file -t b766b779af` -> fatal. (Stated against `origin` on purpose: a box whose
-    # LOCAL-ONLY `refs/preserved/*` happens to hold the object can still resolve it, so a bare
-    # `cat-file` here measures the box, not the citation.) It was then rewritten to say the splice
+    # ⛔ CITE A SHA THAT RESOLVES. This comment first cited `b766b779af`, which no reader can
+    # resolve: `git cat-file -t b766b779af` -> fatal, `git rev-list --all | grep -c b766b779` -> 0
+    # (it is in no history this clone holds), and it is no advertised TIP on `origin`
+    # (`git ls-remote origin | grep b766b779` -> 0 matches). ⛔ Neither command settles
+    # reachability on its own, and quoting the wrong one is how a sound conclusion gets an
+    # unsound proof: `ls-remote` lists TIPS, so its grep can only show a sha is not a tip — an
+    # ancestor of any tip is fetched by every clone without ever matching that grep (e.g.
+    # `bbe54363ad` is in `origin/main`'s history and greps 0 there), while a bare `cat-file`
+    # measures the BOX, not the citation, because a local-only ref such as `refs/preserved/*`
+    # can hold an object no reader has. It was then rewritten to say the splice
     # is at "no reachable commit" — which is also false, so the correction repeated the very
     # defect it was removing. Both halves are reachable today, measured with this module's own
     # helpers: `dc42c55baa` (on `integration/14296-on-new-main`) is the RANGE-with-semicolon
