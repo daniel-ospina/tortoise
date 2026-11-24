@@ -1194,8 +1194,11 @@ jobs:
           #
           # Declared `workflow` in .github/scripts/fly-managed-secrets.txt — read
           # the ⛔ OVERRIDES block there for why this route rather than the
-          # `fly-toml-env` route the rest of #4126 uses (that route cannot be
-          # COMPLETED without `flyctl` and a Fly token to unset the live shadow).
+          # `fly-toml-env` route #4126 otherwise PREFERS. ⚠️ Not a departure from
+          # every other #4126 name: the versioned model default above took
+          # `workflow` too, so this follows that precedent. `fly-toml-env` cannot
+          # be COMPLETED without `flyctl` and a Fly token to unset the live
+          # shadow, which is the whole reason for the route.
           ARGS+=(TORTOISE_CAPTURE_IN_FLIGHT=16)
           # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
           # embeds (supabase-js createClient). Was never synced to Fly, so the
