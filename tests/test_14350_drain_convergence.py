@@ -60,6 +60,8 @@ from tortoise.capture_spool import (
     write_spool_entry,
 )
 
+REPO = Path(__file__).resolve().parent.parent
+
 ROOT_TURNS = [{"role": "user", "content": "One turn."}]
 
 CAPACITY_BODY = json.dumps({
@@ -1343,6 +1345,198 @@ def test_an_EMPTY_only_session_id_is_UNTARGETED_and_takes_the_claim(tmp_path):
         "an empty session id drained a spool another process was draining")
     assert posts == [], "and it posted nothing"
     holder.release()
+
+
+def test_a_pass_that_HELD_the_claim_clears_the_fact_WITHOUT_attempting_anything(tmp_path):
+    """⛔ THE PASS THAT ATTEMPTS NOTHING IS EXACTLY THE PASS THAT CLEARS NOTHING —
+    which left the durable fact STRANDED on the operator's line.
+
+    The `ok` write is gated on `attempted > 0` (an empty spool must not erase a
+    recorded refusal), so a pass holding the claim over an empty or
+    backoff-only spool wrote no record at all and the field survived: the operator
+    kept reading `NO drain exclusion (<path>)` for an obstruction they had already
+    removed, and the self-heal could not fire either. Measured: obstruction → pass 1
+    records it; remove it; pass 2 acquires the claim, attempts 0 → the line still
+    said "NO drain exclusion".
+
+    MUTATION THAT REDS THIS: gate the clearing on `attempted > 0` too (the field is
+    then only ever cleared by a filing pass).
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    write_capture_status(root, {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True,
+        "claim_unavailable_reason": "stale obstruction",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    # NO entries: the pass holds the claim and attempts nothing.
+    summary = flush_spool(root, lambda _e: PostOutcome(ok=True), now=1000.0,
+                          sleep=lambda _s: None)
+    assert summary.attempted == 0, "this test is about the pass that attempts NOTHING"
+    recorded = read_capture_status(root)
+    assert not recorded.get("claim_unavailable"), (
+        "a pass that HELD the claim must clear the fact even with nothing to do: "
+        + repr(recorded))
+    assert "NO drain exclusion" not in capture_health_line(root, api_key="present").line
+
+
+def test_the_HEALTH_LINE_is_BYTE_IDENTICAL_on_both_legs(tmp_path):
+    """⛔ THE CROSS-LEG PIN THE OLD COMMENT PROMISED AND NOBODY WROTE.
+
+    `capture_health_line`'s docstring and the parity test's own prose both said the
+    rendered sentence was "pinned by a cross-leg parity test that executes the real
+    TypeScript" — but the only cross-leg comparison was the STATUS CLASSIFIERS, and
+    the health line had one substring assertion per leg. So changing either leg's
+    punctuation, spacing or suffix left both suites green while the two legs told
+    an operator two different things about one spool (found in review).
+
+    This executes the real Pi leg over a status matrix and compares its FULL line
+    with the Python leg's, byte for byte.
+
+    MUTATION THAT REDS THIS: change either leg's `, NO drain exclusion` separator
+    (comma, spacing) or its suffix wording.
+    """
+    from tests.test_capture_spool import _node_that_can_strip_ts
+
+    node = _node_that_can_strip_ts()
+    ext = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
+    rows = [
+        {"version": 1, "state": "ok", "updated_at": "2026-01-01T00:00:00+00:00"},
+        {"version": 1, "state": "ok", "claim_unavailable": True,
+         "claim_unavailable_reason": "/x/drain.claim exists and is not a claim record",
+         "updated_at": "2026-01-01T00:00:00+00:00"},
+        {"version": 1, "state": "blocked", "reason": "402 quota", "status": 402,
+         "claim_unavailable": True, "claim_unavailable_reason": "/x/drain.claim",
+         "updated_at": "2026-01-01T00:00:00+00:00"},
+    ]
+    driver = tmp_path / "health-parity.mjs"
+    driver.write_text(
+        'import { captureHealthLine } from "' + ext + '";\n'
+        "const rows = JSON.parse(process.argv[2]);\n"
+        "const out = [];\n"
+        "for (const r of rows) {\n"
+        "  const dir = process.argv[3] + '/s' + out.length;\n"
+        "  await (await import('node:fs')).promises.mkdir(dir, { recursive: true });\n"
+        "  await (await import('node:fs')).promises.writeFile(\n"
+        "    dir + '/status.json', JSON.stringify(r));\n"
+        "  out.push(captureHealthLine(dir, { apiKey: 'present' }).line);\n"
+        "}\n"
+        "console.log(JSON.stringify(out));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [node, "--experimental-strip-types", str(driver),
+         json.dumps(rows), str(tmp_path)],
+        capture_output=True, text=True, timeout=120, cwd=str(REPO),
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    pi_lines = json.loads(proc.stdout.strip().splitlines()[-1])
+    py_lines = []
+    for i, row in enumerate(rows):
+        root = tmp_path / f"py{i}"
+        root.mkdir(parents=True)
+        write_capture_status(root, row)
+        py_lines.append(capture_health_line(root, api_key="present").line)
+    assert pi_lines == py_lines, (
+        "the two legs describe the SAME spool with different words:\n  pi: "
+        + repr(pi_lines) + "\n  py: " + repr(py_lines))
+
+
+def test_a_peer_RELEASING_during_the_clear_is_RETRIED_not_called_unclearable(tmp_path):
+    """⛔ `GONE` IS NOT `REFUSED` — the distinction a boolean could not make, and
+    collapsing them ran a whole pass UNCLAIMED beside a live peer claim.
+
+    Two legs meet at a FIFO at `<spool>/drain.claim`: this one `lstat`s it, a peer
+    `unlink`s it (its own release or takeover), and this one's `unlink` then answers
+    `ENOENT`. The old `except OSError: return False` read that as "cannot be
+    cleared", `acquire` raised `DrainClaimUnavailable`, and `flush_spool`'s handler
+    ran the entire pass without the exclusion — while the peer's own claim sat on
+    disk. For the length of a pass the spool had two drainers, which is the defect
+    this module exists to remove (and it is NOT the documented `ttl/3` bound: an
+    unclaimed pass never holds or re-checks a lease).
+
+    The FIFO stands in for "something that is not a claim, that a peer removes
+    under me", and the peer's `unlink` is played by the first `os.unlink` call
+    failing `ENOENT` — the exact errno, reached the exact way.
+
+    MUTATION THAT REDS THIS: answer `_CLEAR_REFUSED` (or `False`) from the
+    `FileNotFoundError` arm — the FIFO path then raises `DrainClaimUnavailable` and
+    the pass runs unclaimed beside the peer.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = _spool(tmp_path, sessions=1)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+
+    real_unlink = os.unlink
+    undone: list = []
+
+    def peer_wins(path, *a, **kw):
+        if str(path) == str(fifo) and not undone:
+            undone.append(path)
+            real_unlink(path)                       # the peer's removal lands first
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_unlink(path, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "unlink", peer_wins)
+    try:
+        claim = drain_claim.acquire(root, leg="python")
+    finally:
+        monkeypatch.undo()
+    assert undone, "the test never reached the FIFO clear"
+    assert claim is not None, (
+        "a peer that removed the obstruction is not an unclearable path: `acquire` "
+        "must RETRY and install its claim (or honour whatever the peer put there)")
+    claim.release()
+
+
+def test_the_clear_NEVER_deletes_an_object_it_did_not_judge(tmp_path):
+    """The quarantine compare is not the only place a delete can race: the
+    obstruction clear is the protocol's ONE uncompared removal, and `lstat` →
+    `unlink` is a TOCTOU with a live claim on the other side of it.
+
+    Judge a FIFO, be preempted, and by the time the `unlink` lands the path can
+    hold a peer's VALID claim — deleting it lets this process win the next `link`
+    and hold a spool a peer is also draining, for up to `ttl/3`, silently. So the
+    `(st_dev, st_ino)` judged is re-read immediately before the removal.
+
+    The re-read is driven here by replacing `lstat` on its SECOND call for the
+    claim path with the identity of a file this test substituted — the substitution
+    a preempted process would see.
+
+    MUTATION THAT REDS THIS: drop the identity re-check (unlink on the strength of
+    the first `lstat`) — the substituted object is then deleted.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = root / "drain.claim"
+    os.mkfifo(fifo)
+    substitute = root / "live-claim.txt"      # the object a peer installs meanwhile
+    substitute.write_text("a live claim")
+    real_lstat = os.lstat
+    seen: list = []
+
+    def racing_lstat(path, *a, **kw):
+        if str(path) == str(fifo):
+            seen.append(path)
+            if len(seen) > 1:
+                # A DIFFERENT object (another inode) now sits at the path.
+                return real_lstat(substitute, *a, **kw)
+        return real_lstat(path, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "lstat", racing_lstat)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert outcome == drain_claim._CLEAR_REFUSED, (
+        "an object that changed identity under the call must be JUDGED AGAIN, not "
+        "deleted — got " + repr(outcome))
+    assert fifo.exists(), "the object this call never judged was deleted"
 
 
 def test_an_UNCLEARABLE_obstruction_runs_the_pass_UNCLAIMED_and_SAYS_what_it_is(tmp_path):

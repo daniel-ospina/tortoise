@@ -4093,7 +4093,8 @@ def _with_store_sync_terms(base: CaptureHealth, root: Path) -> CaptureHealth:
     return base._replace(line=f"{base.line}, {', '.join(parts)}")
 
 
-def _record_capture_status(root: Path, summary: FlushSummary) -> None:
+def _record_capture_status(root: Path, summary: FlushSummary, *,
+                           held_claim: bool = False) -> None:
     """Persist what this flush OBSERVED (agent-infra#2100).
 
     The record is the LAST refusal a leg saw, never a permanent verdict, so only
@@ -4178,6 +4179,23 @@ def _record_capture_status(root: Path, summary: FlushSummary) -> None:
             summary.claim_unavailable_reason or "the spool root cannot hold a claim")[:300]
         record["updated_at"] = _now_iso()
         write_capture_status(root, record)
+    elif held_claim:
+        # ⛔ AND A PASS THAT HELD THE CLAIM CLEARS IT EVEN IF IT ATTEMPTED NOTHING.
+        # `attempted > 0` gates the `ok` write above (an empty spool must not erase a
+        # recorded refusal), which left the claim fields stranded: a pass holding the
+        # claim over an empty/backoff-only spool wrote nothing, so the operator kept
+        # reading `NO drain exclusion (<path>)` for an obstruction they had already
+        # removed (#14423 cycle-8 review, P2 — reproduced). One write, and only when
+        # there is something to clear; `state`/`reason`/`status` are untouched, so the
+        # quota-survives-an-empty-pass rule still holds.
+        prior = read_capture_status(root)
+        if prior is not None and (prior.get("claim_unavailable")
+                                  or prior.get("claim_unavailable_reason")):
+            record = dict(prior)
+            record.pop("claim_unavailable", None)
+            record.pop("claim_unavailable_reason", None)
+            record["updated_at"] = _now_iso()
+            write_capture_status(root, record)
 
 
 # ── Replay ─────────────────────────────────────────────────────────────────
@@ -4291,6 +4309,10 @@ def flush_spool(
             try:
                 mode = os.lstat(claim_path(root)).st_mode
             except FileNotFoundError:
+                # NOTHING at the path: the root cannot hold a 60-byte claim file, so
+                # it cannot hold a spool entry either. (A claim that vanished under
+                # `acquire` no longer lands here — `_clear_unusable_claim_path`
+                # answers `GONE` and `acquire` retries instead of raising.)
                 summary.claim_unavailable = True
             except OSError:
                 # The path cannot even be STAT'ed, which means the root itself is
@@ -4441,7 +4463,7 @@ def _flush_claimed(
     # drain line, `tortoise session health`, `pr-doctor`) sees the same answer
     # whether or not it observed the failing POST itself.
     with contextlib.suppress(Exception):
-        _record_capture_status(root, summary)
+        _record_capture_status(root, summary, held_claim=claim is not None)
     return summary
 
 

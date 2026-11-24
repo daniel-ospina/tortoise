@@ -95,9 +95,9 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```text
-# 55 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
+# 59 cases — the claim protocol, the capacity rule, the falsifier, 5 CROSS-LEG
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-55 passed
+59 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
@@ -105,12 +105,12 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-744 passed
+748 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-312 pass / 0 fail
+314 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -250,6 +250,18 @@ the exclusion being off was reported only on a stderr that nobody reads.
 | **P2** `_dispose_quarantine`'s failed restore deleted a live claim with no trace, and the sentence justifying it ("the displaced holder … stops at its next refresh, which is the safe direction") was FALSE — it keeps draining until that refresh, up to TTL/3 | **fixed**: the failure now WARNS with the cause on both legs, and the sentence states what actually happens (a bounded double-drain, `ttl/3`, not "the safe direction"). The bound is quoted by a function (`_ttl_third_hint`) so the prose and `DEFAULT_TTL_S / RENEW_FRACTION` cannot drift — the earlier comment named a constant that does not exist under that name. |
 | **P2** the measurement's `overlapped` field could never report what its comment claimed (`min(arrivals, done + winners)` is always `processes`), and a winner that timed out released EARLY — after which a straggler legitimately took the claim and was counted as a second winner | **fixed**: the winner prints the bound it observed (`RELEASED <bounded>`), an early release makes the run **no verdict** (`bounded: false`) instead of a false "two drainers", and `overlapped` reports the population that actually attempted. |
 | **P2 / P2** two stale citations in the test docstrings — one named a capacity test that never existed under that name, the other named an `acquire`-path test that does not exist at all | **corrected**: both now cite tests that exist, and the second says plainly that the nearest cover asserts the GIVE-UP rather than the restore. That is the same overclaim class this PR has now corrected four times; a citation to a nonexistent test is how it survives a review. |
+
+**Cycle 9** (a fresh-context reviewer at `5b9ee557` — the head after the pin re-cut) — 1 **P1**, 4 P2.
+This one is the sharpest yet, because every finding is a hole in THIS PR's own
+safety valve:
+
+| finding | disposition |
+|---|---|
+| **P1** the obstruction clear answered a BOOLEAN, so *"the object vanished under me"* and *"I may not delete it"* were the same answer. Two legs meet at a FIFO, the peer's own `unlink` lands first, this one's `unlink` gets `ENOENT` → "cannot be cleared" → **the whole pass ran UNCLAIMED beside a live peer claim**. That is the two-drainer defect this PR exists to remove, reproduced from the path that was meant to be the safety valve — and unlike the documented bound it is for a whole pass, since an unclaimed pass never holds or re-checks a lease (reviewer reproduced it). | **fixed on both legs**: the answer is tri-state (`GONE` / `REFUSED` / `DONE`), `GONE` makes `acquire` RETRY the loop (install the claim, or judge whatever the peer put there), and only `REFUSED` raises `DrainClaimUnavailable`. A test drives the exact interleave on each leg; both mutants red (answering `REFUSED` for `ENOENT`). |
+| **P2** that same clear was the protocol's **only uncompared delete**: `lstat` → `unlink` could remove a claim a peer installed *under it*, then win the next `link` — two holders for up to `ttl/3`, silently | **fixed on both legs**: the `(dev, ino)` judged is re-read immediately before the removal and the object is left alone if it changed — the same rule `_dispose_quarantine` already applied to every other removal. Test drives the substitution; dropping the check reds it. |
+| **P2** the durable `claim_unavailable` fact was **stranded**: the `ok` write is gated on `attempted > 0`, so a pass that HELD the claim over an empty/backoff-only spool wrote nothing and the operator kept reading `NO drain exclusion (<path>)` for an obstruction already removed | **fixed on both legs**: a pass that held the claim clears the two fields even when it attempts nothing (one write, only when there is something to clear; `state`/`reason`/`status` untouched, so the quota-survives-an-empty-pass rule still holds). Test drives the no-op pass; gating the clearing on `attempted` reds it. |
+| **P2** the Pi leg's "a HEALTHY pass clears the recorded claim fact" test was **vacuous** — it wrote the "healthy" record itself and never called the pass, so the mutation it named could not reach it (measured `pass 1 / fail 0` while the Python twin redded) | **fixed**: the test drives a REAL pass through the extension over an EMPTY spool (the shape that discriminates the no-op clearing — a filing pass clears the field through the `ok` write's fresh record, so an entry in the spool would hide the bug). Verified green, and red with the clearing disabled. |
+| **P2** two docstrings claimed the health-line wording was "pinned by the cross-leg parity test" — **no such pin existed**; both legs had one substring assertion each, so changing either leg's punctuation left both suites green | **fixed by writing the pin rather than dropping the claim**: a new test runs the REAL TypeScript leg over a three-row status matrix and compares the FULL rendered line with the Python leg's, byte for byte. Changing one leg's spacing reds it. |
 
 ## Residuals, stated
 
