@@ -4255,6 +4255,12 @@ def _record_capture_status(root: Path, summary: FlushSummary, *,
         record["claim_unavailable"] = True
         record["claim_unavailable_reason"] = (
             summary.claim_unavailable_reason or "the spool root cannot hold a claim")[:300]
+        # ⛔ THIS ARM RE-MEASURED THE CLAIM PATH, so a recorded STALL does not survive
+        # it: the unreadable object it described is not what is there any more (a pass
+        # that reached this arm could not link a claim at all). Carrying it would be a
+        # one-way latch — the same defect, pointing the other way (#14480 review, P2).
+        record.pop("claim_unreadable", None)
+        record.pop("claim_unreadable_reason", None)
         record["updated_at"] = _now_iso()
     elif summary.claim_unreadable:
         # ⛔ A CLAIM THAT EXISTS AND CANNOT BE READ IS A **STALLED** DRAIN, and the
