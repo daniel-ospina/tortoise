@@ -6108,6 +6108,17 @@ def _cmd_create_point(args) -> int:
         # text tells the caller to re-send and nothing made re-sending safe.
         payload["dedup"] = True
 
+    # ⛔ CONSTRUCT THE REQUEST OUTSIDE THE `try` BELOW. `Request(...)` PARSES the
+    # URL and raises `ValueError` (`Invalid IPv6 URL`) BEFORE any socket exists —
+    # and the pre-flight above ADMITS such a value (`http://[::1` starts with
+    # `http://`). While construction sat inside that `try`, its `ValueError` fell
+    # into the `except ValueError` arm, which is necessarily HEDGED ("that does
+    # not prove it failed to land") because that arm also covers post-send /
+    # redirect-phase errors. So a URL the client could not even build a request
+    # from was reported as a possibly-committed write, inventing a duplicate risk
+    # for a request that was never made. Splitting the two makes BOTH messages
+    # true: construction cannot put a byte on the wire and now says so, and the
+    # hedge stays where it is warranted.
     try:
         data = _json.dumps(payload).encode("utf-8")
         req = Request(
@@ -6119,6 +6130,19 @@ def _cmd_create_point(args) -> int:
             },
             method="POST",
         )
+    except ValueError as e:
+        # Same redaction as the arm below: `{e}` quotes the URL it failed on.
+        _build_text = str(e).replace(api_url, "<api_url>")
+        if api_key:
+            _build_text = _build_text.replace(api_key, "<api_key>")
+        print(f"Cannot reach API at "
+              f"{_printable(_mask_display_target(api_url))}: "
+              f"{_printable(_build_text)}", file=_sys.stderr)
+        print("The request was never built, so nothing was sent — check the "
+              "configured API URL.", file=_sys.stderr)
+        return 1
+
+    try:
         with urlopen(req, timeout=30) as resp:
             result = _json.loads(resp.read())
     except HTTPError as e:
@@ -6199,6 +6223,10 @@ def _cmd_create_point(args) -> int:
         # request was on the wire (`Invalid IPv6 URL` is the measured one). So it
         # may NOT claim the write was not sent — see the `URLError` arm for the
         # same reasoning, and `test_an_unreachable_api_does_not_claim_nothing_was_written`.
+        # ⛔ `Request(...)` CONSTRUCTION IS DELIBERATELY OUTSIDE THIS `try`: it
+        # cannot put a byte on the wire, so its `ValueError` gets the "nothing was
+        # sent" wording at the construction site instead of this hedge. Moving it
+        # back in makes a never-built request read as a possibly-committed write.
         #
         # ⛔ AND REDACT THE TEXT: `{e}` quotes the URL it failed on, so a store
         # `api_url` carrying `?token=…`/`user:pw@` would reach stderr unmasked —
@@ -16440,7 +16468,7 @@ def _cmd_doctor(args):
                 #
                 # ⛔ "Hosted-shaped" is not just `_HOSTED_KEY_PREFIXES`: the
                 # `Hosted` row ALSO admits the `oat_` family as a hosted identity
-                # (`:15649` — an OAuth access token that is MCP-only by design,
+                # (`:15677` — an OAuth access token that is MCP-only by design,
                 # ADR-010). Omitting it here left the same one-screen
                 # contradiction this gate exists to remove, narrowed to `oat_`: a
                 # Graph row saying "Run `tortoise init`" beside a Hosted row
@@ -16489,7 +16517,7 @@ def _cmd_doctor(args):
                 # repo-controllable — so `{{"api_url": ["https://…"]}}` reaches
                 # `_mask_display_target` -> `.split()` on a list and raises
                 # `AttributeError`, killing the whole verb with no report (measured,
-                # exit 1 after the banner). `_doctor_hosted_rows` (:15526) coerces for
+                # exit 1 after the banner). `_doctor_hosted_rows` (:15554) coerces for
                 # exactly this reason; this arm sits outside every guard, so it must
                 # too.
                 _display_url = _printable(_mask_display_target(

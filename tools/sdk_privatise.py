@@ -1951,7 +1951,12 @@ SWEEP_NAMES = 66
 #: than inherited. The re-cut carries the PR's content only (main took it in `024387f533`), so there
 #: are no rows to attribute row-by-row: the pair below is `--repin`'s own output on the RESOLVED
 #: tree, not arithmetic across the parents (main pins 11899, the branch 11872).
-SWEEP_RESIDUE = (11903, "df4f73cd9d41cdd1")
+#: ⛔ RE-PINNED ON THE RE-CUT ONTO `origin/main` `e6b3cf2908` (2026-11-24): the pin is a reading of a
+#: TREE, so it is taken by `--repin` on the MERGED tree rather than inherited from either parent. Both
+#: sides of this merge had moved the pair (the branch to 11903, `main` to its own figure), which is why
+#: the two conflicted; `--repin` on this resolved tree prints **(11902, 'f904d86cb6ad82f6')** and
+#: `--check` exits 0 on it with `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11902, "f904d86cb6ad82f6")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

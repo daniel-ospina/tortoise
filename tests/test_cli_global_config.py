@@ -507,6 +507,38 @@ class TestCreatePointRetrySafety:
         assert "nothing was sent" not in err.lower()
         assert "does not prove it failed to land" in err
 
+    def test_a_url_the_client_cannot_build_never_claims_the_write_may_land(
+            self, tmp_path, capsys):
+        """A CONSTRUCTION-phase `ValueError` must not borrow the post-send hedge.
+
+        `Request(...)` parses the URL and raises `ValueError: Invalid IPv6 URL`
+        BEFORE any socket exists — and the pre-flight ADMITS the value
+        (`http://[::1` starts with `http://`). While construction shared the
+        `try` with `urlopen`, that `ValueError` landed in the arm whose message
+        is hedged ("does not prove it failed to land"), so a request that was
+        never built read as a possibly-committed write and invented a duplicate
+        risk the user cannot have. Measured on the tree that shipped it: store
+        `api_url="http://[::1"` printed "The request did not complete — that does
+        not prove it failed to land … re-run with `--dedup`".
+
+        ⛔ The sibling above is the OTHER half and must stay: a `ValueError`
+        raised by `urlopen`/the redirect handler AFTER the send DOES warrant the
+        hedge. Splitting construction out is what makes both true.
+
+        Mutation: move `req = Request(...)` back inside the `urlopen` `try` and
+        this REDs — the hedge reappears and `urlopen` is never reached.
+        """
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({**GLOBAL_CFG, "api_url": "http://[::1"}))
+        store.chmod(0o600)
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            assert main(["create-point", "hello world"]) == 1
+        assert not urlopen.called, "no request may reach the transport"
+        err = capsys.readouterr().err
+        assert "nothing was sent" in err
+        assert "does not prove it failed to land" not in err
+
     def test_the_valueerror_arm_does_not_echo_the_credential(self, tmp_path, capsys):
         """`{e}` quotes the URL it failed on, and can quote the header value.
 
