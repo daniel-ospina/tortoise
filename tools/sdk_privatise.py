@@ -2637,6 +2637,22 @@ def baseline_rev(explicit: str | None = None) -> tuple[str | None, str]:
     STRICTER ABOVE it, where a tree that added nothing still reds because its total is already over
     the pin (a stale clone is exactly that case, and it is the treadmill's signature). Both facts
     are the caller's to print, beside the way out: `--baseline REV`, or fetch `origin/main`.
+
+    ⛔ AND ON A BRANCH THAT HAS FOLDED `origin/main`, A LOCAL `--check` REDS ON ROWS THIS BRANCH DID
+    NOT AUTHOR — STATED BECAUSE IT LOOKS LIKE THE BRANCH'S OWN GROWTH. The merge base is frozen at
+    the point the branch left `main`, while `git diff <merge-base>` on a branch that MERGED `main`
+    carries every one of `main`'s commits since then, so their new receivers are inside the diff and
+    the ratchet charges them to the fold. MEASURED on the `#14548` fold of `origin/main`
+    `10f0107689`: `--check` on the folded feature head reads **11913 now vs 11903** and reds, naming
+    `tests/test_14219_batch_ingest.py` (6 `graph.query`, 2 `graph.delete`), `tests/test_14219_batches_api.py`
+    (1 `seen.update`) and `tortoise/hosted_api.py`'s `proj.g.query` — all of them `main`'s rows, none
+    of them the branch's. On the tree CI actually grades this does not happen: the `pull_request`
+    checkout is the PR's MERGE commit, whose merge base with `origin/main` IS `origin/main`, so both
+    sides carry those rows. Measured as the equivalent invocation — `--check --baseline origin/main`
+    exits **0** with `11913 now vs 11913 on the baseline` — which is the same question the merge tree
+    asks. ⛔ DO NOT “FIX” THIS BY RE-PINNING: under the ratchet the pin is a historical reading and the
+    red is the diff's scope rather than the pin's value, so a fresh pair clears nothing and a branch
+    that reds here should be read against `origin/main` before anyone touches the number.
     """
     if explicit is not None:
         # ⛔ `is not None`, not truthiness: `--baseline "$BASE_REV"` with the variable UNSET yields
