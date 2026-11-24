@@ -21956,7 +21956,18 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 # and the pin itself asserts non-vacuity, so the number is not load-bearing.
 # ⚠️ Count the ROWS the helper returns, not the verdicts a commit message enumerates:
 # `fb21c37aa298`'s message says "6 verdicts" while enumerating 5.
-_CUT_CLAIM_WINDOW = 200
+#: ⛔ MEASURED, NOT TUNED TO A GUESS. At 200 this bound was a blind spot: the record at
+#: `tools/ci_selection.py:224-232` names its arm 207 characters after its verdict word, so
+#: the scan read the record as NO CLAIM — and a false verdict written the same way would
+#: have shipped green. The bound was raised until the sweep showed no further false
+#: compatinctions appear; past a point a name is charged with another arm's distant verdict,
+#: which is why this stays a BOUND rather than "unbounded". Re-derive after any edit with
+#: the one-liner above, at two window sizes.
+#: ⛔ No figure is stated here on purpose (see the census note above): the sweep moves with
+#: every edit to this file. A residual remains — an arm paired with its verdict beyond this
+#: distance inside one block is still unread, and the principled fix is name/clause
+#: attribution rather than a length (#12140, which also carries the attribution fail-open).
+_CUT_CLAIM_WINDOW = 400
 #: A restoration defuses a CUT verdict only when it is ATTRIBUTED — "RESTORED by
 #: `#14481`" / "restored by <sha>". A bare `restored` must not defuse, or the false claim
 #: this pin exists to catch passes by carrying the word in an unrelated clause.
@@ -22128,14 +22139,14 @@ def _arm_names_in(text: str) -> set[str]:
 #: uses. A digit after the stop is not a boundary (`837.7`, `v1.2`), and a stop with
 #: nothing after it is not one either, which is what each alternative's whitespace class
 #: states.
-#: ⛔ A SEMICOLON IS **NOT** A SENTENCE END, and making it one cost a TRUE record. It joins
-#: two clauses of one sentence, so a restoration after it still belongs to the arm's own
-#: statement. Measured — `tools/ci_selection.py:2052-2055` reads "…was cut with `#14439`'s
-#: re-cut on 2026-11-23;\n# #14481 restored that arm with the rest of the file…", and a
-#: `;`-through-newline boundary cut the restoration out of its own clause and charged the
-#: record as a contradiction. A semicolon keeps the ORIGINAL `;` + space behaviour (no record
-#: relies on one to defuse), while a full stop takes the widened treatment above.
-_CLAUSE_SEP_RE = re.compile(r"\.[ \t]*(?:\n[ \t]*#*[ \t]*|[ \t]+)|;[ \t]+")
+#: ⛔ A SEMICOLON IS **NOT** A SENTENCE END, IN ANY SPELLING. It joins two clauses of one
+#: sentence, so a restoration after it still belongs to the arm's own statement — and a
+#: rule that treated `;`+space as a bound but `;`+newline as not would grade a record
+#: DIFFERENTLY PURELY BY WHITESPACE: measured, the same words flip from green to RED on a
+#: trailing space before the wrap, or on joining the wrap. A whitespace edit must never
+#: change a grade. Attribution is still enforced by `_CUT_CLAIM_RESTORED_RE` (an
+#: UNATTRIBUTED "restored" does not defuse), so this is a clause bound, not a grant.
+_CLAUSE_SEP_RE = re.compile(r"\.[ \t]*(?:\n[ \t]*#*[ \t]*|[ \t]+)")
 
 
 def _claim_clause_bounds(text: str, pos: int) -> tuple[int, int]:
@@ -22158,7 +22169,7 @@ def _claim_clause_bounds(text: str, pos: int) -> tuple[int, int]:
     return lo, hi
 
 
-def _cut_claim_restoration_defuses(text: str, start: int, end: int, name: str) -> bool:
+def _cut_claim_restoration_defuses(text: str, start: int, name: str) -> bool:
     """Does a restoration in THIS NAME'S OWN CLAUSE defuse its verdict?
 
     ⛔ BOUND TO THE NAME, NOT MERELY NEAR IT — and not to a distance at all. Two measured
@@ -22175,6 +22186,22 @@ def _cut_claim_restoration_defuses(text: str, start: int, end: int, name: str) -
     also keeps the shape the pin's own message prescribes GREEN: one marker over a list
     of names restores every name in the list, and charging the furthest one would red a
     correct record.
+
+    ⛔ ONE KNOWN FAIL-OPEN IS RECORDED AND DELIBERATELY NOT FIXED HERE (#12140, which
+    carries the two verbatim shapes — they are NOT repeated in this docstring, because
+    this text lives inside the file the scan reads and a verdict word beside this
+    function's own `def` line becomes a claim about itself). In short: two records differ
+    only by their SUBJECT — one restates the same arm with a pronoun, one restates a
+    DIFFERENT, collective subject — and a marker in the FOLLOWING sentence is outside the
+    arm's own clause, so the first is graded as if nothing restored it.
+
+    Accepting a following-sentence marker to fix that shape is exactly what reopens a
+    false PASS for the second, because "names no arm in its own clause" cannot tell a
+    pronoun that refers back from a collective subject that does not. Three consecutive
+    rounds bound this marker by distance, then by joint clause, then by clause origin,
+    each closing one direction and opening the other; a fourth blind span tweak is the
+    wrong bet, so the pair is recorded on #12140 and tracked. The bounds that ARE settled
+    are pinned by the fixtures in `test_no_record_calls_an_arm_CUT_while_that_arm_is_live`.
     """
     clause_lo, clause_hi = _claim_clause_bounds(text, start)
     clause = text[clause_lo:clause_hi]
@@ -22228,7 +22255,7 @@ def _cut_claims_in(text: str, live: set[str]) -> list[tuple[int, str, bool]]:
         claims.append((m.start(), name,
                        name in live
                        and not _cut_claim_restoration_defuses(
-                           text, m.start(), m.end(), name)))
+                           text, m.start(), name)))
     return claims
 
 
@@ -22259,11 +22286,22 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
     # `fb21c37aa298` had to fix for the plan ledger. Count the sources the pin exists to
     # read. Per-file equality was deliberately NOT used: it would red a later PR that
     # legitimately removes a file's last verdict, which is not a lost source.
-    foreign = [c for c in claims if c[0] != _SELF_SCAN_REL]
-    assert len(foreign) >= 2, (
-        "the CUT-verdict scan read its verdicts only from its OWN fixtures — a record "
-        "source was dropped from `_CUT_CLAIM_FILES` or became unreadable, and the "
-        f"non-vacuity floor would otherwise pass green. claims={claims!r}")
+    # ⛔ AND THE FLOOR MUST NOT BE SATISFIED BY THIS TEST'S OWN FIXTURES, and it must FAIL
+    # when a SINGLE source is dropped. Both halves matter: 58 of the 82 claims the scan
+    # reads at this head come from THIS file — the guard's prose and its synthetic
+    # fixtures — so a bare count is met by the fixtures alone. A foreign-count floor was
+    # ALSO wrong: measured, dropping any ONE of the five record sources still left >= 2
+    # foreign claims and passed green, i.e. the guard its own comment says exists to catch
+    # a dropped source could not catch one. The assertion is the SET, so a file that
+    # legitimately loses its last verdict must delete its `_CUT_CLAIM_FILES` entry in the
+    # same commit — which is the honest record of that change.
+    foreign_sources = {c[0] for c in claims if c[0] != _SELF_SCAN_REL}
+    assert foreign_sources == set(_CUT_CLAIM_FILES) - {_SELF_SCAN_REL}, (
+        "the CUT-verdict scan lost a record source (or the scope moved without its "
+        "entry): a source dropped from `_CUT_CLAIM_FILES`, or one that became "
+        "unreadable, must red here rather than pass on the pin's own fixtures. "
+        f"read={sorted(foreign_sources)!r} expected="
+        f"{sorted(set(_CUT_CLAIM_FILES) - {_SELF_SCAN_REL})!r}")
     # ⛔ AND THE WRAP MUST BE READ, not skipped. `origin/main`'s pre-fix
     # `slow_wall_projection` sentence backticked this arm across a line break, and an
     # unbroken-token scan called it clean — the false-PASS this pin exists to forbid.
@@ -22421,6 +22459,26 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         got = {n: c for _o, n, c in _cut_claims_in(passage, live2)}
         assert got == {"test_c_arm": True}, (
             f"a {tag} block must bound its verdict: {got!r}")
+
+    # ⛔ AND THE WINDOW MUST REACH A VERDICT THAT IS WRITTEN FAR FROM ITS ARM. Measured:
+    # `tools/ci_selection.py`'s shard-scaling record names the arm 207 characters after
+    # "cut by", so at `_CUT_CLAIM_WINDOW = 200` the scan read it as NO CLAIM at all — and a
+    # false "CUT" written the same way would have shipped green. Pinned at 207, i.e. past
+    # the old bound, so a re-narrowing reds here.
+    far = ("x" * 207) + " `test_live` — cut by `#14439`.\n"
+    got = _cut_claims_in(far, {"test_live"})
+    assert [c for _o, _n, c in got] == [True], (
+        f"a verdict written far from its arm is still a verdict: {got!r}")
+
+    # ⛔ AND THE CLAUSE MUST NOT CARE WHERE THE SEMICOLON FALLS. A rule that bounded a
+    # clause at `;`+space but not at `;`+newline graded the SAME record differently by
+    # whitespace alone (green when wrapped, RED with one trailing space). A whitespace edit
+    # must never move a grade, so `;` bounds nothing in any spelling.
+    for sep in (";\n", "; \n", "; "):
+        passage = f"`test_live` was CUT by #14439{sep}# It was RESTORED by `#14481`.\n"
+        got = _cut_claims_in(passage, {"test_live"})
+        assert got and not any(c for _o, _n, c in got), (
+            f"a semicolon must join, not bound, in every spelling ({sep!r}): {got!r}")
 
     contradictions = [c for c in claims if c[3]]
     assert not contradictions, (
