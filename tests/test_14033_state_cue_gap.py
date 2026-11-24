@@ -309,7 +309,7 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       routes, and so does one with a bare quantifier subject (`is the plan some
       team abandoned`), and so does a TIME SPAN that names no record
       (`is the quarter ended`) — see the module's ``_NP_STOP`` note for all
-      SEVEN residuals;
+      EIGHT residuals;
     * …and the same stop is what refuses an ADJUNCT: `is the data safe once
       archived`, `is the report still accurate once archived` and
       `is the policy unless bookings were cancelled` — the ending there belongs
@@ -722,9 +722,39 @@ def test_a_multi_word_negator_is_the_stated_cost_of_a_closed_negator_list():
         "is the plan nowhere near cancelled",
         "is the plan in no way archived",
         "is the plan nothing like cancelled",
+        # ⛔ AND THE HYPHEN-JOINTED FORM OF A STOP THAT IS ALREADY IN THE LIST —
+        # `-` is a member of `_NP_WORD`, so `no-longer` is ONE token and the
+        # `longer` alternative is never evaluated at its start (module residual
+        # #8). Pre-existing on `origin/main`, not a fold regression.
+        "is the plan no-longer archived",
     ):
         got = detect_state_question(inverted)
         assert got.population is not None, (
             f"{inverted!r} now refuses — that may be better, but the module's "
             f"``_NP_STOP`` residual #7 says it ROUTES with inverted polarity, so "
             f"the disclosure has to move in the same change")
+
+
+def test_the_indefinite_and_relative_arm_is_load_bearing():
+    """The `whoever|whatever|whichever|such` arm was the one unpinned guard.
+
+    ⛔ It is not dead: removing it routes all four rows below (measured), because
+    each is a relative/indefinite subject the run would otherwise swallow and
+    then read the run's own word as the question's predicate. Every OTHER arm in
+    ``_NP_STOP`` already had a falsifier that reds a row; this one red-ed none, so
+    the standard the file applies everywhere else ("a pin must be able to reach
+    the guard it pins") was not met here (PR #14491 review cycle 6, P2).
+    """
+    from tortoise.state_intent import detect_state_question
+
+    for swallowed in (
+        "is the report whatever archived",
+        "is the report whichever archived",
+        "is the report whoever archived",
+        "is the report such archived",
+    ):
+        got = detect_state_question(swallowed)
+        assert got.population is None, (
+            f"{swallowed!r} routed to {got.population!r} — the relative/indefinite "
+            f"subject arm of ``_NP_STOP`` no longer stops the run, so the ending "
+            f"is read as the predicate of a clause the caller did not ask about")

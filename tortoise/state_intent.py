@@ -167,10 +167,12 @@ _ENDING_WORDS = (
 #:
 #: ⛔ THE TYPOGRAPHIC VARIANTS ARE FOLDED AT THE BOUNDARY, NOT ENUMERATED HERE. A
 #: character class that lists every spelling of an apostrophe and a hyphen is a
-#: losing game — U+2010/U+2011/U+2012/U+2013/U+2014 hyphens and a decomposed (NFD)
-#: accent each answered `0 rows` while U+2019 and the ASCII forms routed (review
-#: cycle 3, P2). `detect_state_question` now TRANSLATES those code points to their
-#: ASCII forms and NFKC-normalises before any shape is tried, so this class stays
+#: losing game — the U+2010..U+2014 dashes and a decomposed (NFD) accent each
+#: answered `0 rows` while U+2019 and the ASCII forms routed (review cycle 3, P2).
+#: `detect_state_question` now TRANSLATES those code points and NFC-normalises
+#: before any shape is tried (⛔ NFC, not NFKC — a compatibility fold breaks
+#: fractions; and a SEPARATOR dash folds to a SPACE while a HYPHEN folds to `-` —
+#: see that note, both measured), so this class stays
 #: readable and the fold is the single place that knows about typography. The
 #: `’` member is therefore a redundant safety net, kept because it costs nothing
 #: and because a future caller may match `_NP_WORD` on un-normalised text.
@@ -221,9 +223,12 @@ _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 #:   pinned futurity rows, while a bare `be` alternative routes nothing it alone
 #:   can reach — every infinitive that survives to this tail anchor carries the
 #:   marker in front of it. So the frame is what does the work and `be` is
-#:   deliberately NOT a separate stop word (it would be an un-falsifiable
-#:   alternative and, worse, would refuse `is the be all plan archived`-class
-#:   head nouns for no closure). The words are kept INSIDE the frame because
+#:   deliberately NOT a separate stop word: as a slot-2 token it is
+#:   un-falsifiable (nothing reaches it that the frame does not already stop).
+#:   ⛔ An `is the be all plan archived` argument does NOT pay for it — that
+#:   spelling sits in the HEAD slot, where `_NP_STOP` never applies at all (see
+#:   the note below), so citing it confuses the two slots. The words are kept
+#:   INSIDE the frame because
 #:   `due`/`going` are ordinary head-noun modifiers in the second slot:
 #:   `is the annual due diligence report archived` and `is the current going
 #:   concern note archived` still route;
@@ -248,7 +253,7 @@ _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 #: retired`, `is the US footprint archived`), and the head-noun slot is not a
 #: place a zero relative's subject can stand.
 #:
-#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are seven:
+#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are eight:
 #:
 #: * a zero relative whose subject is a BARE NOUN (`is the claim finance
 #:   retracted`) is lexically identical to a two-word head noun plus a predicate
@@ -301,6 +306,17 @@ _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 #:   vocabulary (`estate will probate`). Chasing the rest of English's negation
 #:   is the unbounded word-list shape #13128 refuses, so this is disclosed rather
 #:   than closed;
+#: * ⛔ AND IT IS SO FOR A SECOND, SEPARATE REASON: A MULTI-WORD STOP JOINTED BY A
+#:   HYPHEN NEVER REACHES THE WHOLE-WORD ANCHOR. `-` is a member of `_NP_WORD`, so
+#:   `no-longer` is ONE token and the `longer` alternative — which IS in the list
+#:   and does stop `no longer` — is never evaluated at its start:
+#:   `is the plan no-longer archived` routes, on this head and on `origin/main`
+#:   (measured; it is NOT a regression of the fold, whose typographic spelling
+#:   `no—longer` is handled by folding a separator dash to a SPACE). The same
+#:   applies to any hyphen-joined stop (`to-be`, `far-from`, `anything-but`). This
+#:   is stated rather than closed because the fix is structural: the stop
+#:   lookahead is anchored at a token start, and teaching it every hyphen
+#:   segmentation is a second grammar to be kept in step with `_NP_WORD` by hand;
 
 _NP_STOP = (
     r"(?!(?:that|which|who|whom|whose|where|when"
@@ -876,8 +892,9 @@ def detect_state_question(text: str | None) -> StateQuestion:
     folded = str(text).translate(
         {
             0x2018: "'", 0x2019: "'", 0x02BC: "'",  # quotes / modifier apostrophe
-            0x2010: "-", 0x2011: "-", 0x2012: "-",  # hyphens
-            0x2013: "-", 0x2014: "-", 0x2212: "-",  # dashes / minus sign
+            0x2010: "-", 0x2011: "-",                # HYPHENS — joiners
+            0x2012: " ", 0x2013: " ", 0x2014: " ",  # dashes — separators
+            0x2212: " ",                             # minus sign
         }
     )
     t = " ".join(unicodedata.normalize("NFC", folded.lower()).split())
