@@ -155,11 +155,11 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # whatever its caller — and `_get_proj` is not a capture-specific leg
     # (measured on this tree with `git grep -c '_get_proj('`: 395 lines under
     # `tortoise/`, 394 besides the one `def`; 207 in `tortoise/sdk.py`, where it
-    # is defined, i.e. 206 besides that `def`),
-    # it is the cold
-    # projection attach. `#4451` owns the completion-gate leg named here and
-    # NOT that population; a future on-loop `_get_proj` elsewhere joins the
-    # exemption silently and is then reported as `#4451`'s. Declared rather
+    # is defined, i.e. 206 besides that `def`). It is the cold projection
+    # attach, not a capture-only door. `#4451` owns the completion-gate leg
+    # named here and NOT that population; a future on-loop `_get_proj`
+    # elsewhere joins the exemption silently and is then reported as `#4451`'s.
+    # Declared rather
     # than narrowed because narrowing needs a call-site label the census does
     # not carry; whoever owns `#4451` should prefer the label over the name
     # (#14086 review, P3).
@@ -248,11 +248,12 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     (which issue removes the leg); the only membership this file asserts is
     `_get_registry` — the instrument-liveness row — plus the negative rule that
     no UNDECLARED leg may appear at all. ⛔ An earlier cut of this paragraph
-    said "ONE on-loop leg, `_get_registry`", and the table two screens up
-    contradicted it in the same file ("measured 2.50 ms + 4.11 ms on the loop"
-    for `_graph_write_with_retry`) — a figure stated wider than the measurement
-    is the same defect this cycle's reviews kept correcting, so the number is
-    gone rather than re-copied (#14086 review F3).
+    said "ONE on-loop leg, `_get_registry`", and the table above contradicted
+    it in the same file, with a figure stated wider than the measurement — the
+    defect this cycle's reviews kept correcting, so the number is gone rather
+    than re-copied (#14086 review F3). ⛔ The row that carried that figure
+    (`_graph_write_with_retry`) was DELETED by the change this file now pins
+    (#13722/#14112), so no prose here points at it as though it still exists.
 
     ⛔ Its COST is a reading, not a pin, and that distinction is deliberate:
     nothing here asserts a millisecond figure, because a wall-clock number
@@ -465,6 +466,12 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
 # row above was deleted by the change this pins (its owner was #14112), so this
 # test is now the row's replacement: the stamp half of `_capture_session_impl`
 # is submitted as ONE closure through `_run_off_loop(_CAPTURE_EXECUTOR, …)`.
+# ⛔ MEASURED, so nobody re-derives it: with the `await` reverted to an inline
+# call, the census above (and the bar's own test) stay GREEN — 2 passed. The
+# deleted row's per-record cost lands under the 5 ms TOTAL bar, so the census
+# cannot see this regression at any bar; the assertions below are the whole
+# falsifier, which is why the pool identity among them is asserted and not just
+# recorded.
 #
 # MEASURED, pre-fix vs post-fix, same fixture: pre-fix the ticker completes 0
 # ticks inside the blocking window and `/health` answers only after `exited`;
@@ -576,6 +583,13 @@ def test_the_stamp_chain_record_write_does_not_block_the_event_loop(
         "the single uvicorn worker's loop is parked for the whole write and "
         "every concurrent request accrues it as `pre_handler` (#13722's 53 s "
         "`loop_blocks` episode)")
+    assert str(state.get("thread", "")).startswith("capture-extract"), (
+        f"the stamp chain's write ran on {state.get('thread')!r}, not the "
+        "dedicated capture pool — `asyncio.to_thread` would put it on the "
+        "loop's SHARED default executor, the starvation path #3060 recorded "
+        "and `_submit_off_loop` exists to avoid. It confines contextvars "
+        "either way, so the POOL is the whole difference: "
+        "`_run_off_loop(_CAPTURE_EXECUTOR, ...)` is the seam (#13722/#14112)")
 
     entered, exited = state["entered"], state["exited"]
     in_stall = [t for t in ticks if entered < t < exited]
@@ -585,9 +599,12 @@ def test_the_stamp_chain_record_write_does_not_block_the_event_loop(
         f"{_STAMP_MIN_TICKS_IN_STALL}) — the write is blocking the loop, so "
         "every concurrent request waits for it (#13722)")
 
-    # The body, not the status, is the assertable part: `/health` catches each
-    # internal step and answers `ok`/`degraded`, so it never 5xxes and a bare
-    # status assertion could not fail.
+    # ⛔ THIS ASSERTS THE PROBE, NOT THE BEHAVIOUR, and says so rather than
+    # posing as a behavioural row: `/health` answers `ok`/`degraded` from
+    # in-memory state (#2850), so no mutation of this diff can move the value.
+    # What it does catch is the probe missing the route — a 404 body has no
+    # `status`, so a `/health` request that never reached the handler fails here
+    # instead of being read as a served request below.
     assert health.json()["status"] in {"ok", "degraded"}, health.text
     assert health_done < exited, (
         "/health was NOT served while the stamp write was blocked (answered "

@@ -22174,13 +22174,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             #
             # ONE submission, not seven per record: the closure is submitted
             # whole, so the sequence stays atomic with respect to the loop
-            # exactly as it was inline. `_run_off_loop` (NOT a bare
-            # `asyncio.to_thread`) because it confines contextvars onto the
-            # worker, and `_live_write_scope(_CAPTURE_PROVENANCE_LANE)` is
-            # opened INSIDE the moved callable — so the lane's `ContextVar`
-            # authorisation rides the confined context and the only thing that
-            # changes is WHERE the same callable runs (#14104's withdrawn
-            # premise).
+            # exactly as it was inline. `_run_off_loop` and NOT a bare
+            # `asyncio.to_thread`, because THAT one uses the loop's SHARED
+            # default executor — the starvation path #3060 recorded, which
+            # `_submit_off_loop` exists to avoid; contextvars are confined
+            # either way. The lane's `ContextVar` authorisation still rides
+            # that context because `_live_write_scope(_CAPTURE_PROVENANCE_LANE)`
+            # is opened INSIDE the moved callable (#14104's withdrawn premise).
             # ⛔ No batching, no statement change, no change to which records
             # are written or in what order. Baking those together is what wedged
             # the previous lane, and batching can reorder a load-bearing stamp
