@@ -83,13 +83,13 @@ version: 1
 # only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged tree; never carry
 # the last revision's minute, seconds, or split.
 #
-# `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
+# `8c373f59a15ba` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
 # durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
 # 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
 # `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
 # re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
-# and re-measures the graded extent on ITS resolved tree — that pair is THAT FOLD'S OWN READING,
-# not a count of the tree a reader is holding: the `#:` run has MOVED with every fold since, and the
+# and re-measures the graded extent on ITS resolved tree, not a count of the tree a reader is
+# holding: the `#:` run has MOVED with every fold since, and the
 # figure that may be trusted is the one `_residue_block`'s docstring publishes, graded against its
 # own walk by `tests/test_sdk_privatise_sweep.py::test_the_extent_figure_is_the_walks_own_count`
 # (post-merge review of #14459, P3: this sentence read as a measurement of "the resolved tree" while
