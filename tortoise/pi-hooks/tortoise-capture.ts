@@ -5413,22 +5413,53 @@ export function takedownClaim(
  */
 export function disposeQuarantine(
   quarantine: string, raw: string, path: string, expected: string,
+  //: TEST seams with the module defaults, for the same reason `restoreQuarantine`
+  //: takes them: the failure arms cannot be built portably otherwise.
+  link: (from: string, to: string) => void = linkSync,
+  move: (from: string, to: string) => void = renameSync,
 ): boolean {
   if (raw !== expected) {
     try {
-      linkSync(quarantine, path);
+      link(quarantine, path);
     } catch (err) {
-      warn(
-        `a displaced drain claim could not be restored at ${path} ` +
-          `(${(err as NodeJS.ErrnoException)?.code ?? String(err)}); ` +
-          "its holder keeps draining until its next refresh (up to ttl/3)",
-      );
-      // ⛔ THE ONLY OTHER COPY (review, cycle 16, P3): the rename vacated `path`, so
-      // on a non-EEXIST failure this quarantined file is all that is left of a live
-      // holder's claim. Deleting it turns "restore failed" into "claim destroyed".
-      // Left in place — the `*.tmp-*` shape is swept by mtime, so nothing outlives
-      // the process here.
-      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return false;
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "EEXIST") {
+        warn(
+          `a displaced drain claim could not be restored at ${path} ` +
+            `(${code}); its holder keeps draining until its next refresh (up to ttl/3)`,
+        );
+      } else {
+        // ⛔ THE ONLY OTHER COPY (review, P3): the rename vacated `path`, so on a
+        // non-EEXIST failure this quarantined file is all that is left of a live
+        // holder's claim. Deleting it turns "restore failed" into "claim destroyed"
+        // and frees the path for the next `linkSync`. It is not merely spared: while
+        // the path is still FREE the object is renamed BACK (`renameSync` needs no
+        // hard link — `tox-dev/filelock#843`), and only when that also fails is the
+        // copy left in place (BOUNDED — the `*.tmp-*` shape is swept by mtime).
+        let pathFree = false;
+        try { lstatSync(path); } catch { pathFree = true; }
+        if (pathFree) {
+          try {
+            move(quarantine, path);
+            return false;
+          } catch (renameErr) {
+            warn(
+              `a displaced drain claim could not be restored at ${path} ` +
+                `(${code ?? String(err)}; rename: ${
+                  (renameErr as NodeJS.ErrnoException)?.code ?? String(renameErr)
+                }) and is PRESERVED at ${quarantine}; its holder keeps draining ` +
+                "until its next refresh (up to ttl/3)",
+            );
+            return false;
+          }
+        }
+        warn(
+          `a displaced drain claim could not be restored at ${path} ` +
+            `(${code ?? String(err)}) — the path is OCCUPIED, so the copy is ` +
+            `PRESERVED at ${quarantine}; its holder keeps draining until its next ` +
+            "refresh (up to ttl/3)",
+        );
+      }
     }
     try { unlinkSync(quarantine); } catch { /* best effort */ }
     return false;
@@ -5449,36 +5480,83 @@ export function disposeQuarantine(
  * the claim path whose bytes could not be read. It is a possible holder (the
  * doctrine is "an unprovable read is ALIVE"), so it is honoured rather than
  * deleted — see the call site in `clearUnusableClaimPath` (#14480 review, F3).
- * Mirrors `drain_claim._restore_quarantine`.
+ *
+ * ⛔ THE FAILURE PATH MUST NOT DELETE THE OBJECT EITHER. The first cut unlinked the
+ * quarantine on ANY `linkSync` failure but `EEXIST`, and the claim path had already
+ * been VACATED by the caller's `rename` — so the peer's record existed nowhere
+ * while the peer still believed it held, and this process won the next `linkSync`:
+ * the two-holder window this mechanism exists to close, with the only copy of the
+ * evidence destroyed and the warning on a stderr a session discards (#14480
+ * cycle-17 review, P3).
+ *
+ * A filesystem that refuses hard links (`EPERM`/`EXDEV`/`EMLINK`/`ENOSYS`) is the
+ * reachable case, and it has a restore that needs no link: `rename` the object back
+ * **while the claim path is still free** — the fallback `filelock`'s stale break
+ * takes for exactly this reason (`tox-dev/filelock#843`). `rename` replaces, so it
+ * is used ONLY after `lstat` says the path is empty.
+ *
+ * Returns `true` when the object is back at `path` or a NEWER object holds it, and
+ * `false` when it could not be put back — in which case the quarantined copy is
+ * LEFT IN PLACE, never unlinked. Mirrors `drain_claim._restore_quarantine`.
+ * ⛔ The `link` and `move` parameters are TEST seams with the module defaults: a
+ * filesystem that refuses hard links cannot be built portably in a test, and the
+ * arm that matters is what happens when it does. `move` is the same seam the
+ * caller already takes for its own `rename`, so a test can stand inside the
+ * restore's fallback too.
  */
 export function restoreQuarantine(
-  quarantine: string, path: string,
+  quarantine: string,
+  path: string,
+  link: (from: string, to: string) => void = linkSync,
+  move: (from: string, to: string) => void = renameSync,
 ): boolean {
   try {
-    linkSync(quarantine, path);
+    link(quarantine, path);
   } catch (err) {
-    // EEXIST is the normal case: a newer object already holds the path, and that
-    // is a holder either way. Anything else means the object we could not read
-    // could NOT be put back — and since the rename already vacated `path`, the
-    // quarantined file is then the ONLY copy of a live holder's claim.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // EEXIST is the normal case: a newer object already holds the path, and that is
+    // a holder either way. ANY other errno means the object we could not read could
+    // NOT be put back — and since the rename already vacated `path`, the quarantined
+    // file is then the ONLY copy of a live holder's claim.
     //
-    // ⛔ SO IT IS NOT DELETED (review, cycle 16, P3). This used to warn and then
-    // `unlinkSync` unconditionally, which destroyed that only copy and answered
-    // `held` over an EMPTY path: the next `link` wins and two holders coexist for up
-    // to `ttl/3`, silently — exactly the window the quarantine rule exists to close,
-    // with the moved-aside evidence gone too. `link(2)` lists
-    // EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV besides EEXIST, and
+    // ⛔ SO IT IS NOT DELETED (review, P3). This used to warn and then `unlinkSync`
+    // unconditionally, which destroyed that only copy and answered `held` over an
+    // EMPTY path: the next `linkSync` wins and two holders coexist for up to
+    // `ttl/3`, silently — the window the quarantine rule exists to close, with the
+    // moved-aside evidence gone too. `link(2)` lists
+    // EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside EEXIST, and
     // ENOSPC/EDQUOT on a spool directory is the ordinary case, not the exotic one.
-    // The `*.tmp-*` shape means the scratch sweeper collects it by mtime if this
-    // process dies here, so leaving it behind is BOUNDED.
-    if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") {
-      warn(
-        `an unreadable drain claim could not be restored at ${path} ` +
-          `(${(err as NodeJS.ErrnoException)?.code ?? String(err)}); it is left in ` +
-          "the quarantine, honoured as a holder, and this pass must not run beside it",
-      );
-      return false;
+    if (code === "EEXIST") {
+      try { unlinkSync(quarantine); } catch { /* best effort */ }
+      return true;
     }
+    let pathFree = false;
+    try { lstatSync(path); } catch { pathFree = true; }
+    if (pathFree) {
+      // No hard link on this filesystem, and the path is still free: put the
+      // object BACK rather than strand a live holder's record.
+      try {
+        move(quarantine, path);
+        return true;
+      } catch (renameErr) {
+        warn(
+          `an unreadable drain claim could not be restored at ${path} ` +
+            `(${code ?? String(err)}; rename: ${
+              (renameErr as NodeJS.ErrnoException)?.code ?? String(renameErr)
+            }) and is PRESERVED at ${quarantine}; it is honoured as a holder, so ` +
+            "this pass must not run beside it",
+        );
+        return false;
+      }
+    }
+    warn(
+      `an unreadable drain claim could not be restored at ${path} ` +
+        `(${code ?? String(err)}) — the path is OCCUPIED, so it is not replaced — ` +
+        "and the " +
+        `copy is PRESERVED at ${quarantine}; it is honoured as a holder, so this ` +
+        "pass must not run beside it",
+    );
+    return false;
   }
   try { unlinkSync(quarantine); } catch { /* best effort */ }
   return true;
@@ -5544,6 +5622,10 @@ export type ClaimPathClear = "gone" | "refused" | "done" | "held";
 export function clearUnusableClaimPath(
   path: string,
   rename: (from: string, to: string) => void = renameSync,
+  //: The restore's `link` seam, for the same reason `rename` is a seam: a
+  //: filesystem that refuses hard links cannot be built in a test, and the arm
+  //: that matters is what the restore does when the link is refused.
+  link: (from: string, to: string) => void = linkSync,
 ): ClaimPathClear {
   let before: ReturnType<typeof lstatSync>;
   try {
@@ -5598,8 +5680,11 @@ export function clearUnusableClaimPath(
     // advisory GHSA-fq56-3cx3-fjxp describes, and it inverts the doctrine
     // `acquireDrainClaim` states below: a regular claim we could not read is
     // HONOURED (`undefined` = somebody holds it) and never unlinked
-    // (#14480 review, F3). The Python twin carries the same branch.
-    restoreQuarantine(quarantine, path);
+    // (#14480 review, F3). The Python twin carries the same branch, and the
+    // restore itself never deletes the object it promised to honour: a refused
+    // `linkSync` renames it back while the path is free, and preserves it
+    // otherwise (cycle-17 review, P3).
+    restoreQuarantine(quarantine, path, link, rename);
     return "held";
   }
   try {
