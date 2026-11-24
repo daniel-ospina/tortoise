@@ -99,7 +99,7 @@ The last rows matter as much as the first: on today's main the free server is **
 uv run python tools/test_lane.py run -- tests/test_14350_drain_convergence.py -q
 84 passed
 
-# capture family + install-contract pins (generation 33) + store_sync + doctor
+# capture family + install-contract pins (generation 34) + store_sync + doctor
 uv run python tools/test_lane.py run -- tests/test_capture_spool.py \
     tests/test_14350_drain_convergence.py tests/test_12483_12487_spool_integrity.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
@@ -413,6 +413,19 @@ and the P3 it reported as already closed is confirmed closed at the commit it na
 | **P3** the two legs disagree in words on the shared operator line for a NON-STRING `claim_unavailable_reason` (Python gated on `isinstance(reason, str)`, the Pi leg on truthiness, so one shared `status.json` rendered `…, NO drain exclusion` and `…, NO drain exclusion (5)`), and at the carry-forward arm a JSON `null` reason was dropped by one leg and carried by the other | **fixed on both legs, and in the third place the same class lived**: the suffix is string-gated on both, the carry-forward treats `null` as absent on both, and the SELF-HEAL now keeps every claim-axis key the record HOLDS instead of only the truthy ones (a `claim_unavailable: false` and a `null` reason vanished on the Pi leg and survived on the Python leg). Pinned three ways: two parity rows (non-string reason, null reason), a cross-leg carry-forward test that executes the real `applyClaimPolicy`, and a parity row whose self-heal fires (`queued == 0`) whose REPAIRED record is compared key-for-key across legs. Each verified RED by reverting the corresponding pre-fix predicate. |
 | **P3** record counts stale at the head they claimed (`71`/`320` vs `74`/`321`) | **already fixed, confirmed** — `21a2c5e9b0` (`74`/`773`/`321`), and re-derived again here because this round adds cases: `84`/`783`/`327` (the merged tree: the peer lane's own cases moved the Pi count from the `326` this lane measured alone). |
 
+**Cycle 20** (a fresh-context reviewer posted against `bcb52e1d` — 1 **P1** + 5 **P3**, and the
+round that moved shipped BYTES). ⚠️ It had no row until now, and the delta's own citations said
+"cycle 19", which is a DIFFERENT round (exported at `23ac4a97d1fd`): that is why the table below
+exists, and why the code comments now cite it by head.
+
+| finding | disposition |
+|---|---|
+| **P1** generation 33 had ALREADY SHIPPED on `main`, so this PR's in-place re-cut of 33 would have graded every Pi install made from `main` as a BLOCKING `modified-artifact` ("local edit") — for a change the user never made | **fixed by shipping generation 34** on both halves, with 33's entries frozen at `main`'s digests, and **pinned by a new row** (`test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why`) after the reviewer MEASURED that reverting the whole fix left every suite green. |
+| **P3** the seam-digest sweep: the same stale generation appeared in four places | **fixed**, and the fifth (`pr-body.md`'s Tests block label) with it. |
+| **P3** "cycle 19" was cited for findings owned by this round, which had no row | **fixed**: this table, plus head-dated citations in the code. |
+| **P3** "cycle 11 F5" — cycle 11's digest finding is `F1` (`F5` is cycle 13's label set) | **fixed**. |
+| **P3** an installed-artifact paragraph claimed "ELEVEN re-cuts / TWELVE distinct forms" against a command that yields neither | **fixed by RUNNING it**: 22 distinct forms over 56 commits from `6a72cfd661`, and the note now says the figure is re-derived. |
+
 ## Residuals, stated
 
 * **Generation 34 is this PR's; generation 33 SHIPPED on `main` in #14423** (`da82ece4226`,
@@ -422,15 +435,23 @@ and the P3 it reported as already closed is confirmed closed at the commit it na
   moved, so `detect_artifact_install` would have graded every Pi install made from `main`
   as a BLOCKING `modified-artifact` ("local edit"). Both 33 entries are now FROZEN at
   `main`'s digests and this PR ships **34** on both halves (a marker change on one half
-  alone makes `contract_version_for("pi")` answer `None`), so no byte change in this branch
-  can move a shipped generation again.
+  alone makes `contract_version_for("pi")` answer `None`).
+  ⛔ AND THE FREEZE IS A CONVENTION PLUS ONE NEW ROW, NOT AN EXISTING GATE — stated because it
+  was measured, not assumed (review at `bcb52e1d`, P3): reverting the whole fix (both markers
+  back to 33, both pins back to the branch's re-cut pair) left `306 passed` and
+  `327 pass / 0 fail`, because every other row asserts only that the LIVE number and the LIVE
+  digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped number satisfies
+  all of them. That is why this PR adds
+  `test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why`: it pins the artifacts at 34 AND
+  pins `_GENERATION_DIGESTS[33]`/`_READ_SEAM_GENERATION_DIGESTS[33]` as something other than
+  this branch's pair, so re-cutting the shipped 33 reds. Verified RED under that re-cut.
 * **The seam digests this record quotes, each re-derived with `sha256sum` and never copied.**
   At the head this record ships, the capture half is `18b1256d…` = `_PINNED_PI_SEAM_INSTALL_CONTRACT`
   = `_GENERATION_DIGESTS[34]`, and the read half is `469eb352…` =
   `_PINNED_PI_READ_SEAM_INSTALL_CONTRACT` = `_READ_SEAM_GENERATION_DIGESTS[34]`. The values the
   branch derived at EARLIER heads are kept only WITH the head that owned them, because a
   figure that is not quoted at a head is not a claim a reader can check — and this bullet is
-  the third place the same rot was found (cycle 11 F5, cycle 19 P3): `3eef418b…` at the
+  the third place the same rot was found (cycle 11 F1, cycle 19 P3): `3eef418b…` at the
   branch's first commit, `932d74a2…` at the cycle-11 head, `f36b8c84…` at `71c89986ef6f`.
   Every one of those was an in-place re-cut of generation **33**, legal only while 33 was
   unreleased, and none of them is 33's shipped value (33's is `746075470aab…`, above).
@@ -468,7 +489,7 @@ and the P3 it reported as already closed is confirmed closed at the commit it na
   with the `clearClaimPath` seam and asserts `state.raced === true`). ⚠️ A predecessor
   of this line said the flag had NO forcing test and was set at "three sites"; both
   halves were false and contradicted this record's own cycle-13 F4 row (#14480
-  cycle-19 review, P3 — the third time this row was reported and the second time the
+  the review at `bcb52e1d`, P3 — the third time this row was reported and the second time the
   merge re-introduced it). What remains true: the takedown/disposal lost-race arms are
   staged only at the seam, not by a peer process inside the two acquisition attempts.
 * **A wedged pass holds the claim until its lease (≤120 s).** That is what a lease is; the bound is derived from the transport (`REQUEST_TIMEOUT_MS` 10 s / `urlopen` 30 s), and a real fetch always ends. A hung *mock* does not — which is why the #2100 case above had to release it.

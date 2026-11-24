@@ -4930,16 +4930,19 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: block above `_PINNED_PI_SEAM_INSTALL_CONTRACT`). Earlier heads of this PR re-cut
 #: generation 33 in place on the false premise that it had never shipped; the entry
 #: for 33 below is now `main`'s frozen digest and 34 carries this branch's bytes.
-#: ⚠️ 33's CAPTURE digest has been re-cut ELEVEN times under that same never-shipped
-#: exception, and the count is stated because THIS note is what a later re-pinner
-#: reads to justify reusing 33: measured with
-#: `for c in $(git rev-list --reverse origin/main..HEAD); do git show "$c:tortoise/pi-hooks/tortoise-capture.ts" | sha256sum; done | sort -u`
-#: over this branch's 25 commits, the shipped file takes TWELVE distinct forms —
-#: `3660e09d`, `2416b186`, `15393a96`, `a2314416`, `a97a8a0a`, `5a47bb65`,
-#: `d0e8e41d`, `35235567`, `2d011c33`, `442d76f5`, `72d2cf62`, and this head's — because
-#: the PR has been through eight review cycles and every one of them moved shipped
-#: bytes. Several of those re-cuts are BEHAVIOUR, not comments, and the digest covers
-#: them because it is the `sha256` of the whole file (graded at
+#: ⚠️ HOW MANY TIMES THIS FILE'S BYTES MOVED — MEASURED, not estimated, because THIS note
+#: is what a later re-pinner reads before judging whether reusing a number is safe:
+#: `for c in $(git rev-list --reverse <base>..HEAD); do git show "$c:tortoise/pi-hooks/tortoise-capture.ts" | sha256sum; done | sort -u | wc -l`
+#: returns **22 distinct forms over 56 commits** from `origin/main`'s merge base
+#: `6a72cfd661` to the head this note ships with, including `main`'s shipped form at
+#: generation 33 and this head's at generation 34.
+#: ⛔ THE NUMBER IS RE-DERIVED, NEVER CARRIED. An earlier version of this note claimed
+#: "ELEVEN re-cuts / TWELVE distinct forms / this branch's 25 commits" and listed eleven
+#: digests, NONE of which occurs in that range at all — a figure nobody could reproduce
+#: with the command printed beside it (review at `bcb52e1d`, P3). The command stands
+#: here so the next reader can check it in one line, and the form is `sort -u`'s.
+#: The re-cuts are BEHAVIOUR as well as comments, and the digest covers both because it
+#: is the `sha256` of the whole file (graded at
 #: `test_a_shipped_pi_seam_byte_change_moves_the_generation`):
 #:   * `c214f341` — the two legs' clock units unified (`CLAIM_VERSION` 1 → 2);
 #:   * `e3577f40` — a claim we cannot READ is honoured, never deleted;
@@ -6399,3 +6402,40 @@ def test_pi_hooks_status_keeps_a_non_blocking_step_that_clears_the_refusal(cli):
     assert "❌ stale-artifact: run `tortoise session verify --harness pi` "
     "for the repair path" in r.stdout, (
         "the BLOCKING finding's command is still withheld:\n" + r.stdout)
+
+
+def test_a_SHIPPED_generation_is_frozen_and_the_bump_is_why():
+    """⛔ THE BUG THIS PR ACTUALLY SHIPPED FIXES: a number that had ALREADY SHIPPED was
+    being re-cut in place.
+
+    Generation 33 reached `main` (`da82ece422`, #14423), so `main` ships
+    `tortoise-hook-version: 33` with its own bytes. Re-cutting 33 in place on this
+    branch therefore produces a DIFFERENT file under the SAME number, and
+    `hook_install.detect_artifact_install` reads an install made from `main` as
+    `modified-artifact` — a BLOCKING "local edit" accusation against every user who
+    installed from main, for a change they never made. The fix is the bump to 34,
+    which leaves 33 frozen at main's bytes.
+
+    ⛔ AND NOTHING ELSE IN THIS FILE CATCHES IT (measured, review at `bcb52e1d`):
+    reverting the whole fix — both markers back to 33, both pins back to the re-cut
+    pair, `_GENERATION_DIGESTS[33]` back to the branch's digest — left
+    `306 passed` and `327 pass / 0 fail`, because every other row asserts only that
+    the LIVE number and the LIVE digests agree with each other. A self-consistent
+    re-cut of a shipped number is exactly the shape that reads green everywhere and
+    blocks installs everywhere.
+
+    MUTATION THAT REDS THIS: set `_GENERATION_DIGESTS[33]` (or
+    `_READ_SEAM_GENERATION_DIGESTS[33]`) to this branch's digest instead of the
+    shipped one, or move either artifact marker back to 33.
+    """
+    # 33 is `main`'s, not this branch's: the markers moved past it and the entry is
+    # the digest `main` ships. Both halves are asserted because either one alone is
+    # satisfiable by a re-cut that blocks installs.
+    assert hook_install.read_hook_version(_PI_SRC) == 34, (
+        "the capture artifact must be a NEW generation, because 33 already shipped")
+    assert hook_install.read_hook_version(_PI_READ_SEAM_SRC) == 34, (
+        "the read seam moved with it")
+    assert _GENERATION_DIGESTS[33] != _GENERATION_DIGESTS[34], (
+        "generation 33 must NOT carry this branch's bytes — that is the re-cut that "
+        "reads as modified-artifact for an install made from main")
+    assert _READ_SEAM_GENERATION_DIGESTS[33] != _READ_SEAM_GENERATION_DIGESTS[34]
