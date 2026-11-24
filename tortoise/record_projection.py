@@ -2534,14 +2534,19 @@ _ALTER_COLUMN_TYPE_RE = re.compile(
 #: flag — every registered migration actually read — so a PARTIAL tree is re-read
 #: per consult instead of freezing a silently SHORT map; and
 #: :func:`table_columns` / :func:`refused_props_names` / :func:`jsonb_columns`
-#: each gate their own memo on the completeness of their own parse);
+#: each gate their own memo on the completeness of the read behind it);
 #: and (c) a caller that must SEE an edit has a verb — `_release_schema_cache()`,
 #: which drops the SQL, the column map and every parse together. ⛔
-#: `_jsonb_cache_clear()` is NOT an interchangeable spelling of it: it pops the
-#: `jsonb` view ONLY, so after an edit it answers a FRESH name set beside a STALE
-#: column map — the same divergence as a shrink, from the other side. It exists
-#: for tools and pins that need the encoding view re-taken; anything that must
-#: re-resolve the schema calls `_release_schema_cache()`. The earlier wording in this block ("The map cannot go stale
+#: `_jsonb_cache_clear()` is NOT an interchangeable spelling of it, and since the
+#: resident `jsonb` reader parses the SAME memoised SQL as the other two it no
+#: longer even refreshes its own view: popping that memo forces a RE-PARSE OF THE
+#: SAME BYTES, so after an edit it returns the unchanged answer with no signal that
+#: nothing was refreshed (measured: after an `ADD COLUMN … jsonb` and an
+#: `_jsonb_cache_clear()`, both the name set AND the column map still lack the
+#: column, while `_declared_types_for_dir(tree)` has it; only
+#: `_release_schema_cache()` makes either see it). It exists so a test or tool can
+#: re-derive the encoding view without disturbing anything else; anything that must
+#: RE-RESOLVE the schema calls `_release_schema_cache()`. The earlier wording in this block ("The map cannot go stale
 #: mid-process") was wider than the code and is corrected here rather than
 #: deleted, because the invariant it once carried is worth answering in place:
 #: *"`supabase/migrations` is applied by a workflow separate from the app deploy,
@@ -2952,9 +2957,10 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
     (:func:`_resident_entry`) — parsed at most once per process, then zero
     filesystem operations per call ONCE A COMPLETE SET WAS READABLE (an ABSENT or
     PARTIALLY-present tree is re-parsed per consult so it can self-heal, pinned by
-    `test_a_partial_jsonb_read_does_not_freeze_the_name_set`) — with
-    `_jsonb_cache_clear()` as the refresh
-    verb. ⛔ IT WAS A 5 s TTL UNTIL #4625, and the TTL is the defect: an expiry
+    `test_a_partial_jsonb_read_does_not_freeze_the_name_set`). ⛔ `_jsonb_cache_clear()`
+    drops ONLY this memo, and because this reader now parses the schema entry's
+    certified SQL, dropping it re-parses THE SAME BYTES: it is not a way to see an
+    edit. `_release_schema_cache()` is. ⛔ IT WAS A 5 s TTL UNTIL #4625, and the TTL is the defect: an expiry
     under load re-read and re-parsed TWENTY `.sql` files INSIDE `replay_plan`, on
     the single serving thread, which is what the production stack caught
     (`_jsonb_or_scalar` → `jsonb_columns` → `_jsonb_columns_for_dir` →
