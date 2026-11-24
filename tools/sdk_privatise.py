@@ -2064,6 +2064,28 @@ SWEEP_NAMES = 66
 #:     (`--report --top 5000` on both trees, 862 shape-carrying lines either side, one differing line).
 #: 11912 - 2 = 11910, and the pair below is `--repin`'s own output on THIS tree, never arithmetic; a
 #: pin that FALLS cannot hide a new untyped reference, which is the direction this arm exists to catch.
+#: ── PR #14531's RECORD, RE-MEASURED ON THIS REBASE ONTO `origin/main` `6a02515d14` ────────────
+#: This PR's own earlier record measured the THEN-merge tree at (11912, "73827c80583e139f") for a
+#: base of `59a08fdb8b`: three trees were measured one at a time (`--report --base 28ca66878d7c
+#: --top 100000`, row sets sorted and diffed, every tuple `--repin`'s own output on that tree):
+#:   * `origin/main` `59a08fdb8b` commits `(11910, "adc8229295339239")` while that rev's own tree
+#:     derived **(11911, "4ed42694957a174d")** — one row stale, which was `main`'s to repair;
+#:   * this branch's pre-merge head `05c46e24a278` commits `(11911, "3e92044bab08cc3d")`, the pin it
+#:     honestly carried for its own tree — no parent can supply the merge tree's pair;
+#:   * the `#14506` fold's `seen.update(kwargs)` row is `tests/test_collision_preflight.py:10584`,
+#:     inside the `spy` fixture, and it arrived with `7d9e7b99c4` (`#14506`).
+#: ⛔ THAT EARLIER PAIR IS SUPERSEDED, AND NOT BY ARITHMETIC. `#4625` then retired the last two
+#: `_JSONB_CACHE.update({...})` rows in `tortoise/record_projection.py` with the 5 s `jsonb` TTL (its
+#: block above attributes that -2 row by row), so the pin below is RE-MEASURED by `--repin` on THIS
+#: rebased tree. This PR's own bytes add no `.update(` receiver — `#:` prose here, and prose plus two
+#: graded register entries in `tests/test_sdk_privatise_sweep.py` — and `typed references still
+#: pointing at a public name: 0` here, so the re-cut legitimises no typed call site.
+#: ⛔ A BASE-RELATIVE CENSUS WAS CONSIDERED AND IS NOT ADOPTED. Grading the residue as a DELTA
+#: against the merge base would keep a base-branch advance from colouring a PR's result, but it
+#: changes WHAT THIS GATE ANSWERS, from "the tree holds exactly N rows" to "this PR moved the count
+#: by M", which is a recorded decision in this file's own provenance rule ("the pin is graded on
+#: PULL REQUESTS only … re-derived with `--repin` on THIS tree"). Reversing it is a REOPEN against
+#: `#14294` / `#14308`, not something a lane repairing a red may adopt.
 SWEEP_RESIDUE = (11910, "3216395d35345904")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
