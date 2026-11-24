@@ -13767,7 +13767,7 @@ def test_the_head_total_guard_is_not_vacuous(tmp_path):
 #: Shard names are read in BOTH spellings this map uses — an explicit list (`f, h`)
 #: and a range (`a–e`) — and the count may be a word (`nine`) as the surrounding prose
 #: prefers. A guard that only reads one spelling turns the other into an unread claim,
-#: which is how the sibling head-total guard above became inert three times.
+#: which is how the sibling head-total guard above became inert.
 _EMISSION_COUNT_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
     "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
@@ -13796,10 +13796,17 @@ _EMISSION_UNREAD_SENTENCE_RE = re.compile(r"\d\.\d+\s*s\s*\([a-z]")
 #: attempt matched `[x\u00d7X]` and `=|up to` and was itself spelling-bound (it missed `*`, `→`,
 #: `->`, `=>`), which is why this one anchors on the operand and reads the first `N m` after it.
 _EMISSION_DERIVATION_RE = re.compile(r"(?P<est>\d+\.\d)\s*/\s*60")
-_EMISSION_MINUTE_AFTER_RE = re.compile(r"(?P<minutes>\d+)\s*m\b")
-#: How far past an operand its stated minute may sit. The manifest's own prose form —
-#: `rounds 840.2/60 x 2.0 up to 29 m` — puts it 14 characters after the operand.
-_DERIVATION_LOOKAHEAD = 60
+#: The minute a derivation states. The lookbehind matters: without it `85.0 m` yields `0`, because
+#: `\d+` happily matches the decimal's last digit and the unit follows it — a false minute that
+#: would red a CORRECT block.
+_EMISSION_MINUTE_AFTER_RE = re.compile(r"(?<!\d\.)(?<!\d)(?P<minutes>\d+)\s*m\b")
+#: How far either side of an operand its stated minute may sit. ⛔ BOTH directions, and generous
+#: on purpose: measured on this head, a minute placed BEFORE the operand
+#: (`carries a 29 m watchdog, derived as 836.9/60 x 2`) and one placed 64 characters after it
+#: (`… rounds 836.9/60 x 2.0 — the multiplier … — up to 29 m`) both read GREEN with the older
+#: forward-only 60-character window, which is the same false PASS this arm exists to close. The
+#: residual is stated rather than hidden: a claim further than this from its operand is NOT read.
+_DERIVATION_CONTEXT = 200
 
 
 def _emission_names(phrase: str) -> set[str]:
@@ -13929,14 +13936,22 @@ def _emission_block_claims(
         # `840.2/60 x 2.0 up to 29 m`). Measured: an unscoped version reds the real block, which
         # is the one failure this check must not produce.
         graded = {float(est_str)} | {float(est) for est in groups}
+        operands = [(m.start(), m.end(), float(m.group("est")))
+                    for m in _EMISSION_DERIVATION_RE.finditer(header)]
         conflicting: dict[float, int] = {}
-        for operand in _EMISSION_DERIVATION_RE.finditer(header):
-            minute = _EMISSION_MINUTE_AFTER_RE.search(
-                header[operand.end():operand.end() + _DERIVATION_LOOKAHEAD])
-            if minute is None:
+        for minute in _EMISSION_MINUTE_AFTER_RE.finditer(header):
+            # Attribute the minute to its NEAREST operand, in either direction. A blind window is
+            # wrong in both directions: it misses a minute stated before its operand, and it
+            # sweeps up a NEIGHBOURING derivation's minute and reds a correct block (measured —
+            # this file's own historical fixture, where `840.2/60 … up to 29 m` sits inside the
+            # window of the graded `836.4/60 … = 28 m` clause).
+            start, end, est = min(
+                operands, key=lambda o: min(abs(minute.start() - o[0]), abs(minute.start() - o[1])))
+            distance = min(abs(minute.start() - start), abs(minute.start() - end))
+            if distance > _DERIVATION_CONTEXT or est not in graded:
                 continue
-            est, stated = float(operand.group("est")), int(minute.group("minutes"))
-            if est in graded and stated != int(minutes_str):
+            stated = int(minute.group("minutes"))
+            if stated != int(minutes_str):
                 conflicting[est] = stated
         assert not conflicting, (
             f"the block derives {sorted(conflicting)} s to {sorted(conflicting.values())} m in a "
@@ -13964,7 +13979,7 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
     `g`, `i`–`k`) and two at 721.7 s (`f`, `h`), while `push_legs` packed **seven** at
     **722.0** (`a`–`e`, `i`, `j`) and **four** at **721.9** (`f`, `g`, `h`, `k`) — the
     `origin/main` merge moved the pool and the sentence was carried instead of
-    re-emitted, which is the third time this block went stale. The watchdog is
+    re-emitted. The watchdog is
     unaffected (25 m either way), so arithmetic on the minute could not catch it: only
     the `est_seconds` figures can.
     """
@@ -14147,6 +14162,19 @@ def test_the_emission_block_guard_is_not_vacuous():
         _emission_block_claims(
             "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
             "# `ceil(836.4/60 x 2)` = 28 m\n# 836.3/60 x 2 \u2192 30 m\n\nfast_shards: 11\n")
+    # ⛔ …and the minute is read on BOTH sides of its operand, and further than a short window.
+    # Both shapes were measured GREEN on the previous head, with the real partition intact: a
+    # forward-only 60-character window missed them, which is the same false PASS one placement
+    # over. Each case below states 29 m against a graded 28 m.
+    for placement in (
+            "# the emitted worst shard carries a 29 m watchdog, derived as 836.4/60 x 2\n",
+            "# `shard_watchdog_minutes()` rounds 836.4/60 x 2.0 — the multiplier the packer "
+            "applies to every bin — up to 29 m\n"):
+        with pytest.raises(AssertionError, match="derivation nothing grades"):
+            _emission_block_claims(
+                "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at "
+                "836.3 s (f, g, i)\n"
+                "# `ceil(836.4/60 x 2)` = 28 m\n" + placement + "\nfast_shards: 11\n")
     # …and the check is SCOPED to the est the block grades, so the header's historical derivation
     # at a DIFFERENT operand — the S=10 paragraph's `840.2/60 x 2.0 up to 29 m`, which is prose
     # about a tree that is not this one — must NOT red. Without this negative the arm could be
