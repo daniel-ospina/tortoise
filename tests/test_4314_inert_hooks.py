@@ -109,11 +109,12 @@ def _breadcrumb_body(text: str) -> dict | None:
 
     The shipped writers emit their record with ONE ``printf`` whose output
     reaches the file conversion by conversion, so a concurrent reader can
-    sample any PREFIX of it. Measured on one 287-byte record: 6 distinct
-    partial sizes, the first two `b"{"` then `b"{\\n"`. And
-    ``json.loads(b"{\\n")`` is exactly ``Expecting property name enclosed in
-    double quotes: line 2 column 1 (char 2)`` — the failure that reddened
-    #14445's shard `d`, read from a 2-byte prefix.
+    sample any PREFIX of it. Measured on the real writer (400 writes, a
+    concurrent poller): the file was observed at 2, 24, 220, 261 and 287 bytes
+    — FIVE partial states — before its complete 289, and the 2-byte state was
+    ``b'{\\n'``. ``json.loads(b'{\\n')`` raises
+    ``Expecting property name enclosed in double quotes: line 2 column 1
+    (char 2)``, which is the failure that reddened #14445's shard `d`.
 
     So readiness is COMPLETENESS — the bytes parse as a JSON object — never
     "the file exists" and never "the file is non-empty". Both of those are the
@@ -130,7 +131,8 @@ def _breadcrumb_body(text: str) -> dict | None:
 
 
 def _read_text(path: Path) -> str | None:
-    """The file's bytes as text, or None when it cannot be read as UTF-8."""
+    """The file as text, or None when it cannot be read (absent, or bytes
+    that are not valid UTF-8)."""
     try:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -1855,12 +1857,19 @@ def test_a_breadcrumb_reads_only_once_it_is_COMPLETE(tmp_path, prefix):
     concurrent reader can sample any of these prefixes — and
     ``json.loads(b'{\\n')`` is verbatim the ``Expecting property name enclosed
     in double quotes: line 2 column 1 (char 2)`` that reddened #14445's shard
-    `d` off a 2-byte prefix of a 287-byte record. Readiness used to be
-    "the file exists and is non-empty", which accepted every one of them.
+    `d`, off a 2-byte prefix of the record.
 
-    Mutation: restore ``path.is_file()`` / ``.read_text().strip() != ""`` as
-    the readiness predicate — this REDs, because the prefix is accepted as
-    complete and the caller's parse then raises ``JSONDecodeError``."""
+    Readiness used to be a non-empty check, which accepts every one of these
+    prefixes but the EMPTY document — and the two sites that waited on
+    ``path.is_file()`` alone accepted that one too. So restoring either
+    spelling reds this arm, by a different amount: ``is_file()`` on all four
+    prefixes, ``.read_text().strip() != ""`` on the three non-empty ones (the
+    empty document is held by the ``_read_complete_breadcrumb`` assert above,
+    not by readiness).
+
+    Mutation: restore one of those readiness predicates — this REDs, because
+    the prefix is then accepted as COMPLETE and the caller's parse raises
+    ``JSONDecodeError``."""
     path = tmp_path / "codex-install.json"
     path.write_bytes(prefix)
     assert _read_complete_breadcrumb(path) is None, (
