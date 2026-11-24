@@ -3974,6 +3974,20 @@ def _css_rightmost_selects(rightmost: str, compound: str) -> bool:
     as selecting. Over-reaching reds a correct page, which a maintainer can see;
     the other direction hides an override, which is the defect class every round
     of this review has found.
+
+    ⛔ `=` IS ONE OF THOSE OPERATORS, and round 8 left it out. The operator was
+    read inside the REGEX (`[~|^$*]?=`), so a selector that spelled the operator
+    the plain way never matched the pattern at all and fell through to `False` —
+    not to the fail-closed arm, which only covered a value it could not parse.
+    Measured (#14406 review round 9): `[class="btn"] { margin-top: 0 }` selects
+    the same CTAs as `.btn` (three of the four cards carry `class="btn"`
+    exactly), restores the three-baseline / 70.2px split, and left EVERY row of
+    `TestProductTeamsPricingCardCtaBaseline` GREEN; `[class="pricing-card"]
+    { display: block }` was invisible to the flex row for the same reason.
+
+    ⛔ AND ATTRIBUTE NAMES ARE CASE-INSENSITIVE in HTML, so `[CLASS="btn"]`
+    selects exactly what `[class="btn"]` does — a lowercase-only match is the
+    same blind spot wearing a different case (#14406 review round 9).
     """
     if compound in rightmost:
         return True
@@ -3982,14 +3996,23 @@ def _css_rightmost_selects(rightmost: str, compound: str) -> bool:
     name = compound[1:]
     if not name:
         return False
-    for m in re.finditer(r"\[\s*class\s*([~|^$*]?=)\s*([^\]]*)\]", rightmost):
-        op, raw = m.group(1), m.group(2).strip()
-        quoted = re.fullmatch(r"[\"'](.*)[\"']", raw, re.S)
+    # The attribute NAME is matched case-insensitively and the operator is read
+    # OUT of the value, so an operator (or a `[class]` presence test) this
+    # reader does not model fails CLOSED instead of falling through to `False`.
+    for m in re.finditer(r"\[\s*class\b([^\]]*)\]", rightmost, re.IGNORECASE):
+        raw = m.group(1).strip()
+        operator = re.match(r"([~|^$*]?=)\s*(.*)$", raw, re.S)
+        if not operator:
+            return True
+        op, raw_value = operator.group(1), operator.group(2).strip()
+        quoted = re.fullmatch(r"[\"'](.*)[\"']", raw_value, re.S)
         if not quoted:
             # A value this reader cannot read (a variable, an unquoted word)
             # may match the class, so it counts — fail closed.
             return True
         value = quoted.group(1)
+        if op == "=" and value == name:
+            return True
         if op == "~=" and value == name:
             return True
         if op == "|=" and (value == name or name.startswith(value + "-")):
@@ -4343,6 +4366,38 @@ def _max_height_media_blocks(html: str) -> list[tuple[int, str]]:
         blocks.append((int(match.group(1)),
                        _brace_block(blanked, match.end() - 1)))
     return blocks
+
+
+#: An inline `style` ATTRIBUTE in any spelling the HTML parser accepts.
+#: `style="…"` is only ONE of them: an unquoted attribute value, a
+#: single-quoted value and a value with whitespace around the `=` are all valid
+#: HTML and all out-rank every rule in the sheet, which is what makes one
+#: spelling a fail-open rather than a formatting difference. `(?<![\w-])` keeps
+#: a `data-style=…` / `x-style=…` attribute out, so the reader cannot false-RED
+#: a correct page that carries a similarly-named attribute.
+INLINE_STYLE_ATTR_RE = re.compile(
+    r"(?<![\w-])style\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
+    re.IGNORECASE)
+
+
+def _inline_style_attributes(markup: str) -> list[str]:
+    """Every inline `style` attribute in `markup`, in ANY quoting spelling.
+
+    An inline declaration out-ranks every selector in the sheet, so
+    `<div class="pricing-card" style="display:block">` splits the four CTAs
+    back to three baselines while no CSS reader can see it (#14406 review
+    round 8). The row that closes that hole read the attribute as the LITERAL
+    `style="` … `"`, which is one spelling out of four: `style='display:block'`,
+    `style = "display:block"` and the unquoted `style=display:block` are all
+    valid HTML, all apply, and all left every row of
+    `TestProductTeamsPricingCardCtaBaseline` GREEN (#14406 review round 9,
+    measured against the pre-fix reader). The reader takes the attribute, not a
+    formatting convention, so the row cannot be defeated by a quote character.
+
+    It returns the matched spine (attribute name through value) rather than a
+    boolean, so a failure message can quote the offending attribute verbatim.
+    """
+    return INLINE_STYLE_ATTR_RE.findall(markup)
 
 
 #: The e2e test that proves the company host's served root.
@@ -11800,11 +11855,20 @@ class TestProductTeamsPricingCardCtaBaseline:
         (the two places a card or its CTA is authored), so the page's unrelated
         inline styles stay legal — there are two of them today, both outside the
         grid, and a whole-page version of this row would red them.
+
+        ⛔ THE ATTRIBUTE IS READ BY `_inline_style_attributes`, NOT BY THE LITERAL
+        `style="`. Round 8 wrote the row as `re.findall(r'style="[^"]*"', …)`,
+        which is ONE of the four spellings an HTML parser accepts: a
+        single-quoted `style='display:block'`, a spaced `style =
+        "display:block"` and the unquoted `style=display:block` all out-rank the
+        pinned CSS exactly as the double-quoted form does — and all left every
+        row of this class GREEN (#14406 review round 9, measured against the
+        pre-fix reader).
         """
         served = _served(_product_teams_html())
         grid = _static_pricing_grid(served)
         assert grid, "the pricing grid slice is empty — this row would pass vacuously"
-        inline = re.findall(r'style="[^"]*"', grid)
+        inline = _inline_style_attributes(grid)
         assert inline == [], (
             f"a pricing card or its CTA carries an inline `style` attribute "
             f"({inline[0]!r}). An inline declaration out-ranks every rule in "
@@ -11816,11 +11880,12 @@ class TestProductTeamsPricingCardCtaBaseline:
         template = re.search(r"return `<div class=\"pricing-card[^`]*`",
                              _product_teams_html(), re.S)
         assert template, "renderPricing()'s card template changed shape — re-point this gate"
-        assert 'style="' not in template.group(0), (
+        template_inline = _inline_style_attributes(template.group(0))
+        assert template_inline == [], (
             "renderPricing()'s template builds a card or CTA with an inline "
-            "`style` attribute, which out-ranks the pinned card CSS on the "
-            "path a real visitor sees while the static cards stay aligned "
-            "(#14406 review round 8)")
+            f"`style` attribute ({template_inline[0]!r}), which out-ranks the "
+            "pinned card CSS on the path a real visitor sees while the static "
+            "cards stay aligned (#14406 review round 8)")
 
     def test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render(self):
         """`margin-top: auto` aligns the LAST item — so nothing may follow the CTA.
@@ -12135,6 +12200,116 @@ class TestCssDesktopReachAndSpecificity:
                 f"`{compound}`, but the `all` reach found nothing — the "
                 "negative row would stay GREEN over a one-declaration revert "
                 "of the pinned CSS (#14406 review round 8)")
+    def test_an_exact_class_attribute_match_reaches_the_class_it_names(self):
+        """`=` is an operator too, and attribute NAMES are case-insensitive.
+
+        Round 8 modelled `~= |= ^= $= *=` and read the operator inside its OWN
+        regex, so `[class="btn"]` never matched the pattern and fell through to
+        `False` — not to the fail-closed arm, which only covered a VALUE the
+        reader could not parse. A browser applies it: three of the four pricing
+        cards carry `class="btn"` EXACTLY, so `[class="btn"] { margin-top: 0 }`
+        is `.pricing-card .btn { margin-top: 0 }` by another name and restores
+        the three-baseline / 70.2px split. Measured (#14406 review round 9)
+        against the pre-fix reader: every row of
+        `TestProductTeamsPricingCardCtaBaseline` stayed GREEN, `_css_reaching_decls`
+        returned no competing declaration at all, and
+        `[class="pricing-card"].popular { padding-bottom: 1.75rem }` — (0,2,0),
+        later in source, so it TAKES the cascade — left the popular-card row
+        reading `calc(1.75rem - 1px)`.
+
+        HTML attribute NAMES are case-insensitive (`[CLASS="btn"]` selects the
+        same elements), so a lowercase-only match is the same hole in a
+        different case; both are asserted below.
+        """
+        # The operator itself, in every spelling that means "exactly this value".
+        for selector in ('[class="btn"]', "[class='btn']",
+                         '[CLASS="btn"]', '[ class = "btn" ]'):
+            assert _css_rightmost_selects(selector, ".btn"), (
+                f"`{selector}` is the `=` (exact) class-attribute match, which "
+                "selects every element whose class attribute is exactly `btn` "
+                "— the pattern the pricing CTAs carry — but the reach reader "
+                "says it selects nothing (#14406 review round 9)")
+        # ...and it is not a licence to reach EVERY class.
+        assert not _css_rightmost_selects('[class="btn-secondary"]', ".btn"), (
+            "`=` is an EXACT match, so `[class=\"btn-secondary\"]` does not "
+            "select `.btn` — reading it as a reach would false-RED a correct "
+            "page")
+        assert not _css_rightmost_selects('[classname="btn"]', ".btn"), (
+            "`classname` is a different attribute; only `class` carries the "
+            "class list")
+
+        # Page-level: the two mutants the pre-fix reader could not see.
+        for mutant, prop, compound, pinned in (
+                ('[class="btn"] { margin-top: 0 }', "margin-top", ".btn", "auto"),
+                ('[class="pricing-card"] { display: block }',
+                 "display", ".pricing-card", "flex")):
+            disagreeing = [(p, v) for p, v in _css_reaching_decls(
+                self._page_with(mutant), prop, compound)
+                if v.strip() != pinned]
+            assert disagreeing, (
+                f"`{mutant}` selects the same elements as `{compound}` and "
+                f"overrides the pinned `{prop}: {pinned}`, but no agreement "
+                "sweep sees it — the CTA/flex rows stay GREEN over a rendered "
+                "3-baseline split (#14406 review round 9)")
+
+        cascade = _css_block_end_cascade(
+            self._page_with(
+                '[class="pricing-card"].popular { padding-bottom: 1.75rem }'),
+            ".pricing-card")
+        assert cascade[-1][2] == "1.75rem", (
+            "`[class=\"pricing-card\"].popular` is (0,2,0) — TIED with the "
+            "pinned `.pricing-card.popular` and later in source, so a browser "
+            "applies its `padding-bottom: 1.75rem` and the popular CTA drops "
+            f"1px. The cascade reader's winner is {cascade[-1]!r} "
+            "(#14406 review round 9)")
+
+    def test_the_inline_style_reader_sees_every_quoting_spelling(self):
+        """An inline `style` attribute has FOUR legal spellings, not one.
+
+        The round-8 row read the attribute as the literal `style="…"`. The
+        HTML parser accepts a single-quoted value, whitespace around the `=`,
+        and an unquoted value, and every one of them out-ranks the whole sheet:
+        `<div class="pricing-card" style='display:block'>` splits the four CTAs
+        back to three baselines exactly as the double-quoted form does.
+        Measured (#14406 review round 9) against the pre-fix row: the
+        single-quoted, spaced and unquoted mutants all left every row of
+        `TestProductTeamsPricingCardCtaBaseline` GREEN.
+        """
+        for mutant, pre_fix_reader_sees_it in (
+                ('style="display:block"', True),
+                ("style='display:block'", False),
+                ('style = "display:block"', False),
+                ("style=display:block", False),
+        ):
+            markup = f'<div class="pricing-card popular" {mutant}>'
+            # This pins the FINDING, not just the fix: if the pre-fix reader's
+            # coverage ever changes, the claim in this docstring is wrong and
+            # this row says so instead of asserting against a memory.
+            assert bool(re.findall(r'style="[^"]*"', markup)) is pre_fix_reader_sees_it, (
+                f"the PRE-FIX reader's coverage of {mutant!r} is not what this "
+                "row records — re-derive the finding before trusting the fix")
+            assert _inline_style_attributes(markup) == [mutant], (
+                f"`{mutant}` is a legal inline-style attribute and out-ranks "
+                "every rule in the sheet, but the reader does not see it "
+                f"(got {_inline_style_attributes(markup)!r}) — the "
+                "no-inline-style row stays GREEN over a split baseline "
+                "(#14406 review round 9)")
+
+        # A differently-NAMED attribute is not an inline style, or the row would
+        # false-RED a correct page that carries one.
+        assert _inline_style_attributes('<div data-style="x" x-style="y">') == []
+
+        # The page's own inline styles are real, and the reader sees them — a
+        # reader that returned `[]` unconditionally would pass every row above.
+        assert _inline_style_attributes(_served(_product_teams_html())), (
+            "the page carries inline `style` attributes of its own, so a reader "
+            "that finds none is not reading the attribute at all")
+        assert _inline_style_attributes(
+            _static_pricing_grid(_served(_product_teams_html()))) == [], (
+            "the pricing grid itself now carries an inline `style` attribute — "
+            "that is the defect `test_no_card_carries_an_inline_style` exists "
+            "for, and this row would mask it by staying green here")
+
     def test_an_or_condition_is_the_same_logical_or_as_a_query_list(self):
         """`or` is a top-level OR too — the round-7 splitter only knew commas.
 
