@@ -2108,9 +2108,12 @@ def _resident_entry() -> dict[str, Any]:
     after the first consult.
 
     ⚠️ `_migrations_dir()` is called INSIDE the lock and exactly once per
-    RESOLUTION (not once per process, and never per record): it probes both
-    candidate locations (:func:`_complete` is a `stat` per registered migration),
-    so calling it per record was itself part of the measured cost. Other callers
+    RESOLUTION (not once per process, and never per record): it walks the
+    candidate locations IN ORDER and stops at the first complete one
+    (:func:`_complete` is an `exists()` per registered migration — measured, 20 on
+    a checkout deployment, which never probes the packaged copy because the repo
+    tree answers first), so calling it per record was itself part of the measured
+    cost. Other callers
     resolve it independently — `tortoise/hosted_api.py` does at IMPORT time for
     `/health`'s `migrations_source`/head pair (#10447), `column_types(None)`,
     `_read_migrations(None)` and both `RecordProjectionError` message paths do at
@@ -2582,14 +2585,26 @@ _ALTER_COLUMN_TYPE_RE = re.compile(
 
 
 def _jsonb_cache_clear() -> None:
-    """Drop the memoised `jsonb` name map (the refresh verb for #9548's rule).
+    """Drop the memoised `jsonb` name map. NOT a refresh verb — see below.
+
+    ⛔ THIS DOES NOT MAKE AN EDIT VISIBLE. Every resident reader parses the schema
+    entry's memoised SQL, so dropping the `jsonb` view makes `jsonb_columns()`
+    RE-PARSE THE SAME BYTES and answer what it answered before (measured: after
+    `ADD COLUMN … jsonb` and a clear, the column is absent from BOTH
+    `jsonb_columns()` and `table_columns()`, while `_declared_types_for_dir(tree)`
+    has it; only :func:`_release_schema_cache` makes either see it). The one verb
+    for seeing an edit is that one.
 
     The map is memoised on the RESIDENT entry, so that is what this drops; the
     loop over `_SCHEMA_CACHE` is belt-and-braces for an explicit-directory entry
-    that ever memoises one (none does today — `jsonb_columns(dir)` parses
-    directly and is invalidated by the fingerprint key, which is why the loop is
-    described as defensive rather than as coverage). Cheap and idempotent: it
-    removes computed results, never the file state they were derived from.
+    that ever memoises one. ⚠️ None does today, and the reason is NOT a fingerprint
+    key: `jsonb_columns(dir)` parses the directory directly on every call
+    (`_jsonb_columns_for_dir`), never touching `_schema_entry` or
+    `_migrations_fingerprint` — measured: with `_migrations_fingerprint` stubbed
+    to raise, `jsonb_columns(dir)` still answers while `table_columns(dir)` raises.
+    So the loop is defensive in the strict sense: there is no such entry to find.
+    Cheap and idempotent: it removes computed results, never the file state they
+    were derived from.
 
     ⚠️ LAST-WRITER-WINS, unlike :func:`_release_schema_cache`. A reader that
     computed the map outside the lock re-assigns it after this `pop`, so a clear
@@ -3037,10 +3052,14 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
 
     CACHED, AND THE TWO MODES DIFFER ON PURPOSE (#9558 / R10, #4625). This used
     to be deliberately uncached "so a migration edit can never be read stale" —
-    correct about the risk, wrong about the price: the live record door calls it
-    once per BATCH, so every batch re-read and re-regex-parsed all twenty
-    migration files (`record_writer` priced it at "~4 ms of plan
-    materialization"). It is now served from the process's RESIDENT schema
+    correct about the risk, wrong about the price. The price was measured when the
+    door called it once per JOURNAL RECORD: every record re-read and
+    re-regex-parsed all twenty migration files (`record_writer` priced it at
+    "~4 ms of plan materialization"). ⛔ Say it that way, not "every batch": the
+    door now calls it ONCE PER PLAN (before `replay_plan`'s record loop), so the
+    per-call cost is not paid per batch either — the shape that made the read
+    expensive was the per-RECORD frequency #9558 removed. It is now served from
+    the process's RESIDENT schema
     (:func:`_resident_entry`) — resolved once, zero filesystem operations per
     call ONCE THAT RESOLUTION READ A COMPLETE TREE — because the deployed image
     bakes those files in. ⚠️ An ABSENT or PARTIALLY-present tree is re-read on
