@@ -243,10 +243,10 @@ _ENDING_BASE = (
 #:   `what has ended recently` a RELEVANCE read (§ the adverb bullet below).
 #:   ⛔ IT IS THE HANDLER DOCSTRING, NOT THE SERVED DESCRIPTION (#14491 review).
 #:   The served tool description is `ToolDefinition.description`
-#:   (`tortoise/tool_registry.py:509-515`) and it carries no state-routing
-#:   sentence at all; the sentence that names the adverb is the handler's
-#:   docstring in `tortoise/mcp_server.py`. Both cells are frozen, and the
-#:   docstring is the one carrying the claim this shape defers to.
+#:   (`tortoise/tool_registry.py:511-522` — its `description=` at `:514-517`) and it
+#:   carries no state-routing sentence at all; the sentence that names the adverb
+#:   is the handler's docstring in `tortoise/mcp_server.py`. Both cells are
+#:   frozen, and the docstring is the one carrying the claim this shape defers to.
 #: * ``is_predicate`` — the ending is the PREDICATE of a yes/no question about a
 #:   named record: "is the onboarding flow retired?". #14033's measured miss.
 #:   ⛔ Tail-anchored (the participle must END the question), the subject NP is
@@ -414,7 +414,7 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # would be harmless for the POPULATION — `recently` names no BOUNDARY, which
     # is the whole of the argument and not the ordering: `endedAt` is coalesced
     # over five time properties with no fallback, and FalkorDB sorts NULL FIRST
-    # under that `DESC` (`analyze.py:1048` records the ASC half), so a row
+    # under that `DESC` (`analyze.py:1049-1050` records the ASC half), so a row
     # carrying none leads the page rather than trailing it — but the
     # `tortoise_search` HANDLER DOCSTRING names `what has ended recently` as a
     # RELEVANCE read, so a route here would leave that documented contract WRONG
