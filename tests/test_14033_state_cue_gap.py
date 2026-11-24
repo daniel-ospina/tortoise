@@ -292,12 +292,17 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       to an adjunct clause and the question's predicate is `safe` / `accurate` /
       the policy's applicability, so the run would swallow it;
     * the PREDICATE-MODIFIER stop is the sixth guard, and its falsifier is the
-      FIFTY-TWO measured rows of
-      :func:`test_a_modified_predicate_is_not_the_question_asked` — re-measure
-      `len(MODIFIED_PREDICATE_STAYS_OUT)` rather than trusting any count in prose
-      (twelve NEGATED, seven FUTURE, three PROGRESSIVE, one DISJUNCTIVE, eight
-      CONTRACTION, seven ADJUNCT/LINKER, four `of`-COMPLEMENT, and ten
-      APPROXIMATIVE at this head).
+      FIFTY-SIX measured rows of
+      :func:`test_a_modified_predicate_is_not_the_question_asked`. ⛔ THE
+      BREAKDOWN IS BY GUARD, MEASURED BY REMOVING THAT GUARD ALONE and counting
+      the rows that then route — never by tallying the tab, because a tab heading
+      is a comment and a count read off it is how this number went stale three
+      times: NEGATED 11, APPROXIMATIVE 14, CONTRACTION 9, FUTURE (the frame) 6,
+      `of`-COMPLEMENT 4, PROGRESSIVE 3, ADJUNCT/LINKER 3, DISJUNCTION 1. ⛔ Those
+      sum to 51, NOT 56: five rows are refused by MORE THAN ONE guard, so removing
+      one arm still leaves them refused and no single-guard mutant can isolate
+      them. That is a property of the rows, not a miscount — re-measure, never
+      re-derive.
       Dropping the stop routes that class, which answers the question with the
       POLARITY-INVERTED (or a not-yet-existing, or an in-flight) population.
       ⛔ The APPROXIMATIVE rows are the ones that pin the POSITIONAL arm: a flat
@@ -387,11 +392,14 @@ def test_the_imperative_lookup_for_one_record_is_still_refused():
 
 
 #: A PREDICATE MODIFIER between the head noun and the ending — the slot can only
-#: be modifying the predicate, and every row here was answered with the ended
-#: population on the pre-fix head EXCEPT the one BOUNDARY row named below
-#: (`is the plan not going to be cancelled`, which the NP bound already
-#: refused) — measured row by row against
-#: `git show 4aecc782d3^:tortoise/state_intent.py`, 46 of 47 routed there.
+#: be modifying the predicate. ⛔ NOT every row reds on the pre-fix head: measured
+#: row by row against `git show 4aecc782d3^:tortoise/state_intent.py`, 51 of 56
+#: routed there and FIVE did NOT — `is the plan not going to be cancelled` (the NP
+#: bound `{0,3}` already refused it) and the four SMART-APOSTROPHE contractions,
+#: which that head's ASCII token class never matched at all. The four are
+#: non-vacuity pins only against the INTERMEDIATE head that widened `_NP_WORD`
+#: before the `['’-]` contraction arm landed — i.e. the hole created by the two
+#: changes together, which existed on neither alone:
 #:
 #: EIGHT classes, each with its own failure, and none of them is the question
 #: asked:
@@ -453,13 +461,25 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     "is the plan far from cancelled",
     "is the plan anything but cancelled",
     "is the plan hardly been cancelled",
+    # the NEGATION-FLAVOURED ADVERBIALS, which the arm accepts as the ONE
+    # intervening word — `ever`/`yet` cannot modify a noun in this slot, so they
+    # cost no recall, while the adjective `used` in the same slot does (see
+    # `STOP_WORDS_KEEP_THIS_RECALL`). These four leaked as ENDED on the head that
+    # allowed only an auxiliary (PR #14491 review, P1: the narrowing had widened
+    # the leak by one word).
+    "is the plan hardly yet archived",
+    "is the plan hardly ever cancelled",
+    "is the plan rarely ever cancelled",
+    "is the plan barely ever cancelled",
     # the HYPHENATED spelling, where the separator is `-` not whitespace and the
     # negator is one compound token (`hardly-ever`)
     "is the plan hardly-ever cancelled",
-    # a standalone `n't` token, which `_NP_WORD` accepts because a word-run
-    # element may begin with `n` — the guard is live, not inert (see the
-    # module's `_NP_STOP` note; the CONTRACTED copula `isn't the plan cancelled`
-    # is refused by the start anchor instead, which is a different string)
+    # a standalone `n't` token — ⛔ it is caught by the CONTRACTION arm below, not
+    # by this one, and it is tabulated HERE because the strings around it are the
+    # class it belongs to semantically; the per-guard counts in the docstring are
+    # measured by MUTATION for exactly this reason
+    # (see the module's `_NP_STOP` note; the CONTRACTED copula `isn't the plan
+    # cancelled` is refused by the start anchor instead, a different string)
     "is the plan n't archived",
     # futurity / intent — the ending has not happened, so the ended population
     # cannot answer it (the LAST row is the NP-bound boundary pin above, not a
@@ -664,3 +684,28 @@ def test_a_two_word_adverbial_negation_is_the_stated_cost_of_the_positional_arm(
         f"the two-word adverbial negation now refuses ({got.population!r}) — that "
         f"may be better, but the module's ``_NP_STOP`` residual #6 says it ROUTES, "
         f"so the disclosure has to move in the same change")
+
+
+def test_a_multi_word_negator_is_the_stated_cost_of_a_closed_negator_list():
+    """A KNOWN COST, pinned so it cannot drift silently (module ``_NP_STOP``, r7).
+
+    The negator list is the closed class this module stops, NOT a complete
+    negation grammar. Multi-word negators outside it route, and because they are
+    negations the population served is the POLARITY-INVERTED answer — this is a
+    wrong answer, not a safe miss. ⛔ Closing them is the unbounded word-list
+    shape #13128 refuses, so residual #7 discloses it instead; if a later change
+    closes any of these, the residual list must move in the same diff.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    for inverted in (
+        "is the plan by no means cancelled",
+        "is the plan nowhere near cancelled",
+        "is the plan in no way archived",
+        "is the plan nothing like cancelled",
+    ):
+        got = detect_state_question(inverted)
+        assert got.population is not None, (
+            f"{inverted!r} now refuses — that may be better, but the module's "
+            f"``_NP_STOP`` residual #7 says it ROUTES with inverted polarity, so "
+            f"the disclosure has to move in the same change")

@@ -237,7 +237,7 @@ _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 #: retired`, `is the US footprint archived`), and the head-noun slot is not a
 #: place a zero relative's subject can stand.
 #:
-#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are six:
+#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are seven:
 #:
 #: * a zero relative whose subject is a BARE NOUN (`is the claim finance
 #:   retracted`) is lexically identical to a two-word head noun plus a predicate
@@ -266,16 +266,30 @@ _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 #:   shape that could go either way does not fire. The cost is not new either:
 #:   `is_predicate` did not exist on the base module, which refused the same
 #:   string. It is disclosed here so a later round does not present it as a find.
-#: * AND THE APPROXIMATIVE NEGATORS ARE CLOSED ONLY WITHIN ONE WORD of the
-#:   ending. The arm below is positional (see its note), and its lookahead allows
-#:   a single intervening word, so `is the plan hardly cancelled` refuses while
-#:   `is the plan hardly at all cancelled` and `is the plan hardly ever been
-#:   cancelled` still reach the CANCELLED population — the polarity-inverted
-#:   answer. Widening the lookahead to two words is NOT the fix: it would refuse
-#:   `is the old barely visible notice archived`, which is a real state question
-#:   whose negator modifies a noun. So the trade is taken and stated: the
-#:   positional guard needs the negator adjacent to the predicate, and a caller
-#:   who inserts an adverbial (`at all`, `ever`) keeps the relevance read;
+#: * AND THE APPROXIMATIVE NEGATORS ARE CLOSED ONLY ACROSS ONE CLOSED-CLASS
+#:   WORD. The arm below is positional (see its note): the negator stops the run
+#:   only when the ENDING follows it, optionally across an auxiliary or a
+#:   negation-flavoured adverbial (`been|ever|yet`). So `is the plan hardly
+#:   cancelled`, `… hardly been cancelled`, `… hardly ever cancelled` and
+#:   `… hardly-ever cancelled` all REFUSE — but once TWO words intervene,
+#:   `is the plan hardly at all cancelled` ROUTES TO THE ENDED POPULATION, i.e.
+#:   the question is answered with the records that ARE cancelled. ⛔ THAT IS THE
+#:   POLARITY-INVERTED ANSWER, NOT A SAFE MISS — do not read this residual as
+#:   "the caller keeps the relevance read". Widening the window is NOT the fix:
+#:   it refuses `is the old barely visible notice archived` and `is the service
+#:   hardly used archived`, real state questions whose negator modifies a noun.
+#:   The trade is therefore taken and stated — the guard needs the negator
+#:   adjacent to the predicate.
+#: * AND THE NEGATOR LIST IS NOT THE WHOLE LANGUAGE. It is the closed class this
+#:   module stops, not a complete negation grammar: MULTI-WORD negators outside
+#:   it route with inverted polarity — `is the plan by no means cancelled`, `is
+#:   the plan nowhere near cancelled`, `is the plan in no way archived`, `is the
+#:   plan nothing like cancelled` all reach the CANCELLED/ENDED population. So
+#:   does a modal (`is the plan will be cancelled`) — `will` is deliberately NOT
+#:   a stop word because it is an ordinary noun modifier in this product's
+#:   vocabulary (`estate will probate`). Chasing the rest of English's negation
+#:   is the unbounded word-list shape #13128 refuses, so this is disclosed rather
+#:   than closed;
 
 _NP_STOP = (
     r"(?!(?:that|which|who|whom|whose|where|when"
@@ -307,7 +321,7 @@ _NP_STOP = (
     # refused and which is a real state question. That distinction is why the
     # intervening class is closed rather than `{_NP_WORD}` (PR #14491 review P1).
     rf"|(?:(?:hardly|barely|scarcely|rarely)(?:-ever)?|far\s+from|anything\s+but)"
-    rf"(?=[\s-]+(?:(?:been|be|being)[\s-]+)?(?:{_ENDING_WORDS}))"
+    rf"(?=[\s-]+(?:(?:been|ever|yet)[\s-]+)?(?:{_ENDING_WORDS}))"
     # `being` is the PROGRESSIVE and is a separate token from the infinitive
     # frame below, because no frame marker sits in front of it:
     # `is the plan being cancelled`, `is the report still being archived`.
@@ -338,22 +352,18 @@ _NP_STOP = (
     # still answered with the CANCELLED records (measured, PR #14491 review). The
     # class is therefore `…n` + EITHER apostrophe + `t`.
     rf"|[^\W_]*n['’-]t"
-    # ⛔ THE APPROXIMATIVE NEGATIONS ARE THE SAME POLARITY CLASS — `hardly
-    # archived` / `barely archived` answer the question with the population of
-    # records that HAVE ended, which is the inversion the negation stop exists to
-    # refuse. They are covered by the POSITIONAL arm above, which also carries
-    # `rarely`, `far from` and `anything but`.
-    # ⛔ THEY ARE **NOT** FLAT STOP WORDS, and the flat form is a measured RECALL
-    # LOSS rather than a closure: each is also an ordinary modifier INSIDE the NP,
-    # and `_NP_STOP` applies from slot 2 on, so a flat word refuses
-    # `is the old barely visible notice archived`, `is the legacy scarcely used
-    # endpoint retired` and `is the current hardly used service archived` — three
-    # real state questions the relevance read answers `0 rows` (measured on this
-    # head, PR #14491 reconciliation). The in-slot spellings that made the flat
-    # cut look free (`is the barely visible notice archived`) only pass because
-    # the negator lands in the HEAD-noun slot, where the stop never applies at
-    # all — that is not a general property. `will` stays a residual
-    # (`estate will probate`) rather than a stop word.
+    # ⛔ THE SIXTH TAB IS THE SAME CLASS AS THE POSITIONAL ARM ABOVE — kept here
+    # only for its RECALL argument, because the flat-stop-word alternative keeps
+    # being proposed and it is measurably wrong: each negator is also an ordinary
+    # modifier INSIDE the NP, and `_NP_STOP` applies from slot 2 on, so a flat word
+    # refuses `is the old barely visible notice archived`, `is the legacy scarcely
+    # used endpoint retired`, `is the current hardly used service archived` and
+    # `is the service hardly used archived` — real state questions the relevance
+    # read answers `0 rows`. The in-slot spellings that made the flat cut look free
+    # (`is the barely visible notice archived`) only pass because the negator lands
+    # in the HEAD-noun slot, where the stop never applies. ⛔ `will` is NOT part of
+    # this class and is a residual, not a stop word (`estate will probate`) — see
+    # residual #7.
     r"|unless|once|if|before|after|until|while|because|although|though"
     r"|as|since|whenever|whereas|whether"
     r"|each|every|both|either|another|several|many|most|few|none"
