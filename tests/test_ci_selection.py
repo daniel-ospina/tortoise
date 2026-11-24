@@ -9220,10 +9220,16 @@ def _emission_block_header(manifest_text: str) -> str:
 #: matching cannot either — the splice lands mid-sentence, which is what leaves a severed fragment
 #: like "…flat 2.0 s at 28 m." behind. A DOUBLE-QUOTED span is masked first, because this block
 #: legitimately quotes a clause it RETRACTED (the record of a dead claim is not a live second claim).
+#: ⛔ The masking is therefore DELIBERATE and its cost is named: a duplicate INSIDE a double-quoted
+#: span is ungraded by this arm (measured: repeating the block's own 15-word quoted retraction
+#: returns `0` spans). That is accepted — a retraction recorded twice claims nothing new, so it can
+#: red no figure — and it is stated rather than left as a hole, because the case it excludes is the
+#: one this block deliberately quotes.
 #:
 #: ⛔ 10 IS MEASURED, NOT CHOSEN — and the measurement is the guard's own false negative. This block
 #: states ONE instruction verbatim twice ("never carry the last revision's minute, seconds, or
-#: split.", `config/ci-surfaces.yml:133` and `:152`), so a 9-word window reds on CLEAN prose —
+#: split." — `grep -c` on the block returns exactly 2, in the per-registration and the
+#: `--emit-push-matrix` paragraphs), so a 9-word window reds on CLEAN prose —
 #: **2 spans, one per copy** — and 10 is the smallest window on which the guard is quiet over the
 #: tree it guards (**0**, and 0 again at 11). A span is counted PER COPY, so the 2 at window 9 are
 #: one instruction seen twice, not two defects. The cost is that a repeated span SHORTER than the
@@ -9250,6 +9256,19 @@ _SPLICE_SHINGLE_WORDS = 10
 #: bounds the read on a ~2,900-word block. jscpd's clone taxonomy draws the same line: divergent
 #: copies are reported as separate EXACT clones, and merging across a gap is opt-in there
 #: (`--max-gap-lines`), reported as a `similar` clone WITH its similarity score.
+#:
+#: ⛔ IT NAMES NO TOKEN OUTSIDE A BAND, and the band is a NAMED residual rather than a surprise: the
+#: reporter reads only the words AFTER a repeated shingle, and it demands `RESYNC` agreeing words
+#: after the difference. So a divergence inside a copy's first `_SPLICE_SHINGLE_WORDS` (10) words, or
+#: within `RESYNC` (6) words of its end, is never named — and a copy of 16 words or fewer can never
+#: be named at all (band ≈ word index `[10, len-7)`). Measured on 17-word copies with one figure
+#: changed: index 1 -> `[]`, index 5 -> `[]`, index 10 -> `('2.0361', '2.0362')`, index 12 -> `[]`.
+#: A difference of WIDTH (an insertion or a deletion) is likewise never named, because both tails are
+#: indexed with the same gap. This field is DIAGNOSTIC ONLY — the arm reds and reports the spans
+#: either way — so the board is stated instead of being closed by widening the bounds, which would
+#: start naming two different sentences that merely begin alike. The real spliced tree (34-word
+#: copies, difference at word 12) sits inside the band, which is why every fixture and the recorded
+#: `14b8322eb2` measurement name their token.
 _SPLICE_DIVERGENCE_MAX_GAP_WORDS = 3
 _SPLICE_DIVERGENCE_RESYNC_WORDS = 6
 _SPLICE_DIVERGENCE_LOOKAHEAD_WORDS = 80
