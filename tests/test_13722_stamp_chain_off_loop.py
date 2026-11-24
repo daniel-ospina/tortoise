@@ -64,9 +64,6 @@ import pytest
 
 HOSTED_API = Path(__file__).resolve().parent.parent / "tortoise" / "hosted_api.py"
 
-#: The capture handler that owns the provenance stamp chain.
-_HANDLER = "_capture_session_impl"
-
 #: The stamp door the chain calls (imported at module scope by `hosted_api`).
 _STAMP_DOOR = "_stamp_capture_provenance"
 
@@ -173,11 +170,11 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     """
     tree = _module()
     # ⛔ MODULE-WIDE ON PURPOSE (review cycle 4, P2): the walk used to start at
-    # `_HANDLER` while the header claimed every stamp call in `hosted_api`, so a
-    # stamp appended to any OTHER function of this module was never looked at and
-    # the stated population was wider than the measured one (a `/tmp` mutant that
-    # added an inline stamp elsewhere stayed green). All four calls live in the
-    # handler today; the scan does not assume it.
+    # `_capture_session_impl` while the header claimed every stamp call in
+    # `hosted_api`, so a stamp appended to any OTHER function of this module was
+    # never looked at and the stated population was wider than the measured one
+    # (a `/tmp` mutant that added an inline stamp elsewhere stayed green). All
+    # four calls live in the handler today; the scan does not assume it.
     calls = _stamp_calls(tree)
     assert calls, (
         f"{HOSTED_API.name} no longer calls {_STAMP_DOOR} — if the stamp chain "
@@ -227,10 +224,10 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
             "event loop, which is the 53 s `loop_blocks` "
             f"wedge #13722 exists to remove. Submissions found: {submissions}")
         assert (_OFF_LOOP_POOL, owner) in awaited, (
-            f"{_HANDLER} submits {owner!r} to {_OFF_LOOP} but never awaits the "
-            "submission — the handler's own `except` is what keeps a stamp "
-            "failure non-fatal (#8501/#1529), and a detached task moves that "
-            "failure where nothing reports it (#13722)")
+            f"{owner!r} is submitted to {_OFF_LOOP}({_OFF_LOOP_POOL}, …) but that "
+            "submission is never awaited — the handler's own `except` is what "
+            "keeps a stamp failure non-fatal (#8501/#1529), and a detached task "
+            "moves that failure where nothing reports it (#13722)")
 
 
 if __name__ == "__main__":  # pragma: no cover
