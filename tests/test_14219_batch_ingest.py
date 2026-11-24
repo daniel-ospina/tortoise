@@ -3977,6 +3977,68 @@ def test_a_store_that_recovers_after_the_ceiling_settles_the_item_visibly():
         f"the settled row does not say why: {settled.reason!r}")
 
 
+def test_a_settle_that_faults_itself_still_settles_once_the_window_elapses(
+        monkeypatch):
+    """#14415 recut review (MEDIUM): the one-shot latch was PERMANENT.
+
+    `_claim_settle_attempt` used to be a lifetime latch — `_SETTLE_TRIED` was a
+    set, and the only thing that re-armed it was `_clear_failed_pass`, which is
+    unreachable for an exhausted item. So when the SINGLE settle read itself
+    faulted, the row was stranded `queued`/`attempts 0` for the life of the
+    process: every later pass raised `RetryCeilingReached` without touching the
+    store, `_drain_batch` excludes exhausted items from `leftover` so the batch
+    was never re-driven, and the batch row settled `running` over `pending: 1`.
+
+    Measured on the pre-fix code with `get_item` raising `2 × BATCH_MAX_ATTEMPTS
+    + 1` times then healthy (the +1 is the ceiling's own settle read):
+
+        ceiling pass: RetryCeilingReached  (settle read faulted -> None)
+        later passes: RetryCeilingReached  forever; item `queued`
+
+    So the latch has to be a WINDOW: one attempt per window (never per pass,
+    which is the property the permanent latch was protecting), so a store that
+    recovers one window later still settles the item visibly.
+    """
+    bi_module._reset_failed_passes()
+    # 2 reads per failed pass, then the settle read faults too (+1), then healthy.
+    store = _FlakyReadStore(faults=2 * bi_module.BATCH_MAX_ATTEMPTS + 1)
+    coord = BatchCoordinator(store)
+    _, items = coord.submit(ORG, ["/d/a.md"])
+    item = items[0]
+
+    for _ in range(bi_module.BATCH_MAX_ATTEMPTS):
+        with pytest.raises(RuntimeError):
+            coord.run_item(ORG, item, lambda *a, **k: None)
+
+    # The ceiling pass: its ONE settle attempt hits the store's last injected fault.
+    with pytest.raises(bi_module.RetryCeilingReached):
+        coord.run_item(ORG, item, lambda *a, **k: None)
+    stranded = store.get_item(ORG, item.batch_id, item.item_id)
+    assert stranded.state is BatchItemState.QUEUED, stranded.state
+
+    # INSIDE the window the settle must NOT be retried — that is the "never per
+    # pass" half, and it is what keeps this from becoming a new unbounded loop.
+    reads_before = store.raises
+    with pytest.raises(bi_module.RetryCeilingReached):
+        coord.run_item(ORG, item, lambda *a, **k: None)
+    assert store.raises == reads_before, (
+        "the settle was retried inside its window — the latch became a per-pass "
+        "read, which is the unbounded loop the window exists to prevent")
+
+    # The window elapses (the store is healthy by now): the item must settle
+    # VISIBLY instead of staying `queued` for ever.
+    monkeypatch.setattr(bi_module, "_SETTLE_RETRY_WINDOW_S", 0.0)
+    settled = coord.run_item(ORG, item, lambda *a, **k: None)
+    assert settled.state is BatchItemState.FAILED, (
+        "the settle window never re-armed, so a store that recovered one pass "
+        f"after the ceiling left the row {settled.state} for the process "
+        "lifetime — the exact inert row the ceiling exists to remove")
+    assert "retry ceiling" in settled.reason, settled.reason
+    assert bi_module.item_counts([settled])["pending"] == 0, (
+        "a settled item still counts as pending, so the batch can never "
+        "derive `complete`")
+
+
 # ── round 22: the adoption's liveness rule, the takeover's compare, and the ──
 # ── ceiling's liveness rule                                                 ──
 def test_a_young_orphan_is_an_acceptance_in_flight_and_is_not_adopted():

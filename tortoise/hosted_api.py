@@ -17721,11 +17721,27 @@ async def create_batch(body: BatchRequest,
         raise HTTPException(status_code=503,
                             detail="Batch could not be recorded — nothing was "
                                    "accepted; retry shortly.") from exc
+    except _batch_ingest._BatchIdConflict:
+        # ⛔ THE FAULT HALF IS `_BatchStoreFault` ABOVE; THIS IS THE CONFLICT HALF
+        # (#14415 recut review, MEDIUM — measured). `_BatchIdConflict` subclasses
+        # `ValueError`, so it still reached the staging-refusal arm below and told
+        # a customer with a perfectly valid body to "send items as paths under the
+        # configured document storage" — advice that cannot fix a lost create and
+        # never says retry. `create_batch` passes no `batch_id`, so the reachable
+        # case here is a MINTED id losing its create to a concurrent writer or to
+        # the recovery scan; nobody wrote anything the caller must tidy up, so the
+        # answer is "nothing was accepted, retry" — 409, because the request
+        # itself was fine and resending it is safe.
+        _logger.warning(
+            "batch acceptance lost its create for team %s", org_id, exc_info=True)
+        raise HTTPException(
+            status_code=409,
+            detail="This batch could not be recorded just now — nothing was "
+                   "accepted and nothing was charged; retry.") from None
     except ValueError as exc:
-        # The one refusal raised by the layer at acceptance: inline text with
-        # nowhere durable to put it. 503, because that is a SERVER missing its
-        # configuration, not a bad request (a valid body retried for ever is
-        # what a 400 here would buy — #14219 review).
+        # The staging refusal (inline text with nowhere durable to put it). The
+        # route pre-gates this above, so this arm is belt-and-braces; it stays a
+        # 503 because it IS a server missing its configuration, not a bad request.
         raise HTTPException(status_code=503,
                             detail="Batch storage is unavailable on this "
                                    "server — send items as paths under the "
@@ -17757,7 +17773,8 @@ async def create_batch(body: BatchRequest,
             batch.batch_id, org_id)
 
     return _batch_ingest.acceptance_receipt(
-        batch, items, status_url=f"/v1/batches/{batch.batch_id}")
+        batch, items, status_url=f"/v1/batches/{batch.batch_id}",
+        fallback_estimate=est_dict)
 
 
 @app.get("/v1/batches")
@@ -53775,7 +53792,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (728 distinct
+# ABSOLUTE line number from 208 tracked files (726 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
