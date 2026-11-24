@@ -110,7 +110,7 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-305 pass / 0 fail
+308 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -216,11 +216,27 @@ finding fixed once and the duplication removed rather than merged as-is.
 | **P2** the measurement harness carried two dead constants and cited a constant that does not exist (`_CAPACITY_CAPACITY_RETRY_AFTER_S` for `_CAPTURE_CAPACITY_RETRY_AFTER_S`) | **fixed**: the unused `RETRY_AFTER`/`CAPACITY_BODY` are deleted and the name is corrected. |
 | **P2** the receipts in this record were stale | **fixed**: re-measured at this head (51 / 740 / 302), and `WORKTREE-REPORT.md` carries the commands verbatim. |
 
+**Cycle 7** (a fresh-context reviewer at `745b0cd505`, i.e. on the merged state) —
+1 **P1**, 4 P2. The P1 is a real defect the merge INTRODUCED: each lane had fixed
+one leg, and the pair disagreed. All five are fixed here; three of the five were
+false claims in this record, which is the half that matters as much as the code.
+
+| finding | disposition |
+|---|---|
+| **P1** the Pi leg had no answer for an UNCLEARABLE obstruction at the claim path: a non-empty directory cannot be cleared (`rmdir` → `ENOTEMPTY`) and cannot be a claim record, but the caller read `existsSync` as "somebody holds it" and reported a **phantom holder** — every pass, forever. The Python leg had just been taught to discriminate; the merge left the two legs disagreeing on the very property R6 names. | **fixed, mirroring the Python leg exactly**: `acquireDrainClaim` now names the obstruction on its existing `state` seam, `flushSpool` answers it BEFORE the fail-closed arm (run the pass UNCLAIMED, `claimUnavailable` + `claimUnavailableReason` naming the path), and the operator line prints that reason instead of a hard-coded "the spool root is not writable", which was a false diagnosis. Three causes, three answers, both legs: unreadable REGULAR file → contention (fail closed); unclearable stranger → unclaimed + named; nothing at the path → unclaimed + named. Two new tests; each arm's mutant reds it (dropping the obstruction arm, and deleting the fail-closed arm). |
+| **P2** the Pi leg's `renew` CAS had **no test that could fail**: the only test called `linkSync`/`renameSync` directly on its own files, so reverting the install to `renameSync` left the suite green | **fixed for real**: `renew` now honours the same `takedown` seam `release` uses, and a new test stands INSIDE the window (take the claim, install a peer's record, assert `renew` returns false and the peer's token is on disk). Measured red on `linkSync` → `renameSync`. The primitive test keeps its own honest claim and says it is the primitive. |
+| **P2** `test_the_claim_is_written_COMPLETE_never_visible_empty` could not see its own mutant: both assertions were post-hoc, and a create-then-write claim satisfies them | **fixed**: the assertion is now the ORDER — a wrapper around `os.link` reads the SOURCE bytes at the instant the name becomes visible, so the test asserts that what a racing reader could see is a complete record (and that a `link` happened at all). Measured red on the create-in-place mutant. |
+| **P2** the takedown test named a mutant that cannot red it (a revert of `acquire`'s takeover leaves the primitives it drives unchanged) | **corrected in the record, not in the code**: the stated mutant is now the one that does red it (dropping `_dispose_quarantine`'s byte compare), and the line says plainly which test covers the acquire path instead. |
+| **P2** the convergence measurement counted winners over a population it never proved overlapped: the winner held a FIXED 1.0 s, so on a loaded box a slow starter legitimately took the released claim and was counted as a second winner | **fixed**: the processes now rendezvous on a barrier before attempting and the winner holds until every peer has FINISHED its attempt, so the count is over a population that provably overlapped. ⚠️ Measured both ways: with the barrier removed the run reports **9 winners of 10** — the exact false "two drainers" verdict a correct protocol would have been blamed for; with it, **1 of 10**. The receipt now also publishes `overlapped` so a run that did not overlap says so. |
+
+⚠️ The Pi-leg byte changes are another re-cut of generation 33's digest — see the
+note beside `_PINNED_PI_SEAM_INSTALL_CONTRACT`.
+
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `53f085bc…`, re-cut at every byte change: for the export-only test seam, for
+  (capture half `43f8f29d…`, re-cut at every byte change: for the export-only test seam, for
   the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
   changes, and for the MERGE of the two — a merge is a byte set neither side
   hashed, so the digest is always derived from the merged tree; the read half moved

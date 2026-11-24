@@ -1441,6 +1441,13 @@ export interface FlushSummary {
   /** #14350: the claim could not be CREATED (an unwritable spool root), so this
    *  pass ran WITHOUT the cross-process exclusion. Never a silent state. */
   claimUnavailable?: boolean;
+  /** ⛔ WHICH unclearable thing made the exclusion unavailable, when one did.
+   *  The Python leg carries the same field (`FlushSummary.claim_unavailable_reason`)
+   *  and the operator line prints it instead of a hard-coded guess: the old text
+   *  said "the spool root is not writable" for a NON-EMPTY DIRECTORY at the claim
+   *  path too, which is a false diagnosis of a real fault (#14423 cycle-7 review,
+   *  P1 — the Pi leg had no such cause at all). */
+  claimUnavailableReason?: string;
   /** #14350: the CAPACITY refusal that ended this pass, if any. Nothing was
    *  charged to the entry's `attempts` and no backoff was armed — that is the
    *  difference between this and a per-entry deferral, and it is what keeps the
@@ -4493,7 +4500,7 @@ export async function flushSpool(
   // and therefore run the pass UNCLAIMED beside a peer that is mid-install, i.e.
   // the two-drainer defect R1 states cannot happen. The Python twin fails closed
   // here: ANY `None` from `acquire` becomes `held_by_claim` (`capture_spool.py`).
-  const race: { raced: boolean } = { raced: false };
+  const race: { raced: boolean; obstruction?: string } = { raced: false };
   const claim = acquireDrainClaim(dir, { leg: "pi", state: race });
   if (!claim) {
     const record = readDrainClaim(dir);
@@ -4504,6 +4511,22 @@ export async function flushSpool(
       const leg = typeof record.leg === "string" ? ` (${record.leg} leg)` : "";
       summary.claimHolder =
         `another drainer holds this spool${leg}: ${who} — nothing attempted`;
+      return summary;
+    }
+    // ⛔ AN UNCLEARABLE OBSTRUCTION IS NOT A HOLDER (checked BEFORE the
+    // can't-read arm below, because that arm's answer — fail closed — is wrong
+    // here): there is no claim record to honour, only something that cannot be
+    // one. Running unclaimed cannot create a second drainer, while reporting
+    // contention names a process that does not exist and wedges the spool FOREVER
+    // — the permanent block #14350 forbids. The reason NAMES the object, in the
+    // same words the Python leg uses, because both legs write the same
+    // `status.json` for the same spool (R6).
+    if (race.obstruction) {
+      const summary = await flushSpoolPass(cfg, opts, undefined);
+      summary.claimUnavailable = true;
+      summary.claimUnavailableReason =
+        `${race.obstruction} exists and is not a claim record (not a regular file) ` +
+        "and could not be cleared — this pass ran WITHOUT the one-drainer exclusion";
       return summary;
     }
     // ⛔ SOMETHING AT THE CLAIM PATH THAT WE COULD NOT READ IS NOT "NOBODY":
@@ -5416,15 +5439,31 @@ export function acquireDrainClaim(
      *  empty because the winner is installing, not because nothing can be written
      *  (#14423 review, P2). Mirrors the Python leg, where any `None` from
      *  `acquire` is `held_by_claim`. */
-    state?: { raced: boolean };
-    /** ⛔ TEST SEAM for `release`'s ORDERING, and nothing else. The not-ours
+    state?: {
+      raced: boolean;
+      /** ⛔ Set when SOMETHING sits at the claim path that is not a claim record and
+       *  cannot be cleared (a non-empty directory, a FIFO, a device). `undefined`
+       *  cannot carry this: the caller must answer it DIFFERENTLY from both "a
+       *  regular claim we could not read" (fail CLOSED — it may be a live holder)
+       *  and "a lost race, the path is momentarily empty" (fail CLOSED — a peer is
+       *  installing). This one is the opposite: there is no holder to honour, and
+       *  reporting contention would name a process that does not exist and wedge
+       *  the spool FOREVER, which #14350 forbids. Mirrors `capture_spool.py`'s
+       *  `S_ISREG` branch, which discriminates the same three causes
+       *  (#14423 cycle-7 review, P1: the Pi leg collapsed them into `heldByClaim`). */
+      obstruction?: string;
+    };
+    /** ⛔ TEST SEAM for the ORDER of the dispose paths (`release`, and `renew`'s
+     *  compare-and-swap). The not-ours
      *  release must take NO destructive step, and that is a fact about which
      *  function was CALLED — not about the bytes afterwards: a rename + restore
      *  preserves the inode, the mtime and the content, so the pre-fix order is
      *  byte-indistinguishable from the fixed one whenever no third process fills
      *  the gap (#14423 review, cycle 7: reverting `release` to takedown-first left
      *  the whole suite green, including two release tests). The Python leg asserts
-     *  the same fact by monkeypatching `_takedown`; this is the Pi equivalent. */
+     *  the same fact by monkeypatching `_takedown`; this is the Pi equivalent.
+     *  `renew` uses it too, so the CAS's window (peer claims between our takedown
+     *  and our install) can be driven from this leg instead of only inferred. */
     takedown?: (
       path: string, token: string,
     ) => { quarantine: string; raw: string } | undefined;
@@ -5503,7 +5542,10 @@ export function acquireDrainClaim(
         if (mode.isFile()) return undefined;
         // A directory, symlink, FIFO/socket or device: corruption, not a holder.
         // Leaving it would `EEXIST` every future attempt — a permanent block.
-        if (!clearUnusableClaimPath(path)) return undefined;
+        if (!clearUnusableClaimPath(path)) {
+          if (opts.state) opts.state.obstruction = path;
+          return undefined;
+        }
         continue;
       }
       // ATOMIC TAKEDOWN, then verify in quarantine — see `takedownClaim`.
@@ -5566,7 +5608,13 @@ export function acquireDrainClaim(
         // refresh with `linkSync` makes the window a real CAS: `EEXIST` means a
         // peer claimed in it and THEIR claim stands, which is the safe direction.
         // The Python twin states the same reasoning; this is one protocol (R6).
-        const moved = takedownClaim(path, token);
+        // ⛔ THE SAME SEAM `release` USES, for the same reason: the CAS's window
+        // (between our takedown and our install) is a fact about ORDER, and without
+        // a way to stand inside it a test can only pin the primitive. The Python
+        // twin's window test monkeypatches `_takedown`; this is the Pi equivalent
+        // (#14423 cycle-7 review, P2 — the earlier Pi test called `linkSync`
+        // directly, so reverting this line to `renameSync` left it green).
+        const moved = (opts.takedown ?? takedownClaim)(path, token);
         if (!moved) return false;
         if (moved.raw !== rawNow) {
           // We displaced a NEWER record than the one we judged — dispose puts it
@@ -6201,9 +6249,10 @@ function reportFlush(
   }
   if (summary.claimUnavailable) {
     warn(
-      "spool flush: the drain claim is unavailable (the spool root is not writable, " +
-        "or holds an object at `drain.claim` that cannot be cleared) — this pass ran " +
-        "WITHOUT the one-drainer exclusion",
+      summary.claimUnavailableReason
+        ? `spool flush: ${summary.claimUnavailableReason}`
+        : "spool flush: the drain claim is unavailable (the spool root is not writable) " +
+          "— this pass ran WITHOUT the one-drainer exclusion",
     );
   }
   if (summary.lostClaim) {

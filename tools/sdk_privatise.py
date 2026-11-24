@@ -1864,6 +1864,18 @@ SWEEP_NAMES = 66
 #: `tools/measure_drain_convergence.py`, `tests/test_14350_drain_convergence.py`) carry no
 #: `.query` / `.update` / `.delete` reference AT ALL (`grep -nE '\.(query|update|delete)\b'` → no
 #: match on all three), and the branch's other edits are inside files that already carry their rows.
+#: ⛔ RE-PINNED A SECOND TIME BY THE SAME LANE (#14423), AND AGAIN FROM `main`'S DRIFT — the
+#: observation is **(11901, "953c70c05b55923b")**, +3 rows and a new digest, measured after this
+#: branch merged `origin/main` `b2d1e9086a` (the `tests/test_7879…` / `#14371 offline-embed` pair).
+#: The same three-tree rule as the `11898` block above, re-measured rather than assumed: a detached
+#: worktree at `origin/main`'s OWN `43182ac09a` reports the IDENTICAL
+#: `observed: (11901, '953c70c05b55923b')` against the old `11898` pin — so the drift is `main`'s,
+#: this branch contributes no row, and the branch's own three new files still carry no
+#: `.query`/`.update`/`.delete` reference at all. ⛔ ROW-LEVEL ATTRIBUTION OF THE +3 IS NOT CLAIMED
+#: here for the reason the block above already gives: the committed pin stores a COUNT and a DIGEST,
+#: never the row set, so which of `main`'s new files added them cannot be recovered from the
+#: artifact — only re-measured against a tree that predates it, which is what the `43182ac09a`
+#: measurement IS. `--check` is green on the new pair with
 #: ⛔ THE +2 IS THEREFORE NOT ATTRIBUTED ROW BY ROW HERE, AND THAT IS STATED RATHER THAN HIDDEN: the
 #: committed pin stores a COUNT and a DIGEST, never the row set, so the rows `#14038` moved cannot be
 #: recovered from the artifact — only re-measured against a tree that predates it. What IS measured
@@ -1876,7 +1888,7 @@ SWEEP_NAMES = 66
 #: `python-ci-gate` for EVERY open PR — leaving it is a fleet-wide landing block, not this PR's
 #: inconvenience. `--check` exits 0 on the pair below with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11898, "8cf59d52af09e536")
+SWEEP_RESIDUE = (11901, "953c70c05b55923b")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

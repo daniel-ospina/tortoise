@@ -4953,8 +4953,15 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: — the digest is re-derived from the merged tree on every merge
 #: (`sha256sum tortoise/pi-hooks/tortoise-capture.ts`), never carried over from
 #: either side. A pin that survives a merge unexamined is a pin nobody derived.
+#: ⚠️ …and a FIFTH at the cycle-7 review's own fix: the Pi leg gained the cause
+#: `acquireDrainClaim` could not previously NAME (an UNCLEARABLE obstruction at the
+#: claim path is not a holder — it reports `state.obstruction`, the caller runs the
+#: pass UNCLAIMED and prints the reason, where it used to report a phantom
+#: `heldByClaim` for every pass, forever), plus the `takedown` seam `renew`'s CAS
+#: test drives. Both move BEHAVIOUR on shipped bytes, so the digest moved with them
+#: — derived from this tree, never carried.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "53f085bcc89ba004f1b118e613fcae7c9cf207c3b3fcc289b0cd943adb180b0f")
+    33, "43f8f29db74399894bdf4057f8f3627d9e8c3f846529e735d1c44c56585a8f42")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5140,7 +5147,7 @@ _GENERATION_DIGESTS = {
     # byte-indistinguishability that made the first attempt vacuous (rename + link
     # preserves inode, mtime and content) is why the order has to be observed at the
     # call site rather than at the filesystem.
-    33: "53f085bcc89ba004f1b118e613fcae7c9cf207c3b3fcc289b0cd943adb180b0f",
+    33: "43f8f29db74399894bdf4057f8f3627d9e8c3f846529e735d1c44c56585a8f42",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

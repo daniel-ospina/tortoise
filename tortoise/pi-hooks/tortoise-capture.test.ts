@@ -8090,7 +8090,7 @@ test("#14350: the capacity cause renders the SAME words on both legs", async () 
   );
 });
 
-test("#14350: the renew install is CREATE-IF-ABSENT, so it cannot clobber a peer", async () => {
+test("#14350: the INSTALL PRIMITIVE is create-if-absent (what renew's CAS rests on)", async () => {
   // `renew` installs its refreshed record with `linkSync` after moving the old one
   // aside (`takedownClaim`), which makes the refresh a compare-and-swap: a peer
   // that claimed inside that window makes the install fail `EEXIST` and ITS record
@@ -8104,7 +8104,12 @@ test("#14350: the renew install is CREATE-IF-ABSENT, so it cannot clobber a peer
   // (`test_a_RENEW_never_clobbers_a_peer_that_claimed_in_the_window`), which drives
   // the same `_takedown` arbitrage; a single-threaded test here cannot open that
   // window without injecting into the module under test.
-  // MUTATION THAT REDS THIS: install with `renameSync` — it does NOT throw EEXIST.
+  // MUTATION THAT REDS THIS: swap the first `linkSync` for `renameSync` — the
+  // `assert.throws(/EEXIST/)` becomes a silent success and the peer's record is
+  // replaced. ⛔ THIS IS THE PRIMITIVE, NOT THE CAS: it cannot see `renew`'s own
+  // ordering, which is why the test BELOW drives the window through the takedown
+  // seam (#14423 cycle-7 review, P2 — this test used to claim the renew mutation,
+  // and reverting `renew` to a `rename` install left it green).
   const spool = tmpSpool();
   const claimPath = join(spool, "drain.claim");
   writeFileSync(claimPath, '{"token":"peer"}\n');
@@ -8120,5 +8125,100 @@ test("#14350: the renew install is CREATE-IF-ABSENT, so it cannot clobber a peer
   assert.equal(
     JSON.parse(readFileSync(claimPath, "utf8")).token, "ours",
     "rename replaces unconditionally — which is why the install cannot use it",
+  );
+});
+
+// ── #14423 cycle-7 review: the three answers the claim path owes, PER CAUSE ────
+
+test("#14350: an UNCLEARABLE obstruction runs the pass UNCLAIMED and NAMES it", async () => {
+  // A non-empty directory at `drain.claim` cannot be a claim record and cannot be
+  // cleared (`rmdir` → ENOTEMPTY). The pre-fix caller collapsed it into
+  // `heldByClaim`, i.e. it named a holder that does not exist and attempted
+  // nothing — for EVERY pass, forever: the permanent block #14350 forbids, and a
+  // divergence from the Python leg, which discriminates the object's type.
+  //
+  // MUTATION THAT REDS THIS: drop the `state.obstruction` arm in `flushSpool` (the
+  // `existsSync` fail-closed arm then answers `heldByClaim` and files nothing).
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-obstructed"));
+  const obstruction = join(spool, "drain.claim");
+  mkdirSync(obstruction);
+  writeFileSync(join(obstruction, "keep"), "not a claim\n");
+  const { fetchImpl, calls } = mockFetch([{ ok: true }]);
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 });
+  assert.equal(summary.heldByClaim, undefined, "a directory is NOT a holder");
+  assert.equal(summary.claimUnavailable, true, "the exclusion was unavailable");
+  assert.match(
+    String(summary.claimUnavailableReason), /not a claim record/,
+    `the reason must NAME the object, not guess at the root: ${summary.claimUnavailableReason}`,
+  );
+  assert.ok(String(summary.claimUnavailableReason).includes(obstruction),
+    "the operator needs the PATH to clear it");
+  assert.equal(calls.length, 1, "the pass must still run and file");
+  assert.equal(summary.filed, 1);
+});
+
+test("#14350: an UNREADABLE regular claim still reads as CONTENTION (fail closed)", async () => {
+  // The OTHER direction, and the reason the fix above cannot simply be "run
+  // unclaimed whenever the claim is missing": a regular file we cannot read may
+  // belong to a drainer that is working right now, so the answer is fail CLOSED.
+  //
+  // MUTATION THAT REDS THIS: delete the `existsSync` arm (the pass then runs
+  // unclaimed beside a live holder — two drainers).
+  if (typeof process.getuid === "function" && process.getuid() === 0) return;  // root reads anything
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-unreadable"));
+  const claimPath = join(spool, "drain.claim");
+  const holder = acquireDrainClaim(spool, { leg: "python" });
+  assert.ok(holder);
+  chmodSync(claimPath, 0o000);
+  try {
+    const { fetchImpl, calls } = mockFetch([{ ok: true }]);
+    const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 });
+    assert.deepEqual(calls, [], "fail closed: nothing attempted");
+    assert.equal(summary.heldByClaim, true);
+    assert.equal(summary.claimUnavailable, undefined);
+  } finally {
+    chmodSync(claimPath, 0o600);
+    holder.release();
+  }
+});
+
+test("#14350: renew's CAS loses the window to a peer, and the PEER'S claim stands", () => {
+  // The window `renew` has to survive: between our takedown (which moves the
+  // judged record aside) and our install, a peer claims the spool. The install is
+  // `linkSync` — create-if-absent — so it fails EEXIST and THEIR record stands; a
+  // `renameSync` install REPLACES it and both processes then hold the spool.
+  //
+  // The window is driven through the same `takedown` seam `release` uses (the
+  // Python twin monkeypatches `_takedown` for the same reason): a test that cannot
+  // stand inside the window can only pin the primitive, which is the defect the
+  // cycle-7 review found in the sibling test above.
+  //
+  // MUTATION THAT REDS THIS: install the refresh with `renameSync` (and drop the
+  // EEXIST arm) — `renew` then returns true and the on-disk token is OURS.
+  const spool = tmpSpool();
+  const claimPath = join(spool, "drain.claim");
+  const peer = {
+    version: DRAIN_CLAIM_VERSION, token: "peer-token", leg: "python",
+    pid: process.pid, host: "peerhost", boot_id: "peerboot",
+    started_at: 0, expires_at: Date.now() + 600_000,
+  };
+  const claim = acquireDrainClaim(spool, {
+    leg: "pi", ttlMs: 60_000,
+    takedown: (p, token) => {
+      const moved = takedownClaim(p, token);       // the real move-aside
+      writeFileSync(p, `${JSON.stringify(peer)}\n`);  // the peer claims in the window
+      return moved;
+    },
+  });
+  assert.ok(claim, "the first acquisition is uncontended");
+  assert.equal(
+    claim.renew(Date.now() + 1_000), false,
+    "we lost the spool to the peer — renew must say so",
+  );
+  assert.equal(
+    JSON.parse(readFileSync(claimPath, "utf8")).token, "peer-token",
+    "the peer's fresh claim must be intact: a replace here is two drainers",
   );
 });

@@ -115,19 +115,39 @@ def test_a_second_drainer_cannot_take_the_claim(tmp_path):
     assert drain_claim.read_claim(root) is None
 
 
-def test_the_claim_is_written_COMPLETE_never_visible_empty(tmp_path):
+def test_the_claim_is_written_COMPLETE_never_visible_empty(tmp_path, monkeypatch):
     """A reader that sees a zero-length claim reads it as corrupt (rule 1) and
     would STEAL a live claim mid-write.
 
-    MUTATION THAT REDS THIS: replace the tmp+`link` pair with
-    `open(path, O_CREAT|O_EXCL)` followed by a write — the claim is then visible
-    before its bytes are.
+    ⛔ THE ASSERTION IS THE ORDER, NOT THE RESULT. Asserting the file's contents
+    AFTER `acquire` returns cannot see this at all: a create-then-write mutant
+    satisfies any post-hoc check, because by then the write has long landed
+    (#14423 cycle-7 review, P2 — that is exactly what the earlier version of this
+    test did). So the source of the `link` is read AT THE INSTANT the link makes the
+    name visible: those are the bytes a concurrent reader would see.
+
+    MUTATION THAT REDS THIS: create the claim at its final path with
+    `open(path, O_CREAT|O_EXCL)` and then write it — no `link` happens, so nothing
+    is ever "published", and the first assertion fails.
     """
     root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    published: list[bytes] = []
+    real_link = drain_claim.os.link
+
+    def reading_link(src, dst, **kwargs):
+        published.append(Path(src).read_bytes())  # the bytes a reader races against
+        return real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(drain_claim.os, "link", reading_link)
     claim = drain_claim.acquire(root, leg="python")
     assert claim is not None
-    raw = drain_claim.claim_path(root).read_text(encoding="utf-8")
-    assert json.loads(raw)["token"] == claim.token
+    assert published, (
+        "the claim must be PUBLISHED by `link` from a fully-written file — a claim "
+        "created in place is visible before its bytes are")
+    assert json.loads(published[0].decode("utf-8"))["token"] == claim.token, (
+        "the first bytes any reader can observe must be a COMPLETE record")
+    monkeypatch.undo()
     # …and no scratch file is left behind for the spool's accounting to find.
     assert [p.name for p in root.iterdir() if p.name.startswith("drain.claim.tmp-")] == []
     claim.release()
@@ -756,8 +776,15 @@ def test_a_TAKEDOWN_never_deletes_a_live_claim_installed_under_it(tmp_path):
     aside, a NEW claim is installed, and the stale takedown must then decline and
     restore rather than dispose.
 
-    MUTATION THAT REDS THIS: go back to compare-then-unlink (the taken claim's
-    bytes are no longer what was judged stale, so the successor is deleted).
+    MUTATION THAT REDS THIS: drop the BYTE COMPARE in `_dispose_quarantine`
+    (dispose unconditionally) — `restored_ok` becomes True and the successor's bytes
+    are deleted. ⛔ NOT "go back to compare-then-unlink": that reverts `acquire`'s
+    TAKEOVER, which this test does not drive, so it would leave every assertion here
+    green — the overclaim the Pi twin already records
+    (`tortoise-capture.test.ts`, "Reverting to compare-then-unlink does NOT red THIS
+    test"). The acquire path's own cover is `test_the_SECOND_acquire_loses…` /
+    `test_a_RENEW_never_clobbers_a_peer_that_claimed_in_the_window` above, which
+    drive the window through `_takedown` rather than this primitive.
     """
     root = tmp_path / "spool"
     claim = drain_claim.acquire(root, leg="python")

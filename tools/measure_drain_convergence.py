@@ -139,20 +139,55 @@ def _claim_race(processes: int) -> dict:
     if not (REPO_ROOT / "tortoise" / "drain_claim.py").is_file():
         return {"supported": False, "winners": None}
     root = Path(tempfile.mkdtemp()) / "claim-race"
+    root.mkdir(parents=True, exist_ok=True)
+    arrivals = Path(tempfile.mkdtemp()) / "arrived"
+    arrivals.mkdir(parents=True, exist_ok=True)
+    done = Path(tempfile.mkdtemp()) / "done"
+    done.mkdir(parents=True, exist_ok=True)
     # The WINNER KEEPS THE CLAIM while every loser gives up: a winner that exits
     # immediately leaves a claim with a dead pid, and the next process would
     # CORRECTLY reclaim it — counting that as a second winner would measure the
     # probe's own lifetime, not the exclusion.
+    #
+    # ⛔ AND IT WAITS FOR EVERY PEER TO HAVE *ARRIVED*, not for a fixed 1.0 s. A
+    # fixed hold is a false-positive generator under load: measured here, importing
+    # `tortoise.drain_claim` costs ~0.19 s per process on an idle box, and on an
+    # oversubscribed cell ten CPython startups spread far past a one-second hold —
+    # so a late starter legitimately took the claim the winner had already released
+    # and was counted as a SECOND WINNER by a protocol that is correct. The count is
+    # only meaningful over a population that provably overlapped (#14423 cycle-7
+    # review, P2). Each process touches its own arrival marker BEFORE it attempts,
+    # so `all-present` means every attempt happened while the winner held.
     script = (
         f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r})\n"
+        "import os, time\n"
+        "from pathlib import Path\n"
+        f"arrivals = Path({str(arrivals)!r})\n"
+        f"done = Path({str(done)!r})\n"
+        f"root = Path({str(root)!r})\n"
+        "me = str(os.getpid())\n"
+        "(arrivals / me).write_bytes(me.encode())\n"
+        "deadline = time.monotonic() + 60.0\n"
+        "while len(list(arrivals.iterdir())) < " + str(processes) + ":\n"
+        "    if time.monotonic() > deadline:\n"
+        "        print('BARREN')\n"
+        "        raise SystemExit(3)\n"
+        "    time.sleep(0.005)\n"
         "from tortoise.drain_claim import acquire\n"
-        f"c = acquire({str(root)!r}, leg='measure')\n"
+        "c = acquire(root, leg='measure')\n"
         "if c is None:\n"
+        "    (done / me).write_bytes(b'x')\n"
         "    print('LOST')\n"
         "    raise SystemExit(0)\n"
         "print('WON', flush=True)\n"
-        "import time; time.sleep(1.0)\n"
+        "# hold until every peer has FINISHED its attempt\n"
+        "while len(list(done.iterdir())) < " + str(processes - 1) + ":\n"
+        "    if time.monotonic() > deadline:\n"
+        "        print('WAITED_TOO_LONG')\n"
+        "        break\n"
+        "    time.sleep(0.005)\n"
         "c.release()\n"
+        "(done / me).write_bytes(b'x')\n"
     )
     procs = [subprocess.Popen([sys.executable, "-c", script],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -160,9 +195,19 @@ def _claim_race(processes: int) -> dict:
              for _ in range(processes)]
     winners = 0
     for proc in procs:
-        out, _err = proc.communicate(timeout=60)
+        out, _err = proc.communicate(timeout=90)
         winners += out.count("WON")
-    return {"supported": True, "winners": winners, "processes": processes}
+    # `overlapped` is the count of processes that reached the attempt line while the
+    # winner still held the claim — the population the answer is about. A run where
+    # it is below `processes` proves the winner's hold was too short, so the number
+    # is reported rather than silently trusted.
+    # `overlapped` is how many processes both ANNOUNCED and FINISHED their attempt
+    # while the winner held the claim — the population the answer is about. A run
+    # where it is below `processes` proves the barrier did not hold, so the number
+    # is reported rather than silently trusted.
+    overlapped = min(len(list(arrivals.iterdir())), len(list(done.iterdir())) + winners)
+    return {"supported": True, "winners": winners, "processes": processes,
+            "overlapped": overlapped}
 
 
 def measure(sessions: int, drainers: int, post_seconds: float) -> dict:
