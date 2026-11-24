@@ -327,3 +327,134 @@ test never tokenizes (§1 refuses to fetch an encoder) and `tools/` ships no key
 renderer, so the §3b cells are reproduced by tokenizing `_keys_once()`'s own output with the
 dump named in §3b — that recipe is the producer, and the cells are recorded here because
 their re-derivation is not available to a deterministic leg.
+
+---
+
+## 7. The same lever, re-measured on a box with **no provider key** (`#14371`)
+
+`#14371` carries the two items this bundle's `## Done when` could not run: a measured
+before → after, and the `#7949` quality re-run. **Only the first is arithmetic**, and it was
+reachable all along — that is the correction this section records. The token half is
+`json.dumps(..., indent=1)` versus compact separators over the SAME objects, counted; it
+needs no model, no key, no spend, and no network beyond tiktoken's own local BPE cache. It
+now has a verb of its own, so it is reproducible by one command instead of by hand:
+
+```bash
+uv run python tools/extractor_cost_measure.py embed-json \
+    --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
+    --evidence docs/evidence/14277-extractor-cost/measurements.jsonl \
+    --out docs/evidence/14343-amplify/embed-json-offline.md \
+    --json-out docs/evidence/14343-amplify/embed-json-offline.json
+```
+
+⛔ The two `--out` flags are what make it a REGENERATION. Without them the verb
+prints the document to stdout and writes nothing, so a lane following a command that
+omits them sees no file change and can record a stale artifact as current.
+
+Output: `docs/evidence/14343-amplify/embed-json-offline.md` (generated — do not hand-edit)
+and `embed-json-offline.json`. The verb reuses `serialization_lever` (§1's instrument) and
+`decompose` (§2's solve); a structural pin refuses a second harness.
+
+### 7a. The cells, and their agreement with §1 and §4a
+
+| | this run | §1 / §4a of this bundle |
+|---|---|---|
+| sessions / emissions / items | 7 / 14 / 580 | 7 / 14 / 580 |
+| `indent=1` | **77,561** | 77,561 |
+| compact | **52,346** | 52,346 |
+| saved | **25,215 (32.50 %)** | 25,215 (32.5 %) |
+| per emission | **1,801** | 1,801 |
+| per-emission share span | 29.64 %–34.99 % | 29.6 %–35.0 % |
+
+The instrument and the record agree exactly — the point of re-running it on the same
+corpus rather than quoting it.
+
+### 7b. Before → after per median document, with the arithmetic shown
+
+1. the re-sent embed region is **solved** per S4 call: `23,176.0` (provider `prompt_tokens`
+   per call) − `8,562` (the S4 static render) − `2,109.5` (S1's story, re-sent) − `93` (the
+   #10311 untrusted-data envelope) = **12,411.5** tokens (this bundle prints `12,412` — the
+   same solve at whole-token precision). Every term is subtracted because each is charged to
+   its OWN row in §1; omitting the last two gives 14,614.0, **which is not this region**.
+2. S4 takes **1.14** calls per document over 50 documents ⇒
+   `12,411.5 × 1.14` = **14,149.1 tokens/document** (§4a's 14,149 is the same quantity at
+   that display precision);
+3. the measured share, exact: `25,215 / 77,561` = **32.5099 %** ⇒
+   `0.325099 × 14,149.1` = **4,599.9 tokens/document** (**4,035.0 per S4 call**);
+4. the median document is `48,461 in + 16,338 out` = **64,799 tokens** ⇒ after =
+   `64,799 − 4,599.9` = **60,199.1 (−7.1 %)**.
+
+| | before | after (`compact`) | Δ |
+|---|---|---|---|
+| input tokens / median document | 48,461 | 43,861.1 | −4,599.9 |
+| output tokens / median document | 16,338 | 16,338 | 0 (**not measured** — §5.2) |
+| **tokens / median document** | **64,799** | **60,199.1** | **−4,599.9 (−7.1 %)** |
+
+⚠️ **Two rounding paths are published, and they are 2 tokens apart on purpose.** §4a applies
+the ROUNDED `32.5 %` and prints **4,598** → 60,201; this section applies the EXACT
+`32.5099 %` and prints **4,599.9** → 60,199.1 (§2 above also prints 4,600 for the exact
+ratio). Same quantity, three display precisions — stated so a reader comparing the tables
+does not read one of them as rot, and so nobody "fixes" one into agreement with the other.
+
+### 7c. What it buys, at the allowance levels AS GIVEN
+
+⛔ The levels are **inputs** from `#14275` (owner), not re-derived here, and no price is
+computed: this section reports what a saving buys, never what a tier should cost. Every
+count is a **floor** (`affordable_count`, §4a's one convention).
+
+| tier | allowance | documents/month before | after (`compact`) | the floor, shown |
+|---|---|---|---|---|
+| solo | 3,000,000 | 46 | **49** | `49 × 60,199.1 = 2,949,755.9 ≤ 3,000,000`; `50 × 60,199.1 = 3,009,955.0` overruns |
+| pro | 4,000,000 | 61 | **66** | `66 × 60,199.1 = 3,973,140.6 ≤ 4,000,000`; `67 × 60,199.1 = 4,033,339.7` overruns |
+| team | 24,000,000 | 370 | **398** | `398 × 60,199.1 = 23,959,241.8 ≤ 24,000,000`; `399 × 60,199.1 = 24,019,440.9` overruns |
+
+That is **+3 / +5 / +28** documents a month. (The counts agree with §4a's 49 / 66 / 398.
+The multiplication lines differ in the last few tokens because §4a multiplies the unit it
+prints — `60,201` — while this run's unit is `60,199.1`; **each table multiplies the unit IT
+DISPLAYS**, so both re-derive as written. An earlier revision of this section multiplied the
+unrounded `60,199.139…` and printed it at 1 dp, which made the printed equations evaluate 2–15
+tokens short — the same display gap §7b reconciles, and now removed at the source.)
+
+### 7d. The guards that make this quotable
+
+- **Posture, graded by RESOLUTION through the pipeline's own predicates.** The solved region
+  is only comparable to 12,411.5 under the posture the corpus was scored in, so the verb
+  **refuses** a value that MOVES the render (`TORTOISE_S4_DELTA=0/off`,
+  `TORTOISE_EXTRACTOR_PROMPT=compact`, `TORTOISE_CLASSIFY_LATER`, `TORTOISE_REFERENTIALITY`)
+  and **does not refuse** a value that resolves to it (`S4_DELTA=1` or `garbage`,
+  `EXTRACTOR_PROMPT=verbose`). Presence-based grading was measured refusing this repo's own
+  suite, which exports `TORTOISE_S4_DELTA=0` from `tests/conftest.py`.
+  `TORTOISE_PACKS_DIR` is graded the same way: `pack_registry.env_packs_dir()` DISCARDS a
+  missing / not-a-dir / manifest-less value and the in-tree catalog renders, so a set-but-broken
+  value is **accepted** (refusing it was a measured false block — the fleet's normal case is a
+  reaped worktree under an exported variable), while a DIFFERENT loadable catalog is refused
+  because its vocabulary cannot be proved identical.
+- **One arm or no artifact.** `cost_table` prices the COLD arm whenever the corpus carries one,
+  so `--arm warm` would have published warm's call structure and solved region beside cold's
+  medians under a single label (measured: the team cell moved 398 → 397 on a quantity belonging
+  to neither arm). A mismatch is now refused (exit 2) instead of mixed.
+- **Offline, as POSITIVE evidence.** The verb wraps `tiktoken.load.read_file` — the function
+  `read_file_cached` reaches ONLY on a cache miss — and reports the blob URLs it was called for.
+  The recorded run called it **zero times** (`network_used: false`, `fetched: []`), so
+  "reproducible with no network" is an observation rather than a claim. A directory snapshot
+  could not answer this: tiktoken resolves its cache by PRESENCE of
+  `TIKTOKEN_CACHE_DIR`/`DATA_GYM_CACHE_DIR` (an empty value disables caching and fetches on every
+  call while writing nothing), so a snapshot of the wrong directory reports "no fetch" most
+  confidently when it is wrong.
+
+`tests/test_14371_offline_embed_json.py` pins the recorded cells against the committed
+artifact, pins both layouts back to the **identical parsed object** on every real emission
+(key order included — the risk is a format change a downstream parser tolerates but reads
+differently), pins the guard in both directions plus the arm-mixing refusal, and runs the whole
+measurement end to end wherever a BPE cache holds the `cl100k_base` blob, skipping rather than
+downloading where it does not (the skip gate names the blob, not "some file in a directory":
+any other encoding in the cache would pass a loose gate and then download on the miss).
+
+### 7e. What this does NOT deliver
+
+⛔ **The quality re-run on `#7949` is NOT delivered here.** What the layout does to what the
+model EMITS (E1 volume / E2 correctness / E3 provenance / E4 operator edges) is unmeasured,
+so `TORTOISE_S4_EMBED_JSON=compact` stays **OFF** — arming takes the variable AND the
+`DOOR_PINNED_OFF` preregistration pin withdrawn in the same change (§5.2). `#14371`'s
+item 2 is still open; this section closes its item 1 only, at the exact position `#14371`
+splits them.

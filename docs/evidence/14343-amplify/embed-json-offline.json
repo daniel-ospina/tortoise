@@ -1,0 +1,219 @@
+{
+ "lever": "TORTOISE_S4_EMBED_JSON",
+ "created": "2026-11-23",
+ "offline": true,
+ "provider_calls": 0,
+ "tokenizer": "cl100k_base",
+ "encoder_cache": {
+  "cache_dir": "/tmp/data-gym-cache",
+  "caching_disabled": false,
+  "fetched": [],
+  "network_used": false
+ },
+ "posture": {
+  "verdict": "production",
+  "problems": [],
+  "observed": {
+   "TORTOISE_S4_DELTA": "<unset>",
+   "TORTOISE_EXTRACTOR_PROMPT": "<unset>",
+   "TORTOISE_CLASSIFY_LATER": "<unset>",
+   "TORTOISE_REFERENTIALITY": "<unset>",
+   "TORTOISE_PACKS_DIR": "<unset>",
+   "TORTOISE_S4_EMBED_JSON": "indent"
+  }
+ },
+ "receipts": "tests/eval/write_path/receipts/7947-arms-2026-10-18",
+ "evidence": "docs/evidence/14277-extractor-cost/measurements.jsonl",
+ "arm": "cold",
+ "corpus": {
+  "documents": 50,
+  "median_doc_tokens": 5211.0,
+  "s4_calls_per_doc": 1.14,
+  "median_document_in": 48461.0,
+  "median_document_out": 16338.0,
+  "median_document_total": 64799.0
+ },
+ "per_emission": [
+  {
+   "session": "wp01_quarry_debug",
+   "arm": "raw",
+   "items": 47,
+   "indented_tokens": 6276,
+   "compact_tokens": 4243,
+   "emission_tokens": 4582,
+   "story_tokens": 1143
+  },
+  {
+   "session": "wp01_quarry_debug",
+   "arm": "narrative",
+   "items": 51,
+   "indented_tokens": 7165,
+   "compact_tokens": 4851,
+   "emission_tokens": 5266,
+   "story_tokens": 640
+  },
+  {
+   "session": "wp02_lumen_refactor",
+   "arm": "raw",
+   "items": 45,
+   "indented_tokens": 5833,
+   "compact_tokens": 3815,
+   "emission_tokens": 4860,
+   "story_tokens": 879
+  },
+  {
+   "session": "wp02_lumen_refactor",
+   "arm": "narrative",
+   "items": 49,
+   "indented_tokens": 5998,
+   "compact_tokens": 4084,
+   "emission_tokens": 4424,
+   "story_tokens": 653
+  },
+  {
+   "session": "wp03_ember_design",
+   "arm": "raw",
+   "items": 39,
+   "indented_tokens": 5118,
+   "compact_tokens": 3327,
+   "emission_tokens": 3584,
+   "story_tokens": 928
+  },
+  {
+   "session": "wp03_ember_design",
+   "arm": "narrative",
+   "items": 46,
+   "indented_tokens": 5626,
+   "compact_tokens": 3872,
+   "emission_tokens": 4130,
+   "story_tokens": 596
+  },
+  {
+   "session": "wp04_aurora_perf",
+   "arm": "raw",
+   "items": 30,
+   "indented_tokens": 4412,
+   "compact_tokens": 2975,
+   "emission_tokens": 3213,
+   "story_tokens": 795
+  },
+  {
+   "session": "wp04_aurora_perf",
+   "arm": "narrative",
+   "items": 38,
+   "indented_tokens": 5696,
+   "compact_tokens": 3880,
+   "emission_tokens": 4187,
+   "story_tokens": 509
+  },
+  {
+   "session": "wp05_retro_writeup",
+   "arm": "raw",
+   "items": 45,
+   "indented_tokens": 6048,
+   "compact_tokens": 4084,
+   "emission_tokens": 4380,
+   "story_tokens": 853
+  },
+  {
+   "session": "wp05_retro_writeup",
+   "arm": "narrative",
+   "items": 54,
+   "indented_tokens": 7547,
+   "compact_tokens": 5114,
+   "emission_tokens": 5453,
+   "story_tokens": 614
+  },
+  {
+   "session": "wp06_quarry_rollout",
+   "arm": "raw",
+   "items": 43,
+   "indented_tokens": 5970,
+   "compact_tokens": 3952,
+   "emission_tokens": 4276,
+   "story_tokens": 840
+  },
+  {
+   "session": "wp06_quarry_rollout",
+   "arm": "narrative",
+   "items": 36,
+   "indented_tokens": 4346,
+   "compact_tokens": 3058,
+   "emission_tokens": 3263,
+   "story_tokens": 342
+  },
+  {
+   "session": "wp07_bluepeak_followup",
+   "arm": "raw",
+   "items": 20,
+   "indented_tokens": 2566,
+   "compact_tokens": 1704,
+   "emission_tokens": 3384,
+   "story_tokens": 893
+  },
+  {
+   "session": "wp07_bluepeak_followup",
+   "arm": "narrative",
+   "items": 37,
+   "indented_tokens": 4960,
+   "compact_tokens": 3387,
+   "emission_tokens": 3542,
+   "story_tokens": 479
+  }
+ ],
+ "aggregate": {
+  "receipts": 7,
+  "emissions": 14,
+  "items": 580,
+  "indented_tokens": 77561,
+  "compact_tokens": 52346,
+  "saved_tokens": 25215,
+  "saved_pct": 32.5,
+  "saved_ratio_exact": 0.325098954371398,
+  "saved_per_emission": 1801,
+  "tokens_per_item": 100.9,
+  "per_emission_share_min_pct": 29.64,
+  "per_emission_share_max_pct": 34.99
+ },
+ "per_document": {
+  "embed_region_per_s4_call": 12411.5,
+  "s4_calls_per_doc": 1.14,
+  "embed_region_per_doc": 14149.1,
+  "saved_per_call": 4035.0,
+  "saved_per_doc": 4599.9,
+  "before_in": 48461.0,
+  "before_out": 16338.0,
+  "before_total": 64799.0,
+  "after_in": 43861.1,
+  "after_total": 60199.13913371411,
+  "saved_pct": 7.1,
+  "solve": {
+   "s4_prompt_tokens_per_call": 23176.0,
+   "s4_static_render_per_call": 8562,
+   "story_re_sent_per_call": 2109.5,
+   "untrusted_envelope_per_call": 93,
+   "embed_region_per_call": 12411.5
+  }
+ },
+ "documents_per_month": [
+  {
+   "tier": "solo",
+   "allowance": 3000000,
+   "documents_before": 46,
+   "documents_after": 49
+  },
+  {
+   "tier": "pro",
+   "allowance": 4000000,
+   "documents_before": 61,
+   "documents_after": 66
+  },
+  {
+   "tier": "team",
+   "allowance": 24000000,
+   "documents_before": 370,
+   "documents_after": 398
+  }
+ ],
+ "not_delivered": "the #7949 quality re-run (E1 volume / E2 correctness / E3 provenance / E4 operator edges): what the layout does to what the model EMITS is unmeasured here, so the lever stays DISARMED"
+}
