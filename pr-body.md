@@ -429,7 +429,7 @@ head it belongs to.
 | **P3** R6's "everything else … is the same on both sides" | **fixed**: the sentence now names the shared-format writer the cross-leg matrix grades, instead of asserting sameness. |
 
 **Cycle 21** (a fresh-context reviewer at `2b36e643` — 5 **P3**, and one measurement that was not on
-its list; the table below holds all six, the measured one last): it MEASURED that the P1 fix itself was unpinned — reverting the whole bump left
+its list; the table below holds all six): it MEASURED that the P1 fix itself was unpinned — reverting the whole bump left
 `306 passed` and `327 pass / 0 fail`, because every other row asserts only that the LIVE number and
 the LIVE digests agree WITH EACH OTHER, and a self-consistent re-cut of a shipped number satisfies
 them all. That is the shape that reads green everywhere and blocks installs everywhere.
@@ -441,6 +441,7 @@ them all. That is the shape that reads green everywhere and blocks installs ever
 | **P3** "cycle 11 F5" — cycle 11's digest finding is `F1` (`F5` is cycle 13's label set) | **fixed**. |
 | **P3** the Tests block labelled the install-contract pins "generation 33" at a head whose pins are 34 | **fixed**. |
 | **P3** the Residuals bullet stated the generation freeze as though a gate enforced it, when the round had measured that nothing did | **fixed**: the bullet says what was measured, names the new row as the gate, and now carries the post-row counts too (see the bullet above). This is the row whose absence made the Cycle-21 header's "5 P3" untrue; the header now counts five plus the measured one. |
+| **P3 (correction to this record's own history)** the commit `4a49c877` claimed `grep -rn 'cycle-19' tests/ tortoise/ pr-body.md` "returns nothing in this PR's files". It overstates twice, and is corrected here rather than by rewriting history: that grep returns many hits on those paths (unrelated, pre-existing files), and WITHIN this PR's files it returns exactly ONE — `tests/test_14350_drain_convergence.py:2488`, a CORRECT cycle-19 P3 citation (the `null`-carry-forward arm, whose row is cycle 19's third). A later lane must not "fix" it. | **recorded**: no code change; the only hyphenated `cycle-19` left in this PR's files is the legitimate one, and the two `test_capture_install.py` citations that WERE wrong now read cycle 20. |
 | **P3** an installed-artifact note claimed "ELEVEN re-cuts / TWELVE distinct forms" beside a command yielding neither | **fixed by RUNNING it**, and the range is now stated so it reproduces: at `1474ec7b`, **22 distinct forms over 57 commits** from `6a72cfd661` (`git rev-list --count 6a72cfd661..1474ec7bf58d`). ⛔ The base is NOT described as the merge base — `git merge-base origin/main HEAD` is `2f380536`, one commit later, and the two ranges give different counts (21/56). |
 
 ## Residuals, stated
