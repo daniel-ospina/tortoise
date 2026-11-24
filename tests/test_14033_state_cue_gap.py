@@ -460,6 +460,41 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     "is the plan neither deprecated nor retired",
     "is the ticket still not archived",
     "is the plan any longer cancelled",
+    # ⛔ THE DASH-JOINED SPELLINGS. The boundary fold rewrites every separator dash
+    # (U+2010..U+2015, U+2212) to `-`, and `-` is a head-noun JOINER (that is what keeps
+    # `all-hands` one token), so without a guard the dash re-attaches the stop word to the
+    # noun and the whole stop list is bypassed: measured `ended/is_predicate` — the
+    # polarity-INVERTED population, i.e. a WRONG ANSWER, not the safe miss — for 12 of the
+    # 13 arms across all four separator codepoints. The guard is grammatical: a dash may
+    # JOIN a word but may not ABSORB a stop word. Pinned per ARM, not one representative,
+    # because each arm is its own alternative and a single row leaves the rest free.
+    "is the plan\u2014not cancelled",
+    "is the plan\u2013not cancelled",
+    "is the plan-not cancelled",
+    "is the report\u2014being archived",
+    "is the ticket\u2014being archived",
+    "is the v2 api\u2014to be retired",
+    "is the api\u2013to be retired",
+    "is the list\u2014of retired services archived",
+    "is the plan\u2014hardly cancelled",
+    "is the plan\u2014far from cancelled",
+    "is the plan\u2014anything but cancelled",
+    "is the plan\u2014never archived",
+    "is the plan\u2014once archived",
+    "is the plan\u2014or archived",
+    "is the plan\u2014which was archived",
+    "is the plan\u2014no longer archived",
+    # ⛔ AND THE SAME GUARD ON THE ARMS WHOSE SEPARATOR IS THE DASH ITSELF: `[\s-]+` was
+    # widened so a dash-joined multi-word stop still fires (`no\u2014longer`, `to\u2014be`,
+    # `of\u2014retired`). Those spellings had NO test at all — reverting the widening, any
+    # one arm or all three, left the suite green while flipping six probe rows from `None`
+    # to `ended` — so they are pinned here for the same reason as the arms above.
+    "is the plan no\u2014longer archived",
+    "is the plan no-longer archived",
+    "is the v2 api to\u2014be retired",
+    "is the v2 api to-be retired",
+    "is the list of\u2014retired services archived",
+    "is the list of-retired services archived",
     # the APPROXIMATIVE negators — the same polarity INVERTED answer as `not`, in
     # the spelling a caller actually writes. ⛔ One tab, not two: this class used
     # to be documented twice under two review-round labels, which read as two

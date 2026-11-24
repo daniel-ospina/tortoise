@@ -307,8 +307,8 @@ _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 #:   is the unbounded word-list shape #13128 refuses, so this is disclosed rather
 #:   than closed;
 
-_NP_STOP = (
-    r"(?!(?:that|which|who|whom|whose|where|when"
+_NP_STOP_BODY = (
+    r"(?:that|which|who|whom|whose|where|when"
     r"|the|a|an|this|these|those|our|your|their|its|my"
     r"|we|us|i|they|them|he|she|you|it"
     r"|anyone|anybody|someone|somebody|everyone|everybody|nobody"
@@ -316,7 +316,12 @@ _NP_STOP = (
     # predicate modifiers — negation, futurity/intent, disjunction (see the note
     # above: each one changes what the question asks, and a negated predicate is
     # answered with the polarity-INVERTED population)
-    r"|not|never|neither|nor|no[\s-]+longer|longer"
+    # ⛔ `no` IS NOT A STOP WORD, and the dash-joined `no—longer` needs no arm of its own:
+    # `longer` catches the spaced spelling at the next token, and the token guard in
+    # `_NP_WORD_GUARDED` refuses the joined one (measured: reverting a `no[\s-]+longer`
+    # alternative left the suite green, i.e. it was an INERT arm — the guard was already
+    # doing the work).
+    r"|not|never|neither|nor|longer"
     # ⛔ AND THE APPROXIMATIVE NEGATORS, BUT ONLY IN THE PREDICATE SLOT. Measured
     # (PR #14491 review, P1): `is the plan hardly cancelled`, `… barely
     # cancelled`, `… scarcely archived`, `… far from cancelled` and `… anything
@@ -386,8 +391,30 @@ _NP_STOP = (
     # ⛔ AND AT AN `of`-COMPLEMENT WHOSE HEAD IS THE ENDING WORD (`is the list of
     # retired services archived`): the question is about the LIST, and the ending
     # modifies the complement, so the head noun is not the thing that ended.
-    rf"|of[\s-]+(?:{_ENDING_WORDS}))\b)"
+    rf"|of[\s-]+(?:{_ENDING_WORDS}))"
 )
+
+#: The lookahead itself: a NEGATIVE assertion at a token start. Kept as a wrapper over
+#: `_NP_STOP_BODY` so the body can be reused where the question is not "is this token a
+#: stop" but "may this character JOIN the previous token" — see `_NP_WORD_GUARDED`.
+_NP_STOP = rf"(?!(?:{_NP_STOP_BODY})\b)"
+
+#: ⛔ THE HYPHEN INSIDE A HEAD NOUN IS A JOINER **OR** A SEPARATOR, and the two are
+#: lexically identical — which is why `_NP_WORD` alone is not usable in this shape.
+#: Measured (PR #14491 review, P1): after the boundary fold turns every dash into `-`,
+#: `is the plan—not cancelled`, `…—being archived`, `…—to be retired`,
+#: `…—hardly cancelled`, `…—never/—or/—which/—once …` all answered `ended/is_predicate`
+#: — the polarity-INVERTED population, i.e. a WRONG ANSWER rather than the safe miss the
+#: old shape returned — because `-` is a `_NP_WORD` member, so `plan-not` was consumed as
+#: ONE head noun and `_NP_STOP` never saw `not`. Measured across all four separator
+#: codepoints (U+2012/U+2013/U+2014/U+2212), 12 of 13 stop arms leaked.
+#: ⛔ AND THE OBVIOUS FIXES ARE BOTH WRONG: folding separators to a SPACE reds the
+#: pinned `is the all—hands meeting archived` row (1 failed, 213 passed), and dropping `-`
+#: from `_NP_WORD` reds the same row (a hyphen is an ordinary spelling inside a head noun
+#: — the shape's own comment above says so). So the dash stays a JOINER and becomes a
+#: BOUNDARY only where a stop word follows it: `all-hands` is one token, `plan-not` is
+#: `plan` + a refused tail. The distinction is grammatical, not lexical.
+_NP_WORD_GUARDED = rf"[^\W_](?:(?:-{_NP_STOP})|[^\W_]|['’])*"
 
 #: …and the BASE forms of the same words, which is what do-support selects
 #: ("what did we retire"). A closed list with NO ``end``: "what did we end up
@@ -713,8 +740,8 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("is_predicate", re.compile(
         rf"^(?:is|are|was|were)\s+"
         rf"(?:the|our|your|their|its|my|this|that|these|those)\s+"
-        rf"{_NP_WORD}"                       # the question's HEAD noun
-        rf"(?:\s+{_NP_STOP}{_NP_WORD}){{0,3}}"
+        rf"{_NP_WORD_GUARDED}"                # the question's HEAD noun
+        rf"(?:\s+{_NP_STOP}{_NP_WORD_GUARDED}){{0,3}}"
         rf"\s+(?:{_ENDING_WORDS})\s*[?.!]*$")),
 
     # "list what we retired" / "list what we archived" (#14033). An IMPERATIVE,
@@ -793,7 +820,10 @@ _COMMITMENT_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"(?:\s+(?:[a-z]+ly|still|also|now|ever)){0,2}\s+"
         r"\bcommitt(?:ed|ing)\b"
         r"\s*(?:to\b)?"
-        r"(?=\s*(?:[—–\-,.;:!?]|and\b|or\b|but\b|so\b|yet\b|nor\b|$))")),
+        # ⛔ `—`/`–` are UNREACHABLE here: the boundary fold rewrites every separator dash
+        # to `-` before any shape matches, so listing them was dead weight that read as
+        # coverage. The `-` member is the one that actually carries the fold's appositive.
+        r"(?=\s*(?:[\-,.;:!?]|and\b|or\b|but\b|so\b|yet\b|nor\b|$))")),
     # "current commitments" / "live commitments" / "what are the live commitments"
     ("scoped_noun", re.compile(
         r"^(?:what\s+(?:are|is)\s+)?(?:the\s+)?"
