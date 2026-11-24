@@ -704,6 +704,21 @@ class BatchStore(Protocol):
 
     def put_item(self, org_id: str, item: BatchItem) -> None: ...
 
+    def put_items(self, org_id: str, items: Sequence[BatchItem]) -> None:
+        """Create/refresh MANY item rows in ONE statement.
+
+        ⛔ ACCEPTANCE WAS ONE ROUND TRIP PER ITEM (#14415 review round 13, P2).
+        `_submit_rows` called `put_item` in its loop, so the documented maximum
+        (1 000 items) meant ~1 001 sequential statements inside ONE request on the
+        two-worker bookkeeping pool — the same cost the set-based cancel was
+        introduced to remove at half the count, and this file's own measured
+        contention (a 1 505 ms DB probe) makes it exceed the transport budget. The
+        customer then gets a 504 over an acceptance that COMMITTED, and the route
+        mints its own `batch_id` with no idempotency key, so the retry creates a
+        SECOND batch and every document is ingested and charged twice.
+        """
+        ...
+
     def add_item_tokens(self, org_id: str, batch_id: str, item_id: str, *,
                         tokens_in: int = 0, tokens_out: int = 0,
                         updated_at: str = "") -> BatchItem | None:
@@ -893,6 +908,12 @@ class InMemoryBatchStore:
             if updated_at:
                 row.updated_at = updated_at
             return _copy_item(row)
+
+    def put_items(self, org_id: str, items: Sequence[BatchItem]) -> None:
+        with self._lock:
+            for item in items:
+                bucket = self._items.setdefault((org_id, item.batch_id), {})
+                bucket[item.item_id] = _copy_item(item)
 
     def put_item(self, org_id: str, item: BatchItem) -> None:
         with self._lock:
@@ -1251,6 +1272,36 @@ class GraphBatchStore:
         # `get_item`'s field list.
         return self.get_item(org_id, batch_id, item_id)
 
+    def put_items(self, org_id: str, items: Sequence[BatchItem]) -> None:
+        """⛔ ONE `UNWIND` FOR THE WHOLE SET (#14415 review round 13, P2).
+
+        `UNWIND $rows AS row MERGE (i:…) SET i… ` is the same write as `put_item`
+        performed `rows` times, in a single statement — the shape the set-based
+        cancel already uses. Order is preserved because the acceptance still writes
+        the batch row AFTER this returns.
+        """
+        if not items:
+            return
+        self._q(
+            f"UNWIND $rows AS row "
+            f"MERGE (i:{ITEM_LABEL} {{id:row.iid, batch_id:row.bid, "
+            "org_id:row.org}}) "
+            "SET i.ref=row.ref, i.name=row.name, i.staged_path=row.staged, "
+            "    i.state=row.state, i.reason=row.reason, "
+            "    i.content_key=row.key, i.tokens_in=row.tin, "
+            "    i.tokens_out=row.tout, i.attempts=row.attempts, "
+            "    i.content_changed=row.changed, "
+            "    i.duplicate_of=row.duplicate, i.updated_at=row.updated",
+            {"rows": [{"iid": i.item_id, "bid": i.batch_id, "org": org_id,
+                       "ref": i.ref, "name": i.name, "staged": i.staged_path,
+                       "state": str(i.state), "reason": i.reason,
+                       "key": i.content_key, "tin": int(i.tokens_in),
+                       "tout": int(i.tokens_out), "attempts": int(i.attempts),
+                       "changed": bool(i.content_changed),
+                       "duplicate": i.duplicate_of, "updated": i.updated_at}
+                      for i in items]},
+        )
+
     def put_item(self, org_id: str, item: BatchItem) -> None:
         self._q(
             f"MERGE (i:{ITEM_LABEL} {{id:$iid, batch_id:$bid, org_id:$org}}) "
@@ -1423,7 +1474,15 @@ class GraphBatchStore:
             tokens_in=int(r[5] or 0), tokens_out=int(r[6] or 0),
             attempts=int(r[7] or 0), content_changed=bool(r[8]),
             updated_at=r[9] or "",
-            staged_path=(r[10] or "") if len(r) > 10 else "")
+            staged_path=(r[10] or "") if len(r) > 10 else "",
+            # ⛔ THE COLUMN IS ASKED FOR, SO IT MUST BE MAPPED (#14415 review
+            # round 13, P2). `RETURN` listed `i.duplicate_of` and the constructor
+            # stopped at `r[10]`, so `get_item` always yielded `duplicate_of=""` on
+            # the production store — and `run_item` reads its row through `_fresh`
+            # → `get_item`, which made its TWIN branch (the one that stops a repeat
+            # being skipped when its twin failed) unreachable there: the same bytes
+            # could be extracted, stored and charged a second time.
+            duplicate_of=(r[11] or "") if len(r) > 11 else "")
 
     def discard(self, org_id: str, batch_id: str) -> None:
         self._q(f"MATCH (i:{ITEM_LABEL} {{org_id:$org, batch_id:$bid}}) "
@@ -1836,6 +1895,19 @@ class BatchCoordinator:
         of 500 is acknowledged inside the SAME wait budget a single capture is,
         and the 10 s transport bound is never approached, let alone raised.
 
+        ⛔ THAT SENTENCE IS ONLY TRUE BECAUSE OF THE STATEMENT COUNT, and it was
+        NOT true when it was first written: the item loop called `put_item` once
+        per item, so the documented maximum (1 000) meant ~1 001 sequential round
+        trips inside one request on the two-worker bookkeeping pool — the cost the
+        set-based cancel exists to remove, at half the count. Exceeding the budget
+        there is worse than slow: the customer gets a 504 over an acceptance that
+        COMMITTED, and the route mints its own `batch_id` with no idempotency key,
+        so the retry opens a SECOND batch and every document is ingested and
+        charged twice. The set now goes in ONE `UNWIND` (`put_items`), leaving the
+        row writes at two statements regardless of batch size — the only per-item
+        work left is staging an inline body to disk, which is a local write and
+        not a round trip.
+
         ⛔ The items are written BEFORE the batch is marked ``accepted``: a batch
         row that said ``accepted`` over items that did not land would be a
         receipt for work we did not record (§2.0 — the record is truth).
@@ -1902,8 +1974,11 @@ class BatchCoordinator:
             # landed: skipping it now would lose the document if that copy
             # fails. Cross-batch dedup needs the text too, and happens in the
             # same place for the same reason.
-            self._store.put_item(org_id, item)
             items.append(item)
+        # ⛔ THE WHOLE SET IN ONE STATEMENT (#14415 review round 13, P2), and it
+        # still lands BEFORE the batch row below, so an orphaned acceptance is the
+        # case `_resume_batch` adopts rather than a row pointing at nothing.
+        self._store.put_items(org_id, items)
         batch = Batch(batch_id=bid, org_id=org_id, state=BatchState.ACCEPTED,
                       created_at=stamp, updated_at=stamp,
                       corpus_name=str(corpus_name or ""),

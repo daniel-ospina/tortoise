@@ -1517,16 +1517,17 @@ def test_a_stale_copy_of_a_terminal_item_never_runs_the_runner():
 def test_a_rejected_acceptance_discards_its_own_rows_and_staged_files(tmp_path):
     """BLOCKING 2: the rollback, at the layer's own seam."""
     store = InMemoryBatchStore()
-    real_put = store.put_item
     seen = {"n": 0}
 
-    def _flaky(org_id, item):
+    # ⛔ THE ACCEPTANCE WRITES ITS ITEM SET IN ONE STATEMENT NOW (#14415 review
+    # round 13, P2), so the seam this rollback is pinned at is `put_items` — the
+    # per-item `put_item` call it used to patch is no longer on the path, and a
+    # pin left patching it would pass while testing nothing.
+    def _flaky(org_id, items):
         seen["n"] += 1
-        if seen["n"] == 2:
-            raise TimeoutError("graph timeout")
-        return real_put(org_id, item)
+        raise TimeoutError("graph timeout")
 
-    store.put_item = _flaky  # type: ignore[method-assign]
+    store.put_items = _flaky  # type: ignore[method-assign]
     coord = BatchCoordinator(store)
     base = tmp_path / "ingest"
     base.mkdir()
@@ -2761,25 +2762,76 @@ def test_an_orphan_adoption_cannot_blank_an_acceptance_that_landed_first(monkeyp
 
 
 def test_duplicate_of_round_trips_through_the_production_store():
-    """⛔ ROUND-12 REVIEW P2: `duplicate_of` was the ONE field never persisted.
+    """⛔ ROUND-12/13 REVIEW P2: `duplicate_of` must survive a real ROUND TRIP.
 
     `submit()` sets it, `as_dict()` puts it on the wire and `run_item` branches on
-    it, but `GraphBatchStore.put_item`'s SET listed no column and neither read
-    projection returned one — so on the real store the wire always said
-    `duplicate_of: ""` and the twin branch (the one that stops a repeat being
-    SKIPPED when its twin FAILED) was unreachable there, while the test that pins it
-    ran against the in-memory store, which does preserve it.
+    it, so it has to come back OUT of the store — and the first cut of this pin only
+    grepped the CYPHER TEXT, which is exactly the half that was already right:
+    `RETURN` listed `i.duplicate_of` while the constructor stopped at `r[10]`, so
+    `get_item` always yielded `""` and `run_item`'s twin branch was unreachable in
+    production. The fake `query` therefore answers with a FULL row and the assertion
+    is on the OBJECT.
+    """
+    from tortoise.batch_ingest import GraphBatchStore
+
+    # `get_item` projects (ref, name, state, reason, key, tin, tout, attempts,
+    # changed, updated, staged, duplicate); `items()` prefixes the two ids.
+    row_get = ["/d/b.md", "b.md", "indexed", "", "k", 5, 0, 1, False, "t",
+               "/d/b.md", "b-00000"]
+    row_items = ["b-00001", "/d/b.md", "b.md", "indexed", "", "k", 5, 0, 1,
+                 False, "t", "/d/b.md", "b-00000"]
+
+    class _Rec:
+        def __init__(self):
+            self.cyphers: list[str] = []
+
+        def __call__(self, cypher, params=None, **kw):
+            self.cyphers.append(cypher)
+            # `ORDER BY`/list reads project the ids; a single-row read does not.
+            rows = [row_items if "ORDER BY" in cypher else row_get]
+
+            class _Res:
+                result_set = rows
+
+            return _Res()
+
+    rec = _Rec()
+    store = GraphBatchStore(rec)
+    got = store.get_item(ORG, "b", "b-00001")
+    assert got is not None and got.duplicate_of == "b-00000", (
+        "get_item asks the engine for duplicate_of and then drops it, so the wire "
+        f"always reports an empty twin: {got.duplicate_of if got else None!r}")
+
+    listed = store.items(ORG, "b")
+    assert listed and listed[0].duplicate_of == "b-00000", (
+        "items() drops duplicate_of from the row it returns, so a list read "
+        "reports every repeat as its own document")
+
+    store.put_item(ORG, BatchItem(batch_id="b", item_id="b-00001", ref="/d/b.md",
+                                  duplicate_of="b-00000", updated_at="t"))
+    assert "duplicate_of=$duplicate" in rec.cyphers[-1], (
+        f"put_item never writes the column: {rec.cyphers[-1][:160]}")
+
+
+def test_acceptance_writes_the_whole_item_set_in_one_statement():
+    """⛔ ROUND-13 REVIEW P2: 1 000 items must not be 1 000 round trips.
+
+    Acceptance wrote one statement per item on the two-worker bookkeeping pool, so
+    the documented maximum needed ~1 001 sequential statements inside ONE request.
+    At this file's own measured contention that exceeds the transport budget, and
+    the customer then gets a 504 (or a proxy timeout) over an acceptance that
+    COMMITTED — while the route mints its own `batch_id` and carries no idempotency
+    key, so the retry creates a SECOND batch: every document ingested and charged
+    twice. The set has to go in one `UNWIND`, the shape the set-based cancel uses.
     """
     from tortoise.batch_ingest import GraphBatchStore
 
     class _Rec:
         def __init__(self):
             self.cyphers: list[str] = []
-            self.params: list[dict] = []
 
         def __call__(self, cypher, params=None, **kw):
             self.cyphers.append(cypher)
-            self.params.append(dict(params or {}))
 
             class _Res:
                 result_set: list = []
@@ -2788,20 +2840,13 @@ def test_duplicate_of_round_trips_through_the_production_store():
 
     rec = _Rec()
     store = GraphBatchStore(rec)
-    item = BatchItem(batch_id="b", item_id="b-00001", ref="/d/b.md",
-                     duplicate_of="b-00000", updated_at="t")
-    store.put_item(ORG, item)
-    assert "duplicate_of=$duplicate" in rec.cyphers[-1], (
-        "the production store never writes duplicate_of: "
-        f"{rec.cyphers[-1][:200]}")
-    assert rec.params[-1]["duplicate"] == "b-00000"
-
-    store.items(ORG, "b")
-    assert "i.duplicate_of" in rec.cyphers[-1], (
-        "the production read projection omits duplicate_of, so the wire always "
-        "reports an empty twin")
-    store.get_item(ORG, "b", "b-00001")
-    assert "i.duplicate_of" in rec.cyphers[-1]
+    rows = [BatchItem(batch_id="b", item_id=f"b-{n:05d}", ref=f"/d/{n}.md",
+                      updated_at="t") for n in range(200)]
+    store.put_items(ORG, rows)
+    assert len(rec.cyphers) == 1, (
+        f"200 items took {len(rec.cyphers)} statements, not 1: "
+        f"{rec.cyphers[0][:100]}")
+    assert "UNWIND $rows AS row" in rec.cyphers[0], rec.cyphers[0][:200]
 
 
 def test_the_create_if_absent_reports_creation_not_state_equality():
