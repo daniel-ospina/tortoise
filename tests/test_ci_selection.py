@@ -21826,18 +21826,20 @@ def test_duration_coverage_guard_fires_below_the_floor_and_not_at_it():
     """#3400: the coverage floor FIRES, is INCLUSIVE, and is PINNED at 0.90.
 
     ⛔ CARRIED FROM THE MERGE (`8c373f59a1`), and the claim it used to make about
-    itself was false: it is NOT the falsifier that kept a no-op floor from going
-    green. `test_duration_coverage_guard_boundary_and_realistic` (above) survives
-    B7 and already reds a floor that returns `[]` unconditionally — its 89% case
-    asserts `duration_coverage_issues(below) != []`.
+    itself was false: it is NOT the falsifier that keeps a no-op floor from going
+    green, and it was never the "sole pin". Its BEHAVIOUR is already graded, twice
+    over, by arms that survive B7:
 
-    What nothing else pins is the CONSTANT. The boundary arm is written against
-    89/90/95 coverage, so lowering `DURATION_COVERAGE_MIN` to 0.80 passes it while
-    every real caller keeps composing the guard without asserting a floor
-    (`integrity(...) + ... + duration_coverage_issues(m)`), and
-    `tests/test_ci_timing.py` only names it in a validator tuple. This arm closes
-    that: it pins the constant itself, AND the documented ABSENT-map PASS state,
-    which no surviving sibling states.
+      * `test_duration_coverage_guard_boundary_and_realistic` (above) — pins 0.90
+        from both directions (floor 0.80 reds its 89% case, 0.95 reds its 90% case);
+      * `test_null_or_non_mapping_durations_reports_instead_of_tracebacking` — the
+        documented ABSENT-map PASS state (`cs.main()` must exit 0 on an empty map).
+
+    What nothing else pins is the CONSTANT ITSELF: no behavioural mutation can see a
+    changed `DURATION_COVERAGE_MIN`, because the boundary arm's 89/90/95 fixtures move
+    with it. This arm's first assertion is the literal
+    `assert DURATION_COVERAGE_MIN == 0.90`, and that is its whole remaining
+    contribution — it is kept for that pin, not for a gate nobody else grades.
     """
     from tools.ci_selection import DURATION_COVERAGE_MIN, duration_coverage_issues, load_manifest
 
