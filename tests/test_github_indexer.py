@@ -3325,13 +3325,33 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # paragraphs are kept because they record real measurements of real trees; the pin
     # table is what resolves HERE.
     #
-    # ⛔ RE-DERIVED AGAIN at `3e9278e39349` (`#14220`'s embedder seam moved `sdk.py` and no
-    # landing re-derived these four rows — tracked as `#13937`, whose own "suggested scope"
-    # item 1 is exactly this: re-derive every address at the current tree). Two deltas, not
-    # one — `+53` for the `update_knowledge` pair and `+117` for the NOT-MONOTONE block —
-    # which is why each row was re-found by its own pinned text rather than by adding a
-    # constant. Every row's SPAN is unchanged (176, 3 and 10 lines), so the addresses moved
-    # with the statements rather than being re-pointed at neighbouring code.
+    # ⛔ RE-DERIVED ONCE MORE, and this move belongs to `main`, not to this branch: the block
+    # above was TRUE at `main` `b2d1e9086a92` (#14434), and the very next commit on `main`'s
+    # first-parent — `bbe54363ad65` (#14220, "one embedder seam", 44 files → 14) — moved BOTH
+    # regions by DIFFERENT amounts, so one offset applied to the block would have re-pinned the
+    # wrong function: **+53** above `update_knowledge` (`22988→23041`, its range end located as
+    # the function's own last line `return self._update_entity_any(id, **props)`, `23163→23216`)
+    # and **+117** BELOW it (`56260→56377`, `56412→56529`, `56918→57035`). Each address was
+    # re-found here by its own pinned FIRST-line text (and, for the arm, its own LAST-line text
+    # `continue`) at THIS tree; `git show <sha>:tortoise/sdk.py | grep -n` each own text at
+    # `b2d1e9086a92` and at `bbe54363ad65` is what attributes the move, and the `+53` / `+117`
+    # pair is the CONSISTENCY CHECK on that measurement, never its input.
+    # ⛔ THIS IS A MAIN-RED INHERITED, NOT ONE THIS CHANGE CAUSED — stated so that nobody hunts
+    # for a branch commit to blame: `git diff HEAD -- tortoise/sdk.py` is EMPTY, and all four
+    # addresses are identical at this head, at `origin/main` `af40c97ca312` and at the pre-fold
+    # branch head `7ce74ac20fc0`. The branch's own `sdk.py` never moved this region; `main` did,
+    # and no later `main` commit re-derived this table. The table, and the citations quoting it
+    # (here and in `tortoise/indexer/github_indexer.py`), are re-cut to those measurements.
+    # ⛔ The un-supersede arm's start text occurs TWICE (`56529`, `56568`), so its row is located
+    # by its own `continue` terminator (`56538`) — never by the start text alone, which would
+    # admit either occurrence.
+    # ⛔ THIS IS THE RE-DERIVATION `#13937` ASKS FOR (its own "suggested scope" item 1:
+    # re-derive every address at the current tree), so the note that "no landing re-derived
+    # these four rows" no longer holds. Its figures are above and were re-measured here, not
+    # carried: the mover is `bbe54363ad65` (#14220, on `main`), which is the commit both
+    # `git show <sha>:tortoise/sdk.py | grep -n` probes above name. Every row's SPAN is
+    # unchanged (176, 3, 10 and 1 lines), so the addresses moved with the statements rather
+    # than being re-pointed at neighbouring code.
     ("sdk.py", 56377, 56379): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 56529, 56538): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
