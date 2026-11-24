@@ -1122,15 +1122,22 @@ def test_contact_page_posts_to_the_function() -> None:
 
 def test_hello_is_visible_plainly_on_the_outside_surface() -> None:
     """The owner ruling: where an outside surface shows an address it is
-    `hello@`. It must be visible up front, not only in an error path."""
+    `hello@`. It must be visible up front, not only in an error path.
+
+    The header lede that used to carry the address was removed by the owner's
+    copy edit (the page now opens with the h1 and the form), so this pins the
+    always-rendered "Prefer email?" line below the form — the one place a
+    visitor sees the address without submitting — rather than the element that
+    was deleted. A pin anchored on `.lede` would now fail for the copy edit's
+    own reason, and a pin over the whole page would pass on nothing but the
+    error prose the ruling exists to exclude.
+    """
     html = _src(CONTACT_HTML)
-    # Visible in the lede — before the form, outside any error/fallback block.
-    lede = html[html.index('class="lede"') : html.index("<main>")]
-    assert CONTACT_TO in lede, "the decided address must be visible up front"
-    assert f'href="mailto:{CONTACT_TO}"' in lede, "the up-front address must be actionable"
-    # And as the direct-mailto fallback below the form.
+    # Rendered on load, outside `contact-msg` / `contact-error` (the two nodes
+    # the script writes an outcome into).
     fallback = html[html.index('class="fallback"') : html.index("<noscript>")]
-    assert f'href="mailto:{CONTACT_TO}"' in fallback, "the fallback must name the decided address"
+    assert CONTACT_TO in fallback, "the decided address must be visible up front"
+    assert f'href="mailto:{CONTACT_TO}"' in fallback, "the up-front address must be actionable"
     # No other address may be shown on the outside surface.
     assert "support@" not in html
 
