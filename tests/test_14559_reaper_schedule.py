@@ -165,12 +165,18 @@ class TestNoWidener:
 # ── 3. the credential guard (fail-closed) ────────────────────────────────────
 
 CREDS = {
-    "TORTOISE_DB_URI": "rediss://tortoise:pw@falkordb.example:6379/tortoise",
+    "TORTOISE_DB_URI": "rediss://tortoise:s3cr3t-9f@falkordb.example:6379/tortoise",
     "SUPABASE_URL": "https://project.supabase.co",
     "SUPABASE_SERVICE_KEY": "service-role-key",
     "REAPER_EXECUTE": "true",
     "REAPER_TOTAL_BAND": "200",
 }
+
+#: The password from the URI above, spelled so a leak is unmistakable. It is
+#: asserted ABSENT from the guard's output as a literal: a shape-based check
+#: (`"pw" not in out.replace("pw@", "")`) is vacuous — it strips exactly the
+#: occurrence it is looking for, and stayed green when the URI was printed whole.
+SECRET_PASSWORD = "s3cr3t-9f"
 
 
 class TestCredentialGuard:
@@ -183,7 +189,8 @@ class TestCredentialGuard:
         done = self._guard(tmp_path)
         assert done.returncode == 0, done.stderr
         assert "rediss://falkordb.example" in done.stdout
-        assert "pw" not in done.stdout.replace("pw@", ""), "the password reached the log"
+        assert SECRET_PASSWORD not in done.stdout
+        assert SECRET_PASSWORD not in done.stderr
 
     @pytest.mark.parametrize("missing", ["TORTOISE_DB_URI", "SUPABASE_URL",
                                          "SUPABASE_SERVICE_KEY"])
@@ -353,3 +360,97 @@ class TestVerdict:
         assert done.returncode == 0
         assert record["bytes_freed"] is None
         assert "unmeasured" in summary
+
+
+# ── 5. the arms the first review found missing ───────────────────────────────
+
+class TestReviewFindings:
+    """Each case here is a state that was GREEN before this class existed.
+
+    They are kept together (rather than folded into `TestVerdict`) so the reader
+    can see the shape they share: **a sweep that did nothing, or could not be
+    read, must never look like a sweep that worked.**
+    """
+
+    def test_a_control_plane_that_resolves_NOTHING_is_a_failure(self, tmp_path):
+        """⛔ The `total == 0` guard's mirror image. A control plane that ANSWERS
+        (a restored/empty project, a key scoped elsewhere, namespace drift) turns
+        EVERY graph into `refused-unresolved`: `reapable` is 0, the total is
+        healthy, every other arm passes — and the sweep silently deletes nothing
+        forever while the leak keeps running. Measured green before this arm."""
+        done, record, _ = _verdict(
+            tmp_path, plan=_plan(unresolved=138, total=138),
+            verify=_plan(unresolved=138, total=138), execute=_execute(deleted=0))
+        assert done.returncode != 0, "an all-unresolved control plane read as clean"
+        assert any("resolved none" in r for r in record["reasons"])
+
+    def test_a_CLUSTER_of_unresolved_orphans_is_still_only_a_warning(self, tmp_path):
+        """The discriminator for the arm above: SOME orphans is the tool working as
+        designed (adjudication), so it must not turn red."""
+        done, record, _ = _verdict(
+            tmp_path, plan=_plan(reapable=2, unresolved=3),
+            verify=_plan(reapable=0, unresolved=3), execute=_execute(deleted=2))
+        assert done.returncode == 0, record["reasons"]
+
+    def test_a_killed_execute_pass_is_a_failure_even_with_a_clean_verify(
+            self, tmp_path):
+        """A pass killed by the runner (137) or by `timeout` writes NO document, and
+        the tool had already deleted some graphs — so `deleted` would read 0 while
+        `verify` reads 0 reapable. Verified green before this arm: plan reapable=3,
+        verify reapable=0, EXECUTE_RC=137, no execute document."""
+        done, record, _ = _verdict(
+            tmp_path, plan=_plan(reapable=3), verify=_plan(reapable=0),
+            execute=None, execute_rc="137")
+        assert done.returncode != 0, "a killed reap read as a clean sweep"
+        assert any("execute pass produced no report" in r for r in record["reasons"])
+
+    def test_an_execute_exit_outside_the_reap_verdicts_is_a_failure(self, tmp_path):
+        """Exit 2 IS reachable on the execute path (`main` re-runs `build_report`),
+        so a refused reap must be read, not assumed impossible."""
+        done, record, _ = _verdict(
+            tmp_path, plan=_plan(reapable=1), verify=_plan(reapable=0),
+            execute=_execute(deleted=0), execute_rc="2")
+        assert done.returncode != 0
+        assert any("exited 2" in r for r in record["reasons"])
+
+    def test_a_refused_VERIFY_pass_is_a_failure_even_on_a_rehearsal(self, tmp_path):
+        """The residue invariant is rehearsal-exempt; the verify pass's own health
+        is NOT — a partial view is never a clean one, and a rehearsal that cannot
+        read the estate must not read as green (it would also close the incident)."""
+        done, record, _ = _verdict(
+            tmp_path, plan=_plan(reapable=4), verify=None, execute=None,
+            execute_rc="", verify_rc=2)
+        assert done.returncode != 0, "a refused verify read as clean on a rehearsal"
+        assert any("verify pass produced no report" in r for r in record["reasons"])
+
+    def test_a_rehearsal_cannot_CLOSE_the_incident_issue(self, tmp_path):
+        """⛔ A rehearsal is green by construction, so gating the resolve arm on the
+        verdict alone let a manual `execute: false` run close a live incident and
+        comment "a clean scheduled run" about a run that never swept anything.
+
+        Behaves without the network: the resolve arm sources
+        `.github/scripts/auto-file-issue.sh`, whose dedupe search uses `gh` — a
+        stub that always fails makes an ATTEMPT loud (non-zero) and a SKIP silent
+        (zero)."""
+        script = _script("Resolve the adjudication issue")
+        # A `gh` that always fails: the dedupe search in the resolve arm then
+        # REFUSES (by design, #3907), so an ATTEMPT is non-zero and a SKIP is 0.
+        stub = tmp_path / "stub"
+        stub.mkdir()
+        gh = stub / "gh"
+        gh.write_text("#!/bin/sh\nexit 1\n")
+        gh.chmod(0o755)
+        for execute_ran, expect_attempt in ((False, False), (True, True)):
+            work = tmp_path / f"work-{execute_ran}"
+            work.mkdir()
+            (work / "reaper-verdict.json").write_text(json.dumps({
+                "verdict": "green", "reasons": [], "notes": [], "counts": {},
+                "execute_ran": execute_ran}))
+            env = {"REAPER_WORKDIR": str(work), "GH_TOKEN": "stub",
+                   "RUN_URL": "https://example/run/1",
+                   "PATH": f"{stub}:{os.environ.get('PATH', '')}"}
+            done = _bash(script, env=env, cwd=ROOT)
+            assert (done.returncode != 0) is expect_attempt, (
+                f"execute_ran={execute_ran}: expected "
+                f"{'an attempt' if expect_attempt else 'a skip'}; "
+                f"rc={done.returncode} out={done.stdout} err={done.stderr}")

@@ -73,11 +73,17 @@ version: 1
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
 # `6a02515d14ad` folded in, MINUS this PR's own removal of `tests/test_dod_5090_probe.py` from the
 # `core` surface — that row is what put the file in `fast_pool()`, so dropping it takes the file's
-# weight out of the pool and re-packs every bin) the verb packs six shards at 825.1 s
-# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so
-# `ceil(825.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# weight out of the pool and re-packs every bin) the verb packs seven shards at 825.2 s
+# (a, b, c, d, i, j, k) and four at 825.3 s (e, f, g, h), so
+# `ceil(825.3/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28`, so the two agree by construction rather than
-# by a hand re-read. Re-derive it on the tree after the next fold; never carry this 825.1/825.0.
+# by a hand re-read. Re-derive it on the tree after the next fold; never carry this 825.2/825.3.
+# ⛔ THAT READING IS ALSO THIS PR'S OWN REGISTRATION, and `#14559` is why it moved off the
+# 825.1/825.0 five/six split the parent map emitted: registering
+# `tests/test_14559_reaper_schedule.py` on `core` (it was UNCLASSIFIED, which is what `--integrity`
+# reported as manifest drift) puts its flat 2.0 s weight in the pool and the packer is greedy, so
+# `c` moved into the worst bin and the split widened from 0.1 s to 0.1 s across a different name
+# set. The minute did not move (28 m either way) — again, the SECONDS are the graded claim.
 # ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
 # SETS move on every landed registration while the minute has stood at 28 m across every reading of
 # this pool from 835.5 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
@@ -8445,6 +8451,21 @@ surfaces:
   - test_install_reaper_schedule.py
   - test_reaper.py
   - test_reaper_orphan.py
+  # #14559: the SCHEDULE for the empty-test-graph reaper — the workflow's shape
+  # (trigger set, cadence, scopes, band), the absence of every widener flag, and
+  # two of its run bodies EXECUTED as shell (the credential guard, the verdict).
+  # ⛔ Registered for the same reason the `#4299` line above records: every
+  # `tests/**/test_*.py` must be classified (`test_integrity_covers_all_test_files`
+  # — `--integrity` reported `manifest drift: ['test_14559_reaper_schedule.py']`
+  # while it was missing, which is the `manifest-integrity` job's own red).
+  # ⛔ NEITHER SUBJECT IS A NAMED SURFACE, so nothing else can select it: the
+  # workflow it pins (`.github/workflows/test-graph-reaper.yml`) matches no
+  # SOURCE_PATTERNS row and falls to the full matrix by fail-closed default, and
+  # `tools/reap_empty_test_graphs.py` matches none either — a tools-only diff
+  # selects `surfaces: []` and would run NEITHER this pin nor its sibling.
+  # `core` is the fallback the splitter uses for exactly this case. Hermetic: the
+  # scripts run as `bash -c` against JSON fixtures, no DB, no graph, no network.
+  - test_14559_reaper_schedule.py
   # #3767: the reaper's ownership claim (name/containment is not ownership).
   # Hermetic (raw unix sockets + monkeypatches, no embedded DB) and grouped with
   # its siblings; `tortoise/embedded_reaper.py` changes select the `core` surface.
@@ -15860,6 +15881,16 @@ durations:
   test_13084_ram_cap.py: 2.4
   test_13084_ram_window_census.py: 0.1
   test_13205_graph_provision_leak.py: 0.2
+  # #14559 (new file): a PR-added file takes the header's flat `DEFAULT_FAST_WEIGHT`,
+  # not a hand-picked reading. `--integrity` cannot see a missing row, so this line
+  # is what records the weight. What the weight covers, hermetically: the reaper
+  # schedule's trigger set / 15-minute cadence / scopes / band, the absence of every
+  # widener flag, and TWO of the workflow's `run:` bodies executed as `bash -c`
+  # against the tool's own JSON report shape — the credential guard (each secret
+  # missing in turn) and the verdict step (every arm that must fail, plus the
+  # rehearsal arms that must not). No docker, no DB, no graph, no model call.
+  # ⛔ The CASE COUNT is deliberately not quoted — `--integrity` is the authority.
+  test_14559_reaper_schedule.py: 2.0
   test_13220_record_label_embeddings.py: 1.8
   test_13224_cold_embedder_write_bound.py: 78.8
   test_13302_ended_read.py: 2.5

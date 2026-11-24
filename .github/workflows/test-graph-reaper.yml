@@ -72,16 +72,29 @@ name: test-graph-reaper
 #     comment.
 #   * `total == 0` from the plan pass — same class, one layer down: a wrong target
 #     that answers is indistinguishable from an empty one.
+#   * a control plane that ANSWERS but resolves NONE of the graphs (`refused-unresolved
+#     == total`). This is the `total == 0` guard's mirror image: a restored/empty
+#     project or a key scoped elsewhere turns every graph into an unresolved orphan,
+#     so `reapable` is 0 and the total is healthy while the sweep deletes nothing
+#     forever — green, every 15 minutes. A CLUSTER of orphans (some, not all) is the
+#     tool working as designed; ALL of them is a control-plane fault.
 #   * the plan or verify pass returning 2 (REFUSED: control plane or graph list
-#     unreadable) — a partial view is never a clean one.
-#   * any failed deletion (the tool's exit 1) or any `reapable` residue in the
-#     verify pass (an ACL user that survived its drop leaves the graph in place on
-#     purpose: a live credential must not outlive the graph that explains it).
+#     unreadable) — a partial view is never a clean one. The verify pass's own health
+#     is checked on EVERY path, rehearsal included; only its RESIDUE invariant is
+#     gated on a reap having run.
+#   * any failed deletion (the tool's exit 1), an execute pass that produced no
+#     report at all, or an execute exit outside {0, 1} (124/137/2 — a killed or
+#     refused reap is not a sweep, and its deletion count would be a guess), or any
+#     `reapable` residue in the verify pass (an ACL user that survived its drop
+#     leaves the graph in place on purpose: a live credential must not outlive the
+#     graph that explains it).
 #   * `refused-unreadable` > 0 — the sweep is partly BLIND, which is a defect in
 #     the sweep. `refused-unresolved` is DELIBERATELY NOT a failure: it is the
 #     tool working as designed on an orphan that needs adjudication, so it is
 #     counted, named and warned on, not red. (The issue says exactly this:
-#     "a refusal is visible rather than silent".)
+#     "a refusal is visible rather than silent".) The one exception is the
+#     ALL-unresolved case above, which is a control-plane fault wearing the same
+#     bucket.
 #
 # WHO RUNS IT. GitHub Actions, not a box timer and not an in-process thread: the
 # fleet's own scheduling doctrine (billing-reconcile-cron, registry-backup-cron)
@@ -240,10 +253,13 @@ jobs:
           if [ -s "$REAPER_WORKDIR"/reaper-execute.err ]; then
             cat "$REAPER_WORKDIR"/reaper-execute.err >&2
           fi
-          # rc 0 = every deletion took; 1 = at least one did NOT. Both are
-          # reported by the verdict step; 2 is not reachable on this path (the
-          # report was already built by the plan pass) and is treated as a failure
-          # if it ever is.
+          # rc 0 = every deletion took; 1 = at least one did NOT — both are read
+          # by the verdict step. ⛔ 2 IS reachable on this path: `--execute` calls
+          # `build_report()` again in its own process, so a control plane or graph
+          # list that went unreadable between the plan pass and this one refuses
+          # here and writes NO document. The verdict step treats any rc outside
+          # {0, 1} — and a missing document — as a failure; a killed pass (124/137)
+          # writes no document either, so it cannot read as a clean sweep.
 
       - name: Verify (post-run dry run — the sweep's invariant)
         id: verify
@@ -326,26 +342,49 @@ jobs:
           unreadable = counts.get("refused-unreadable", 0)
           total = plan.get("total", 0)
 
-          if record := execute:
-              failed = record.get("failed", 0)
+          # ⛔ THE MIRROR OF THE `total == 0` GUARD, one layer over. A control plane
+          # that ANSWERS but resolves NONE of the graphs (a restored/empty project,
+          # a key scoped elsewhere, a namespace-derivation drift) turns EVERY graph
+          # into `refused-unresolved`: `reapable` is 0, the total is healthy, so
+          # every other arm passes — and the sweep deletes nothing forever while
+          # the leak keeps running, green, every 15 minutes. That is the #2140 deaf
+          # monitor exactly, so it is a FAILURE, not a warning.
+          if total > 0 and unresolved == total:
+              reasons.append(
+                  f"the control plane ANSWERED but resolved none of the {total} "
+                  f"graph(s): every one is `refused-unresolved`, so `reapable` is 0 "
+                  f"without a single owner being consulted. That is a control-plane "
+                  f"fault, not a clean sweep")
+
+          if execute_ran and execute is None:
+              # A crashed or refused reap writes no document at all, so there is
+              # nothing to read a deletion count from — and the tool had ALREADY
+              # built its report, so this is reachable (exit 2 re-runs
+              # `build_report`, and a killed pass writes nothing).
+              reasons.append(f"the execute pass produced no report (exit {execute_rc}) — a crashed or refused reap cannot be read as a sweep")
+          if execute_ran and execute_rc not in ("0", "1"):
+              reasons.append(f"the execute pass exited {execute_rc} — not a reap verdict (0 = every deletion took, 1 = at least one failed)")
+          if execute:
+              failed = execute.get("failed", 0)
               if failed:
                   reasons.append(f"{failed} deletion(s) FAILED (see outcome in the execute artifact)")
-              if execute_rc == "2":
-                  reasons.append("the execute pass refused (exit 2)")
 
-          if verify is None:
-              if execute_ran:
+          # The verify pass's OWN health is checked on every path (a refusal there
+          # is never a clean sweep, rehearsal or not). Only the RESIDUE invariant
+          # is gated on a reap having run: a rehearsal deleted nothing, so a
+          # non-zero residue there is expected, not a finding.
+          verify_checked = plan_rc == 0
+          if verify_checked:
+              if verify is None:
                   reasons.append(f"the verify pass produced no report (exit {verify_rc}): {verify_err}")
-          elif execute_ran:
-              # ⛔ A REHEARSAL (`workflow_dispatch` with execute=false) deletes
-              # nothing, so a non-zero residue there is EXPECTED, not a finding:
-              # the invariant below is only meaningful when a reap ran.
-              vcounts = verify.get("counts") or {}
-              residue = vcounts.get("reapable", 0)
-              if residue:
-                  reasons.append(f"{residue} graph(s) are still reapable AFTER the execute pass — the sweep did not converge (an ACL user that survived its drop keeps its graph in place on purpose)")
-              if verify_rc != 0:
-                  reasons.append(f"the verify pass exited {verify_rc} — a partial view is never a clean one")
+              else:
+                  if verify_rc != 0:
+                      reasons.append(f"the verify pass exited {verify_rc} — a partial view is never a clean one")
+                  if execute_ran:
+                      vcounts = verify.get("counts") or {}
+                      residue = vcounts.get("reapable", 0)
+                      if residue:
+                          reasons.append(f"{residue} graph(s) are still reapable AFTER the execute pass — the sweep did not converge (an ACL user that survived its drop keeps its graph in place on purpose)")
 
           if unreadable:
               reasons.append(f"{unreadable} graph(s) could not be READ for emptiness (`refused-unreadable`) — the sweep is partly blind, which is a defect in the sweep, not a data question")
@@ -368,11 +407,12 @@ jobs:
               "deleted": deleted, "bytes_freed": freed,
               "counts": counts, "execute_ran": execute_ran,
           }, indent=2))
-
           # The durable record: the same numbers the artifact carries.
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
               out.write("### test-graph-reaper (#14559)\n\n")
               out.write(f"- verdict: **{verdict}**\n")
+              if not execute_ran:
+                  out.write("- mode: **REHEARSAL** (`execute: false`) — plan + verify only, nothing was reaped\n")
               out.write(f"- resident total: {total} (band {band})\n")
               out.write(f"- reapable before: {reapable}\n")
               out.write(f"- deleted: {deleted}\n")
@@ -487,15 +527,22 @@ jobs:
             --body-file "$REAPER_WORKDIR"/reaper-issue.md \
             --label bug
 
-      - name: Resolve the adjudication issue when the run is clean
+      - name: Resolve the adjudication issue when a REAL sweep was clean
+        # ⛔ Requires `execute_ran`, not just a green verdict. A REHEARSAL
+        # (`workflow_dispatch` with execute=false) is green by construction — it
+        # deleted nothing and the residue invariant is not applicable — so gating
+        # on the verdict alone let a manual rehearsal CLOSE a live incident while
+        # the condition persisted, and comment "a clean scheduled run" about a run
+        # that neither ran on a schedule nor swept anything. Closing an incident is
+        # a claim about reality; only a run that actually reaped may make it.
         if: always()
         run: |
           set -euo pipefail
-          verdict="$(python3 -c 'import json,os;from pathlib import Path;print(json.load(open(Path(os.environ.get("REAPER_WORKDIR") or "/tmp")/"reaper-verdict.json"))["verdict"])' 2>/dev/null || echo adjudicate)"
-          if [ "$verdict" != "green" ]; then
-            echo "verdict is ${verdict} — leaving the issue open"
+          read -r verdict ran <<< "$(python3 -c 'import json,os;from pathlib import Path;d=json.load(open(Path(os.environ.get("REAPER_WORKDIR") or "/tmp")/"reaper-verdict.json"));print(d["verdict"], d["execute_ran"])' 2>/dev/null || echo 'adjudicate False')"
+          if [ "$verdict" != "green" ] || [ "$ran" != "True" ]; then
+            echo "verdict=${verdict} execute_ran=${ran} — leaving the issue open"
             exit 0
           fi
           bash .github/scripts/auto-file-issue.sh resolve \
             --title 'test-graph-reaper: a run needs adjudication (#14559)' \
-            --why "A clean scheduled run (#14559): reapable=0 after the sweep, resident total inside the band, no failed deletions. ${RUN_URL}"
+            --why "A clean scheduled run (#14559) after an actual reap: reapable=0 after the sweep, resident total inside the band, no failed deletions. ${RUN_URL}"
