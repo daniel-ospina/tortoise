@@ -233,6 +233,57 @@ def test_expansion_keeps_seed_and_reaches_top_window(seeded_sdk):
         "top-5 reader window")
 
 
+def test_sparse_pass_merges_through_the_fusion_rule(seeded_sdk, monkeypatch):
+    """#14344 at the SPARSE call site: ``_entity_key_expansion_pass`` hands its
+    two legs to ``expansion_merge.fuse_expansion_pass`` and returns THAT order.
+
+    ⛔ The dense twin's row (`test_dense_pass_merges_additively_and_never_
+    drops_a_pass1_id`) covers only the dense half, so without this row the
+    PRIMARY lever's call site could be reverted to the rank concatenation
+    silently (measured in review round 11: the revert left all 19 rows green).
+
+    Mutant (measured): restore
+    ``merged = list(expanded); merged.extend(pass-1-only)`` at the sparse
+    return — ``ids[0]`` becomes the expansion's rank-0 id (``newcomer``),
+    which leads by MEMBERSHIP alone under that rule, so this row REDS.
+    """
+    import tortoise.search_engine as _se
+
+    pass1 = [("incumbent", 0.93), ("pass1-second", 0.41)]
+    # The expansion's own rank-0 row is a NEW id, and the shared id sits at its
+    # rank 1 — so the concatenation put ``newcomer`` on top by membership alone.
+    expanded = [("newcomer", 0.99), ("incumbent", 0.44)]
+    calls: list[dict] = []
+
+    def _fake_run_fts_query(_graph, q, **kwargs):
+        calls.append({"query": q, **kwargs})
+        return list(expanded)
+
+    monkeypatch.setattr(_se, "run_fts_query", _fake_run_fts_query)
+    merged = seeded_sdk._entity_key_expansion_pass(
+        QUESTION, list(pass1),
+        aliases=["road bike repairs"],
+        str_limit=60,
+        excluded_statuses=None,
+        leg_trace=None,
+    )
+    assert calls, "the expansion must run through run_fts_query"
+    assert merged is not None, "a non-empty expansion must yield a merged leg"
+    ids = [pid for pid, _s in merged]
+    assert set(ids) == {"incumbent", "newcomer", "pass1-second"}, (
+        "the candidate set is the UNION — no id may be dropped")
+    # THE discriminator: the id BOTH passes carry earns two reciprocal-rank
+    # terms and leads. The concatenation made the expansion's rank-0 row lead.
+    assert ids[0] == "incumbent", (
+        "the sparse half must merge through the FUSION, not the rank "
+        f"concatenation — got {ids}")
+    # Scores are carried from origin (the single-strategy `threshold` path reads
+    # them), and the expansion wins a collision — the order the old rule used.
+    carried = dict(merged)
+    assert carried["incumbent"] == 0.44
+    assert carried["pass1-second"] == 0.41
+
+
 # ── (b) default OFF: byte-identical no-op ─────────────────────────────────
 
 def test_expansion_disabled_is_default_byte_identical(seeded_sdk):
@@ -676,16 +727,33 @@ def test_dense_composer_bounds_and_no_op_guard():
 
 
 def test_dense_pass_merges_additively_and_never_drops_a_pass1_id(
-        dense_seeded_sdk, _dense_encoder):
-    """The merge contract, at the pass boundary: expanded results first, then
-    every pass-1-only id in its ORIGINAL order, no duplicates. A pass-1 id that
-    is not in the graph at all must survive at the tail — that is the additive
-    guarantee, stated so that a future 'just replace the leg' refactor reds."""
+        dense_seeded_sdk, _dense_encoder, monkeypatch):
+    """The merge contract, at the pass boundary: the two passes are FUSED
+    (`expansion_merge.fuse_expansion_pass`, #14344), so the union is kept, no
+    id is duplicated, a pass-1 id that is not in the graph at all still
+    survives, and the id BOTH passes carry leads — the old rule put the
+    expansion's first row there unconditionally. Stated so that a future
+    'just replace the leg' or 'go back to appending' refactor reds."""
     enc = _dense_encoder()
     sdk = dense_seeded_sdk
     pass1 = [("pass1-only-sentinel", 0.42),
              (DENSE_SEED_ID, 0.31),
              ("pass1-second-sentinel", 0.11)]
+    # Capture the expansion's OWN rows: `ids[0]` below is a discriminator against
+    # the removed concatenation only while the expansion does NOT rank the seed
+    # first — so the precondition is asserted instead of assumed (assertion after
+    # the call, which is where the rows exist).
+    import tortoise.search_engine as _se
+    expansion_rows: list[list[tuple[str, float]]] = []
+    _real_run_vector_query = _se.run_vector_query
+
+    def _recording_run_vector_query(*args, **kwargs):
+        rows = _real_run_vector_query(*args, **kwargs)
+        expansion_rows.append(list(rows or []))
+        return rows
+
+    monkeypatch.setattr(_se, "run_vector_query",
+                        _recording_run_vector_query)
     assert enc.calls == []  # nothing embedded yet
     merged = sdk._entity_key_dense_pass(
         QUESTION, list(pass1),
@@ -702,9 +770,38 @@ def test_dense_pass_merges_additively_and_never_drops_a_pass1_id(
     # both pass-1-only sentinels survive, in their original relative order
     assert ids.index("pass1-only-sentinel") < ids.index("pass1-second-sentinel")
     for sentinel in ("pass1-only-sentinel", "pass1-second-sentinel"):
-        assert ids.index(sentinel) > 0, (
-            "pass-1-only ids are APPENDED after the expanded run, never "
-            "promoted over it")
+        assert sentinel in ids, (
+            "a pass-1 id the expansion did not repeat must SURVIVE the merge "
+            "— the candidate set is the union, whichever rule orders it")
+    # ── #14344: the merge is a FUSION now (the pure rule is pinned in
+    # ``tests/test_expansion_fusion_14344.py``; this fixture's distances cannot
+    # express every discriminator, so assert only what it CAN show). The seed is
+    # carried by BOTH passes, so it earns both reciprocal-rank terms and, ON THIS
+    # FIXTURE's ranks, leads the leg. That is fixture geometry, NOT an invariant:
+    # two terms beat a single-list rank only inside the <=61-in-both bound, so the
+    # assertion below is about this fixture's distances and not about membership.
+    # Session B (expansion-only) still joins: the fusion adds, it does not filter.
+    assert ids[0] == DENSE_SEED_ID, (
+        "ON THIS FIXTURE the id BOTH passes carry earns two terms and leads")
+    # ⚠️ …and that is only a discriminator WHILE the expansion ranks a NEW id
+    # first, so the precondition is pinned rather than left to luck (review round
+    # 17 named this). The composed query sits at L2 **1.0** from BOTH the seed and
+    # session B, so their expansion ORDER is decided by ``recency_tie_key`` (DESC,
+    # #10121) and not by the fusion: the newer session's ``DENSE_JOIN_ID`` is rank
+    # 0 here, measured. A fixture edit that put the SEED at rank 0 would make the
+    # removed concatenation produce this same ``ids[0]`` — the row above would go
+    # GREEN on the pre-fix code and the protection would be silently gone.
+    assert expansion_rows, (
+        "the dense harness must reach run_vector_query or nothing below is about "
+        "the expansion's own ranks")
+    assert expansion_rows[0][0][0] != DENSE_SEED_ID, (
+        "the fixture must keep a NEW id at the expansion's rank 0 (measured: "
+        f"{DENSE_JOIN_ID}) — with the seed there the concatenation mutant would "
+        f"pass `ids[0] == DENSE_SEED_ID` too, disarming this row; got "
+        f"{expansion_rows[0][0][0]}")
+    pass1_only = [p for p, _s in pass1 if p != DENSE_SEED_ID]
+    assert [p for p in ids if p in set(pass1_only)] == pass1_only, (
+        "pass-1-only ids keep their ORIGINAL relative order through the fusion")
 
 
 def test_dense_pass_is_fail_open_on_encode_failure(
