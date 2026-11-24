@@ -253,9 +253,13 @@ def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
     ⛔ ITS EXTENT IS THE ENTIRE RUN (1808 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `953c299c9b` merged into the branch,
-    which KEPT both sides' prose blocks: the pre-merge branch read 1774 and `main` 1796, so the
-    figure is re-derived here rather than carried from either side — and GRADED, see
+    walk — ⛔ RE-WALKED on this tree, and ⛔ IT IS `main`'S FIGURE, NOT A UNION: the merge of
+    `origin/main` `953c299c9b` took `main`'s `tools/sdk_privatise.py` byte-for-byte (the branch's
+    own nine-line `⛔ RE-DERIVED` note was superseded — `git diff 1dc547d 291a09e --
+    tools/sdk_privatise.py` is +43/−9 and that note is absent at the merge), so the branch's 1774
+    reading no longer describes this file. `main`'s own walk is the same 1808 measured here; its
+    PUBLISHED 1796 is what `main` is red on (`test_the_extent_figure_is_the_walks_own_count`,
+    verified red at `953c299c9b`), and this tree publishes the walk — GRADED, see
     `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -286,8 +290,9 @@ def _residue_block() -> str:
     `main`) appended 24 `#:` lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED
     on this tree rather than carried forward from the fold's own reading, which is what the graded
     figure exists to force - and the `#14395` fix lane's re-pin paragraph took it to 1774 on its
-    own tree, while the merge of `origin/main` `953c299c9b` (which KEPT both sides' `#:` prose)
-    re-read 1808 above, re-walked by this function and never adjusted to a carried figure:
+    own tree, but the merge of `origin/main` `953c299c9b` took `main`'s `tools/sdk_privatise.py`
+    byte-for-byte, so the branch's note is gone and the figure above is `main`'s own walk (1808),
+    re-walked by this function and never adjusted to a carried figure:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,

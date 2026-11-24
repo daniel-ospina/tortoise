@@ -8368,8 +8368,12 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # callee-composition residual. ⛔ THAT RESIDUAL'S READ-METHOD HALF IS NOW CLOSED TOO
         # (#14395 round-8 review P1): the `.get("get")(…)` / `.__getitem__("get")(…)`
         # compositions are REFUSED by the position rule and asserted in the REFUSED loop of
-        # `test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN` below, which now
-        # declares only the COPY-callee composition (#14449).
+        # `test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN` below — which
+        # declares THIRTY-SIX rows across seven further classes (`attrgetter`, `partial(exec)`, a
+        # lambda callee, `sys.modules[…]`, `__import__(…)`, `MappingProxyType`, container
+        # selections, `__getattribute__`/`__call__`) besides the 24 copy rows; the copy-callee
+        # composition is the one this PR's own widening touches (#14449), and it is NOT the only
+        # thing that table declares.
         "a READ METHOD subscripted out of a NAMESPACE ALIAS's `__dict__`, INLINE": (
             '    import builtins\n'
             '    _dc = dict\n'
@@ -12465,14 +12469,20 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     namespace-BOUND receivers) read REFUSED at this head and are asserted in the REFUSED loop at
     the bottom rather than declared here. ⛔ THAT IS THIS TABLE'S OWN CONTRACT — “closing it must
     EDIT this table” — not a new declaration.
-    ⛔ WHAT REMAINS DECLARED IS THE **COPY**-CALLEE HALF (`_g = <copy namespace>.get;
-    _f = _g("copy")`, 24 rows): its callee is a copy CONSTRUCTOR, not a mapping read, so the
-    position rule does not reach it. Closing it is the census's existing two-step plus the
-    composed name joining `launderers`, filed as `#14449`.
+    ⛔ THE CLASS THIS PR'S WIDENING LEAVES DECLARED IS THE **COPY**-CALLEE COMPOSITION
+    (`_g = <copy namespace>.get; _f = _g("copy")`, 24 rows): its callee is a copy CONSTRUCTOR, not
+    a mapping read, so the position rule does not reach it. Closing it is the census's existing
+    two-step plus the composed name joining `launderers`, filed as `#14449`. It is NOT the only
+    class the table below declares — that table carries 36 rows across seven further classes.
     ⛔ AND THE NAMESPACE-ALIAS RECEIVER (`_f = builtins.dict.get; _f(m, "exec")`, and the two
     spells of it that cannot run) remains FILED as `#14449`: the position rule reaches the FETCHED
     spellings (`getattr(<class>, …)` and the getattr alias), not an attribute read off the
-    namespace's own `dict` member, whose receiver the `{"dict", "copy"}` union cannot supply.
+    namespace's own `dict` member, whose receiver the `{"dict", "copy"}` union cannot supply. TWO
+    of those spells read GREEN but CANNOT RUN, and they are named here because `#14449`'s
+    acceptance criterion is that GREEN is never read as liveness: `_g =
+    builtins.dict.__getitem__; _g("get")` and `_g = builtins.dict.get; _f = _g("get")` raise
+    `TypeError` (`method_descriptor` does not apply to a `str`). The other five of the seven
+    execute the read.
     Its INLINE twin `builtins.dict.get(m, "exec")` is RED, so that asymmetry is PRE-EXISTING and
     unchanged by this PR — not a half-closure introduced here (#14395 round-4 review, which also
     records why the class's home is `#14449` and ⛔ **NOT** `#14315`/`#14316`: those issues are
@@ -12598,11 +12608,19 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # raises where this does not). All 24 now have rows, and the completeness assertion below
         # re-derives the grid, so the count cannot drift again. The class's home is `#14449`,
         # whose scope names this table.
-        # ⛔ THE BOUNDARY, STATED RATHER THAN IMPLIED: this is the class's spelling set for the
-        # `copy` module at the two bind depths the refused read-method rows above also pin. An
-        # alias of an alias is the same class one bind further and is NOT rowed, for the reason
-        # that boundary is already stated for the read-method receivers: a row per depth is the
-        # spelling list this file refuses to grow.
+        # ⛔ THE BOUNDARY, STATED RATHER THAN IMPLIED, ON THE AXIS THAT ACTUALLY BOUNDS IT: the
+        # class is a callee produced by applying a RESOLVED mapping read to a literal member name,
+        # at ANY APPLICATION DEPTH (read method inline, callee bound then applied inline, applied
+        # then bound to a second name, or an alias of either), and the rows below carry
+        # representative spellings per family — one per receiver × member, NOT one per depth —
+        # because a row per depth is the spelling list this file refuses to grow. MEASURED at the
+        # receivers the rows carry: applying the composed callee INLINE instead of binding it to a
+        # second name is 24 further GREEN and LIVE copy-side spellings (`_g =
+        # <recv><member>; _d = _g("copy")(builtins.__dict__)`) that no row reds. ⛔ THE READ-METHOD
+        # half of the same shape is NOT residual — the position rule REFUSES it, including one
+        # bind further (`_dc = dict; _d2 = _dc; _g = _d2.__dict__.get; _f = _g("get")` is REFUSED,
+        # measured) — so the copy half's depth residual is a property of the copy arm, not of a
+        # doctrine that "a deeper bind is never rowed".
         "`_g = copy.__dict__.pop; _f = _g(\"copy\")` — the `pop` member": (
             'import builtins, copy', '_g = copy.__dict__.pop', '_f = _g("copy")',
             '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
@@ -12695,7 +12713,8 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     for label, lines in declared_residual.items():
         assert not refused(*lines), (
             f"[{label}] is now REFUSED — this row pins it GREEN as a DECLARED residual (the "
-            "COPY-callee composition class, #14449), so closing it must edit this table rather "
+            "class this table declares, #14449 for the copy-callee half), so closing it must "
+            "edit this table rather "
             "than leave the note in `_indirect_reads` contradicting the code")
         # ⛔ AND EVERY ROW MUST STILL APPLY THE READ, NOT MERELY NAME IT (#14395 review P3,
         # MEASURED: a row's `not refused` verdict is the SAME for one statement and for several,
@@ -12804,7 +12823,11 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # `vars(dict).get("get")(builtins.__dict__, "exec") is exec` → True. The mechanism is one
         # rule, not a spelling list: the resolved read-method arm of `_builtin_lookup_name` reads
         # the KEY BY POSITION, so a builtins mapping in position 0 means the callee is the UNBOUND
-        # descriptor and the key is position 1. The class's home is `#14449`.
+        # descriptor and the key is position 1. ⛔ THESE ROWS ARE REFUSED, so the READ-METHOD
+        # composition class is CLOSED at this head (see the paragraph above: "ITS READ-METHOD HALF
+        # IS NOW CLOSED") — `#14449` is the home of what is still DECLARED (the copy-callee half
+        # and the namespace-alias receiver), and pointing these closed rows at it would tell a
+        # reader a live hole remains here.
         "`vars(dict).get(\"get\")(m, \"exec\")` — a read APPLIED, then applied again": (
             'import builtins',
             'vars(dict).get("get")(builtins.__dict__, "exec")'
