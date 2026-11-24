@@ -1011,9 +1011,11 @@ Four properties, because each is a different misread:
   so on the hosted app up to **twelve** admitted captures can be holding slots
   queued behind the four running ones (`16 − 4`). `16 slots` does not mean
   sixteen extractions at once, and it does not mean four are waiting: it is
-  twelve. (The 8-vs-4 DEFAULT pair — four waiting — is what
-  `tests/test_12992_capture_capacity_typed_refusal.py` pins; the app reads the
-  staged 16, which is also the clamp ceiling.)
+  twelve. `8` and `4` above are the CODE defaults, not a pinned contract:
+  `tests/test_12992_capture_capacity_typed_refusal.py` pins the SEPARATION (a
+  reader who saw only `max_in_flight` would overcount) with the ceiling
+  monkeypatched, never the defaults; the app reads the staged 16, which is also
+  the clamp ceiling.
 - **A slot outlives the request.** The transport wait bound is 10 s, and a capture that breaches it
   is abandoned by the CLIENT while its worker keeps the slot until the extraction ends (up to ~800 s
   at a 16K budget). So a steady `in_flight` with a low arrival rate is the signature of long
