@@ -763,12 +763,15 @@ def _stop_fake_lane(proc: subprocess.Popen) -> None:
     anything else it signals that pid alone.
     """
     pgid = getattr(proc, "pi_lane_pgid", None)
-    # ⛔ ONLY SIGNAL A GROUP WE STILL OWN (#14506 review, P2). Several arms reap the lane
-    # themselves — `_wait_for_pi_cwd` polls it on the DEAD-FIXTURE path — and then call this
-    # in `finally`. By then `pgid` is a FREED pid, so an unconditional `killpg` can signal
-    # whatever group now holds that number, and on a runner shared with the fleet that is
-    # another lane's work. A `returncode` is only set once the child has been REAPED (i.e.
-    # its pid is free); while it is `None` the pid is still ours (a zombie holds it).
+    # ⛔ ONLY SIGNAL A GROUP WE STILL OWN (#14506 review, P2). A caller may have REAPED the
+    # lane before tearing down — `test_the_teardown_does_not_signal_a_group_it_no_longer_owns`
+    # does exactly that with its own `proc.wait()`, and any future caller that waits first
+    # would too (cycle 5: this comment named `_wait_for_pi_cwd`, which no longer reaps —
+    # `_peek_child_status` reads the status with `WNOWAIT` precisely so it does not). By then
+    # `pgid` is a FREED pid, so an unconditional `killpg` can signal whatever group now holds
+    # that number, and on a runner shared with the fleet that is another lane's work. A
+    # `returncode` is only set once the child has been REAPED (i.e. its pid is free); while
+    # it is `None` the pid is still ours (a zombie holds it).
     if proc.returncode is not None:
         return
     if pgid is None:
@@ -812,7 +815,7 @@ def _peek_child_status(proc: subprocess.Popen) -> int | None:
     if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
         try:
             info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-        except ChildProcessError:  # pragma: no cover — already reaped elsewhere
+        except ChildProcessError:  # a caller already reaped it — report what IT kept
             return proc.returncode
         if info is None:
             return None
@@ -10406,15 +10409,20 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_the_status_peek_reports_the_rc_of_a_dead_lane_WITHOUT_reaping_it(self):
         """#14506 review, cycle 5 — the helper's status path was pinned by nothing.
 
-        Replacing its body with `proc.poll()` — the exact revert of this commit — left all
-        459 green, because every dead `proc` the suite handed `_wait_for_pi_cwd` had already
-        been reaped by a `wait()`. The property under test is NOT "the status is right", it
-        is "the status is right AND the child was NOT reaped": a reaped pid frees its process
-        group, so the caller's `finally: _stop_fake_lane(proc)` can no longer kill it and the
-        lane's `sleep` is orphaned into the temp dir `tearDown` deletes.
+        Replacing its body with `proc.poll()` — the revert of `d402aebf`, the commit that
+        introduced the peek, NOT of this one (which adds only this arm) — left all 459 green,
+        because every dead `proc` the suite handed `_wait_for_pi_cwd` had already been reaped
+        by a `wait()`. The property under test is NOT "the status is right", it is "the status
+        is right AND the child was NOT reaped": a reaped pid frees its process group, so the
+        caller's `finally: _stop_fake_lane(proc)` can no longer kill it and the lane's `sleep`
+        is orphaned into the temp dir `tearDown` deletes.
 
-        Two deaths, because they take different `si_code` branches: a normal exit (the lane
-        runs its `sleep` out) and a signalled one.
+        Deterministic shape only, so this pin runs on EVERY platform: a normal exit
+        (`sleep 0` runs out). The signalled death takes the other `si_code` branch and needs
+        `/proc` to construct, so it is its own skipped arm below. ⛔ The `returncode`
+        assertion is also why this arm must stay deterministic: on a platform where
+        `_peek_child_status` takes its documented `poll()` fallback, `returncode` would be set
+        by construction and this arm would red for the wrong reason.
         """
         proc = _fake_lane(self.tmp, seconds=0)
         try:
@@ -10431,9 +10439,20 @@ class CollisionPreflightTest(unittest.TestCase):
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
 
+    @unittest.skipUnless(Path("/proc/self/cwd").exists(),
+                         "_wait_for_grandchild reads /proc — without it the signalled "
+                         "death cannot be constructed, and the premise would report a "
+                         "FALSE red")
+    def test_the_status_peek_reports_a_SIGNALLED_death_without_reaping_it(self):
+        """The other `si_code` branch (`CLD_KILLED` → `-signal`), on a landed lane.
+
+        `/proc` is needed twice — to see the grandchild, and to know the shell's own death is
+        the one being reported — so this arm skips where its deterministic sibling runs.
+        """
         proc = _fake_lane(self.tmp)
         try:
-            self.assertTrue(_wait_for_grandchild(proc.pid))
+            self.assertTrue(_wait_for_grandchild(proc.pid),
+                            "the lane's shell never forked its `sleep`")
             proc.terminate()
             deadline = time.monotonic() + 10
             rc = None
@@ -10443,7 +10462,9 @@ class CollisionPreflightTest(unittest.TestCase):
             self.assertEqual(rc, -signal.SIGTERM,
                              "a signalled death reports the negative signal, exactly as "
                              "`poll()` would")
-            self.assertIsNone(proc.returncode)
+            self.assertIsNone(proc.returncode,
+                              "the status was read by REAPING it — `poll()` frees the pid "
+                              "and the group with it")
         finally:
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
@@ -10455,12 +10476,14 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_the_teardown_does_not_signal_a_group_it_no_longer_owns(self):
         """#14506 review, cycle 3 — the `returncode` guard had no arm of its own.
 
-        Several arms reap the lane themselves (`_wait_for_pi_cwd` polls it on the
-        DEAD-FIXTURE path) and then call `_stop_fake_lane` in `finally`. By then the pid is
-        FREE, so an unconditional `killpg` could signal whatever group now holds that
-        number — on a runner shared with the fleet, another lane's work. Deleting the guard
-        left the whole suite green, which is the "claimed and pinned by nothing" class this
-        commit opened for the group reap.
+        A caller may REAP a lane itself before tearing it down — this arm's own `proc.wait()`
+        below is the remaining example, and any future caller that waits first would do the
+        same (`_wait_for_pi_cwd` does NOT: `_peek_child_status` reads the status with
+        `WNOWAIT` precisely so the group is still ours). By then the pid is FREE, so an
+        unconditional `killpg` could signal whatever group now holds that number — on a runner
+        shared with the fleet, another lane's work. Deleting the guard left the whole suite
+        green, which is the "claimed and pinned by nothing" class this commit opened for the
+        group reap.
 
         ⛔ THE STATE IS CONSTRUCTED, NOT ASSUMED (#14506 review, cycle 4). Terminating the
         shell before it has forked `sleep` leaves NO member in the group (measured 0/120,
