@@ -21896,9 +21896,13 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 # #14481's own defect, in the direction it was fixing. The restore re-added
 # `_durations_row_comments` to this file — RESTORED by `#14481` after `#14439`'s
 # squash `8c373f59a1` deleted it, NOT a B7 casualty: the post-B7 main
-# `e6b3cf2908` still carried it — while `tools/ci_timing.py`, a file the PR does
-# not touch and which the head therefore shipped as current, still carried two
-# docstrings calling that reader "CUT in the B7 test cut". The reader is LIVE and
+# `e6b3cf2908` still carried it — while `tools/ci_timing.py`, a file this PR did
+# not touch at the reviewed head (`41db40af`) and which `9050b24505c6` corrected,
+# still carried two docstrings calling that reader "CUT in the B7 test cut".
+# ⛔ The clause names the head on purpose: "a file the PR does not touch" was true
+# of `41db40af` and false from `9050b24505c6` onward (`13 7` on that path), and a
+# record that silently moves from true to false under its own commit is this PR's
+# defect class. The reader is LIVE and
 # MERGE-GATING at the same head, so `_row_continuation_lines`' third condition and
 # the writer's span rule were justified by "the reader is gone, be conservative by
 # construction" — i.e. a writer reasoning about a span no live guard reads, which
@@ -21933,22 +21937,41 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 #
 # `_CUT_CLAIM_FILES` is the SCOPE of that scan, so it is the list the paragraph
 # above is accountable to: one entry per recurrence, the plan ledger's Step-4
-# ledger included (measured with the HELPER, not by counting prose: `_cut_claims()`
-# returns 6 rows at this head, none contradicting, and 5 of them sit in the ledger.
-# ⚠️ The other three an unfiltered scan counted were never verdicts on an arm — the sha
-# `e6b3cf2908`, `main` and `ValueError` — which is why the capture is now filtered to
-# the shapes that can contradict. ⚠️ And count the ROWS the helper returns, not the
-# verdicts a commit message enumerates: `fb21c37aa298`'s message says "6 verdicts"
-# while enumerating 5, which is the off-by-something a count quoted from prose
-# produces — the helper is the instrument.
+# ledger included (measured with the HELPER, not by counting prose — run
+# `python -c "import sys;sys.path.insert(0,'tests');import test_ci_selection as t;
+# print(len(t._cut_claims()))"` — `_cut_claims()` returns 18 rows at this head, none
+# contradicting, and 5 of them sit in the ledger, the Step-4 verdicts). The other 13
+# are `tools/ci_timing.py`'s one and this file's own prose about the class (12, the
+# two fixtures below included) — a pin that reads the paragraphs it lives in, which
+# is why the figure moves with every edit here: re-derive it, never carry it.
+# ⚠️ Two earlier cuts of this comment quoted figures the helper did not return —
+# "9 rows" where a forward-only scan gave 11, and "6 rows" before the arm-shape and
+# wrapped-name reads were added — which is the same "a record quoting a figure its
+# instrument does not return" defect this PR repairs, one level up. And count the
+# ROWS the helper returns, not the verdicts a commit message enumerates:
+# `fb21c37aa298`'s message says "6 verdicts" while enumerating 5.
 # A file added here with no verdicts is harmless; a recurrence left out is a
 # verdict with no grader, which is how each of the four defects survived a round.
 # Added at the `a2daaa9eba` review round, proved non-vacuous: deleting
 # `**RESTORED by `#14481`**` from the ledger's `test_duration_integrity` line reds
 # this pin (that arm is live), and restoring the line greens it.
+#: How far a verdict may sit from the name it judges, in EITHER direction. A
+#: record writes both shapes — "`test_x`, cut by #14439" and "CUT: `test_x`" — and
+#: a forward-only window reads the second as "no verdict", which is a false PASS
+#: in the one guard that exists to catch this class. Measured at the head that
+#: gained the backward half: still 0 contradictions, and the scan sees the
+#: records' verdicts in the inverted spelling too.
 _CUT_CLAIM_WINDOW = 200
+#: How far a restoration may sit from the name. Wider than the verdict window on
+#: purpose: a restoration is often the next sentence.
 _CUT_CLAIM_RESTORED_SPAN = 400
-_CUT_CLAIM_RESTORED_RE = re.compile(r"RESTORED|restored")
+#: A restoration defuses a CUT verdict only when it is ATTRIBUTED — "RESTORED by
+#: `#14481`" / "restored by <sha>". A bare `restored` anywhere in the span must not
+#: defuse, or the false claim this pin exists to catch passes by carrying the word
+#: in an unrelated clause of the same paragraph.
+_CUT_CLAIM_RESTORED_RE = re.compile(
+    r"(?:RESTORED|restored)\s+by\s+`?(?:#\d+|[0-9a-f]{7,40})")
+_CUT_CLAIM_VERDICT_RE = re.compile(r"\bCUT\b")
 _CUT_CLAIM_NAME_RE = re.compile(r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z]\w*)`")
 #: ⛔ THE WRAP IS PART OF THE NAME, NOT A BREAK IN IT. A long name is often backticked
 #: across a comment's line break — `` `…_and_meet_the_` `` then `` `wall_target` `` — which an
@@ -21971,7 +21994,8 @@ _CUT_CLAIM_WRAPPED_RE = re.compile(
 #: file the scan reads and a backticked live name beside the word CUT would become a claim about
 #: itself): measured, a shape-only filter rejected all four, so a record
 #: that called one CUT would be silently dropped — the false PASS this pin exists to forbid,
-#: rebuilt inside its own filter. `_cut_claim_is_claim` therefore keeps any name `live` defines.
+#: rebuilt inside its own filter. _cut_claim_is_claim therefore keeps any name `live`
+#: defines — unbackticked here for the reason above.
 _CUT_CLAIM_ARM_RE = re.compile(r"^(?:test_\w+|_[A-Za-z]\w*)$")
 _CUT_CLAIM_FILES = (
     "tools/ci_timing.py",
@@ -22000,14 +22024,6 @@ def _cut_claim_is_claim(name: str, live: set[str]) -> bool:
 def _cut_claims() -> list[tuple[str, int, str, bool]]:
     """`(path, line, name, contradicts_this_file)` for every CUT verdict on a name.
 
-    A verdict is CONSIDERED when the record backticks a name and the word `CUT`
-    follows within `_CUT_CLAIM_WINDOW` characters — the shape both defects had.
-    `contradicts` is True only when this file DEFINES that name and no restoration
-    is recorded within `_CUT_CLAIM_RESTORED_SPAN`: that is the pair no reviewer
-    should have to catch, because the tree, not the prose, is the authority for
-    what is graded. The two spans differ on purpose — a verdict has to sit close
-    to the name it judges, while a restoration is often the next sentence.
-
     Scope is deliberately this file's `def`s. That is where the arms a cut removes
     live, so it is the direction that can contradict; a name this file does not
     define is not asserted either way (it may be a `tools/` function or a genuinely
@@ -22018,19 +22034,49 @@ def _cut_claims() -> list[tuple[str, int, str, bool]]:
     claims = []
     for rel in _CUT_CLAIM_FILES:
         text = (REPO / rel).read_text(encoding="utf-8")
-        found = [(m, m.group(1)) for m in _CUT_CLAIM_NAME_RE.finditer(text)]
-        found += [(m, m.group(1) + m.group(2))
-                  for m in _CUT_CLAIM_WRAPPED_RE.finditer(text)]
-        for m, name in sorted(found, key=lambda pair: pair[0].start()):
-            if not _cut_claim_is_claim(name, live):
-                continue
-            window = text[m.end():m.end() + _CUT_CLAIM_WINDOW]
-            if not re.search(r"\bCUT\b", window):
-                continue
-            claims.append((rel, text[:m.start()].count("\n") + 1, name,
-                           name in live
-                           and not _CUT_CLAIM_RESTORED_RE.search(
-                               text[m.end():m.end() + _CUT_CLAIM_RESTORED_SPAN])))
+        for offset, name, contradicts in _cut_claims_in(text, live):
+            claims.append((rel, text[:offset].count("\n") + 1, name, contradicts))
+    return claims
+
+
+def _cut_claims_in(text: str, live: set[str]) -> list[tuple[int, str, bool]]:
+    """`(offset, name, contradicts)` for every CUT verdict on a name in `text`.
+
+    Both backticked shapes are read — the unbroken token and the WRAPPED one (see
+    `_CUT_CLAIM_WRAPPED_RE`; a wrapped name is joined before comparison) — and a
+    token is a claim when _cut_claim_is_claim accepts it (unbackticked: a backticked
+    live name beside the word CUT in THIS file is itself a claim the scan reads), so a
+    filter can never drop a name this file defines.
+
+    A verdict is CONSIDERED when the word `CUT` sits within `_CUT_CLAIM_WINDOW`
+    characters of the name, FORWARD OR BACKWARD. Both orders are in the class this
+    pin exists for — "`test_x`, cut by #14439" and "CUT: `test_x`" — and the
+    forward-only first cut read the second as no verdict at all, i.e. CLEAN over
+    exactly the prose it was written to catch.
+
+    `contradicts` is True only when this file DEFINES that name and no ATTRIBUTED
+    restoration ("RESTORED by `#14481`", "restored by <sha>") is recorded within
+    `_CUT_CLAIM_RESTORED_SPAN` on either side: that is the pair no reviewer should
+    have to catch, because the tree, not the prose, is the authority for what is
+    graded. A bare `restored` does not defuse — see `_CUT_CLAIM_RESTORED_RE`.
+    """
+    claims = []
+    found = [(m, m.group(1)) for m in _CUT_CLAIM_NAME_RE.finditer(text)]
+    found += [(m, m.group(1) + m.group(2))
+              for m in _CUT_CLAIM_WRAPPED_RE.finditer(text)]
+    for m, name in sorted(found, key=lambda pair: pair[0].start()):
+        if not _cut_claim_is_claim(name, live):
+            continue
+        forward = text[m.end():m.end() + _CUT_CLAIM_WINDOW]
+        backward = text[max(0, m.start() - _CUT_CLAIM_WINDOW):m.start()]
+        if not (_CUT_CLAIM_VERDICT_RE.search(forward)
+                or _CUT_CLAIM_VERDICT_RE.search(backward)):
+            continue
+        span = text[max(0, m.start() - _CUT_CLAIM_RESTORED_SPAN):
+                    m.end() + _CUT_CLAIM_RESTORED_SPAN]
+        claims.append((m.start(), name,
+                       name in live
+                       and not _CUT_CLAIM_RESTORED_RE.search(span)))
     return claims
 
 
@@ -22089,5 +22135,47 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         "it, so the record contradicts the tree and the next lane reads a live "
         "grader as retired — or as an ungraded by-hand hazard, which is how a "
         "conservative rule gets justified by a reader that is in fact grading. "
-        "Record the restoration in the same passage, or fix the verdict: "
+        "Record the restoration in the same passage (`RESTORED by `#14481`` — an "
+        "unattributed `restored` does not count), or fix the verdict: "
         f"{contradictions!r}")
+
+
+def test_the_cut_verdict_scan_reads_a_verdict_on_either_side_of_the_name():
+    """The scan must see the verdict whichever order the record writes it in.
+
+    Both spellings are in the class this pin exists for — a record saying an arm
+    is gone when the tree defines it. A forward-only window (the first cut) reads
+    the second shape as "no verdict at all", i.e. the guard reports CLEAN over
+    exactly the prose it was written to catch. The control row keeps the window
+    honest: a name with no `CUT` near it is not a verdict, and must not be
+    reported as one.
+    """
+    live = {"test_live"}
+    forward = _cut_claims_in("`test_live` was CUT by #14439's re-cut.", live)
+    backward = _cut_claims_in("CUT then, and still gone: `test_live`.", live)
+    control = _cut_claims_in("`test_live` is the live reader here.", live)
+    assert [c[2] for c in forward] == [True], forward
+    assert [c[2] for c in backward] == [True], backward
+    assert control == [], control
+
+
+def test_the_cut_verdict_scan_requires_an_attributed_restoration():
+    """A bare `restored` must not defuse a false CUT verdict.
+
+    The restoration convention this PR adopted is "CUT by <sha/PR> … RESTORED by
+    `#14481`" — attributed, so a reader can check it. The first cut accepted the
+    word anywhere in a 400-character span, so "… was CUT … and the map was
+    restored to its 2026-10 shape" cleared a verdict that says nothing about THIS
+    name coming back. That is a false PASS in the guard: measured here, the same
+    text is `contradicts=False` under the old regex and `True` under this one.
+    """
+    live = {"test_live"}
+    bare = ("`test_live` was CUT by #14439's re-cut; the durations map was "
+            "restored to its pre-sweep shape in the same commit.")
+    attributed = "`test_live` was CUT by #14439 and RESTORED by `#14481`."
+    assert [c[2] for c in _cut_claims_in(bare, live)] == [True], (
+        "a bare `restored` in an unrelated clause defused the verdict, so a "
+        "record that never says this name is back reads as history")
+    assert [c[2] for c in _cut_claims_in(attributed, live)] == [False], (
+        "an attributed restoration must still be read as history, or every "
+        "correctly-recorded cut reds the tree")
