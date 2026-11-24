@@ -1030,3 +1030,77 @@ OWN_PINS: dict[str, tuple[int, str]] = {
 }
 
 
+
+def test_a_tool_only_diff_selects_this_suite():
+    """A diff to `tools/sdk_privatise.py` ALONE must select the arms that grade its pin.
+
+    ⛔ WITHOUT THIS THE PIN'S OWN GUARDS SLEEP ON THE ONLY DIFF THAT CAN BREAK THEM. `tools/`
+    is a flat `NON_PYTHON_PREFIXES` entry in `tools/ci_selection.py`, and this tool has no
+    `SOURCE_PATTERNS` bridge, so the changed-file filter answers `surfaces: []` — and a PR that
+    edits ONLY `SWEEP_RESIDUE` or its `#:` record then runs none of the arms below. Measured
+    before the `CORE_ALSO` row: `--changed-files tools/sdk_privatise.py` → `surfaces: []`,
+    `full: false`, 106 test files, THIS FILE ABSENT. `--check` (the required `surface-guard`
+    step) is not a substitute: it compares the `(rows, digest)` pair and never reads the prose.
+    So the first diff to notice a bad re-cut was whichever `core`-selecting PR came next — on
+    rows its author never wrote.
+
+    The `CORE_ALSO` row is what fixes it, and both of its failure directions are graded here:
+    the row is removed (surfaces collapse), and the row is made DECORATIVE by adding this file
+    to `tier1` (the `core` pool is skipped for tier-1 files, so the arm would pass while the
+    suite still never ran).
+
+    Runs the selector's own CLI rather than re-deriving its rules, so it grades the wiring the
+    CI job actually uses, and it is object-free (no `fetch-depth` dependence).
+    """
+    import json
+    import subprocess as _sp
+    import sys as _sys
+
+    sel = ROOT / "tools" / "ci_selection.py"
+    done = _sp.run([_sys.executable, str(sel), "--changed-files", "tools/sdk_privatise.py"],
+                   cwd=ROOT, capture_output=True, text=True)
+    assert done.returncode == 0, f"the selector failed on a one-file diff: {done.stderr[-800:]}"
+    got = json.loads(done.stdout)
+    surfaces = got.get("surfaces") or []
+    files = got.get("test_files") or []
+
+    assert "core" in surfaces, (
+        "a diff to tools/sdk_privatise.py selects no `core` surface — the `CORE_ALSO` row in "
+        f"tools/ci_selection.py is gone or shadowed; measured surfaces={surfaces}, full={got.get('full')}")
+    assert not got.get("full"), (
+        "the diff escalated to the FULL matrix — that costs the whole suite for a one-file change")
+    assert "test_sdk_privatise_sweep.py" in files, (
+        "a diff to tools/sdk_privatise.py no longer selects its own pins: "
+        f"{len(files)} test files, this one absent — the selection gap #14062 describes")
+
+    # ⛔ NON-VACUITY, FROM THE OTHER SIDE: if this file joined `tier1`, the `core` pool is skipped
+    # for it and the selects above would pass while the suite still never ran on its own diff.
+    _assert_not_tier1(_load_manifest_for_test())
+
+
+def _load_manifest_for_test():
+    """The real manifest, through the selector's own loader — never a re-typed copy."""
+    import importlib.util as _iu
+    import sys as _sys
+
+    path = ROOT / "tools" / "ci_selection.py"
+    spec = _iu.spec_from_file_location("_ci_selection_for_tier1_guard", path)
+    assert spec is not None and spec.loader is not None
+    mod = _iu.module_from_spec(spec)
+    _sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod.load_manifest()
+
+
+def _assert_not_tier1(manifest):
+    """`core` must not be skipped for this file, and the guard must not lose its subject."""
+    assert "tier1" in manifest, (
+        "not a defect of this file: the manifest no longer carries 'tier1', so this non-vacuity "
+        "guard has lost its subject and would pass for the wrong reason")
+    tier1 = manifest["tier1"] or []
+    # `tier1:` holds bare FILENAMES, not `tests/`-prefixed paths — asserting the prefixed form
+    # would test nothing at all.
+    assert "test_sdk_privatise_sweep.py" not in tier1, (
+        "this file joined 'tier1' — a tier-1 file is SKIPPED for the `core` pool, so the "
+        "`CORE_ALSO` row above is now decorative: the selection asserts pass while the suite "
+        "still never runs on a tools/sdk_privatise.py-only diff")

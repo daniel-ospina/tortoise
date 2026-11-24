@@ -1788,6 +1788,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_measure_4211_session_hierarchy.py::
              # test_a_receipt_only_diff_selects_this_pin.
              "docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json",
+             # #14062 / PR #14445: the privatisation RESIDUE instrument. Same silent-drop
+             # class as the rows above, and MEASURED before this entry: `--changed-files
+             # tools/sdk_privatise.py` -> `surfaces: []`, `full: false`, 106 test files with
+             # `test_sdk_privatise_sweep.py` ABSENT. `tools/` is a flat `NON_PYTHON_PREFIXES`
+             # entry and this file has no `SOURCE_PATTERNS` bridge, so a diff that edits ONLY
+             # the residue pin runs none of the arms that grade it
+             # (`test_the_residue_pin_is_a_reading_of_the_whole_set`, the `OWN_PINS` refspec
+             # arms). The required `surface-guard` job cannot see the gap either: it runs
+             # `--check`, the `(rows, digest)` pair, never the suite. Measured, this is how a
+             # re-cut lands prose that disagrees with the block it describes, reding the NEXT
+             # `core`-selecting PR on rows its author did not write. With the entry:
+             # `surfaces=['core']` and the suite is selected. Pinned by
+             # tests/test_sdk_privatise_sweep.py::test_a_tool_only_diff_selects_this_suite.
+             "tools/sdk_privatise.py",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
              # /docs formula guard lives there), and a SOURCE_PATTERNS match
              # REPLACES the `core` fallback (#2938) — so without this entry the
