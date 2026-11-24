@@ -71,178 +71,73 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `6a72cfd661c` — one fold past the `ae9bf0f959` this paragraph was first re-derived at; #14482 takes
-# no fast registration of its own, so `main`'s own emission is UNMOVED by it and re-emitting at that
-# sha reproduced the partition below unchanged — whose own emission partitions six-at-837.6 (b, f, g, h, i, j) / five-at-837.7
-# (a, c, d, e, k), plus this PR's ONE `core` registration —
-# `tests/test_4625_schema_reads_off_write_path.py` below, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
-# the verb packs eight shards at 837.8 s (b, d, e, f, g, h, i, j) and three at 837.9 s (a, c, k), so
-# `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
-# durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
-# 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
-# `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
-# re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
-# and re-measures the graded extent on the resolved tree, 1915 → 1921, rather than accepting the
-# cut or carrying either side's figure — folded over the #14371, #14186, #14434,
-# #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
-# own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) the verb packs three shards at 837.9 s (a, c, k) and eight at
-# 837.8 s (b, d, e, f, g, h, i, j) — ⛔ MEASURED ON THIS BRANCH'S HEAD, which folded `main` at
-# `2f38053601` and adds this PR's own registration; that parent alone emits five/six at
-# 837.7/837.6 and `da4b76a5851c` a seven/four at 837.5/837.4, so the split quoted here belongs
-# to no `main` sha and the attribution is not allowed to imply one — so
-# `ceil(837.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
-# differ from `main`'s, which is the point of quoting them: a carried figure and a re-derived one
-# differ in the SET, not in the minute, and the minute has stood at 28 m across every reading of
-# this pool from 835.5 s to 837.9 s while the seconds moved under it. So NO arithmetic on the
-# minute can catch a carried figure — only the `est_seconds` partition can, which is why the
-# sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a
-# fast file is registered — the packer is greedy, so ONE 2.0 s row re-packs every bin, which this
-# fold demonstrates: `main`'s six/five partition is this tree's eight/three, with the minute
-# unmoved. Re-run `--emit-push-matrix` on the merged tree; never carry the last revision's minute,
-# seconds, or split.
-# differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
-# SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
-# 835.5 s to 837.9 s while the seconds moved under it. So NO arithmetic on the minute can catch a
-# carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
-# instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
-# the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
-# `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
-# nine/two split this branch last derived (837.3/837.2) with the minute unmoved, and #14423's
-# `tests/test_14350_drain_convergence.py` sits in shard e at this head. That map is the union of both parents'
-# registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
-# (`--emit-push-matrix` lists it in shard j at this head) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
-# matters only because it sits one main fold from rounding again. #14407 registered
-# `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
-# `test_notify`), and that registration is part of the partition stated above — the minute did not
-# move (28 m either way), which is exactly why the SECONDS are the graded claim. ⛔ #13722's
-# `tests/test_13722_stamp_chain_off_loop.py` (dual `api`/`core`) is the registration that moved
-# THIS reading's NAME SETS off the five/six split the parent map emits — `d` AND `e` left the worst
-# bin and the eight below absorbed both — while the minute stayed at 28 m, which is again why the graded
-# claim is the set and not the minute. Its `durations` row states the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: a file a PR ADDS cannot carry a junit reading yet),
-# NOT the hand-picked sub-default weight the row first carried — an unmeasured figure re-packs the
-# bins and so moves THIS graded claim on a number no run measured, which is the deviation the
-# review round on this PR caught. Re-run
-# `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or split.
+# `59a08fdb8b4` plus this PR's own `core` registration — `tests/test_4625_schema_reads_off_write_path.py`
+# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (a) and ten at
+# 838.0 s (b, c, d, e, f, g, h, i, j, k), so
+# `ceil(838.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
+# agree by construction rather than by a hand re-read.
+# ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
+# SETS move on every landed registration while the minute has stood at 28 m across every reading of
+# this pool from 835.5 s to 838.1 s — so NO arithmetic on the minute can catch a carried figure;
+# only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged tree; never carry
+# the last revision's minute, seconds, or split.
+#
 # ⛔ AND THESE PARAGRAPHS ARE HISTORY, NOT A SECOND CLAIM. Every fold of `origin/main` re-derived
-# this emission and left its own reading behind, so the block accumulated five stacked restatements
-# of the same sentence — and a restatement the guard reads as `<est … stated twice>` is how a block
-# ends up claiming two partitions while looking like one. The graded clause is the ONE in the
-# paragraph above, measured on the tree that SHIPS (`main` at `6a72cfd661c` plus this PR's row). What is kept here is
-# paragraph above, measured on THIS BRANCH'S HEAD. What is kept here is
-# only what a reader cannot get from that clause: which registrations `main` has landed at the flat
-# 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's `tests/test_14371_offline_embed_json.py`, #14434's
-# `tests/test_7879_record_chain.py`, #14220's `tests/test_14186_embedder_seam_batching.py`, #14423's
-# `tests/test_14350_drain_convergence.py`, #14038's `tests/test_13998_capacity_notice.py` and
-# #14429's `tests/test_spool_drain_rehearsal.py` (listed in shard `j` at this head) — FIVE of them on top of
-# #14038's row, which the 836.4 s baseline below already counts (measured: that row is in shard c at
-# `4993fa08`, so the baseline's total includes it), and why every one of them moves the split.
-# `test_notify`) — the `core` row is registered in its own right, so the shard letter is MEASURED
-# (shard `c` at the head that registered it) rather than inferred from a neighbour: a `core` neighbour
-# (shard `i` at this head) rather than inferred from `test_notify`'s (shard `g`): a `core` neighbour
-# sits in a different bin because the packer is greedy, and every shard letter in this block is a
-# `push_legs()` reading at the head it names, not a placement inherited from a neighbouring row.
-# The minute did not move (28 m either way), which is exactly why the SECONDS are the graded claim.
-# Re-run `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds,
-# or split.
+# this emission and left its own reading behind, so the block accumulated stacked restatements of
+# the same sentence — and a restatement the guard reads as `<est … stated twice>` is how a block
+# ends up claiming two partitions while looking like one (measured on #14459's merge, which
+# spliced BOTH parents' clauses into this header). The graded clause is the ONE paragraph above.
+# What is kept below is only what a reader cannot get from it: which registrations this reading
+# counts, and the direction the readings have travelled. NO sentence here restates a partition,
+# deliberately — a historical figure spelled as a claim is a claim the guard grades.
 #
-# ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
-# figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
-# reading of this pool while the seconds moved under it (835.5 -> 837.9 s). So NO arithmetic on the
-# minute can catch a carried figure - only the `est_seconds` partition can, which is why the
-# sentence is GRADED above instead of trusted.
-#
-# ⛔ The partition moves on EVERY landed registration, which is why a rebase that interleaves two
-# sides of this block REDS rather than picking one: it was re-emitted for the #14371 row at a
-# six/five split, then for #7879 at a four/seven one within the hour (reddening `main` in
-# between), #14220 moved it to a two/nine split, merging `main`'s #14350 row collapsed it to a
-# single eleven-shard one, and #14429's `core` registration re-split it to nine/two at 837.3 s. Two
-# parents re-deriving this paragraph is what produced the `<est 837.3 stated twice>` /
-# `<ceil stated 2 times>` reds, so the claims live in ONE paragraph (above) and the readings below
-# are HISTORY, deliberately not restated as clauses.
-#
-# That pool is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`,
-# landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
-# shard `j` at this head) - each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only
-# because it sits one main fold from rounding again.
-# The registrations this block's own reading counts are the ones `main` has landed at the flat 2.0 s
+# The registrations this reading counts are the ones `main` has landed at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`, each with the shard `push_legs()` puts it in AT THE HEAD NAMED (a letter is
 # a measurement, never an inference from a neighbouring row): #14409's
 # `tests/test_14371_offline_embed_json.py` (shard c), #14434's `tests/test_7879_record_chain.py`
 # (shard j), #14220's `tests/test_14186_embedder_seam_batching.py` (shard g), #14423's
 # `tests/test_14350_drain_convergence.py` (shard e), #14038's
 # `tests/test_13998_capacity_notice.py` (shard j) and #14429's
-# `tests/test_spool_drain_rehearsal.py` (shard j) - FIVE of them on top of #14038's row, which the
-# 836.4 s baseline below
-# already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
-# it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
-# only the worst figure: five registrations x 2.0 s is the whole of 9200.1 -> 9210.1.
-# ⛔ The partition moves on every landed registration, and this block's own readings show how fast:
-# the guard's landing (#14405) packed eight bins at 836.4 s and three at 836.3 s, #14409's row moved
-# it to six at 836.6 and five at 836.5, #14434's to four at 836.8 and seven at 836.7 (and `main` sat
-# RED between that landing and the next re-cut, which is the failure this block exists to prevent),
-# #14220's to two at 837.0 and nine at 836.9, #14423's flattened all eleven onto 837.1 s — the first
-# perfectly balanced reading since the 2026-11-23 durations refresh. (Each of those five readings was
-# re-derived with `--emit-push-matrix` at its own landing, not quoted from the one before it.) That
-# scope is MEASURED, not a guess about superlatives: of the 26 landings between that refresh and
-# #14423, the twelve that touch this manifest are each split (and the other fourteen do not touch it
-# at all), while `024387f5` emitted 721.6 s on all eleven BEFORE that refresh — so "first at S=11"
-# unscoped is FALSE and is not what this block claims. Then #14429's `core` registration re-packed
-# them back into a nine/two split, and this PR's own `core` row re-packed them once more — into the
-# eight/three partition the graded clause above states (re-measured at this head, not carried: this
-# sentence said `five/six`, which was a PRE-merge reading and is written so the clause parser cannot
-# see it — the carried-figure class this block exists to warn about).
-# ⛔ A rebase that interleaves two sides of this paragraph REDS rather than picking one — which is
-# why this one had to be RE-EMITTED rather than merged: `main` had re-cut these same
-# sentences (#14423's single eleven-shard reading, then #14429's nine/two at 837.3 s) while this
-# branch carried its own re-cut of them, so the merge kept BOTH spellings and the guard read
-# `<est 837.3 stated twice>` / `<ceil stated 2 times>` rather than a clean claim. The sentences
-# above are ONE emission, re-derived at the NAMED head.
-# ⛔ The minute has stood at 28 m across every one of those readings, so NO
-# arithmetic on the minute can catch a carried figure — only the `est_seconds` partition can, which
-# is why the sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES
-# move when a fast file is registered — the packer is greedy, so ONE new 2.0 s file re-packs every
-# bin — which is why the names are stated and graded, not only the seconds. Re-run
-# `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or
-# split.
+# `tests/test_spool_drain_rehearsal.py` (shard j), plus #14407's dual `api`/`core` registration of
+# `tests/test_14407_alert_delivery.py` and #13722's dual `api`/`core` registration of
+# `tests/test_13722_stamp_chain_off_loop.py` — and EVERY one of them re-partitions every bin,
+# because the packer is greedy: ONE new 2.0 s file re-packs the whole map, which is why the NAMES
+# are quoted and graded, not only the seconds. A file a PR ADDS carries the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: it cannot have a junit reading yet), NOT a
+# hand-picked sub-default weight — an unmeasured figure re-packs the bins and so moves a graded
+# claim on a number no run measured.
 #
-# The history, so a reader can see the direction: the 2026-11-16 durations sweep re-packed the same
-# 11 shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,
+# The direction of the readings, as history: the 2026-11-16 durations sweep re-packed the same 11
+# shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,
 # #14015's M5 row to a 25 m worst shard (arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom), and
-# the 2026-11-23 sweep to the 28 m above (arm-2 SUM 59.64 m, x 1.5 = 89.5 m, 0.5 m of headroom).
-# Those numerals are a
-# SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head above — re-derive them
-# with that verb rather than trusting them, but a restatement is fine when it cites the emission
-# it came from — and the promise is GRADED, not just stated:
+# the 2026-11-23 sweep to the 28 m stated above (arm-2 SUM 59.64 m, x 1.5 = 89.5 m, 0.5 m of
+# headroom). Between that sweep and #14423 the twelve landings that touched this manifest each
+# re-split the pool (the other fourteen in the window do not touch it), and #14423's own row was
+# the first perfectly balanced eleven-way reading since the refresh — while `024387f5` emitted a
+# flat 721.6 s on all eleven BEFORE it, so "first at S=11" unscoped is FALSE and is not claimed
+# here. Those numerals are a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the named
+# trees — re-derive them with that verb rather than trusting them.
+#
+# The promise is GRADED, not just stated:
 # `tests/test_ci_selection.py::test_the_fast_shards_header_block_states_the_measured_emission`
-# compares the per-shard sentence above against the live emission (and its own `ceil(...)` operand
+# compares the per-shard clause above against the live emission (and its own `ceil(...)` operand
 # against the emitted watchdog), so a carried figure reds a required leg instead of shipping, which
-# is how this block went stale before this guard existed (#11298 review
-# cycle 5, #14015, #14296). ⛔ The cap was NOT
-# moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
-# re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
-# from the pre-suite terms (those are measurements and file facts).
+# is how this block went stale before this guard existed (#11298 review cycle 5, #14015, #14296).
+# ⛔ The cap was NOT moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
+# re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not from the pre-suite
+# terms (those are measurements and file facts).
 #
-# The 1.25x balance band is enforced by `--integrity`'s
-# `workflow_halves_issues()`, which recomputes the ratio from the committed map
-# (the `test_real_workflow_halves_are_consistent` arm that used to sit beside it
-# went with the durations-map arithmetic cut). The old
-# The 1.25x balance band was enforced by `test_real_workflow_halves_are_
-# consistent`, which recomputed the ratio from the committed map (that arm was
-# CUT in the B7 test cut, 2026-11-23); what still checks it is `--integrity`'s
-# `workflow_halves_issues()`. The old
-# "single-file floor" argument is RETIRED: it rested on
-# `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
-# file — so extra shards do keep reducing max(shard). The lane-parity contract
-# above cannot hold a MINIMUM either way: it requires a SUPERSET of main's
-# labels, so it forbids a SHRINK and is what PERMITS 11, not what caps it at 10.
+# The 1.25x balance band is enforced by `--integrity`'s `workflow_halves_issues()`, which recomputes
+# the ratio from the committed map (the `test_real_workflow_halves_are_consistent` arm that used to
+# sit beside it went with the durations-map arithmetic cut). The old "single-file floor" argument is
+# RETIRED: it rested on `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
+# file — so extra shards do keep reducing max(shard). The lane-parity contract above cannot hold a
+# MINIMUM either way: it requires a SUPERSET of main's labels, so it forbids a SHRINK and is what
+# PERMITS 11, not what caps it at 10.
 #
-# Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
-# capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
-# free win.
+# Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted capacity the epic
+# is trying to enlarge), so it is a wall-clock lever, not a free win.
 fast_shards: 11
 
 # W37: the CARVE-OUT pool. `test-carve-out` was the CI critical path as ONE

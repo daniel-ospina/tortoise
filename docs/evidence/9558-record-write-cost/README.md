@@ -202,8 +202,9 @@ revision, ≈0.68 ms of cache-consult overhead per record, in two halves this
 bullet used to conflate**: `replay_plan` drives BOTH cached readers, and each
 consult costs (i) `_migrations_dir()` → `_complete()`, fifteen `Path.exists()`
 calls resolving the base **before** the key is built (`_schema_entry`'s
-`base = migrations_dir or _migrations_dir()`, with `_complete` at `:1497` and
-`_migrations_dir` at `:1502`; the seam is cited by SYMBOL on purpose — a bare line
+`base = migrations_dir or _migrations_dir()`, with `_complete` at `:1981` and
+`_migrations_dir` at `:1986` at the head that ships this document — re-derived
+THERE, not carried), and the seam is cited by SYMBOL on purpose — a bare line
 number re-stales under exactly the edits this PR makes, and this one has re-staled
 repeatedly inside it (most recently `1659 → 1665 → 1667 → 1669 → 1670`, and one of
 those moves landed *after* a revision of this very sentence had counted the earlier

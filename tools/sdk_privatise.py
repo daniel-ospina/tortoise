@@ -2030,16 +2030,22 @@ SWEEP_NAMES = 66
 #: ⛔ The one vanishing row is a DELETION this PR declares; the direction the pin exists to catch is a
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
 #: so no typed call site is legitimised by the re-cut. ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S.
-#: RE-PINNED DOWN 11910 -> **11908** by #4625's final fold, and the move is the pin's documented
-#: HARMLESS direction (a residue count that FALLS cannot hide a new untyped reference). The two rows
-#: that left are the last `_JSONB_CACHE.update({...})` calls in
+#: ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S. #4625's own fold then RE-PINNED DOWN
+#: 11910 -> **11908** — the pin's HARMLESS direction, because a residue count that FALLS cannot hide a
+#: new untyped reference. The two rows that left are the last `_JSONB_CACHE.update({...})` calls in
 #: `tortoise/record_projection.py`, deleted with the 5 s `jsonb` TTL this PR retires: the TTL was the
 #: only reason that dict was refreshed in place rather than cleared through
-#: `_release_schema_cache()`. Measured, not arithmetic — `--repin` on this tree prints
-#: `(11908, 'f03fb8e5f6e44a9c')`, and a row-level diff of the residue shapes against `origin/main`
-#: shows exactly ONE differing row (`_JSONB_CACHE.update  2`, present there, absent here) with no
-#: shape added or absorbed in either direction.
-SWEEP_RESIDUE = (11908, "f03fb8e5f6e44a9c")
+#: `_release_schema_cache()` — measured `--repin` on the branch's tree printed
+#: `(11908, 'f03fb8e5f6e44a9c')`, no shape added or absorbed.
+#: ⛔ AND THE MERGE WITH `origin/main` MOVED IT BACK UP BY ONE, to **11909 / `1f020f859e887f94`** —
+#: the OTHER direction, so it is attributed ROW BY ROW rather than accepted as a flake: `main`'s
+#: rewrite of `tests/test_collision_preflight.py` adds exactly one untyped `.update` receiver,
+#: `seen.update(kwargs)` in its new `spy()` fixture (`:10584`), and the merge deleted no `.update`
+#: line anywhere (`#4625`'s own −2 is still in this tree: `_JSONB_CACHE.update` is 2 rows on
+#: `origin/main` and 0 here). A rising pin is the direction the guard exists to CATCH, and here the
+#: row is main's, so the pin follows `main` — measured `--repin` on the merged tree, never arithmetic
+#: on the previous number.
+SWEEP_RESIDUE = (11909, "1f020f859e887f94")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
