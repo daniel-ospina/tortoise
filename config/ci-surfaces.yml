@@ -111,7 +111,7 @@ version: 1
 #
 # ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
 # figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
-# reading of this pool while the seconds moved under it (835.5 -> 837.7 s). So NO arithmetic on the
+# reading of this pool while the seconds moved under it (835.5 -> 837.9 s). So NO arithmetic on the
 # minute can catch a carried figure - only the `est_seconds` partition can, which is why the
 # sentence is GRADED above instead of trusted.
 #

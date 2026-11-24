@@ -788,3 +788,26 @@ def test_a_commented_out_ALTER_cannot_reach_exactly_one_reader(monkeypatch, tmp_
             "pre-processing decides what it sees — the divergence this pins")
     finally:
         rp._release_schema_cache()
+
+    # ⛔ THE PARTIAL TREE TAKES A DIFFERENT BRANCH of `_entry_sql_state` and must
+    # strip too: nothing is memoised there, so returning the RAW read gave the
+    # partially-present tree a different TEXT than the complete one (measured: the
+    # same commented DOWN `ADD COLUMN` was read as its UP by all three readers).
+    partial = tmp_path / "partial"
+    partial.mkdir()
+    for name in rp.RECORD_MIGRATIONS[1:]:
+        shutil.copy(source / name, partial / name)
+    first = partial / rp.RECORD_MIGRATIONS[1]
+    first.write_text(first.read_text(encoding="utf-8") + down, encoding="utf-8")
+    monkeypatch.setattr(rp, "_migrations_dir", lambda: partial)
+    rp._release_schema_cache()
+    try:
+        assert rp._resident_entry()["sql"] is None, (
+            "the fixture did not produce a partial read — nothing is memoised on "
+            "that branch, and this arm is about the branch")
+        assert "payload_note" not in rp.jsonb_columns(), (
+            "on a PARTIALLY-present tree the readers parsed UNSTRIPPED text, so a "
+            "commented-out DOWN `ADD COLUMN … jsonb` was read as its UP — the "
+            "`jsonb` name set gains a column the schema does not have")
+    finally:
+        rp._release_schema_cache()

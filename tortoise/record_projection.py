@@ -2367,15 +2367,19 @@ def _entry_sql_state(entry: dict[str, Any]) -> tuple[str, bool]:
     if memoised is not None:
         return memoised, True
     sql, complete = _read_migrations_state(entry["base"])
+    # ⛔ STRIP ON BOTH BRANCHES, and return exactly what a warm call would return.
+    # Two divergences hide here and both were measured: returning the RAW read
+    # while storing the stripped form made the cold parse differ from every warm
+    # one, and returning raw on the INCOMPLETE branch gave the partially-present
+    # tree a different TEXT than the complete one — on that path a commented
+    # `-- ALTER TABLE … ADD COLUMN … jsonb;` (a record migration's DOWN direction,
+    # and `_ALTER_ADD_COLUMN_RE` is `re.S`) was read as its UP, by all three
+    # readers at once. Pre-#4625 the `jsonb` reader stripped per file and did not
+    # have this bug; the partial path must not reintroduce it.
+    stripped = _strip_sql_comments(sql)
     if complete:
-        # ⛔ STORE AND RETURN THE STRIPPED TEXT, so a caller parses exactly what is
-        # memoised — returning the raw read here while storing the stripped form
-        # made the first (cold) parse differ from every warm one, which is the same
-        # class of divergence one layer down (#4625 review).
-        stripped = _strip_sql_comments(sql)
         entry["sql"] = stripped
-        return stripped, True
-    return sql, complete
+    return stripped, complete
 
 
 def _parse_record_tables(sql: str) -> dict[str, frozenset[str]]:
@@ -3073,10 +3077,11 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     correct about the risk, wrong about the price. The price was measured when the
     door called it once per JOURNAL RECORD: every record re-read and
     re-regex-parsed all twenty migration files (`record_writer` priced it at
-    "~4 ms of plan materialization"). ⛔ Say it that way, not "every batch": the
-    door now calls it ONCE PER PLAN (before `replay_plan`'s record loop), so the
-    per-call cost is not paid per batch either — the shape that made the read
-    expensive was the per-RECORD frequency #9558 removed. It is now served from
+    "~4 ms of plan materialization"). ⚠️ Both frequencies are true and they are the
+    SAME call: one `replay_plan` is one batch, and the door calls it once per plan
+    (before the record loop), so the pre-#9558 cost was paid once per BATCH — what
+    #9558 removed was the per-RECORD read, and what #4625 removed is the re-read at
+    that unchanged frequency. It is now served from
     the process's RESIDENT schema
     (:func:`_resident_entry`) — resolved once, zero filesystem operations per
     call ONCE THAT RESOLUTION READ A COMPLETE TREE — because the deployed image
