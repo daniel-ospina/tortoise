@@ -175,9 +175,19 @@ _ENDING_WORDS = (
 #:   polarity-INVERTED answer, which is the #14033 defect class exactly. `no`
 #:   is left in the run by the residual below (it is an ordinary noun modifier),
 #:   so the `no longer` spelling is stopped by its own token rather than by `no`;
-#: * FUTURITY / INTENT (`to`, `be`, `going`, `about`, `due`, `scheduled`) —
+#: * FUTURITY / INTENT (`to`, and the PROGRESSIVE `being`) —
 #:   `is the v2 api to be retired` asks about something that has NOT ended, and
 #:   the ended population can only answer it with records that have;
+#:   `is the report being archived` is an action in flight, which the population
+#:   cannot represent at all. ⛔ THE INFINITIVE IS STOPPED BY `to` ALONE, and the
+#:   narrower list is measured rather than assumed: `be|going|about|due|scheduled`
+#:   were stop words in the round-8 cut, and every one of its futurity rows still
+#:   refuses without them (`to` sits between the head noun and the ending in each),
+#:   while keeping them refuses two ordinary spellings for no closure at all —
+#:   `is the annual due diligence report archived` and `is the current going
+#:   concern note archived`, where `due`/`going` are head-noun modifiers in the
+#:   second slot. `be` on its own had no falsifier at all: every infinitive that
+#:   can reach this tail anchor already carries `to`;
 #: * DISJUNCTION (`or`) — `is the ticket still open or cancelled` asks about two
 #:   states at once, and one population cannot answer both.
 #:
@@ -185,13 +195,15 @@ _ENDING_WORDS = (
 #: AFFIRMATIVE temporal modifiers stay in the run, so `is the claim already
 #: archived`, `is the ticket still archived` and `is the report already withdrawn`
 #: still route. Adding `yet|still|already` as well would close the same class and
-#: additionally refuse those three, so this is the narrower list.
+#: additionally refuse those three, so this is the narrower list. ⛔ IT IS NOT
+#: FREE OF COST, and the cost is a residual below rather than a silence: a head
+#: noun joined by `or` is refused.
 #: ⛔ IT APPLIES FROM THE SECOND WORD ON, never to the head noun: `it` and `us`
 #: are ordinary head nouns in this product's own vocabulary (`is our IT platform
 #: retired`, `is the US footprint archived`), and the head-noun slot is not a
 #: place a zero relative's subject can stand.
 #:
-#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are four:
+#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are five:
 #:
 #: * a zero relative whose subject is a BARE NOUN (`is the claim finance
 #:   retracted`) is lexically identical to a two-word head noun plus a predicate
@@ -212,7 +224,14 @@ _ENDING_WORDS = (
 #:   our ended records. No word list separates `quarter` from a record name
 #:   without becoming the same noun→route assignment, so this is disclosed rather
 #:   than closed; the tail anchor still refuses the windowed spellings
-#:   (`is the quarter ended in Q3`).
+#:   (`is the quarter ended in Q3`);
+#: * AND A HEAD NOUN JOINED BY `or` IS REFUSED — `is the sales or marketing plan
+#:   archived` keeps the relevance read. A coordinator INSIDE the NP is lexically
+#:   identical to the disjunctive PREDICATE the `or` stop exists to close
+#:   (`is the plan live or already cancelled`), and the precision contract says a
+#:   shape that could go either way does not fire. The cost is not new either:
+#:   `is_predicate` did not exist on the base module, which refused the same
+#:   string. It is disclosed here so a later round does not present it as a find.
 #:
 #: One word of the subject NP.
 
@@ -228,11 +247,13 @@ _NP_STOP = (
     r"|we|us|i|they|them|he|she|you|it"
     r"|anyone|anybody|someone|somebody|everyone|everybody|nobody"
     r"|whoever|whatever|whichever|such"
-    # predicate modifiers — negation, futurity/intent, disjunction (see the note
-    # above: each one changes what the question asks, and a negated predicate is
-    # answered with the polarity-INVERTED population)
+    # predicate modifiers — negation, futurity/progress, disjunction (see the
+    # note above: each one changes what the question asks, and a negated predicate
+    # is answered with the polarity-INVERTED population). ⛔ `to` alone stops every
+    # infinitive spelling; `being` is the progressive, and it is a separate token
+    # because no infinitive marker sits in front of it.
     r"|not|never|neither|nor|longer"
-    r"|to|be|going|about|due|scheduled"
+    r"|to|being"
     r"|or"
     # ⛔ AND AT A CLAUSE LINKER / ADJUNCT MARKER, which is the same defect one
     # grammar step further out: the ending there is inside an ADJUNCT, so the
@@ -241,7 +262,15 @@ _NP_STOP = (
     # archived`, and `is the policy unless bookings were cancelled` (whose own
     # finite verb `were` sat inside the run). Measured on the head that already
     # carried the negation/futurity/disjunction list: all three still routed.
-    r"|n't|unless|once|if|before|after|until|while|because|although|though"
+    # ⛔ `n't` WAS a member of that line and is removed here as INERT, measured:
+    # `_NP_WORD` is `[a-z0-9][a-z0-9'-]*`, so no token can BEGIN with `n't` and the
+    # lookahead can never fire at a word start, while a contracted copula
+    # (`isn't the plan cancelled`) never reaches this shape at all — the start
+    # anchor is `^(?:is|are|was|were)\s+`. Dropping it moves no row in this file or
+    # in `test_13557_13558_reachable_reads.py`. A guard that cannot fire is not a
+    # guard, and it hides the fact that the class it appears to close is closed by
+    # the anchor.
+    r"|unless|once|if|before|after|until|while|because|although|though"
     r"|each|every|both|either|another|several|many|most|few|none)\b)"
 )
 
