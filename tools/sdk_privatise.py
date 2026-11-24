@@ -2319,7 +2319,25 @@ SWEEP_NAMES = 66
 #: than left red because that PR moves the very tree this pin grades, and `surface-guard` is a
 #: code-measuring check on the PR's EVALUATED tree that the land rail refuses to merge red,
 #: required or not (`scripts/admin-merge.sh`, "the PR's evaluated-tree surface BLOCKS").
-SWEEP_RESIDUE = (11913, "4953069e1b2ae57c")
+#: ⛔ RE-PINNED UP 11903 -> 11916 ON `#14560` (PR #14572), AND THE 13 IS ATTRIBUTED ROW BY ROW —
+#: 10 of it is `main`'s own movement carried through this fold, 3 is this PR's. This is the RISING
+#: direction — the one this arm exists to catch — so no part of it is waved through. Measured with
+#: this module's own `edits_for` on the RESOLVED merge tree: `main` (`10f0107689b9`) had already
+#: re-pinned 11903 -> **11913** (the `#14544` cut's -7 is the block above; the later folds' +10 are
+#: `main`'s own, and this module's history records each), and this PR adds exactly **three** untyped
+#: `.query` receivers:
+#:   * `tests/test_14560_operator_vectors.py:118` — `whole = g.query(...)`
+#:   * `tests/test_14560_operator_vectors.py:120` — `kinded = g.query(...)`
+#:   * `tests/test_13826_write_gate.py` — `proj.g.query("MATCH (n) DETACH DELETE n")` (the F5
+#:     arms' fixture, added when `:Point`'s restore drop was held)
+#: all three on the projection's own handle (`g = sdk._get_proj().g`, `proj.g`), which is exactly
+#: the untyped shape a typed-reference count cannot see and is deliberate here (these cases MEASURE
+#: the graph the production path writes). 11913 + 3 = 11916, the digest moved with the count, and no
+#: other file in the PR touches a `.query`/`.update`/`.delete` receiver: `--repin` on this tree
+#: prints **(11916, "f75238ea321ee918")** and `--check` exits 0 on it. ⚠️ Without the re-pin,
+#: `surface-guard` reds where it is green on `main` — measured (`observed: (11916, ...)` /
+#: `pinned: (11913, ...)`), and it is a code-measuring check the land rail refuses to merge red.
+SWEEP_RESIDUE = (11916, "f75238ea321ee918")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
