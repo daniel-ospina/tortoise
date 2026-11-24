@@ -3671,15 +3671,55 @@ def test_a_persistent_read_fault_reaches_the_ceiling_without_a_successful_read()
     reads_before = store.raises
     with pytest.raises(bi_module.RetryCeilingReached):
         coord.run_item(ORG, item, lambda *a, **k: None)
-    assert store.raises == reads_before, (
-        "an exhausted item was still read and attempted — the bound is not "
-        "process-local, so an unreadable store still spins")
+    # ONE read is allowed here: the ceiling makes exactly one best-effort attempt
+    # to settle the item VISIBLY (see the recovery pin below). What must not
+    # happen is an attempt per pass.
+    extra = store.raises - reads_before
+    assert extra <= 1, (
+        f"an exhausted item was re-read and attempted on every pass ({extra} "
+        "reads for one refusal) — the bound is not process-local")
+    with pytest.raises(bi_module.RetryCeilingReached):
+        coord.run_item(ORG, item, lambda *a, **k: None)
+    assert store.raises == reads_before + extra, (
+        "the one-shot settle became a per-pass read: an unreadable store still "
+        "spins")
 
     store.faults = 0                              # read the row afterwards
     row = store.get_item(ORG, item.batch_id, item.item_id)
     assert row.state is BatchItemState.QUEUED and row.attempts == 0, (
         "the honest residual is an UNWRITTEN row: with every write path also "
         f"faulting nothing can settle it ({row.state}, attempts {row.attempts})")
+
+
+def test_a_store_that_recovers_after_the_ceiling_settles_the_item_visibly():
+    """#14415 round 23: refusing without settling would strand a RECOVERED row.
+
+    The ceiling's contract is that the item settles `failed`, with a reason naming
+    the attempt count — visible, terminal, actionable. An exhausted item that is
+    refused before touching the store keeps that contract only if the refusal
+    FIRST tries the settle: the fault that filled the ceiling may be transient, and
+    a `queued` row nothing will ever re-drive is precisely the inert row this layer
+    exists to prevent. Exactly ONE attempt, so the settle cannot become a new
+    unbounded loop of its own.
+    """
+    bi_module._reset_failed_passes()
+    # Each failed pass reads TWICE (the fresh read, then `_note_failed_pass`'s own),
+    # so a fault that covers the ceiling is 2 × BATCH_MAX_ATTEMPTS raises; the very
+    # next read — the ceiling's one-shot settle — succeeds, which is the scenario.
+    store = _FlakyReadStore(faults=2 * bi_module.BATCH_MAX_ATTEMPTS)
+    coord = BatchCoordinator(store)
+    _, items = coord.submit(ORG, ["/d/a.md"])
+    item = items[0]
+
+    for _ in range(bi_module.BATCH_MAX_ATTEMPTS):
+        with pytest.raises(RuntimeError):
+            coord.run_item(ORG, item, lambda *a, **k: None)
+
+    settled = coord.run_item(ORG, item, lambda *a, **k: None)
+    assert settled.state is BatchItemState.FAILED, (
+        f"a store that recovered at the ceiling left the row {settled.state}")
+    assert "retry ceiling" in settled.reason, (
+        f"the settled row does not say why: {settled.reason!r}")
 
 
 # ── round 22: the adoption's liveness rule, the takeover's compare, and the ──
