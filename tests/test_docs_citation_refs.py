@@ -224,7 +224,7 @@ another lane owns that block), and the arms rot on every `main` advance that
 re-derives a figure the prose quotes.
 
 THE COUNT, so nobody re-derives it: this file is 9,382 lines / 40 tests at
-the base this cut was taken from (`989765162f`), and 739 / 11 here — 29 arms
+the base this cut was taken from (`989765162f`), and 743 / 11 here — 29 arms
 removed, and TWO of the 31 kept: `test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure`,
 which compares `05-verify.md`'s claim about `hosted_api_cite_census.py --check`
 against the checker's OWN `_sweep` (a green claim stays only while the verb exits 0
@@ -248,9 +248,12 @@ bundle arms here; a document that must not type an unmeasured figure belongs in
 that document's own review, not in this file's suite.
 
 ⚠️ ONE deleted arm graded a DIFFERENT document, and it is named here rather than
-left to be discovered: `test_the_cypher_inventory_types_no_numstat_pair_for_a_
-range_re_taken_here` read `docs/architecture/CYPHER-INVENTORY.md` and refused a
-typed `range`/`numstat` pair for a range that document says is re-taken. It is
+left to be discovered:
+
+    test_the_cypher_inventory_types_no_numstat_pair_for_a_range_re_taken_here
+
+It read `docs/architecture/CYPHER-INVENTORY.md` and refused a typed
+`range`/`numstat` pair for a range that document says is re-taken. It is
 `B` by the same test (a number typed into a document, never a product break), and
 this file's surviving scope is the `file:line` sweep, not that document's prose —
 so the arm went with the rest. ⛔ That leaves the numstat pair over
@@ -258,8 +261,9 @@ so the arm went with the rest. ⛔ That leaves the numstat pair over
 `#11081`'s audit assigns its own cut the row (B1) that removes the document rather
 than the pin, and that cut has not landed — so do not read this deletion as the
 document being gone. Its generator checks live with it
-(`tools/cypher_inventory.py --check`), and `grep -n numstat
-tests/test_13098_cypher_inventory.py` returns none.
+(`tools/cypher_inventory.py --check`), and this greps to nothing:
+
+    grep -n numstat tests/test_13098_cypher_inventory.py
 """
 from __future__ import annotations
 
