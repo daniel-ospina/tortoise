@@ -1550,7 +1550,11 @@ def test_a_rejected_acceptance_discards_its_own_rows_and_staged_files(tmp_path):
         seen["n"] += 1
         raise TimeoutError("graph timeout")
 
-    store.put_batch = _flaky  # type: ignore[method-assign]
+    # ⛔ THE ACK ROW IS CREATED THROUGH THE CREATE-IF-ABSENT (#14415 review round
+    # 17), so `put_batch` is no longer on the acceptance path at all: patching it
+    # injected the failure into a call that never happens and this pin silently
+    # stopped exercising the rollback (DID NOT RAISE). The seam moves with the code.
+    store.put_batch_if_absent = _flaky  # type: ignore[method-assign]
     coord = BatchCoordinator(store)
     base = tmp_path / "ingest"
     base.mkdir()
@@ -1856,6 +1860,19 @@ def test_a_receipt_and_the_meter_agree_when_the_row_moved_on():
 
 # ── round 9: the malformed statement, the cancel a rescan erased, and the
 #    liveness rule's third site ────────────────────────────────────────────
+class _Created:
+    """The engine's answer to `MERGE … ON CREATE SET … RETURN b.create_token`.
+
+    A fake that answers `[]` to that read makes every create look REFUSED, which is
+    not what the engine does: on CREATE the returned value IS the per-call token the
+    caller minted. Modelling it is what lets the acceptance's insert-if-absent be
+    driven hermetically (#14415 review round 17).
+    """
+
+    def __init__(self, token):
+        self.result_set = [[token]] if token is not None else []
+
+
 def _every_store_statement_pairs() -> list[tuple[str, dict]]:
     """Every `(statement, params)` pair `GraphBatchStore` hands to the engine.
 
@@ -2940,6 +2957,10 @@ def test_acceptance_writes_the_whole_item_set_in_one_statement():
 
         def __call__(self, cypher, params=None, **kw):
             self.cyphers.append(cypher)
+            if "RETURN b.create_token" in cypher:
+                # The engine returns the per-call token ONLY when `ON CREATE SET`
+                # ran; a fake that answers `[]` makes every create look refused.
+                return _Created((params or {}).get("token"))
 
             class _Res:
                 def __init__(self) -> None:
@@ -2950,11 +2971,98 @@ def test_acceptance_writes_the_whole_item_set_in_one_statement():
     rec = _Rec()
     coord = BatchCoordinator(GraphBatchStore(rec))
     coord.submit(ORG, [f"/d/{n}.md" for n in range(200)])
-    assert len(rec.cyphers) == 2, (
+    # THREE, NOT ONE PER ITEM: the id-existence read, the item set in one `UNWIND`,
+    # and the create-if-absent row. The count is CONSTANT in batch size, which is
+    # the whole claim — 1 000 items must cost the same three statements.
+    assert len(rec.cyphers) == 3, (
         "200 items took "
-        f"{len(rec.cyphers)} statements, not 2 (item set + batch row): "
-        f"{[c[:60] for c in rec.cyphers[:4]]}")
-    assert rec.cyphers[0].startswith("UNWIND $rows AS row"), rec.cyphers[0][:120]
+        f"{len(rec.cyphers)} statements, not 3 (id check + item set + batch row): "
+        f"{[c[:60] for c in rec.cyphers[:5]]}")
+    unwinds = [c for c in rec.cyphers if c.startswith("UNWIND $rows AS row")]
+    assert len(unwinds) == 1, f"{len(unwinds)} item statements, expected exactly 1"
+
+
+def test_the_item_cas_writes_and_both_reads_project_every_wire_field():
+    """⛔ A DROPPED COLUMN IS SILENT ON A REAL ENGINE (#14415 review round 17, P2).
+
+    The only pin on item-row columns was the `duplicate_of` round-trip, and its fake
+    answers with a HAND-BUILT row, so deleting a column from the CAS `SET` (or from
+    a read projection) left all 168 tests green — the fake does not care what the
+    statement says. On the real engine that is a `failed` item whose `reason` reads
+    `""` (`GET /v1/batches/{id}` returns `{"status": "failed", "reason": ""}`) and a
+    `duplicate_of` that silently reverts to the round-13 defect.
+
+    The pin is table-driven off `BatchItem`'s own field list, so a field ADDED to
+    the record without a column fails here rather than in production.
+    """
+    from tortoise.batch_ingest import GraphBatchStore
+
+    class _Rec:
+        def __init__(self):
+            self.cyphers: list[str] = []
+
+        def __call__(self, cypher, params=None, **kw):
+            self.cyphers.append(cypher)
+            if "RETURN b.create_token" in cypher:
+                return _Created((params or {}).get("token"))
+
+            class _Res:
+                result_set: list = []
+
+            return _Res()
+
+    rec = _Rec()
+    store = GraphBatchStore(rec)
+    store.put_item_if_state(ORG, BatchItem(batch_id="b", item_id="b-00001",
+                                          ref="/d/a.md", updated_at="t"),
+                            BatchItemState.QUEUED)
+    cas = rec.cyphers[-1]
+    store.items(ORG, "b")
+    listed = rec.cyphers[-1]
+    store.get_item(ORG, "b", "b-00001")
+    single = rec.cyphers[-1]
+
+    # batch_id/item_id are the pattern keys, not columns.
+    columns = {
+        "ref": "ref", "name": "name", "staged_path": "staged_path",
+        "state": "state", "reason": "reason", "content_key": "content_key",
+        "duplicate_of": "duplicate_of", "tokens_in": "tokens_in",
+        "tokens_out": "tokens_out", "attempts": "attempts",
+        "content_changed": "content_changed", "updated_at": "updated_at",
+    }
+    # `charge_in`/`charge_out` are DELIBERATELY non-persisted — a fact about one
+    # `run_item` call, never a property of the document, so `as_dict` does not emit
+    # them and re-reading them cannot double-charge.
+    missing_fields = (set(BatchItem.__dataclass_fields__)
+                      - {"batch_id", "item_id", "charge_in", "charge_out"}
+                      - set(columns))
+    assert not missing_fields, (
+        "a new `BatchItem` field has no store column — add it to `put_item`, "
+        f"`put_item_if_state` and both read projections: {sorted(missing_fields)}")
+    # ⛔ TWO WRITERS, TWO COLUMN SETS, and the split is deliberate: `tokens_in/out`
+    # are written ONLY by an accumulating call (round 8 — naming them absolutely
+    # erases a peer's bill) and `duplicate_of` is settled at ACCEPTANCE (`put_item`),
+    # never by a state CAS. Every OTHER persisted column belongs to the CAS.
+    cas_columns = {k: v for k, v in columns.items()
+                   if k not in {"tokens_in", "tokens_out", "duplicate_of"}}
+    unset = [c for c in cas_columns.values()
+             if f"i.{c}=" not in cas.replace(" ", "")]
+    assert not unset, f"the CAS never writes: {unset}\n{cas[:300]}"
+    assert "i.tokens_in=" not in cas.replace(" ", ""), (
+        "a non-accumulating CAS named a token column — that is the read-modify-"
+        "write that erases a peer's bill")
+
+    store.put_item(ORG, BatchItem(batch_id="b", item_id="b-00001", ref="/d/a.md",
+                                  updated_at="t"))
+    upsert = rec.cyphers[-1].replace(" ", "")
+    unset = [c for c in columns.values() if f"i.{c}=" not in upsert]
+    assert not unset, (
+        f"`put_item` never writes: {unset} — the acceptance's own writer must name "
+        "every persisted column")
+    unprojected = [c for c in columns.values() if f"i.{c}" not in listed]
+    assert not unprojected, f"`items()` never projects: {unprojected}"
+    unprojected = [c for c in columns.values() if f"i.{c}" not in single]
+    assert not unprojected, f"`get_item()` never projects: {unprojected}"
 
 
 def test_the_create_if_absent_reports_creation_only_for_this_call():

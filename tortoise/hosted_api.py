@@ -16876,6 +16876,47 @@ def _batch_org_root(org_id: str, *, create: bool = False) -> str | None:
     return root
 
 
+def _batch_staging_writable(org_id: str) -> str | None:
+    """The org root, IF a byte can actually be written under it — else ``None``.
+
+    ⛔ ``_batch_org_root(create=True)`` PROVES NOTHING ABOUT WRITABILITY (#14415
+    review round 17, P2): ``os.makedirs(..., exist_ok=True)`` is a NO-OP when the
+    root already exists, so on a read-only volume, a root whose owner changed under
+    it, a full disk or an exhausted quota it returns a path happily — and the
+    pre-acknowledgement check that rests on it passes. A ≥47-item inline body is
+    then answered `402 BATCH_ACKNOWLEDGEMENT_REQUIRED` ("re-send with
+    acknowledge_overage=true"), and the acknowledged RE-SEND dies in
+    `stage_text` and answers 503. An acknowledgement collected for work that can
+    never run is the exact defect moving the check in front of the gate was for, so
+    the check has to do the thing it is checking: create the batch directory the
+    same way `stage_text` does, write a byte, and remove it.
+    """
+    root = _batch_org_root(org_id, create=True)
+    if root is None:
+        return None
+    probe_dir = os.path.join(root, "_batches")
+    probe = None
+    try:
+        os.makedirs(probe_dir, mode=0o700, exist_ok=True)
+        import tempfile
+
+        fd, probe = tempfile.mkstemp(dir=probe_dir, prefix=".probe-")
+        try:
+            os.write(fd, b"p")
+        finally:
+            os.close(fd)
+    except OSError:
+        _logger.exception("batch: %s is not writable", probe_dir)
+        return None
+    finally:
+        if probe is not None:
+            try:
+                os.unlink(probe)
+            except OSError:
+                pass
+    return root
+
+
 def _batch_item_runner(sdk, corpus_name: str, org_id: str):
     """The production item runner: the repo's EXISTING per-file indexer unit.
 
@@ -17507,15 +17548,15 @@ async def create_batch(body: BatchRequest,
     # can never run is the same defect the URL check below was moved in front of
     # that gate to close; the 503 test beside it uses a ONE-item body, so the gate
     # never ran and the ordering was unpinned.
-    # ⛔ RESOLVED WITH `create=True`, AND REUSED AS `stage_base` (#14415 review
-    # round 16, P3). Without `create` this answered "is `TORTOISE_INGEST_BASE_DIR`
-    # set", not "can the bytes be staged": with the base configured but the org's
-    # directory uncreatable (permissions, a read-only or an evicted volume) a
-    # ≥47-item inline body passed here, was refused `402 BATCH_ACKNOWLEDGEMENT_
-    # REQUIRED` ("re-send with acknowledge_overage=true"), and the re-send then
-    # 503'd — an acknowledgement collected for work that can never run, which is
-    # exactly what moving this check in front of the gate was for.
-    inline_stage_root = (_batch_org_root(org_id, create=True)
+    # ⛔ A WRITE IS PROVED, NOT ASSUMED, AND THE ROOT IS REUSED AS `stage_base`
+    # (#14415 review rounds 16-17, P3→P2). `create=False` answered only "is
+    # `TORTOISE_INGEST_BASE_DIR` set"; `create=True` is a no-op when the root
+    # already exists, so it added nothing on the shape that actually bites (a
+    # read-only mount, a changed owner, a full disk). `_batch_staging_writable`
+    # writes and removes a probe byte exactly where `stage_text` will, so a body
+    # whose bytes cannot be kept is refused HERE — before an acknowledgement is
+    # collected — and the root it approved is the root staging uses.
+    inline_stage_root = (_batch_staging_writable(org_id)
                          if any(it.text is not None for it in body.items)
                          else None)
     if any(it.text is not None for it in body.items) and inline_stage_root is None:
@@ -17585,7 +17626,7 @@ async def create_batch(body: BatchRequest,
         # `max(0, estimate - headroom)`, so a PUBLISHED allowance with headroom
         # ≥ the estimate prices the overage at ZERO while
         # `acknowledgement_required` still fires on the ESTIMATE alone
-        # (batch_ingest.py:452 vs :426-428) — an org on a 10M allowance posting
+        # (batch_ingest.py:453 vs :441-442) — an org on a 10M allowance posting
         # 47 items (3,045,553 tokens, over the 3M floor) would be refused 402 and
         # told to confirm "about 0 tokens (about $0.00)". The two-branch version
         # reported every published allowance as if it were exceeded, and it

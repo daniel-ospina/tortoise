@@ -12,6 +12,8 @@ behaviour (the ordering of write-then-dispatch) rather than a worker's.
 from __future__ import annotations
 
 import contextlib
+import os
+from pathlib import Path
 
 import pytest
 
@@ -1317,7 +1319,10 @@ def test_a_failed_acceptance_leaves_NO_rows_for_a_resume_to_adopt(
     def _flaky(row):
         raise TimeoutError("the graph did not answer")
 
-    monkeypatch.setattr(store, "put_batch", _flaky)
+    # The ACK row is created through the CREATE-IF-ABSENT (round 17), so the
+    # failure has to be injected there: patching `put_batch` would now inject into
+    # a call the acceptance no longer makes, leaving the rollback untested.
+    monkeypatch.setattr(store, "put_batch_if_absent", _flaky)
 
     r = client.post("/v1/batches",
                     json={"items": [{"ref": f"/docs/{n}.md"} for n in range(5)]})
@@ -1835,6 +1840,40 @@ def test_the_413_detail_names_the_configured_cap_not_the_default(monkeypatch):
         "the registered cap must be the shipped constant at import time")
     assert "4 MiB" in detail, detail
 
+    # ⛔ THE HALF ABOVE CANNOT FAIL ON ITS OWN (#14415 review round 17, P3). The
+    # middleware stack is built at IMPORT, so with the env var unset both sides of
+    # that equality are 4 MiB whether the registration consults `_batch_cap_bytes()`
+    # or the static constant — MEASURED: replacing both calls with
+    # `_batch_ingest.BATCH_MAX_INLINE_BYTES` left the whole suite green, i.e. the
+    # env override could have become the silent no-op round 4 killed.
+    #
+    # So the env override is proved where it can actually be observed: a FRESH
+    # INTERPRETER with the variable set, which is the only configuration a deployed
+    # process ever sees. The registration is read back from `app.user_middleware`.
+    import subprocess
+    import sys as _sys
+
+    probe = (
+        "import tortoise.hosted_api as h\n"
+        "caps = {}\n"
+        "for mw in h.app.user_middleware:\n"
+        "    caps.update(getattr(mw, 'kwargs', {}).get('path_caps') or {})\n"
+        "cap, detail = caps['/v1/batches']\n"
+        "print(cap)\n"
+        "print(detail)\n"
+    )
+    env = dict(os.environ, TORTOISE_BATCH_MAX_INLINE_BYTES=str(1024 * 1024))
+    env.pop("TORTOISE_DB_URI", None)
+    out = subprocess.run([_sys.executable, "-c", probe], capture_output=True,
+                         text=True, env=env, cwd=str(Path(__file__).resolve().parent.parent))
+    assert out.returncode == 0, out.stderr[-400:]
+    env_cap, env_detail = out.stdout.splitlines()[:2]
+    assert int(env_cap) == 1024 * 1024, (
+        "TORTOISE_BATCH_MAX_INLINE_BYTES did not reach the registered body cap "
+        f"({env_cap}) — the env override is a silent no-op")
+    assert "1 MiB" in env_detail, (
+        f"the 413 copy still names the default: {env_detail!r}")
+
 
 def test_the_acceptance_copy_says_one_hour_not_1_hours(client):
     """⛔ ROUND-5 REVIEW P3: the string a single-document customer actually gets."""
@@ -2154,43 +2193,45 @@ def test_a_path_item_that_names_a_url_is_still_refused(client):
     assert r.json()["detail"]["error_code"] == "BATCH_REF_URL_NOT_SUPPORTED"
 
 
-def test_a_configured_but_unusable_storage_root_is_refused_before_the_ack_gate(
-        client, monkeypatch):
-    """⛔ ROUND-16 REVIEW P3: "the base is SET" is not "the bytes can be staged".
+def test_a_configured_but_unwritable_root_is_refused_before_the_ack_gate(
+        client, monkeypatch, tmp_path):
+    """⛔ ROUND-17 REVIEW P2: a mkdir proves nothing when the root already exists.
 
-    The pre-gate check called `_batch_org_root(org_id)` WITHOUT `create`, so it
-    answered only the configuration question. With the base configured but the
-    org's directory uncreatable (permissions, a read-only or an evicted volume) a
-    ≥47-item inline body passed the check, was refused `402
-    BATCH_ACKNOWLEDGEMENT_REQUIRED` ("re-send with acknowledge_overage=true"), and
-    the RE-SEND then 503'd — an acknowledgement collected for work that can never
-    run, which is exactly what moving this check in front of the gate was for.
+    `_batch_org_root(create=True)` is a NO-OP for an existing root, so on a
+    read-only volume / a root whose owner changed / a full disk / an exhausted
+    quota it returned a path happily while `stage_text` could not write a byte.
+    A ≥47-item inline body was then answered `402 BATCH_ACKNOWLEDGEMENT_REQUIRED`
+    ("re-send with acknowledge_overage=true"), and the acknowledged re-send died in
+    staging with a 503 — an acknowledgement collected for work that can never run,
+    which is precisely what moving this check in front of the gate exists to
+    prevent. The earlier cut of this pin could not see it: its fake returned the
+    same writable path for `create=False` and `create=True`.
 
-    The pin therefore asserts the CALL SHAPE the refusal depends on (resolved with
-    `create=True`, and the same root the staging later uses): a fake that answers
-    only when asked to create is the seam this ordering turns on.
+    This drives the REAL resolution against a root made genuinely unwritable (the
+    probe write raises `OSError`, which is what a read-only mount or a full disk
+    does), and asserts the refusal happens with NO acknowledgement collected.
     """
-    calls: list[bool] = []
+    base = tmp_path / "ingest"
+    (base / ORG_ID).mkdir(parents=True)
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
 
-    def _root(org_id, *, create=False):
-        calls.append(bool(create))
-        # Configured, and creatable only when the caller actually asks to create —
-        # i.e. the shape that refuses BEFORE collecting an acknowledgement. The
-        # else-arm answers "nothing configured", so a pre-gate check that omits
-        # `create=True` cannot pass by accident (it used to be the SAME string in
-        # both arms, a no-op ternary ruff flags as RUF034 and a reader would read
-        # as a real distinction).
-        return "/tmp/ingest" if create else ""
+    real = ha.os.makedirs
 
-    monkeypatch.setattr(ha, "_batch_org_root", _root)
-    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    def _deny(path, *a, **kw):
+        # The ROOT exists (that is the trap); anything BELOW it is unwritable.
+        if str(path).rstrip("/").endswith("_batches"):
+            raise OSError(30, "Read-only file system")
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(ha.os, "makedirs", _deny)
+
     items = [{"ref": f"/d/{i}.md", "text": "hello"} for i in range(60)]
     r = client.post("/v1/batches", json={"items": items})
-    assert True in calls, (
-        "the pre-gate staging check asked only whether storage is CONFIGURED, so "
-        "a body it approved can still fail to stage after an acknowledgement was "
-        "collected")
-    assert r.status_code in (201, 402), r.text
+    assert r.status_code == 503, (
+        "a body whose bytes cannot be written was answered "
+        f"{r.status_code} — an acknowledgement for work that can never run: "
+        f"{r.text[:200]}")
+    assert r.json()["detail"].startswith("Batch storage is unavailable"), r.json()
 
 
 def test_inline_text_with_no_storage_is_refused_before_the_ack_gate(client,
