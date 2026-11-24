@@ -95,9 +95,9 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```text
-# 53 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
+# 55 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-53 passed
+55 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
@@ -105,12 +105,12 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-742 passed
+744 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-310 pass / 0 fail
+312 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -240,11 +240,22 @@ re-cut on this merged tree (1 327 rows, **0 rows drifted**, because the fold cha
 statement site), and `SWEEP_RESIDUE` stays `(11901, "953c70c0…")` — measured on a
 detached `origin/main` worktree too, so it is `main`'s drift and not this branch's.
 
+**Cycle 8** (a fresh-context reviewer at `5e9e89d0` — the merged head) — 1 **P1**, 4 P2.
+The P1 is the one that mattered most, because it was a hole in THIS PR's own fix:
+the exclusion being off was reported only on a stderr that nobody reads.
+
+| finding | disposition |
+|---|---|
+| **P1** the "run unclaimed and say so" answer said so ONLY on stderr, and the primary firing path discards it (`session-start.sh`: `nohup … session drain … >/dev/null 2>&1 &`). A pass that ran without the one-drainer exclusion could file NOTHING, so no other rule wrote a record either — and the box reported `capture: OK`/`DRAINING` while N drainers POSTed into the same 8-slot ceiling. | **fixed on both legs, durably**: the status record gains `claim_unavailable` + `claim_unavailable_reason`, DECORATED onto whatever state the pass earned (a quota-blocked box with a broken claim path keeps both facts), and the health line carries `, NO drain exclusion (<reason>)` in byte-identical words on both legs. Self-healing in the other direction — a pass that HELD the claim clears it — because a one-way latch teaches an operator to ignore the line. Two tests per leg; both mutants red (dropping the record arm; keeping the stale field on every write). |
+| **P2** `_dispose_quarantine`'s failed restore deleted a live claim with no trace, and the sentence justifying it ("the displaced holder … stops at its next refresh, which is the safe direction") was FALSE — it keeps draining until that refresh, up to TTL/3 | **fixed**: the failure now WARNS with the cause on both legs, and the sentence states what actually happens (a bounded double-drain, `ttl/3`, not "the safe direction"). The bound is quoted by a function (`_ttl_third_hint`) so the prose and `DEFAULT_TTL_S / RENEW_FRACTION` cannot drift — the earlier comment named a constant that does not exist under that name. |
+| **P2** the measurement's `overlapped` field could never report what its comment claimed (`min(arrivals, done + winners)` is always `processes`), and a winner that timed out released EARLY — after which a straggler legitimately took the claim and was counted as a second winner | **fixed**: the winner prints the bound it observed (`RELEASED <bounded>`), an early release makes the run **no verdict** (`bounded: false`) instead of a false "two drainers", and `overlapped` reports the population that actually attempted. |
+| **P2 / P2** two stale citations in the test docstrings — one named a capacity test that never existed under that name, the other named an `acquire`-path test that does not exist at all | **corrected**: both now cite tests that exist, and the second says plainly that the nearest cover asserts the GIVE-UP rather than the restore. That is the same overclaim class this PR has now corrected four times; a citation to a nonexistent test is how it survives a review. |
+
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `74607547…`, re-cut at every byte change: for the export-only test seam, for
+  (capture half `3eef418b…`, re-cut at every byte change: for the export-only test seam, for
   the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
   changes, and for the MERGE of the two — a merge is a byte set neither side
   hashed, so the digest is always derived from the merged tree; the read half moved

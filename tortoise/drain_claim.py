@@ -88,6 +88,7 @@ import os
 import secrets
 import socket
 import stat
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -330,19 +331,52 @@ def _dispose_quarantine(quarantine: Path, data: bytes,
     ``True`` means the bytes really were ``expected`` (ours / the stale record) and
     the claim is gone. ``False`` means we displaced somebody else's NEW claim — a
     third process installed it between our rename and our write — so the bytes are
-    restored by ``link`` (which cannot replace a claim a FOURTH process has since
-    installed; on ``EEXIST`` the displaced holder loses and will stop at its next
-    refresh, which is the safe direction) and this caller gives up.
+    restored by ``link``, which cannot replace a claim a FOURTH process has since
+    installed.
+
+    ⛔ WHAT HAPPENS WHEN EVEN THE RESTORE LOST, stated accurately because the earlier
+    version of this sentence was FALSE and a false sentence is worse than no
+    sentence: the displaced holder does NOT "stop" — its claim file is gone, so it
+    keeps draining until its next `renew`/`renew_if_due` tells it the claim is not
+    ours, up to ``TTL/3`` (≈40 s) away. Two drainers can coexist for that window, and
+    it is BOUNDED BY THE LEASE rather than unbounded, which is the only claim this
+    code makes. The restore attempt is therefore LOGGED rather than swallowed: a
+    silently deleted live claim is exactly the class this module's rules exist to
+    make visible (#14423 cycle-7 review, P2).
     """
     if data != expected:
-        with contextlib.suppress(FileExistsError, OSError):
+        try:
             os.link(quarantine, path)
+        except FileExistsError:
+            # A fourth process holds the path now. The displaced record's bytes are
+            # gone, and the only honest thing left is to say so.
+            print(
+                "tortoise.drain_claim: a displaced claim could not be restored "
+                f"({path} is held by a newer claim); that holder keeps draining "
+                f"until its next refresh (up to {_ttl_third_hint()})",
+                file=sys.stderr)
+        except OSError as exc:
+            print(
+                f"tortoise.drain_claim: a displaced claim could not be restored "
+                f"({exc}); it will be re-verified at the holder's next refresh",
+                file=sys.stderr)
         with contextlib.suppress(OSError):
             os.unlink(quarantine)
         return False
     with contextlib.suppress(OSError):
         os.unlink(quarantine)
     return True
+
+
+def _ttl_third_hint() -> str:
+    """The bound the restore-failure message quotes: a third of the default lease.
+
+    A function rather than prose so the sentence and the constant cannot drift apart:
+    the earlier comment hard-coded "≤ TTL/3 ≈ 40 s" beside a ``DEFAULT_TTL_S`` of 120
+    — the number was RIGHT and nothing tied the two together, which is how a review
+    finds a comment that describes a different constant than the one in the file.
+    """
+    return f"{DEFAULT_TTL_S / RENEW_FRACTION:.0f} s"
 
 
 def _claim_still_ours(path: Path, token: str) -> bool:
