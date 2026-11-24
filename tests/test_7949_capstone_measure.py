@@ -5859,8 +5859,8 @@ _UNIT_WORDS = (r"s|sec|secs|seconds|ms|us|µs|min|mins|h|hr|hrs|hour|hours|days?
 #: that must refuse a POSITION (`9987 lines into the manifest`, `at 9987 lines`,
 #: `9987 rows down`) can use the strict positional variant — and it PAYS for that in
 #: the benign direction, which is stated here rather than implied: a genuine COUNT
-#: whose noun is `lines`/`rows` on such a line is refused too (`— 155 lines` yields
-#: `['155']` under `_BARE_NUM`, measured), because nothing mechanical separates the
+#: whose noun is `lines`/`rows` on such a line is refused too (`— 155 lines` yielded
+#: `['155']` under `_BARE_NUM`, measured before that regex was CUT in the B4 cut), because nothing mechanical separates the
 #: two there.
 #: ⛔ `entries` IS THE SAME CASE, one noun later (#12369 review, P1
 #: residual): it was in the SHARED list, so `9987 entries into the manifest`,
@@ -12291,8 +12291,8 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
                 "forward (#14386 review, P1: all four anchors were one line off; round 10, P2: "
                 "EVERY match of the shape is graded, so a second, stale copy reds too)")
             continue
-        # ⛔ NOT `number in hits` — MEMBERSHIP IS NOT THE PIN, the rule `_D5_PINNED_PAIRS`
-        # already carries (#14003 review, cycle 2, P2 — MEASURED; reintroduced here and
+        # ⛔ NOT `number in hits` — MEMBERSHIP IS NOT THE PIN, the rule the (now CUT)
+        # `_D5_PINNED_PAIRS` table already carried (#14003 review, cycle 2, P2 — MEASURED; reintroduced here and
         # re-measured at #14386 review, P2: 115 lines satisfied the bare `_logger.warning(`
         # needle, so `:28020` -> `:4475` stayed GREEN). A needle that occurs more than once
         # cannot identify the line the row names, so it is a RED — the entry gets a fragment,
