@@ -14737,6 +14737,21 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # that cannot exist. Measured: without this row the raise at
         # `tortoise/sdk.py` reds `test-slow (c)` on the merge tree.
         "get_organisation_account cannot answer for",
+        # #14415 (this lane, measured red on `test-slow (b)` at `af2e482c4317`):
+        # the BATCH estimate's two 503 arms — `_graph_offload`/`_usage_reader`
+        # reported `read_error`/`period_error`, and the reader RAISED. Both
+        # refuse retryably (`Retry-After: 30`) *in order to* keep the `$1.00/1M`
+        # overage from being priced against a figure we could not read (owner
+        # #14275 §4: "so the overage is never discovered on the bill"). That is
+        # the fail-closed SERVER-fault category of "unreadable for resource"
+        # above, not a customer ceiling: no plan a customer buys lifts a metering
+        # blip, so the contact path here would promise an upgrade that cannot
+        # exist — and the sentence already carries the only true remedy
+        # (re-send in a few seconds). Entered the universe on the word
+        # "allowance" in "the batch's allowance impact cannot be priced
+        # honestly". Registered as a CATEGORY entry, never by rewording the
+        # message — this list's own rule (#10142, f8970b536).
+        "could not read this team's extraction usage",
         "resolve_org_limits requires a org_id", "cohort is larger than the",
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",
