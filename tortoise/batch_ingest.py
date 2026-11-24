@@ -1198,9 +1198,12 @@ class GraphBatchStore:
         reporting `estimate: {}`. No caller of this method mutates `estimate` or
         `corpus_name` before calling it (verified: zero assignments to either
         outside the two writers that own them), so a state transition has no
-        business rewriting them. The columns are written by `put_batch` alone —
-        the acceptance that owns the estimate and the orphan adoption that has
-        none to lose.
+        business rewriting them. ⛔ THE OWNERSHIP SENTENCE NAMES THE WRITER THAT
+        ACTUALLY RUNS (#14415 review round 18, P3): it said `put_batch`, which has
+        NO production caller — both writers on this path are creates, so
+        `estimate_json`/`corpus_name` are written by `put_batch_if_absent`'s
+        `ON CREATE SET` alone, the acceptance that owns the estimate and the orphan
+        adoption that has none to lose.
         """
         rows = self._q(
             f"MATCH (b:{BATCH_LABEL} {{id:$bid, org_id:$org}}) "
@@ -1894,6 +1897,19 @@ def _sync_item(target: BatchItem, source: BatchItem) -> BatchItem:
     return target
 
 
+class BatchIdTaken(ValueError):
+    """That batch id already exists for this org — the acceptance is REFUSED.
+
+    ⛔ IT IS AN EXCEPTION CLASS, NOT A BARE ``ValueError``, because ``submit``'s
+    compensating rollback catches ``Exception`` (#14415 review round 18, P1). A
+    plain ``ValueError`` raised inside ``_submit_rows`` was swallowed by it, and the
+    rollback then DELETED the very row the check exists to protect: measured — an
+    existing batch with an ``indexed`` item holding ``tokens_in=100`` lost its row,
+    every item row and its staged files, so ``status`` 404'd and the spend, attempt
+    and cancel facts were unrecoverable.
+    """
+
+
 class BatchCoordinator:
     """Accept, advance, cancel and resume — the only writer of item states.
 
@@ -1941,11 +1957,23 @@ class BatchCoordinator:
         receipt for work we did not record (§2.0 — the record is truth).
         """
         bid = batch_id or new_batch_id()
+        # ⛔ REFUSED HERE, OUTSIDE THE ROLLBACK AND BEFORE A SINGLE BYTE IS WRITTEN
+        # (#14415 review round 18, P1). Inside `_submit_rows` the guard was caught by
+        # the compensating handler below, which discarded the row it exists to
+        # protect — and by then `stage_text` had already `os.replace`-d that batch's
+        # staged documents under the same paths. Checking here means the refusal
+        # costs nothing and destroys nothing.
+        if self._store.get_batch(org_id, bid) is not None:
+            raise BatchIdTaken(f"batch id {bid!r} already exists for this org")
         stamp = self._now()
         try:
             return self._submit_rows(org_id, bid, stamp, refs, names=names,
                                      contents=contents, stage_base=stage_base,
                                      corpus_name=corpus_name, estimate=estimate)
+        except BatchIdTaken:
+            # Belt and braces: nothing has been written for this id, so there is
+            # nothing to compensate.
+            raise
         except Exception:
             # ⛔ COMPENSATE, or the 503 is a lie (#14219 review round 2,
             # BLOCKING 2). A graph write that times out mid-loop, or a disk error
@@ -2015,18 +2043,34 @@ class BatchCoordinator:
         # `accepted` with `cancelled_at`/`cancel_reason` CLEARED: the cancelled work
         # would be re-drained and charged again. The existence check has to come
         # BEFORE the item write, because that write is what does the damage.
-        if self._store.get_batch(org_id, bid) is not None:
-            raise ValueError(f"batch id {bid!r} already exists for this org")
         self._store.put_items(org_id, items)
         batch = Batch(batch_id=bid, org_id=org_id, state=BatchState.ACCEPTED,
                       created_at=stamp, updated_at=stamp,
                       corpus_name=str(corpus_name or ""),
                       estimate=dict(estimate or {}))
         if not self._store.put_batch_if_absent(batch):
-            # Lost the create to a concurrent writer with the same minted id (only
-            # possible for a caller-supplied one). Do not pretend it is ours.
-            self._store.discard(org_id, bid)
-            raise ValueError(f"batch id {bid!r} was created concurrently")
+            # ⛔ A LOST CREATE IS NOT A LOST BATCH (#14415 review round 18, P1).
+            # The first cut called this "only possible for a caller-supplied id" and
+            # `discard`ed — which is wrong: `_resume_batch` adopts THIS acceptance's
+            # orphan item rows and creates the row with `put_batch_if_absent`, so a
+            # recovery landing between `put_items` and here made the acceptance
+            # delete the adopted row, the item rows and the staged files — and by
+            # then recovery had already submitted a drain, so the indexer could have
+            # run and BILLED those items. The customer got "nothing was accepted;
+            # retry", the retry re-staged under a NEW batch id, and every document
+            # was ingested and charged TWICE with the first pass's receipt destroyed.
+            #
+            # The row that won is the record — it was created by an adoption of OUR
+            # items — and the item rows are this call's own, so hand back the row as
+            # it stands.
+            row = self._store.get_batch(org_id, bid)
+            if row is None:
+                # Neither created nor readable: nothing to stand behind.
+                self._store.discard(org_id, bid)
+                raise RuntimeError(
+                    f"batch {bid!r}: the create was lost and the row is not "
+                    "readable — refusing to report an acceptance we cannot see")
+            return row, items
         return batch, items
 
     # -- reads -----------------------------------------------------------
