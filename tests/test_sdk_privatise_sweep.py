@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2025 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1976 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -304,23 +304,6 @@ def _residue_block() -> str:
     `grep -c 14395` on `origin/main`'s copy is 0, so it contributes no `#:` line to the walked
     run and no figure above contains it. The 1862 reading is this function's own walk of the
     RESOLVED file, never an adjustment of a carried figure:
-    — and THIS PR's own two record notes inside that block (`SWEEP_RESIDUE`'s re-pin note, and the
-    note recording that the pair was re-derived on the MERGE tree rather than carried from either
-    side) added nine `#:` lines to the walked run, so the figure above is RE-MEASURED by this walk
-    on this tree at 1930 rather than adjusted by arithmetic from the unmodified tree's 1921 — the
-    merge itself and the peer's reflow of the first note add nothing to the count, which is why
-    the delta is nine and not more,
-    — and the `#14506`-fold re-cut below (`origin/main` `59a08fdb8b`, the merge tree's pair re-derived
-    because `surface-guard` graded the MERGE tree and not this head) appended 46 `#:` lines to
-    `tools/sdk_privatise.py`, so the figure above is RE-MEASURED by this walk on this tree at 1976
-    rather than adjusted by arithmetic from 1930; the fold's two `OWN_PINS` entries and its
-    `seen.update` row live in files this block does not walk, so they add no `#:` line here,
-    — and the `origin/main` `6a02515d14` fold (`#14459`/`#4625`'s own re-pin, the ONE commit of that
-    fold touching `tools/sdk_privatise.py`) KEPT both sides' blocks again and added this
-    fold's own re-derivation note, so the figure above is RE-MEASURED by this walk on the RESOLVED
-    file rather than adjusted by arithmetic from either side's reading — the pair did NOT move on
-    that fold, which was measured with `--repin` on the resolved tree and on `main`'s own tree rather
-    than inferred from the two counts agreeing,
     — and the `2cccf90f4dd4` fold's own re-cut record (`SWEEP_RESIDUE` re-derived on ITS merge tree,
     with main's unpinned `seen.update(kwargs)` row named row by row there) added `#:` lines to the
     walked run, so the figure above is RE-MEASURED by this walk on the folded file rather than
@@ -335,6 +318,12 @@ def _residue_block() -> str:
     moved it again — `main`'s `seen.update(kwargs)` row took the pin UP to `11909` and the block
     gained prose stating that attribution — and the LATEST fold re-derived the pair at `11910`
     on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk:
+    — and THIS BRANCH'S OWN re-cut note (the block recording that its `(11912, …)` was its own merge
+    tree's pair for a `main` that has since moved, that `#14459` then repaired `main`'s red itself,
+    and that the pair is therefore `main`'s and UNCHANGED) appended `#:` lines to
+    `tools/sdk_privatise.py`, so the figure above is RE-MEASURED by this walk on this file at 1976
+    rather than adjusted by arithmetic from `main`'s 1954 — carrying that figure forward is exactly
+    what this arm exists to refuse,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
@@ -518,13 +507,13 @@ _ARM_REFSPECS: dict[str, str] = {
     # (#14282 review, P2). One key, one row.
     "e0accb8fe6": "+e0accb8fe6362942a0c847c7daa1829e272296a9:refs/pi/e0accb8fe6",
     "72c104bcbb": "+72c104bcbb1cbcef901476a535ed35262d167e02:refs/pi/72c104bcbb",
-    # ⛔ THE `#14506` FOLD'S TWO PARENTS ARE FULL-SHA WANTS, not refs. `59a08fdb8b` happens to be
-    # `main`'s tip today and `05c46e24a278` happens to be `refs/pull/14480/head` today, and BOTH
-    # addresses are lies the moment either moves — a re-pin push advances the PR ref, and `main`
-    # advances with every merge it lands. So neither is named by a moving ref: the want form is what
-    # still resolves after the movement, and it is the form this map already grades.
-    "05c46e24a278": "+05c46e24a2782c35c52096a5db2bf07c8eae4708:refs/pi/05c46e24a278",
+    # ⛔ THE RECURRENCE'S TWO ADDRESSES ARE FULL-SHA WANTS, not refs. `59a08fdb8b` was a `main` tip
+    # and `6a02515d14ad5` is the tip this branch was folded onto; NEITHER is safe as a ref, because
+    # `main` advances with every merge it lands and a re-pin push advances a PR ref — which is
+    # precisely how the first of these stopped being a tip in the middle of this PR. The want form is
+    # what still resolves after the movement, and it is the form this map already grades.
     "59a08fdb8b": "+59a08fdb8b4094c1b0394d4191804797facce47b:refs/pi/59a08fdb8b",
+    "6a02515d14ad5": "+6a02515d14ad5587b5b57800813f3f1b37bb43ec:refs/pi/6a02515d14ad5",
     # `8889f1140105` is a MERGE on a deleted feature branch, so no depth-1 REF arms it — but a sha
     # want does, measured from a clone holding neither object: `git fetch --dry-run --depth=1
     # https://github.com/daniel-ospina/tortoise.git 8889f1140105677add2c7c4dd60d0c8c5080ea26` →
@@ -2226,17 +2215,18 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # graded once. Measured: `(11835, "891187f5a4636487")` and `(11843, "6aed5368ffa10513")`.
     "8889f1140105": (11835, "891187f5a4636487"),
     "27cd81d55ebd": (11843, "6aed5368ffa10513"),
-    # ⛔ THE `#14506` FOLD'S TWO PARENTS, RECORDED BECAUSE THE RE-CUT PUBLISHES BOTH IN THE GRADED
+    # ⛔ THE RECURRENCE'S TWO ADDRESSES, RECORDED BECAUSE THE RE-CUT PUBLISHES BOTH IN THE GRADED
     # REGISTER (`<rev>` **COMMITS** `(N, "digest")`). Without these keys the orphan arm would have
     # no key to report and the object-free arm would red on a rev the map lacks — the exact
     # doorway this map's comment above documents twice (a rev published in a spelling the register
     # does not reach is graded by nothing, so a wrong pair passes). Both pairs are what the rev
-    # COMMITS, NOT what its own tree derives — the distinction matters for `main` here, whose
-    # committed pair `(11910, "adc8229295339239")` is one row STALE against the `(11911, …)` its
-    # tree derives, and the block says so in those words. Verified the way every other entry is:
-    # `git show <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`.
+    # COMMITS, NOT what its own tree derives — the distinction matters for `59a08fdb8b` here, whose
+    # committed pair `(11910, "adc8229295339239")` was one row STALE against the `(11911, …)` its
+    # tree derived, and the block says so in those words. `6a02515d14ad5` is the fold that REPAIRED
+    # that red, and its committed and derived pairs agree here. Verified the way every other entry
+    # is: `git show <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`.
     "59a08fdb8b": (11910, "adc8229295339239"),
-    "05c46e24a278": (11911, "3e92044bab08cc3d"),
+    "6a02515d14ad5": (11910, "3216395d35345904"),
 }
 
 
