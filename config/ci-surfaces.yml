@@ -13,6 +13,12 @@ version: 1
 #
 # The value (recomputable from the committed `durations` map:
 # `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
+# S is chosen by that formula on the committed map, and the minutes it yields
+# are deliberately NOT restated here — they move with every re-cut, which is
+# how this block went stale twice. The authoritative pins WERE the balance-band
+# test (`test_real_workflow_halves_are_consistent`, CUT in the B7 test cut on
+# 2026-11-23) and the lane-parity superset test below, which recomputes from the
+# map and stays.
 # S is chosen by that formula on the committed map. What is deliberately NOT
 # restated here is the S-choice ARITHMETIC — it moves with every re-cut, which is
 # how this block has gone stale. Three tests are authoritative, and TWO of
@@ -90,8 +96,10 @@ version: 1
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
 # from the pre-suite terms (those are measurements and file facts).
 #
-# The 1.25x balance band is enforced by `test_real_workflow_halves_are_
-# consistent`, which recomputes the ratio from the committed map. The old
+# The 1.25x balance band was enforced by `test_real_workflow_halves_are_
+# consistent`, which recomputed the ratio from the committed map (that arm was
+# CUT in the B7 test cut, 2026-11-23); what still checks it is `--integrity`'s
+# `workflow_halves_issues()`. The old
 # "single-file floor" argument is RETIRED: it rested on
 # `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
 # file — so extra shards do keep reducing max(shard). The lane-parity contract
@@ -160,10 +168,12 @@ carve_shards: 3
 #
 # Absence means 2 — the shape this repo ran until now — so deleting this key
 # gives the leg count back. It is NOT, on its own, a complete rollback: the
-# wall-target guard recomputes from the map, and 2 legs project ~20.9m against
-# the 10m target, so removing the key reds it
+# wall-target guard recomputed from the map, and 2 legs projected ~20.9m against
+# the 10m target, so removing the key then redded it
 # (`tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_
-# the_wall_target`). A real rollback therefore moves the target/guard too — which
+# the_wall_target`, CUT in the B7 cut, 2026-11-23 — nothing computes that
+# projection now, so re-derive it by hand with `slow_wall_projection()`). A real
+# rollback therefore moves the target/guard too — which
 # is what makes a growing slow file red HERE rather than silently restoring the
 # ceiling.
 slow_shards: 5
@@ -9592,9 +9602,10 @@ surfaces:
   #     `::test_declared_list_matches_the_observation` re-derives the set by running
   #     pytest with an EMPTY URI and reds a declared/observed mismatch (#6884);
   #   * the `durations:` row → the ENTRY RULE pin
-  #     (`tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`),
-  #     which sees ONLY the files named in `ROWED_BY_THIS_FOLD`; the coverage check is a
-  #     0.90 RATIO with headroom and is silent over one missing row.
+  #     (`tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`,
+  #     CUT in the B7 test cut on 2026-11-23 — nothing pins this now), which saw ONLY
+  #     the files named in `ROWED_BY_THIS_FOLD`; the coverage check is a 0.90 RATIO
+  #     with headroom and is silent over one missing row.
   # The three are added together because a lane that adds one and stops is red in a leg
   # it is not looking at — not because any one check reds the others.
   - test_evictor_invalidates_fallback_snapshot_13123.py
@@ -12245,8 +12256,9 @@ tier1:
 # is right. Matching that arithmetic is also why #9539's lever is the LEG COUNT
 # rather than a better cut of two: `slow_shards: 5` takes the critical leg from
 # 18.95m to 7.58m.
-# `test_slow_leg_bounds_clear_the_committed_work` re-derives the 40m watchdog's
-# headroom from the DERIVED legs against the 2.0x `WATCHDOG_HEADROOM` floor (5.3x
+# `test_slow_leg_bounds_clear_the_committed_work` re-derived the 40m watchdog's
+# headroom from the DERIVED legs against the 2.0x `WATCHDOG_HEADROOM` floor (CUT in
+# the B7 test cut, 2026-11-23: re-derive by hand; 5.3x
 # at the 7.58m heavier leg of the pre-#10194 pool; 6.99x at today's 5.72m — the
 # ratio is DERIVED, so it moves with the pool and is not restated as a fixed
 # number), and the workflow's drift guard pins the union of the EXPANDED legs to
@@ -12504,8 +12516,8 @@ slow_files:
 # map's slow-pool rows are themselves only as fresh as the last sweep
 # (`tools/ci_timing.py --refresh-durations`, run by `ci-timing.yml`), so a stale
 # row mis-ranks the pack. The watchdog's headroom (recomputed from the
-# committed leg weights by `test_slow_leg_bounds_clear_the_committed_work`) is
-# what absorbs a ranking error; the durable fix is the scheduled refresh
+# committed leg weights by `test_slow_leg_bounds_clear_the_committed_work`, an arm
+# CUT on 2026-11-23 — by hand now) is what absorbs a ranking error; the durable fix is the scheduled refresh
 # (`.github/workflows/ci-timing.yml` → `tools/ci_timing.py --refresh-durations`),
 # which ships on its own and is NOT half-fixed here.
 #
@@ -12519,8 +12531,9 @@ slow_files:
 # 10.5x at today's 5.72m leg — the multipliers are DERIVED, so re-derive them
 # rather than quoting these); deriving them from the leg
 # weight is the per-leg `matrix.watchdog_minutes` follow-up. The floor that
-# keeps the literals honest is
-# tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
+# kept the literals honest was
+# tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work (CUT in
+# the B7 test cut, 2026-11-23; recompute it by hand before moving a literal).
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
 - eval/retrieval/test_run.py
