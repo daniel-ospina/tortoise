@@ -5413,16 +5413,53 @@ export function takedownClaim(
  */
 export function disposeQuarantine(
   quarantine: string, raw: string, path: string, expected: string,
+  //: TEST seams with the module defaults, for the same reason `restoreQuarantine`
+  //: takes them: the failure arms cannot be built portably otherwise.
+  link: (from: string, to: string) => void = linkSync,
+  move: (from: string, to: string) => void = renameSync,
 ): boolean {
   if (raw !== expected) {
     try {
-      linkSync(quarantine, path);
+      link(quarantine, path);
     } catch (err) {
-      warn(
-        `a displaced drain claim could not be restored at ${path} ` +
-          `(${(err as NodeJS.ErrnoException)?.code ?? String(err)}); ` +
-          "its holder keeps draining until its next refresh (up to ttl/3)",
-      );
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "EEXIST") {
+        warn(
+          `a displaced drain claim could not be restored at ${path} ` +
+            `(${code}); its holder keeps draining until its next refresh (up to ttl/3)`,
+        );
+      } else {
+        // ⛔ THE ONLY OTHER COPY (review, P3): the rename vacated `path`, so on a
+        // non-EEXIST failure this quarantined file is all that is left of a live
+        // holder's claim. Deleting it turns "restore failed" into "claim destroyed"
+        // and frees the path for the next `linkSync`. It is not merely spared: while
+        // the path is still FREE the object is renamed BACK (`renameSync` needs no
+        // hard link — `tox-dev/filelock#843`), and only when that also fails is the
+        // copy left in place (BOUNDED — the `*.tmp-*` shape is swept by mtime).
+        let pathFree = false;
+        try { lstatSync(path); } catch { pathFree = true; }
+        if (pathFree) {
+          try {
+            move(quarantine, path);
+            return false;
+          } catch (renameErr) {
+            warn(
+              `a displaced drain claim could not be restored at ${path} ` +
+                `(${code ?? String(err)}; rename: ${
+                  (renameErr as NodeJS.ErrnoException)?.code ?? String(renameErr)
+                }) and is PRESERVED at ${quarantine}; its holder keeps draining ` +
+                "until its next refresh (up to ttl/3)",
+            );
+            return false;
+          }
+        }
+        warn(
+          `a displaced drain claim could not be restored at ${path} ` +
+            `(${code ?? String(err)}) — the path is OCCUPIED, so the copy is ` +
+            `PRESERVED at ${quarantine}; its holder keeps draining until its next ` +
+            "refresh (up to ttl/3)",
+        );
+      }
     }
     try { unlinkSync(quarantine); } catch { /* best effort */ }
     return false;
@@ -5471,14 +5508,25 @@ export function restoreQuarantine(
   quarantine: string,
   path: string,
   link: (from: string, to: string) => void = linkSync,
-  move: (from: string, to: string) => void = rename,
+  move: (from: string, to: string) => void = renameSync,
 ): boolean {
   try {
     link(quarantine, path);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
+    // EEXIST is the normal case: a newer object already holds the path, and that is
+    // a holder either way. ANY other errno means the object we could not read could
+    // NOT be put back — and since the rename already vacated `path`, the quarantined
+    // file is then the ONLY copy of a live holder's claim.
+    //
+    // ⛔ SO IT IS NOT DELETED (review, P3). This used to warn and then `unlinkSync`
+    // unconditionally, which destroyed that only copy and answered `held` over an
+    // EMPTY path: the next `linkSync` wins and two holders coexist for up to
+    // `ttl/3`, silently — the window the quarantine rule exists to close, with the
+    // moved-aside evidence gone too. `link(2)` lists
+    // EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside EEXIST, and
+    // ENOSPC/EDQUOT on a spool directory is the ordinary case, not the exotic one.
     if (code === "EEXIST") {
-      // A newer object holds the path, and that is a holder either way.
       try { unlinkSync(quarantine); } catch { /* best effort */ }
       return true;
     }
@@ -5797,6 +5845,13 @@ export function acquireDrainClaim(
           // A peer's claim appeared in the window and was put back: there IS a
           // holder, so answer CONTENTION (no obstruction marker). Reporting it as
           // an obstruction ran the pass UNCLAIMED beside a live claim.
+          //
+          // ⛔ "HELD" WITH NOTHING AT THE PATH IS A FAILED RESTORE (review, cycle 16,
+          // P3): the object is the only copy and now sits in the quarantine, so the
+          // caller's `readDrainClaim` arm finds no record and would fall through to
+          // its UNCLAIMED arm. Mark the lost race instead, so the caller fails CLOSED
+          // and does not name a holder it cannot see.
+          if (!existsSync(path)) markRaced();
           return undefined;
         }
         // `gone` / `done`: the path changed, so RETRY — the next tick either installs

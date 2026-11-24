@@ -444,10 +444,36 @@ def _dispose_quarantine(quarantine: Path, data: bytes,
                 f"until its next refresh (up to {_ttl_third_hint()})",
                 file=sys.stderr)
         except OSError as exc:
+            # ⛔ THE ONLY OTHER COPY (review, P3). The rename vacated `path`, so on a
+            # non-`EEXIST` failure this quarantined file is all that is left of a
+            # live holder's claim. Unlinking it turned "restore failed" into "claim
+            # destroyed" and freed the path for the next `link` — two holders for up
+            # to `TTL/3`, silently. `link(2)` lists
+            # EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside EEXIST.
+            # ⛔ AND THE RECOVERY IS THE SAME ONE :func:`_restore_quarantine` USES:
+            # while the path is still free, `rename` needs no hard link, so the
+            # displaced claim goes BACK instead of being stranded for the sweeper to
+            # collect minutes later. Only when that also fails is the copy left in
+            # place (BOUNDED — the `.tmp-` infix is what the sweeper collects).
+            if not os.path.lexists(path):
+                try:
+                    os.rename(quarantine, path)
+                    return False
+                except OSError as rename_exc:
+                    print(
+                        "tortoise.drain_claim: a displaced claim could not be "
+                        f"restored ({exc}; rename: {rename_exc}) and is PRESERVED "
+                        f"at {quarantine}; it will be re-verified at the holder's "
+                        "next refresh",
+                        file=sys.stderr)
+                    return False
             print(
                 f"tortoise.drain_claim: a displaced claim could not be restored "
-                f"({exc}); it will be re-verified at the holder's next refresh",
+                f"({exc}); the path is OCCUPIED, so the copy is PRESERVED at "
+                f"{quarantine} and it will be re-verified at the holder's next "
+                "refresh",
                 file=sys.stderr)
+            return False
         with contextlib.suppress(OSError):
             os.unlink(quarantine)
         return False
@@ -845,17 +871,26 @@ def _clear_unusable_claim_path(path: Path) -> str:
         # `filelock` advisory GHSA-fq56-3cx3-fjxp describes, and it inverts the
         # doctrine `acquire` states 40 lines above: a regular file we could not read
         # is HONOURED and never unlinked (#14480 review, F3).
-        # ⛔ AND THE ANSWER IS `HELD`, NOT `REFUSED`, EVEN WHEN THE RESTORE ITSELF
-        # FAILED. ``REFUSED`` raises ``DrainClaimUnavailable``, whose consumer
-        # re-derives the truth from the path — and this object is no longer AT the
-        # path, so `flush_spool`'s handler sees nothing there and runs the whole
-        # pass UNCLAIMED beside the holder whose record we displaced
-        # (`capture_spool.py:4366-4375`; the Pi twin takes the same unclaimed arm at
-        # `tortoise-capture.ts:4546`). `HELD` is the one answer that keeps the pass
-        # off the spool, and a displaced holder that still believes it holds IS a
-        # holder. The cycle-17 review proposed `REFUSED`; verified against the
-        # consumers, it would reintroduce the two-drainer defect this arm removes.
-        _restore_quarantine(quarantine, path)
+        # ⛔ AND THE ANSWER IS STILL `HELD` WHEN THE RESTORE FAILED (review, P3) —
+        # the failure mode was never the answer, it was the DELETION: the restore
+        # used to unlink the only copy and then report HELD anyway, emptying `path`
+        # so the next `link` won it (the two-drainer window this branch exists to
+        # close). `HELD` is the fail-CLOSED answer on this leg: `acquire` returns
+        # None, which `flush_spool` reads as `held_by_claim` and attempts NOTHING.
+        # ⛔ NOT `_CLEAR_REFUSED`, which the review proposed: that raises
+        # `DrainClaimUnavailable`, whose handler stats the path, finds nothing, and
+        # runs the pass UNCLAIMED with the false reason "the spool root cannot hold a
+        # claim" (`capture_spool.py:4366-4375`; the Pi twin takes the same unclaimed
+        # arm at `tortoise-capture.ts:4546`) — strictly worse than a contention
+        # answer. And when the path is still FREE the restore does not merely leave
+        # the copy aside: `_restore_quarantine` `rename`s it back, so the holder
+        # keeps holding instead of being swept up minutes later.
+        if not _restore_quarantine(quarantine, path):
+            print(
+                f"tortoise.drain_claim: the unreadable claim at {path} could not be "
+                "put back; it is left in the quarantine and this pass must not run "
+                "beside it",
+                file=sys.stderr)
         return _CLEAR_HELD
     try:
         os.unlink(quarantine)

@@ -4999,7 +4999,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: never carried. Generation stays 33 for the same reason the earlier re-cuts did:
 #: **33 has never shipped**, so it freezes when this reaches `main`, not before.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "105d5667ad2f959ed96f1633e32e24fe7f20b77dfbc326ce4641d7b29ebe18c5")
+    33, "d27c01ee4fbb767619bf65de39ec3b6baddfa32dd4d7207c8dbac897eae8c27d")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5189,7 +5189,7 @@ _GENERATION_DIGESTS = {
     # that re-arms a lease which lapsed during the pass's own unbounded whole-spool
     # scan, on both legs. A behaviour change on shipped bytes, and the digest moves
     # with it; 33 still has never shipped, and freezes the moment it reaches `main`.
-    33: "105d5667ad2f959ed96f1633e32e24fe7f20b77dfbc326ce4641d7b29ebe18c5",
+    33: "d27c01ee4fbb767619bf65de39ec3b6baddfa32dd4d7207c8dbac897eae8c27d",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
