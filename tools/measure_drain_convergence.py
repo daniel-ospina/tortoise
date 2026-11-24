@@ -34,17 +34,42 @@ What it measures, and why each number is in the receipt:
 * ``high_water`` — the most captures the DRAIN held concurrently. It is the
   ceiling's own measurement: at 1, seven of the server's eight slots stay free
   for the user's live captures (condition 3's half of the story).
-* ``claim_winners`` — from a separate 8-process race: how many drainers acquired
-  the claim. MUST be 1. Threads would do for the drain measurement (the claim is
-  file-based, so it excludes them identically), but the population this protects
-  is PROCESSES, so the exclusion is measured across processes.
+* ``winners`` — from a separate 8-process race: how many drainers acquired the
+  claim. Threads would do for the drain measurement (the claim is file-based, so
+  it excludes them identically), but the population this protects is PROCESSES,
+  so the exclusion is measured across processes. ⛔ THE FIELD IS ``winners``; an
+  earlier revision of this docstring called it ``claim_winners``, a name the
+  receipt never carries, so a reader grepping the output found nothing (#14480
+  review, cycle 13 P3).
+* ``barren`` — how many processes never reached their attempt because their
+  arrival barrier expired. They are ABSENT from the race, not losers.
+* ``bounded`` — whether every process finished its attempt before the winner
+  released. ``False`` means a late starter could legitimately have taken a free
+  claim, so the winner count no longer measures the protocol.
+* ``supported`` — ``bounded and barren == 0 and winners == 1``, i.e. the receipt
+  is a measurement at all. It is NOT the exit code: the VERDICT is
+  ``_no_verdict``, which covers the three ways of measuring nothing —
+  ``bounded is False``, ``barren > 0``, ``winners == 0`` — and ``main`` exits
+  **2** on any of them. ``winners`` 0 is therefore no longer readable as "the
+  exclusion works": it is no verdict, and a REPORTED ``winners`` of 2 or more
+  stays the FINDING this harness exists to produce (exit 0).
 """
 from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import would fail first, with a traceback instead of this message.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/measure_drain_convergence.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/measure_drain_convergence.py`"
+    )
 
 import argparse
 import json
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -129,12 +154,18 @@ class CeilingServer:
                 self.in_flight -= 1
 
 
-def _claim_race(processes: int) -> dict:
+def _claim_race(processes: int, *, acquire_setup: str | None = None) -> dict:
     """How many of N concurrent PROCESSES take the spool's claim? Must be 1.
 
     Skipped (``null``) on a tree that has no ``tortoise.drain_claim`` — i.e. the
     BEFORE measurement — because the honest answer there is "there is no claim",
     not "0 winners".
+
+    ``acquire_setup`` is a TEST SEAM: it replaces the one line that imports the real
+    ``acquire``, so a test can drive a protocol that ADMITS two holders — the
+    condition the barrier below must survive rather than deadlock on. It has no
+    production caller (#14480 review, F1: the two-winner receipt the tool's own
+    tests built was unreachable from here, so nothing proved the barrier allowed it).
     """
     if not (REPO_ROOT / "tortoise" / "drain_claim.py").is_file():
         return {"supported": False, "winners": None}
@@ -158,6 +189,18 @@ def _claim_race(processes: int) -> dict:
     # only meaningful over a population that provably overlapped (#14423 cycle-7
     # review, P2). Each process touches its own arrival marker BEFORE it attempts,
     # so `all-present` means every attempt happened while the winner held.
+    #
+    # ⛔ AND THE HOLD IS RELEASED BY "EVERY PEER HAS FINISHED ATTEMPTING", EACH PEER'S
+    # OWN MARKER INCLUDED — not by "processes - 1 other markers". The earlier barrier
+    # waited for `processes - 1`, on the assumption that a winner's marker only lands
+    # AFTER it releases; with TWO winners the marker population therefore topped out
+    # at `processes - 2`, every winner blocked until the 60 s deadline, `bounded`
+    # became False, and the run reported NO VERDICT (exit 2, "re-run on a quieter
+    # box") for exactly the two-drainer finding this harness exists to produce
+    # (#14480 review, F1). Marking the ATTEMPT as finished (won or lost) before the
+    # hold makes the barrier a count of attempts, which is the fact the hold needs,
+    # and makes a two-winner receipt reachable AND a FINDING.
+    acquire_setup = acquire_setup or "from tortoise.drain_claim import acquire\n"
     script = (
         f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r})\n"
         "import os, time\n"
@@ -170,44 +213,76 @@ def _claim_race(processes: int) -> dict:
         "deadline = time.monotonic() + 60.0\n"
         "while len(list(arrivals.iterdir())) < " + str(processes) + ":\n"
         "    if time.monotonic() > deadline:\n"
+        "        (done / me).write_bytes(b'x')  # I will never attempt: do not block a winner\n"
         "        print('BARREN')\n"
         "        raise SystemExit(3)\n"
         "    time.sleep(0.005)\n"
-        "from tortoise.drain_claim import acquire\n"
+        + acquire_setup +
         "c = acquire(root, leg='measure')\n"
+        # BEFORE the hold, and for EVERY outcome: what the hold needs to know is that
+        # this peer will never touch the claim again, not that it lost.
+        "(done / me).write_bytes(b'x')\n"
         "if c is None:\n"
-        "    (done / me).write_bytes(b'x')\n"
         "    print('LOST')\n"
         "    raise SystemExit(0)\n"
         "print('WON', flush=True)\n"
         "# hold until every peer has FINISHED its attempt\n"
-        "while len(list(done.iterdir())) < " + str(processes - 1) + ":\n"
+        "bounded = True\n"
+        "while len(list(done.iterdir())) < " + str(processes) + ":\n"
         "    if time.monotonic() > deadline:\n"
-        "        print('WAITED_TOO_LONG')\n"
+        "        bounded = False\n"
         "        break\n"
         "    time.sleep(0.005)\n"
+        "print('RELEASED', bounded, flush=True)\n"
         "c.release()\n"
-        "(done / me).write_bytes(b'x')\n"
     )
     procs = [subprocess.Popen([sys.executable, "-c", script],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True)
              for _ in range(processes)]
     winners = 0
+    bounded = True
+    barren = 0
     for proc in procs:
         out, _err = proc.communicate(timeout=90)
         winners += out.count("WON")
-    # `overlapped` is the count of processes that reached the attempt line while the
-    # winner still held the claim — the population the answer is about. A run where
-    # it is below `processes` proves the winner's hold was too short, so the number
-    # is reported rather than silently trusted.
-    # `overlapped` is how many processes both ANNOUNCED and FINISHED their attempt
-    # while the winner held the claim — the population the answer is about. A run
-    # where it is below `processes` proves the barrier did not hold, so the number
-    # is reported rather than silently trusted.
-    overlapped = min(len(list(arrivals.iterdir())), len(list(done.iterdir())) + winners)
-    return {"supported": True, "winners": winners, "processes": processes,
-            "overlapped": overlapped}
+        # ⛔ A PROCESS THAT NEVER GOT TO ATTEMPT IS NOT A LOSER. `BARREN` means its
+        # arrival barrier expired, so it took no part in the race — and a run where
+        # NONE arrived used to report `winners: 0` with `bounded: True`, i.e.
+        # `supported: true` and exit 0: a measurement that measured nothing, signed
+        # off as a passing one (#14480 review, F2). Counted, not merely printed.
+        barren += out.count("BARREN")
+        # ⛔ A WINNER THAT RELEASED EARLY IS NOT EVIDENCE OF A SECOND DRAINER. If the
+        # hold timed out, the claim was free again while stragglers were still
+        # starting, and a straggler that then takes it is CORRECT — counting it as a
+        # second winner is the false verdict this harness exists to avoid
+        # (#14423 cycle-7 review, P2). An early release makes the run NO VERDICT.
+        if "RELEASED False" in out:
+            bounded = False
+    # ⛔ `overlapped` USED TO BE REPORTED HERE AND COULD NOT VARY, which is why it is
+    # GONE rather than redefined (#14480 review, F4). Each process — the winner
+    # included — writes exactly one `done` marker, so `len(done)` was ALWAYS
+    # `processes`; the barrier below is what makes that true, so the field could
+    # never report the condition its own comment claimed. A receipt field no mutation
+    # of this file can move reads as coverage and is none.
+    #
+    # What can invalidate the winner count: the winner RELEASING before a straggler
+    # has attempted (then a late starter legitimately takes a free claim and is not a
+    # second drainer — that is `bounded`), a process that never ATTEMPTED at all
+    # (`barren`), and a race nobody won (`winners == 0`). All three now GATE the
+    # verdict (`supported`, and a non-zero exit from `main`) instead of being fields a
+    # human had to remember to check. `bounded` alone was the whole gate when this was
+    # written, which let a run that measured NOTHING exit 0 as `supported: true`
+    # (#14480 review, F2).
+    # ⛔ `supported` IS THE PROTOCOL'S CLAIM: EXACTLY ONE process may take the claim.
+    # It used to be `bounded` alone, which is a statement about the probe's own hold —
+    # a race nobody won was therefore "supported". A run that produced TWO winners is
+    # a genuine FINDING (the defect being measured) and must keep exiting 0 with
+    # `supported: false`; a run that produced NO winner measured nothing and is a
+    # NO VERDICT, which `_no_verdict` turns into exit 2.
+    return {"supported": bounded and barren == 0 and winners == 1,
+            "bounded": bounded, "barren": barren, "winners": winners,
+            "processes": processes}
 
 
 def measure(sessions: int, drainers: int, post_seconds: float) -> dict:
@@ -301,7 +376,61 @@ def main(argv: list[str] | None = None) -> int:
         receipt = measure(args.sessions, args.drainers, args.post_seconds)
     receipt["tree"] = str(REPO_ROOT)
     print(json.dumps(receipt, indent=2 if args.pretty else None, sort_keys=True))
+    # ⛔ `bounded: false` IS "NO VERDICT", AND NOW IT SAYS SO IN THE EXIT CODE.
+    # It used to be a receipt field nothing turned into a verdict: `main` returned 0
+    # unconditionally, so an early release — the case where a straggler legitimately
+    # takes a free claim and `winners` stops measuring the protocol — printed
+    # `winners: 2` and read exactly like a real two-drainer finding (#14480 review,
+    # F4). A measurement whose invalidating condition is invisible is not a
+    # measurement.
+    if _no_verdict(receipt):
+        print(
+            "measure_drain_convergence: NO VERDICT — the claim race did not measure "
+            "the one-drainer protocol: a process never reached its attempt "
+            "(`BARREN`), the winner released before every straggler had attempted "
+            "(`bounded: false`), or the race produced no winner at all. Re-run on a "
+            "quieter box.",
+            file=sys.stderr)
+        return 2
     return 0
+
+
+def _no_verdict(receipt: dict) -> bool:
+    """Whether any claim-race in this receipt MEASURED NOTHING.
+
+    Three ways that happens, and all three are no-verdicts — the receipt may not be
+    read as a passing measurement:
+
+    * ``bounded is False`` — the winner released before every straggler had attempted,
+      so a late starter could legitimately take a free claim and the winner count no
+      longer measures the protocol;
+    * ``barren > 0`` — one or more processes never reached the attempt at all (their
+      arrival barrier expired), so they are absent from the race rather than losing it;
+    * ``winners == 0`` — the race ran and NOBODY took the claim, which is not "the
+      exclusion works", it is "nothing was measured". Read separately from ``barren``
+      because a barrier can be satisfied and the attempt still never land.
+
+    ⛔ ``winners == 2`` IS NOT A NO-VERDICT. That is the FINDING this harness exists to
+    produce (two drainers holding the spool), and folding it into "no verdict" would
+    silence the measurement in exactly the case it was built for. A race on a tree
+    with no ``drain_claim`` at all reports ``winners: None`` and is likewise not
+    counted here — there is no claim to have won.
+    """
+    races = [receipt.get("claim_race")]
+    for key in ("baseline", "saturated"):
+        nested = receipt.get(key)
+        if isinstance(nested, dict):
+            races.append(nested.get("claim_race"))
+    for race in races:
+        if not isinstance(race, dict):
+            continue
+        if race.get("bounded") is False:
+            return True
+        if isinstance(race.get("barren"), int) and race["barren"] > 0:
+            return True
+        if race.get("winners") == 0:
+            return True
+    return False
 
 
 
