@@ -7,13 +7,19 @@ event loop was blocked for 53 s, and the stack's leaf was the record fold
 -> `record_projection.replay`).
 
 The measured cause is not a parse and not a prewarm: every live record write is
-SEVEN blocking Postgres round trips (two tenant-prologue statements, the
-cursor-presence read, three plan statements and one commit) taken on the
-CALLER's thread, and the capture handler's provenance stamp chain emits one
-record per stamped id. 53.041 s / (7 x round-trip latency) = 1647 / 49.7 / 31.5
-records at the 4.6 / 152.5 / 240.7 ms latencies measured on the live box, and
-`workload_in_flight` was observed at 19-32 — the wedge IS the in-flight
-population, i.e. one capture's stamp chain.
+blocking Postgres round trips taken on the CALLER's thread (two tenant-prologue
+statements, the cursor-presence read, the plan's statements, one commit), and the
+capture handler's provenance stamp chain emits one record per stamped id. ⛔ THE
+COUNT IS PER RECORD TYPE and the stamp's type is `PointRevised`, whose plan is TWO
+statements (`UPDATE public.point` + the `journal_event` row) — SIX round trips,
+not the SEVEN of the `PointAdded` shape, whose third plan statement is the
+`node_identity` insert (measured through `record_projection.replay_plan` at this
+head: `PointRevised` -> 2, `PointAdded` -> 3). At N = 6: 53.041 s / (6 x
+round-trip latency) = 1921 / 58 / 36.7 records at the 4.6 / 152.5 / 240.7 ms
+latencies measured on the live box (1647 / 49.7 / 31.5 at N = 7);
+`workload_in_flight` was observed at 19-32, so at the worst latency the wedge is
+a few dozen records — the in-flight population's order, i.e. the stamp chains of
+the captures in flight rather than a hidden blocker.
 
 So the fix is to take that chain OFF the loop, and the pin is structural rather
 than a wall-clock assertion (a timing assertion in a test rots into a pass, and

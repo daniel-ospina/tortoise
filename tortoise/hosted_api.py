@@ -22020,7 +22020,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # MEASURED (issue #13722, `/health` -> `loop_blocks`, the loop
             # thread's own stack, innermost LAST):
             #
-            #   record_projection.py:2119 in _ordered_column_ops
+            #   record_projection.py:2203 in _ordered_column_ops  (the production
+            #     box's checkout read that frame at :2119; #14432 moved the
+            #     definition, so the line is re-pointed at this head — a cite is
+            #     pinned to its content, never to the box's copy)
             #     -> ... -> record_writer.write_live_record -> replay
             #
             # with `loop_blocks.max_age_s` 53.041 against `wait_bound_breaches`
