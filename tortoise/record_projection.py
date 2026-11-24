@@ -2630,9 +2630,17 @@ def _jsonb_cache_clear() -> None:
     not equally safe and pretending otherwise is how a test verb becomes a
     production promise.
 
-    Nothing in production calls it (the deployed schema is immutable); it exists
-    so a process that must PROVE a fresh read — and the pins that assert an edit
-    is seen — has a verb instead of a `del` on a private dict.
+    Nothing in production calls it (the deployed schema is immutable); it is a
+    RESET for pins, so that dropping the derived view does not have to be a `del`
+    on a private dict. ⛔ A process — or a pin — that must PROVE a fresh read asks
+    :func:`_release_schema_cache`, the one verb that can see an edit; this one
+    re-parses the same certified bytes and cannot. The pin that asserts an edit is
+    seen (`tests/test_9548_record_search_keys_shape.py`) sees it through the
+    EXPLICIT-DIRECTORY path's per-call re-read — this function is only its
+    `finally:` reset — and
+    `tests/test_4625_schema_reads_off_write_path.py::test_the_jsonb_reset_cannot_make_an_edit_visible`
+    pins that difference on the RESIDENT path, so the sentence above is
+    executable rather than asserted.
     """
     with _SCHEMA_CACHE_LOCK:
         resident = _RESIDENT_SCHEMA.get("entry")

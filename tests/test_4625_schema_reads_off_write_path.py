@@ -269,6 +269,53 @@ def test_the_refresh_verb_re_resolves_the_resident_schema(monkeypatch, tmp_path)
         rp._release_schema_cache()
 
 
+def test_the_jsonb_reset_cannot_make_an_edit_visible(monkeypatch, tmp_path):
+    """`_jsonb_cache_clear()` is a RESET, not a refresh — pinned as BEHAVIOUR.
+
+    WHY THIS PIN EXISTS (#14459 review, P2). `_jsonb_cache_clear`'s docstring used
+    to close by saying it exists so a process that must PROVE a fresh read has a
+    verb — five lines below the same docstring's headline denying exactly that,
+    and contradicted by this PR's own freshness story (every resident reader
+    parses the entry's memoised SQL, so a `pop` re-parses the SAME bytes). A lane
+    that read that sentence would reach for the reset after a red pin, get a
+    green, and have proven nothing — the false-PASS class this PR is written
+    against. The prose is corrected; this test makes the correction EXECUTABLE,
+    so the claim cannot drift back without a red.
+
+    FALSIFIER (executed — see the commit message): make the reset actually a
+    refresh (`_jsonb_cache_clear` additionally detaching the resident entry, the
+    shape the old sentence promised) and the first `not in` assertion below reds,
+    because the edited column then appears without `_release_schema_cache()`.
+    """
+    tree = _tree(tmp_path)
+    monkeypatch.setattr(rp, "_migrations_dir", lambda: tree)
+    rp._release_schema_cache()
+    try:
+        assert "reset_probe_jsonb" not in rp.jsonb_columns()
+        target = tree / rp.RECORD_MIGRATIONS[-1]
+        target.write_text(
+            target.read_text(encoding="utf-8")
+            + "ALTER TABLE public.point ADD COLUMN reset_probe_jsonb jsonb;\n",
+            encoding="utf-8")
+        rp._jsonb_cache_clear()
+        assert "reset_probe_jsonb" not in rp.jsonb_columns(), (
+            "`_jsonb_cache_clear()` made an edit to the migrations visible — it is "
+            "documented as a RESET over the same certified bytes, and the only "
+            "refresh verb is `_release_schema_cache()`. Either the behaviour or "
+            "the docstring must move, and the docstring is what this PR fixed.")
+        assert "reset_probe_jsonb" not in rp.table_columns()["point"], (
+            "the jsonb reset reached the column map — it drops one derived view, "
+            "not the memoised SQL both views are parsed from")
+        rp._release_schema_cache()
+        assert "reset_probe_jsonb" in rp.jsonb_columns(), (
+            "`_release_schema_cache()` did not re-resolve the resident schema — "
+            "the control half of this pin is dead, so the assertions above prove "
+            "only that NOTHING can see an edit")
+        assert "reset_probe_jsonb" in rp.table_columns()["point"]
+    finally:
+        rp._release_schema_cache()
+
+
 def test_a_named_directory_is_still_revalidated_per_call(tmp_path):
     """The OTHER mode of `_schema_entry`, pinned so the split is not tidied away.
 
