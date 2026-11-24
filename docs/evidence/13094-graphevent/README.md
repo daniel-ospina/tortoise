@@ -357,17 +357,22 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 | `docs/evidence/13094-graphevent/measure_graphevent_residency.py` + 2 JSON outputs | the residency measurement above, reproducible; it refuses any graph name outside the `probe_13094` prefix with **exit 2**, and exits **2** again when a run's schema statement did not install (`schema_complete: false` — a population measured without the schema it claims must not be quoted as one); `1` is reserved for a produced verdict, so a refusal never shares it |
 | `docs/evidence/13094-graphevent/readers.json` | the census table, as the verb emits it |
 
-**No product code changed. No graph write changed. No record read changed. Nothing deleted.**
-`git diff --name-only origin/main...HEAD -- 'tortoise/*.py'` lists two files —
-`tortoise/activation_scorecard.py` and `tortoise/hosted_api.py` — and every changed line in both is
-a `#` comment. That is MEASURED, not restated, because the line counts move with every rebase:
+**#13094 changed no product code. No graph write changed. No record read changed. Nothing deleted.**
+That is MEASURED, not restated, because the line counts move with every rebase. At THIS branch's head
+the tree carries four changed `tortoise/*.py` files and the same command prints `27` — `#13094`'s
+alone prints `0`, and the other three are the product work of the PRs this branch was rebased onto:
+`#13722`'s stamp-chain submission (4 non-comment lines in `tortoise/hosted_api.py`) and `#14483`'s
+landing (`13` in `tortoise/embed_worker.py`, `10` in `tortoise/embed_writer_register.py`);
+`tortoise/activation_scorecard.py` is all-comment. None of that is a drift in this record, and none
+of it is reachable by `#13094`'s own claim — which is what the re-runnable form below scopes:
 `git diff origin/main -- 'tortoise/*.py' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' | grep -vc '#'`
 prints `0` at this PR's own head (`#13094`'s), so no changed body line in ITS diff is anything but a
 comment. ⛔ THAT IS A CLAIM ABOUT THIS PR, NOT ABOUT THE TREE: the command diffs against whatever
-`origin/main` is NOW, so a LATER PR's own product change to `tortoise/hosted_api.py` legitimately
-makes it print a non-zero count here — `#13722`'s stamp-chain move prints `4`, which is that PR's
-behavioural fix and not a drift in this record — and the graded figures below are re-derived by
-`--refresh` rather than by this sentence. Each block carries a
+`origin/main` is NOW, so a LATER PR's own product change under `tortoise/*.py` legitimately makes it
+print a non-zero count here — that is the `27` above, three PRs' behavioural work and not a drift in
+this record — and the graded figures below are re-derived by `--refresh` rather than by this
+sentence. The one figure here that NO `--refresh` row and no test grades is the `27` itself, which is
+why it names the PRs it comes from instead of standing alone. Each block carries a
 count this PR re-derived
 (`160` distinct cite targets above the pivot from `726` in all, over `208` citing files —
 `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and
