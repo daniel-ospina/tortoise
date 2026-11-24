@@ -59,7 +59,7 @@ version: 1
 # on the minute can catch a carried figure — only the `est_seconds` partition can. ⛔ BOTH the
 # seconds and the shard NAMES move when a fast file is registered — the packer is greedy, so a
 # seventh file re-packs every bin — which is why the names are stated and graded, not only the
-# seconds, and why the sentence below is GRADED instead of trusted. That map is the union of both
+# seconds, and why the graded sentence above is GRADED instead of trusted. That map is the union of both
 # parents' registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
 # (`--emit-push-matrix` lists it in shard c) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
 # matters only because it sits one main fold from rounding again. #14407 registered
