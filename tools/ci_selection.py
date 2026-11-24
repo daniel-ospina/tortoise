@@ -2060,6 +2060,18 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # That is the disclosed price of taking a document/status-word
              # scorecard off nearly every PR (AGENTS.md §Product Over Process);
              # re-adding BOTH rows is the way back if the trade is judged wrong.
+             # #13108/#13121 review F4: the LIVE entry below is
+             # `tools/dense_leg_probe_13108.py`, which owns
+             # tests/test_dense_leg_probe_13108.py (registered `core`), and the
+             # same flat `tools/` swallow applies: a probe-only change filters to
+             # `changed == []`, takes the docs-only early return and runs tier-1
+             # smoke, where that file is NOT registered. That matters here for the
+             # reason it mattered for the retired entry above — this instrument's
+             # deliverable is the latency/mechanism table `#13108` reopens
+             # `STORAGE-ARCHITECTURE.md` §14.3 V3 on, so a diff that hard-wires
+             # `over_budget` or drops `percentile`'s `None`-for-empty would merge
+             # with every pin that catches it asleep. Pinned by
+             # tests/test_dense_leg_probe_13108.py::test_a_tool_only_diff_selects_this_pin.
              "tools/dense_leg_probe_13108.py",
              # #13629: the entity-vector retirement pair — the parity census and the
              # preview-by-default stripper — own tests/test_13629_entity_vector_retire.py
