@@ -1,0 +1,35 @@
+{
+  "chars_per_session": {
+    "max": 18894,
+    "mean": 5341.7,
+    "min": 41,
+    "n": 265,
+    "p50": 5274,
+    "p90": 10075,
+    "p99": 16564,
+    "sum": 1415559
+  },
+  "encoder": "tiktoken:o200k_base",
+  "sessions": 265,
+  "tokens_per_session": {
+    "max": 5486,
+    "mean": 1596.3,
+    "min": 25,
+    "n": 265,
+    "p50": 1615,
+    "p90": 2977,
+    "p99": 4759,
+    "sum": 423021
+  },
+  "top_decile_share_of_tokens": 0.217,
+  "turns_per_session": {
+    "max": 88,
+    "mean": 5.9,
+    "min": 2,
+    "n": 265,
+    "p50": 3,
+    "p90": 11,
+    "p99": 43,
+    "sum": 1559
+  }
+}
