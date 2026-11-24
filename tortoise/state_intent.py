@@ -179,15 +179,18 @@ _ENDING_WORDS = (
 #:   `is the v2 api to be retired` asks about something that has NOT ended, and
 #:   the ended population can only answer it with records that have;
 #:   `is the report being archived` is an action in flight, which the population
-#:   cannot represent at all. ⛔ THE INFINITIVE IS STOPPED BY `to` ALONE, and the
-#:   narrower list is measured rather than assumed: `be|going|about|due|scheduled`
-#:   were stop words in the round-8 cut, and every one of its futurity rows still
-#:   refuses without them (`to` sits between the head noun and the ending in each),
-#:   while keeping them refuses two ordinary spellings for no closure at all —
+#:   cannot represent at all. ⛔ THE INFINITIVE IS STOPPED BY THE FRAME
+#:   `to|going|about|due|scheduled (to) be`, and the FRAME is the load-bearing
+#:   part: measured, dropping it (with `being` left in the list) routes all six
+#:   pinned futurity rows, while a bare `be` alternative routes nothing it alone
+#:   can reach — every infinitive that survives to this tail anchor carries the
+#:   marker in front of it. So the frame is what does the work and `be` is
+#:   deliberately NOT a separate stop word (it would be an un-falsifiable
+#:   alternative and, worse, would refuse `is the be all plan archived`-class
+#:   head nouns for no closure). The words are kept INSIDE the frame because
+#:   `due`/`going` are ordinary head-noun modifiers in the second slot:
 #:   `is the annual due diligence report archived` and `is the current going
-#:   concern note archived`, where `due`/`going` are head-noun modifiers in the
-#:   second slot. `be` on its own had no falsifier at all: every infinitive that
-#:   can reach this tail anchor already carries `to`;
+#:   concern note archived` still route;
 #: * DISJUNCTION (`or`) — `is the ticket still open or cancelled` asks about two
 #:   states at once, and one population cannot answer both.
 #:
@@ -260,7 +263,7 @@ _NP_STOP = (
     # `being` is the PROGRESSIVE and is a separate token from the infinitive
     # frame below, because no frame marker sits in front of it:
     # `is the plan being cancelled`, `is the report still being archived`.
-    r"|be|being"
+    r"|being"
     # ⛔ FUTURITY/INTENT is a FRAME, not a word list: `to|going|about|due|scheduled`
     # are ordinary noun modifiers elsewhere (`is the go to market plan archived`,
     # `is the past due invoice archived`, `is the point to point integration

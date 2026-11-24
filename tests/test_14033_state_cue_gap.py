@@ -241,12 +241,12 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
 
     ⛔ A pin has to be able to reach the guard it pins. The
     `is the payment terms clause given the contract was archived` row of
-    ``NOT_SELECTED`` (``tests/test_13557_13558_reachable_reads.py``) is refused
-    by the NP STOP — `the` — and by nothing else: measured, relaxing the start
-    anchor, dropping the tail anchor and widening the word bound all leave it
-    refused, and only dropping `_NP_STOP` routes it. So it cannot pin any of the
-    other guards, and the strings below are the ones that go red when a guard is
-    removed:
+    ``NOT_SELECTED`` (``tests/test_13557_13558_reachable_reads.py``) is refused by
+    BOTH the NP stop (`the`) and the four-word bound: measured, dropping
+    `_NP_STOP` alone leaves it refused (the bound stops the run) and widening the
+    bound alone leaves it refused (the stop fires first) — it routes only with
+    BOTH off. So it pins neither guard on its own, and the strings below are the
+    ones that go red when a single guard is removed:
 
     * dropping the tail anchor routes `is the report archived in S3` — a lookup
       whose ending is not the whole predicate;
@@ -275,15 +275,18 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       to an adjunct clause and the question's predicate is `safe` / `accurate` /
       the policy's applicability, so the run would swallow it;
     * the PREDICATE-MODIFIER stop is the sixth guard, and its falsifier is the
-      TWENTY-THREE measured rows of
-      :func:`test_a_modified_predicate_is_not_the_question_asked` (the count is
-      the tuple's own length, not the review's twelve and not the round-8
-      nineteen: twelve NEGATED — seven plain, four correlative/`no longer`/
-      `any longer`, one standalone `n't` — seven FUTURE, three PROGRESSIVE and
-      one DISJUNCTIVE) —
-      dropping the `not|never|…|or` line routes that class, which answers the
-      question with the POLARITY-INVERTED (or a not-yet-existing, or an
-      in-flight) population;
+      THIRTY-EIGHT measured rows of
+      :func:`test_a_modified_predicate_is_not_the_question_asked` — re-measure
+      `len(MODIFIED_PREDICATE_STAYS_OUT)` rather than trusting any count in prose
+      (twelve NEGATED, six FUTURE, three PROGRESSIVE, one DISJUNCTIVE, four
+      CONTRACTION, seven ADJUNCT/LINKER, four `of`-COMPLEMENT at this head).
+      Dropping the stop routes that class, which answers the question with the
+      POLARITY-INVERTED (or a not-yet-existing, or an in-flight) population.
+      ⛔ The FUTURITY rows are held by the FRAME
+      `(to|going|about|due|scheduled) (to) be`, not by a bare `be`: measured,
+      dropping the frame Routes all six, while a bare `be` alternative — which an
+      earlier cut carried — routes nothing it alone can reach;
+
     * relaxing the START anchor (`^(?:is|are|was|were)` →
       `(?:^|\\b)(?:is|are|was|were)`) routes the two NESTED
       clauses at the end of this loop — measured, with that one edit, nothing
@@ -363,9 +366,10 @@ def test_the_imperative_lookup_for_one_record_is_still_refused():
 
 #: A PREDICATE MODIFIER between the head noun and the ending — the slot can only
 #: be modifying the predicate, and every row here was answered with the ended
-#: population before the NP stop carried `not|never|neither|nor|longer|to|being|or`
-#: (PR #14491 review, P1/P2 — measured on the pre-fix head, all routed to
-#: `ended`/`is_predicate`).
+#: population on the pre-fix head EXCEPT the one BOUNDARY row named below
+#: (`is the plan not going to be cancelled`, which the four-word bound already
+#: refused) — measured row by row against
+#: `git show 4aecc782d3^:tortoise/state_intent.py`, 37 of 38 routed there.
 #:
 #: Four classes, one failure each, and none of them is the question asked:
 #:
