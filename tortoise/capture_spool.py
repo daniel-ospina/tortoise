@@ -3990,11 +3990,19 @@ def _spool_health_line(
     # carries them, and no second walk over `entries/` is needed.
     unrecorded = tuple(_unrecorded_from_metas(scan_metas))
     recorded = read_capture_status(root)
+    previous = recorded
     if queued == 0 and recorded is not None and recorded.get("state") != "ok":
         # Self-healing: the block is over (or the other leg filed everything).
         # Never keep a stale verdict on disk that no evidence supports.
         recorded = {"version": 1, "state": "ok", "queued": 0,
                     "updated_at": _now_iso()}
+        # ⛔ EXCEPT the claim axis: it is a fact about the SPOOL ROOT, not about the
+        # queue, so an empty spool does not make it untrue — and erasing it here
+        # would make the next capture on a broken box report a healthy drain.
+        keep = {k: v for k, v in (previous or {}).items()
+                if k in ("claim_unavailable", "claim_unavailable_reason")}
+        if keep:
+            recorded.update(keep)
         write_capture_status(root, recorded)
     # The verdict over the metas this call ALREADY read — no second scan, and the
     # same arithmetic (`_saturated_for_metas`) the write path runs. READ-ONLY by
@@ -4048,10 +4056,20 @@ def _spool_health_line(
             "inactive", queued, None,
             f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)",
             unrecorded)
-    if queued > 0:
-        return CaptureHealth("draining", queued, None,
-                             f"capture: DRAINING ({queued} queued)", unrecorded)
-    return CaptureHealth("ok", 0, None, "capture: OK (0 queued)", unrecorded)
+    verdict = (
+        CaptureHealth("draining", queued, None, f"capture: DRAINING ({queued} queued)", unrecorded)
+        if queued > 0
+        else CaptureHealth("ok", 0, None, "capture: OK (0 queued)", unrecorded))
+    # ⛔ AND THE LINE CARRIES IT, on both legs (`spoolHealthLine` in the Pi leg):
+    # the record is where a pass that filed nothing can still be heard, so the line
+    # every operator reads is where it must land. Wording pinned by the cross-leg
+    # parity test — a divergence here is invisible to everyone except a human who
+    # ran the other leg.
+    if recorded is not None and recorded.get("claim_unavailable"):
+        reason = recorded.get("claim_unavailable_reason")
+        suffix = f" ({reason})" if isinstance(reason, str) and reason else ""
+        return verdict._replace(line=f"{verdict.line}, NO drain exclusion{suffix}")
+    return verdict
 
 
 def _with_store_sync_terms(base: CaptureHealth, root: Path) -> CaptureHealth:
@@ -4139,6 +4157,27 @@ def _record_capture_status(root: Path, summary: FlushSummary) -> None:
     elif summary.attempted > 0:
         write_capture_status(
             root, {"version": 1, "state": "ok", "updated_at": _now_iso()})
+    # ⛔ THE EXCLUSION BEING OFF IS A DURABLE FACT, not a console line. A pass that
+    # ran WITHOUT the one-drainer claim may have filed nothing at all, so every rule
+    # above can write nothing — and the reason reached only stderr, which the primary
+    # firing path DISCARDS (`session-start.sh`: `nohup … session drain … >/dev/null
+    # 2>&1 &`). The result was the worst shape this file knows: N drainers POSTing
+    # into the same 8-slot ceiling while `capture: OK`/`DRAINING` reported a healthy
+    # box (#14423 cycle-7 review, P1 — the same argument the CAPACITY arm above makes
+    # for its own cause, which is why it is one field and not a new mechanism).
+    #
+    # It is DECORATED onto whatever state this pass earned rather than replacing it:
+    # a quota-blocked box with a broken claim path is both, and dropping the 402 to
+    # report the obstruction would trade one misdiagnosis for another. Writers that
+    # wrote a fresh record above (quota/capacity/ok) self-heal it, because their dict
+    # has no claim field.
+    if summary.claim_unavailable:
+        record = dict(read_capture_status(root) or {"version": 1, "state": "ok"})
+        record["claim_unavailable"] = True
+        record["claim_unavailable_reason"] = (
+            summary.claim_unavailable_reason or "the spool root cannot hold a claim")[:300]
+        record["updated_at"] = _now_iso()
+        write_capture_status(root, record)
 
 
 # ── Replay ─────────────────────────────────────────────────────────────────

@@ -8268,3 +8268,44 @@ test("#14350: renew's CAS loses the window to a peer, and the PEER'S claim stand
     "the peer's fresh claim must be intact: a replace here is two drainers",
   );
 });
+
+// ── #14423 cycle-7 review: the exclusion being OFF is a DURABLE fact ─────────
+
+test("#14350: a recorded claim-unavailable FACT is rendered on the health line", () => {
+  // Both legs read the SAME `<spool>/status.json`, so a box whose claim path is
+  // obstructed must say so in the one line an operator reads — not only on a
+  // stderr the firing path discards. The wording is byte-identical to the Python
+  // leg's (`capture_spool._spool_health_line`); if it drifts, a human who ran the
+  // other leg sees two different answers about one box.
+  //
+  // MUTATION THAT REDS THIS: drop the `claim_unavailable` arm from `spoolHealthLine`
+  // (the line then reports a perfectly healthy drain).
+  const spool = tmpSpool();
+  writeCaptureStatus(spool, {
+    version: 1, state: "ok",
+    claim_unavailable: true,
+    claim_unavailable_reason: "/x/drain.claim exists and is not a claim record",
+    updated_at: new Date().toISOString(),
+  });
+  const line = captureHealthLine(spool, { apiKey: "present" }).line;
+  assert.match(line, /NO drain exclusion/, line);
+  assert.match(line, /not a claim record/, "the line must name WHAT stops it: " + line);
+  assert.match(line, /^capture: OK \(0 queued\)/, "the verdict itself must not move");
+});
+
+test("#14350: a HEALTHY pass clears the recorded claim fact (no one-way latch)", () => {
+  // The other direction, and the reason the field cannot simply be kept: a durable
+  // marker nobody clears teaches an operator to ignore the line.
+  //
+  // MUTATION THAT REDS THIS: keep the stale field on every `ok` write.
+  const spool = tmpSpool();
+  writeCaptureStatus(spool, {
+    version: 1, state: "ok",
+    claim_unavailable: true,
+    claim_unavailable_reason: "stale obstruction",
+    updated_at: new Date().toISOString(),
+  });
+  writeCaptureStatus(spool, { version: 1, state: "ok", updated_at: new Date().toISOString() });
+  const line = captureHealthLine(spool, { apiKey: "present" }).line;
+  assert.doesNotMatch(line, /NO drain exclusion/, line);
+});

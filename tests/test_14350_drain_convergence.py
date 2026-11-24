@@ -56,6 +56,7 @@ from tortoise.capture_spool import (
     flush_spool,
     read_capture_status,
     read_spool_meta,
+    write_capture_status,
     write_spool_entry,
 )
 
@@ -715,7 +716,9 @@ def test_the_falsifier_holds(tmp_path):
     And with TWO drainers it never saturates the 8-slot ceiling, so NO capacity
     refusal occurs here at all: `server.refusals == 0` is asserted below rather
     than implied. The capacity half of the shape gets its own forcing test
-    (`test_a_CAPACITY_refusal_charges_NOBODY`), which drives the refusal
+    (the capacity half is INLINE below, in
+    `test_a_CAPACITY_refusal_charges_NOTHING_and_stops_the_pass` — an earlier revision
+    cited a separate `..._charges_NOBODY` that never existed), which drives the refusal
     directly. This test therefore proves the SERIALIZATION + convergence half
     only, and says so.
 
@@ -849,7 +852,10 @@ def test_a_TAKEDOWN_never_deletes_a_live_claim_installed_under_it(tmp_path):
     TAKEOVER, which this test does not drive, so it would leave every assertion here
     green — the overclaim the Pi twin already records
     (`tortoise-capture.test.ts`, "Reverting to compare-then-unlink does NOT red THIS
-    test"). The acquire path's own cover is `test_the_SECOND_acquire_loses…` /
+    test"). The nearest cover for the acquire path is
+    `test_a_crashed_takers_quarantine_is_COLLECTED_by_the_scratch_sweeper` (which
+    patches `_dispose_quarantine` to False and reds if `acquire` proceeds — it asserts
+    the GIVE-UP, not the restore) and
     `test_a_RENEW_never_clobbers_a_peer_that_claimed_in_the_window` above, which
     drive the window through `_takedown` rather than this primitive.
     """
@@ -1484,3 +1490,64 @@ def test_a_RENEW_never_clobbers_a_peer_that_claimed_in_the_window(tmp_path, monk
     on_disk = drain_claim.read_claim(root)
     assert on_disk is not None and on_disk.get("token") == "peer-token", (
         f"the peer's live claim was destroyed by our refresh: {on_disk}")
+
+
+def test_an_UNCLAIMED_pass_RECORDS_it_DURABLY_and_the_LINE_says_so(tmp_path):
+    """⛔ "RUN UNCLAIMED AND SAY SO" IS NOT SATISFIED BY A CONSOLE LINE.
+
+    The primary firing path discards stderr (`session-start.sh`: `nohup … session
+    drain … >/dev/null 2>&1 &`), so a pass that ran without the one-drainer
+    exclusion and only WARNED left the box reporting `capture: OK`/`DRAINING` while
+    N drainers POSTed into the same ceiling — the silent-failure shape this spool's
+    rules exist to remove (#14423 cycle-7 review, P1).
+
+    This pass files NOTHING (the spool is empty), so every other rule in
+    `_record_capture_status` writes nothing at all: the claim axis has to write the
+    record ITSELF.
+
+    MUTATION THAT REDS THIS: drop the `summary.claim_unavailable` arm from
+    `_record_capture_status` — no `status.json` is written, and the health line
+    reports a normal drain.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    obstruction = drain_claim.claim_path(root)
+    obstruction.mkdir()
+    (obstruction / "keep").write_text("not a claim\n", encoding="utf-8")
+    summary = flush_spool(root, lambda _e: PostOutcome(ok=True), now=1000.0,
+                          sleep=lambda _s: None)
+    assert summary.claim_unavailable is True
+    recorded = read_capture_status(root)
+    assert recorded is not None, "the exclusion being off must be DURABLE"
+    assert recorded.get("claim_unavailable") is True
+    assert "not a claim record" in recorded["claim_unavailable_reason"]
+    line = capture_health_line(root, api_key="present").line
+    assert "NO drain exclusion" in line, line
+    assert "not a claim record" in line, (
+        "the line must name WHAT stops the exclusion: " + line)
+
+
+def test_a_HEALTHY_pass_CLEARS_the_recorded_claim_fact(tmp_path):
+    """The other direction: a durable field nobody clears is a one-way latch, and a
+    one-way latch is how an operator learns to ignore the line.
+
+    MUTATION THAT REDS THIS: keep the stale field when a claimed pass writes `ok`
+    (e.g. merge the previous record into every write instead of only into the
+    claim-decorated one).
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    write_capture_status(root, {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True,
+        "claim_unavailable_reason": "stale obstruction",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    _spool(tmp_path, sessions=1)
+    summary = flush_spool(root, lambda _e: PostOutcome(ok=True), now=1000.0,
+                          sleep=lambda _s: None)
+    assert summary.claim_unavailable is not True
+    recorded = read_capture_status(root)
+    assert not recorded.get("claim_unavailable"), (
+        "a pass that HELD the claim must clear the fact: " + repr(recorded))
+    assert "NO drain exclusion" not in capture_health_line(root, api_key="present").line

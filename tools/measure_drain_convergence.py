@@ -181,11 +181,13 @@ def _claim_race(processes: int) -> dict:
         "    raise SystemExit(0)\n"
         "print('WON', flush=True)\n"
         "# hold until every peer has FINISHED its attempt\n"
+        "bounded = True\n"
         "while len(list(done.iterdir())) < " + str(processes - 1) + ":\n"
         "    if time.monotonic() > deadline:\n"
-        "        print('WAITED_TOO_LONG')\n"
+        "        bounded = False\n"
         "        break\n"
         "    time.sleep(0.005)\n"
+        "print('RELEASED', bounded, flush=True)\n"
         "c.release()\n"
         "(done / me).write_bytes(b'x')\n"
     )
@@ -194,9 +196,17 @@ def _claim_race(processes: int) -> dict:
                               text=True)
              for _ in range(processes)]
     winners = 0
+    bounded = True
     for proc in procs:
         out, _err = proc.communicate(timeout=90)
         winners += out.count("WON")
+        # ⛔ A WINNER THAT RELEASED EARLY IS NOT EVIDENCE OF A SECOND DRAINER. If the
+        # hold timed out, the claim was free again while stragglers were still
+        # starting, and a straggler that then takes it is CORRECT — counting it as a
+        # second winner is the false verdict this harness exists to avoid
+        # (#14423 cycle-7 review, P2). An early release makes the run NO VERDICT.
+        if "RELEASED False" in out:
+            bounded = False
     # `overlapped` is the count of processes that reached the attempt line while the
     # winner still held the claim — the population the answer is about. A run where
     # it is below `processes` proves the winner's hold was too short, so the number
@@ -205,9 +215,15 @@ def _claim_race(processes: int) -> dict:
     # while the winner held the claim — the population the answer is about. A run
     # where it is below `processes` proves the barrier did not hold, so the number
     # is reported rather than silently trusted.
-    overlapped = min(len(list(arrivals.iterdir())), len(list(done.iterdir())) + winners)
+    # `overlapped` is how many processes both ANNOUNCED and FINISHED their attempt.
+    # ⛔ `min(arrivals, done + winners)` was INERT — every process writes exactly one
+    # `done` marker, so it was always `processes` and could never report the
+    # condition its own comment claimed. The honest population is `done` (each
+    # process, winner included, writes exactly one), so it is reported as that, and
+    # `bounded` carries the one thing that actually invalidates the count.
+    overlapped = len(list(done.iterdir()))
     return {"supported": True, "winners": winners, "processes": processes,
-            "overlapped": overlapped}
+            "overlapped": overlapped, "bounded": bounded}
 
 
 def measure(sessions: int, drainers: int, post_seconds: float) -> dict:

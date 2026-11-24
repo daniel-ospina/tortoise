@@ -1500,6 +1500,16 @@ export interface CaptureStatus {
   detail?: string;
   /** Entries queued when the state was recorded (advisory, never the authority). */
   queued?: number;
+  /** ⛔ The last pass ran WITHOUT the one-drainer claim, and here is what stopped
+   *  it from taking one. DURABLE on purpose, and decorated onto whatever state the
+   *  pass earned: a pass that ran unclaimed may have filed nothing, so no other
+   *  rule in `recordOutcome` writes at all, and the reason would reach only stderr
+   *  — which the firing path discards (`nohup … >/dev/null 2>&1 &`). Without this
+   *  field the box reports `capture: OK`/`DRAINING` while N drainers POST into the
+   *  same ceiling (#14423 cycle-7 review, P1). Mirrors the Python leg's
+   *  `claim_unavailable` / `claim_unavailable_reason` fields exactly. */
+  claim_unavailable?: boolean;
+  claim_unavailable_reason?: string;
   updated_at: string;
 }
 
@@ -5369,9 +5379,18 @@ export function takedownClaim(
  *
  * `true` means the bytes really were `expected` and the claim is gone. `false`
  * means we displaced somebody else's NEW claim — a third process installed it
- * between our rename and our write — so it is restored by `linkSync` (which
- * cannot replace a claim a FOURTH process has since installed; on `EEXIST` the
- * displaced holder loses and stops at its next refresh — the safe direction).
+ * between our rename and our write — so it is restored by `linkSync`, which
+ * cannot replace a claim a FOURTH process has since installed.
+ *
+ * ⛔ WHAT HAPPENS WHEN EVEN THE RESTORE LOST — stated accurately, because the
+ * earlier version of this sentence ("the displaced holder … stops at its next
+ * refresh — the safe direction") was FALSE, and a false sentence is worse than no
+ * sentence: the displaced holder's claim file is GONE, so it keeps draining until
+ * its next `renew` tells it the claim is not ours — up to `ttlMs / 3` away. Two
+ * drainers can coexist for that window, and it is BOUNDED BY THE LEASE rather than
+ * unbounded, which is the only claim this code makes. The failure is therefore
+ * WARNED rather than swallowed: a silently deleted live claim is exactly the class
+ * this module exists to make visible. Mirrors `drain_claim._dispose_quarantine`.
  *
  * ⚠️ EXPORTED AS THE TEST SEAM — see `takedownClaim`.
  */
@@ -5379,7 +5398,15 @@ export function disposeQuarantine(
   quarantine: string, raw: string, path: string, expected: string,
 ): boolean {
   if (raw !== expected) {
-    try { linkSync(quarantine, path); } catch { /* a fourth holder has it */ }
+    try {
+      linkSync(quarantine, path);
+    } catch (err) {
+      warn(
+        `a displaced drain claim could not be restored at ${path} ` +
+          `(${(err as NodeJS.ErrnoException)?.code ?? String(err)}); ` +
+          "its holder keeps draining until its next refresh (up to ttl/3)",
+      );
+    }
     try { unlinkSync(quarantine); } catch { /* best effort */ }
     return false;
   }
@@ -6084,10 +6111,20 @@ function spoolHealthLine(
   }
   const queued = scan.pending;
   let recorded = readCaptureStatus(dir);
+  const previous = recorded;
   if (queued === 0 && recorded && recorded.state !== "ok") {
     // Self-healing: the block is over (or another leg filed everything). Never
     // keep a stale verdict on disk that no evidence supports.
-    recorded = { version: 1, state: "ok", queued: 0, updated_at: new Date().toISOString() };
+    // ⛔ EXCEPT the claim axis: it is a fact about the SPOOL ROOT, not about the
+    // queue, so an empty spool does not make it untrue — erasing it here would make
+    // the next capture on a broken box report a healthy drain.
+    const keep = {
+      ...(previous?.claim_unavailable ? { claim_unavailable: true as const } : {}),
+      ...(previous?.claim_unavailable_reason
+        ? { claim_unavailable_reason: previous.claim_unavailable_reason }
+        : {}),
+    };
+    recorded = { version: 1, state: "ok", queued: 0, updated_at: new Date().toISOString(), ...keep };
     writeCaptureStatus(dir, recorded);
   }
   // A READ-ONLY question (`repair: false`): a health line must not quarantine,
@@ -6170,10 +6207,19 @@ function spoolHealthLine(
       line: `capture: INACTIVE (no TORTOISE_API_KEY, ${queued} queued)`,
     };
   }
-  if (queued > 0) {
-    return { state: "draining", queued, line: `capture: DRAINING (${queued} queued)` };
+  const verdict = queued > 0
+    ? { state: "draining" as const, queued, line: `capture: DRAINING (${queued} queued)` }
+    : { state: "ok" as const, queued, line: "capture: OK (0 queued)" };
+  // ⛔ AND THE LINE CARRIES IT, byte-identical to the Python leg's
+  // (`_spool_health_line`): the record is the only place a pass that filed nothing
+  // can be heard, so the one line every operator reads is where it must land. A
+  // divergence here is invisible to everyone but a human who ran the other leg.
+  if (recorded?.claim_unavailable) {
+    const reason = recorded.claim_unavailable_reason;
+    const suffix = reason ? ` (${reason})` : "";
+    return { ...verdict, line: `${verdict.line}, NO drain exclusion${suffix}` };
   }
-  return { state: "ok", queued, line: "capture: OK (0 queued)" };
+  return verdict;
 }
 
 /**
@@ -6489,6 +6535,25 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
             : {}),
           updated_at: new Date().toISOString(),
         });
+      }
+      // ⛔ THE EXCLUSION BEING OFF IS A DURABLE FACT, not a console line — the same
+      // argument the capacity arm above makes, for a worse fault: a pass that ran
+      // WITHOUT the one-drainer claim may have filed nothing, so every rule above
+      // can write nothing, and the reason reached only stderr, which the firing
+      // path DISCARDS (`session-start.sh`: `nohup … >/dev/null 2>&1 &`). The box
+      // then reports `capture: OK`/`DRAINING` while N drainers POST into the same
+      // ceiling (#14423 cycle-7 review, P1). Decorated rather than replacing, so a
+      // quota-blocked box with a broken claim path keeps BOTH facts.
+      if (summary.claimUnavailable) {
+        const base: Record<string, unknown> = readCaptureStatus(spoolDir)
+          ?? { version: 1, state: "ok" };
+        writeCaptureStatus(spoolDir, {
+          ...base,
+          claim_unavailable: true,
+          claim_unavailable_reason: (summary.claimUnavailableReason
+            ?? "the spool root cannot hold a claim").slice(0, 300),
+          updated_at: new Date().toISOString(),
+        } as never);
       }
       // Say the state out loud whenever it MOVED: the start-of-session line was
       // printed from the marker this pass has just superseded, and leaving that
