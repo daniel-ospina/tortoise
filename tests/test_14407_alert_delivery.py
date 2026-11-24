@@ -14,8 +14,8 @@ These tests pin the fixed contract:
 
 1. a filing class pushes exactly ONCE per incident lifecycle, and the message
    names the issue (attribution);
-2. a new EPISODE (the incident was resolved) pushes exactly once more — the bound
-   is the episode, never a mute;
+2. a new EPISODE (the incident was resolved) pushes exactly once more — an
+   episode end releases the window, so a new episode is never folded;
 3. a measurement class (R3/R4/R8) files nothing BY DESIGN (#10156's ACTIVITY
    register) and delivers a bounded digest instead of one message per window;
 4. when the incident channel cannot be built at all the human is STILL told — the
@@ -354,7 +354,7 @@ def test_a_reminder_scopes_its_bound_to_a_HELD_window_not_to_the_open_episode(
     notify.reset_abuse_delivery_for_tests()
 
 
-# ── 2. the bound is the EPISODE, never a mute ────────────────────────────────
+# ── 2. a new episode pages at once — bounded, never a mute ─────────────────
 def test_a_pre_14407_rule_less_incident_is_adopted_not_duplicated(delivered):
     """Subjects became rule-scoped here, so an existing ``{org}`` incident must
     be ADOPTED — otherwise the first recurrence files a second issue for one

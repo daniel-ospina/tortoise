@@ -176,9 +176,9 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
     where this ledger is the only delivery there is.
 
     Returning BOTH vocabularies per incident kind costs one dict walk and makes
-    the release independent of which spelling a caller used — the bound is the
-    episode (``#4872``/R2), and an episode end must never leave a stale window
-    behind in any spelling.
+    the release independent of which spelling a caller used — an episode end
+    releases the window whatever spelling armed it, and must never leave a stale
+    window behind in any spelling.
     """
     kinds = list(_EPISODE_INCIDENT_KINDS)
     kinds.extend(event for event, incident in _INCIDENT_KIND_OF_EVENT.items()
@@ -992,8 +992,8 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         reason=f"{reason}{tail}")
                 return
         else:
-            # The bound is the EPISODE, with a bounded RE-ALARM, and both are the
-            # delivery ledger's (`_claim_delivery`). Arm the window here on EVERY
+            # The bound is the WINDOW, with a bounded RE-ALARM, and the ledger is
+            # what holds it (`_claim_delivery`). Arm the window here on EVERY
             # outcome so the first repeat cannot page again in the same minute:
             # the create-once path has already pushed the episode's first message
             # when it FILED, and on DEDUP the ledger alone decides whether the
