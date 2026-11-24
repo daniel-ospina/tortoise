@@ -55,40 +55,17 @@ version: 1
 # x 1.5 = 90.96 m against the 90 m cap (RED, where BOTH parents pass). At S=11
 # the map as #11576 shipped it packed the worst shard at 782.0 s -> 27 m, i.e. 58.64 x 1.5 =
 # 87.96 m: 2.04 m of real headroom rather than the 0.54 m S=10 was clearing by. (The
-# 2026-11-16 durations sweep re-packed the same 11 shards to a 23 m worst-shard watchdog,
-# #12926's own 10.0 s row moved that emission to 24 m (arm-2 SUM 55.64 m, x 1.5 = 83.5 m,
-# 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
-# is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
-# ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `6a02515d14ad` folded in, MINUS this PR's own removal of `tests/test_dod_5090_probe.py` from the
-# `core` surface — that row is what put the file in `fast_pool()`, so dropping it takes the file's
-# weight out of the pool and re-packs every bin) the verb packs seven shards at 825.2 s
-# (a, b, c, d, i, j, k) and four at 825.3 s (e, f, g, h), so
-# `ceil(825.3/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28`, so the two agree by construction rather than
-# by a hand re-read. Re-derive it on the tree after the next fold; never carry this 825.2/825.3.
-# ⛔ THAT READING IS ALSO THIS PR'S OWN REGISTRATION, and `#14559` is why it moved off the
-# 825.1/825.0 five/six split the parent map emitted: registering
-# `tests/test_14559_reaper_schedule.py` on `core` (it was UNCLASSIFIED, which is what `--integrity`
-# reported as manifest drift) puts its flat 2.0 s weight in the pool and the packer is greedy, so
-# `c` moved into the worst bin and the split widened from 0.1 s to 0.1 s across a different name
-# set. The minute did not move (28 m either way) — again, the SECONDS are the graded claim.
-# ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
-# SETS move on every landed registration while the minute has stood at 28 m across every reading of
-# this pool from 835.5 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
-# only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged tree; never carry
-# the last revision's minute, seconds, or split.
 # 2026-11-16 sweep and the two rows that followed it.)
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
-# `main` at `af40c97ca312`, and the pool it emits is the union of BOTH parents' registrations —
+# `main` at `b665cbd619860`, and the pool it emits is the union of BOTH parents' registrations —
 # ⛔ `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
 # `tests/test_14033_state_cue_gap.py` are BOTH `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, and
-# this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
-# (measured: the only `durations` lines this PR touches are comment rewrites of two existing rows,
-# `test_7949_capstone_measure.py` and `test_e2e_wrangler_prewarm.py`, whose values are unchanged), so
-# the split below is `main`'s reading too.
+# this PR DOES add one fast-file registration of its own — `tests/test_14559_reaper_schedule.py`,
+# #14559's schedule fixture (it was UNCLASSIFIED, which `--integrity` reported as manifest drift),
+# whose flat 2.0 s `DEFAULT_FAST_WEIGHT` weight is now in the pool — so the split below is THIS
+# tree's, re-emitted with the verb, and NOT `main`'s reading. The minute did not move; the SECONDS
+# and the NAME SETS did, and those are the graded claim.
 # `8c373f59a1` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the durations
 # map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added, 0 removed,
 # against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue counts; at
@@ -97,17 +74,17 @@ version: 1
 # DELETED, not merged: it said one shard at 838.1 s and ten at 838.2 s, which was true of the previous
 # fold and is not true of this one — the `merge=union` driver (#5373) kept both parents' clauses, so
 # the block briefly claimed two partitions. Re-derived below with the verb.
-# ⛔ AND THIS FOLD REPEATED THE SAME SPLICE, one merge later: `main`'s `b665cbd61986` and
-# `#14559`'s own registration both moved the pool, so BOTH parents' clauses arrived and the block
-# again claimed two partitions (825.2/825.3 AND 825.1/825.0). One graded clause remains, above;
-# the stale parent reading is deleted rather than kept as history, because a second restatement is
-# exactly what `_EMISSION_CLAUSE_RE` reads as a rival claim.
-# What this reading COUNTS: `main` at `b665cbd61986` folded in, PLUS `tests/test_14559_reaper_schedule.py`
-# registered `core` (it was unclassified — the `manifest-integrity` red) at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`. That registration is why the split moved off the parent map's
-# 825.1/825.0 five/six partition: the packer is greedy, so 2.0 s into the pool re-packs every bin and
-# `c` joins the worst one. The minute did not move (28 m either way) — again, the SECONDS are the
-# graded claim and the verb is the only thing that makes them true. Re-derive after the next fold.
+# On THIS merged tree (`main` at
+# `b665cbd619860` folded in) the verb packs seven shards at 825.2 s
+# (a, b, c, d, i, j, k) and four at 825.3 s (e, f, g, h), so
+# `ceil(825.3/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.04`, so the two
+# agree by construction rather than by a hand re-read. Re-derive it on the tree after the next fold;
+# never carry this 825.2/825.3. ⛔ The CAUSAL story this sentence used to carry is DELETED because it
+# is false at this tree: it said removing `tests/test_dod_5090_probe.py` from the `core` surface took
+# that file's weight out of the pool — but the file is registered on the `eval` surface, so
+# `fast_pool()` still carries it and dropping a `core` row would not move the bin. The FIGURES above
+# were re-derived with the verb, and the verb is the only thing that made them true.
 #
 # `8c373f59a15ba` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
 # durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
