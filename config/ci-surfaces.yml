@@ -102,7 +102,7 @@ version: 1
 # #14038's row, which the 836.4 s baseline below already counts (measured: that row is in shard c at
 # `4993fa08`, so the baseline's total includes it), and why every one of them moves the split.
 # `test_notify`) — the `core` row is registered in its own right, so the shard letter is MEASURED
-# (shard `c` at this head) rather than inferred from `test_notify`'s (shard `e`): a `core` neighbour
+# (shard `c` at the head that registered it) rather than inferred from a neighbour: a `core` neighbour
 # sits in a different bin because the packer is greedy, and every shard letter in this block is a
 # `push_legs()` reading at the head it names, not a placement inherited from a neighbouring row.
 # The minute did not move (28 m either way), which is exactly why the SECONDS are the graded claim.

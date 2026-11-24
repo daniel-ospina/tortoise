@@ -693,3 +693,51 @@ def test_an_incomplete_read_never_reaches_the_sql_memo(monkeypatch, tmp_path):
             "the memo was not served back to a later call")
     finally:
         rp._release_schema_cache()
+
+
+def test_a_commented_out_ALTER_cannot_reach_exactly_one_reader(monkeypatch, tmp_path):
+    """All three residents parse the SAME text, including its comment stripping (#4625).
+
+    A record migration carries its DOWN direction in comments, and
+    `_ALTER_ADD_COLUMN_RE` is `re.S`, so a commented
+    `-- ALTER TABLE public.point ADD COLUMN … jsonb;` is a live match for a parser
+    that reads RAW text and no match at all for one that strips. While the `jsonb`
+    reader stripped and the other two did not, that single comment made them
+    disagree about pre-processing rather than about the tree — measured: the column
+    map kept the column, the `jsonb` name set had no such name, and
+    `_jsonb_or_scalar` bound the value as a RAW string (the `22P02` row-drop
+    class). The stripping now happens ONCE, when the SQL is stored.
+
+    FALSIFIER (executed): drop `_strip_sql_comments` from the store and this pin
+    reds on the column-map assertion.
+    """
+    source = _real_migrations()
+    tree = tmp_path / "migrations"
+    tree.mkdir()
+    for name in rp.RECORD_MIGRATIONS:
+        shutil.copy(source / name, tree / name)
+    down = (
+        "\n-- Down (run by hand).\n"
+        "-- ALTER TABLE public.point ADD COLUMN payload_note jsonb;\n")
+    target = tree / rp.RECORD_MIGRATIONS[0]
+    target.write_text(target.read_text(encoding="utf-8") + down, encoding="utf-8")
+    monkeypatch.setattr(rp, "_migrations_dir", lambda: tree)
+    rp._release_schema_cache()
+    try:
+        columns = rp.table_columns()
+        names = rp.jsonb_columns()
+        assert "payload_note" not in columns.get("point", ()), (
+            "a COMMENTED-OUT `ADD COLUMN` reached the column map — a migration's "
+            "DOWN direction is not its UP. The resident readers must parse the "
+            "same comment-stripped text.")
+        assert "payload_note" not in names, (
+            "a COMMENTED-OUT `ADD COLUMN … jsonb` reached the `jsonb` name set")
+        # …and the two readers were looking at the same text all along: an
+        # unstripped store is exactly how one of them sees this comment and the
+        # other does not.
+        assert rp._resident_entry()["sql"] is not None
+        assert "-- Down (run by hand)" not in rp._resident_entry()["sql"], (
+            "the stored SQL still carries comments, so each reader's own "
+            "pre-processing decides what it sees — the divergence this pins")
+    finally:
+        rp._release_schema_cache()

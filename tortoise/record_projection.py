@@ -2342,10 +2342,20 @@ def _entry_sql_state(entry: dict[str, Any]) -> tuple[str, bool]:
     caller deriving an answer FROM THEM needs. (An earlier revision of this
     paragraph claimed the flag was "this call's, not the entry's", which is FALSE
     for the memoised branch: no read happens there at all.)
-    ⛔ AND IT IS THE FLAG EVERY RESIDENT READER GATES ON, because every resident
-    reader (the column map, the refusal carve-out AND the `jsonb` name set) parses
-    THESE SAME BYTES — that is what stops the three from ever disagreeing once the
-    tree changes underneath a resolved entry.
+    ⛔ AND EVERY RESIDENT READER PARSES THESE SAME BYTES — not merely the same
+    FILES. What is stored here is the COMMENT-STRIPPED text
+    (:func:`_strip_sql_comments`), and the column map, the refusal carve-out and
+    the `jsonb` name set all parse that one string. ⛔ Stripping at the STORE, not
+    at each parser, is load-bearing: a record migration carries its DOWN direction
+    in comments, and `_ALTER_ADD_COLUMN_RE` is `re.S`, so a commented
+    `-- ALTER TABLE public.point ADD COLUMN … jsonb;` is a live match for a parser
+    that reads raw text and not for one that strips. Measured on that shape:
+    `table_columns()` kept the column while `jsonb_columns()` had no such name and
+    `_jsonb_or_scalar` bound the value as a RAW string — the `22P02` row-drop
+    class, from two readers disagreeing about PRE-PROCESSING rather than about the
+    tree. Nothing else reads `entry["sql"]`, and on the current tree the parse
+    payloads are identical either way (verified), so this removes the class without
+    moving an answer.
 
     The healthy path is untouched: a first read that finds a complete tree still
     memoises, so a warm process keeps its zero-filesystem-operations property.
@@ -2353,12 +2363,18 @@ def _entry_sql_state(entry: dict[str, Any]) -> tuple[str, bool]:
     entry is keyed on the migration fingerprint (`_schema_entry`), so an
     edit/addition/removal is a cache MISS there whether or not this is memoised.
     """
-    sql = entry["sql"]
-    if sql is not None:
-        return sql, True
+    memoised = entry["sql"]
+    if memoised is not None:
+        return memoised, True
     sql, complete = _read_migrations_state(entry["base"])
     if complete:
-        entry["sql"] = sql
+        # ⛔ STORE AND RETURN THE STRIPPED TEXT, so a caller parses exactly what is
+        # memoised — returning the raw read here while storing the stripped form
+        # made the first (cold) parse differ from every warm one, which is the same
+        # class of divergence one layer down (#4625 review).
+        stripped = _strip_sql_comments(sql)
+        entry["sql"] = stripped
+        return stripped, True
     return sql, complete
 
 
@@ -2780,16 +2796,16 @@ def _declared_types_for_dir(migrations_dir: Path) -> dict[str, dict[str, str]]:
     explicit-directory mode) answer through it, and its result is what
     :func:`_declared_types_from_chunks` produces from one chunk per file.
 
-    ⛔ IT IS NOT "the one parse every reader answers through" — the RESIDENT
-    `jsonb_columns()` parses the schema entry's memoised SQL instead (through the
-    same :func:`_declared_types_from_chunks`, so the PARSE cannot differ), and that
-    is deliberate: every resident reader must read the SAME bytes or they can
-    disagree after an edit. The consequence is stated rather than denied — this
-    function RE-READS the files on every call, so on a resolved resident entry an
-    edit can be visible here and not there until `_release_schema_cache()`. That is
-    the documented trade (`_schema_entry`), and `#11075`'s pin is a per-call
-    CONTRACT read, not the encoder's source of truth; the encoder and the
-    column map, which must never disagree, both come from the certified SQL.
+    ⛔ IT IS NOT "the one parse every reader answers through": the RESIDENT readers
+    parse the schema entry's memoised, comment-stripped SQL through
+    :func:`_declared_types_from_chunks` instead, and that is deliberate — all three
+    must parse the SAME text or they can disagree. The consequence is stated rather
+    than denied: this function RE-READS the files on every call, so on a resolved
+    resident entry an edit can be visible here and not there until
+    `_release_schema_cache()`. That is the documented trade (`_schema_entry`), and
+    `#11075`'s pin is a per-call CONTRACT read, not the encoder's source of truth;
+    the encoder and the column map, which must never disagree, both come from the
+    certified SQL.
 
     Three statement shapes, in file order (append-only history: the LAST
     declaration wins, which is the rule `key_properties()` applies):
@@ -3010,7 +3026,11 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
         # by the next record") true for ALL THREE READERS instead of two, and it
         # costs ZERO filesystem operations: the SQL is already in memory.
         sql, complete = _entry_sql_state(entry)
-        declared = _declared_types_from_chunks([_strip_sql_comments(sql)]) if sql else {}
+        # ⛔ `sql` is already comment-stripped by `_entry_sql_state`, and the other
+        # two readers parse that same string — do NOT strip again here, or this
+        # reader sees a different TEXT than they do (the divergence the module's
+        # freshness block measures).
+        declared = _declared_types_from_chunks([sql]) if sql else {}
         if not declared:
             raise RecordProjectionError(
                 "the record schema is not on disk — no CREATE TABLE for any "
