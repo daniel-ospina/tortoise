@@ -107,14 +107,15 @@ def _wait_for(predicate, timeout: float = 8.0) -> bool:
 def _breadcrumb_body(text: str) -> dict | None:
     """The parsed body of a breadcrumb RECORD, or None while it is not COMPLETE.
 
-    The shipped writers emit their record with ONE ``printf`` whose output
-    reaches the file conversion by conversion, so a concurrent reader can
-    sample any PREFIX of it. Measured on the real writer (400 writes, a
-    concurrent poller): the file was observed at 2, 24, 220, 261 and 287 bytes
-    — FIVE partial states — before its complete 289, and the 2-byte state was
-    ``b'{\\n'``. ``json.loads(b'{\\n')`` raises
-    ``Expecting property name enclosed in double quotes: line 2 column 1
-    (char 2)``, which is the failure that reddened #14445's shard `d`.
+    The shipped SHELL hooks emit their record with ONE ``printf`` whose output
+    reaches the file one ``write()`` per LINE, so a concurrent reader can
+    sample any PREFIX of it: EMPTY first (the redirect's truncate window), then
+    the successive line boundaries. Measured on the real writer (400 writes, a
+    concurrent poller) for a 289-byte record: empty, then 2 bytes, then 24,
+    220, 261 and 287 — the ends of the record's four interior lines. The
+    2-byte state is ``b'{\\n'``, and ``json.loads`` of it raises ``Expecting
+    property name enclosed in double quotes: line 2 column 1 (char 2)``,
+    which is the failure that reddened #14445's shard `d`.
 
     So readiness is COMPLETENESS — the bytes parse as a JSON object — never
     "the file exists" and never "the file is non-empty". Both of those are the
@@ -174,9 +175,15 @@ def _wait_for_breadcrumb(path: Path, what: str, *,
         seen.append(body)
         return True
 
-    assert _wait_for(_complete, timeout=timeout), (
+    # The wait must RUN before the diagnostic is built, and the diagnostic is
+    # total on an empty list: one that can itself raise (`last[-1]` with nothing
+    # appended) would replace the message with an IndexError — the failure mode
+    # this whole change is about.
+    ok = _wait_for(_complete, timeout=timeout)
+    observed = last[-1][:600] if last else "<no read was attempted>"
+    assert ok, (
         f"{what} — no COMPLETE breadcrumb at {path} (absent, still being "
-        f"written, or not a JSON object); last observed: {last[-1][:600]!r}")
+        f"written, or not a JSON object); last observed: {observed!r}")
     return seen[-1]
 
 
@@ -1853,19 +1860,19 @@ def test_the_claude_refusal_naming_a_hostile_path_is_valid_json(tmp_path):
 def test_a_breadcrumb_reads_only_once_it_is_COMPLETE(tmp_path, prefix):
     """A PREFIX of the record is not the record.
 
-    The shipped writers flush their body conversion by conversion, so a
-    concurrent reader can sample any of these prefixes — and
-    ``json.loads(b'{\\n')`` is verbatim the ``Expecting property name enclosed
-    in double quotes: line 2 column 1 (char 2)`` that reddened #14445's shard
-    `d`, off a 2-byte prefix of the record.
+    The shipped shell hooks flush their body one ``write()`` per line, so a
+    concurrent reader can sample EMPTY (the truncate window) or any line
+    boundary — and ``json.loads(b'{\\n')`` is verbatim the ``Expecting
+    property name enclosed in double quotes: line 2 column 1 (char 2)`` that
+    reddened #14445's shard `d`, off a 2-byte prefix of the record.
 
-    Readiness used to be a non-empty check, which accepts every one of these
-    prefixes but the EMPTY document — and the two sites that waited on
-    ``path.is_file()`` alone accepted that one too. So restoring either
-    spelling reds this arm, by a different amount: ``is_file()`` on all four
-    prefixes, ``.read_text().strip() != ""`` on the three non-empty ones (the
-    empty document is held by the ``_read_complete_breadcrumb`` assert above,
-    not by readiness).
+    Readiness used to be a non-empty check at ONE of the four replaced sites,
+    and the bare ``path.is_file()`` the other THREE used. Only the first rejects
+    this arm's empty document, so the two spellings red it by different
+    amounts: ``is_file()`` on all four prefixes, ``.read_text().strip() != ""``
+    on the three non-empty ones only — the EMPTY arm passes under that spelling,
+    because readiness rejects the document before the caller can parse it (no
+    assertion in this arm covers that case for that mutation).
 
     Mutation: restore one of those readiness predicates — this REDs, because
     the prefix is then accepted as COMPLETE and the caller's parse raises
