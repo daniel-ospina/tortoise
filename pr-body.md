@@ -458,18 +458,23 @@ was fixed (a finding is a claim, not a fact): the clear's final `unlink` re-rais
 | **P3 ×3** the figures the previous head shipped did not survive re-measurement: `783 passed` (the row `1474ec7b` added was never folded in), `7 CROSS-LEG` beside two "four"s (the file spawns `node` from FIVE tests), and a citation to `capture_spool.py:4366-4375` for a handler that lives at `4412-4473` | **fixed by MEASURING, not by arithmetic**: the family was re-run (`785 passed`, recorded in `WORKTREE-REPORT.md` by the tool that parses it), the cross-leg count was counted from the spawn sites (`grep -nE "subprocess\.run\(" …`), and the handler's range was read from `grep -n "except DrainClaimUnavailable"`. |
 
 **Cycle 23** (a fresh-context reviewer at `9864698e` — the head after cycle 22's P2 fix) — 3 **P3**,
-and all three were CITATIONS THE CYCLE-22 COMMIT ITSELF INVALIDATED. That is the honest description:
-the reviewer re-verified every substantive claim of cycle 22 (the `DONE`/`done` answer on both legs,
-the digests, all three counts, the census pin, the durability policy, and that each new row reds under
-its named mutant) and found the mechanism clean; what it caught was line numbers moved by the fix's
-own +17 and +51 lines. Recorded rather than minimised, because it is the second time this round's own
-commit created this class.
+and the split matters: TWO were citations the cycle-22 commit itself invalidated (line-number drift
+from its own `+17` and `+52` lines) and the THIRD was an older misattribution the round merely
+SURFACED — "Two existing cases needed a stated reason" was already in the record at `1a0c29c3`,
+before the commit this paragraph is about (`git show 1a0c29c3:pr-body.md` holds it verbatim), so it
+is an ancestor defect and not part of that commit's self-inflicted class. Both halves are recorded
+rather than merged into one count, because the difference decides whether this commit's citation
+drift is a two-occurrence pattern or a three-occurrence one.
+
+The reviewer also re-verified the substantive half in the same pass — the `DONE`/`done` answer on
+both legs, the digests, all three counts, the census pin, the durability policy, and that each new
+row reds under its named mutant — and found the mechanism clean.
 
 | finding | disposition |
 |---|---|
 | **P3** the Residuals bullet's six `markRaced()` line numbers were the PARENT head's — the fix's `+17` lines in `clearUnusableClaimPath` moved all six, so a reader following the pointer found `parsed = undefined;` and two closing braces | **fixed by re-reading them off the tree**: `grep -n "markRaced()" tortoise/pi-hooks/tortoise-capture.ts` → `5870, 5889, 5903, 5908, 5913, 5922`. |
-| **P3** the cycle-21 row's `tests/test_14350_drain_convergence.py:2488` (the ONE legitimate `cycle-19` citation that row exists to certify) moved to `:2540` when the fix inserted 51 lines above it | **fixed**: the citation now reads `:2540`, verified with `grep -n "cycle-19"` on that file. |
-| **P3** the Tests block said "Two existing cases needed a stated reason", presenting #12603's and #2100's adaptations as this PR's work — BOTH landed with #14423, which is already on `origin/main` (`da82ece4226b`) | **fixed by dating the attribution**: the sentence says both landed with #14423 and names them because this contract RELIES on them, not as adaptations this diff makes — checkable, because `git diff origin/main...HEAD -- tortoise/pi-hooks/tortoise-capture.test.ts` contains neither case and its only deleted line is the now-unused `lstatSync` import. |
+| **P3** the cycle-21 row's `tests/test_14350_drain_convergence.py:2488` (the ONE legitimate `cycle-19` citation that row exists to certify) moved to `:2540` when the fix inserted **52** lines above it (`git diff --numstat 1a0c29c3 9864698e -- tests/test_14350_drain_convergence.py` → `52 0`: the `import errno` line plus the 51-line test), and `2488 + 52 = 2540` reproduces the move exactly | **fixed**: the citation now reads `:2540`, verified with `grep -n "cycle-19"` on that file. ⚠️ An earlier wording of this row said `51` — the test is 51 lines but the commit also added the `import errno` line, so the arithmetic did not reproduce; corrected here by counting rather than by describing. |
+| **P3** the Tests block said "Two existing cases needed a stated reason", presenting #12603's and #2100's adaptations as this PR's work — BOTH landed with #14423, which is already on `origin/main` (`da82ece4226b`) | **fixed by dating the attribution**: the sentence says both landed with #14423 and names them because this contract RELIES on them, not as adaptations this diff makes — checkable, because `git diff origin/main...HEAD -- tortoise/pi-hooks/tortoise-capture.test.ts` contains neither case and its only deleted line is the now-unused `lstatSync` import. ⚠️ This defect predates the cycle-22 commit (see the header), so it is recorded as surfaced-here, not created-here. |
 
 ## Residuals, stated
 
