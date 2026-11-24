@@ -578,6 +578,83 @@ def test_every_evidence_bundle_readme_declares_its_affiliation() -> None:
     )
 
 
+def test_every_evidence_bundle_frontmatter_parses_and_survives() -> None:
+    """#14424 review: the presence arm above cannot see a block that does not PARSE.
+
+    ``test_every_evidence_bundle_readme_declares_its_affiliation`` reads the block
+    with ``_missing``, a LINE lexer: it asserts each required KEY appears on some
+    line. ``parse_frontmatter`` catches a YAML error and returns ``{}`` **by
+    design**, so a block can carry every key as a line — green above — and still
+    degrade to nothing for every real consumer. That is the #13432/#13452 class,
+    and until this arm existed the parse half was measured ONLY over
+    ``docs/research/**`` (``test_research_doc_frontmatter_parses_as_yaml``), which
+    is a different population.
+
+    Measured on #14424's own bundle before this arm: its ``aboutSubjects`` read
+    ``… create-point CLI retry safety, doctor Graph: health row`` — an unquoted
+    ``: `` — so ``yaml.safe_load`` raised
+    ``ScannerError: mapping values are not allowed here`` and
+    ``parse_frontmatter`` returned ``{}``: all eight keys gone, `subjects.team`
+    and both affiliation keys with them. The presence arm was GREEN on it, and so
+    was CI. Quoting the value fixed that one bundle; this arm is what stops the
+    next one.
+
+    SCOPE, stated so the sentence is not read as more than it is: this asserts
+    PARSEABILITY and KEY SURVIVAL (the keys the module already treats as required
+    plus the two affiliation keys) by calling the pipeline's own consumer. It does
+    NOT re-run (A)-(E), the research arm's value-truncation checks — those remain
+    specific to ``docs/research/**``, where #13452's `#`-truncation population
+    lives. A value here that parses and keeps its key but is silently SHORT is
+    therefore still unmeasured by this arm, which is a gap this docstring records
+    rather than a coverage claim it makes.
+
+    Non-vacuity: the bundle this was written for reds it at ``6b426d208a6``
+    (``parse_frontmatter -> {}``); it is green at the head that quoted the value.
+    """
+    from tortoise.file_indexer import parse_frontmatter
+
+    paths = [
+        path
+        for path in sorted((ROOT / "docs" / "evidence").glob("*/README.md"))
+        if str(path.relative_to(ROOT)) != GRANDFATHERED
+    ]
+    assert paths, "docs/evidence/ has no README.md files — re-point this guard"
+    # Mirror `_missing`: the team field is an EITHER/OR (TEAM_KEYS), so this arm
+    # must not invent a stricter rule than the presence arm and red content that
+    # arm accepts. Measured: `docs/evidence/3589-3326-salvage/README.md` declares
+    # `ownedBy` and no `subjects.team`, and an earlier cut of this arm failed on
+    # it by requiring the one key instead of the pair.
+    failures: dict[str, str] = {}
+    checked = 0
+    for path in paths:
+        # No block at all is the presence arm's business, above.
+        if not _frontmatter(path):
+            continue
+        checked += 1
+        rel = str(path.relative_to(ROOT))
+        parsed = parse_frontmatter(path.read_text(encoding="utf-8"))
+        if not parsed:
+            failures[rel] = (
+                "frontmatter block does not PARSE (parse_frontmatter -> {}): "
+                "check for an unquoted `: ` or ` #` in a value"
+            )
+            continue
+        dropped = [key for key in (*REQUIRED_KEYS, *AFFILIATION_KEYS)
+                   if key not in parsed]
+        if not any(key in parsed for key in TEAM_KEYS):
+            dropped.append("|".join(TEAM_KEYS))
+        if dropped:
+            failures[rel] = f"parses, but drops {dropped}"
+    assert checked, (
+        "no docs/evidence/*/README.md carries a frontmatter block — this arm "
+        "measured nothing, so it is not green"
+    )
+    assert not failures, (
+        f"docs/evidence/*/README.md frontmatter does not parse or does not "
+        f"survive ({checked} blocks checked): {failures}"
+    )
+
+
 def test_research_doc_frontmatter_parses_as_yaml() -> None:
     """#13432 F1 + #13452: presence is not PARSEABILITY, and neither is SURVIVAL.
 
