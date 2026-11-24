@@ -294,6 +294,26 @@ _PATH_REF = re.compile(r"(?<![\w/])(docs/[A-Za-z0-9_./-]+\.md):(\d+)(?:-(\d+))?"
 #: while leaving `` `317`-scoping:128 `` and `265 scoping:128` intact.
 _SHORT_REF = re.compile(r"(?<![\w-])`?(\d+)`?[-\s](scoping|research):(\d+)(?:-(\d+))?")
 
+#: ⛔ THE ONE DOCUMENT IN THIS REPO WHOSE `hosted_api.py` CITE IS A **STAMP**, and the head
+#: it is stamped at. `03-test-design.md` rows 82 and 147 name the 402 quota guard by NUMBER;
+#: that number is `18205` at `a577d0e25c` and is NOT an address on any later head, which the
+#: document's own provenance note states and its governing decision (`05-verify.md` D5) forbids
+#: "fixing" by re-pointing. It has been re-pointed anyway, three times (`18503` -> `18493`,
+#: `20978`/`18205` -> `21101`, `21101` -> `22257`), and each cut landed on a blank line or an
+#: unrelated comment at the head its reader was actually on — nothing red-ed, because the
+#: sweep above is scoped to `docs/scoping|research` TARGETS and `_dead_reason` only refuses a
+#: BLANK or past-EOF line. So the head must travel WITH the number, on the line that carries
+#: it: a re-point then edits the number beside a head it visibly does not belong to, instead
+#: of silently inheriting the one 150 lines below it. A re-stamp updates this constant and the
+#: note in the same change — deliberately, which is the whole point.
+_STAMPED_A_CORPUS_DOC = (
+    DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone" / "03-test-design.md"
+)
+_STAMP_HEAD = "a577d0e25c"
+
+#: A `hosted_api.py:NNN` pointer wrapped in backticks, as that document writes them.
+_HOSTED_API_POINTER = re.compile(r"`hosted_api\.py:(\d+)`")
+
 
 def _in_scope(target: Path, root: Path) -> bool:
     """Is this citation's target one this guard owns?"""
@@ -735,6 +755,48 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
                 "(measured in-process with the module's own `_sweep`). Landing this would "
                 "put a false PASS claim into a document beside a checker that refutes it. "
                 "State the COMMAND and the head it must be read at — never a green")
+
+
+def test_the_stamped_bundle_cites_carry_the_head_they_resolve_at():
+    """Every `hosted_api.py:NNN` stamp in `03-test-design.md` names its own head.
+
+    The number is only meaningful AT a named sha (D5's rule: "where a number is given it
+    carries the head it was read at"). Without the head on the same markdown line, the next
+    reader supplies the CURRENT head — which is exactly how three re-points landed on a blank
+    line and an unrelated comment while this file was green. This arm is the cheap half of
+    that policy: it does not resolve the number (a `git show` here would put a subprocess and
+    a clone-depth hazard back into this file, which its ci-surfaces row records as absent),
+    it requires the head the number resolves at to be stated where the number is.
+    """
+    assert _STAMPED_A_CORPUS_DOC.is_file(), _STAMPED_A_CORPUS_DOC
+    lines = _STAMPED_A_CORPUS_DOC.read_text(encoding="utf-8").splitlines()
+
+    pointers = [
+        (lineno, match.group(1))
+        for lineno, line in enumerate(lines, 1)
+        for match in _HOSTED_API_POINTER.finditer(line)
+    ]
+    # NON-VACUITY, in two directions: the arm has a population to grade here, and that
+    # population is the STAMPED one. Deleting the cites, or deleting the head from all of
+    # them, must red — a check that passes over nothing grades nothing.
+    assert pointers, (
+        "no `hosted_api.py:NNN` pointer found in "
+        f"{_STAMPED_A_CORPUS_DOC.name} — either the cites were deleted or this arm is "
+        "now scoped to a document that no longer carries them"
+    )
+    assert any(_STAMP_HEAD in line for line in lines), (
+        f"{_STAMPED_A_CORPUS_DOC.name} names no `{_STAMP_HEAD}` stamp head at all"
+    )
+
+    missing = [
+        f"line {lineno} cites `hosted_api.py:{number}` with no `{_STAMP_HEAD}` on the line"
+        for lineno, number in pointers
+        if _STAMP_HEAD not in lines[lineno - 1]
+    ]
+    assert not missing, (
+        "a stamped cite lost the head it resolves at, so a reader supplies their own (and a "
+        "re-point becomes invisible). State the head beside the number: " + "; ".join(missing)
+    )
 
 
 def test_the_real_docs_tree_is_not_empty():
