@@ -71,8 +71,7 @@ version: 1
 # DELETED, not merged: it said one shard at 838.1 s and ten at 838.2 s, which was true of the previous
 # fold and is not true of this one — the `merge=union` driver (#5373) kept both parents' clauses, so
 # the block briefly claimed two partitions. Re-derived below with the verb.
-# ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
+# On THIS merged tree (`main` at
 # `af40c97ca312` folded in) the verb packs six shards at 825.1 s
 # (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so
 # `ceil(825.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
@@ -83,11 +82,6 @@ version: 1
 # that file's weight out of the pool — but the file is registered on the `eval` surface, so
 # `fast_pool()` still carries it and dropping a `core` row would not move the bin. The FIGURES above
 # were re-derived with the verb, and the verb is the only thing that made them true.
-# ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
-# SETS move on every landed registration while the minute has stood at 28 m across every reading of
-# this pool from 825.1 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
-# only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged tree; never carry
-# the last revision's minute, seconds, or split.
 #
 # `8c373f59a15ba` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
 # durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
@@ -139,8 +133,8 @@ version: 1
 # NAME SETS on the head it landed at: at `f4eb91fd7a7a` (#14504) it took the split off the five/six
 # its own parent emitted to three/eight — `d` AND `e` leaving the worst bin — while the minute stayed
 # at 28 m, which is again why the graded claim is the set and not the minute. ⛔ Stated at the sha it
-# was MEASURED at and not as a claim about this head: later folds moved it again (this head emits the
-# one/ten graded above), which is why the rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
+# was MEASURED at and not as a claim about this head: later folds moved it again, which is why the
+# rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: a file a PR ADDS cannot carry a junit reading yet),
 # NOT the hand-picked sub-default weight the row first carried — an unmeasured figure re-packs the
 # bins and so moves THIS graded claim on a number no run measured, which is the deviation the
@@ -157,7 +151,7 @@ version: 1
 # ⛔ ONE RESIDUAL, NAMED: the guard grades the partition and the `ceil(...)` MULTIPLIER
 # (`WATCHDOG_HEADROOM`), NOT the printed `watchdog_headroom:` ratio beside them — so the ratio is
 # re-read by hand whenever the seconds move. It moves: `2.01` at 837.9 s (1680 / 837.9 = 2.0050),
-# and `2.0` at this head's 838.2 s (1680 / 838.2 = 2.0043). A carried ratio in a graded sentence is
+# and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0362). A carried ratio in a graded sentence is
 # exactly the defect this block exists to prevent, one level below what it grades.
 #
 # ⛔ ONE CLAUSE, NOT A LEDGER — AND THE CLAUSE IS GRADED, NOT TRUSTED. The split is 0.1 s wide and
