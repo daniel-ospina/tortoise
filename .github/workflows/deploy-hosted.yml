@@ -1044,8 +1044,11 @@ jobs:
           # mechanism, and it is load-bearing for the RENAMED PAIR: where a Fly name is
           # fed by a GitHub secret of a DIFFERENT name (`GITHUB_CLIENT_ID` ←
           # `GH_CLIENT_ID`, `SUPABASE_SERVICE_ROLE_KEY` ← `SUPABASE_SERVICE_KEY`;
-          # `fly-managed-secrets.txt` line 27 documents the class), blanking the FLY
-          # name above does not blank the SOURCE variable the compose line reads — so
+          # `fly-managed-secrets.txt`'s `gh-secret:<GH_NAME>` paragraph documents the
+          # class — cited by TEXT, never by line: an insertion above it renumbered the
+          # old "line 27" citation onto an unrelated paragraph and nothing redded),
+          # blanking the FLY name above does not blank the SOURCE variable the compose
+          # line reads — so
           # the line still stages the name and only the tail removes it. The gate
           # proves the name did not reach the payload either way.
           # ⛔ KNOWN RESIDUAL, stated rather than implied: for a renamed pair the

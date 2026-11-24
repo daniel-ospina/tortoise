@@ -125,18 +125,24 @@ def _env(
     present: set[str] | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in _AMBIENT}
-    env.update(
-        FLY_SECRETS_FILE=str(secrets),
-        FLY_MANAGED_SECRETS_FILE=str(manifest),
-        DEPLOY_WORKFLOW=str(workflow),
-        FLY_TOML=str(FLY_TOML),
-        FLY_MITIGATION_LEDGER=str(EMPTY_LEDGER),
-    )
+    # ⛔ A DICT LITERAL, not `.update(...)` and not `|=`: `tools/sdk_privatise.py --check`
+    # counts an untyped `.update(`/`.query(`/`.delete(` receiver as residue against a
+    # RATCHET, and it reads `env |= {...}` as that same receiver shape (`+4 env.update` on
+    # this file's own first cut). Its remedy line is "type the receiver, or convert the
+    # call", and a `dict[str, str]` annotation does NOT type it — so the merges below are
+    # spelled `{**a, **b}`, which is the same statement with no receiver to count.
+    env = {
+        **{k: v for k, v in os.environ.items() if k not in _AMBIENT},
+        "FLY_SECRETS_FILE": str(secrets),
+        "FLY_MANAGED_SECRETS_FILE": str(manifest),
+        "DEPLOY_WORKFLOW": str(workflow),
+        "FLY_TOML": str(FLY_TOML),
+        "FLY_MITIGATION_LEDGER": str(EMPTY_LEDGER),
+    }
     if present is not None:
-        env["GH_SECRETS_PRESENT"] = " ".join(sorted(present))
+        env = {**env, "GH_SECRETS_PRESENT": " ".join(sorted(present))}
     if extra_env:
-        env.update(extra_env)
+        env = {**env, **extra_env}
     return env
 
 
@@ -193,7 +199,7 @@ def test_a_clean_run_files_nothing_it_has_no_credential_at_all():
     imported: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            imported.update(alias.name.split(".")[0] for alias in node.names)
+            imported = imported | {alias.name.split(".")[0] for alias in node.names}
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
     assert "subprocess" not in imported, (
@@ -613,6 +619,29 @@ def test_the_resolve_sweep_only_recognises_this_workflows_own_titles():
     )
 
 
+def test_a_whitespace_bearing_name_round_trips_through_the_title_grammar():
+    r"""`read_fly_secret_names` accepts ANY non-empty name, so `\S+` was self-contradictory.
+
+    The comment above `_TITLE_RE` states the permissive class exists "because a name
+    this grammar could not round-trip would be reported by `file` and then never
+    resolved by the sweep, i.e. an issue that outlives its own fix" — and a
+    whitespace-bearing name is exactly such a name. Pre-fix, `--filter-owned-titles`
+    recognised nothing for `A B`, so its issue was filed and could never be closed:
+    the "ledger that can only grow" defect (#8841).
+
+    Kept OUT of `_TITLE_NAMES`, which two other rows compare with `stdout.split()`:
+    a whitespace name would be split into two tokens and grade the harness, not the tool.
+    """
+    for name in ("A B", "A\tB", "A  B"):
+        title = _tool("--title", name).stdout.strip()
+        proc = _tool("--filter-owned-titles", stdin=title + "\n")
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == name, (
+            f"{name!r} was filed under {title!r} and the sweep cannot read it back — "
+            "that issue can never be resolved"
+        )
+
+
 def test_the_workflow_owns_the_grammar_in_exactly_one_place():
     """No title literal in the shell: a grammar spelled twice drifts."""
     text = WORKFLOW_FILE.read_text()
@@ -784,10 +813,19 @@ class _Harness:
         rc: str,
         reading: dict | None,
         file_issues: str = "true",
+        on_default_branch: str = "true",
         report: Path | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> str:
-        """Run the SHIPPED report step. `report` mimics `steps.read.outputs.report`."""
+        """Run the SHIPPED report step. `report` mimics `steps.read.outputs.report`.
+
+        `on_default_branch` stands in for the workflow's `ON_DEFAULT_BRANCH`
+        expression (`github.ref == refs/heads/<default branch>`), exactly as
+        `file_issues` stands in for the `FILE_ISSUES` one: the step reads what
+        Actions would have computed, so the harness never re-implements the
+        comparison. The DEFAULT here is "true" because the ordinary tick this
+        class models is a `schedule` run, which GitHub sends on the default branch.
+        """
         report = report if report is not None else self.root / "reading.json"
         if reading is not None:
             report.write_text(json.dumps(reading))
@@ -798,23 +836,25 @@ class _Harness:
             for k, v in os.environ.items()
             if k not in _AMBIENT and not k.startswith("GH_")
         }
-        env.update(
+        # Spell merges as literals here too — see `_env`'s note on the privatisation ratchet.
+        env = env | {
             # The stub is the ONLY gh/jq on PATH; python3 and the shell still resolve.
-            PATH=f"{self.bin}:{os.environ['PATH']}",
-            GH_STUB_DIR=str(self.state),
-            GH_TOKEN="stub-token",
-            GITHUB_REPOSITORY="daniel-ospina/tortoise",
-            GITHUB_SERVER_URL="https://github.com",
-            GITHUB_RUN_ID="0",
-            RC=rc,
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "GH_STUB_DIR": str(self.state),
+            "GH_TOKEN": "stub-token",
+            "GITHUB_REPOSITORY": "daniel-ospina/tortoise",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "0",
+            "RC": rc,
             # ⛔ The reading's identity now comes from the read step's own OUTPUT, so
             # there is no fixed path to substitute: the harness stands in for that
             # output the same way Actions would.
-            REPORT=str(report),
-            FILE_ISSUES=file_issues,
-        )
+            "REPORT": str(report),
+            "FILE_ISSUES": file_issues,
+            "ON_DEFAULT_BRANCH": on_default_branch,
+        }
         if extra_env:
-            env.update(extra_env)
+            env = env | extra_env
         proc = subprocess.run(
             ["bash", "-e", str(script)], capture_output=True, text=True, env=env, timeout=300
         )
@@ -896,6 +936,93 @@ def test_a_clean_tick_never_closes_a_sibling_monitors_issue(tmp_path):
     calls = h.calls()
     assert "--method PATCH" not in calls, (
         f"the sweep closed an issue it does not own:\n{calls}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_a_clean_reading_on_a_dry_run_never_closes_the_ledger(tmp_path):
+    """`file_issues=false` is a DRY RUN, and it must be dry on BOTH mutating arms.
+
+    Pre-fix `FILE_ISSUES` was consulted in the DRIFT arm only (`:432`), so a
+    `workflow_dispatch` with the default dry-run input read CLEAN, printed
+    "Nothing to file.", and then PATCH-closed every open issue this workflow owns —
+    a run the UI calls a dry run wrote to the ledger. The pin that existed until now
+    (`test_a_dispatched_dry_run_files_nothing`) drives rc="1" only, so the CLEAN arm
+    had no assertion at all.
+    """
+    h = _Harness(tmp_path)
+    h.run(rc="1", reading=_drift_reading("ALPHA_SECRET"))
+    assert len(h.filed_titles()) == 1
+
+    h.reset_calls()
+    out = h.run(rc="0", reading={"verdict": "CLEAN", "remainder": []}, file_issues="false")
+    calls = h.calls()
+    assert "--method PATCH" not in calls, (
+        "a DRY RUN closed the ledger — `file_issues=false` is not honoured on the "
+        f"CLEAN arm, so a 'dry run' wrote to GitHub:\n{calls}"
+    )
+    assert "DRY RUN" in out, out
+    assert len(h.filed_titles()) == 1, "the dry run lost the ledger entry it must not touch"
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_a_clean_reading_from_a_non_default_ref_never_closes_the_ledger(tmp_path):
+    """The sweep may only resolve on a reading of the tree the ledger DESCRIBES.
+
+    `schedule` sends `GITHUB_REF` as the default branch, while `workflow_dispatch`
+    sends the ref the operator picked (GitHub, "Events that trigger workflows") —
+    and this file's header tells operators NEVER to dispatch at `main`, so the
+    natural dispatch ref is the branch that ADDS a declaration. That tree reads
+    CLEAN, and pre-fix the sweep closed the open finding for a name the default
+    branch's deploy gate still refuses; `main`'s next tick then re-filed it as a NEW
+    issue (the dedupe search matches OPEN issues only), so the ledger churned and a
+    "Resolved" comment asserted a recovery that had not happened.
+    """
+    h = _Harness(tmp_path)
+    h.run(rc="1", reading=_drift_reading("ALPHA_SECRET"))
+    assert len(h.filed_titles()) == 1
+
+    h.reset_calls()
+    out = h.run(
+        rc="0",
+        reading={"verdict": "CLEAN", "remainder": []},
+        on_default_branch="false",
+    )
+    calls = h.calls()
+    assert "--method PATCH" not in calls, (
+        "a reading of a NON-default ref resolved the ledger, which describes the "
+        f"default branch:\n{calls}"
+    )
+    assert "default branch" in out, out
+    assert len(h.filed_titles()) == 1, "a non-default-ref run lost the ledger entry"
+
+
+def test_the_ledger_sweep_is_gated_on_the_dry_run_input_and_the_default_branch():
+    """Both gates must be WIRED, and they must precede the sweep.
+
+    The behavioural rows above can only pass while the workflow supplies the two
+    values they hand the harness; deleting either env entry (or moving a guard below
+    the sweep) would leave them green on a harness that supplies what the shipped
+    step no longer receives. This is the static half: `ON_DEFAULT_BRANCH` must be
+    derived from `github.event.repository.default_branch` as an EXPRESSION, and both
+    guards must sit above `auto-file-issue.sh resolve`.
+    """
+    env = _report_step_env()
+    assert "default_branch" in env, (
+        "the resolve sweep is not told which branch it read — without it a dispatched "
+        f"run resolves the ledger from a tree the ledger does not describe: {env}"
+    )
+    run = _report_step()
+    # `.find()` rather than `.index()`: a missing guard must RED, not raise, so the
+    # failure says which gate is gone instead of "substring not found".
+    dry_run_guard = run.find('if [ "${FILE_ISSUES:-true}" != "true" ]')
+    ref_guard = run.find('if [ "${ON_DEFAULT_BRANCH:-false}" != "true" ]')
+    sweep = run.find("auto-file-issue.sh resolve")
+    assert dry_run_guard != -1, "the CLEAN arm no longer honours the dry-run input"
+    assert ref_guard != -1, "the CLEAN arm no longer checks which branch it read"
+    assert sweep != -1, "the resolve sweep is gone — did the ledger ever close (#8841)?"
+    assert dry_run_guard < sweep and ref_guard < sweep, (
+        "a ledger-closing guard sits BELOW the sweep, so it guards nothing"
     )
 
 
@@ -1038,15 +1165,15 @@ def test_the_workflow_pins_the_only_command_it_runs(tmp_path):
         "'{\"name\":\"GIT_SHA\"},{\"name\":\"GITHUB_CLIENT_ID\"}]'\n"
     )
     fly.chmod(0o755)
-    e = {k: v for k, v in os.environ.items() if k not in _AMBIENT}
-    e.update(
-        PATH=f"{binder}:{os.environ['PATH']}",
-        FLY_SECRETS_CMD=env["FLY_SECRETS_CMD"],
-        FLY_MANAGED_SECRETS_FILE=str(MANIFEST),
-        DEPLOY_WORKFLOW=str(WORKFLOW),
-        FLY_TOML=str(FLY_TOML),
-        FLY_MITIGATION_LEDGER=str(EMPTY_LEDGER),
-    )
+    e = {
+        **{k: v for k, v in os.environ.items() if k not in _AMBIENT},
+        "PATH": f"{binder}:{os.environ['PATH']}",
+        "FLY_SECRETS_CMD": env["FLY_SECRETS_CMD"],
+        "FLY_MANAGED_SECRETS_FILE": str(MANIFEST),
+        "DEPLOY_WORKFLOW": str(WORKFLOW),
+        "FLY_TOML": str(FLY_TOML),
+        "FLY_MITIGATION_LEDGER": str(EMPTY_LEDGER),
+    }
     proc = subprocess.run(
         [sys.executable, str(TOOL)], capture_output=True, text=True, env=e, timeout=120
     )
@@ -1099,6 +1226,26 @@ def test_a_failing_row_enumeration_never_exits_green(tmp_path):
     out = h.run(rc="1", reading=_drift_reading("ALPHA_SECRET"))
     assert h.last_rc != 0, out
     assert "could not enumerate" in out, out
+    assert "issues --method POST" not in h.calls()
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_a_drift_verdict_over_an_empty_remainder_is_an_error_not_a_green_run(tmp_path):
+    """`DRIFT — 0 undeclared` is a self-contradictory artifact, not a finding-free run.
+
+    Pre-fix the count was read but never asserted positive, so a reading of
+    `{"verdict": "DRIFT", "remainder": []}` printed `DRIFT — 0 undeclared …`, the
+    "have been filed/refreshed" warning over zero filings, and exited **0**. It is
+    unreachable while `report()` derives the verdict from the remainder — it takes a
+    second defect to produce — which is exactly why the arm exists: the comment above
+    the ROWS guard claims "a failed read of the reading is an ERROR, not an empty
+    finding", and the empty-FINDING half was the one still open.
+    """
+    h = _Harness(tmp_path)
+    out = h.run(rc="1", reading={"verdict": "DRIFT", "remainder": []})
+    assert h.last_rc == 1, f"a contradiction was rendered as a clean run:\n{out}"
+    assert "::error::" in out, out
+    assert "DRIFT — 0" not in out, out
     assert "issues --method POST" not in h.calls()
 
 

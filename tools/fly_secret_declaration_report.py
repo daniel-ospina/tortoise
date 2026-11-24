@@ -155,12 +155,20 @@ TITLE_PREFIX = "Fly secret "
 TITLE_SUFFIX = (
     " is undeclared — the deploy gate refuses every run until it is declared (#4126)"
 )
-#: A permissive name class (`\S+`, the whole title is whitespace-delimited) because
-#: `read_fly_secret_names` accepts ANY non-empty name: a name this grammar could not
-#: round-trip would be reported by `file` and then never resolved by the sweep, i.e.
-#: an issue that outlives its own fix.
+#: A permissive name class (`(.+)`, one line) because `read_fly_secret_names`
+#: accepts ANY non-empty name: a name this grammar could not round-trip would be
+#: reported by `file` and then never resolved by the sweep, i.e. an issue that
+#: outlives its own fix (#8841).
+#: ⛔ `(.+)` AND NOT `(\S+)`. This comment claimed the round-trip property while the
+#: grammar denied it for every whitespace-bearing name — which `read_fly_secret_names`
+#: accepts, so `A B` was filed under a title the sweep could never recognise: a
+#: permanently open issue, the exact defect the sentence above forbids (measured in
+#: review: `'A B' -> roundtrip: False`, `'A\tB' -> roundtrip: False`). GREEDY on
+#: purpose — the escaped SUFFIX anchors the end, so the capture is the LONGEST name
+#: that still leaves the grammar intact, which is what round-trips a name that itself
+#: contains the suffix text.
 _TITLE_RE = re.compile(
-    r"^" + re.escape(TITLE_PREFIX) + r"(\S+)" + re.escape(TITLE_SUFFIX) + r"$"
+    r"^" + re.escape(TITLE_PREFIX) + r"(.+)" + re.escape(TITLE_SUFFIX) + r"$"
 )
 
 
