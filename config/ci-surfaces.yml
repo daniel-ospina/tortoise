@@ -82,6 +82,19 @@ version: 1
 # greedy, so one new `core` row re-packs every bin — which is why the names are stated and
 # graded, not only the seconds. Re-run `--emit-push-matrix` on the MERGED tree; never carry the
 # last revision's minute, seconds, or split.
+# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
+# `b2d1e9086a`, plus this PR's two `core`-registered rows — `tests/test_14371_offline_embed_json.py`
+# and `tests/test_14186_embedder_seam_batching.py` — both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
+# the verb packs eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k), so
+# `ceil(837.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
+# agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
+# reading of this pool from 835.5 s to 837.1 s while the SECONDS moved under it, so NO arithmetic
+# on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
+# sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a
+# fast file is registered — the packer is greedy, so a seventh file re-packs every bin — which is
+# why the names are stated and graded, not only the seconds. Re-run `--emit-push-matrix` on the
+# merged tree; never carry the last revision's minute, seconds, or split.
 #
 # The history, so a reader can see the direction: the 2026-11-16 durations sweep re-packed the same
 # 11 shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,
@@ -12315,8 +12328,8 @@ tier1:
 # JSON/markdown reads plus the in-memory corpus.
 - test_text_gate_13099.py
 # #12184: the shifted-evidence-cite pin (`core` above). Every document it guards is
-# under `docs/` — `CAPABILITY-PLACEMENT-AUDIT.md`, `SUBSTRATE-REBUILD-MAP.md`, the
-# #12298 M3 recall brief and the #13083 census README — and `docs/` is in
+# under `docs/` — `SUBSTRATE-REBUILD-MAP.md`, the #12298 M3 recall brief, the #13083
+# census README, `ENTITY-VERDICT-BANDS.md`, `00_index.md`, the #4997 plan — and `docs/` is in
 # NON_PYTHON_PREFIXES while none of them matches a SOURCE_PATTERNS entry, so a
 # docs-only diff takes the early return and selects NO surface: measured at this
 # head, `--changed-files docs/architecture/SUBSTRATE-REBUILD-MAP.md` ->
