@@ -9432,19 +9432,34 @@ def test_the_fast_shards_header_block_states_no_span_twice():
         "the newer spelling usually wins, and where the copies disagree on a FIGURE the figure "
         "is the tell — then re-derive the emission with the verb rather than around the splice.")
     # NON-VACUITY: the shape measured on `45dd35ba9a`, RE-WRAPPED — so a line-level check calls
-    # this clean and the guard above would be decoration. Both fixtures are the same claim; only
-    # the second copy's line breaks differ, which is exactly how the real splice hid.
-    spliced = _emission_block_header(
-        "# the verb packs six shards at 825.1 s\n"
-        "# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so\n"
-        "# `ceil(825.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST\n"
+    # this clean and the guard above would be decoration. Both copies are the same claim; only the
+    # FIRST copy's line breaks differ, which is exactly how the real splice hid.
+    # ⛔ The re-wrap is GRADED below, never asserted in this comment. Measured on this arm's own
+    # pre-fix fixture: both copies were line-for-line IDENTICAL (three duplicate `#` lines), so the
+    # very check the comment claimed to defeat caught it — while the real spliced base `14b8322eb2`
+    # carries ZERO duplicate lines and five repeated spans. The fixture proved the opposite of its
+    # own comment, in a PR whose thesis is that a claim graded by nothing rots.
+    spliced_raw = (
+        "# the verb packs six shards at 825.1 s (a, b, g, i, j, k) and\n"
+        "# five at 825.0 s (c, d, e, f, h), so `ceil(825.1/60 x 2)` = 28 m\n"
+        "# governs (a shard's job-level wall clock is the SLOWEST\n"
         "# the verb packs six shards at 825.1 s\n"
         "# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so\n"
         "# `ceil(825.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST\n"
         "\nfast_shards: 11\n")
+    spliced = _emission_block_header(spliced_raw)
     assert _repeated_header_spans(spliced), (
         "a re-wrapped duplicate of the same sentence was not read — the pattern has been "
         "narrowed into silence, so the sibling arm is decoration")
+    fixture_lines = [ln.lstrip("# ").strip() for ln in spliced_raw.splitlines()
+                     if ln.strip().startswith("#")]
+    duplicate_lines = {ln for ln in fixture_lines
+                       if len(ln.split()) > 3 and fixture_lines.count(ln) > 1}
+    assert not duplicate_lines, (
+        "the non-vacuity fixture's two copies share a line VERBATIM, so a line-level check would "
+        f"catch this shape and the arm proves nothing about the re-wrapped one: {duplicate_lines!r}. "
+        "Re-wrap one copy — the real splice's copies differ line for line (measured at the spliced "
+        "base `14b8322eb2`: 0 duplicate lines, 5 repeated spans).")
     # …and a DOUBLE-QUOTED retraction is NOT a second claim. This block quotes the clause it
     # retracted, twice, and that quotation is how the retraction stays checkable; masking quotes
     # is what keeps the guard from redding on the block's own honesty.
