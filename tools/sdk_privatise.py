@@ -1647,8 +1647,8 @@ SWEEP_NAMES = 66
 #: rows and NO digest at all (measured: `--report --base 28ca66878d… --top 5 | grep -c
 #: f0647020531c078c` → **0**), so a pair quoted as `--report`'s output sends a reader to a command
 #: that cannot reproduce it. `--repin` prints `SWEEP_RESIDUE = (n, digest)`. `--check` no longer
-#: prints the TREE's own pair at all — a green run prints the RECORDED pin's, and its failure path
-#: prints rows and sites with no digest — so a pair quoting a tree is `--repin`'s or nothing.
+#: prints the TREE's own pair: a green run prints the RECORDED pin's, and its failure path prints
+#: rows and sites with no OBSERVED digest — so a pair quoting a tree is `--repin`'s or nothing.
 #: ⚠️ THIS PR (#14480) MOVED THE PIN BY ONE FROM ITS OWN LINE — stated because the pin's own note
 #: says a count that moves without a named cause is the drift it exists to catch: the durable
 #: `claim_unavailable` record writes `recorded.update(keep)` in `capture_spool`'s self-heal
@@ -2299,7 +2299,8 @@ def baseline_rev(explicit: str | None = None) -> tuple[str | None, str]:
     the tree the question "did this change ADD an untyped receiver?" is asked against. A
     detached `origin/main` resolves no merge base, so `origin/main` itself is the fallback; a
     clone with no such ref at all returns `None`, and the caller degrades to the recorded pin
-    (which is STRICTER, never weaker: growth over the pin still reds).
+    (which is LOOSER, not stricter: the pin is frozen, so growth between this tree's count and
+    the pin passes, and the caller prints that).
     """
     if explicit:
         try:
@@ -2323,7 +2324,10 @@ def baseline_rev(explicit: str | None = None) -> tuple[str | None, str]:
 
 
 def baseline_rows(
-    rev: str, rmap: dict[str, str], measured: dict[str, Counter]
+    rev: str,
+    rmap: dict[str, str],
+    measured: dict[str, Counter],
+    measured_sites: dict[str, dict[str, list[int]]] | None = None,
 ) -> tuple[Counter, dict[str, Counter], dict[str, dict[str, list[int]]]]:
     """The residue rows on `rev`, walking ONLY the paths that moved since `rev`.
 
@@ -2333,9 +2337,10 @@ def baseline_rows(
     (whose BASELINE rows come from the OLD path: a file that only moved its own untyped calls
     must not read as growth), and only those blobs are measured, from the object store.
 
-    Returns `(whole-tree baseline rows, per-moved-path baseline rows, per-moved-path sites)`; the
-    maps are what let the failure name the path whose row count rose, and which of its lines the
-    baseline did NOT already carry.
+    Returns `(whole-tree baseline rows, per-path baseline rows, per-path sites)`. ⛔ The maps are
+    PER PATH for every path the baseline tree has, not only the ones that moved: the failure
+    names a file by comparing its count now against its count on the baseline, so a missing entry
+    would read as "baseline 0" and blame an untouched file for receivers it always had.
     """
     try:
         tree_paths = {
@@ -2350,11 +2355,17 @@ def baseline_rows(
     # `.py` file carry its untyped receivers into BOTH sides and hide them (measured: the probe
     # file at this lane's own growth proof read as "equal to the baseline"). A file the baseline
     # does not have cannot have baseline rows.
-    for path, rows in measured.items():
-        if path in tree_paths:
-            out += rows
-    per_file: dict[str, Counter] = {}
-    per_file_sites: dict[str, dict[str, list[int]]] = {}
+    measured_sites = measured_sites or {}
+    per_file: dict[str, Counter] = {
+        path: rows for path, rows in measured.items() if path in tree_paths
+    }
+    per_file_sites: dict[str, dict[str, list[int]]] = {
+        path: measured_sites.get(path, {}) for path in per_file
+    }
+    # An UNMOVED file's baseline rows ARE its measured rows (same bytes, same AST), so every path
+    # is seeded here and the diff loop below REPLACES the ones that moved.
+    for rows in per_file.values():
+        out += rows
     for line in _git("diff", "--name-status", "-M", rev).splitlines():
         parts = line.split("\t")
         if len(parts) < 2:
@@ -2369,7 +2380,10 @@ def baseline_rows(
                 if out[row] <= 0:
                     del out[row]
         # `A` (added) and `C` (copied) have no baseline blob of their OWN: a copy that clones an
-        # untyped call site IS growth, so it must contribute nothing to the baseline.
+        # untyped call site IS growth, so it must contribute nothing to the baseline. Kept as a
+        # guard rather than as live logic, and said out loud: an `A` row's `paths[0] == dest`, so
+        # the `git show <rev>:<dest>` below already fails for it, and `-M` without `-C` never
+        # emits a `C` row at all. A future `-C` must not silently seed a copy from its source.
         if kind.startswith(("A", "C")):
             continue
         src_path = paths[0]
@@ -2388,6 +2402,9 @@ def baseline_rows(
             per_file[dest] = measured_at_src.residue
             per_file_sites[dest] = measured_at_src.sites
             out += measured_at_src.residue
+        else:  # the baseline blob carries no residue: it must stop being counted for `dest`
+            per_file.pop(dest, None)
+            per_file_sites.pop(dest, None)
     return out, per_file, per_file_sites
 
 
@@ -2398,32 +2415,48 @@ def _new_sites(
     sites: dict[str, dict[str, list[int]]],
     baseline_sites: dict[str, dict[str, list[int]]] | None = None,
     limit: int = 12,
+    files_limit: int = 8,
 ) -> list[str]:
     """`file:line` for the files whose count of `row` ROSE against the baseline.
 
-    ⛔ WHICH lines, not just how many: the baseline's own line numbers are subtracted when they
-    are available, because `ast.walk` is BREADTH-first — its order is not source order, so a
-    receiver appended at the end of a 40-site file can sit in the middle of the list, and
-    truncating that list would print the pre-existing lines and drop the new one. When the
-    baseline's lines are unavailable the whole list is shown with the count, never a silent cut.
+    ⛔ WHICH lines, not just how many. Two things a bare `sites[:n]` got wrong: `ast.walk` is
+    BREADTH-first, so source order is not list order and truncating prints pre-existing lines and
+    drops the new one; and the baseline's own lines are subtracted as a MULTISET, because a plain
+    set difference is only sound while no line moved — inserting a receiver above existing ones
+    shifts every later one, which would name survivors as new and hide the addition. When the
+    difference does not account for the growth, every site is shown with that said, rather than a
+    confident wrong line.
     """
-    out = []
+    cands = []
     for path in sorted(files):
         now = files[path].get(row, 0)
         before = baseline_files.get(path, Counter()).get(row, 0)
-        if now <= before:
-            continue
+        if now > before:
+            cands.append((now - before, path, now, before))
+    cands.sort(reverse=True)
+    out = []
+    for _delta, path, now, before in cands[:files_limit]:
         have = sites.get(path, {}).get(row, [])
         had = (baseline_sites or {}).get(path, {}).get(row, [])
-        fresh = sorted(set(have) - set(had)) if had else []
-        shown = fresh or sorted(have)
-        if shown:
-            where = ", ".join(f"line {n}" for n in shown[:limit])
-            if len(shown) > limit:
-                where += f", … +{len(shown) - limit} more of {len(shown)}"
+        note = ""
+        if not had:
+            # No baseline lines to subtract (a new file, or a baseline measured without sites):
+            # show them all rather than claim a line is not locatable.
+            fresh = sorted(have)
+        else:
+            fresh = sorted(Counter(have) - Counter(had))
+            if len(fresh) != now - before:
+                fresh = sorted(have)
+                note = "  (baseline lines shifted, so the new site is among these, not singled out)"
+        if fresh:
+            where = ", ".join(f"line {n}" for n in fresh[:limit])
+            if len(fresh) > limit:
+                where += f", … +{len(fresh) - limit} more of {len(fresh)}"
         else:
             where = "site not located"
-        out.append(f"{path}  (baseline {before} -> now {now}): {where}")
+        out.append(f"{path}  (baseline {before} -> now {now}): {where}{note}")
+    if len(cands) > files_limit:
+        out.append(f"… +{len(cands) - files_limit} more file(s) rising in this row")
     return out
 
 
@@ -3071,7 +3104,8 @@ def main() -> int:
                 f"increase ({why}; the PIN is the ceiling, not a merge base)"
             ]
         else:
-            base_rows, base_files, base_sites = baseline_rows(base_rev, rmap, per_file)
+            base_rows, base_files, base_sites = baseline_rows(
+                base_rev, rmap, per_file, per_file_sites)
             print(f"ratchet baseline: {base_rev[:12]} ({why})")
             ok, lines = ratchet_verdict(
                 after_residue, base_rows, per_file, base_files, per_file_sites,
