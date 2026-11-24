@@ -22121,8 +22121,10 @@ def _arm_names_in(text: str) -> set[str]:
     return {n for n in names if _CUT_CLAIM_ARM_RE.match(n)}
 
 
-#: ⛔ A SENTENCE ENDS AT A FULL STOP OR SEMICOLON FOLLOWED BY ANY WHITESPACE — A LINE
-#: BREAK INCLUDED, and through a `#` comment prefix. Comment prose WRAPS, so the corpus
+#: ⛔ A SENTENCE ENDS AT A FULL STOP FOLLOWED BY ANY WHITESPACE — A LINE
+#: BREAK INCLUDED, and through a `#` comment prefix. (A semicolon ends one only when a
+#: SPACE follows it on the SAME line — see the semicolon note below; `;` plus a line
+#: break is NOT a boundary.) Comment prose WRAPS, so the corpus
 #: writes the overwhelming majority of its sentence boundaries as `\n` or `\n# `, not as
 #: `. `. A separator set of `(". ", "; ")` therefore left the name's clause running to the
 #: end of the PARAGRAPH whenever the sentences were wrapped, and a subject-less
@@ -22259,13 +22261,18 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         "(the durations arithmetic this PR restored, and the arms B7 really did "
         "take), so this is the scan going blind — a renamed verdict word or file — "
         f"not a tree with nothing to check. claims={claims!r}")
-    # ⛔ AND THE FLOOR MUST NOT BE SATISFIED BY THIS TEST'S OWN FIXTURES. At this head 28
-    # of the 47 claims the scan reads come from THIS file — the guard's prose and the
+    # ⛔ AND THE FLOOR MUST NOT BE SATISFIED BY THIS TEST'S OWN FIXTURES. A large share of
+    # the claims the scan reads come from THIS file — the guard's prose and the
     # synthetic passages below — so `len(claims) >= 2` passes green even when a real record
     # source is dropped from `_CUT_CLAIM_FILES`, which is exactly the recurrence
     # `fb21c37aa298` had to fix for the plan ledger. Count the sources the pin exists to
     # read. Per-file equality was deliberately NOT used: it would red a later PR that
     # legitimately removes a file's last verdict, which is not a lost source.
+    # ⛔ AND NO SHARE IS STATED HERE, for the reason the `_CUT_CLAIM_FILES` note gives: the
+    # figure moves with every record edit (measured: it differed at each of the three heads
+    # before this one, and this block carried a stale one), so a share quoted here is the
+    # carried-figure defect this PR repairs. Re-derive it instead (total, self, foreign):
+    #     uv run python -c "import sys;sys.path.insert(0,'tests');import test_ci_selection as t;c=t._cut_claims();print(len(c), sum(1 for x in c if x[0]==t._SELF_SCAN_REL), sum(1 for x in c if x[0]!=t._SELF_SCAN_REL))"
     foreign = [c for c in claims if c[0] != _SELF_SCAN_REL]
     assert len(foreign) >= 2, (
         "the CUT-verdict scan read its verdicts only from its OWN fixtures — a record "
