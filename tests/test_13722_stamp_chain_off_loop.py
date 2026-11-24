@@ -76,6 +76,15 @@ submission arm must speak first for a revert; the `async def` arm must only spea
 once submission and await hold (an `async def` that IS submitted and awaited still
 reaches it, so nothing is lost by the reorder).
 
+WHAT IS PINNED DIRECTLY, WITHOUT USING `hosted_api.py` AS THE FIXTURE. The two
+predicates the main test rests on — `_string_value`'s constant fold, and the shape
+set `_refers_to`/`_submitted_names` agree on — are ALSO graded on synthetic
+sources below. The shipped module uses only the bare-name spelling, so those arms
+were otherwise reachable only through it: reverting either predicate left the
+WHOLE SUITE GREEN (measured twice, review P2 at `4fd3fc8c` and again at
+`1d59c806` on `/tmp` copies). A gate whose only encoding of its own arm is prose
+is a habit, not a gate.
+
 WHAT IT DELIBERATELY DOES NOT PIN. The number of round trips per record. That
 number is a property of `record_projection.replay`'s plan and is measured (not
 asserted) by `tests/test_9558_record_write_cost.py`'s prologue assertion and by
@@ -96,6 +105,7 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -108,6 +118,14 @@ _STAMP_DOOR = "_stamp_capture_provenance"
 #: The off-loop submission helper and the pool it must be given.
 _OFF_LOOP = "_run_off_loop"
 _OFF_LOOP_POOL = "_CAPTURE_EXECUTOR"
+
+#: `ast.FormattedValue.conversion` → the function the interpreter applies for it
+#: (`-1` is "no conversion", and is absent from this map on purpose).
+_FSTRING_CONVERSIONS: dict[int, Callable[[str], str]] = {
+    ord("s"): str,
+    ord("r"): repr,
+    ord("a"): ascii,
+}
 
 
 def _module() -> ast.Module:
@@ -191,6 +209,25 @@ def _off_loop_submissions(
     return out
 
 
+def _callable_name(node: ast.AST) -> str | None:
+    """The NAME a reference node spells — a bare `name`, or an `obj.name` — else ``None``.
+
+    ⛔ ONE PREDICATE, ASKED BY BOTH ARMS (review note N1, measured).
+    `_submitted_names`' docstring claimed its shapes were "resolved through
+    `_refers_to`" while it spelled `(ast.Name, ast.Attribute)` on its own: two
+    spellings that agreed by inspection only, so a shape added to one side would
+    stop being a reference at all on the other and the grading would go silently
+    fail-open. Both arms now resolve through THIS function, and
+    `test_the_arms_agree_on_what_a_reference_is` measures the agreement on
+    synthetic sources rather than trusting the prose.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
 def _refers_to(node: ast.AST, name: str) -> bool:
     """Does `node` NAME the callable `name` — as a bare name OR as an attribute?
 
@@ -205,9 +242,7 @@ def _refers_to(node: ast.AST, name: str) -> bool:
     (measured: `1 passed`, rc=0). A walk that cannot see a reference the submission
     arm accepts is not a gate.
     """
-    if isinstance(node, ast.Name):
-        return node.id == name
-    return isinstance(node, ast.Attribute) and node.attr == name
+    return _callable_name(node) == name
 
 
 def _submitted_names(tree: ast.Module) -> list[ast.Name | ast.Attribute]:
@@ -216,7 +251,8 @@ def _submitted_names(tree: ast.Module) -> list[ast.Name | ast.Attribute]:
     i.e. the second positional argument of every awaited
     `_run_off_loop(_CAPTURE_EXECUTOR, <name>)` — a bare name or an attribute whose
     `.attr` is the name (the same shapes `_off_loop_submissions` accepts, resolved
-    through `_refers_to` so the two arms cannot drift apart).
+    through `_callable_name` so the two arms cannot drift apart — the sentence here
+    used to name `_refers_to`, which this function did not call).
     """
     awaited = {
         id(node.value)
@@ -237,7 +273,7 @@ def _submitted_names(tree: ast.Module) -> list[ast.Name | ast.Attribute]:
             len(args) > 1
             and isinstance(args[0], ast.Name)
             and args[0].id == _OFF_LOOP_POOL
-            and isinstance(args[1], (ast.Name, ast.Attribute))
+            and _callable_name(args[1]) is not None
         ):
             out.append(args[1])
     return out
@@ -317,7 +353,18 @@ def _string_value(node: ast.AST) -> str | None:
                 inner = _string_value(value.value)
                 if inner is None:
                     return None
-                parts.append(inner)
+                # ⛔ APPLY THE CONVERSION, DO NOT IGNORE IT (review note N2,
+                # measured). `!r`/`!s`/`!a` run at RUNTIME, so folding the raw inner
+                # value is wrong in BOTH directions: `f"{'_stamp_chain'!r}"`
+                # evaluates to `"'_stamp_chain'"` — WITH quotes, so it does not name
+                # the chain — while `f"{'_stamp_chain'!s}"` evaluates to the name
+                # itself and does. Ignoring `conversion` reported RED on the first
+                # (an over-block) and GREEN on the second (a fail-open of the arm
+                # that exists to close fail-opens). `str`/`repr`/`ascii` are exactly
+                # what the interpreter applies, computed here on the folded constant,
+                # so the comparison is against the string the module actually holds.
+                convert = _FSTRING_CONVERSIONS.get(value.conversion)
+                parts.append(inner if convert is None else convert(inner))
             else:
                 return None
         return "".join(parts)
@@ -573,6 +620,139 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         "test away, so the submission is never reached and the chain silently "
         "does NOT run: no record, no `PointRevised`, no warning (#13722). Remove "
         "the dead guard rather than leaving the offload unreachable")
+
+
+def _expr(source: str) -> ast.expr:
+    """The single expression of a one-line source."""
+    return ast.parse(source, mode="eval").body
+
+
+def _tree(lines: list[str]) -> ast.Module:
+    """A synthetic module whose LINE NUMBERS are ``1..len(lines)``.
+
+    Building the source from a list rather than a triple-quoted string keeps the
+    line of each statement the arithmetic a reader expects, so the assertions below
+    can name it (`(2, True)`) instead of being written to match a leading newline.
+    """
+    return ast.parse("\n".join(lines) + "\n")
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # ─── FOLDED: the family the pre-#14522 exact-`ast.Constant` arm missed ───
+        ('"_stamp_chain"', "_stamp_chain"),
+        ('"_stamp_" + "chain"', "_stamp_chain"),
+        ('"_stamp_" "chain"', "_stamp_chain"),
+        ('f"{\'_stamp\'}{\'_chain\'}"', "_stamp_chain"),
+        # `!s` on a str IS the str, so this one names the chain at run time…
+        ('f"{\'_stamp_chain\'!s}"', "_stamp_chain"),
+        # ─── NOT FOLDED: the declared boundary, owned by #14528 ───
+        ('"%s%s" % ("_stamp", "_chain")', None),
+        ('"".join(["_stamp", "_chain"])', None),
+        ('"_stamp{}".format("_chain")', None),
+        ('"_stamp" + chr(95) + "chain"', None),
+        ('f"{chr(95)}_stamp_chain"', None),
+        ('f"{\'_stamp_chain\':>20}"', None),
+        # ─── …and these ADD characters, so they do NOT name it (review note N2) ───
+        ('f"{\'_stamp_chain\'!r}"', repr("_stamp_chain")),
+        ('f"{\'_stamp_chain\'!a}"', ascii("_stamp_chain")),
+    ],
+)
+def test_string_value_folds_exactly_what_the_interpreter_folds(
+    source: str, expected: str | None
+) -> None:
+    """`_string_value` returns the string the module would HOLD, or ``None``.
+
+    ⛔ THE PIN THE REVIEW ASKED FOR (P2, measured). Everything `_string_value` can
+    fold reds the string arm in the main test; every row above expecting a value
+    returns ``None`` under the pre-#14522 arm (`isinstance(node, ast.Constant) and
+    node.value == owner`), so reverting the fold reds HERE instead of leaving the
+    suite green. Verified by mutation, not by reading: with `_string_value`
+    restored to the constant compare, the five FOLDED rows fail and the rest pass.
+
+    The ``None`` rows matter in both directions. They pin the boundary the
+    docstring declares — so a later "improvement" that starts guessing at run-time
+    composition reds here rather than silently claiming coverage — and the `!r`/`!a`
+    rows pin that the fold yields the string the interpreter yields, not the inner
+    literal: folding `f"{'_stamp_chain'!r}"` to the bare name reported RED on a
+    string that does not contain it (review note N2, measured).
+    """
+    assert _string_value(_expr(source)) == expected
+
+
+def test_the_arms_agree_on_what_a_reference_is() -> None:
+    """The submission arm and the reference walk see the SAME two shapes.
+
+    ⛔ THE SECOND PIN THE REVIEW ASKED FOR (P2, measured). `_refers_to`'s widening
+    from `isinstance(node, ast.Name)` — the measured fail-open this PR exists to
+    close — and `_submitted_names`' matching widening were reachable only through
+    the real module, which carries no attribute submission FOR THIS OWNER and no
+    split spelling. A revert of either predicate therefore red nothing. These
+    sources are the `tests/test_11609_write_containers.py:743` idiom: the
+    Name-vs-Attribute distinction proved on source built for it, with the legal
+    shape as the negative control (it must stay GREEN).
+    """
+    # The legal refactor `_refers_to`'s docstring blesses: an attribute submission.
+    legal = _tree([
+        "async def g(holder):",
+        f"    await {_OFF_LOOP}({_OFF_LOOP_POOL}, holder._stamp_chain)",
+    ])
+    assert _off_loop_references(legal, "_stamp_chain") == [(2, True)]
+
+    # …and the inline attribute call beside it, i.e. the mutant that ran on the
+    # loop while the pre-fix walk reported ZERO references (measured, review m1).
+    both = _tree([
+        "async def g(holder):",
+        f"    await {_OFF_LOOP}({_OFF_LOOP_POOL}, holder._stamp_chain)",
+        "    holder._stamp_chain()",
+    ])
+    assert _off_loop_references(both, "_stamp_chain") == [(2, True), (3, False)]
+
+    # The shipped spelling, for symmetry: a bare-name submission plus an inline call.
+    named = _tree([
+        "async def g():",
+        f"    await {_OFF_LOOP}({_OFF_LOOP_POOL}, _stamp_chain)",
+        "    _stamp_chain()",
+    ])
+    assert _off_loop_references(named, "_stamp_chain") == [(2, True), (3, False)]
+
+    # ⛔ AND THE TWO ARMS MUST NAME THE SAME NODES (review note N1). If
+    # `_submitted_names` accepts a shape `_refers_to` cannot see, the submission is
+    # a "reference" the walk never reports as submitted — the exact drift the
+    # docstring claims is impossible. Measured here rather than asserted in prose.
+    for tree in (legal, both, named):
+        submitted = sorted(node.lineno for node in _submitted_names(tree))
+        reported = sorted(
+            line
+            for line, is_submission in _off_loop_references(tree, "_stamp_chain")
+            if is_submission
+        )
+        assert submitted and submitted == reported
+
+
+def test_a_string_built_callable_is_the_string_arm_that_sees_it() -> None:
+    """The reference walk is blind to a split literal BY DESIGN — the fold sees it.
+
+    Encodes the DIVISION OF LABOUR between the two arms, which was previously only
+    stated in comments: `getattr(holder, "_stamp_" + "chain")()` is invisible to
+    `_off_loop_references` (it walks Name/Attribute nodes) and is caught only
+    because the string arm folds the constant. Deleting the fold turns the second
+    assertion into `[]` while the first still passes, so the blind spot cannot
+    silently widen (review P3, closed at `1d59c806`; the residual run-time
+    compositions remain declared and are #14528's to close).
+    """
+    tree = _tree([
+        "async def g(holder):",
+        f"    await {_OFF_LOOP}({_OFF_LOOP_POOL}, _stamp_chain)",
+        '    getattr(holder, "_stamp_" + "chain")()',
+    ])
+    # the walk sees only the legal submission…
+    assert _off_loop_references(tree, "_stamp_chain") == [(2, True)]
+    # …and the fold is what makes the assembled spelling visible at all.
+    assert [
+        node.lineno for node in ast.walk(tree) if _string_value(node) == "_stamp_chain"
+    ] == [3]
 
 
 if __name__ == "__main__":  # pragma: no cover
