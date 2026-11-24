@@ -378,7 +378,7 @@ diff is empty there) and false on any branch carrying other work (it lists whate
 touched — comments and feature code alike), so a merger could read "no product code changed" beside
 thousands of changed lines. A claim about a diff that moves with every rebase is not a measurement.
 
-Each block carries a count this PR re-derived (`160` distinct cite targets above the pivot from `727` in all, over `208` citing files — `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and `--check` grades the two note blocks against the same measurement, so none of them is a hand count), not a change to what the code does.
+Each block carries a count this PR re-derived (`160` distinct cite targets above the pivot from `728` in all, over `208` citing files — `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and `--check` grades the two note blocks against the same measurement, so none of them is a hand count), not a change to what the code does.
 
 ---
 
