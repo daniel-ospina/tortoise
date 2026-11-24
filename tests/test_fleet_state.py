@@ -4059,6 +4059,90 @@ def _ps_answers() -> bool:
     return bool(out)
 
 
+def _census_env() -> dict[str, str]:
+    """The census lane's environment: the REAL interpreter under a FOREIGN `argv[0]`.
+
+    ⛔ `PYTHONHOME` IS LOAD-BEARING, NOT DEFENSIVE (#14122 root cause, measured on
+    #14459). The lane is spawned as `[<long path>/pi, "-c", …]` with
+    `executable=sys.executable` — a foreign `argv[0]` in front of the real
+    interpreter, which is the only portable way to put an arbitrary name in front
+    of a live process (#12039). CPython resolves its install PREFIX from `argv[0]`,
+    and the child aborts in `init_fs_encoding` — `Could not find platform
+    independent libraries` / `No module named 'encodings'` — and exits rc=1 in
+    milliseconds whenever the prefix that resolution yields carries no stdlib
+    landmark. (A BARE `argv[0]` such as `pi` has a second way in: CPython resolves
+    it on `$PATH` and adopts whatever program of that name it finds as its own
+    executable — `sys._base_executable = '<host>/…/pi'` — the measured root cause
+    of #14506 on the self-hosted runner. This lane's `argv[0]` is a long PATH, so
+    that arm does not reach it.)
+    The census then correctly fails to find a process that never lived, and this
+    pin's expiry classification reads it as a census gap instead of a dead fixture.
+    Measured on `cpython-3.9` (uv-managed): identical spawn rc=1 without the
+    variable, rc=0 with it; `/usr/bin/python3` needs neither (compiled-in prefix),
+    which is why it passed on some hosts and not others.
+
+    ⛔ "RELOCATABLE" IS NOT THE DISCRIMINATOR, and an earlier revision of this
+    docstring said it was (review of #14459, executed there). A venv over a
+    uv-managed `3.12.14` STARTS under the same foreign `argv[0]` — rc=0, a warning
+    on stderr, no abort — so "CI runs a venv" does not imply the abort, and a lane
+    that tested only the packaging would conclude this variable was unnecessary and
+    delete it, restoring the red. The load-bearing property is the PREFIX.
+
+    `PYTHONHOME` is CPython's own named remedy; the lane imports only `time`.
+    """
+    return {**os.environ, "PYTHONHOME": sys.base_prefix}
+
+
+def test_the_census_env_keeps_a_foreign_argv0_interpreter_alive(tmp_path) -> None:
+    """The census lane must be a LIVE interpreter, not one that aborts at startup.
+
+    ⛔ This is the pin behind :func:`_census_env`, and it exists because the
+    long-path census test can only OBSERVE the defect second-hand: a decoy that
+    dies makes the census answer negatively, and that test's arms then classify the
+    expiry rather than naming an interpreter that never started. Measured on
+    #14459's shard `test (b)`: `the fake lane pid … EXITED with rc=1`, the same
+    mechanism in `tests/test_collision_preflight.py` and
+    `tests/test_ci_preview_isolation.py`.
+
+    FALSIFIER (executed): drop `PYTHONHOME` from :func:`_census_env` and the
+    behavioural arm reds with `rc=1` — or, on an interpreter whose prefix is
+    compiled in (`/usr/bin/python3`), that arm cannot red at all and the structural
+    arm is the only signal, which is the point of having it.
+    """
+    # ⛔ `.get(...)`, never `["PYTHONHOME"]` — the FALSIFIER for this arm is
+    # exactly the mutant that DELETES the key, and a subscript raises `KeyError`
+    # there: the crafted message below would never render, and a bare `KeyError`
+    # at the assert line reads as a broken fixture rather than as the red the pin
+    # exists to produce (review, delta cycle 2 on #14459).
+    assert _census_env().get("PYTHONHOME") == sys.base_prefix, (
+        "the census lane's env must carry PYTHONHOME: `executable=` leaves a "
+        "FOREIGN argv[0] in front of the interpreter, and CPython resolves its "
+        "prefix from it (#14122)")
+    # Local imports, mirroring the long-path test below (this suite keeps
+    # `contextlib`/`subprocess` off the module import path).
+    import contextlib
+    import subprocess
+    long_dir = Path(tmp_path) / ("pi-census-" + "x" * 40)
+    long_dir.mkdir()
+    pi = long_dir / "pi"
+    proc = subprocess.Popen([str(pi), "-c", "import time; time.sleep(60)"],
+                            executable=sys.executable, env=_census_env(),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        # Far outside every start-up path (the abort is tens of milliseconds) and
+        # cheap enough that the census suite does not notice it.
+        time.sleep(0.5)
+        assert proc.poll() is None, (
+            f"the census lane's interpreter EXITED rc={proc.returncode} instead of "
+            "sleeping 60 s, so the long-path census pin would read a DEAD fixture "
+            "as a census gap (#14122)")
+    finally:
+        with contextlib.suppress(OSError):
+            proc.kill()
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            proc.wait(timeout=10)
+
+
 def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     """End-to-end MATCHER coverage: a real process named `pi` under a long path is found.
 
@@ -4212,6 +4296,16 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
         # `pi`, and the child is a live process on every image (see the docstring).
         proc = subprocess.Popen([str(pi), "-c", "import time; time.sleep(60)"],
                                 executable=sys.executable,
+                                # ⛔ `PYTHONHOME` IS LOAD-BEARING (#14122 root cause, measured
+                                # on #14459) — see `_census_env`, which is also pinned by its own
+                                # test above. Without it, a prefix resolved from this foreign
+                                # `argv[0]` carries no stdlib landmark and the child aborts in
+                                # `init_fs_encoding`, exiting rc=1 in milliseconds — so this
+                                # test's expiry would classify a DEAD FIXTURE as a census gap.
+                                # (`/usr/bin/python3` needs neither: its prefix is compiled in,
+                                # which is why it passed on some hosts. ⛔ NOT "relocatable" —
+                                # that word is refuted in `_census_env`.)
+                                env=_census_env(),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             # Bounded poll on the CENSUS ITSELF — never a widened or loosened match

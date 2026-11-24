@@ -132,12 +132,51 @@ def _child_pids(pid: int) -> list[int]:
     return kids
 
 
-def _spawn(cmd: list[str], cwd: Path, executable: str | None = None) -> subprocess.Popen:
+def _decoy_env() -> dict[str, str]:
+    """The decoy's environment: the REAL interpreter under a FOREIGN `argv[0]`.
+
+    ⛔ `PYTHONHOME` IS LOAD-BEARING, NOT DEFENSIVE (#14122 root cause, measured on
+    #14459). `executable=` decides what RUNS while `argv[0]` stays the decoy's own
+    path, and CPython resolves its install PREFIX from `argv[0]` — so when the
+    prefix that resolution yields carries no stdlib landmark the child aborts in
+    `init_fs_encoding`: `Could not find platform independent libraries <prefix>`
+    and `ModuleNotFoundError: No module named 'encodings'`, exit 1, in
+    milliseconds. (A BARE `argv[0]` has a second way in: CPython resolves it on
+    `$PATH` and adopts whatever program of that name it finds as its own
+    executable — `sys._base_executable = '<host>/…/pi'`, the measured root cause of
+    #14506 on the self-hosted runner. This decoy's `argv[0]` is a path, not a bare
+    name, so that arm does not reach it.)
+    Measured in-process on `cpython-3.9` (uv-managed): the identical spawn with
+    `executable=sys.executable` and a `/tmp/…/bin/workerd` argv[0] returns rc=1 with
+    that message; adding `PYTHONHOME=sys.base_prefix` returns rc=0. `/usr/bin/python3`
+    is unaffected because its prefix is compiled in — which is why the same fixture
+    passed on some hosts, and why the failure arrived as a RACE: the decoy was always
+    dying, and only the sample timing decided whether a pin saw it.
+
+    `PYTHONHOME` is CPython's own named remedy (it prints the variable in that error).
+    It costs the decoy the venv's `site-packages`, which the decoy never uses — it
+    imports `ctypes` and `time` from the stdlib only.
+
+    ⛔ "RELOCATABLE" IS NOT THE DISCRIMINATOR, and an earlier revision of this
+    docstring said it was (review of #14459, executed there). A venv over a
+    uv-managed `3.12.14` STARTS under the same foreign `argv[0]` — rc=0, a warning
+    on stderr, no abort. The load-bearing property is the PREFIX, not the
+    interpreter's packaging; the structural assert in the pin below holds the
+    variable in place rather than resting on that diagnostic story.
+    """
+    return {**os.environ, "PYTHONHOME": sys.base_prefix}
+
+
+def _spawn(cmd: list[str], cwd: Path, executable: str | None = None,
+           env: dict[str, str] | None = None) -> subprocess.Popen:
     """A detached process, like `wrangler pages dev` under a runner step.
 
     `executable=` decouples WHAT RUNS from `argv[0]`: the census/`pkill` name and the
     program are then two different things, which is the only portable way to put an
-    arbitrary name in front of a live process (#12039).
+    arbitrary name in front of a live process (#12039). ⛔ `env` exists because that
+    decoupling is NOT free: CPython derives its prefix from `argv[0]`, so an
+    interpreter spawned under a foreign name needs :func:`_decoy_env` to start
+    wherever that prefix has no stdlib landmark (#14122).
 
     ⛔ THE DECOY'S STDERR IS KEPT, NOT DISCARDED (#14122). It used to go to
     `subprocess.DEVNULL`, which made the two very different failures produce the SAME
@@ -154,7 +193,7 @@ def _spawn(cmd: list[str], cwd: Path, executable: str | None = None) -> subproce
     try:
         proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.DEVNULL,
                                 stderr=fh, start_new_session=True,
-                                executable=executable)
+                                executable=executable, env=env)
     except BaseException:
         # ⛔ A `Popen` THAT RAISES NEVER REACHES `_DECOY_STDERR`, so nothing would ever
         # remove this log: the registry is the only handle on it (review of #14388, F4).
@@ -753,6 +792,60 @@ def test_every_preview_boot_tolerates_a_dead_pid_from_record() -> None:
 
 # ── 2. the mechanism: stop() is pid-scoped, and it refuses a recycled pid ───
 
+def test_the_decoy_interpreter_STARTS_and_survives_the_foreign_argv0(tmp_path: Path) -> None:
+    """The decoy must be a LIVE interpreter, not one that aborts at startup (#14122).
+
+    ⛔ WHAT THIS PIN EXISTS FOR, measured on #14459's shard `test (d)` (run
+    45367815168). Every mechanism pin in this file stands a decoy up with
+    `executable=sys.executable` and `argv[0]` set to the decoy's own path, and
+    CPython derives its install PREFIX from `argv[0]`. When that prefix carries no
+    stdlib landmark the spawn dies in `init_fs_encoding` (`Could not find platform
+    independent libraries` / `ModuleNotFoundError: No module named 'encodings'`) in
+    milliseconds, so the decoy only looked alive when the sample happened to win
+    the race. That is why these pins were chronically red on main at ~35% and green
+    locally. ⛔ The discriminator is the PREFIX, not "relocatable" — a venv over a
+    uv-managed python was measured to start (see :func:`_decoy_env`).
+    `_decoy_env()`'s `PYTHONHOME` is the fix; this test is its falsifier.
+
+    FALSIFIER (executed): delete `PYTHONHOME` from `_decoy_env()` and this reds on
+    `the decoy died` with the child's own stderr quoted — the message the harness
+    could not print before #14388 captured it. ⚠️ The structural assertion is
+    deliberate: on an interpreter whose prefix is compiled in (`/usr/bin/python3`)
+    the behavioural arm cannot red at all, so the env rule is also stated directly
+    rather than inferred from timing.
+    """
+    # ⛔ `.get(...)`, never `["PYTHONHOME"]`: the pin's own falsifier deletes the
+    # key, so a subscript reds as `KeyError` and the crafted message never renders
+    # (review, delta cycle 2 on #14459).
+    assert _decoy_env().get("PYTHONHOME") == sys.base_prefix, (
+        "the decoy's env must carry PYTHONHOME: `executable=` leaves a FOREIGN "
+        "argv[0] in front of the interpreter, and CPython resolves its prefix "
+        "from it — without this the decoy exits rc=1 before it sleeps (#14122)")
+    peer_bin = tmp_path / "bin"
+    peer_bin.mkdir()
+    peer_workerd = peer_bin / "workerd"
+    decoy = _spawn([str(peer_workerd), "-c", "import time\ntime.sleep(120)\n"],
+                   tmp_path, executable=sys.executable, env=_decoy_env())
+    try:
+        # Long enough to be out of every plausible start-up path (the abort is
+        # measured in tens of milliseconds), short enough not to slow the file.
+        time.sleep(0.5)
+        said = ""
+        log = _DECOY_STDERR.get(decoy.pid)
+        if log is not None:
+            with contextlib.suppress(OSError):
+                said = log.read_text(errors="replace").strip()
+        assert decoy.poll() is None, (
+            f"the decoy interpreter EXITED rc={decoy.returncode} instead of sleeping "
+            "120 s, so every decoy pin in this file measures a DEAD process and only "
+            "the sample timing decides green or red (#14122). The child's own stderr"
+            + (f" said {said!r}" if said else " was EMPTY"))
+    finally:
+        _reap(decoy.pid)
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            decoy.wait(timeout=10)
+
+
 def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) -> None:
     """#10283's own indicator (a): job A's cleanup leaves job B's decoy alive.
 
@@ -796,7 +889,7 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
          "    pass\n"              # no prctl (macOS): `comm` stays the interpreter's,
          "                        #  and the name pin below cannot run without /proc\n"
          "time.sleep(120)\n"],
-        tmp_path, executable=sys.executable,
+        tmp_path, executable=sys.executable, env=_decoy_env(),
     )
     # ⛔ THE DECOY IS SPAWNED BEFORE THE `try:` THAT OWNS ITS `finally: _reap(...)`
     # further down, so every assertion between the two is a leak path for a 120 s
