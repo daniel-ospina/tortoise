@@ -3432,6 +3432,77 @@ def test_a_read_fault_while_deciding_ownership_refuses_and_deletes_nothing():
         f"the ownership read was never reached ({store.reads} reads)")
 
 
+def test_a_write_fault_on_the_takeover_refuses_and_keeps_the_batch():
+    """⛔ THE SAME RULE ONE CALL LATER (round 22 follow-up, P1 — measured).
+
+    The guarded read was one of THREE store calls inside `submit`'s `try` whose
+    `except Exception` discards the batch row, its item rows and its staged bytes.
+    The takeover's compare-and-set is the second: a WRITE fault there is a fault,
+    not a lost race. Measured before this guard: `submit raised RuntimeError` and
+    `discarded=['batch_…']`, the row GONE, its items gone and the staged documents
+    unlinked — for a batch a drain may already be working, so the `503 … retry`
+    the fault invites would ingest and charge the same content twice.
+    """
+    class _FaultyCasStore(_AdoptingStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.discarded: list[str] = []
+
+        def put_batch_if_state(self, *a, **kw):
+            raise RuntimeError("graph statement timeout (write)")
+
+        def discard(self, org_id, batch_id):
+            self.discarded.append(batch_id)
+            return super().discard(org_id, batch_id)
+
+    store = _FaultyCasStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+
+    assert store.discarded == [], (
+        "a WRITE FAULT on the takeover was answered by discarding the batch "
+        f"row: {store.discarded}")
+    assert store.get_batch(ORG, batch.batch_id) is not None, (
+        "the batch row was deleted by a fault it has nothing to do with")
+    assert [i.item_id for i in store.items(ORG, batch.batch_id)] == [
+        i.item_id for i in items]
+
+
+def test_a_read_fault_before_the_item_write_refuses_and_writes_nothing():
+    """…AND THE THIRD CALL: the pre-write existence read (round 22 follow-up, P1).
+
+    Nothing has been written when this read runs, so a fault has NOTHING to
+    compensate for. Routing it into the rollback still deletes whatever another
+    writer put at that id — and measured before the guard: `discard(…)` ran,
+    `submit raised RuntimeError`, and the id was left with no rows at all.
+    """
+    class _FaultyPreWriteReadStore(InMemoryBatchStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+            self.discarded: list[str] = []
+
+        def get_batch(self, org_id, batch_id):
+            self.reads += 1
+            if self.reads == 1:
+                return None            # `submit`'s own check, outside the `try`
+            raise RuntimeError("graph probe timeout")
+
+        def discard(self, org_id, batch_id):
+            self.discarded.append(batch_id)
+            return super().discard(org_id, batch_id)
+
+    store = _FaultyPreWriteReadStore()
+    coord = BatchCoordinator(store)
+    with pytest.raises(ValueError, match="could not be shown to be free"):
+        coord.submit(ORG, ["/d/a.md"], batch_id="b-pre-write")
+
+    assert store.discarded == [], (
+        f"a fault before any write still discarded the id: {store.discarded}")
+    assert store.items(ORG, "b-pre-write") == [], (
+        "the item rows were written despite the refusal")
+
+
 def test_a_caller_supplied_id_that_was_adopted_is_still_a_conflict():
     """The takeover is scoped to MINTED ids — a caller's clash stays a refusal.
 

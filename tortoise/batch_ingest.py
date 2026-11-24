@@ -2174,7 +2174,21 @@ class BatchCoordinator:
         # `accepted` with `cancelled_at`/`cancel_reason` CLEARED: the cancelled work
         # would be re-drained and charged again. The existence check has to come
         # BEFORE the item write, because that write is what does the damage.
-        if self._store.get_batch(org_id, bid) is not None:
+        # ⛔ AND THE READ BEFORE THE ITEM WRITE MUST NOT RAISE EITHER (round 22
+        # follow-up, P1 — measured). This check is inside `submit`'s `try`, whose
+        # `except Exception` discards the row, its item rows and its staged bytes.
+        # A fault here would delete a batch THIS CALL HAS NOT WRITTEN YET — nothing
+        # exists to compensate for, so a refusal is free and a deletion is not.
+        try:
+            existing = self._store.get_batch(org_id, bid)
+        except Exception:
+            _logger.warning(
+                "batch %s: the row could not be read before the item write — "
+                "refusing rather than discarding a batch this call does not own",
+                bid, exc_info=True)
+            raise _BatchIdConflict(
+                f"batch id {bid!r} could not be shown to be free") from None
+        if existing is not None:
             raise _BatchIdConflict(f"batch id {bid!r} already exists for this org")
         self._store.put_items(org_id, items)
         batch = Batch(batch_id=bid, org_id=org_id, state=BatchState.ACCEPTED,
@@ -2249,10 +2263,26 @@ class BatchCoordinator:
                     "the id — refusing rather than discarding a batch this call "
                     "may not own", bid, exc_info=True)
                 current = None
-            if (current is not None and current.created_at == stamp
-                    and self._store.put_batch_if_state(
+            adopted = False
+            if current is not None and current.created_at == stamp:
+                # ⛔ AND THE CAS FAULT TOO (round 22 follow-up, P1 — measured). A
+                # WRITE fault here is a fault, not a lost race, and it is inside the
+                # same `try`: it must REFUSE, never reach the rollback that discards
+                # the row, its items and its staged bytes. The batch may already be
+                # live (a drain can be working it), so a delete here turns the
+                # `503 … retry` this fault invites into an ingested-twice,
+                # charged-twice document.
+                try:
+                    adopted = self._store.put_batch_if_state(
                         batch, (BatchState.RESUMING, BatchState.RUNNING),
-                        write_identity=True)):
+                        write_identity=True)
+                except Exception:
+                    _logger.warning(
+                        "batch %s: the takeover could not be written — refusing "
+                        "rather than discarding a batch this call may not own",
+                        bid, exc_info=True)
+                    adopted = False
+            if adopted:
                 return batch, items
             if current is not None and current.created_at == stamp:
                 # Our own rows, but the row moved past every state this takeover
