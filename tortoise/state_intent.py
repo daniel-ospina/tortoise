@@ -253,7 +253,7 @@ _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 #: retired`, `is the US footprint archived`), and the head-noun slot is not a
 #: place a zero relative's subject can stand.
 #:
-#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are eight:
+#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are seven:
 #:
 #: * a zero relative whose subject is a BARE NOUN (`is the claim finance
 #:   retracted`) is lexically identical to a two-word head noun plus a predicate
@@ -306,17 +306,6 @@ _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 #:   vocabulary (`estate will probate`). Chasing the rest of English's negation
 #:   is the unbounded word-list shape #13128 refuses, so this is disclosed rather
 #:   than closed;
-#: * ⛔ AND IT IS SO FOR A SECOND, SEPARATE REASON: A MULTI-WORD STOP JOINTED BY A
-#:   HYPHEN NEVER REACHES THE WHOLE-WORD ANCHOR. `-` is a member of `_NP_WORD`, so
-#:   `no-longer` is ONE token and the `longer` alternative — which IS in the list
-#:   and does stop `no longer` — is never evaluated at its start:
-#:   `is the plan no-longer archived` routes, on this head and on `origin/main`
-#:   (measured; it is NOT a regression of the fold, whose typographic spelling
-#:   `no—longer` is handled by folding a separator dash to a SPACE). The same
-#:   applies to any hyphen-joined stop (`to-be`, `far-from`, `anything-but`). This
-#:   is stated rather than closed because the fix is structural: the stop
-#:   lookahead is anchored at a token start, and teaching it every hyphen
-#:   segmentation is a second grammar to be kept in step with `_NP_WORD` by hand;
 
 _NP_STOP = (
     r"(?!(?:that|which|who|whom|whose|where|when"
@@ -327,7 +316,7 @@ _NP_STOP = (
     # predicate modifiers — negation, futurity/intent, disjunction (see the note
     # above: each one changes what the question asks, and a negated predicate is
     # answered with the polarity-INVERTED population)
-    r"|not|never|neither|nor|longer"
+    r"|not|never|neither|nor|no[\s-]+longer|longer"
     # ⛔ AND THE APPROXIMATIVE NEGATORS, BUT ONLY IN THE PREDICATE SLOT. Measured
     # (PR #14491 review, P1): `is the plan hardly cancelled`, `… barely
     # cancelled`, `… scarcely archived`, `… far from cancelled` and `… anything
@@ -347,7 +336,7 @@ _NP_STOP = (
     # (`is the service hardly used archived`), which a generic one-word window
     # refused and which is a real state question. That distinction is why the
     # intervening class is closed rather than `{_NP_WORD}` (PR #14491 review P1).
-    rf"|(?:(?:hardly|barely|scarcely|rarely)(?:-ever)?|far\s+from|anything\s+but)"
+    rf"|(?:(?:hardly|barely|scarcely|rarely)(?:-ever)?|far[\s-]+from|anything[\s-]+but)"
     rf"(?=[\s-]+(?:(?:been|ever|yet)[\s-]+)?(?:{_ENDING_WORDS}))"
     # `being` is the PROGRESSIVE and is a separate token from the infinitive
     # frame below, because no frame marker sits in front of it:
@@ -359,7 +348,7 @@ _NP_STOP = (
     # archived`) and refusing them cost that recall, so they stop the run only
     # where they introduce the predicate (`… to be retired`, `… due to be
     # cancelled`).
-    r"|(?:to|going|about|due|scheduled)\s+(?:to\s+)?be\b"
+    r"|(?:to|going|about|due|scheduled)[\s-]+(?:to[\s-]+)?be\b"
     r"|or"
     # ⛔ AND AT A CLAUSE LINKER / ADJUNCT MARKER, which is the same defect one
     # grammar step further out: the ending there is inside an ADJUNCT, so the
@@ -397,7 +386,7 @@ _NP_STOP = (
     # ⛔ AND AT AN `of`-COMPLEMENT WHOSE HEAD IS THE ENDING WORD (`is the list of
     # retired services archived`): the question is about the LIST, and the ending
     # modifies the complement, so the head noun is not the thing that ended.
-    rf"|of\s+(?:{_ENDING_WORDS}))\b)"
+    rf"|of[\s-]+(?:{_ENDING_WORDS}))\b)"
 )
 
 #: …and the BASE forms of the same words, which is what do-support selects
@@ -879,11 +868,24 @@ def detect_state_question(text: str | None) -> StateQuestion:
     # `is the ½ price plan archived` answers `None` (measured, PR #14491 review
     # cycle 5, P1: it routed before the fold). NFC composes the NFD accent that
     # motivated the normalisation in the first place (`cafe` + U+0301 -> `café`)
-    # and leaves fractions alone. ⛔ THE COST IS STATED: compatibility forms —
-    # full-width Latin, ligatures — are NOT folded, so a question typed in
-    # full-width still keeps the relevance read. That is the pre-fold behaviour,
-    # not a regression; manufacturing a regression to gain it is the trade this
-    # refuses.
+    # and leaves fractions alone. ⛔ NFC ALSO FORGOES COMPATIBILITY FOLDING
+    # (full-width Latin, ligatures) — and that costs NOTHING here, because
+    # `[^\W_]` accepts any alphanumeric, so `is the ｐｌａｎ archived` and
+    # `is the ﬁle plan archived` route either way (measured on both this head and
+    # an NFKC mutant). An earlier cut of this note claimed full-width input
+    # "keeps the relevance read"; that was false and is not repeated.
+    # ⛔ EVERY DASH FOLDS TO `-`, AND THAT IS DELIBERATE — but it is why the
+    # MULTI-WORD stops in `_NP_STOP` accept `[\s-]+` rather than `\s+`. `-` is a
+    # member of `_NP_WORD`, so a dash with no spaces around it JOINS the words
+    # either side into ONE token: `no—longer`, `to—be`, `far—from`,
+    # `anything—but` are each a single token after the fold, and a stop lookahead
+    # anchored at a token start never sees the second word. ⛔ FOLDING A SEPARATOR
+    # DASH TO A SPACE INSTEAD IS WRONG, and it was measured: `committed_to`'s
+    # terminator admits `[—–-,.;:!?]` and depends on the dash still being THERE,
+    # so folding it away silently dropped `what are we currently committed to —
+    # pricing, …` out of the commitments population and into the relevance read (a
+    # P0 in review cycle 7, which also red-ed the sibling pin). So the dash
+    # survives as punctuation and the STOPS are written to cross it.
     # ⛔ THE ORDER MATTERS AND IS TRANSFORM -> LOWER -> NORMALISE: normalising LAST
     # means the composed form is what the shapes see, and lowering before the
     # composition means a decomposed accent still composes afterwards. The
@@ -892,9 +894,8 @@ def detect_state_question(text: str | None) -> StateQuestion:
     folded = str(text).translate(
         {
             0x2018: "'", 0x2019: "'", 0x02BC: "'",  # quotes / modifier apostrophe
-            0x2010: "-", 0x2011: "-",                # HYPHENS — joiners
-            0x2012: " ", 0x2013: " ", 0x2014: " ",  # dashes — separators
-            0x2212: " ",                             # minus sign
+            0x2010: "-", 0x2011: "-", 0x2012: "-",  # hyphens AND dashes
+            0x2013: "-", 0x2014: "-", 0x2212: "-",  # all fold to `-`
         }
     )
     t = " ".join(unicodedata.normalize("NFC", folded.lower()).split())

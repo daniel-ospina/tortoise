@@ -309,7 +309,7 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       routes, and so does one with a bare quantifier subject (`is the plan some
       team abandoned`), and so does a TIME SPAN that names no record
       (`is the quarter ended`) — see the module's ``_NP_STOP`` note for all
-      EIGHT residuals;
+      SEVEN residuals;
     * …and the same stop is what refuses an ADJUNCT: `is the data safe once
       archived`, `is the report still accurate once archived` and
       `is the policy unless bookings were cancelled` — the ending there belongs
@@ -722,11 +722,6 @@ def test_a_multi_word_negator_is_the_stated_cost_of_a_closed_negator_list():
         "is the plan nowhere near cancelled",
         "is the plan in no way archived",
         "is the plan nothing like cancelled",
-        # ⛔ AND THE HYPHEN-JOINTED FORM OF A STOP THAT IS ALREADY IN THE LIST —
-        # `-` is a member of `_NP_WORD`, so `no-longer` is ONE token and the
-        # `longer` alternative is never evaluated at its start (module residual
-        # #8). Pre-existing on `origin/main`, not a fold regression.
-        "is the plan no-longer archived",
     ):
         got = detect_state_question(inverted)
         assert got.population is not None, (
