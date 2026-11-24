@@ -144,9 +144,11 @@ def test_one_incident_is_one_push_for_its_whole_lifecycle(delivered):
     # is the resulting truth, and both are deliberate: this opening message wears the
     # DR vocabulary, while the 24h REMINDER (the re-alarm arm of
     # `notify._notify_abuse_incident`, which no store path emits) keeps the
-    # abuse-specific `🚨 Tortoise Security: <kind>` header — the per-detection TEXT
-    # survives there, on the unattributed path and in the digest, even though the
-    # per-detection SENDER is gone. Both name the kind and the issue, so neither is
+    # abuse-specific `🚨 Tortoise Security: <kind>` header — one of the THREE renderers
+    # of `notify._abuse_message` (the other two are the unattributed delivery and the
+    # activity digest), so the per-detection TEXT survives on those paths even though
+    # the per-detection SENDER is gone. The reminder is the one arm of the INCIDENT
+    # path that no store emitter serves. Both name the kind and the issue, so neither is
     # unattributable; what a reader must not do is grep for one label and conclude the
     # other kind of message does not exist. A relabelling of a security alert into
     # the DR vocabulary is fine ONLY while it is stated and watched: the runbook's
@@ -193,13 +195,15 @@ def test_an_open_episode_re_alarms_at_most_once_per_window(delivered, monkeypatc
     assert len(delivered.pushes) == 2, delivered.pushes
     assert "Still open" in delivered.pushes[-1]
     assert "issue #1" in delivered.pushes[-1], "a reminder must name the incident"
-    # ⛔ THE SECOND LABEL, pinned (#14407 review cycle 6). One episode pages under TWO
-    # headers and both are deliberate: the OPENING push is the store's create-once
-    # template (`🚨 DR alert: …`, shared with every incident kind), while this
-    # REMINDER is the abuse-specific `notify._abuse_message` text — the only path no
-    # store emitter serves. Stating one label in the runbook while the code emits two
-    # is how a triager greps for the wrong string and concludes the reminder does not
-    # exist, so both are read here.
+    # ⛔ THE SECOND ALERT LABEL, pinned (#14407 review cycle 6). One episode emits THREE
+    # messages and each wears its own string: the OPENING push is the store's
+    # create-once template (`🚨 DR alert: …`, shared with every incident kind), this
+    # REMINDER renders the abuse-specific `notify._abuse_message` text (the one arm of
+    # the incident path no store emitter serves), and the episode END adds the store's
+    # `✅ DR resolved: …` close — which contains neither alert label, so the runbook
+    # row names all three and says to grep the KIND. Stating one label while the code
+    # emits three is how a triager greps for the wrong string and concludes the
+    # reminder does not exist, so the two ALERT labels are read here.
     assert delivered.pushes[0].startswith("🚨 DR alert: ABUSE_FLAG_RAISED"), (
         delivered.pushes[0])
     assert delivered.pushes[-1].startswith("🚨 Tortoise Security:"), (
@@ -1384,6 +1388,18 @@ def test_episode_end_resolves_the_abuse_incidents(delivered, monkeypatch):
     assert delivered.closed == [1], "the episode-end close is the recovery path"
     titles = [t for t, _ in delivered.filed]
     assert len(titles) == 1, "resolving must not re-file"
+    # ⛔ THE THIRD STRING, pinned (#14407 review cycle 7). The episode's lifecycle emits
+    # THREE messages, each with its own header: the store's `🚨 DR alert:` open, this
+    # reminder's `🚨 Tortoise Security:`, and the store's `✅ DR resolved:` close below.
+    # The close contains NEITHER alert label, so a triager who grepped both of those
+    # would conclude the incident never resolved; the runbook row names all three and
+    # says to grep the KIND. Pinned so a template change on this arm is visible.
+    resolved_pushes = [p for p in delivered.pushes if "DR resolved" in p]
+    assert resolved_pushes, (
+        "the episode-end close pushed no message — the resolution is then invisible "
+        f"in the chat: {delivered.pushes}")
+    assert resolved_pushes[0].startswith("✅ DR resolved: ABUSE_FLAG_RAISED"), (
+        f"the close's header changed: {resolved_pushes[0][:70]!r}")
 
 
 def test_a_clean_window_with_no_episode_does_no_store_work(monkeypatch):
