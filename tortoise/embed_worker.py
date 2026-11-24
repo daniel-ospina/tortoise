@@ -55,6 +55,8 @@ import sys
 import threading
 import time
 
+from tortoise.env_truthy import is_truthy
+
 _logger = logging.getLogger(__name__)
 
 #: How often the parent-liveness check runs when no request is in flight. The
@@ -75,9 +77,15 @@ ENV_WORKER_REQUIRE_PEER = "TORTOISE_EMBED_WORKER_REQUIRE_PEER"
 
 
 def _require_peer() -> bool:
-    """Whether an unverifiable peer must be REFUSED rather than allowed."""
-    return (os.environ.get(ENV_WORKER_REQUIRE_PEER) or "").strip().lower() in {
-        "1", "true", "yes", "on"}
+    """Whether an unverifiable peer must be REFUSED rather than allowed.
+
+    The vocabulary is the declared contract (:func:`tortoise.env_truthy.is_truthy`),
+    not a local copy: a second spelling is how the five-way divergence #4097 exists
+    to prevent started. ``is_truthy`` is exactly the set this read carried
+    (``{"1","true","yes","on"}``, case-insensitive, whitespace-stripped), so the
+    behaviour is unchanged — and the guard in ``tests/test_env_truthy.py`` grades it.
+    """
+    return is_truthy(os.environ.get(ENV_WORKER_REQUIRE_PEER))
 
 
 def _peer_uid(conn: socket.socket) -> int | None:
