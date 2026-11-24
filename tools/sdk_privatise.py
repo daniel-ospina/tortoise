@@ -113,7 +113,24 @@ SWEEP_NAMES = 66
 #: The residue the sweep REFUSED to guess at, pinned as `(rows, digest)` over the sorted rows so
 #: that a NEW untyped shape — the ordinary-word receivers (`x.query`, `x.update`, `x.delete`) that
 #: cannot be typed from evidence — reds `--check` instead of being silently absorbed into a fresh
-#: count each review (#13899 F6). Re-pin deliberately with `--repin`, in a commit that says why.
+#: count each review (#13899 F6).
+#:
+#: ⛔ THE PIN IS A **HISTORICAL READING**, NOT THE GATE (#14548). `--check` no longer compares this
+#: `(rows, digest)` pair to the tree; it is a RATCHET: the observed untyped-receiver count must not
+#: EXCEED a baseline reconstructed at check time from the tree's base point with `origin/main` (the
+#: merge base, or `--baseline REV`; a named baseline that does not resolve is a REFUSAL, exit 2).
+#: Growth reds naming the row, the file and the line; a REMOVAL passes; the digest is kept only as a
+#: non-blocking SHAPE signal (rows appeared / vanished / moved), because a count alone cannot see a
+#: rename and gating on the digest would rebuild the re-pin treadmill this replaces. So `--repin` is
+#: wanted only when a re-cut is worth RECORDING, never to make the gate pass — the values below are
+#: left untouched and still read, as the record's own measurement.
+#: ⛔ EVERY `--check` EXIT READING BELOW IS A **PRE-RATCHET** READING. The records that follow were
+#: written against the equality gate, and each is true of the tree and commit it NAMES; the verb in
+#: them (`--check` exits 0, `--check` exited 1) reports what THAT gate said there. Re-running TODAY's
+#: `--check` on those trees does not reproduce those exits — it returns a ratchet verdict about that
+#: tree against its own base point — so the reproducible command for a pair recorded below is
+#: `--repin` on the named tree, which prints the pair the record states. Nothing below is
+#: re-litigated by the mechanism change, and no recorded value moves.
 #:
 #: RE-PINNED (11776, bfbf6195136edc2c) → (11782, 0f00153d4691e3de) → (11769, 3dc892001700a031)
 #: by #13899's fix rounds, and both moves are the intended direction:
@@ -280,10 +297,10 @@ SWEEP_NAMES = 66
 #: The proof is the ATTRIBUTION, not the sign of the delta: reverting ONLY that one call site (the
 #: file's only `stub._get_point` hit) back to the retired public spelling reproduces exactly 11822,
 #: so the -1 is that one removed call site and nothing else. ⛔ A shrink is NOT evidence on its own —
-#: `--check` compares the `(count, digest)` PAIR and `--repin` prints a fresh pair that is pasted in
-#: deliberately, so a re-pin absorbs whatever shape the tree holds in EITHER direction (remove two
-#: untyped receivers, add one different shape -> net -1, absorbed). Read the rows `--repin` prints,
-#: not the direction of the delta (#14003 review, round 3, P3 / #14030).
+#: `--check` RATCHETS the COUNT against the base point and reports the digest without gating on it,
+#: so a NET SHRINK passes on its own (remove two untyped receivers, add one different shape -> net
+#: -1, passes) while any NET GROWTH reds. Read the rows `--report`'s dump names, not the direction of
+#: the delta (#14003 review, round 3, P3 / #14030; ratcheted by #14548).
 #: ⚠️ NO LINE NUMBERS ARE TYPED HERE ON PURPOSE: a reproducer that says `:803` is not reproducible
 #: once the file moves, and this block carried exactly such a stale address — nothing in the tree
 #: reads it (`grep -rln 'tools/sdk_privatise.py:' tests/` is empty), so a lane following it edits the
@@ -754,11 +771,11 @@ SWEEP_NAMES = 66
 #: The proof is the ATTRIBUTION, not the sign of the delta: reverting ONLY that one call site (the
 #: file's only `stub._get_point` hit) back to the retired public spelling reproduces exactly 11822,
 #: so the -1 is that one removed call site and nothing else. ⛔ A shrink is NOT evidence on its own —
-#: `--check` compares the `(count, digest)` PAIR and `--repin` prints a fresh pair that is pasted in
-#: deliberately, so a re-pin absorbs whatever shape the tree holds in EITHER direction (remove two
-#: untyped receivers, add one different shape -> net -1, absorbed). Read the ROWS from `--report`'s
-#: dump against `SWEEP_BASE` (`--repin` prints only the tuple), not the direction of the delta
-#: (#14003 review, round 3, P3 / #14030).
+#: `--check` RATCHETS the COUNT against the base point and reports the digest without gating on it,
+#: so a NET SHRINK passes on its own (remove two untyped receivers, add one different shape -> net
+#: -1, passes) while any NET GROWTH reds. Read the ROWS from `--report`'s dump against `SWEEP_BASE`
+#: (`--repin` prints only the tuple), not the direction of the delta (#14003 review, round 3, P3 /
+#: #14030; ratcheted by #14548).
 #: ⚠️ NO LINE NUMBERS ARE TYPED HERE ON PURPOSE: a reproducer that says `:803` is not reproducible
 #: once the file moves, and this block carried exactly such a stale address — nothing in the tree
 #: reads it (`grep -rln 'tools/sdk_privatise.py:' tests/` is empty), so a lane following it edits the
@@ -2088,19 +2105,21 @@ SWEEP_NAMES = 66
 #: accepted as a flake: `main`'s rewrite of `tests/test_collision_preflight.py` adds exactly one
 #: untyped `.update` receiver, `seen.update(kwargs)` in its new `spy()` fixture, and that merge
 #: deleted no `.update` line anywhere (`#4625`'s own -2 is still in that tree: `_JSONB_CACHE.update`
-#: is 2 rows on `origin/main` and 0 there). A rising pin is the direction the guard exists to CATCH,
+#: is 2 rows on `2cccf90f4dd4` and 0 here). A rising pin is the direction the guard exists to CATCH,
 #: and there the row is main's, so the pin followed `main` — measured `--repin` on that merged tree,
 #: never arithmetic on the old number.
 #: ⛔ AND THE NEXT FOLD OF `origin/main` RE-DERIVED IT AGAIN RATHER THAN INHERITING EITHER SIDE,
 #: because the fold's own tree is a THIRD tree: that merge brought main's durable
 #: `claim_unavailable` self-heal, whose `recorded.update(keep)` in `tortoise/capture_spool.py` is one
 #: new untyped `.update(` receiver, and `--repin` on THAT resolved tree printed
-#: **(11910, "3216395d35345904")**. The -3 between that and that `main`'s committed 11911 is
-#: attributed ROW BY ROW, not waved through:
+#: **(11910, "3216395d35345904")**. The TWO rows between that and the **11912** `main`'s own
+#: tree derives are attributed ROW BY ROW, not waved through:
 #:   * that `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1
 #:     is `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which
-#:     arrived with `#14491`'s rewrite and which that re-pin did not count. So `--check` exited 1 on
-#:     that `main` ITSELF (the `#14062` recurrence the blocks above record a sixth time); this
+#:     arrived with `#14506`'s rewrite and which that re-pin did not count. So `--check` exited 1 on
+#:     that `main` AT THAT COMMIT (the `#14062` recurrence the blocks above record a sixth time);
+#:     `#14459` then re-derived the pin at 11910 on its own tree, so `main` reads exit 0 today
+#:     (measured); this
 #:     branch inherits main's row set, not main's number.
 #:   * `#4625`'s own -2 is the pair of `_JSONB_CACHE.update({...})` rows the retired 5 s `jsonb` TTL
 #:     took with it — 2 rows on that `origin/main`, 0 there, and the report row sets are otherwise
@@ -2111,25 +2130,38 @@ SWEEP_NAMES = 66
 #:   kept as prose here for the same one-assignment reason, and ⛔ ITS PAIR IS `#4625`'S MERGE TREE,
 #:   NOT THIS ONE'S.
 #:
-#: ⛔ MERGED `origin/main` `6a02515d14ad` INTO THIS BRANCH — the PR was `CONFLICTING`, and the two
-#: conflicted files are exactly the ones this pin lives in (`tools/sdk_privatise.py` and its grading
-#: suite): each side had appended its own re-cut record above the SAME `SWEEP_RESIDUE` assignment.
-#: BOTH SIDES' BLOCKS ABOVE ARE KEPT VERBATIM, which is this block's ground rule: each is a true
-#: measurement of the tree it NAMES, so neither side is dropped to make a conflict go away — and the
-#: one line that CANNOT be kept twice is the assignment itself, because a second one binds silently
-#: while the walk still grades the first.
-#: ⛔ THE PIN IS THEN RE-MEASURED ON THE RESOLVED TREE: a merge tree is a THIRD tree, so neither
-#: parent's numeral is inherited, and `--repin` HERE is the only thing that reads it. It prints
-#: **(11910, "3216395d35345904")** with `typed references still pointing at a public name: 0`, and
-#: `--check` exits 0 on it. ⚠️ THAT IS BYTE-IDENTICAL TO THE PAIR `main` COMMITS, and the agreement
-#: is a MEASUREMENT of two trees rather than a carry: this fold adds NO row, so the matching numeral
-#: must not be read as confirmation of anything this branch contributes.
-#: ⛔ THE 2-ROW GAP BETWEEN THIS PAIR AND THE BRANCH'S OWN PRE-MERGE 11912 IS ATTRIBUTED ROW BY ROW,
-#: not waved through: the branch's pre-merge tree still carried the two `_JSONB_CACHE.update({...})`
+#: ⛔ REBASED ONTO `origin/main` `533e256f2c89` — the PR was `CONFLICTING`, and the two conflicted
+#: files are exactly the ones this pin lives in (`tools/sdk_privatise.py` and its grading suite).
+#: BOTH SIDES' BLOCKS ABOVE ARE KEPT, which is this block's ground rule: each is a true measurement
+#: of the tree it NAMES, so neither side is dropped to make a conflict go away — and the one line
+#: that CANNOT be kept twice is the assignment itself, because a second one binds silently while the
+#: walk still grades the first.
+#: WHY THE CONFLICT EXISTED, per file rather than as a shrug: `#14445` on `main` expanded the re-cut
+#: chain above into the fuller record this file now carries (the `#14480` entry, the two `#14445`
+#: re-cuts on `main`'s behalf), while this branch's commits corrected three statements in the OLDER
+#: narrative that `#14445` had carried forward verbatim. The resolution keeps `main`'s fuller chain
+#: and applies those three corrections ON TOP of it, each re-verified against Git rather than
+#: carried on trust: `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture
+#: arrived with `#14506` (`7d9e7b99c473`), not `#14491` (`07a483ab38c7` touches that file zero
+#: times); the gap to this tree's pair is TWO rows and not three (`11912 - 11910`); and
+#: `_JSONB_CACHE.update` is 2 rows at `2cccf90f4dd4`, not on `origin/main`, which `#14459` retired
+#: to 11910. The suite's conflict was a pure double-append at EOF — `main` added
+#: `test_a_tool_only_diff_selects_this_suite`, this branch added the ratchet arms, one anchor — so
+#: BOTH are kept and neither arm is lost.
+#: ⛔ RE-CUT ONTO `origin/main` `af40c97ca312` AFTER IT MOVED THE PIN AGAIN, AND **MAIN'S
+#: VALUE IS THE ONE KEPT**: `#14544` on `main` re-pinned `11910` → **`11903`** on its own tree (the
+#: block immediately above attributes that `-7` row by row), so the assignment below carries MAIN'S
+#: pair and this branch contributes NO pair of its own. ⛔ That is not a convenience, it is what the
+#: change IS: under the RATCHET below the recorded pair is a HISTORICAL READING that no `--check`
+#: compares against the tree, so a re-cut has nothing to re-pin and the treadmill this change exists
+#: to stop gets no new run on `main`'s behalf. The branch's earlier prose read `11910` and called it
+#: "the pair `main` commits"; both halves of that were true of `533e256f2c89` and are false here, so
+#: the sentence is replaced rather than carried.
+#: ⛔ THE 2-ROW GAP BETWEEN 11912 AND 11910 IS ATTRIBUTED ROW BY
+#: ROW, not waved through: the branch's earlier tree carried the two `_JSONB_CACHE.update({...})`
 #: rows `#4625` retires (measured `git grep -c '_JSONB_CACHE.update'` → **2** on that tree, **0** on
 #: `origin/main`), which is exactly the pair the block above already accounts for. Adopting main's
 #: deletion is what makes this tree read main's count; nothing fell unaccounted in either direction.
-#:
 #: ⛔ RE-PINNED DOWN 11910 -> 11903 ON THE `#14544` CUT, AND THE 7 IS ATTRIBUTED ROW BY ROW. That
 #: PR deletes 270 cases from `tests/test_dod_5090_probe.py`, and `--repin` on THIS tree prints
 #: **(11903, "1fb861e2c8163aec")**. Measured with this module's own `edits_for`, not reasoned from
