@@ -95,7 +95,7 @@ Exit codes (the gate's own three, for the gate's own reason)
       failing the run with the reason — an hour of "unknown" must never look like
       an hour of "declared".
 
-Env seams (the gate's, unchanged — all optional, all used by the hermetic suite)
+Env seams (the gate's — all optional, all exercised by the hermetic suite)
   FLY_SECRETS_FILE          fixture holding the ``--json`` secret list
   FLY_SECRETS_CMD           secret-list command override (default: the read)
   FLY_MANAGED_SECRETS_FILE  manifest path override
@@ -105,6 +105,12 @@ Env seams (the gate's, unchanged — all optional, all used by the hermetic suit
   FLY_MITIGATION_LEDGER     mitigation ledger the payload filter reads (#11122).
                             NOT test-only: the sync step drops ledgered names, so
                             the "can this be staged" answer is wrong without it.
+  GH_SECRETS_PRESENT        the run's OWN present-secret sample — the gate's own
+                            seam (#4259), and the third population
+                            ``staged_names`` unions in. Unset on a SCHEDULED tick,
+                            which is the residual the module docstring states;
+                            read only to WIDEN the reading, never to narrow it.
+                            (This file reads it; the gate is what defines it.)
 """
 
 from __future__ import annotations
@@ -179,10 +185,16 @@ def _gate() -> ModuleType:
 def staged_names(gate: ModuleType, workflow_text: str) -> set[str]:
     """Every Fly variable ``deploy-hosted.yml``'s payload CAN assign.
 
-    ``assigned | unconditional``: the all-secrets-present sample (what a fully
-    configured repo stages) plus the no-secrets sample (what a ``-z``-guarded
-    line stages while its secret is absent). A name in EITHER sample is a name
-    the deploy can create on Fly, so the declaration must exist before it does.
+    ``assigned | unconditional | live``: the all-secrets-present sample (what a
+    fully configured repo stages), plus the no-secrets sample (what a
+    ``-z``-guarded line stages while its secret is absent), plus the RUN sample —
+    the gate's own third population, and the only one that can see a guard NEITHER
+    synthetic sample reproduces. A name in ANY of them is a name the deploy can
+    create on Fly, so the declaration must exist before it does.
+    ⛔ The run sample is present only when ``GH_SECRETS_PRESENT`` is set; the
+    module docstring's residual paragraph states what that leaves unseen on a
+    scheduled tick. A reader who assumes the run sample is ignored has just deleted
+    the seam — keep this line in step with the ``return`` below.
 
     ⛔ The payload is EXECUTED (``payload_partition`` runs it under a stubbed
     ``flyctl``), so no shell spelling — ``&&``, ``test``, ``[[``, ``case``, a

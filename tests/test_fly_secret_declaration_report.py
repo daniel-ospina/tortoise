@@ -986,6 +986,27 @@ def test_the_read_step_publishes_a_fresh_reading_identity_every_tick():
     )
 
 
+def test_no_scratch_file_in_the_report_step_uses_a_fixed_tmp_path():
+    """Static, because the defect is only reachable under CONCURRENT execution.
+
+    A fixed `/tmp` name lets a killed/concurrent tick's listing be consumed as this
+    tick's, which resolves an issue whose condition nobody re-read. It was measured
+    at 5 failures in 24 runs with the fixed literals versus 0 in 24 with `mktemp`,
+    driving 4 pytest processes at once — and the repo's own CI is SERIAL
+    (`config/ci-surfaces.yml`: "with no xdist — one serial pytest process per leg"),
+    so `-n 4` reproduces nothing and a behavioural pin would be vacuous. A static
+    assertion reds the moment the literal comes back, whatever the suite shape.
+    """
+    run = _report_step()
+    assert "/tmp/" not in run, (
+        "the Report step holds a fixed /tmp path again: a stale listing from a "
+        "killed or concurrent tick can be consumed as this tick's, resolving an "
+        "issue whose condition nobody re-read. Give it its own identity (mktemp)."
+    )
+    # …and the same for the read step's reading (which publishes its identity).
+    assert "/tmp/" not in _read_step()["run"]
+
+
 def test_the_workflow_pins_the_only_command_it_runs(tmp_path):
     """`FLY_SECRETS_CMD` is an env seam — a default is not a pin.
 
