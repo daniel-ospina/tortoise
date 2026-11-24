@@ -1154,7 +1154,15 @@ class GraphBatchStore:
             "RETURN i.id",
             {"iid": item_id, "bid": batch_id, "org": org_id,
              "tin": max(0, int(tokens_in)), "tout": max(0, int(tokens_out)),
-             "updated": updated_at or self._now()})
+             # ⛔ `_utc_now()`, NOT `self._now()` (#14415 recut review, P3). `_now`
+             # is a `BatchCoordinator` attribute; `GraphBatchStore` never defines
+             # it, so the `updated_at=""` default — the signature's own documented
+             # form — raised `AttributeError: 'GraphBatchStore' object has no
+             # attribute '_now'`. `_bill` always passes a stamp, so the live path
+             # never took it, and the pin that was supposed to drive every
+             # statement did not drive this one: a latent crash in a public store
+             # method, invisible to the whole suite until the pin was widened.
+             "updated": updated_at or _utc_now()})
         if not rows:
             return None
         # Read back through the ONE row projection, so this cannot drift from
@@ -1249,6 +1257,13 @@ class GraphBatchStore:
              # is never handed to the query.
              **({"tin": int(token_delta[0]), "tout": int(token_delta[1])}
                 if token_delta is not None else {}),
+             # ⛔ `attempts` IS NAMED BY THE SET ABOVE, so it must be in the map
+             # (#14415 review round 13). The `token_delta` refactor rebuilt this
+             # dict and dropped the key, and the statement then failed at the
+             # engine with `Missing parameters` on EVERY compare-and-set — the
+             # claim, the settle, the cancel, the resume. Only the live test saw
+             # it; the hermetic ones use a fake `query`.
+             "attempts": int(item.attempts),
              "changed": bool(item.content_changed),
              "updated": item.updated_at,
              # Sent only when the pattern above names it, so an unused parameter
@@ -2588,11 +2603,30 @@ class BatchCoordinator:
             orphan_items = self._store.items(org_id, batch_id)
             if not orphan_items:
                 return None
-            batch = Batch(batch_id=batch_id, org_id=org_id,
-                          state=BatchState.RESUMING,
-                          created_at=orphan_items[0].updated_at,
-                          updated_at=orphan_items[0].updated_at)
-            self._store.put_batch(batch)
+            # ⛔ RE-READ BEFORE ADOPTING (#14415 recut review, P2). The orphan shape
+            # is not only a crash residue: `submit()` writes the item rows BEFORE
+            # the batch row on purpose, and `pending_batches()` UNIONs the ITEM arm —
+            # so a recovery scan running while an acceptance is inside its item loop
+            # sees this exact shape and read `get_batch -> None` a moment ago. The
+            # adoption then called `put_batch`, an UNCONDITIONAL `MERGE ... SET`
+            # over `estimate_json`, `corpus_name`, `cancelled_at`: it wiped the
+            # estimate the ACK is required to carry (owner §4) and relabelled
+            # `accepted` as `resuming` over work that never stopped. The other three
+            # writers of this row were each hardened to a compare-and-set; this one
+            # is hardened by not writing over a row that has since appeared.
+            #
+            # DECLARED RESIDUAL: a re-read NARROWS this window rather than closing
+            # it — a write landing between this read and the one below still loses.
+            # The atomic form is an insert-if-absent (`MERGE ... ON CREATE SET`)
+            # on the store protocol, which this fix does not add; the window is now
+            # this thread's own two statements instead of the whole acceptance loop.
+            batch = self._store.get_batch(org_id, batch_id)
+            if batch is None:
+                batch = Batch(batch_id=batch_id, org_id=org_id,
+                              state=BatchState.RESUMING,
+                              created_at=orphan_items[0].updated_at,
+                              updated_at=orphan_items[0].updated_at)
+                self._store.put_batch(batch)
         if batch.state is BatchState.CANCELLED:
             # A cancelled batch is NOT resumed: the customer stopped it, and a
             # restart is not a reason to spend their allowance. But an item left

@@ -392,6 +392,70 @@ def test_a_cancel_during_an_in_flight_item_keeps_that_item_s_result():
     assert coord.settle(ORG, batch.batch_id).state is BatchState.CANCELLED
 
 
+def test_orphan_adoption_never_wipes_the_estimate_the_ack_carried():
+    """⛔ RECUT REVIEW P2: the FOURTH writer of the batch row was still unconditional.
+
+    `submit()` writes the item rows BEFORE the batch row on purpose (an ACK must
+    never name a document we did not record), and `pending_batches()` UNIONs the
+    ITEM arm — so a recovery scan running while an acceptance is inside its item
+    loop sees items with no batch row and reads `get_batch -> None`. It then
+    constructed a `Batch(estimate={}, corpus_name="")` and called `put_batch`, an
+    UNCONDITIONAL `MERGE ... SET` over `estimate_json`, `corpus_name`,
+    `cancelled_at`: the estimate owner §4 requires on the ACK was WIPED and the
+    batch relabelled `resuming` over work that never stopped. The three other
+    writers of that row were each hardened to a compare-and-set; this one was not.
+
+    The stale read is injected (`get_batch` returns `None` once, exactly what the
+    scan saw), so this reproduces the window without threads and FAILS on the
+    pre-fix code.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    # ⛔ The estimate must be NON-EMPTY or this test is vacuous: `submit()` with no
+    # estimate already stores `{}`, so comparing `{} == {}` would pass over the
+    # very wipe it exists to catch (measured: it did).
+    estimate = {"items": 2, "tokens_per_item": 64799,
+                "estimated_tokens": 129598, "included_tokens": None,
+                "overage_tokens": 0, "overage_usd": 0.0}
+    batch, _items = coord.submit(ORG, ["/d/a.md", "/d/b.md"],
+                                 corpus_name="handbook", estimate=estimate)
+    before = store.get_batch(ORG, batch.batch_id)
+    assert before is not None
+    assert before.estimate, "the premise: the ACK wrote a non-empty estimate"
+    assert before.corpus_name == "handbook", "the premise: the ACK wrote a corpus"
+
+    real_get = store.get_batch
+    fired = {"done": False}
+
+    def stale_get(org_id, batch_id):
+        if not fired["done"]:
+            fired["done"] = True
+            return None          # the read the scan took BEFORE the row was written
+        return real_get(org_id, batch_id)
+
+    store.get_batch = stale_get  # type: ignore[method-assign]
+    coord.recover(ORG)
+
+    assert fired["done"], "the stale read did not fire — the test proves nothing"
+    after = real_get(ORG, batch.batch_id)
+    assert after is not None, "the adoption DELETED the batch row"
+    assert after.estimate == before.estimate, (
+        "the adoption overwrote the ACK's estimate with an empty one — owner §4 "
+        f"requires it on the record: {before.estimate!r} -> {after.estimate!r}")
+    # ⛔ NOT asserted: `state is not RESUMING`. A genuine recovery of an accepted
+    # batch that still has `queued` items SHOULD report `resuming` — that is the
+    # feature, not the defect. What the adoption must never do is rewrite the
+    # fields the ACK put on the record from an orphan-shaped (empty) Batch. The
+    # measurement that isolates it is the estimate, the corpus name and the
+    # creation stamp.
+    assert after.corpus_name == before.corpus_name, (
+        f"the adoption overwrote corpus_name: {before.corpus_name!r} -> "
+        f"{after.corpus_name!r}")
+    assert after.created_at == before.created_at, (
+        "the adoption re-stamped created_at from an orphan item's updated_at, so "
+        "the batch's own age is lost")
+
+
 def test_a_restart_settles_what_a_cancelled_batch_left_in_flight():
     """A crash AFTER a cancel must not leave a permanently non-terminal row."""
     store = InMemoryBatchStore()
@@ -1612,22 +1676,28 @@ def test_a_receipt_and_the_meter_agree_when_the_row_moved_on():
 
 # ── round 9: the malformed statement, the cancel a rescan erased, and the
 #    liveness rule's third site ────────────────────────────────────────────
-def _every_store_statement() -> list[str]:
-    """Every Cypher statement `GraphBatchStore` can emit, by driving all of it.
+def _every_store_statement_pairs() -> list[tuple[str, dict]]:
+    """Every `(statement, params)` pair `GraphBatchStore` hands to the engine.
 
     A recording `query` returns an empty result set, so nothing is asserted about
-    RESULTS here — only about the STATEMENTS this module hands to FalkorDB. That
-    is deliberate: the fake `query` in the rest of this suite accepts ANY string,
-    which is exactly why a malformed statement went unnoticed.
+    RESULTS here — only about what this module EMITS. That is deliberate: the
+    fake `query` in the rest of this suite accepts ANY string, which is exactly
+    why a malformed statement went unnoticed.
+
+    ⛔ THE PARAMS ARE COLLECTED TOO. Braces are half of "does the engine accept
+    this"; the other half is the parameters, and a statement that names `$x`
+    without supplying it is FalkorDB's `Missing parameters` — a RUN-time failure
+    invisible to every hermetic test (#14415 recut review, P0, measured on the
+    live round-trip).
     """
-    seen: list[str] = []
+    pairs: list[tuple[str, dict]] = []
 
     class _Res:
         def __init__(self) -> None:
             self.result_set: list = []
 
-    def _record(cypher, params=None, timeout=None, _seen=seen):
-        _seen.append(cypher)
+    def _record(cypher, params=None, timeout=None, _pairs=pairs):
+        _pairs.append((cypher, dict(params or {})))
         return _Res()
 
     store = GraphBatchStore(_record)
@@ -1647,7 +1717,21 @@ def _every_store_statement() -> list[str]:
     store.batch_counts(ORG, [batch.batch_id])
     store.find_settled_by_content_key(ORG, "k")
     store.discard(ORG, batch.batch_id)
-    return seen
+    # ⛔ `add_item_tokens` is the ONE statement whose failure is SWALLOWED
+    # (`_bill` logs and carries on: "the ledger is charged, the row's total is
+    # short"), so a malformed emission here is exactly the bill/receipt
+    # disagreement this branch fixed twice — and this pin, whose docstring claims
+    # "every Cypher statement `GraphBatchStore` can emit", did not drive it, so
+    # neither the brace guard nor the live round-trip could reach it (#14415
+    # recut review, P3). A pin wider than its reach is the no-op-gate class.
+    store.add_item_tokens(ORG, batch.batch_id, items[0].item_id,
+                          tokens_in=1, tokens_out=1)
+    return pairs
+
+
+def _every_store_statement() -> list[str]:
+    """The statements alone, for the arms that grade shape and not parameters."""
+    return [cypher for cypher, _params in _every_store_statement_pairs()]
 
 
 def test_every_emitted_statement_is_brace_balanced():
@@ -1667,7 +1751,7 @@ def test_every_emitted_statement_is_brace_balanced():
     doubled brace anywhere in any statement) and not only that one line.
     """
     seen = _every_store_statement()
-    assert len(seen) >= 14, f"only {len(seen)} statements reached the store"
+    assert len(seen) >= 15, f"only {len(seen)} statements reached the store"
     # ⛔ THREE SHAPES, NOT ONE (#14415 review round 11, LOW). Balanced braces are
     # not enough: an `f` prefix dropped from `f"WHERE 1=1 {attempts_clause}"`
     # leaves the braces balanced and emits the literal text `{attempts_clause}`,
@@ -1868,6 +1952,34 @@ def test_the_graph_store_speaks_real_cypher():
     finally:
         graph.query("MATCH (n) DETACH DELETE n")
         graph.delete()
+
+
+def test_every_emitted_statement_receives_every_parameter_it_names():
+    """⛔ P0: a statement that names `$attempts` without supplying it is DEAD on
+    FalkorDB and green everywhere else.
+
+    Measured at the recut head: a SET-block rewrite dropped
+    `"attempts": int(item.attempts)` from `put_item_if_state`'s params while the
+    statement still wrote `i.attempts=$attempts`. FalkorDB answered
+    `redis.exceptions.ResponseError: Missing parameters` — so EVERY item write
+    (claim, settle, cancel) failed on the production store, and the batch sat
+    `resuming` for ever. The whole hermetic suite was green: a fake `query`
+    accepts any string, and the brace guard grades braces. Only the live
+    round-trip saw it.
+
+    This pins the class hermetically: every `$name` the emitted Cypher references
+    must be present in the params handed to the same call.
+    """
+    import re as _re
+
+    missing: list[tuple[str, str]] = []
+    for cypher, params in _every_store_statement_pairs():
+        for name in set(_re.findall(r"\$([A-Za-z_][A-Za-z0-9_]*)", cypher)):
+            if name not in params:
+                missing.append((name, cypher.split("\n")[0][:110]))
+    assert not missing, (
+        "a statement names a parameter it never supplies — FalkorDB answers "
+        f"`Missing parameters` at run time: {missing}")
 
 
 def test_the_store_statements_carry_the_tenant_filter():
@@ -2099,7 +2211,7 @@ def test_a_cancel_stops_the_queued_set_in_one_statement():
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
     refs = [f"/d/{i}.md" for i in range(50)]
-    batch, items = coord.submit(ORG, refs)
+    batch, _items = coord.submit(ORG, refs)
 
     per_item: list[str] = []
     real_cas = store.put_item_if_state
