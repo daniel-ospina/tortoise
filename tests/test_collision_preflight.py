@@ -763,6 +763,14 @@ def _stop_fake_lane(proc: subprocess.Popen) -> None:
     anything else it signals that pid alone.
     """
     pgid = getattr(proc, "pi_lane_pgid", None)
+    # ⛔ ONLY SIGNAL A GROUP WE STILL OWN (#14506 review, P2). Several arms reap the lane
+    # themselves — `_wait_for_pi_cwd` polls it on the DEAD-FIXTURE path — and then call this
+    # in `finally`. By then `pgid` is a FREED pid, so an unconditional `killpg` can signal
+    # whatever group now holds that number, and on a runner shared with the fleet that is
+    # another lane's work. A `returncode` is only set once the child has been REAPED (i.e.
+    # its pid is free); while it is `None` the pid is still ours (a zombie holds it).
+    if proc.returncode is not None:
+        return
     if pgid is None:
         with suppress(OSError):
             proc.kill()
@@ -783,7 +791,10 @@ def _stop_fake_lane(proc: subprocess.Popen) -> None:
         else:
             with suppress(OSError):
                 proc.kill()
-        proc.wait(timeout=10)
+        # ⛔ DO NOT RAISE OUT OF A `finally` (#14506 review, P2): a `TimeoutExpired` here
+        # would REPLACE the test's real failure with a teardown error.
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
 
 
 def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
@@ -797,10 +808,14 @@ def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
         if raw.endswith(" (deleted)"):
             return
         time.sleep(0.02)
+    # ⛔ ONE STABLE LINE FIRST (#14506 review, P2). The pid is per-run, so on the
+    # identity line it made a different failure on every run and the exemption engine's
+    # `pr <= main` subset test then never matched. The dead lane's own words ride the
+    # continuation, where `_dead_lane_note(pid)`'s caller keeps them out of the signature.
     raise AssertionError(
-        f"`/proc/{pid}/cwd` never read back as deleted — the fixture cannot model "
-        f"a live `pi` whose cwd is unreadable, so this run proves nothing"
-        f"{_dead_lane_note(pid)}")
+        "`/proc/<pid>/cwd` never read back as deleted — the fixture cannot model a live "
+        "`pi` whose cwd is unreadable, so this run proves nothing\n"
+        f"pid {pid} was still readable after {timeout:.1f}s{_dead_lane_note(pid)}")
 
 
 #: A `ps` that hides the BOX's UNATTRIBUTABLE `pi` rows from this suite.
@@ -4728,7 +4743,12 @@ class CollisionPreflightTest(unittest.TestCase):
             if line.startswith("VERDICT: INCOMPLETE")
         ]
         if len(lines) != 1:
-            raise AssertionError(f"expected exactly one VERDICT line: {out}")
+            # ⛔ ONE STABLE LINE FIRST (#14506 review, P2). The whole per-run report below
+            # is the measurement; on the identity line it is a different failure on every
+            # run, and the exemption engine's `pr <= main` subset test then never matches.
+            raise AssertionError(
+                "expected exactly one VERDICT line in the tool's report\n"
+                f"report:\n{out}")
         return lines[0]
 
     def test_both_causes_on_one_surface_are_both_named(self):
@@ -9932,9 +9952,18 @@ class CollisionPreflightTest(unittest.TestCase):
             # never reach the identity.
             fatal += self._fake_lane_stderr_note(pid)
         # ⛔ LINE 1 IS A GATE IDENTITY, NOT PROSE — DO NOT PUT A MEASUREMENT ON IT (#14506).
+        # The pre-merge exemption decision compares ONE stable string per failure, and the
+        # path that produces it depends on the test's SHAPE (#14506 review, P2 — the first
+        # version of this comment named only the first path). For a function-based test,
         # `ci_exemption.py::_signature_from` reads pytest's FIRST `E   ` line of the
-        # FAILURES block, so the pre-merge exemption decision compares line 1 and nothing
-        # else. #14388 appended the measurement tail to line 1 (a `f"(...)"` with no
+        # FAILURES block. For this file's `unittest.TestCase` ids that block is never
+        # attributed — its header is dotted (`_____ Class.test _____`) while the join keys
+        # on `nodeid.split("::")[-1]` — so the identity is the ` - <detail>` of the short
+        # summary instead, which pytest CLIPS AT THE MESSAGE'S FIRST NEWLINE. Both paths
+        # therefore read line 1, and the short-summary one is ALSO terminal-width sensitive
+        # (too long and the detail is dropped, leaving the id unsigned and exempt by
+        # nothing) — so line 1 must stay BOTH a single line AND short.
+        # #14388 appended the measurement tail to line 1 (a `f"(...)"` with no
         # newline), and every datum in that tail is per-run: the HOST's `pi` pid list, the
         # fixture's temp dir, the child's rc. The identity therefore differed on every
         # run — including from the identity `main`'s own table holds for these SAME ids
@@ -10082,12 +10111,18 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_the_census_failure_IDENTITY_is_its_first_line_not_its_measurements(self):
         """⛔ LINE 1 OF THIS MESSAGE IS A GATE IDENTITY — a measurement on it is a bypass.
 
-        `ci_exemption.py::_signature_from` reads pytest's FIRST `E   ` line of the FAILURES
-        block, and the pre-merge exemption decision compares THAT and nothing else. Every
-        datum this message measures is per-run (the host's `pi` pid list, the fixture's
-        temp dir, the child's rc), so #14388's tail-on-line-1 made the identity different
-        on every run — including from the identity `main`'s own failure table holds for
-        these same ids — and the predicate then read main's ambient flake as a NEW failure.
+        `ci_exemption.py` compares ONE stable string per failure, and which path produces
+        it depends on the test's SHAPE (#14506 review, P2): for a function-based test it is
+        the FIRST `E   ` line of the FAILURES block, but for these `unittest.TestCase` ids
+        that block is never attributed (its header is dotted, the join key is
+        `nodeid.split("::")[-1]`), so it is the ` - <detail>` of the short summary — which
+        pytest clips at the message's first newline AND drops entirely on a narrow terminal.
+        So the message must be ONE SHORT LINE whose first line is the stable identity.
+        Every datum this message measures is per-run (the host's `pi` pid list, the
+        fixture's temp dir, the child's rc), so #14388's tail-on-line-1 made the identity
+        different on every run — including from the identity `main`'s own failure table
+        holds for these same ids — and the predicate then read main's ambient flake as a
+        NEW failure.
         Measured on #14506: four of these ids refused the required `python-ci-gate` twice at
         an unchanged head, on a diff that only deletes test arms, while `main` failed the
         identical ids at 7/17 (`signature differs from main's`). #12399 records the same
@@ -10229,6 +10264,49 @@ class CollisionPreflightTest(unittest.TestCase):
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
 
+    @unittest.skipUnless(os.name == "posix", "process groups are POSIX-only")
+    def test_a_lane_leads_its_own_group_and_the_teardown_reaps_the_group(self):
+        """#14506 review, P2 — the group-reap is claimed and was pinned by NOTHING.
+
+        The lane is a SHELL whose child is `sleep` (`_fake_lane_argv`), so a plain
+        `terminate()` signals only the shell and reparents the sleeper to init, where it
+        outlives the temp dir it stands in — measured at ~11 orphans per full run of this
+        file. Reverting the teardown to the pre-#14506 `proc.terminate(); proc.wait()` left
+        all 457 tests green, so nothing could see the leak return. This asserts the seam:
+        the spawn asks for its own session, the lane really LEADS that group, and a teardown
+        leaves no process in it.
+
+        ⛔ `os.killpg(pgid, 0)` is the assertion, not `proc.poll()`: it fails with
+        `ProcessLookupError` only when NOTHING is left in the group, which is the orphan
+        this exists for — the shell can be reaped while its `sleep` lives on.
+        """
+        real_popen = subprocess.Popen
+        seen: dict[str, object] = {}
+
+        def spy(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            seen.update(kwargs)
+            return proc
+
+        with mock.patch.object(subprocess, "Popen", side_effect=spy):
+            proc = _fake_lane(self.tmp)
+        try:
+            self.assertTrue(seen.get("start_new_session"),
+                            "the lane must lead its own group, or its `sleep` child is "
+                            "orphaned to init on teardown")
+            self.assertEqual(getattr(proc, "pi_lane_pgid", None), proc.pid)
+            self.assertEqual(os.getpgid(proc.pid), proc.pid,
+                             "the pid is not a group id — `killpg` would signal someone "
+                             "else's group")
+        finally:
+            _stop_fake_lane(proc)
+            _FAKE_LANE_STDERR.pop(proc.pid, None)
+        with self.assertRaises(ProcessLookupError,
+                               msg="a `sleep` outlived the teardown — every arm leaves one, "
+                                   "and a leaked process is the ambient state this suite's "
+                                   "own census arms exist to stop trusting"):
+            os.killpg(proc.pid, 0)
+
     def test_the_fake_lane_kit_survives_an_environment_that_cannot_start_python(self):
         """⛔ THE FIXTURE MUST NOT DEPEND ON THE INTERPRETER'S OWN PATH CONFIG (#14506).
 
@@ -10301,12 +10379,15 @@ class CollisionPreflightTest(unittest.TestCase):
                 return
             time.sleep(0.05)
         # ⛔ LINE 1 IS THIS FAILURE'S GATE IDENTITY TOO (#14506 review, P2 — the same rule
-        # as `_wait_for_pi_cwd`): `ci_exemption.py::_signature_from` reads pytest's FIRST
-        # `E   ` line, and `pid`, `want` (a per-run temp path), `timeout` and `last` are all
-        # per-run, so a one-line message here is a different identity on every run and the
-        # `pr <= main` subset test can never be satisfied — the `signature differs from
-        # main's` block this change exists to remove, for a different set of ids. Its
-        # callers are census/cwd arms that fail on the same pooled hosts.
+        # as `_wait_for_pi_cwd`): the exemption decision compares one stable string per
+        # failure, and for a `unittest.TestCase` id it is the short summary's ` - <detail>`,
+        # which pytest clips at the message's first newline and drops on a narrow terminal —
+        # so line 1 must stay BOTH one line AND short. `pid`, `want` (a per-run temp path),
+        # `timeout` and `last` are all per-run, so a one-line message here is a different
+        # identity on every run and the `pr <= main` subset test can never be satisfied —
+        # the `signature differs from main's` block this change exists to remove, for a
+        # different set of ids. Its callers are census/cwd arms that fail on the same pooled
+        # hosts.
         self.fail(
             "the tool's own cwd reader could not attribute the fake lane to the worktree\n"
             f"pid {pid} was not attributed to {want!r} within {timeout:.0f}s (last read: "
