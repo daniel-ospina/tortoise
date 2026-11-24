@@ -21933,7 +21933,12 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 #
 # `_CUT_CLAIM_FILES` is the SCOPE of that scan, so it is the list the paragraph
 # above is accountable to: one entry per recurrence, the plan ledger's Step-4
-# ledger included (measured at this head: 6 verdicts there, none contradicting).
+# ledger included (measured at this head: `_cut_claims()` returns 9 rows overall and
+# none contradicts; 7 of them sit in the ledger — its 5 Step-4 verdicts plus 2
+# incidental backticked words, `main` and `ValueError`, that the "`CUT` follows the
+# name" window also matches). ⚠️ Count the ROWS, not the verdicts: `#14481`'s
+# `fb21c37aa298` message says "6 verdicts" while enumerating 5, which is the same
+# off-by-something a count quoted from prose produces — the helper is the instrument.
 # A file added here with no verdicts is harmless; a recurrence left out is a
 # verdict with no grader, which is how each of the four defects survived a round.
 # Added at the `a2daaa9eba` review round, proved non-vacuous: deleting
