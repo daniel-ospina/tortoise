@@ -622,6 +622,11 @@ _CENSUS_MODULES = (
     "tortoise/sdk.py",
     "tortoise/derived_invalidation.py",
     "tortoise/consistency.py",
+    # #13450: EP's operator-input participation test was the consumer that read
+    # only two of the four conditions (`status in TERMINAL_EXCLUDED_STATUSES or
+    # bool(outdated)`), so a position-axis-ended input still voted. Scanned here
+    # so the same re-spelling cannot come back.
+    "tortoise/ep.py",
 )
 
 #: Every remaining hand-written comparison, with the reason it is NOT a
@@ -728,6 +733,9 @@ class TestNoReaderRespellsThePredicate:
             "tortoise/topic_summarization.py": "_terminal_excluded",
             "tortoise/sdk.py": "_terminal_excluded",
             "tortoise/derived_invalidation.py": "is_position_ended",
+            # #13450: the participation test answers from the ONE declaration
+            # (both axes) and keeps its names for the diagnostic.
+            "tortoise/ep.py": "ending_axes",
         }
         for module, symbol in expected.items():
             src = Path(module).read_text(encoding="utf-8")
