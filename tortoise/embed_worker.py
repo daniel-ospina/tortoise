@@ -75,9 +75,19 @@ ENV_WORKER_REQUIRE_PEER = "TORTOISE_EMBED_WORKER_REQUIRE_PEER"
 
 
 def _require_peer() -> bool:
-    """Whether an unverifiable peer must be REFUSED rather than allowed."""
-    return (os.environ.get(ENV_WORKER_REQUIRE_PEER) or "").strip().lower() in {
-        "1", "true", "yes", "on"}
+    """Whether an unverifiable peer must be REFUSED rather than allowed.
+
+    ⛔ THE VOCABULARY IS IMPORTED, NOT RESTATED (#4097, red on the required
+    `test` lane at `bf68509ae87`). This module declared its own
+    ``{"1","true","yes","on"}`` literal — a sixth convention in a tree whose
+    single declared contract is :data:`tortoise.env_truthy.TRUTHY`. The
+    ownership guard counts literal owners, so a copy here reds
+    `tests/test_env_truthy.py` even when the two sets happen to agree today, and
+    "agree today" is exactly the property that has no pin.
+    """
+    from .env_truthy import TRUTHY
+
+    return (os.environ.get(ENV_WORKER_REQUIRE_PEER) or "").strip().lower() in TRUTHY
 
 
 def _peer_uid(conn: socket.socket) -> int | None:
