@@ -234,6 +234,14 @@ _NP_STOP = (
     r"|not|never|neither|nor|longer"
     r"|to|be|going|about|due|scheduled"
     r"|or"
+    # ⛔ AND AT A CLAUSE LINKER / ADJUNCT MARKER, which is the same defect one
+    # grammar step further out: the ending there is inside an ADJUNCT, so the
+    # question's predicate is something else entirely and the run drops it —
+    # `is the data safe once archived`, `is the report still accurate once
+    # archived`, and `is the policy unless bookings were cancelled` (whose own
+    # finite verb `were` sat inside the run). Measured on the head that already
+    # carried the negation/futurity/disjunction list: all three still routed.
+    r"|n't|unless|once|if|before|after|until|while|because|although|though"
     r"|each|every|both|either|another|several|many|most|few|none)\b)"
 )
 

@@ -3180,7 +3180,9 @@ surfaces:
   # #14033 (PR #14491 review, P1): the cue-set widening's routing table — the two phrasings
   # #14033 names that this change routes, the four content questions it says must NOT route, the
   # phrasings that must keep the relevance read (including the deferred vague-adverb tail, held
-  # back until the served description moves with it), and the falsifier rows for each new guard
+  # back until the `tortoise_search` HANDLER DOCSTRING moves with it — not the served
+  # `ToolDefinition.description`, which carries no state-routing sentence), and the falsifier rows for
+  # each new guard
   # (both `is_predicate` guards and its start anchor, both `list_what` guards). `core` for the same
   # reason the sibling above gives: the module it guards
   # (`tortoise/state_intent.py`) is a `core` trigger, so a diff to it must actually run the pins.

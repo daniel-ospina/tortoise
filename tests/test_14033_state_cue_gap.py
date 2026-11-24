@@ -266,6 +266,11 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       team abandoned`), and so does a TIME SPAN that names no record
       (`is the quarter ended`) — see the module's ``_NP_STOP`` note for all
       four residuals;
+    * …and the same stop is what refuses an ADJUNCT: `is the data safe once
+      archived`, `is the report still accurate once archived` and
+      `is the policy unless bookings were cancelled` — the ending there belongs
+      to an adjunct clause and the question's predicate is `safe` / `accurate` /
+      the policy's applicability, so the run would swallow it;
     * the PREDICATE-MODIFIER stop is the sixth guard, and its falsifier is the
       twelve measured rows of
       :func:`test_a_modified_predicate_is_not_the_question_asked` — dropping the
@@ -294,6 +299,9 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
         "is the data we retired",
         "is the ticket they deprecated",
         "is the release the team cancelled",
+        "is the data safe once archived",
+        "is the report still accurate once archived",
+        "is the policy unless bookings were cancelled",
         "is the plan anyone abandoned",
         "is the ticket both teams cancelled",
         "is the report nobody archived",
