@@ -89,7 +89,8 @@ version: 1
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
 # which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `6a02515d14ad`
 # and adds this PR's own registration only
-# (`tests/test_14033_state_cue_gap.py`, which the same emission puts in shard `f`). A restatement
+# (`tests/test_14033_state_cue_gap.py`). ⛔ No letter here: one registration is not the claim, and a
+# per-file letter rots on the next fold — see the GRADED rule below. A restatement
 # here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
 # reads every `N at X.X s (names)` sentence in this block, so a repeated figure reports as
 # `<est … stated twice>` and reds the required leg. ⛔ The split is 0.1 s WIDE and the NAME SETS
@@ -100,10 +101,10 @@ version: 1
 # instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
 # `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
-# nine/two split this branch last derived (837.3/837.2) with the minute unmoved, and #14423's
-# `tests/test_14350_drain_convergence.py` sits in shard e at this head. That map is the union of both parents'
+# nine/two split this branch last derived (837.3/837.2) with the minute unmoved — and #14423's
+# `tests/test_14350_drain_convergence.py` is packed in that same pool. That map is the union of both parents'
 # registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
-# (`--emit-push-matrix` lists it in shard j at this head) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
+# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
 # matters only because it sits one main fold from rounding again. #14407 registered
 # `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
 # `test_notify`), and that registration is part of the partition stated above — the minute did not
@@ -167,15 +168,24 @@ version: 1
 # hand-picked sub-default weight — an unmeasured figure re-packs the bins and so moves a graded
 # claim on a number no run measured.
 #
-# ⛔ NO PER-FILE SHARD LETTER IS RECORDED HERE ANY MORE. This block used to state, per registration,
+# ⛔ NO PER-FILE SHARD LETTER IS RECORDED HERE ANY MORE — and unlike every earlier statement of that
+# rule, this one is GRADED: `test_the_fast_shards_header_block_records_no_per_file_shard_letter`
+# scans this block for a `test_<file> … shard <letter>` claim outside the fenced history below and
+# reds the required leg on one. This block used to state, per registration,
 # which shard `push_legs()` put that file in ("a letter is a measurement, never an inference"), and
 # at the head that wrote them they were true — but the packer is greedy, so EVERY fold moves every
 # letter, and by this fold SEVEN OF THE EIGHT recorded letters were false while the paragraph still
-# read as a measurement (measured at `2cccf90f4dd4`: `test_14371_offline_embed_json` is in shard i,
+# read as a measurement — and the sweep that deleted them MISSED one, which is why a rule stated in
+# prose was not enough. The one exemption is the fenced span below, which states the sha it was
+# measured at and is therefore a HISTORY rather than a claim about this head:
+# ⛔ HISTORICAL-LETTERS-BEGIN
+# (measured at `2cccf90f4dd4`: `test_14371_offline_embed_json` is in shard i,
 # not k; `test_7879_record_chain` b, not i; `test_14186_embedder_seam_batching` a, not f;
 # `test_14350_drain_convergence` k, not d; `test_13998_capacity_notice` j, not i;
 # `test_spool_drain_rehearsal` b, not i; `test_14407_alert_delivery` j, not c; only
-# `test_13526_quota_refusal_figures` matched, at e). A claim that must be re-derived on every fold
+# `test_13526_quota_refusal_figures` matched, at e)
+# ⛔ HISTORICAL-LETTERS-END
+# A claim that must be re-derived on every fold
 # and is graded by nothing is a claim that rots, so what survives is the RULE rather than the
 # values: read the letter off `--emit-push-matrix` at the head you are citing and never infer it
 # from a neighbouring row — `tests/test_14407_alert_delivery.py` is registered on TWO surfaces (`api`

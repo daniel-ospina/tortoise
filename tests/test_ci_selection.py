@@ -9133,6 +9133,23 @@ _EMISSION_UNREAD_SENTENCE_RE = re.compile(r"\d\.\d+\s*s\s*\([a-z]")
 #: `->`, `=>`), which is why this one anchors on the operand and reads the first `N m` after it.
 _EMISSION_DERIVATION_RE = re.compile(r"(?P<est>\d+\.\d)\s*/\s*60")
 _EMISSION_MINUTE_AFTER_RE = re.compile(r"(?P<minutes>\d+)\s*m\b")
+#: A PER-FILE shard letter: a file named, then a `shard`/`bin`/`half` word, then one letter.
+#: The letter is a measurement of the greedy packer, so it rots on EVERY fold — measured
+#: 2026-11-24 on this PR: one sweep deleted seven of eight false letters from the block and
+#: MISSED a survivor that read `test_14350_drain_convergence.py sits in shard e at this head`
+#: while `--emit-push-matrix` packed that file in `k`. The block's rule ("NO PER-FILE SHARD
+#: LETTER IS RECORDED HERE ANY MORE") was prose, so nothing read it; this pattern is what
+#: `test_the_fast_shards_header_block_records_no_per_file_shard_letter` grades it with.
+#: The `(?![A-Za-z0-9_])` guard keeps `per-shard clause` ("shard c" + "lause") out: a
+#: spelling-bound pattern that reads a word as a letter is how a guard reds on its own prose.
+_PER_FILE_SHARD_LETTER_RE = re.compile(
+    r"test_[A-Za-z0-9_]+[^;]{0,120}?\b(?:shard|bin|half)\s*`?[a-k]`?(?![A-Za-z0-9_])")
+#: The ONE span of the header allowed to state letters: a fenced history that names the sha it
+#: was measured at. Fenced rather than inferred from prose ("measured at …") because a
+#: CURRENT-head sentence also cites a sha — it names the `main` fold — so prose inference would
+#: have exempted exactly the claim that rotted.
+_HISTORICAL_LETTERS_RE = re.compile(
+    r"\u26d4 HISTORICAL-LETTERS-BEGIN.*?\u26d4 HISTORICAL-LETTERS-END", re.DOTALL)
 #: How far past an operand its stated minute may sit. The manifest's own prose form —
 #: `rounds 840.2/60 x 2.0 up to 29 m` — puts it 14 characters after the operand.
 _DERIVATION_LOOKAHEAD = 60
@@ -9598,6 +9615,78 @@ def test_the_emission_block_guard_is_not_vacuous():
         _EMISSION_CLAUSE_RE.findall(spliced)), (
         "a spliced block's unreadable shard-figure sentence went undetected — that is the "
         f"fail-open this arm exists for: {spliced}")
+
+
+def test_the_fast_shards_header_block_records_no_per_file_shard_letter():
+    """#14481: a per-file shard letter is a measurement the next fold falsifies.
+
+    The block states the rule in prose ("NO PER-FILE SHARD LETTER IS RECORDED HERE ANY MORE")
+    and prose is graded by nothing, so the rule was broken twice: seven of the eight letters
+    recorded before `2cccf90f4dd4` were false at the next fold, and the sweep that deleted them
+    left a survivor reading `test_14350_drain_convergence.py sits in shard e at this head` while
+    `--emit-push-matrix` packed that file in `k` (measured 2026-11-24 at `c496c67fd339`).
+
+    One span is exempt and it is FENCED, not inferred: the historical enumeration names the sha
+    it was measured at, and a current-head sentence ALSO cites a sha (the `main` fold), so
+    inference from prose would have exempted exactly the claim that rotted.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    assert len(_HISTORICAL_LETTERS_RE.findall(header)) == 1, (
+        "the block must carry exactly ONE fenced historical-letter span — zero means the "
+        "history was deleted or the fence markers were renamed (and then this guard silently "
+        "widens to the whole block), two means a merge spliced the fence, which would exempt "
+        "text neither half measured")
+    found = _PER_FILE_SHARD_LETTER_RE.findall(
+        _HISTORICAL_LETTERS_RE.sub(" ", header))
+    assert found == [], (
+        "the `fast_shards` header states a per-file shard letter outside the fenced history: "
+        f"{found}. A letter is a measurement of the greedy packer, so it is false one fold "
+        "later and no test reads it; state the RULE and let the graded partition sentence "
+        "above carry the names, or cite the sha you measured the letter at inside the fence.")
+
+
+def test_the_per_file_shard_letter_guard_is_not_vacuous():
+    """The pre-fix claim must RED, and the fence must exempt only what it encloses.
+
+    `stale` is the text this PR carried at `c496c67fd339` minus the sweep — the survivor letter
+    on its own line, with no sha anywhere near it — so the arm is measured against the defect
+    that was actually shipped rather than a sentence invented to match the pattern. The
+    `current_head_sha` fixture is the false negative the fence exists for: a claim that cites a
+    sha (the `main` fold) while stating a letter about THIS head, which prose inference would
+    wave through.
+    """
+    stale = _emission_block_header(
+        "# moved this partition with the minute unmoved, and #14423's\n"
+        "# `tests/test_14350_drain_convergence.py` sits in shard e at this head.\n"
+        "\nfast_shards: 11\n")
+    assert _PER_FILE_SHARD_LETTER_RE.findall(stale), (
+        "the pre-fix survivor letter did not match — the pattern has been narrowed into "
+        f"silence, so the sibling guard is decoration: {stale!r}")
+    current_head_sha = _emission_block_header(
+        "# ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `6a02515d14ad`\n"
+        "# and adds this PR's own registration only (`tests/test_14033_state_cue_gap.py`, which\n"
+        "# the same emission puts in shard `f`).\n\nfast_shards: 11\n")
+    assert _PER_FILE_SHARD_LETTER_RE.findall(current_head_sha), (
+        "a letter claim that cites the `main` fold sha must still be SUBJECT to the rule — "
+        "a sha is not a property of the letter, it is a property of the sentence")
+    fenced = _emission_block_header(
+        "# ⛔ HISTORICAL-LETTERS-BEGIN\n"
+        "# (measured at `2cccf90f4dd4`: `test_14371_offline_embed_json` is in shard i, not k)\n"
+        "# ⛔ HISTORICAL-LETTERS-END\n\nfast_shards: 11\n")
+    assert _PER_FILE_SHARD_LETTER_RE.findall(
+        _HISTORICAL_LETTERS_RE.sub(" ", fenced)) == [], (
+        "the fence did not exempt the letters it encloses, so the guard would red on the "
+        "history it is meant to allow")
+    # …and the fence is BOUNDED: a claim after it is still graded. Without this the arm would be
+    # satisfied by a regex that simply swallows the rest of the block.
+    assert _PER_FILE_SHARD_LETTER_RE.findall(_HISTORICAL_LETTERS_RE.sub(" ", _emission_block_header(
+        "# ⛔ HISTORICAL-LETTERS-BEGIN\n"
+        "# (measured at `2cccf90f4dd4`: `test_14371_offline_embed_json` is in shard i)\n"
+        "# ⛔ HISTORICAL-LETTERS-END\n"
+        "# and `tests/test_14350_drain_convergence.py` sits in shard e at this head.\n"
+        "\nfast_shards: 11\n"))), (
+        "the fence swallowed a claim stated AFTER it — the exemption must end where its "
+        "marker ends")
 
 
 def test_watchdog_is_per_shard_and_scales_with_the_shard():
