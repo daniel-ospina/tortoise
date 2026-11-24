@@ -4441,6 +4441,13 @@ def _css_reaching_decls(css: str, prop: str, compound: str,
 PADDING_END_PROPS = ("padding-bottom", "padding-block-end", "padding",
                      "padding-block")
 
+#: The same family for the CTA's block-END margin. None of these should declare
+#: `auto` on the CTA: a second `auto` does not add to `margin-top: auto`, it
+#: SPLITS the card's free space with it, centring the button in each card's own
+#: leftover (#14406 review round 12).
+BLOCK_END_MARGIN_PROPS = ("margin-bottom", "margin-block-end", "margin",
+                          "margin-block")
+
 
 def _css_tokens(value: str) -> list[str]:
     """A declaration value split on whitespace, but keeping `calc(…)` whole.
@@ -4468,6 +4475,21 @@ def _css_tokens(value: str) -> list[str]:
     return tokens
 
 
+#: A trailing `!important` on a declaration value. It is a PRIORITY marker, not
+#: part of the value, so every reader that compares or splits a value must strip
+#: it first. Three measured consequences of NOT stripping it (#14406 review
+#: round 12): `margin-bottom: auto !important` is invisible to an equality test
+#: against `auto` (a fail-open); `margin-top: auto !important` — the pinned
+#: intent, only stronger — reads as a COMPETING declaration to the slack row;
+#: and `display: flex !important` reads as not `flex` (both false REDs).
+_CSS_IMPORTANT = re.compile(r"!\s*important\s*$")
+
+
+def _without_important(value: str) -> str:
+    """`value` with a trailing `!important` removed."""
+    return _CSS_IMPORTANT.sub("", value).strip()
+
+
 def _css_block_end(prop: str, value: str) -> str:
     """The value `prop` gives the BLOCK-END (bottom) side of the box.
 
@@ -4489,7 +4511,7 @@ def _css_block_end(prop: str, value: str) -> str:
     """
     if prop not in ("padding", "padding-block", "margin", "margin-block"):
         return value
-    tokens = _css_tokens(value)
+    tokens = _css_tokens(_without_important(value))
     if not tokens:
         return value
     if prop in ("padding-block", "margin-block"):
@@ -4543,7 +4565,14 @@ def _css_flex_direction(prop: str, value: str) -> str:
     RESETS the component it omits, which is the half a token-presence check
     cannot see (`flex-flow: nowrap` reads as "no direction here" and is in fact
     "direction: row").
+
+    ⛔ `!important` is stripped first, for EVERY prop: it is a priority marker,
+    not part of the value, and leaving it on made `flex-direction: column
+    !important` — the pin's own intent, only stronger — read as a DISAGREEMENT
+    with the pinned `column`, and made `display: flex !important` read as not
+    `flex` (#14406 review round 12, both measured RED on a correct page).
     """
+    value = _without_important(value)
     if prop not in FLEX_DIRECTION_PROPS:
         return value
     if prop == "flex-direction":
@@ -11974,14 +12003,32 @@ def _expected_popular_block_end_pad(css: str) -> str:
     fixed the one row it was looking at; the reviewer then measured the same
     false RED three more times. One helper, so there is no fifth copy to pin.
     """
-    base_card = _css_last_declaring_body(css, ".pricing-card", "padding")
-    assert base_card is not None, (
-        "no rule naming `.pricing-card` declares `padding`, so the base inset "
-        "the compensation is derived from is gone — same reader as the border "
-        "reads (#14406 review round 13: `.pricing-card { align-self: stretch }` "
-        "appended as its own rule left this reading an empty padding)")
-    base_pad = _css_block_end(
-        "padding", _effective_decl(base_card, "padding") or "")
+    # A base card may declare its block-end inset as a LONGHAND rather than the
+    # `padding` shorthand; reading only the shorthand made this helper assert —
+    # a false RED on a page whose geometry is unchanged (#14406 review round
+    # 12). Every property is still read through the OWNING rule, so the
+    # round-13 shadowing fix is preserved; the most specific spelling wins, in
+    # the order the CSS grammar makes them override each other.
+    base_pad = None
+    for prop in ("padding-block-end", "padding-bottom"):
+        owner = _css_last_declaring_body(css, ".pricing-card", prop)
+        if owner is not None:
+            base_pad = _without_important(_effective_decl(owner, prop) or "")
+            break
+    if base_pad is None:
+        for prop in ("padding-block", "padding"):
+            owner = _css_last_declaring_body(css, ".pricing-card", prop)
+            if owner is not None:
+                base_pad = _css_block_end(
+                    prop, _effective_decl(owner, prop) or "")
+                break
+    assert base_pad, (
+        "no rule naming `.pricing-card` declares a block-END padding as "
+        "`padding`, `padding-block`, `padding-bottom` or `padding-block-end`, "
+        "so the base inset the compensation is derived from is gone — same "
+        "reader as the border reads (#14406 review round 13: `.pricing-card "
+        "{ align-self: stretch }` appended as its own rule left this reading "
+        "an empty padding)")
     extra_px = _popular_border_extra_px(css)
     assert extra_px > 0, (
         "the popular card's bottom border is not WIDER than its siblings', so "
@@ -12086,7 +12133,12 @@ class TestProductTeamsPricingCardCtaBaseline:
             "no rule naming `.pricing-card` declares `display`, so this row "
             "would compare None to 'flex' — the card's container is gone "
             "(#13645 item 6)")
-        assert _effective_decl(card_display, "display") == "flex", (
+        # ⛔ `!important` is a PRIORITY, not part of the value, so it is stripped
+        # before the comparison: `display: flex !important` is this pin's own
+        # intent, only stronger, and comparing the raw declaration reded a
+        # correct page (#14406 review round 12).
+        assert _without_important(
+            _effective_decl(card_display, "display") or "") == "flex", (
             "`.pricing-card` is not a flex container, so `margin-top: auto` on "
             "its CTA has no free space to absorb and the four buttons go back "
             "to their content-length heights (three baselines, 70.2px apart at "
@@ -12096,7 +12148,8 @@ class TestProductTeamsPricingCardCtaBaseline:
         assert card_direction is not None, (
             "no rule naming `.pricing-card` declares `flex-direction`, so the "
             "children stack along the browser default `row` (#13645 item 6)")
-        assert _effective_decl(card_direction, "flex-direction") == "column", (
+        assert _without_important(
+            _effective_decl(card_direction, "flex-direction") or "") == "column", (
             "`.pricing-card` is a flex ROW, so its children sit side by side "
             "instead of stacking — the card renders as one line of text "
             "(#13645 item 6)")
@@ -12105,7 +12158,11 @@ class TestProductTeamsPricingCardCtaBaseline:
         assert cta_slack is not None, (
             "no rule naming `.pricing-card .btn` declares `margin-top`, so the "
             "CTA does not take the leftover height (#13645 item 6)")
-        assert _effective_decl(cta_slack, "margin-top") == "auto", (
+        # ⛔ `!important` is a PRIORITY, not part of the value: `margin-top: auto
+        # !important` is this pin's own intent, only stronger, and comparing the
+        # raw declaration reded a correct page (#14406 review round 12).
+        assert _without_important(
+            _effective_decl(cta_slack, "margin-top") or "") == "auto", (
             "the card's CTA does not take the leftover height, so it sits "
             "wherever its tier's copy ends and the four buttons do not share a "
             "baseline (#13645 item 6). `margin-top: auto` is the mechanism; "
@@ -12227,6 +12284,30 @@ class TestProductTeamsPricingCardCtaBaseline:
         # restore the defect with every row green (measured, #14406 review
         # round 12); `align-items: stretch` is inert on the first and applies to
         # the CROSS axis on the second.
+        #
+        # ⛔ AND AN EXPLICIT CROSS SIZE BEATS `stretch`, so a definite `height`
+        # or `max-height` on the card re-opens the split from the other side
+        # (#14406 review round 12, measured GREEN):
+        #
+        #       .pricing-card { height: fit-content }    each card content-height
+        #       .pricing-card { max-height: 700px }      capped below the stretch
+        #
+        # `min-height` is deliberately NOT refused: it raises a floor that
+        # `stretch` still applies above, all four cards carry the same one, and
+        # refusing it would red a correct page — a named residual, not a silent
+        # one.
+        capped = [(prop, value, prelude)
+                  for prop in ("height", "max-height", "block-size",
+                               "max-block-size")
+                  for prelude, value in _css_reaching_decls(
+                      css, prop, ".pricing-card")]
+        assert capped == [], (
+            f"a rule that can select `.pricing-card` declares `{capped[0][0]}: "
+            f"{capped[0][1] if capped else ''}` ({capped[0][2]!r}), and an "
+            "explicit cross size BEATS the grid's `stretch` — so the four boxes "
+            "stop sharing one height and `margin-top: auto` aligns each CTA to "
+            "its own card's bottom (#13645 item 6), with every other row in "
+            "this class still GREEN")
         for prop, allowed in (("display", {"flex", "inline-flex"}),
                               ("flex-direction", {"row", "row-reverse"}),
                               ("flex-flow", {"row", "row-reverse"})):
@@ -12273,11 +12354,9 @@ class TestProductTeamsPricingCardCtaBaseline:
         """
         css = _product_teams_html()
         bad = [(prop, value, prelude)
-               for prop in ("margin-bottom", "margin-block-end",
-                            "margin", "margin-block")
-               for prelude, value in _css_reaching_decls(
-                   css, prop, ".btn")
-               if _css_block_end(prop, value).strip().lower() == "auto"]
+               for prelude, prop, value in _css_block_end_cascade(
+                   css, ".btn", BLOCK_END_MARGIN_PROPS)
+               if value.strip().lower() == "auto"]
         assert bad == [], (
             "a rule that can select `.pricing-card .btn` gives the CTA an "
             f"`auto` block-END margin (`{bad[0][0]}: {bad[0][1]}`, "
@@ -12326,9 +12405,13 @@ class TestProductTeamsPricingCardCtaBaseline:
         competing = []
         for prop in self.SLACK_PROPS:
             for prelude, value in _css_reaching_decls(css, prop, ".btn"):
+                # `!important` is a priority marker, not part of the value: an
+                # `margin-top: auto !important` is the PINNED intent, stronger,
+                # and reading it as a competitor reded a correct page.
+                bare = _without_important(value)
                 # The block-start side is the first token for the shorthands.
-                start_side = (value.split()[0] if prop in ("margin", "margin-block")
-                              else value)
+                start_side = (bare.split()[0] if prop in ("margin", "margin-block")
+                              else bare)
                 if start_side == "auto":
                     continue
                 competing.append((prelude, prop, value))
