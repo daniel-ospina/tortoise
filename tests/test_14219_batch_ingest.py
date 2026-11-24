@@ -3874,6 +3874,44 @@ def test_a_fault_after_observing_the_row_still_says_check_not_resend():
         f"— the retry duplicates the ingest: {raised!r}")
 
 
+def test_a_loser_faulted_after_seeing_the_row_says_check_not_resend():
+    """⛔ A LOSER'S `False` IS AN OBSERVATION TOO (round 27, P2 — measured).
+
+    `put_batch_if_absent` answering False means a row IS there, and the loser arm is
+    rollback-exempt, so OUR item rows survive and `pending_batches()` selects them
+    through its item arm — the recovery scan adopts and bills them. If the takeover's
+    ownership read then faults, "nothing was accepted; retry shortly" invites a second
+    batch over the same content (the retry mints a NEW id; the cross-batch dedup only
+    matches items already `indexed`). Measured before the fix: `_BatchStoreFault` with
+    `pending_batches() == [bid]` and the item `QUEUED`.
+    """
+    class _LoserThenFaultStore(InMemoryBatchStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+
+        def put_batch_if_absent(self, batch) -> bool:
+            return False               # a rival (or our own scan) holds the id
+
+        def get_batch(self, org_id, batch_id):
+            self.reads += 1
+            if self.reads <= 1:
+                return None            # the pre-write check
+            raise RuntimeError("graph probe timeout")   # the takeover's read
+
+    store = _LoserThenFaultStore()
+    coord = BatchCoordinator(store)
+    raised: BaseException | None = None
+    try:
+        coord.submit(ORG, ["/d/a.md"])
+    except BaseException as exc:      # asserted below, never swallowed
+        raised = exc
+
+    assert isinstance(raised, bi_module._BatchMaybeAccepted), (
+        "a loser whose ownership read faulted told the customer nothing was "
+        f"accepted — our item rows survive and are adopted: {raised!r}")
+
+
 def test_the_acceptance_copy_names_no_window_when_the_record_has_no_duration():
     """⛔ `customer_copy(0.0)` PROMISED "1 hour" FOR ANY SIZE BATCH (round 23, P1).
 

@@ -2467,6 +2467,15 @@ class BatchCoordinator:
                     created = False
                     break
                 raise
+        # ⛔ A LOSER'S `False` IS ALSO AN OBSERVATION (round 27, P2 — measured).
+        # `put_batch_if_absent` answering False means a row IS there, and this arm is
+        # rollback-exempt (`except _BatchStoreFault: raise`), so OUR item rows survive
+        # and `pending_batches()` selects them through its ITEM arm. If the takeover's
+        # ownership read then faults, "nothing was accepted; retry shortly" is the same
+        # lie: the retry mints a new id and re-ingests, while the scan adopts and bills
+        # ours. Send them to the list surface instead.
+        if created is False and not present:
+            present = True
         if not created:
             # Lost the create. Do not pretend it is ours — and do NOT discard:
             # `discard(org_id, bid)` removes the batch row AND its item rows, and
