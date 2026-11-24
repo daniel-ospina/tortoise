@@ -418,5 +418,55 @@ def test_an_absent_schema_heals_without_the_refresh_verb(monkeypatch, tmp_path):
             "stop the #9548 encoding and drop the row with no signal.")
         # …and the healthy path still resolves ONCE: the memo is taken now.
         assert "point" in rp.table_columns()
+        assert rp.refused_props_names()
+    finally:
+        rp._release_schema_cache()
+
+
+#: The migration that declares `point`'s money columns by a forward
+#: `ALTER TABLE … ADD COLUMN` (#2782) — omitting it leaves a NON-EMPTY, silently
+#: SHORT column map, which is the case a "read is empty?" guard alone misses.
+_PARTIAL_OMITTED = "20261018000001_record_point_money_value_2782.sql"
+
+
+def test_a_partially_present_schema_heals_without_the_refresh_verb(monkeypatch, tmp_path):
+    """incomplete→complete on the RESIDENT path heals by itself (#4625 review).
+
+    The absent-schema pin above covers the read that returns `""`. This one covers
+    the read that returns SOMETHING: `_read_migrations` skips every absent file
+    (`if (base / name).exists()`), so a tree missing one of the twenty yields a
+    non-empty join of the other nineteen. A resident entry that memoised THAT
+    freezes a silently short column map for the life of the process — the record
+    would then write a row without the missing migration's columns, which is the
+    row-drop class `#9548` exists to end — and no raise ever surfaces it, so
+    `table_columns()`'s own guard is not the protection here.
+
+    FALSIFIER (executed): restore `if sql: entry["sql"] = sql` (memoise any
+    non-empty read) in `_entry_sql` and `amount_minor` never appears below.
+    """
+    source = _real_migrations()          # the real tree, captured BEFORE the patch
+    tree = tmp_path / "migrations"
+    tree.mkdir()
+    for name in rp.RECORD_MIGRATIONS:
+        if name != _PARTIAL_OMITTED:
+            shutil.copy(source / name, tree / name)
+    monkeypatch.setattr(rp, "_migrations_dir", lambda: tree)
+    rp._release_schema_cache()
+    try:
+        short = rp.table_columns()
+        assert "point" in short, (
+            "the partial tree did not even parse the base `CREATE TABLE` — this "
+            "pin is not exercising the partial-read path it claims")
+        assert "amount_minor" not in short["point"], (
+            "the omitted migration's column is present without its file, so the "
+            "fixture does not create a partial read")
+        # …the missing migration appears under the SAME process, no refresh verb.
+        shutil.copy(source / _PARTIAL_OMITTED, tree / _PARTIAL_OMITTED)
+        healed = rp.table_columns()
+        assert "amount_minor" in healed["point"], (
+            "a partially-present schema was memoised from a non-empty read: the "
+            "column map stays short for the life of the process, with no error "
+            "and no production caller for the refresh verb. Do not memoise an "
+            "INCOMPLETE read — gate the memo on `_complete()`.")
     finally:
         rp._release_schema_cache()

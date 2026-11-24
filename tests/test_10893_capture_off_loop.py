@@ -294,9 +294,12 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     """THE CENSUS: every sync `TortoiseSDK` method, plus the record-projection
     schema readers (#4625), observed on the loop.
 
-    The invariant test above pins one leg. This one pins the CLASS: it wraps all
-    381 synchronous SDK methods (guarding against nested re-entry, which would
-    otherwise charge a whole call tree to its outer method) and asserts that the
+    The invariant test above pins one leg. This one pins the CLASS: it wraps every
+    synchronous SDK method the filter below selects (the count is whatever the SDK
+    has — the failure message prints `methods wrapped: N` rather than this
+    docstring restating a figure that re-stales; it read 381 when the SDK had a
+    different surface) guarding against nested re-entry, which would
+    otherwise charge a whole call tree to its outer method — and asserts that the
     set of them observed running on the loop is the declared residual — each
     entry naming its owning issue. It also wraps the three `record_projection`
     schema readers as their own legs (`rp.table_columns`,

@@ -264,8 +264,10 @@ so it is corrected on the issue itself rather than here).
 **(b) The column-map half is real but smaller than the issue's "~4 ms" note
 suggests.** At the #9558 head `table_columns()` cost ~1.7 ms uncached and ~0.47 ms
 cached. ⚠️ The CALL COUNT did not change there (1 per record): what changed is
-that the call stopped reading and regex-parsing the migration files (twenty at
-this head) and **stat-ed** them instead. ⛔ **#4625 then removed that stat pass
+that the call stopped reading and regex-parsing the migration files (fifteen of
+them at that head — measured `len(RECORD_MIGRATIONS) == 15` at `2efe92c5f8`, the
+commit that wrote this paragraph; twenty at the current one) and **stat-ed** them
+instead. ⛔ **#4625 then removed that stat pass
 too**, so at the CURRENT head a warm `table_columns()` performs **zero**
 filesystem operations on the migrations — it answers from the process's resident
 schema, read and parsed once per process, with `_release_schema_cache()` as the
