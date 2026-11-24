@@ -393,13 +393,16 @@ def _dispose_quarantine(quarantine: Path, data: bytes,
 
     ⛔ WHAT HAPPENS WHEN EVEN THE RESTORE LOST, stated accurately because the earlier
     version of this sentence was FALSE and a false sentence is worse than no
-    sentence: the displaced holder does NOT "stop" — its claim file is gone, so it
-    keeps draining until its next `renew`/`renew_if_due` tells it the claim is not
-    ours, up to ``TTL/3`` (≈40 s) away. Two drainers can coexist for that window, and
-    it is BOUNDED BY THE LEASE rather than unbounded, which is the only claim this
-    code makes. The restore attempt is therefore LOGGED rather than swallowed: a
-    silently deleted live claim is exactly the class this module's rules exist to
-    make visible (#14423 cycle-7 review, P2).
+    sentence — and because the code changed under it: on a non-``EEXIST`` failure the
+    object is **left in the quarantine** (it is the only copy of that holder's claim
+    once the rename has vacated the path), so the claim at ``path`` is absent while a
+    peer may still be installing one. The displaced holder does NOT "stop": it keeps
+    draining until its next `renew`/`renew_if_due` tells it the claim is not ours, up
+    to ``TTL/3`` (≈40 s) away. Two drainers can coexist for that window, and it is
+    BOUNDED BY THE LEASE rather than unbounded, which is the only claim this code
+    makes. The restore attempt is LOGGED rather than swallowed — and it is no longer
+    DELETED: the earlier sentence described an unlink this branch no longer performs
+    (review, cycle 17, P3).
     """
     if data != expected:
         try:
