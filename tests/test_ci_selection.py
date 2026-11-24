@@ -8795,11 +8795,15 @@ def test_halves_guard_reports_single_sided_pack_without_crashing():
     # all-zero measured map), and this is the only check that catches it:
     # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both pass
     # when one half is empty.
-    # Restored by #14481 with the rest of this file: the #14439 merge cut it, and
-    # nothing else at that head reached the `lo <= 0` branch (the durations-free
-    # `_halves_manifest()` fixtures take the count path, and every real-manifest
-    # caller weighs all shards above zero), so removing it left the branch
-    # ungraded — a mutation to `ratio = round(hi / lo, 2)` redded nothing.
+    # CARRIED FORWARD, not restored: `#14419`'s B7 cut (`f0a5187115`) DELETED this
+    # arm, and the `#14439` merge (`8c373f59a1`) ADDED it back — measured, both
+    # directions: 1 at `f0a5187115^`, 0 at `f0a5187115` / `e6b3cf2908`, 1 at
+    # `8c373f59a1` and on `main`. So it is `main`'s arm and this PR carries it
+    # unchanged; the window it closes is real, though — between B7 and the merge,
+    # nothing reached the `lo <= 0` branch (the durations-free `_halves_manifest()`
+    # fixtures take the count path, and every real-manifest caller weighs all
+    # shards above zero), so a mutation to `ratio = round(hi / lo, 2)` redded
+    # nothing until it came back.
     from tools.ci_selection import workflow_halves_issues
     m = {"surfaces": {"core": ["test_only.py"]}, "tier1": [], "slow_files": [],
          "durations": {"test_only.py": 5.0}}
@@ -8808,8 +8812,9 @@ def test_halves_guard_reports_single_sided_pack_without_crashing():
 
 
 def test_halves_guard_reports_all_zero_map_without_crashing():
-    # Restored by #14481 — see the single-sided arm above for the mutation it
-    # grades (`lo <= 0` with every weight zero rather than with an empty half).
+    # CARRIED FORWARD, like the single-sided arm above (`#14419` cut it, the #14439
+    # merge added it back) — see that arm for the mutation both grade: `lo <= 0`
+    # with every weight zero rather than with an empty half.
     from tools.ci_selection import workflow_halves_issues
     files = ["test_a.py", "test_b.py", "test_c.py"]
     m = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
@@ -21818,16 +21823,21 @@ def test_the_committed_map_still_declares_its_three_caps():
 # Both pass unmodified against this tree.
 
 def test_duration_coverage_guard_fires_below_the_floor_and_not_at_it():
-    """#3400: the coverage floor FIRES, and it is INCLUSIVE.
+    """#3400: the coverage floor FIRES, is INCLUSIVE, and is PINNED at 0.90.
 
-    ⛔ RESTORED ON REVIEW (2026-11-23). The B7 cut deleted this arm with the rest of
-    the durations arithmetic, which left `duration_coverage_issues` with NO falsifier:
-    every surviving caller only asserts that it COMPOSES (tests/test_ci_selection.py
-    `integrity(...) + ... + duration_coverage_issues(m)`), and
-    `tests/test_ci_timing.py` only names it in a validator tuple — so a floor that
-    returned `[]` unconditionally would keep the required `manifest-integrity` leg
-    green. That is the no-op-gate class this batch is not allowed to create, and the
-    only test is whether the deleted arm was the SOLE pin on a live gate. It was.
+    ⛔ CARRIED FROM THE MERGE (`8c373f59a1`), and the claim it used to make about
+    itself was false: it is NOT the falsifier that kept a no-op floor from going
+    green. `test_duration_coverage_guard_boundary_and_realistic` (above) survives
+    B7 and already reds a floor that returns `[]` unconditionally — its 89% case
+    asserts `duration_coverage_issues(below) != []`.
+
+    What nothing else pins is the CONSTANT. The boundary arm is written against
+    89/90/95 coverage, so lowering `DURATION_COVERAGE_MIN` to 0.80 passes it while
+    every real caller keeps composing the guard without asserting a floor
+    (`integrity(...) + ... + duration_coverage_issues(m)`), and
+    `tests/test_ci_timing.py` only names it in a validator tuple. This arm closes
+    that: it pins the constant itself, AND the documented ABSENT-map PASS state,
+    which no surviving sibling states.
     """
     from tools.ci_selection import DURATION_COVERAGE_MIN, duration_coverage_issues, load_manifest
 
