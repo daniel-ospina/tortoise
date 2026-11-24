@@ -2009,10 +2009,16 @@ def test_a_string_built_callable_is_the_string_arm_that_sees_it() -> None:
         ("True or _flag", False),
     ],
 )
-def test_statically_false_folds_exactly_what_the_interpreter_folds(
+def test_statically_false_answers_always_false_not_whether_cpython_folds(
     source: str, folded: bool
 ) -> None:
     """`_statically_false` answers "always false" — not "the interpreter folds it".
+
+    ⛔ THE NAME USED TO SAY "folds exactly what the interpreter folds", which this
+    docstring and the code both reject (`_flag and False` is graded dead and CPython
+    does not fold it): a lane "aligning" the code to the old name would drop the
+    collection-literal grading (`[]`/`{}`/`{*()}`), the fail-open the module header
+    forbids. Renamed rather than left as a trap (review P2, landing round).
 
     ⛔ THE THIRD PIN ON THE P2 AXIS (measured). The `dead_guards` arm reads this
     predicate, and on the shipped module it passes VACUOUSLY — there is no
