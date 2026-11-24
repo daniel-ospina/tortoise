@@ -4694,6 +4694,11 @@ def _css_block_end(prop: str, value: str) -> str:
 #: A CSS length this file can convert to px: a number and `px` or `rem`.
 _CSS_LENGTH = re.compile(r"([0-9]*\.?[0-9]+)(px|rem)$")
 
+#: A BARE zero — `0`, `0.0`, `.0` — the one unitless number CSS accepts as a
+#: length. One definition, because the border-width reader and `_css_length_px`
+#: must agree on it (#14406 review round 20).
+_BARE_ZERO_LENGTH = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)")
+
 
 def _css_root_px(css: str) -> float | None:
     """The page's `rem` base in px — 16 unless `html`/`:root` overrides it.
@@ -4723,8 +4728,7 @@ def _css_length_px(value: str, root: float | None) -> float | None:
     review round 15).
     """
     text = _without_important(value).strip().lower()
-    if re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", text) \
-            and float(text) == 0.0:
+    if _BARE_ZERO_LENGTH.fullmatch(text) and float(text) == 0.0:
         return 0.0
     match = _CSS_LENGTH.match(text)
     if not match:
@@ -12214,8 +12218,12 @@ class TestProductTeamsCopy:
 
 #: Every property that can set a box's BLOCK-END border WIDTH.
 BORDER_END_WIDTH_PROPS = ("border", "border-width", "border-block",
-                          "border-bottom", "border-block-end",
-                          "border-bottom-width", "border-block-end-width")
+                          "border-block-width", "border-bottom",
+                          "border-block-end", "border-bottom-width",
+                          "border-block-end-width")
+
+#: Border-style keywords that mean "no border" and therefore a WIDTH of zero.
+_BORDER_NONE_STYLES = ("none", "hidden")
 
 
 def _css_border_end_width(prop: str, value: str) -> float | None:
@@ -12239,19 +12247,46 @@ def _css_border_end_width(prop: str, value: str) -> float | None:
     Widths are picked out by the px pattern rather than by position, because a
     `border:` shorthand interleaves style and colour tokens
     (`2px solid var(--accent)`) and those are not lengths.
+
+    ⛔ A ZERO WIDTH IS A WIDTH, and dropping it was a fail-open (#14406 review
+    round 20, measured): the width list kept only `px` tokens, so the commonest
+    way to REMOVE a border — `border-bottom: 0`, `border-bottom: none`,
+    `border-bottom-width: 0` — produced no length at all, the declaration was
+    skipped entirely, and the cascade fell back to an EARLIER rule's width. On
+    the shipped page that re-derives `extra_px = 1` where a browser applies -1,
+    i.e. the popular CTA moves 2px and every row stays GREEN — precisely the
+    compensation's own signature. The positions are kept too: in
+    `border-width: 1px 0 3px` the zero is the THIRD value and block-end is 0,
+    so a list of only the px tokens would read the wrong side.
+
+    `border-block-width` is in the family for the same reason as the other
+    longhands (#14406 review round 20): it sets the block-END width and it was
+    absent from `BORDER_END_WIDTH_PROPS`, so `border-block-width: 3px` was
+    invisible and the row compared the compensation to itself. Its 1/2 values
+    are `(start, end)`, like `border-block`.
     """
-    widths = [m for m in (_BORDER_WIDTH_PX.fullmatch(t)
-                          for t in _css_tokens(_without_important(value)))
-              if m]
-    if not widths:
+    tokens = _css_tokens(_without_important(value))
+    lengths: list[float] = []
+    for token in tokens:
+        match = _BORDER_WIDTH_PX.fullmatch(token)
+        if match:
+            lengths.append(float(match.group(1)))
+        elif _BARE_ZERO_LENGTH.fullmatch(token) and float(token) == 0.0:
+            lengths.append(0.0)
+    if not lengths:
+        # `border: none` / `border: hidden` state no length, but they do state a
+        # width of zero — unlike `border: thin`, whose px width this file cannot
+        # read, so it stays None and the caller fails rather than guesses.
+        if any(t.lower() in _BORDER_NONE_STYLES for t in tokens):
+            return 0.0
         return None
     if prop in ("border", "border-width"):
-        chosen = widths[2] if len(widths) >= 3 else widths[0]
-    elif prop == "border-block":
-        chosen = widths[-1] if len(widths) > 1 else widths[0]
+        chosen = lengths[2] if len(lengths) >= 3 else lengths[0]
+    elif prop in ("border-block", "border-block-width"):
+        chosen = lengths[-1] if len(lengths) > 1 else lengths[0]
     else:
-        chosen = widths[0]
-    return float(chosen.group(1))
+        chosen = lengths[0]
+    return chosen
 
 
 def _border_end_width_cascade(css: str, compound: str,
@@ -13657,6 +13692,95 @@ class TestCssDesktopReachAndSpecificity:
                 "rule (0,2,1) out-ranks `.pricing-card.popular`'s (0,2,0) calc "
                 "and the popular CTA drops 1px below the other three "
                 "(#13645 item 6, #14406 review round 6 finding 1)")
+
+    def test_a_zeroed_border_is_read_as_the_zero_width_a_browser_applies(self):
+        """A border REMOVED with `0`/`none` is a width of zero, not silence.
+
+        `_css_border_end_width` collected only `px` tokens, so the commonest way
+        to remove a border produced no length at all: the declaration was
+        skipped, the cascade fell back to an EARLIER rule's width, and the
+        relation compared itself. Measured at `ef58aef247` (#14406 review round
+        20), each rule appended to the tracked page and the reader evaluated:
+
+            .pricing-card.popular { border-bottom: 0 }             browser -1, read 1
+            .pricing-card.popular { border-bottom: none }          browser -1, read 1
+            .pricing-card.popular { border-bottom-width: 0 }       browser -1, read 1
+            .pricing-card.popular { border: 0 }                    browser -1, read 1
+            .pricing-card { border-bottom: 0 }                     browser  2, read 1
+            .pricing-card.popular { border-block-width: 3px }      browser  2, read 1
+            .pricing-card.popular { border-block-width: 2px 3px }  same
+
+        `border-block-width` was absent from `BORDER_END_WIDTH_PROPS` entirely,
+        so the whole longhand was invisible; the zero shapes were read as "this
+        rule says nothing about the border". Both re-split the four CTAs by
+        1–2px — the compensation's own signature — with every row GREEN.
+        """
+        shipped = _product_teams_html()
+        assert _popular_border_extra_px(shipped) == 1.0, (
+            "the unmutated page must read 1px, or the rows below cannot tell a "
+            "caught mutant from a page that is already wrong; it reads "
+            f"{_popular_border_extra_px(shipped):g}")
+
+        # The FAMILY membership is asserted on the helper: a page mutant cannot
+        # prove a property that is absent from the tuple itself.
+        assert "border-block-width" in BORDER_END_WIDTH_PROPS, (
+            "`border-block-width` sets the block-END width, so leaving it out "
+            "of the family makes the whole longhand invisible to the relation")
+        for prop, value, expected in (
+                ("border", "none", 0.0),
+                ("border", "hidden", 0.0),
+                ("border", "0 solid #f00", 0.0),
+                ("border-width", "1px 2px 0", 0.0),
+                ("border-block-width", "2px 3px", 3.0),
+                ("border-block-width", "4px", 4.0),
+                ("border-bottom", "0", 0.0),
+                ("border-bottom", "0px", 0.0),
+        ):
+            assert _css_border_end_width(prop, value) == expected, (
+                f"`{prop}: {value}` gives block-end {expected:g}px in a "
+                f"browser; the reader says {_css_border_end_width(prop, value)!r}")
+        # …and a width this file CANNOT read still fails rather than being read
+        # as zero: `thin` is a keyword, not a length.
+        assert _css_border_end_width("border", "thin") is None, (
+            "`border: thin` states a width this file cannot convert to px, so "
+            "the reader must return None and let the caller fail — treating it "
+            "as zero would be a guess in the compensation's own arithmetic")
+
+        # The relation itself, on the shapes a maintainer actually writes. The
+        # expectation is the browser's: extra = popular's block-END minus base's.
+        for mutant, expected in (
+                (".pricing-card.popular { border-bottom: 0 }", -1.0),
+                (".pricing-card.popular { border-bottom: none }", -1.0),
+                (".pricing-card.popular { border-bottom-width: 0 }", -1.0),
+                (".pricing-card.popular { border: 0 }", -1.0),
+                (".pricing-card.popular { border-bottom: 0px }", -1.0),
+                (".pricing-card { border-bottom: 0 }", 2.0),
+                (".pricing-card { border: none }", 2.0),
+                (".pricing-card.popular { border-block-width: 3px }", 2.0),
+                (".pricing-card.popular { border-block-width: 2px 3px }", 2.0),
+                (".pricing-card.popular { border-bottom: 1px solid #f00 }", 0.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(mutant))
+            assert got == expected, (
+                f"appending `{mutant}` makes the browser apply {expected:g}px "
+                f"more block-end border on the popular card than on its three "
+                f"siblings, so the compensation relation needs {expected:g}; "
+                f"the reader derives {got:g} and the CTA baseline rows stay "
+                "GREEN over a page whose CTAs are off the shared baseline "
+                "(#14406 review round 20)")
+
+        # NO OVER-REACH: a rule that states no width at all cannot become the
+        # operand (round 13's shape), and an EQUAL border is 0 extra, not 1.
+        for quiet, expected in (
+                (".pricing-card.popular { border-color: #fff }", 1.0),
+                (".pricing-card { border-color: #fff }", 1.0),
+                (".pricing-card.popular { border-bottom-style: solid }", 1.0),
+        ):
+            got = _popular_border_extra_px(self._page_with(quiet))
+            assert got == expected, (
+                f"`{quiet}` declares no border WIDTH, so the shipped 1px "
+                f"compensation is still correct; the reader derives {got:g} "
+                "instead of 1 — a FALSE RED on a page that renders as designed")
 
     def test_a_max_width_block_at_or_above_the_desktop_floor_is_reached(self):
         """`@media (max-width: 1440px)` applies at 1440 — so the guard must see it.
