@@ -996,8 +996,12 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         reason=f"{reason}{tail}")
                 return
         else:
-            # The bound is the WINDOW, with a bounded RE-ALARM, and the ledger is
-            # what holds it (`_claim_delivery`). Arm the window here on EVERY
+            # A window is what a message SPENDS, and the ledger (`_claim_delivery`)
+            # holds that window inside an episode — it is NOT the bound of the
+            # episode: in THIS shape (no incident channel) an episode end re-arms
+            # it unconditionally, so a flapping rule's bound is per episode
+            # (`resolve_abuse_episode`, and the `_INCIDENT_DELIVERY_WINDOW_S`
+            # block above carries the scopes). Arm the window here on EVERY
             # outcome so the first repeat cannot page again in the same minute:
             # the create-once path has already pushed the episode's first message
             # when it FILED, and on DEDUP the ledger alone decides whether the
