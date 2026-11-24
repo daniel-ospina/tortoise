@@ -1685,8 +1685,8 @@ SWEEP_NAMES = 66
 #: (`tortoise/capture_spool.py:4107`, the one new untyped `.update(` receiver in this diff), so
 #: `--repin` on the tree being merged prints **(11911, "3e92044bab08cc3d")**. Re-derived by RUNNING
 #: the tool on that tree, never by arithmetic on the delta. ⛔ THAT PAIR IS `#14480`'s MERGE TREE, NOT
-#: THIS ONE: after `#14445`'s re-cut and this fold of `origin/main` `2cccf90f4dd4`, `--repin` here
-#: prints (11912, "73827c80583e139f") — see the pin's own note below, which owns this tree's value.
+#: THIS ONE's: `#14445`'s re-cut merged with `origin/main` `2cccf90f4dd4` — `--repin` there read
+#: (11912, "73827c80583e139f"). ⛔ SUPERSEDED since: the `e66997b81e76` fold note owns this tree's pair.
 #: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
 #: and diffed, and EXACTLY ONE row differs
 #: out of an UNCHANGED 856-row SHAPE set on both sides:
@@ -2227,7 +2227,7 @@ SWEEP_NAMES = 66
 #: `--repin` on the tree being merged prints **(11911, "3e92044bab08cc3d")**. Re-derived by RUNNING
 #: the tool on that tree, never by arithmetic on the delta. ⛔ THAT PAIR IS `#14480`'s MERGE TREE, NOT
 #: THIS ONE's: `#14445`'s re-cut merged with `origin/main` `2cccf90f4dd4` — `--repin` there read
-#: (11912, "73827c80583e139f"). ⛔ SUPERSEDED since: the `e66997b81e76` fold note above owns this tree's pair.
+#: (11912, "73827c80583e139f"). ⛔ SUPERSEDED since: the `e66997b81e76` fold note owns this tree's pair.
 #: ⛔ RE-PINNED FROM `main`'S DRIFT BY THE `#14342 D1` LANE (#14350, PR #14423), and THIS BRANCH'S
 #: OWN CONTRIBUTION IS ZERO ROWS — measured on three trees, not inferred from a difference.
 #: That lane merges `origin/main` `0fbfbb5b210c` into `fix/14342-d1-drain`, re-cuts the pin on the
