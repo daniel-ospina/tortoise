@@ -22111,27 +22111,27 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 # and the pin itself asserts non-vacuity, so the number is not load-bearing.
 # ⚠️ Count the ROWS the helper returns, not the verdicts a commit message enumerates:
 # `fb21c37aa298`'s message says "6 verdicts" while enumerating 5.
-#: ⛔ MEASURED, NOT TUNED TO A GUESS. At 200 this bound was a blind spot: the record at
-#: `tools/ci_selection.py:224-232` names its arm 207 characters after its verdict word, so
-#: the scan read the record as NO CLAIM — and a false verdict written the same way would
-#: have shipped green. The bound was raised until the sweep showed no further false
-#: compatinctions appear; past a point a name is charged with another arm's distant verdict,
-#: which is why this stays a BOUND rather than "unbounded". Re-derive after any edit with
-#: the one-liner above, at two window sizes.
-#: ⛔ No figure is stated here on purpose (see the census note above): the sweep moves with
-#: every edit to this file. A residual remains — an arm paired with its verdict beyond this
-#: distance inside one block is still unread, and the principled fix is name/clause
-#: attribution rather than a length (#12140, which also carries the attribution fail-open).
-_CUT_CLAIM_WINDOW = 400
+#: ⛔ NO DISTANCE BOUND EXISTS. A length was tried (`_CUT_CLAIM_WINDOW = 200`, then
+#: 400) and both directions failed measurably: too short and a record naming its arm
+#: after the verdict read as NO CLAIM (fail-open), too long and an incidental sibling
+#: was charged with a neighbour's verdict (false RED). The rule is now ATTRIBUTION —
+#: the verdict and the restoration must sit in the name's own CLAUSE (see
+#: `_cut_claims_in`, `_claim_clause_bounds`) — so there is no window to tune and no
+#: figure to carry here.
 #: A restoration defuses a CUT verdict only when it is ATTRIBUTED — "RESTORED by
 #: `#14481`" / "restored by <sha>". A bare `restored` must not defuse, or the false claim
 #: this pin exists to catch passes by carrying the word in an unrelated clause.
 #: ⛔ `[\s#]+` between the words, not `\s+`: these records wrap across a COMMENT
 #: line, so the continuation arrives as "restored\n#   by `#14481`". Measured: with
 #: `\s+` the marker went unread and a TRUE record was charged as a contradiction.
+#: ⛔ THE VERB IS READ IN ANY CASE AND WITH EVERY PREPOSITION THE CORPUS USES
+#: (`Restored by`, `restored in ⁠`#14481⁠``). The verdict regex reads both spellings, so a
+#: marker that does not is the same grade flipped by one capital — measured: `Restored
+#: by `#14481`` charged a TRUE record as a contradiction. An UNATTRIBUTED `restored`
+#: must still fail to defuse, which is why the #/sha operand stays required.
 _CUT_CLAIM_RESTORED_RE = re.compile(
-    r"(?:RESTORED|restored)[\s#]+by[\s#]+`?(?:#\d+|[0-9a-f]{7,40})"
-    r"|`?(?:#\d+|[0-9a-f]{7,40})`?[\s#]+restored")
+    r"(?:[Rr]estored|RESTORED)[\s#]+(?:by|in|with|as)[\s#]+`?(?:#\d+|[0-9a-f]{7,40})"
+    r"|`?(?:#\d+|[0-9a-f]{7,40})`?[\s#]+(?:[Rr]estored|RESTORED)")
 #: ⛔ BOTH SPELLINGS, AND ONLY THE VERDICT PHRASE OF THE LOWERCASE ONE. The corpus
 #: writes this verdict in lowercase as often as not — `cut by #14419`, `cut with the B7
 #: arithmetic` — and a `\bCUT\b`-only token read those as CLEAN: measured, a lowercase
@@ -22146,10 +22146,15 @@ _CUT_CLAIM_RESTORED_RE = re.compile(
 #: all, i.e. CLEAN) while still matching "the re-cut by #14439", which is a verdict about
 #: the re-cut, not about the arm. So: every following-word form the corpus writes, PLUS the
 #: punctuation form, and the lookbehind is what excludes `re-cut` in both.
+#: …and the ACTIVE voice (`the squash cut `X``), which is how a record can put the arm
+#: AFTER the verb: it matched no alternative and the claim did not exist at all — the
+#: fail-open direction, i.e. the class this pin forbids (measured). Keyed on a following
+#: backtick so `cut the tree` is not a verdict.
 _CUT_CLAIM_VERDICT_RE = re.compile(
     r"\bCUT\b"
     r"|(?<![-A-Za-z_])[Cc]ut\s+(?:by|in|with|on|as|at|from|for)\b"
-    r"|(?<![-A-Za-z_])[Cc]ut\s*[\(,.;:]",
+    r"|(?<![-A-Za-z_])[Cc]ut\s*[\(,.;:]"
+    r"|(?<![-A-Za-z_])[Cc]ut\s+(?=`)",
 )
 #: ⛔ A NEGATED VERDICT IS NOT A VERDICT. The corpus writes its survive-convention the
 #: same way it writes its cut-convention (`never cut by #14419`, `not cut in the squash`),
@@ -22159,8 +22164,8 @@ _CUT_CLAIM_VERDICT_RE = re.compile(
 #: false claims (#11065), and "X was never cut by B7, unlike Y, which was CUT" must
 #: still red for Y.
 _CUT_CLAIM_NEGATION_RE = re.compile(
-    r"(?:\bnever|\bnot|\bno\s+longer|\bisn['’]t|\bwasn['’]t)"
-    r"[\s,]+$")
+    r"(?:\bnever|\bnot|\bno\s+longer|\b(?:is|was|has|had|does|did|do)n['’]t)"
+    r"[\s,]+(?:been\s+)?$")
 #: ⛔ THE `tests/` PREFIX IS OPTIONAL: the corpus cites the same arm both ways
 #: (`tests/test_ci_selection.py::arm` and `test_ci_selection.py::arm`), and a scan that
 #: required the prefix read the unprefixed spelling as no claim at all — measured FALSE
@@ -22752,6 +22757,22 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         "`test_live` was cut by #14439. The sibling `test_other` covers one row.", live3)}
     assert got.get("test_live") is True and "test_other" not in got, (
         f"the verdict must still bind its own subject: {got!r}")
+
+    # ⛔ CASE AND VOICE. The verdict is read in both spellings, so the RESTORATION must be
+    # too, or a grade flips on one capital (`Restored by`); the ACTIVE voice
+    # (`the squash cut `X``) put the arm after the verb and matched no alternative at all,
+    # i.e. the claim did not exist. And "hasn't been cut" is the corpus's other negation.
+    for passage in ("`test_live` was CUT by #14419 and Restored by `#14481`.",
+                    "`test_live` was CUT by #14419. Restored by `#14481`.",
+                    "`test_live` was CUT by #14419 and restored in `#14481`."):
+        got = [c for _o, _n, c in _cut_claims_in(passage, live3)]
+        assert got == [False], f"a restoration in any case must defuse: {passage!r} -> {got!r}"
+    for passage in ("The #14439 squash cut `test_live` during B4.",
+                    "`test_live` hasn't been cut by #14419.",
+                    "`test_live` wasn't cut by #14419."):
+        got = [c for _o, _n, c in _cut_claims_in(passage, live3)]
+        assert got == ([True] if "squash cut" in passage else []), (
+            f"active voice is a verdict; a negated one is not: {passage!r} -> {got!r}")
 
     contradictions = [c for c in claims if c[3]]
     assert not contradictions, (
