@@ -8787,6 +8787,60 @@ def test_halves_duplicate_entry_flagged():
     assert any("test_api" in i and "MORE THAN ONE shard" in i for i in issues), issues
 
 
+def test_halves_guard_reports_single_sided_pack_without_crashing():
+    # #3407 review P2 (RESTORED — B7's durations cut deleted this arm): the
+    # branch written to CATCH a zero-weight half died with ZeroDivisionError
+    # while formatting its own diagnosis — `hi / lo` was evaluated inside the
+    # f-string after `lo <= 0` had short-circuited the comparison. A
+    # single-sided pack is reachable (a 1-file pool, or an all-zero measured
+    # map), and this is the only check that catches it: `leg_coverage_issues()`
+    # and `fast_files_absent_from_halves()` both pass when one half is empty.
+    from tools.ci_selection import workflow_halves_issues
+    m = {"surfaces": {"core": ["test_only.py"]}, "tier1": [], "slow_files": [],
+         "durations": {"test_only.py": 5.0}}
+    issues = workflow_halves_issues(m, {"a": {"test_only.py"}, "b": set()})
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_halves_guard_reports_all_zero_map_without_crashing():
+    # Companion arm to the single-sided pack above: an all-zero measured map
+    # makes BOTH half weights 0, so `lo` is 0 for a different reason and the
+    # zero-division guard must hold for it too.
+    from tools.ci_selection import workflow_halves_issues
+    files = ["test_a.py", "test_b.py", "test_c.py"]
+    m = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+         "durations": {f: 0.0 for f in files}}
+    issues = workflow_halves_issues(m, {"a": set(files), "b": set()})
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_halves_ratio_decides_at_the_published_precision():
+    """#6145 (RESTORED — B7's durations cut deleted this arm), same root as the
+    watchdog gate: this check compared the EXACT ratio and then rendered both
+    operands at 2 dp, so a fire inside (1.25, 1.255) printed "ratio 1.25x,
+    tolerance 1.25x" — a diagnosis that reads as compliant while the check
+    refuses, the very contradiction the #6145 change removes next door. The
+    ratio is now decided at the precision it publishes, so no message can print
+    a value that reads as within tolerance.
+    """
+    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, workflow_halves_issues
+    halves = {"a": ["test_api"], "b": ["test_auth", "test_crypto"]}
+    # 1250.4 / 1000 = 1.2504 -> prints 1.25 -> INSIDE tolerance, so it must pass
+    # (under the old exact comparison this fired with a 1.25x-vs-1.25x message).
+    inside = _halves_manifest()
+    inside["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 250.4}
+    assert not any("imbalanced" in i
+                   for i in workflow_halves_issues(inside, halves))
+    # 1256.0 / 1000 = 1.256 -> prints 1.26 -> still refused.
+    beyond = _halves_manifest()
+    beyond["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                           "test_crypto.py": 256.0}
+    assert any("imbalanced" in i
+               for i in workflow_halves_issues(beyond, halves))
+    assert HALF_DURATION_IMBALANCE_RATIO == 1.25
+
+
 def test_fast_files_absent_from_halves_reports_coverage_hole():
     from tools.ci_selection import fast_files_absent_from_halves
     halves = {"a": ["test_api"], "b": ["test_crypto"]}
@@ -10768,7 +10822,7 @@ def test_every_fast_file_this_fold_rows_carries_a_durations_row():
 
     ⛔ RESTORED with B7's durations-map arithmetic cut. The cut deleted this arm as
     arithmetic, but it is the ONLY whole-set assertion behind the header above
-    (`:10200`): "dropping a row it names still reds required CI". The per-file pins
+    (`:10498`): "dropping a row it names still reds required CI". The per-file pins
     (`test_the_eviction_suite_is_in_the_entry_rule_set_13123`, `…_14357_…_14362`,
     `…_record_chain_suite_…_7879`, the `_13110` pair) each cover ONE row, so the
     remaining members were uncovered: dropping one of their rows left `--integrity`
