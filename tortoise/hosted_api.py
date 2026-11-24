@@ -16985,7 +16985,15 @@ def _batch_item_runner(sdk, corpus_name: str, org_id: str):
 #: drains it; the entries are `(org, batch_id)` only, never a credential.
 _BATCH_RETRY: list[tuple[dict, str]] = []
 _BATCH_RETRY_LOCK = threading.Lock()
-_BATCH_RETRY_INTERVAL_S = max(5, _int_env("TORTOISE_BATCH_RETRY_S", 60))
+#: ⛔ A WINDOW-SHAPED KNOB GOES THROUGH `_window_env`, NOT `_int_env` (#5493, and
+#: `tests/test_abuse.py::test_no_window_is_read_with_int_env` — which is what
+#: reds shard `a` when this file reads a `_S`-suffixed knob raw). `_int_env`
+#: accepts `0`, and a zero-length retry window re-drives the leftover set on
+#: every tick. `_window_env` floors a non-positive value back to the default and
+#: warns ONCE; the `max(5, …)` beside it is NOT a second fail-open floor — it is
+#: the cadence bound, so a legitimately small positive value cannot turn the
+#: drain into a spin loop either.
+_BATCH_RETRY_INTERVAL_S = max(5, _window_env("TORTOISE_BATCH_RETRY_S", 60))
 _BATCH_RETRY_THREAD: threading.Thread | None = None
 
 #: Per-org recovery bookkeeping: WHEN this process last scanned the tenant's
@@ -17017,8 +17025,11 @@ _BATCH_SCAN_MAX_ORGS = 10_000
 #: tenant's first request carries (it runs on the 2-worker bookkeeping pool) while
 #: the rotating offset guarantees progress for the rest.
 _BATCH_RECOVER_LIMIT = 50
-_BATCH_RESCAN_S = max(30, _int_env("TORTOISE_BATCH_RESCAN_S",
-                                   int(_batch_ingest.BATCH_RECLAIM_AFTER_S)))
+#: Same rule as `_BATCH_RETRY_INTERVAL_S` above: `_window_env` (fail-open floor,
+#: #5493), then the cadence bound. A zero-length rescan window would make every
+#: tenant read re-scan the whole window on each pass.
+_BATCH_RESCAN_S = max(30, _window_env("TORTOISE_BATCH_RESCAN_S",
+                                      int(_batch_ingest.BATCH_RECLAIM_AFTER_S)))
 #: How soon a FAILED scan may be retried. Short, so one transient fault does not
 #: sideline recovery for a whole window — but not zero, so a poison batch cannot
 #: make every read pay a full failing scan (#14415 review round 7, N2).
@@ -53863,7 +53874,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (727 distinct
+# ABSOLUTE line number from 208 tracked files (726 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
