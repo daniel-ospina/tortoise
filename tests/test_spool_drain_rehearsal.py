@@ -818,7 +818,12 @@ def test_the_uri_gate_parses_the_host_instead_of_matching_a_substring() -> None:
     drain wrote to `falkordb.prod` — a fail-open in the only enforcement of
     recorded decision 2. The check is now on the parsed hostname, exactly.
     """
-    # the reported bypass: loopback text in the USERINFO, a real host elsewhere
+    # MEASURED against the pre-fix body (executed, not assumed) — two groups, because
+    # only the first was a bypass:
+    #   ACCEPT -> REFUSE : loopback text in the USERINFO, real host elsewhere. #14442.
+    #   REFUSE -> REFUSE : host-SUFFIX shapes. These already refused (the old regex
+    #                      needed `:` or `/` right after the host token), kept as
+    #                      regression cover so a looser replacement cannot admit them.
     for uri in ("bolt://u:localhost:x@falkordb.prod:6379/g",
                 "docker://:pw@127.0.0.1:6379@falkordb.prod/g",
                 "bolt://127.0.0.1.evil.com:6379/g",
@@ -826,8 +831,10 @@ def test_the_uri_gate_parses_the_host_instead_of_matching_a_substring() -> None:
         with pytest.raises(SystemExit) as exc:
             rehearsal._gate_uri(uri)
         assert "non-loopback" in str(exc.value), (uri, exc.value)
-    # non-vacuity: the three forms the tool actually uses still pass, so the row is
-    # not just asserting that everything is refused.
+    # Non-vacuity, and one of these is a FIX rather than a preservation: `[::1]` was
+    # REFUSED by the substring form (`::1]` is followed by `]`, not `:`/`/`), i.e. a
+    # legitimate loopback the product accepts (`tortoise/config.py:57 LOOPBACK_HOSTS`)
+    # was over-blocked. It is accepted now, so the gate agrees with the product.
     for uri in ("bolt://localhost:6379/g",
                 "docker://:pw@127.0.0.1:6379/tortoise_test_matrix",
                 "docker://:pw@[::1]:6379/g"):
