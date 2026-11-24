@@ -3653,6 +3653,18 @@ def read_capture_status(root: Path) -> dict | None:
     already gates on the CLAIM file (cycle-5 P1), applied to the status file this
     diff is what put on the drain path (#14480 review, P1 — measured: a FIFO here
     never returned).
+
+    ⚠️ STATED RESIDUAL: the ``lstat`` → ``read_text`` sequence has a REPLACE WINDOW,
+    and CERT C ``FIO32`` ("Prevent Blocking on Special Files") names it — the check
+    and the open are two syscalls, so an object swapped for a FIFO between them still
+    blocks. The race-free form is ``open(O_RDONLY|O_NONBLOCK)`` then ``fstat`` the
+    FD, which is what ``xz``'s ``file_io.c`` does for exactly this reason. It is left
+    unadopted HERE deliberately, not by omission: ``drain_claim._read_raw`` gates the
+    CLAIM file the same way and the two legs of this feature must be one mechanism (a
+    second, stronger gate on one path is a divergence a later reader would have to
+    re-derive); the exposure is a local writer replacing the box's own ``status.json``
+    with a FIFO, which is already a box-takeover primitive. Filed as a stated residual
+    rather than silently widened — ``fifo(7)`` and CERT ``FIO32`` are the sources.
     """
     path = capture_status_path(root)
     try:
