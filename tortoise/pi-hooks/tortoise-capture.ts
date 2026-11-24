@@ -6195,6 +6195,78 @@ function healthScan(
  * path) is one of those early returns. Mirrors `capture_spool._with_claim_term`
  * byte for byte — the cross-leg parity test compares the FULL rendered line.
  */
+/**
+ * ⛔ ONLY A PASS THAT **HELD** THE CLAIM MAY **CLEAR** THE DURABLE EXCLUSION FACT —
+ * every other write CARRIES IT FORWARD. One function, because the rule is one rule.
+ *
+ * The rule was written as "a pass that holds the claim self-heals it", but the code
+ * cleared it on ANY `attempted > 0` write, and the pass that writes most often never
+ * asks for the claim at all: a TARGETED (live) pass takes no claim by design, so it
+ * reports neither `claimUnavailable` nor `claimHeld`, and its fresh `ok` record — a
+ * record with no claim field — DELETED the fact. The record is the SHARED
+ * `<spool>/status.json`, so a targeted pass on this leg erased the warning the Python
+ * leg's reader renders, reproducing exactly the false PASS the durable field exists to
+ * remove (#14480 review, F1).
+ *
+ * @param next      the record this pass EARNED (quota/capacity/`ok`), or null when it
+ *                  earned none — an empty or backoff-only spool writes nothing.
+ * @param previous  what is on disk now.
+ * @param summary   the pass's own claim observations.
+ * @returns the record to write, or null for "write nothing".
+ */
+export function applyClaimPolicy(
+  next: CaptureStatus | null,
+  previous: CaptureStatus | undefined,
+  summary: Pick<FlushSummary, "claimUnavailable" | "claimUnavailableReason" | "claimHeld">,
+): CaptureStatus | null {
+  const hadFact = Boolean(
+    previous?.claim_unavailable || previous?.claim_unavailable_reason);
+  if (summary.claimUnavailable) {
+    // ⛔ THE EXCLUSION BEING OFF IS A DURABLE FACT, not a console line — a pass that
+    // ran WITHOUT the one-drainer claim may have filed nothing, so every rule above
+    // can write nothing, and the reason reached only stderr, which the firing path
+    // DISCARDS (`session-start.sh`: `nohup … >/dev/null 2>&1 &`). The box then
+    // reports `capture: OK`/`DRAINING` while N drainers POST into the same ceiling
+    // (#14423 cycle-7 review, P1). Decorated rather than replacing, so a
+    // quota-blocked box with a broken claim path keeps BOTH facts.
+    return {
+      ...(next ?? previous ?? { version: 1, state: "ok" }),
+      claim_unavailable: true,
+      claim_unavailable_reason: (summary.claimUnavailableReason
+        ?? "the spool root cannot hold a claim").slice(0, 300),
+      updated_at: new Date().toISOString(),
+    } as CaptureStatus;
+  }
+  if (summary.claimHeld) {
+    // ⛔ A PASS THAT HELD THE CLAIM CLEARS THE FACT EVEN IF IT ATTEMPTED NOTHING.
+    // `attempted > 0` gates the `ok` record (an empty spool must not erase a recorded
+    // refusal), which left the claim fields STRANDED: a pass holding the claim over an
+    // empty/backoff-only spool wrote nothing, so the operator kept reading
+    // `NO drain exclusion (<path>)` for an obstruction already removed (#14423
+    // cycle-8 review, P2 — reproduced). One write, and only when there is something to
+    // clear; `state`/`reason`/`status` are untouched, so quota-survives-an-empty-pass
+    // still holds.
+    if (next === null && hadFact) next = { ...previous } as CaptureStatus;
+    if (hadFact && next) {
+      delete next.claim_unavailable;
+      delete next.claim_unavailable_reason;
+      next.updated_at = new Date().toISOString();
+    }
+    return next;
+  }
+  if (next && hadFact) {
+    // The pass did not ask for the claim (the targeted/live pass) and did not report
+    // the exclusion as unavailable, so it has NO standing to clear the fact: carry it
+    // onto the record it earned. `updated_at` stays this pass's, because the state
+    // half of the record IS this pass's observation.
+    next.claim_unavailable = true;
+    if (previous?.claim_unavailable_reason !== undefined) {
+      next.claim_unavailable_reason = previous.claim_unavailable_reason;
+    }
+  }
+  return next;
+}
+
 function withClaimTerm(
   health: CaptureHealth,
   recorded: CaptureStatus | undefined,
@@ -6603,15 +6675,22 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
   const recordOutcome = (summary: FlushSummary): void => {
     try {
       const previous = readCaptureStatus(spoolDir);
+      // ⛔ BUILT, THEN WRITTEN ONCE AT THE TAIL — the Python twin's shape, for the
+      // Python twin's reason (#14480 review, F1). Every arm below used to write the
+      // file immediately, so whether the durable claim fact survived depended on
+      // which arm had run; one of them wrote a record with no claim field at all and
+      // therefore deleted the fact. A single write point is what makes the claim
+      // policy ONE rule instead of a property of four call sites.
+      let next: CaptureStatus | null = null;
       if (summary.quota) {
-        writeCaptureStatus(spoolDir, {
+        next = {
           version: 1,
           state: "blocked",
           reason: summary.quota.code ?? `${summary.quota.status}`,
           status: summary.quota.status,
           ...(summary.quota.detail ? { detail: summary.quota.detail.slice(0, 500) } : {}),
           updated_at: new Date().toISOString(),
-        });
+        };
       } else if (summary.attempted > 0 && !summary.capacity) {
         // Some POST was ATTEMPTED and none of them was refused for quota, so the
         // recorded cause is superseded: the marker is the LAST OBSERVED
@@ -6627,11 +6706,11 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
         // server accepted a capture, not proof the allowance lifted. The window
         // is one pass wide: a still-exhausted quota refuses the NEXT attempt
         // and re-marks it in the same pass that attempted it.
-        writeCaptureStatus(spoolDir, {
+        next = {
           version: 1,
           state: "ok",
           updated_at: new Date().toISOString(),
-        });
+        };
       }
       if (summary.capacity) {
         // #14350: the box is at its capture ceiling. Recorded as BLOCKED with the
@@ -6641,7 +6720,7 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
         // console line alone leaves the next process to re-POST to find out why
         // nothing moved. Self-healing: a later pass with a free slot writes `ok`,
         // and the health line clears it when the queue empties.
-        writeCaptureStatus(spoolDir, {
+        next = {
           version: 1,
           state: "blocked",
           reason: summary.capacity.code ?? `${summary.capacity.status}`,
@@ -6650,45 +6729,13 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
             ? { detail: summary.capacity.detail.slice(0, 500) }
             : {}),
           updated_at: new Date().toISOString(),
-        });
+        };
       }
-      // ⛔ THE EXCLUSION BEING OFF IS A DURABLE FACT, not a console line — the same
-      // argument the capacity arm above makes, for a worse fault: a pass that ran
-      // WITHOUT the one-drainer claim may have filed nothing, so every rule above
-      // can write nothing, and the reason reached only stderr, which the firing
-      // path DISCARDS (`session-start.sh`: `nohup … >/dev/null 2>&1 &`). The box
-      // then reports `capture: OK`/`DRAINING` while N drainers POST into the same
-      // ceiling (#14423 cycle-7 review, P1). Decorated rather than replacing, so a
-      // quota-blocked box with a broken claim path keeps BOTH facts.
-      if (summary.claimUnavailable) {
-        const base: Record<string, unknown> = readCaptureStatus(spoolDir)
-          ?? { version: 1, state: "ok" };
-        writeCaptureStatus(spoolDir, {
-          ...base,
-          claim_unavailable: true,
-          claim_unavailable_reason: (summary.claimUnavailableReason
-            ?? "the spool root cannot hold a claim").slice(0, 300),
-          updated_at: new Date().toISOString(),
-        } as never);
-      }
-      // ⛔ A PASS THAT HELD THE CLAIM CLEARS THE FACT EVEN IF IT ATTEMPTED NOTHING.
-      // `summary.attempted > 0` gates the `ok` write above (an empty spool must not
-      // erase a recorded refusal), which left the claim fields STRANDED: a pass that
-      // held the claim over an empty/backoff-only spool wrote nothing, so the operator
-      // kept reading `NO drain exclusion (<path>)` for an obstruction already removed
-      // (#14423 cycle-8 review, P2 — reproduced). One write, and only when there is
-      // something to clear; `state`/`reason`/`status` are untouched, so the
-      // quota-survives-an-empty-pass rule still holds.
-      if (summary.claimHeld && !summary.claimUnavailable) {
-        const prior = readCaptureStatus(spoolDir);
-        if (prior?.claim_unavailable || prior?.claim_unavailable_reason) {
-          const next = { ...prior } as Record<string, unknown>;
-          delete next.claim_unavailable;
-          delete next.claim_unavailable_reason;
-          next.updated_at = new Date().toISOString();
-          writeCaptureStatus(spoolDir, next as never);
-        }
-      }
+      // ⛔ THE CLAIM POLICY IS ONE EXPORTED FUNCTION, not four call sites: see
+      // `applyClaimPolicy` for the rule and for the review finding (F1) that made it
+      // a rule. The build above only decides which STATE the pass earned.
+      next = applyClaimPolicy(next, previous, summary);
+      if (next) writeCaptureStatus(spoolDir, next);
       // Say the state out loud whenever it MOVED: the start-of-session line was
       // printed from the marker this pass has just superseded, and leaving that
       // as the last thing the lane logged is the misdiagnosis the supersede
@@ -7005,8 +7052,12 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
       reportFlush(summary, "session_shutdown", { continuing: false });
       // The general pass is the LATER evidence, so it writes last (a quota
       // refusal it saw must win over the live session's 2xx).
-      // The targeted (live) pass takes NO claim by design, so it never CLEARS a
-      // recorded exclusion: only the general pass knows whether the box held one.
+      // The targeted (live) pass takes NO claim by design, so it cannot CLEAR a
+      // recorded exclusion — and that is now ENFORCED by `applyClaimPolicy` (the fact
+      // is carried forward), not merely implied by this write ORDER: the general pass
+      // below usually overwrites the record afterwards, but a claim-less leg with a
+      // general pass that writes nothing would have left the erasure standing
+      // (#14480 review, F1).
       if (liveSummary) recordOutcome(liveSummary);
       recordOutcome(summary);
     } catch (err) {

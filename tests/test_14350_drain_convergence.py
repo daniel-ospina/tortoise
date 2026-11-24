@@ -1933,3 +1933,209 @@ def test_a_HEALTHY_pass_CLEARS_the_recorded_claim_fact(tmp_path):
     assert not recorded.get("claim_unavailable"), (
         "a pass that HELD the claim must clear the fact: " + repr(recorded))
     assert "NO drain exclusion" not in capture_health_line(root, api_key="present").line
+
+
+def test_a_TARGETED_pass_cannot_erase_the_durable_claim_fact(tmp_path):
+    """⛔ ONLY A PASS THAT HELD THE CLAIM MAY CLEAR IT (#14480 review, F1).
+
+    A TARGETED pass (`only_session_id` set) takes NO claim by design, so it reports
+    neither `claim_unavailable` nor `held_claim` — and it wrote its `ok` record
+    WITHOUT the claim fields, which DELETED the durable fact. That pass is the
+    SessionEnd path (`tortoise session capture`), the most frequent writer on the
+    box; on an obstructed spool one successful capture therefore wiped the warning
+    until the next general pass re-recorded it, which is exactly the false-PASS
+    direction the durable fact exists to remove.
+
+    MUTATION THAT REDS THIS: gate the carry-forward arm on nothing (i.e. let the
+    `attempted > 0` `ok` write replace the record wholesale, as before) — the fact
+    is gone from `status.json` and from the health line.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    write_capture_status(root, {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True,
+        "claim_unavailable_reason": "the spool root cannot hold a claim",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    entry = write_spool_entry(
+        root,
+        Snapshot(session_id="targeted-0", turns=ROOT_TURNS, source="test",
+                 machine_id="machine-1"),
+    )
+    assert entry, "the entry was written"
+    summary = flush_spool(root, lambda _e: PostOutcome(ok=True), now=1000.0,
+                          only_session_id="targeted-0", sleep=lambda _s: None)
+    assert summary.attempted > 0, "the precondition: the targeted pass FILED something"
+    assert summary.claim_unavailable is not True
+    recorded = read_capture_status(root)
+    assert recorded is not None
+    assert recorded.get("claim_unavailable") is True, (
+        "a targeted pass never asked for the claim, so it cannot clear the fact: "
+        + repr(recorded))
+    assert recorded.get("claim_unavailable_reason") == (
+        "the spool root cannot hold a claim")
+    line = capture_health_line(root, api_key="present").line
+    assert "NO drain exclusion" in line, line
+    assert summary.filed > 0, "the pass still filed its entry; the fact is orthogonal"
+
+
+def test_a_TARGETED_pass_that_attempted_NOTHING_leaves_the_record_alone(tmp_path):
+    """The other half of the same rule: a targeted pass with an empty spool writes
+    nothing at all, so it can neither clear nor invent the fact.
+
+    MUTATION THAT REDS THIS: write an `ok` record unconditionally from the targeted
+    arm (dropping the `attempted > 0` gate) — `updated_at` moves and the state the
+    previous pass recorded is overwritten with a pass that observed nothing.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    before = {
+        "version": 1, "state": "blocked", "reason": "quota_exhausted",
+        "claim_unavailable": True,
+        "claim_unavailable_reason": "the spool root cannot hold a claim",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    write_capture_status(root, before)
+    summary = flush_spool(root, lambda _e: PostOutcome(ok=True), now=1000.0,
+                          only_session_id="absent-session", sleep=lambda _s: None)
+    assert summary.attempted == 0
+    assert read_capture_status(root) == before, (
+        "a pass that attempted nothing observed nothing, so it writes nothing")
+
+
+def test_the_claim_policy_agrees_on_every_summary_shape(tmp_path):
+    """⛔ THE TWO LEGS ARE ONE PROTOCOL on a SHARED `<spool>/status.json`, so the
+    clearing/carrying rule is compared rather than each leg holding its own opinion.
+
+    This matrix is the SAME one the Pi leg drives
+    (`the claim policy agrees between both legs on every summary shape` in
+    `tortoise-capture.test.ts`), row for row; a leg that drifts reds on its own side.
+
+    MUTATION THAT REDS THIS: make any row disagree with the twin — clear the fact on a
+    pass that did not hold the claim, or write a record from a targeted pass that
+    observed nothing.
+    """
+    from tortoise.capture_spool import FlushSummary, _record_capture_status
+
+    fact = {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True, "claim_unavailable_reason": "obstructed",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    # (label, attempted, claim state, expect a record?, expect claim_unavailable)
+    matrix = [
+        ("targeted, earned nothing", 0, {}, False, None),
+        ("targeted, earned ok", 3, {}, True, True),
+        ("holder, earned nothing", 0, {"held": True}, True, False),
+        ("holder, earned ok", 3, {"held": True}, True, False),
+        ("unclaimed, earned nothing", 0, {"unavailable": True}, True, True),
+        ("unclaimed AND holder", 0, {"unavailable": True, "held": True}, True, True),
+    ]
+    for index, (label, attempted, state, writes, expected) in enumerate(matrix):
+        root = tmp_path / f"row-{index}"
+        root.mkdir(parents=True)
+        write_capture_status(root, dict(fact))
+        summary = FlushSummary(attempted=attempted)
+        if state.get("held"):
+            summary.claim_unavailable = False
+        if state.get("unavailable"):
+            summary.claim_unavailable = True
+            summary.claim_unavailable_reason = "obstructed"
+        _record_capture_status(
+            root, summary,
+            held_claim=bool(state.get("held")),
+        )
+        recorded = read_capture_status(root)
+        assert recorded is not None, label + ": prior record vanished"
+        wrote = recorded != fact
+        assert wrote is writes, label + " → writes? " + repr(recorded)
+        if writes:
+            assert bool(recorded.get("claim_unavailable")) is expected, (
+                label + " → " + repr(recorded))
+
+
+def _receipt(**race) -> dict:
+    return {"claim_race": dict(race)}
+
+
+def test_the_measurement_is_NO_VERDICT_when_NOBODY_won_the_claim():
+    """⛔ A RACE NOBODY WON MEASURED NOTHING, and it used to exit 0 as a PASS.
+
+    `supported` was `bounded` alone — a statement about the probe's own hold — so a
+    run whose processes never reached their attempt reported `winners: 0` with
+    `bounded: true` and `supported: true`, and `main` returned 0. The `BARREN` marker
+    that says exactly this was printed by nobody who parsed it (#14480 review, F2).
+
+    MUTATION THAT REDS THIS: drop the `winners == 0` row from `_no_verdict` (the
+    pre-fix behaviour: `bounded` is the only question asked).
+    """
+    import tools.measure_drain_convergence as M
+
+    assert M._no_verdict(_receipt(supported=False, bounded=True, winners=0,
+                                  processes=10)) is True
+    assert M._no_verdict(_receipt(supported=False, bounded=True, winners=0,
+                                  barren=4, processes=10)) is True
+
+
+def test_the_measurement_is_NO_VERDICT_when_a_process_never_arrived():
+    """A `BARREN` process is ABSENT from the race, not a loser: its arrival barrier
+    expired, so it never attempted. Counting it as "not a winner" is how a run that
+    measured nothing read as a clean one.
+
+    MUTATION THAT REDS THIS: drop the `barren > 0` row from `_no_verdict`.
+    """
+    import tools.measure_drain_convergence as M
+
+    assert M._no_verdict(_receipt(supported=False, bounded=True, winners=1,
+                                  barren=1, processes=10)) is True
+
+
+def test_TWO_winners_is_a_FINDING_not_a_no_verdict():
+    """The other side, and the reason the winners check is `== 0` and not `!= 1`:
+    TWO winners is the defect this harness exists to measure. Folding it into "no
+    verdict" would silence the measurement in exactly the case it was built for.
+
+    MUTATION THAT REDS THIS: make the row `winners != 1` — the harness then reports
+    NO VERDICT on the finding it was written to find.
+    """
+    import tools.measure_drain_convergence as M
+
+    assert M._no_verdict(_receipt(supported=False, bounded=True, winners=2,
+                                  processes=10)) is False
+    assert M._no_verdict({"claim_race": {"supported": False, "winners": None}}) is False
+
+
+def test_the_measurement_EXITS_NONZERO_on_a_no_verdict_receipt(monkeypatch, capsys):
+    """The gate itself, end to end: `main` must return 2 when the measurement it
+    produced is a no-verdict, and 0 when it is a real one.
+
+    ⛔ THIS IS THE ROW THE TOOL DID NOT HAVE: `git grep measure_drain_convergence --
+    tests/` returned 0 hits, so deleting the `if _no_verdict(receipt): … return 2`
+    block redded nothing (#14480 review, F2).
+
+    MUTATION THAT REDS THIS: delete that block — the no-verdict receipt then exits 0.
+    """
+    import tools.measure_drain_convergence as M
+
+    monkeypatch.setattr(M, "measure", lambda *a, **k: _receipt(
+        supported=False, bounded=True, winners=0, processes=10))
+    assert M.main(["--scenario", "baseline"]) == 2
+    assert "NO VERDICT" in capsys.readouterr().err
+
+    monkeypatch.setattr(M, "measure", lambda *a, **k: _receipt(
+        supported=True, bounded=True, winners=1, barren=0, processes=10))
+    assert M.main(["--scenario", "baseline"]) == 0
+
+
+def test_the_measurement_EXITS_ZERO_on_a_real_two_drainer_FINDING(monkeypatch):
+    """A two-winner receipt is a FINDING, not a failure of the run: exit 0, with the
+    count in the receipt. A gate that refused it would refuse to report the bug.
+
+    MUTATION THAT REDS THIS: make `_no_verdict` fire on `winners != 1`.
+    """
+    import tools.measure_drain_convergence as M
+
+    monkeypatch.setattr(M, "measure", lambda *a, **k: _receipt(
+        supported=False, bounded=True, winners=2, barren=0, processes=10))
+    assert M.main(["--scenario", "baseline"]) == 0

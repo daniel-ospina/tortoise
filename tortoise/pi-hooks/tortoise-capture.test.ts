@@ -109,6 +109,7 @@ import {
   admissionSaturated,
   cheapSpoolScan,
   clearUnusableClaimPath,
+  applyClaimPolicy,
 } from "./tortoise-capture.ts";
 import tortoiseCapture from "./tortoise-capture.ts";
 
@@ -8406,4 +8407,84 @@ test("#14350: a HEALTHY pass clears the recorded claim fact (no one-way latch)",
     "a pass that HELD the claim must clear the stale fact: " + JSON.stringify(recorded));
   const line = captureHealthLine(spool, { apiKey: "present" }).line;
   assert.doesNotMatch(line, /NO drain exclusion/, line);
+});
+
+test("#14350: a TARGETED pass cannot erase the durable claim fact (F1)", () => {
+  // ⛔ ONLY A PASS THAT HELD THE CLAIM MAY CLEAR IT (#14480 review, F1).
+  //
+  // The targeted (live) pass takes NO claim by design, so it reports neither
+  // `claimUnavailable` nor `claimHeld`. Its fresh `ok` record — a record with no claim
+  // field — therefore DELETED the durable fact, and the record is the SHARED
+  // `<spool>/status.json`, so this leg erased the warning the Python leg renders.
+  //
+  // MUTATION THAT REDS THIS: drop the final `next && hadFact` carry-forward arm from
+  // `applyClaimPolicy` (the pre-fix behaviour: the earned record replaces the file
+  // wholesale).
+  const previous = {
+    version: 1 as const, state: "ok" as const,
+    claim_unavailable: true,
+    claim_unavailable_reason: "the spool root cannot hold a claim",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  };
+  const earned = { version: 1 as const, state: "ok" as const,
+                   updated_at: "2026-01-02T00:00:00.000Z" };
+  const out = applyClaimPolicy(earned, previous, {});
+  assert.ok(out, "the pass earned a record, so one is written");
+  assert.equal(out.claim_unavailable, true,
+    "a pass that never asked for the claim cannot clear the fact");
+  assert.equal(out.claim_unavailable_reason,
+    "the spool root cannot hold a claim");
+  assert.equal(out.updated_at, "2026-01-02T00:00:00.000Z",
+    "the state half of the record IS this pass's observation");
+});
+
+test("#14350: a TARGETED pass that earned NO record writes nothing at all (F1)", () => {
+  // The other half of the same rule: an empty or backoff-only targeted pass observed
+  // nothing, so it must neither clear the fact nor invent a record.
+  //
+  // MUTATION THAT REDS THIS: return `next ?? previous` from the carry-forward arm
+  // unconditionally, which rewrites the unchanged record (a write nothing observed).
+  const previous = {
+    version: 1 as const, state: "blocked" as const, reason: "quota_exceeded",
+    claim_unavailable: true,
+    claim_unavailable_reason: "the spool root cannot hold a claim",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  };
+  assert.equal(applyClaimPolicy(null, previous, {}), null);
+});
+
+test("#14350: the claim policy agrees between both legs on every summary shape", () => {
+  // ⛔ THE TWO LEGS ARE ONE PROTOCOL on a SHARED file, so their policy is compared
+  // rather than each leg's own opinion of it. This matrix is the SAME one the Python
+  // twin drives (`test_the_claim_policy_agrees_on_every_summary_shape`), so a leg that
+  // drifts reds on its own row.
+  //
+  // MUTATION THAT REDS THIS: make any one row below disagree with the Python twin —
+  // e.g. clear the fact on a pass that did not hold the claim, or write a record from
+  // a targeted pass that observed nothing.
+  const fact = {
+    version: 1 as const, state: "ok" as const,
+    claim_unavailable: true, claim_unavailable_reason: "obstructed",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  };
+  const earned = { version: 1 as const, state: "ok" as const,
+                   updated_at: "2026-01-02T00:00:00.000Z" };
+  // [label, earned, summary, writes?, claim_unavailable on the result]
+  const matrix: Array<[string, object | null, object, boolean, boolean | null]> = [
+    ["targeted, earned nothing", null, {}, false, null],
+    ["targeted, earned ok", earned, {}, true, true],
+    ["holder, earned nothing", null, { claimHeld: true }, true, false],
+    ["holder, earned ok", earned, { claimHeld: true }, true, false],
+    ["unclaimed, earned nothing", null, { claimUnavailable: true }, true, true],
+    ["unclaimed AND holder", null, { claimUnavailable: true, claimHeld: true },
+      true, true],
+  ];
+  for (const [label, earnedRec, summary, writes, expected] of matrix) {
+    const out = applyClaimPolicy(earnedRec as never, fact, summary as never);
+    assert.equal(out !== null, writes, label + " → writes? " + JSON.stringify(out));
+    if (writes) {
+      assert.equal(Boolean(out?.claim_unavailable), expected,
+        label + " → " + JSON.stringify(out));
+    }
+  }
 });

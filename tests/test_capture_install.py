@@ -4988,8 +4988,18 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: verdict (BLOCKED / SATURATED / INACTIVE / UNREADABLE), not only the last one.
 #: Behaviour on shipped bytes, so the digest moves again — derived from this tree,
 #: never carried.
+#: ⚠️ …and a NINTH, still #14480's own review (F1): the durable claim fact could be
+#: ERASED by a pass that never asked for the claim. The targeted (live) pass takes no
+#: claim by design and wrote a fresh `ok` record carrying no claim field, so one
+#: SessionEnd erased the warning — on the SHARED `status.json`, meaning this leg
+#: silenced the Python leg's reader too. The clearing/carrying rule is now ONE
+#: exported function (`applyClaimPolicy`) rather than a property of four write sites,
+#: and it carries the fact forward on every write that did not hold the claim.
+#: Behaviour on shipped bytes, so the digest moves again — derived from this tree,
+#: never carried. Generation stays 33 for the same reason the earlier re-cuts did:
+#: **33 has never shipped**, so it freezes when this reaches `main`, not before.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "932d74a2036e9420263b1634c79f5b7b66fbed0b4f954354fafa270c86e5b438")
+    33, "c139da33534a72feba820b1774c43ed3693392dbe2c2078f75732b472605ca20")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5179,7 +5189,7 @@ _GENERATION_DIGESTS = {
     # that re-arms a lease which lapsed during the pass's own unbounded whole-spool
     # scan, on both legs. A behaviour change on shipped bytes, and the digest moves
     # with it; 33 still has never shipped, and freezes the moment it reaches `main`.
-    33: "932d74a2036e9420263b1634c79f5b7b66fbed0b4f954354fafa270c86e5b438",
+    33: "c139da33534a72feba820b1774c43ed3693392dbe2c2078f75732b472605ca20",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

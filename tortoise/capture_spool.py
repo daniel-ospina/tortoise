@@ -4148,9 +4148,15 @@ def _record_capture_status(root: Path, summary: FlushSummary, *,
     # had (found in review). The record states the box's state at the END of the
     # pass; the console line below tells the same story from the same flag.
     capacity = summary.capacity if summary.capacity_stopped else None
+    # ⛔ BUILT, THEN WRITTEN ONCE AT THE TAIL. Every arm below used to write the file
+    # immediately, which made "the durable claim fact survives" depend on which arm
+    # had run — and one arm wrote a record with no claim field at all, deleting the
+    # fact (#14480 review, F1). A single write point is what lets the claim policy
+    # below be ONE rule instead of a property of four call sites.
+    record: dict | None = None
     if quota is not None:
         status = quota.get("status")
-        record: dict = {
+        record = {
             "version": 1,
             "state": "blocked",
             "reason": quota.get("code") or (str(status) if status is not None else None),
@@ -4161,7 +4167,6 @@ def _record_capture_status(root: Path, summary: FlushSummary, *,
         detail = quota.get("detail")
         if isinstance(detail, str) and detail:
             record["detail"] = detail[:500]
-        write_capture_status(root, record)
     elif capacity is not None:
         # #14350: the box is at its capture ceiling. Recorded as BLOCKED with the
         # server's own 429 so `capture: BLOCKED (n queued, 429 capture capacity
@@ -4183,31 +4188,39 @@ def _record_capture_status(root: Path, summary: FlushSummary, *,
         detail = capacity.get("detail")
         if isinstance(detail, str) and detail:
             record["detail"] = detail[:500]
-        write_capture_status(root, record)
     elif summary.attempted > 0:
-        write_capture_status(
-            root, {"version": 1, "state": "ok", "updated_at": _now_iso()})
-    # ⛔ THE EXCLUSION BEING OFF IS A DURABLE FACT, not a console line. A pass that
-    # ran WITHOUT the one-drainer claim may have filed nothing at all, so every rule
-    # above can write nothing — and the reason reached only stderr, which the primary
-    # firing path DISCARDS (`session-start.sh`: `nohup … session drain … >/dev/null
-    # 2>&1 &`). The result was the worst shape this file knows: N drainers POSTing
-    # into the same 8-slot ceiling while `capture: OK`/`DRAINING` reported a healthy
-    # box (#14423 cycle-7 review, P1 — the same argument the CAPACITY arm above makes
-    # for its own cause, which is why it is one field and not a new mechanism).
-    #
-    # It is DECORATED onto whatever state this pass earned rather than replacing it:
-    # a quota-blocked box with a broken claim path is both, and dropping the 402 to
-    # report the obstruction would trade one misdiagnosis for another. Writers that
-    # wrote a fresh record above (quota/capacity/ok) self-heal it, because their dict
-    # has no claim field.
+        record = {"version": 1, "state": "ok", "updated_at": _now_iso()}
+
+    # ⛔ ONLY A PASS THAT **HELD** THE CLAIM MAY CLEAR THE FACT — every other write
+    # CARRIES IT FORWARD. The rule was written as "a pass that holds the claim
+    # self-heals it", but the code cleared it on any `attempted > 0` write, and the
+    # most frequent such pass never asks for the claim at all: a TARGETED pass
+    # (`only_session_id` set — the SessionEnd path and the store-sync replay) takes
+    # no claim by design, so it reported neither `claim_unavailable` nor
+    # `held_claim`, wrote a record with no claim field, and ERASED the fact. On an
+    # obstructed box one successful `tortoise session capture` then wiped the
+    # warning until the next general pass re-recorded it, which is the false-PASS
+    # direction this whole field exists to remove — through the writer that runs
+    # most often, and cross-leg, because `status.json` is shared (#14480 review, F1).
+    prior = read_capture_status(root)
     if summary.claim_unavailable:
-        record = dict(read_capture_status(root) or {"version": 1, "state": "ok"})
+        # ⛔ THE EXCLUSION BEING OFF IS A DURABLE FACT, not a console line. A pass that
+        # ran WITHOUT the one-drainer claim may have filed nothing at all, so every rule
+        # above can write nothing — and the reason reached only stderr, which the primary
+        # firing path DISCARDS (`session-start.sh`: `nohup … session drain … >/dev/null
+        # 2>&1 &`). The result was the worst shape this file knows: N drainers POSTing
+        # into the same 8-slot ceiling while `capture: OK`/`DRAINING` reported a healthy
+        # box (#14423 cycle-7 review, P1 — the same argument the CAPACITY arm above makes
+        # for its own cause, which is why it is one field and not a new mechanism).
+        #
+        # It is DECORATED onto whatever state this pass earned rather than replacing it:
+        # a quota-blocked box with a broken claim path is both, and dropping the 402 to
+        # report the obstruction would trade one misdiagnosis for another.
+        record = dict(record if record is not None else (prior or {"version": 1, "state": "ok"}))
         record["claim_unavailable"] = True
         record["claim_unavailable_reason"] = (
             summary.claim_unavailable_reason or "the spool root cannot hold a claim")[:300]
         record["updated_at"] = _now_iso()
-        write_capture_status(root, record)
     elif held_claim:
         # ⛔ AND A PASS THAT HELD THE CLAIM CLEARS IT EVEN IF IT ATTEMPTED NOTHING.
         # `attempted > 0` gates the `ok` write above (an empty spool must not erase a
@@ -4217,14 +4230,26 @@ def _record_capture_status(root: Path, summary: FlushSummary, *,
         # removed (#14423 cycle-8 review, P2 — reproduced). One write, and only when
         # there is something to clear; `state`/`reason`/`status` are untouched, so the
         # quota-survives-an-empty-pass rule still holds.
-        prior = read_capture_status(root)
-        if prior is not None and (prior.get("claim_unavailable")
-                                  or prior.get("claim_unavailable_reason")):
+        has_fact = prior is not None and (prior.get("claim_unavailable")
+                                          or prior.get("claim_unavailable_reason"))
+        if record is None and has_fact:
             record = dict(prior)
+        if has_fact:
             record.pop("claim_unavailable", None)
             record.pop("claim_unavailable_reason", None)
             record["updated_at"] = _now_iso()
-            write_capture_status(root, record)
+    elif record is not None and prior is not None and (prior.get("claim_unavailable")
+                                                       or prior.get("claim_unavailable_reason")):
+        # The pass did not ask for the claim (a targeted pass) and did not report the
+        # exclusion as unavailable, so it has NO standing to clear the fact: carry it
+        # onto the record it earned. `updated_at` stays this pass's, because the state
+        # half of the record IS this pass's observation.
+        record["claim_unavailable"] = True
+        if prior.get("claim_unavailable_reason") is not None:
+            record["claim_unavailable_reason"] = prior["claim_unavailable_reason"]
+
+    if record is not None:
+        write_capture_status(root, record)
 
 
 # ── Replay ─────────────────────────────────────────────────────────────────
