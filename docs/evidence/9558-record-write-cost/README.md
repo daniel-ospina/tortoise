@@ -293,8 +293,11 @@ work here at all.)
 per-record read). **`jsonb_columns()` no longer has a TTL** (#4625): it runs once
 per string PARAMETER, where even a stat pass would be a regression, so it now
 answers from the process's RESIDENT schema — resolved once per process, zero
-filesystem operations per call, with `_release_schema_cache()` /
-`_jsonb_cache_clear()` as the refresh verbs. A bounded window is only cheap when
+filesystem operations per call, with `_release_schema_cache()` as THE refresh
+verb. ⚠️ `_jsonb_cache_clear()` is NOT an interchangeable spelling of it: it
+re-parses the SAME certified bytes, so it re-derives the encoding view but cannot
+see an edit (that is the whole difference, and it is stated at
+`_jsonb_cache_clear`). A bounded window is only cheap when
 the work behind it is cheap, and the work behind this one is a twenty-file read:
 the 5 s expiry is what #4625 caught inside `replay_plan` on the serving thread.
 The division is stated at `_resident_entry` and at `column_types`.

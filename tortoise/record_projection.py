@@ -2818,32 +2818,22 @@ def _declared_types_for_dir(migrations_dir: Path) -> dict[str, dict[str, str]]:
 
     Comments are stripped first (:func:`_strip_sql_comments`), so a migration's
     recorded DOWN direction cannot be read as its UP.
-    """
-    return _declared_types_for_dir_state(migrations_dir)[0]
 
-
-def _declared_types_for_dir_state(
-        migrations_dir: Path) -> tuple[dict[str, dict[str, str]], bool]:
-    """`(the map, whether EVERY registered migration was read)`.
-
-    ⛔ THE COMPLETENESS IS THIS CALL'S, DECIDED BY THE SAME `exists()` THAT
-    DECIDES WHETHER TO READ (#4625 review, F2). A caller that memoises an answer
-    built from a tree missing one migration stores a SHORTER, plausible map — and
-    for `jsonb_columns` that silently changes how a bound parameter is encoded
-    (a `jsonb` column read as a scalar is JSON-quoted; a narrowed one read as a
-    container is not), with no error anywhere. Deciding it here, per file, from
-    the stat this loop already performs, costs nothing and cannot disagree with
-    the map it returns.
+    ⚠️ NO COMPLETENESS FLAG IS RETURNED, and that is deliberate (#4625 review):
+    this reader has NO memo, so there is nothing a short answer could be stored
+    under. The completeness the F2 argument is about is the RESIDENT path's, and
+    it is decided AND consumed there — :func:`_entry_sql_state` returns
+    `(sql, complete)` from the same `exists()` that decided whether to read, so a
+    partial tree is never memoised as a short join. A `(map, complete)` tuple
+    here would have no consumer: both call sites of this view take the map alone.
     """
     chunks: list[str] = []
-    complete = True
     for name in RECORD_MIGRATIONS:
         path = migrations_dir / name
         if not path.exists():
-            complete = False
             continue
         chunks.append(_strip_sql_comments(path.read_text(encoding="utf-8")))
-    return _declared_types_from_chunks(chunks), complete
+    return _declared_types_from_chunks(chunks)
 
 
 def _declared_types_from_chunks(chunks: list[str]) -> dict[str, dict[str, str]]:
@@ -2913,7 +2903,7 @@ def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
     cannot delete a column that is `jsonb` in ANOTHER record table; flattened to
     names at the end (the one caller is handed a column name and nothing else).
     """
-    declared = _declared_types_for_dir_state(migrations_dir)[0]
+    declared = _declared_types_for_dir(migrations_dir)
     if not declared:
         # ⛔ FAIL CLOSED, like `table_columns()`. An EMPTY set is the worst
         # answer this function can give: it silently stops the #9548 encoding
