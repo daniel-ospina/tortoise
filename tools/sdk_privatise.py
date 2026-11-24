@@ -1511,9 +1511,12 @@ SWEEP_NAMES = 66
 #: ROW" IS FALSE AS A GENERAL CLAIM: an integration CAN add untyped receivers, and re-cutting the
 #: pin is exactly how that gets recorded — the block BELOW is one, where merging `10e51693` moved
 #: the pair to `(11864, …)`, "FOUR MORE than this branch's parent". ⛔ AND THE EVIDENCE IS
-#: `--repin`'s OUTPUT, NOT THE CHECK'S EXIT: `--check` exiting 0 says the observed pair equals the
-#: pin, which it reports just as readily on a tree whose pin was re-cut after the integration
-#: added rows.
+#: `--repin`'s OUTPUT, NOT THE CHECK'S EXIT: `--check` exiting 0 compares the observed COUNT to a
+#: baseline measured AT CHECK TIME on the tree in front of it, so it says nothing at all about which
+#: PAIR the tree derives — the tree it passes is the tree it was measured against. (Before the
+#: ratchet it compared the pair to the pin and reported equality just as readily on a tree whose pin
+#: had been re-cut after the integration added rows; since #14548 there is no pin to re-cut, and the
+#: count is what a rise has to beat.)
 #: ⛔ NAMED BY ITS COMMITS, NOT BY "this branch's base": the base moves under every integration
 #: and a parenthetical reading `this branch's base` went stale at the very next merge (measured:
 #: written naming `0467ba329d`, false the moment `47e28b549e76` was merged).
@@ -2148,15 +2151,17 @@ SWEEP_NAMES = 66
 #: to 11910. The suite's conflict was a pure double-append at EOF — `main` added
 #: `test_a_tool_only_diff_selects_this_suite`, this branch added the ratchet arms, one anchor — so
 #: BOTH are kept and neither arm is lost.
-#: ⛔ RE-CUT ONTO `origin/main` `af40c97ca312` AFTER IT MOVED THE PIN AGAIN, AND **MAIN'S
+#: ⛔ RE-CUT ONTO `origin/main` `14b8322eb271` AFTER IT MOVED THE PIN, AND **MAIN'S
 #: VALUE IS THE ONE KEPT**: `#14544` on `main` re-pinned `11910` → **`11903`** on its own tree (the
 #: block immediately above attributes that `-7` row by row), so the assignment below carries MAIN'S
 #: pair and this branch contributes NO pair of its own. ⛔ That is not a convenience, it is what the
 #: change IS: under the RATCHET below the recorded pair is a HISTORICAL READING that no `--check`
 #: compares against the tree, so a re-cut has nothing to re-pin and the treadmill this change exists
-#: to stop gets no new run on `main`'s behalf. The branch's earlier prose read `11910` and called it
-#: "the pair `main` commits"; both halves of that were true of `533e256f2c89` and are false here, so
-#: the sentence is replaced rather than carried.
+#: to stop gets no new run on `main`'s behalf. (`main` moved twice while this re-cut was being made,
+#: `af40c97ca312` -> `14b8322eb271` -> `b665cbd6198`; this branch is based on the SECOND of those,
+#: and neither move touches this file or its suite.) The branch's earlier prose read `11910` and
+#: called it "the pair `main` commits"; both halves of that were true of `533e256f2c89` and are false
+#: here, so the sentence is replaced rather than carried.
 #: ⛔ THE 2-ROW GAP BETWEEN 11912 AND 11910 IS ATTRIBUTED ROW BY
 #: ROW, not waved through: the branch's earlier tree carried the two `_JSONB_CACHE.update({...})`
 #: rows `#4625` retires (measured `git grep -c '_JSONB_CACHE.update'` → **2** on that tree, **0** on

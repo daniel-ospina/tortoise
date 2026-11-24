@@ -256,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2064 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2069 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -361,11 +361,12 @@ def _residue_block() -> str:
     — and THIS PR'S OWN TEST CUT THEN MOVED THE PAIR DOWN, 11910 -> `11903`, on a tree that is
     neither of the fold's parents: `tests/test_dod_5090_probe.py` loses 270 cases, and that file's
     own residue rows go 8 -> 1 (`edits_for` on each side, not differenced from the two pins), so
-    the movement is `-7` and the figure above is RE-MEASURED at 2032 rather than carried from the
-    fold's reading. The re-pin note that records it is `#:` prose INSIDE this run, which is why
+    the movement is `-7` and the figure that cut published was RE-MEASURED at 2032 on THAT tree
+    rather than carried from the fold's reading. The re-pin note that records it is `#:` prose INSIDE this run, which is why
     the extent moved with the pair here instead of only with a merge,
     — and the PR was `CONFLICTING` against `origin/main` AGAIN, so its commits were RE-CUT onto
-    `af40c97ca312` rather than merged into it, and the resolution rule for this second re-cut is
+    `14b8322eb271` (`main` then moved once more, to `b665cbd6198`, and neither move touches either
+    file here) rather than merged into it, and the resolution rule for this second re-cut is
     the one this change is made of: MAIN'S pin VALUES WIN, THIS PR'S ratchet LOGIC WINS. That is
     not a tie-break but the mechanism's own consequence — under the ratchet the recorded pair is a
     HISTORICAL READING no `--check` compares against the tree, so there is nothing for this PR to
