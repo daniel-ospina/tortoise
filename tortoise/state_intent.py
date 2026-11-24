@@ -148,6 +148,13 @@ _ENDING_WORDS = (
     r"|ended"
 )
 
+#: One word of the subject NP.
+#: ⛔ A hyphen or an apostrophe is an ordinary spelling INSIDE a head noun
+#: (`company's`, `all-hands`, `e-mail`), not a clause boundary — a `[a-z0-9]+` run
+#: refuses those spellings and answers `0 rows`, because the relevance read
+#: excludes terminal statuses.
+_NP_WORD = r"[a-z0-9][a-z0-9'-]*"
+
 #: What a ``is_predicate`` subject NP's word run may NOT cross. A word run alone
 #: admits a relative clause whose own finite verb then reads as the question's
 #: predicate, and there are TWO spellings of that clause:
@@ -170,7 +177,9 @@ _ENDING_WORDS = (
 #: PREDICATE, and each of the three classes below changes what the question asks.
 #: Measured before this guard (PR #14491 review, P1/P2) — every row routed:
 #:
-#: * NEGATION (`not`, `never`, `neither`, `nor`, `longer`) — `is the plan not
+#: * NEGATION (`not`, `never`, `neither`, `nor`, `longer`, the contracted
+#:   auxiliaries matched as the SUFFIX `…n't`, and the approximatives
+#:   `hardly`/`barely`/`scarcely`/`rarely`) — `is the plan not
 #:   cancelled` was answered with the population of CANCELLED records, the
 #:   polarity-INVERTED answer, which is the #14033 defect class exactly. `no`
 #:   is left in the run by the residual below (it is an ordinary noun modifier),
@@ -238,14 +247,6 @@ _ENDING_WORDS = (
 #:   shape that could go either way does not fire. The cost is not new either:
 #:   `is_predicate` did not exist on the base module, which refused the same
 #:   string. It is disclosed here so a later round does not present it as a find.
-#:
-#: One word of the subject NP.
-
-#: ⛔ A hyphen or an apostrophe is an ordinary spelling INSIDE a head noun
-#: (`company's`, `all-hands`, `e-mail`), not a clause boundary — a `[a-z0-9]+` run
-#: refuses those spellings and answers `0 rows`, because the relevance read
-#: excludes terminal statuses.
-_NP_WORD = r"[a-z0-9][a-z0-9'-]*"
 
 _NP_STOP = (
     r"(?!(?:that|which|who|whom|whose|where|when"
@@ -283,6 +284,15 @@ _NP_STOP = (
     # served the polarity-INVERTED population. `[a-z0-9'-]*n't` matches the token
     # that carries it.
     r"|[a-z0-9'-]*n't"
+    # ⛔ THE APPROXIMATIVE NEGATIONS ARE THE SAME POLARITY CLASS — `hardly
+    # archived` / `barely archived` answer the question with the population of
+    # records that HAVE ended, which is the inversion the negation stop exists to
+    # refuse (`is the plan hardly archived`, `is the plan barely archived` and
+    # `is the plan scarcely archived` all routed on the head that stopped only the
+    # literal negators; PR #14491 review, P3). They are adjectives/adverbs in the
+    # PREDICATE slot and never head nouns, so they cost no recall — unlike `will`,
+    # which stays a residual (`estate will probate`) rather than a stop word.
+    r"|hardly|barely|scarcely|rarely"
     r"|unless|once|if|before|after|until|while|because|although|though"
     r"|as|since|whenever|whereas|whether"
     r"|each|every|both|either|another|several|many|most|few|none"
@@ -595,6 +605,8 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `is the policy when a booking is cancelled` all refuse. The tail anchor, the
     # NP bound, the NP stop and the start anchor are each pinned by a falsifier
     # that reaches it in `tests/test_14033_state_cue_gap.py`; the `what is …` row
+    # of `NOT_SELECTED` cannot exercise any of them, because the start anchor
+    # (`^(?:is|are|was|were)`) never reaches it.
     # ⛔ AND THE SUBJECT RUN STOPS AT A PREDICATE MODIFIER (PR #14491 review,
     # P1/P2): a `not`/`never` in the run INVERTS the question — `is the plan not
     # cancelled` was served the CANCELLED records — and a futurity (`to be
@@ -602,8 +614,6 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # the ended population cannot represent. All three classes are pinned in
     # `tests/test_14033_state_cue_gap.py`, and the affirmative temporal modifiers
     # (`already`, `still`) stay in the run so their spellings still route.
-    # of `NOT_SELECTED` cannot exercise any of them, because the start anchor
-    # (`^(?:is|are|was|were)`) never reaches it.
     # ⛔ THE COPULA IS THE WHOLE be-PARADIGM, not `is` alone: `was the onboarding
     # flow retired?`, `are our endpoints deprecated` and `were the claims
     # retracted` are the same question in another tense/number, and refusing them
