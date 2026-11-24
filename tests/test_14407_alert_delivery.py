@@ -1643,6 +1643,63 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
     notify.reset_abuse_delivery_for_tests()
 
 
+# ── 4b. the runbook's own cells agree with the code's classification ────────
+
+def _runbook_row(kind: str) -> str:
+    """The triage-table row for ``kind`` from the DR runbook (#14487 round 12)."""
+    from pathlib import Path
+
+    runbook = (Path(__file__).resolve().parent.parent
+               / "docs/ops/registry-backup-dr.md")
+    for line in runbook.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"| {kind} |"):
+            return line
+    raise AssertionError(f"no triage row for {kind!r} in {runbook}")
+
+
+def test_the_runbook_calls_a_failed_close_the_episode_end_release_it_is():
+    """Two surfaces described ONE event two ways, and this PR rewrote both.
+
+    ``release_abuse_delivery``'s docstring says a close that RAISES or is backing
+    off is part of the EPISODE-END release (it leaves ``skipped_window`` false,
+    so the ``if not skipped_window:`` gate inside ``resolve_abuse_episode`` does
+    not hold) and states explicitly that it is NOT in the kind-agnostic
+    per-outcome set. The runbook's ``ABUSE_FLAG_RAISED`` row classified the same
+    event the other way — *"a release that is not an episode end (a failed
+    close, ...)"* — so an operator got two answers for one event.
+
+    Mechanically it IS the episode-end release: the release loop sits inside
+    ``resolve_abuse_episode``, which the engine calls on the ``ended`` branch
+    only (``AbuseEngine._end_alert_episode``).
+    """
+    row = _runbook_row("ABUSE_FLAG_RAISED")
+    assert "not an episode end (a failed close" not in row, (
+        "the row calls the failed-close release something other than the "
+        f"episode-end release the code performs: {row!r}")
+    assert "EPISODE-END release" in row, (
+        f"the row must name the release that actually re-arms the window: {row!r}")
+    # BOTH polarities: a fix that deleted the clause would under-report the
+    # genuinely kind-agnostic releases this row exists to name.
+    assert "FAILED SEND" in row, row
+
+
+def test_the_suspended_runbook_row_names_the_re_arm_sites_the_code_has():
+    """The cap-eviction fix reached ``notify.py`` and stopped there.
+
+    ``_INCIDENT_DELIVERY_WINDOW_S`` names ``_enforce_delivery_cap`` as a re-arm
+    site for ``abuse_suspended``: it evicts the soonest-to-expire LIVE keys once
+    the population passes ``_MAX_DELIVERY_KEYS``, ending an armed window with NO
+    release firing. The runbook row for that same kind enumerated the re-arm set
+    without it, so the operator-facing surface was the one place the F5 fix did
+    not reach. Deleting the clause reddens; so does dropping FAILED SEND.
+    """
+    row = _runbook_row("abuse_suspended")
+    assert "cap eviction" in row, (
+        "the runbook's re-arm set omits the ledger's own cap eviction, which "
+        f"notify.py names for this kind: {row!r}")
+    assert "FAILED SEND" in row, row
+
+
 # ── 5. the engine owns the episode, so it must end it ───────────────────────
 
 def test_episode_end_resolves_the_abuse_incidents(delivered, monkeypatch):
