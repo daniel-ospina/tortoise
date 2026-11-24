@@ -294,11 +294,18 @@ per-record read). **`jsonb_columns()` no longer has a TTL** (#4625): it runs onc
 per string PARAMETER, where even a stat pass would be a regression, so it now
 answers from the process's RESIDENT schema — resolved once per process, zero
 filesystem operations per call, with `_release_schema_cache()` as THE refresh
-verb. ⚠️ `_jsonb_cache_clear()` is NOT an interchangeable spelling of it: it
-re-parses the SAME certified bytes, so it re-derives the encoding view but cannot
-see an edit (that is the whole difference, and it is stated at
-`_jsonb_cache_clear`). A bounded window is only cheap when
-the work behind it is cheap, and the work behind this one is a twenty-file read:
+verb. ⚠️ **THAT ZERO-OPERATION PROPERTY IS THE COMPLETE-TREE CASE.** While the
+tree is absent or PARTIAL its SQL is deliberately NOT memoised — that is how the
+entry self-heals with no TTL and no per-call `stat` — so the READ is paid per
+consult, and a consult is one per bound string PARAMETER; only the PARSE is
+cached, keyed on the SQL text it came from. A degraded tree is therefore cheaper
+than one parse per parameter and it is NOT free, and `_resident_entry` states
+that split rather than quoting this number for both. ⚠️ `_jsonb_cache_clear()` is
+NOT an interchangeable spelling of the refresh verb: it re-parses the SAME
+certified bytes, so it re-derives the encoding view but cannot see an edit (that
+is the whole difference, and it is stated at `_jsonb_cache_clear`). A bounded
+window is only cheap when the work behind it is cheap, and the work behind this
+one is a twenty-file read:
 the 5 s expiry is what #4625 caught inside `replay_plan` on the serving thread.
 The division is stated at `_resident_entry` and at `column_types`.
 
