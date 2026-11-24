@@ -4046,6 +4046,169 @@ def _css_rightmost_selects(rightmost: str, compound: str) -> bool:
     return False
 
 
+class _FirstClassElement(HTMLParser):
+    """The FIRST start tag in a document whose class list contains one class.
+
+    The SUBJECT's identity — `("a", {"href": "/auth", "class": "btn"})` — is
+    the half of the selector-matching question no CSS reader can answer from a
+    selector alone: `_css_compound_matches_element` needs to know which ELEMENT
+    the subject is before it can say whether a compound that names no class
+    selects it (#14406 review round 10).
+    """
+
+    def __init__(self, cls: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self._cls = cls
+        self.element: tuple[str, dict[str, str]] | None = None
+
+    def _record(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.element is not None:
+            return
+        # Attribute NAMES are case-insensitive in HTML, so the map is keyed
+        # lowercase; `class` is looked up the same way it is spelled by the
+        # parser, which already lowercases names.
+        found = {name.lower(): (value or "") for name, value in attrs}
+        if self._cls in found.get("class", "").split():
+            self.element = (tag.lower(), found)
+
+    def handle_starttag(self, tag, attrs):
+        self._record(tag, attrs)
+
+    def handle_startendtag(self, tag, attrs):
+        self._record(tag, attrs)
+
+
+def _element_carrying_class(markup: str, cls: str,
+                            ) -> tuple[str, dict[str, str]] | None:
+    """The first element carrying `cls`, as `(tag, attributes)` — or None.
+
+    Parsed with `HTMLParser` rather than a regex: the attribute set is the
+    thing being read (a bare `<a href="/auth">` rule selects the pricing CTA by
+    its OWN tag and destination), and a regex over `class="…"` would have to
+    re-implement quoting, ordering and case to get the same answer.
+    """
+    parser = _FirstClassElement(cls)
+    parser.feed(markup)
+    parser.close()
+    return parser.element
+
+
+def _css_compound_matches_element(compound: str,
+                                  element: tuple[str, dict[str, str]]) -> bool:
+    """Can this RIGHTMOST compound select `element` (the subject's identity)?
+
+    This is the OTHER half of `_css_rightmost_selects`: that function answers
+    "does this compound name the subject's CLASS" — in every spelling of the
+    `class` attribute, `[class~="x"]` / `[class="x"]` included — and this one
+    answers "does it select the subject's ELEMENT", for the compounds that name
+    no class at all. Measured (#14406 review round 10, before it existed):
+    `#pricing-grid a { margin-top: 0 }` and `.pricing-grid a[href] {
+    margin-top: 0 }` both take the pricing CTA's slack — (1,0,1) and (0,2,1)
+    against the pinned `.pricing-card .btn`'s (0,2,0), so they win at ANY source
+    order — and left EVERY row of `TestProductTeamsPricingCardCtaBaseline`
+    GREEN while the rendered CTAs split back to three baselines, 70.2px apart
+    (#13645 item 6).
+
+    ⛔ IT IS NOT A LICENCE TO MATCH EVERYTHING, and the two ways it could
+    false-RED a CORRECT page are both closed here rather than by the caller:
+
+    * `p { margin: … }` rule on the page (measured: it has them) must not count
+      as reaching the CTA — the TAG has to match, so `p` does not select an
+      `<a>`.
+    * `*` and `a[href="/auth"]` DO select it, but they cannot win the cascade
+      against a stronger pin — that is `_css_element_reaches`'s specificity
+      floor, not this function's business.
+
+    Unreadable input fails CLOSED, the same direction the class reader takes: an
+    attribute value this reader cannot model counts as matching.
+    """
+    tag, attrs = element
+    if re.search(r":root\b", compound):
+        # `:root` is the document element, whatever the subject is.
+        return tag.lower() == "html"
+    for match in re.finditer(
+            r"\[\s*([\w-]+)\s*(?:([~|^$*]?=)\s*(\"[^\"]*\"|'[^']*'|[^\]]*?))?"
+            r"\s*([iIsS])?\s*\]", compound):
+        name = match.group(1).lower()
+        operator, raw, insensitive = match.groups()[1:]
+        if name not in attrs:
+            return False
+        if operator is None:
+            continue                     # `[href]`: a presence test
+        quoted = re.fullmatch(r"[\"'](.*)[\"']", (raw or "").strip(), re.S)
+        if not quoted:
+            return True                  # fail closed: may match
+        value, actual = quoted.group(1), attrs[name]
+        if insensitive:
+            value, actual = value.lower(), actual.lower()
+        if (operator == "=" and actual == value) or (
+                operator == "~=" and value in actual.split()) or (
+                operator == "|=" and (actual == value
+                                       or actual.startswith(value + "-"))) or (
+                operator == "^=" and actual.startswith(value)) or (
+                operator == "$=" and actual.endswith(value)) or (
+                operator == "*=" and value in actual):
+            continue
+        return False
+    core = re.sub(r"\[[^\]]*\]", " ", compound)
+    for match in re.finditer(r"#([\w-]+)", core):
+        if attrs.get("id") != match.group(1):
+            return False
+    if re.search(r"\.[\w-]+", core):
+        # A class-named compound is `_css_rightmost_selects`'s question, and it
+        # is already asked. Returning False here keeps ONE owner per question.
+        return False
+    remainder = re.sub(r"::?[\w-]+(?:\([^)]*\))?", " ", core).strip()
+    if remainder and remainder != "*":
+        return remainder.lower() == tag.lower()
+    # Nothing but pseudo-classes (`:hover`, `:first-child`, `:root` above): a
+    # state/pseudo-class test this reader cannot evaluate, so it may match.
+    return True
+
+
+#: Which rule OWNS each subject's pinned declarations, as a SELECTOR — the
+#: specificity floor a bare-element rule has to reach before it can override
+#: them. `.pricing-card`'s `display`/`flex-direction` are pinned by the base
+#: rule itself; the CTA's `margin-top: auto` is pinned by
+#: `.pricing-card .btn`. A rule that cannot reach the pin's specificity cannot
+#: win (the cascade's 2nd criterion), so including it would only false-RED a
+#: correct page — which is why this floor exists on the AGREEMENT reader and
+#: not on the cascade one, which sorts instead (#14406 review round 10).
+PINNED_OWNER_SELECTOR = {".pricing-card": ".pricing-card",
+                         ".btn": ".pricing-card .btn"}
+
+
+def _css_element_reaches(part: str, rightmost: str,
+                         element: tuple[str, dict[str, str]],
+                         floor: tuple[int, int, int], value: str) -> bool:
+    """Does a BARE-ELEMENT compound select the subject AND out-rank the pin?
+
+    Both halves are load-bearing and were measured (#14406 review round 10):
+
+    * WITHOUT the element test, the guard is blind to `#pricing-grid a` — a
+      rule that moves the CTA with every row GREEN.
+    * WITHOUT the floor, it false-REDs a correct page on the page's own
+      `*, *::before, *::after { margin: 0; padding: 0 }` (a universal selector
+      matches every subject but out-ranks nothing) and on `.selfhost a { … }`
+      ((0,1,1), below the CTA's pin) — and a guard that reds the page it ships
+      is a guard a maintainer deletes.
+
+    `!important` beats the floor: an important declaration out-ranks ANY
+    non-important one regardless of specificity, so it is admitted whatever the
+    selector's weight.
+    """
+    if re.search(r"\.[\w-]+", rightmost):
+        return False                     # a class-named compound: other branch
+    if not _css_compound_matches_element(rightmost, element):
+        return False
+    if re.search(r"!\s*important\s*$", value):
+        return True
+    specificity = _css_specificity(part)
+    # An unmodellable selector (`:is()` etc.) counts as MAXIMALLY specific, the
+    # same fail-closed direction `_css_specificity`'s callers already take.
+    return specificity is None or specificity >= floor
+
+
 def _css_reaching_decls(css: str, prop: str, compound: str,
                         tokens: tuple[str, ...] = ()) -> list[tuple[str, str]]:
     """Every rule that declares `prop` and can select `compound` at desktop size.
@@ -4087,21 +4250,29 @@ def _css_reaching_decls(css: str, prop: str, compound: str,
       pin the logical alias it delegates to (`margin-block-start`) and any
       shorthand that resets it (`margin`, `margin-block`) — see
       `SLACK_PROPS` in `TestProductTeamsPricingCardCtaBaseline`.
-    * ⛔ IT ONLY REACHES A SELECTOR THAT NAMES THE SUBJECT'S CLASS. A selector
-      that matches the CTA without naming `.btn` — a bare `a`, `#pricing-grid
-      a`, or `a[href="/auth"]`, which are the page's own CTA tag and
-      destination — is NOT a candidate, and a rule there can move the button.
-      Measured (#14406 review round 9): all three left every row of
-      `TestProductTeamsPricingCardCtaBaseline` GREEN. This is a STATED residual,
-      not an oversight: settling it means modelling which DOM element the
-      subject IS (its tag and attributes), because the cheap approximation in
-      the other direction — "a compound that names no class may match" — reds a
-      correct page on every `p { margin: … }` (measured: the page declares
-      such rules, and a naked `p` cannot select a `.btn`). A lane that fixes
-      this must add the subject's element to the reader's contract, not widen
-      the class test.
+    * ⛔ IT ALSO REACHES A SELECTOR THAT NAMES NO CLASS BUT SELECTS THE
+      SUBJECT'S ELEMENT, when that selector can out-rank the pinned rule. Round
+      9 declared this a residual — `a` / `#pricing-grid a` / `a[href="/auth"]`
+      select the page's own CTA tag and destination, and all three left every
+      row of `TestProductTeamsPricingCardCtaBaseline` GREEN. Round 10 settled it
+      with the subject's ELEMENT in the reader's contract
+      (`_element_carrying_class` → `_css_compound_matches_element`) rather than
+      by widening the class test: the tag has to match, so the page's own
+      `p { margin: … }` rules cannot count, and `_css_element_reaches` adds the
+      specificity floor that keeps `*` and `.selfhost a { … }` from reding a
+      correct page. The floor is the cascade's own rule — a rule that cannot
+      reach the pin's specificity cannot win — not a tolerance.
+
+      What is still NOT reached: a compound whose subject it cannot decide from
+      identity alone but that names a class for a DIFFERENT element (`a.foo`
+      matching `.btn`'s anchor through a class the subject does not carry), and
+      `@layer` / `@supports` / inheritance, which no reader here models.
     """
     out: list[tuple[str, str]] = []
+    element = (_element_carrying_class(css, compound[1:])
+               if compound.startswith(".") else None)
+    owner = PINNED_OWNER_SELECTOR.get(compound)
+    floor = _css_specificity(owner) if owner else None
     for prelude, body, _condition in _css_desktop_rules(css):
         value = _effective_decl(body, prop)
         if value is None:
@@ -4110,6 +4281,11 @@ def _css_reaching_decls(css: str, prop: str, compound: str,
             rightmost = _css_rightmost_compound(part)
             if _css_rightmost_selects(rightmost, compound) and all(
                     t in rightmost for t in tokens):
+                out.append((part, value))
+                break
+            if (element is not None and floor is not None
+                    and _css_element_reaches(part, rightmost, element, floor,
+                                             value)):
                 out.append((part, value))
                 break
     return out
@@ -4276,12 +4452,19 @@ def _css_block_end_cascade(css: str, compound: str,
       specific, so an unmodelled override fails closed (red).
     * It does not model `@layer`, `@supports`, inheritance or `revert` — none of
       which this page uses, and each of which would need its own reader.
-      It also reaches only a selector that NAMES `compound`'s class: a bare
-      `a` / `#pricing-grid a` / `a[href="/auth"]` rule is not a candidate —
-      the same stated residual `_css_reaching_decls` documents, measured in
-      #14406 review round 9.
+    * It reaches a selector that names NO class but selects the subject's
+      ELEMENT (`#pricing-grid a`, `#pricing-grid div`, `a[href="/auth"]`,
+      `*`), through the same `_css_compound_matches_element` the agreement
+      reader uses (#14406 review round 10). ⛔ NO specificity floor here, and
+      that asymmetry with `_css_element_reaches` is deliberate: this reader
+      ORDERS the cascade, so a weak bare-element rule is ranked BELOW the pin
+      and cannot become the winner — it needs no exclusion to be harmless,
+      while the agreement reader has no ordering and must exclude it or red a
+      correct page.
     """
     ranked: list[tuple[tuple, str, str, str]] = []
+    element = (_element_carrying_class(css, compound[1:])
+               if compound.startswith(".") else None)
     for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
         for part in (p.strip() for p in prelude.split(",")):
             # `_css_desktop_rules` cuts the document `<head>` off the FIRST
@@ -4296,7 +4479,9 @@ def _css_block_end_cascade(css: str, compound: str,
                 continue
             rightmost = _css_rightmost_compound(part)
             if not _css_rightmost_selects(rightmost, compound) and not (
-                    rightmost.startswith("*")):
+                    rightmost.startswith("*")) and not (
+                    element is not None
+                    and _css_compound_matches_element(rightmost, element)):
                 continue
             specificity = _css_specificity(part) or (9, 9, 9)
             for decl_index, decl in enumerate(_css_blanked(body).split(";")):
@@ -12310,6 +12495,102 @@ class TestCssDesktopReachAndSpecificity:
             "applies its `padding-bottom: 1.75rem` and the popular CTA drops "
             f"1px. The cascade reader's winner is {cascade[-1]!r} "
             "(#14406 review round 9)")
+
+    def test_a_bare_element_selector_that_outranks_the_pin_reaches_the_subject(self):
+        """A selector can select the CTA WITHOUT naming `.btn` — and win.
+
+        Round 9 declared this a residual: `#pricing-grid a`, `a[href="/auth"]`
+        and a bare `a` select the page's own CTA tag and destination, and all
+        three left every row of `TestProductTeamsPricingCardCtaBaseline` GREEN.
+        Round 10 settles it with the subject's ELEMENT in the reader's contract
+        (`_element_carrying_class` → `_css_compound_matches_element`) plus the
+        cascade's own specificity floor (`_css_element_reaches`), and this row
+        pins BOTH directions, because each half alone is a broken guard:
+
+        * without the element test, `#pricing-grid a { margin-top: 0 }` —
+          (1,0,1) against the pinned `.pricing-card .btn` (0,2,0), so it wins at
+          ANY source order — moves the CTA with every row GREEN;
+        * without the floor, the page's own `*, *::before, *::after { margin: 0
+          }` and `.selfhost a { … }` would red a CORRECT page, and a guard that
+          reds the page it ships is a guard a maintainer deletes.
+        """
+        page = _product_teams_html()
+        cta = _element_carrying_class(page, "btn")
+        card = _element_carrying_class(page, "pricing-card")
+        assert cta and cta[0] == "a", (
+            f"the pricing CTA's element is {cta!r} — the reader's subject moved")
+        assert card and card[0] == "div", (
+            f"the pricing card's element is {card!r} — the reader's subject "
+            "moved")
+
+        # Identity, not styling: tag, id and attributes decide. A class is the
+        # OTHER reader's question and must not be answered twice.
+        assert _css_compound_matches_element("a", cta)
+        assert _css_compound_matches_element('a[href="/auth"]', cta)
+        assert _css_compound_matches_element("*", cta)
+        assert not _css_compound_matches_element("p", cta), (
+            "the page declares `p { … }` rules; a naked `p` cannot select an "
+            "`<a>`, so matching it would false-RED a correct page")
+        assert not _css_compound_matches_element('a[href="/signup"]', cta)
+        assert not _css_compound_matches_element("#pricing-section", cta)
+        assert not _css_compound_matches_element(".btn", cta)
+
+        # The mutants a browser applies — all four left every row of the class
+        # GREEN before this round (measured against the pre-fix reader).
+        for mutant, prop, compound, pinned in (
+                ("#pricing-grid a { margin-top: 0 }", "margin-top", ".btn",
+                 "auto"),
+                ("#pricing-grid div { display: block }", "display",
+                 ".pricing-card", "flex"),
+                (".pricing-grid a[href] { margin-top: 0 }", "margin-top",
+                 ".btn", "auto"),
+                # `!important` out-ranks ANY non-important declaration, so it is
+                # admitted whatever the selector's weight.
+                ("a { margin-top: 0 !important }", "margin-top", ".btn",
+                 "auto")):
+            disagreeing = [
+                (p, v) for p, v in _css_reaching_decls(
+                    self._page_with(mutant), prop, compound)
+                if v.replace("!important", "").strip() != pinned]
+            assert disagreeing, (
+                f"`{mutant}` selects the subject and out-ranks the pinned "
+                f"`{prop}: {pinned}` — (1,0,1)/(0,2,1) beat (0,2,0) at any "
+                "source order, and `!important` beats it outright — but no "
+                "agreement sweep sees it, so the rows stay GREEN over the "
+                "3-baseline / 70.2px split (#13645 item 6, #14406 round 10)")
+
+        # ...and the OTHER direction, on the same reader: a bare-element rule
+        # that CANNOT win the cascade must not make a correct page red.
+        for mutant in ("a { margin-top: 0 }",          # (0,0,1)
+                       '* { margin-top: 0 }',           # (0,0,0)
+                       'a[href="/auth"] { margin-top: 0 }',   # (0,1,1)
+                       ".selfhost a { margin-top: 0 }"):  # (0,1,1)
+            competing = [
+                (p, v) for p, v in _css_reaching_decls(
+                    self._page_with(mutant), "margin-top", ".btn")
+                if v.strip() != "auto"]
+            assert competing == [], (
+                f"`{mutant}` cannot out-rank the pinned `.pricing-card .btn "
+                "`margin-top: auto`)` (its specificity is below (0,2,0) and it "
+                "is not `!important`), so a browser keeps the pinned value — "
+                f"counting it reds a correct page. Competing: {competing!r}")
+
+        # The cascade reader has no floor on purpose: it ORDERS, so a weak
+        # bare-element rule is ranked below the pin instead of being excluded —
+        # and a strong one (1,0,1) must become the winner, or the 1px defect
+        # ships under a GREEN popular-card row.
+        assert _css_block_end_cascade(
+            self._page_with("p { padding-bottom: 1.75rem }"),
+            ".pricing-card")[-1][2] == "calc(1.75rem - 1px)", (
+            "a `p` rule does not select the card, so it must not become the "
+            "cascade winner (and the page's own `p` rules must stay harmless)")
+        assert _css_block_end_cascade(
+            self._page_with("#pricing-grid div { padding-bottom: 1.75rem }"),
+            ".pricing-card")[-1][2] == "1.75rem", (
+            "`#pricing-grid div` is (1,0,1) — it out-ranks the popular card's "
+            "(0,2,0) compensation, so a browser applies its `padding-bottom: "
+            "1.75rem` and the popular CTA drops 1px; the cascade reader's "
+            "winner must be that declaration (#14406 review round 10)")
 
     def test_the_inline_style_reader_sees_every_quoting_spelling(self):
         """An inline `style` attribute has FOUR legal spellings, not one.
