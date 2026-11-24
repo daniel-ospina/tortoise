@@ -364,7 +364,7 @@ a `#` comment. That is MEASURED, not restated, because the line counts move with
 `git diff origin/main -- 'tortoise/*.py' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' | grep -vc '#'`
 prints `0` at this head, so no changed body line is anything but a comment. Each block carries a
 count this PR re-derived
-(`160` distinct cite targets above the pivot from `728` in all, over `208` citing files —
+(`160` distinct cite targets above the pivot from `725` in all, over `205` citing files —
 `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and
 `--check` grades the two note blocks against the same measurement, so none of them is a hand
 count), not a
