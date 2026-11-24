@@ -2304,6 +2304,30 @@ def rename_map(rev: str | None = None) -> list[Entry]:
     return out
 
 
+#: ⛔ GIT QUOTES ANY PATH HOLDING A NON-ASCII BYTE BY DEFAULT (`core.quotePath`), and a quoted path
+#: is not the path — every reader in this file then disagrees, SILENTLY, about which files exist
+#: (#14548 review, P3 latent). MEASURED with the flag removed, on a tree carrying `tortoise/añ.py`
+#: (the review named the third state; the FIRST is the one this file was actually in):
+#:   * BOTH reads quoted, `py_files()` as shipped: it is handed `"tortoise/a\303\261.py"`,
+#:     `ROOT / name` is not a file on disk, so the WHOLE FILE LEAVES THE CENSUS. Every receiver in
+#:     it leaves `now` — and a ratchet passes any shrink — so **growth written into that file is
+#:     absorbed, silently.** `ls-tree` is quoted too, so it is missing from `tree_paths` as well:
+#:     consistently invisible on BOTH sides is what makes it a clean PASS rather than a red.
+#:   * BOTH reads quoted, with the census fixed: the path is still absent from `tree_paths` and its
+#:     `diff` row still fails `dest.endswith(".py")` (the row ends in `"`), so its rows are neither
+#:     seeded nor replaced and read as `baseline 0` — a false attribution and a false RED.
+#:   * `ls-tree` unquoted but `diff` quoted (a MIXED state): the path is seeded at its MEASURED
+#:     count AND its `diff` row is skipped, so it keeps the working tree's own count as its baseline
+#:     and **growth inside it is absorbed** — the mechanism the review named, and it needs the two
+#:     reads to disagree.
+#: One flag on EVERY read is what keeps the three populations the SAME population, so no mixed state
+#: is reachable. Measured in this clone: `git ls-files | grep -cP '[^\x00-\x7F]'` → **0**, so the
+#: hole is LATENT; it is closed anyway because one of its states is a silent PASS.
+#: Residual, stated rather than hidden: a path holding a TAB or a NEWLINE still breaks the line/`\t`
+#: parsing below (`-z` would be needed for that). This clone has none.
+_QUOTE_PATH_OFF = ("-c", "core.quotePath=false")
+
+
 def py_files() -> list[Path]:
     # ⛔ `check=True`: a FAILED `git ls-files` (dubious-ownership refusal, a `GIT_INDEX_FILE`
     # temp index, a corrupt index) used to return `""` and this walk would then measure NO files.
@@ -2311,10 +2335,11 @@ def py_files() -> list[Path]:
     # be an ERROR, never an empty population. (The equality pin this change replaced could not be
     # fooled that way; a ratchet has to refuse it explicitly.)
     tracked = subprocess.run(
-        ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
+        ["git", *_QUOTE_PATH_OFF, "ls-files", "*.py"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout.split()
     untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "*.py"],
+        ["git", *_QUOTE_PATH_OFF, "ls-files", "--others", "--exclude-standard", "*.py"],
         cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout.split()
     out = []
@@ -2354,9 +2379,15 @@ _SKIP_PREFIXES = ("archive/", ".venv/", ".worktrees/")
 
 
 def _git(*args: str) -> str:
-    """Run `git` in ROOT and return its stdout. Raises `CalledProcessError` on failure."""
+    """Run `git` in ROOT and return its stdout. Raises `CalledProcessError` on failure.
+
+    ⛔ `-c core.quotePath=false` on EVERY read — see `_QUOTE_PATH_OFF`. Without it a non-ASCII path
+    comes back quoted from `ls-tree`/`diff`, and a quoted path is either dropped from the baseline
+    population or skipped off `dest.endswith(".py")` — the two reads disagreeing is what absorbs
+    growth in that file.
+    """
     return subprocess.run(
-        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True
+        ["git", *_QUOTE_PATH_OFF, *args], cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout
 
 
@@ -2366,9 +2397,12 @@ def baseline_rev(explicit: str | None = None) -> tuple[str | None, str]:
     The MERGE BASE with `origin/main` is the tree this working change is a diff against, so it is
     the tree the question "did this change ADD an untyped receiver?" is asked against. A
     detached `origin/main` resolves no merge base, so `origin/main` itself is the fallback; a
-    clone with no such ref at all returns `None`, and the caller degrades to the recorded pin
-    (which is LOOSER, not stricter: the pin is frozen, so growth between this tree's count and
-    the pin passes, and the caller prints that).
+    clone with no such ref at all returns `None`, and the caller degrades to the recorded pin.
+    ⛔ THAT FALLBACK IS NOT SIMPLY "LOOSER" (#14548 review, P3): the pin is FROZEN, so it is looser
+    BELOW itself — growth up to the pin's count passes, and nobody writes the pin any more — and
+    STRICTER ABOVE it, where a tree that added nothing still reds because its total is already over
+    the pin (a stale clone is exactly that case, and it is the treadmill's signature). Both facts
+    are the caller's to print, beside the way out: `--baseline REV`, or fetch `origin/main`.
     """
     if explicit is not None:
         # ⛔ `is not None`, not truthiness: `--baseline "$BASE_REV"` with the variable UNSET yields
@@ -3214,10 +3248,12 @@ def main() -> int:
             return 1
         if base_rev is None:
             # DEGRADED: with no `origin/main` there is no tree to measure, so the recorded pin is
-            # the only ceiling available. ⛔ That is LOOSER than the ratchet, not stricter — it
-            # reds at `now > SWEEP_RESIDUE[0]`, so growth between this tree's count and the pin
-            # passes, and the pin is now written by nobody. Stated rather than implied: run with
-            # `--baseline <rev>` (or fetch `origin/main`) for the real merge-base ratchet.
+            # the only ceiling available. ⛔ IT IS NOT SIMPLY "LOOSER" (#14548 review, P3): the pin is
+            # FROZEN, so it reds at `now > SWEEP_RESIDUE[0]` — looser BELOW itself (growth up to the
+            # pin passes, and the pin is now written by nobody) and STRICTER ABOVE it (a tree
+            # already over the pin reds having added nothing; a stale clone is that case). Both are
+            # stated rather than implied: run with `--baseline <rev>` (or fetch `origin/main`) for
+            # the real merge-base ratchet.
             pinned_rows = SWEEP_RESIDUE[0]
             ok = now <= pinned_rows
             lines = [

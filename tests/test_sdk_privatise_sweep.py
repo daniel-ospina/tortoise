@@ -2700,10 +2700,12 @@ def test_a_named_baseline_that_does_not_resolve_is_a_REFUSAL(monkeypatch, tmp_pa
 def test_without_origin_main_the_RECORDED_PIN_is_the_ceiling(monkeypatch, tmp_path, capsys):
     """The degraded path: no `origin/main`, so the FROZEN pin is the only ceiling available.
 
-    ⛔ LOOSER, not stricter — growth between this tree's count and the pin passes — and the body
-    says so. Both directions are graded, plus the sentence that tells a lane the ceiling is
-    frozen, because a lane reading "not an increase" off a frozen pin without knowing it is
-    frozen has been told the wrong thing by a true number.
+    ⛔ NOT SIMPLY "LOOSER" (#14548 review, P3): a frozen pin is looser BELOW itself — growth
+    between this tree's count and the pin passes — and STRICTER ABOVE it, where a tree that added
+    nothing still reds because its total is already over the pin (a stale clone is that case).
+    Both directions are graded, plus the sentence that tells a lane the ceiling is frozen, because
+    a lane reading "not an increase" off a frozen pin without knowing it is frozen has been told
+    the wrong thing by a true number.
 
     Mutation: flip the degraded `ok` to `True` — the above-the-pin arm REDs; delete the
     "frozen" clause from the message — the message assert REDs.
@@ -3047,6 +3049,71 @@ def test_a_rename_out_of_archive_does_not_donate_baseline_rows(tmp_path, monkeyp
     assert sum(base.values()) == 0, (
         f"an archived file was never counted, so its receivers are NOT baseline rows: {base}")
     assert not base_files, base_files
+
+
+def test_a_non_ascii_path_is_MEASURED_not_silently_dropped(tmp_path, monkeypatch):
+    """⛔ git QUOTES a non-ASCII path by default, and a quoted path is a silent PASS (#14548
+    review, P3 latent).
+
+    With `core.quotePath` on (git's default) `git ls-files`, `ls-tree` and `diff --name-status`
+    print `"tortoise/a\303\261.py"`. ⛔ MEASURED, not assumed: the review named the baseline
+    absorbing the growth, and that IS reachable — but only while the reads DISAGREE. In the state
+    this file shipped in, BOTH are quoted, and the load-bearing consequence is the CENSUS:
+    `ROOT / '"tortoise/a\303\261.py"'` is not a file, so `py_files()` drops a whole FILE, `now`
+    loses every receiver in it, and a ratchet passes any shrink — growth written into that file is
+    absorbed for free. Second site, same root: with the census fixed but the reads still quoted, the
+    path is missing from `tree_paths` and its `diff` row fails `dest.endswith(".py")`, so its
+    rows read as `baseline 0` (a false attribution). Both are graded below; `-c
+    core.quotePath=false` on every read closes them together.
+
+    Mutation: remove `-c core.quotePath=false` from `_git`/`py_files` → `py_files()` stops listing
+    the file at all (the first assert REDs), and the baseline misses the committed blob.
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "tortoise").mkdir()
+    carrier = repo / "tortoise" / "añ.py"
+    carrier.write_text(_UNTYPED, encoding="utf-8")
+    (repo / "plain.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+
+    carrier.write_text(_UNTYPED + "    reg.update({'b': 2})\n", encoding="utf-8")
+    # PREMISE, measured at this git version rather than assumed: the DEFAULT does quote it.
+    default_quoting = subprocess.run(
+        ["git", "diff", "--name-status", "-M", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True).stdout
+    assert '"' in default_quoting and "\\303\\261" in default_quoting, (
+        "premise: git's default `core.quotePath` quotes this path — if a future git stops doing "
+        f"that, this arm's reason has changed: {default_quoting!r}")
+
+    # ⛔ THE LOAD-BEARING HALF: a file the census cannot see is a file whose growth cannot red.
+    walked = {p.relative_to(repo).as_posix() for p in privatise.py_files()}
+    assert "tortoise/añ.py" in walked, (
+        "a quoted `ls-files` row is not a file on disk, so the whole file leaves the census and "
+        f"every receiver in it leaves `now`, which a ratchet passes: {sorted(walked)}")
+
+    measured = {
+        "plain.py": privatise.edits_for(repo / "plain.py", rmap).residue,
+        "tortoise/añ.py": privatise.edits_for(carrier, rmap).residue,
+    }
+    sites = {p: privatise.edits_for(repo / p, rmap).sites for p in measured}
+    assert sum(measured["tortoise/añ.py"].values()) == 2, (
+        "premise: the working tree carries the committed receiver plus one added one")
+    base, base_files, base_sites = privatise.baseline_rows("HEAD", rmap, measured, sites)
+    assert sum(base_files["tortoise/añ.py"].values()) == 1, (
+        "the COMMITTED blob carries ONE receiver, so the baseline must read 1 — a quoted `tree_paths` "
+        f"entry is not the path, so it is never seeded and reads as `baseline 0`: {base_files}")
+
+    total = Counter()
+    for rows in measured.values():
+        total += rows
+    ok, lines = privatise.ratchet_verdict(
+        total, base, measured, base_files, sites, "HEAD", baseline_sites=base_sites)
+    assert ok is False, f"growth inside a non-ASCII-named file is still growth: {lines}"
+    text = "\n".join(lines)
+    assert "tortoise/añ.py" in text and "baseline 1 -> now 2" in text, (
+        f"and the growth is ATTRIBUTED to that file at its real baseline, not `baseline 0`: {text}")
 
 
 def _standin_src(shift: int = 0) -> tuple[str, str]:
