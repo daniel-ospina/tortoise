@@ -14127,6 +14127,103 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
             "the `id:` — an unused id reads as a gate that is not there.")
 
 
+def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
+    """#11065 round 5 (ISSUE 1): the anchor must be the block, not "first in the file".
+
+    The arm that judges the `test` job's `⛔ OVERRIDES:` block located its subject with
+    `next(ln for ln in <whole workflow> if "⛔ OVERRIDES:")`, so it judged whichever
+    departure marker came FIRST in `python-ci.yml` — measured at `60981107a8` as a
+    fail-open (a degraded real block read GREEN once an unrelated marker was inserted
+    above it) AND a false block (that unrelated marker reddened a correct real block).
+
+    Both directions are replayed here on a MUTATED copy of the real workflow text, so
+    the proof is non-vacuous without editing the shipped file: the pre-fix locator is
+    re-implemented inline (`first marker in the file`) and must MISS in each direction
+    while `_test_job_cache_overrides_block` must SEE. Nothing else about the block is
+    altered — the decoy is comments only, and the banned sentence is the exact one the
+    arm exists to catch.
+    """
+    wf_lines = (Path(__file__).resolve().parents[1]
+                / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
+    prune_name = str(next(s for s in _load_python_ci()["jobs"]["test"]["steps"]
+                          if "uv cache prune" in str(s.get("run") or "")).get("name") or "")
+    real = _test_job_cache_overrides_block(wf_lines, prune_name)
+    # The shipped text is clean: the arm's subject is the uv block, nothing is misattributed.
+    assert _overrides_payload_misattribution(real) is None
+    assert "~/.cache/uv" in real and "uv sync --frozen" in real
+
+    def _pre_fix_locator(lines: list[str]) -> str:
+        """The locator this test replaces: the FIRST `⛔ OVERRIDES:` in the file."""
+        start = next(i for i, ln in enumerate(lines) if "⛔ OVERRIDES:" in ln)
+        block: list[str] = []
+        for ln in lines[start:]:
+            if re.match(r"\s*#\s*ARM \d", ln):
+                break
+            block.append(ln)
+        return "\n".join(block)
+
+    decoy = [
+        "      # ⛔ OVERRIDES: an unrelated departure declared by a job ABOVE this one —",
+        "      # the shape `AGENTS.md` guarantees will keep appearing in this workflow.",
+        "      # ARM 9",
+        "      #",
+    ]
+    hdr = next(i for i, ln in enumerate(wf_lines) if _TEST_JOB_CACHE_SECTION_HDR in ln)
+    decoyed = wf_lines[:hdr] + decoy + wf_lines[hdr:]
+
+    # ── A1′ — a decoy above, real block untouched and CORRECT ──────────────────────
+    # Pre-fix: judges the decoy, which names neither `~/.cache/uv` nor `uv sync --frozen`
+    # -> false block on a correct block. Now: still the real block -> clean.
+    assert "~/.cache/uv" not in _pre_fix_locator(decoyed), (
+        "the pre-fix locator no longer misses the real block — this mutation no longer "
+        "demonstrates the false-block direction, so the proof is stale")
+    anchored = _test_job_cache_overrides_block(decoyed, prune_name)
+    assert anchored == real, (
+        "an unrelated `⛔ OVERRIDES:` block inserted above this job's dependency-caches "
+        "section re-routed the arm away from the block it governs — the locator is "
+        "anchored by position again instead of by the step the block documents")
+    assert _overrides_payload_misattribution(anchored) is None
+
+    # ── A1 — the same decoy above, and a FALSE attribution inside the REAL block ───
+    banned = "      # #7612's payload is in `~/.cache/uv`."
+    arm_at = next(i for i, ln in enumerate(decoyed) if re.match(r"\s*#\s*ARM 2", ln))
+    degraded = [*decoyed[:arm_at], banned, *decoyed[arm_at:]]
+    # Pre-fix: reads the decoy, sees no claim -> GREEN while the real block asserts the
+    # exact falsehood that reddens a payload-SHRINKING change. That is the fail-open.
+    assert _overrides_payload_misattribution(_pre_fix_locator(degraded)) is None, (
+        "the pre-fix locator caught the false attribution — this mutation no longer "
+        "demonstrates the fail-open the anchoring fix closes")
+    # Now: the real block, so the claim is judged and the arm reds.
+    seen = _test_job_cache_overrides_block(degraded, prune_name)
+    assert _overrides_payload_misattribution(seen) is not None, (
+        "a false `#7612` attribution inside the governed `OVERRIDES:` block read GREEN "
+        "once an unrelated marker existed above it — the arm is judging the wrong block")
+    assert "~/.cache/uv" in seen and "uv sync --frozen" in seen, (
+        "the arm must still judge the real block when a decoy sits above it")
+
+    # ── a marker that is NOT attached to this block fails closed ────────────────────
+    # The anchor is lost (the real marker is gone) and the only one left is in `changes`,
+    # a job above, separated from this block by CODE lines. The locator must RAISE rather
+    # than quietly judge the wrong departure — that is the whole difference between a pin
+    # on "this block" and a pin on "whatever marker came first".
+    real_marker = next(i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln)
+    jobs_at = next(i for i, ln in enumerate(wf_lines) if ln.rstrip() == "jobs:")
+    dropped = [
+        *wf_lines[:real_marker],
+        wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)"),
+        *wf_lines[real_marker + 1:],
+    ]
+    detached = [*dropped[:jobs_at], *decoy, *dropped[jobs_at:]]
+    with pytest.raises(AssertionError, match="different block"):
+        _test_job_cache_overrides_block(detached, prune_name)
+
+    # ── a SECOND marker inside the section is refused, not tie-broken ────────────────
+    inside = wf_lines[:hdr + 1] + decoy + wf_lines[hdr + 1:]
+    with pytest.raises(AssertionError, match="carries 2"):
+        _test_job_cache_overrides_block(inside, prune_name)
+
+
+
 def test_the_cache_key_scan_reads_restore_keys_and_not_key_alone():
     """#11065 cycle 8 (P2): a cache guard is only as wide as the fields it reads.
 
