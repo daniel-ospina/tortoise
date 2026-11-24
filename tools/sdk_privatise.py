@@ -2021,7 +2021,7 @@ SWEEP_NAMES = 66
 #:     and its own tree is 4 rows above the number it committed. Open roots are `#14294` / `#14308`;
 #:     `surface-guard` is not in `DEFERRABLE_LEGS`, so the red travels into the REQUIRED
 #:     `python-ci-gate` for EVERY open PR — it is repaired here for that reason, not absorbed.
-#:   * the RESOLVED merge tree derives **11902 / `f904d86c`**, i.e. one row under `main`'s, and the −1
+#:   * THAT LANE'S RESOLVED merge tree derives **11902 / `f904d86c`**, i.e. one row under `main`'s, and the −1
 #:     is attributed ROW BY ROW rather than waved through: `--report --base 28ca66878d… --top 5000`
 #:     was run on BOTH trees (`origin/main`'s and this one), row sets sorted and diffed, EXACTLY ONE
 #:     row differs — `window.update` **1 → 0**. That row lived in the helper `_wall_clock_cap_claims`
@@ -2029,8 +2029,8 @@ SWEEP_NAMES = 66
 #:     861 → 860, and no shape is added or absorbed in either direction.
 #: ⛔ The one vanishing row is a DELETION this PR declares; the direction the pin exists to catch is a
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
-#: so no typed call site is legitimised by the re-cut. The pair below is `--repin`'s own output on THIS
-#: tree, never arithmetic on the last pin; `--check` exits 0 on it.
+#: so no typed call site is legitimised by the re-cut. ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S — the
+#: pair below is `--repin`'s output HERE **(11910, "adc8229295339239")**; `--check` exits 0 on it.
 SWEEP_RESIDUE = (11910, "adc8229295339239")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
