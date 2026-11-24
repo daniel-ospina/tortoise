@@ -253,8 +253,10 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1921 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1931 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED at `#14445`, whose pin re-cut added the 10 `#:` lines that attribute the
+    re-pin, so the figure was re-derived rather than carried across that edit; before it, and
+    ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
     GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
