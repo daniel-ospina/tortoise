@@ -4152,7 +4152,15 @@ class TestDoctorPreInit:
         # "says whether that will work" therefore resolves to nothing in the mode
         # the evidence bundle itself exercised. Mutation: restore "says whether
         # that will work" and this REDs.
-        assert "could not be checked" in line
+        # ⛔ THE POINTER MUST NOT DEPEND ON A ROW THAT MAY NOT BE PRINTED. An
+        # earlier cut said "the `Hosted` row below shows whether that will work,
+        # or why it could not be checked", but `_doctor_hosted_rows` returns
+        # immediately after its `Credentials` \(❌\) arm for an unsendable key
+        # (`__main__.py:15406-15414`), so in that admitted state NO `Hosted` row is
+        # appended at all (measured: report holds `Graph: health` + `Credentials`
+        # only) and the pointer resolves to nothing. Naming the COMMAND instead is
+        # true in every state, including that one.
+        assert "without `--offline` checks whether that will work" in line
         # ...and the self-hosted remedy is demoted to the named override
         assert "init` only if you ALSO want a local graph" in line
 

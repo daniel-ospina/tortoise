@@ -6141,11 +6141,19 @@ def _cmd_create_point(args) -> int:
     # (declared in docs/evidence/14424-onboarding/README.md D5), so the next
     # action must name the doors that do — otherwise "Created point: <id>" is a
     # success with no next step, and the memory is never found again.
+    # ⛔ NAME THE STORE THAT ACTUALLY WON. `_resolve_config_path` resolves
+    # env -> ./​.tortoise -> ~/.tortoise/credentials.json, and
+    # `docs/quickstart-cloud.md` tells users to create the PROJECT-LOCAL one with
+    # `tortoise init --api-key`. A hint that always says
+    # `~/.tortoise/credentials.json` therefore names a file the user was never
+    # told to create, and following it sends an empty Bearer to a gated endpoint
+    # (`/v1/search` -> 401). `_cfg_path` is the store that resolved, so print it.
+    _key_src = (_printable(str(_cfg_path)) if _cfg_path is not None
+                else "$TORTOISE_API_KEY")
     print(f"  Next: search for it — GET "
           f"{_printable(_mask_display_target(api_url or ''))}/v1/search?q=WORD "
-          "with an `Authorization: Bearer` header carrying your key "
-          "($TORTOISE_API_KEY if you exported it, else the `api_key` in "
-          "`~/.tortoise/credentials.json`) — or the `tortoise_search` MCP tool / "
+          f"with an `Authorization: Bearer` header carrying the key from "
+          f"`{_key_src}` — or the `tortoise_search` MCP tool / "
           "`TortoiseSDK.search_knowledge`. This CLI has no search verb yet "
           "(#14424).")
     return 0
@@ -6227,8 +6235,11 @@ def _create_point_retry_hint(exc, *, dedup_used: bool) -> str:
     else:
         lines.append(
             "Re-running WITHOUT --dedup can create a duplicate Point for "
-            "content that already landed (measured: 4 attempts, 4 Points). "
-            "Re-run with --dedup to make the retry safe.")
+            "content that already landed on the HOSTED API, where dedup "
+            "defaults off (measured: 4 attempts, 4 Points). Re-run with "
+            "--dedup to make the retry safe. On a self-hosted server dedup "
+            "already defaults ON, so the flag is a no-op there and the retry "
+            "folds either way (`tortoise/selfhost_api.py:35`).")
     return "\n".join(lines)
 
 
@@ -16332,15 +16343,24 @@ def _cmd_doctor(args):
                 #   * `_mask_display_target` — a `user:pass@` or `?token=` in
                 #     that URL otherwise reaches the transcript, against this
                 #     store's own contract that it NEVER prints the credential.
-                _display_url = _printable(_mask_display_target(_h_url or ""))
+                # ⛔ COERCE FIRST. `_resolve_config_path` validates `api_key` is a
+                # `str` but passes `api_url` through VERBATIM, and `./.tortoise` is
+                # repo-controllable — so `{{"api_url": ["https://…"]}}` reaches
+                # `_mask_display_target` -> `.split()` on a list and raises
+                # `AttributeError`, killing the whole verb with no report (measured,
+                # exit 1 after the banner). `_doctor_hosted_rows` (:15377) coerces for
+                # exactly this reason; this arm sits outside every guard, so it must
+                # too.
+                _display_url = _printable(_mask_display_target(
+                    _h_url if isinstance(_h_url, str) else str(_h_url or "")))
                 _detail = (
                     f"not used by this setup — you have a hosted credential "
                     f"({_src}{', ' + _display_url if _display_url else ''}), "
                     f"so your memory "
                     f"lives there and a local graph is not required. Your next "
-                    f"step is `tortoise create-point \"…\"` — the `Hosted` row "
-                    f"below shows whether that will work, or why it could not "
-                    f"be checked. Override: run `tortoise init` only if you "
+                    f"step is `tortoise create-point \"…\"` — `tortoise doctor` "
+                    f"without `--offline` checks whether that will work. "
+                    f"Override: run `tortoise init` only if you "
                     f"ALSO want a local graph."
                 )
             else:

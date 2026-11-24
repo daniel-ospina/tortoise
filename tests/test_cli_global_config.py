@@ -262,6 +262,29 @@ class TestCreatePointRetrySafety:
         out = capsys.readouterr().out
         assert "//v1/search" not in out
 
+    def test_the_success_hint_never_prints_a_url_credential(self, tmp_path, capsys):
+        """The success line prints the target URL, so it must MASK userinfo.
+
+        `doctor` output and CLI transcripts are what users paste into issues, and
+        a store-supplied `api_url` may carry basic-auth credentials.
+
+        Mutation: replace `_printable(_mask_display_target(api_url or ''))` with
+        `api_url or ''` and this REDs — measured, the raw form printed
+        `https://svc:sup3rsecretpw@api.premiselabs.co/v1/search?q=WORD`.
+        """
+        _seed_global(tmp_path)
+        store = tmp_path / ".tortoise" / "credentials.json"
+        store.write_text(json.dumps({
+            **GLOBAL_CFG,
+            "api_url": "https://svc:sup3rsecretpw@api.premiselabs.co",
+        }))
+        store.chmod(0o600)
+        with mock.patch("urllib.request.urlopen", return_value=_ok({"id": "p1"})):
+            assert main(["create-point", "hello world"]) == 0
+        out = capsys.readouterr().out
+        assert "sup3rsecretpw" not in out
+        assert "/v1/search?q=" in out
+
     def test_wait_bound_refusal_names_the_delay_and_the_safe_retry(
             self, tmp_path, capsys):
         _seed_global(tmp_path)
