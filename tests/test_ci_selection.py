@@ -9671,6 +9671,17 @@ ROWED_BY_THIS_FOLD = (
     # `DEFAULT_FAST_WEIGHT`, not a local reading — the refresher samples push-to-main
     # runs, so a file a PR ADDS cannot have a junit figure yet (#3400/#4348).
     "test_14371_offline_embed_json.py",
+    # #13722 — the capture provenance stamp chain's off-loop pin, a file this PR ADDED
+    # and registered on `api` + `core` (which is what puts it in `fast_pool()`). Its
+    # `durations:` row first carried a hand-picked 0.2 s, which the review round on this
+    # PR caught: no push-to-main sweep can have measured a file the PR adds, so a
+    # sub-default figure is a DECLARED weight dressed as a reading — and because the
+    # shard packer is greedy it re-packed the `fast_shards` partition and moved the
+    # graded name sets. ⛔ The row is the flat `DEFAULT_FAST_WEIGHT`, not a local reading
+    # (#3400/#4348), and `test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722`
+    # asserts that VALUE — this tuple is what puts the file behind an assertion at all,
+    # since `--integrity` cannot see which files a PR added.
+    "test_13722_stamp_chain_off_loop.py",
 )
 
 
@@ -9732,6 +9743,51 @@ def test_the_record_chain_suite_is_in_the_entry_rule_set_7879():
     assert name in real, (
         f"#7879 put {name} in a fast surface but shipped no `durations:` row, so it "
         "packs at the flat default with nothing recording that it was a choice")
+    holed = {k: v for k, v in real.items() if k != name}
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
+        "dropping THIS row from the live map must name exactly this file as rowless; "
+        "if another member of the guarded set is missing a row this pin cannot "
+        "distinguish that state from the one it guards")
+
+
+def test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722():
+    """#13722 review finding: a file a PR ADDS takes the flat default, not a local weight.
+
+    MEASURED on this PR's head before this pin: the row read
+    `test_13722_stamp_chain_off_loop.py: 0.2` — a hand-picked sub-default figure for a
+    file **this PR adds**, so no push-to-main junit sweep can possibly have measured it
+    (the `durations` refresher samples those runs only) and the row's own comment said in
+    as many words that no prior sweep included the file. Nothing reddened over it, which
+    is why a review finding and not a CI red carried it here: `--integrity` cannot see
+    which files a PR added, and the ENTRY-RULE pins above assert membership and row
+    PRESENCE, never the VALUE.
+
+    ⛔ It was not inert. `push_legs()` packs greedily, so the weight re-packed the
+    `fast_shards` partition and moved the graded `est_seconds` name sets in the header
+    block — a graded claim resting on a number no run measured. At the flat default the
+    row is equivalent to no row at all (which is the point: it packages nothing the
+    default does not already supply), and only the documentation stays.
+
+    The VALUE arm is the one that reds on the pre-fix map: `0.2 != 2.0`. The other two
+    arms are the `#13123`/`#14362`/`#7879` shape, so the file cannot fall out of this
+    tuple (and out of the guard's sight) silently either.
+    """
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT, load_manifest
+    name = "test_13722_stamp_chain_off_loop.py"
+    assert name in ROWED_BY_THIS_FOLD, (
+        f"#13722 registers {name} in two fast surfaces, but it is not in "
+        "ROWED_BY_THIS_FOLD — nothing then grades its `durations:` row, so dropping it "
+        "(or re-introducing a hand-picked weight) would be silent")
+    real = load_manifest()["durations"]
+    assert name in real, (
+        f"#13722 put {name} in a fast surface but ships no `durations:` row, so it "
+        "packs at the flat default with nothing recording what the weight covers")
+    assert real[name] == DEFAULT_FAST_WEIGHT, (
+        f"{name} carries {real[name]!r} s, not the flat `DEFAULT_FAST_WEIGHT` "
+        f"({DEFAULT_FAST_WEIGHT!r} s) — a file a PR ADDS cannot carry a junit reading "
+        "yet (#3400/#4348), so any other figure is a hand-picked shard-layout input, "
+        "and the packer re-packs every bin around it (moving the graded `fast_shards` "
+        "partition this map states)")
     holed = {k: v for k, v in real.items() if k != name}
     assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
         "dropping THIS row from the live map must name exactly this file as rowless; "
