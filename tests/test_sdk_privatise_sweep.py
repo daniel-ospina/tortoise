@@ -26,6 +26,7 @@ read from the map and from the typing, and the two synthetic modules carry the s
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -252,11 +253,12 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2015 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on this merge tree (`origin/main` `2cccf90f4dd4` merged into the branch,
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2109 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED on this merge tree (`origin/main` `533e256f2c89` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch and
     `main` each published their OWN tree's reading, so the figure is re-derived here rather
     than carried from either side — and GRADED, see
+    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
@@ -342,6 +344,58 @@ def _residue_block() -> str:
     figures the kept blocks above publish (1914 on this branch's pre-merge tree, 1930 on
     `main`'s own) are each side's OWN measurement and neither is the figure above; this fold's
     `#:` lines in `tools/sdk_privatise.py` are what the delta between them accounts for.
+    — and the LATER fold of `origin/main` `2cccf90f4dd4` kept both sides' blocks once more (this
+    lane's copy read 1930, the peer re-cut's copy 1931) and brought that peer's own `#14445`
+    `SWEEP_RESIDUE` re-cut — the `#:` lines that attribute it are prose in the same run. ⛔ THAT
+    FOLD'S FIRST RESOLUTION DID NOT keep either: it replaced BOTH sides' records with one new
+    paragraph. That deleted the `#14480` record the branch's side of that fold carried — pair
+    (11911, "3e92044bab08cc3d") — AND the peer's `(11911, "4ed42694957a174d")` one, and left the
+    surviving sentence pointing at a note
+    no longer in the file — against this block's own rule a few hundred lines above (`BOTH SIDES'
+    RECORDS ARE KEPT VERBATIM ABOVE`, and there is ONE assignment after them). Review rounds
+    caught it; BOTH records are restored verbatim above the later paragraph, each with a marker
+    naming the ONE tree that reproduces its pair — `59a08fdb8b40` for the peer's,
+    `05c46e24a2782` for `#14480`'s (neither is a tree this branch ever built, and an earlier marker
+    naming `a2f165b0ba47` was wrong: that tree derives 11912 and `--check` exits 1 there) — so the
+    claim in this sentence is now true of the resolved file rather than
+    only of the peer's half. So the figure above is RE-MEASURED by this walk ON THE RESOLVED FILE
+    at 2019 rather than inherited from either side, and that fold's pair was re-derived by RUNNING
+    `--repin` on BOTH trees
+    (`main`'s pristine worktree and this one, identical) rather than differenced from a parent's pin,
+    — and the `2cccf90f4dd4` fold's own re-cut record (`SWEEP_RESIDUE` re-derived on ITS merge tree,
+    with main's unpinned `seen.update(kwargs)` row named row by row there) added `#:` lines to the
+    walked run, so the figure above is RE-MEASURED by this walk on the folded file rather than
+    adjusted by arithmetic from either parent's reading,
+    — and `#4625`'s OWN residue re-pin block above (`SWEEP_RESIDUE` `11910` → `11908`, the two
+    `_JSONB_CACHE.update({...})` rows the 5 s `jsonb` TTL retired) appended `#:` lines to
+    `tools/sdk_privatise.py`, so the figure above is RE-MEASURED on this tree rather than carried
+    forward from it — which is the defect THIS arm exists to catch, and it caught it here: the
+    figure and the walk are now graded together
+    (`test_the_extent_figure_is_the_walks_own_count`), so a prose edit that moves the run REDS
+    naming both numbers instead of shipping the stale one. The MERGE with `origin/main` then
+    moved it again — `main`'s `seen.update(kwargs)` row took the pin UP to `11909` and the block
+    gained prose stating that attribution — and the LATEST fold re-derived the pair at `11910`
+    on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk:
+    — and THIS fold of `origin/main` `6a02515d14ad` kept BOTH sides' blocks once more (each side
+    had appended its own re-cut record above the SAME assignment, so every conflicted hunk was
+    prose), and the resolution keeps both verbatim rather than trimming the run to one side's
+    reading — so the figure above is RE-MEASURED by this walk on the RESOLVED FILE, never inherited
+    from either side's published `1953` or `1954`: that resolution first walked 2010, and the peer's
+    two P2 repairs then restored a six-line record INSIDE the same run, so the figure above is the
+    FINAL reading of the resolved file and neither intermediate numeral is published here,
+    and the pair did NOT follow the run: `--repin` on this resolved tree prints
+    `(11910, "3216395d35345904")`, byte-identical to the pair `main` commits, because this fold
+    adds no row — the 11912 this branch carried sat 2 above it only while the branch still held
+    the two `_JSONB_CACHE.update` rows `#4625` retires (measured 2 on this branch's pre-merge
+    tree, 0 on `origin/main`), and that pair is what adopting main's deletion removes,
+    — and the NINTH FOLD (`origin/main` `533e256f2c89`, this merge) kept BOTH sides' blocks once
+    more, as every fold before it did, and re-walked the run rather than carrying either side's
+    reading: the figure above is THIS function's own walk of the resolved file, and neither of the
+    numerals the two kept blocks above publish is it — each is its own tree's measurement, which is
+    what the graded figure exists to force. This fold's `#:` lines in `tools/sdk_privatise.py` are
+    what the delta between them accounts for, and the pair did NOT move with them: `--repin` on this
+    resolved tree prints `(11910, "3216395d35345904")`, byte-identical to the pair `main` commits,
+    because this branch contributes no row.
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
@@ -2366,3 +2420,133 @@ def test_the_parent_pair_attribution_is_only_ever_quoted_as_falsified():
             "an UNREFUTED `same pair as the parent` claim is the round-14 defect: the pair one "
             "rev commits is not its parent's, so the claim is only honest where the block itself "
             "calls it wrong")
+
+
+def test_a_tool_only_diff_selects_this_suite(tmp_path):
+    """A diff to `tools/sdk_privatise.py` ALONE must select the arms that grade its pin.
+
+    ⛔ WITHOUT THIS THE PIN'S OWN GUARDS SLEEP ON THE ONLY DIFF THAT CAN BREAK THEM. `tools/`
+    is a flat `NON_PYTHON_PREFIXES` entry in `tools/ci_selection.py`, and this tool has no
+    `SOURCE_PATTERNS` bridge, so the changed-file filter answers `surfaces: []` — and a PR that
+    edits ONLY `SWEEP_RESIDUE` or its `#:` record then runs none of this suite's arms. Measured
+    before the `CORE_ALSO` row: `--changed-files tools/sdk_privatise.py` → `surfaces: []`,
+    `full: false`, and the tier-1 smoke set selected, THIS FILE ABSENT. (That selected set is
+    `manifest["tier1"] - slow - uri_requiring - on_demand` — the subtraction chain the docs-only
+    return at `tools/ci_selection.py`'s `if not changed:` applies; its size today equals
+    `len(manifest["tier1"])` but is NOT that population; it moves with every registration and is
+    deliberately not typed — the arm's own failure message prints `len(files)`, the size of the
+    list the selector returned.) `--check` (the required `surface-guard`
+    step) is not a substitute: it grades the `(rows, digest)` pair against the tree and the
+    count of typed references that survive, never this suite's arms.
+
+    ⛔ WHAT THAT LEAVES UNGRADED — the loose version of this paragraph is
+    false: the pin's SHAPE (rows > 0, and a digest separating SHAPES and COUNTS), the
+    vacuous-map REFUSAL (an empty map must exit 2 with its own diagnosis — without it a map
+    that silently derived nothing still exits 1, but reported as `the residue SET moved off
+    its pin`, which sends the reader to the pin instead of to the map), the
+    import-shape arm
+    `test_reading_the_approved_set_does_not_shadow_the_package_star_import`, the
+    scope-local typing arms and the refspec arms — the WHOLE suite is unselected, so the
+    list is illustrative rather than exhaustive. ⛔ `--check` covers only PART of the floor:
+    it compares the DERIVED map's size against `SWEEP_NAMES` (`VACUOUS CHECK`, exit 2, on every
+    PR), so a re-pin that moved `SWEEP_BASE` and `SWEEP_NAMES` together (66 -> 60) stays green
+    there. The literal `SWEEP_NAMES == 66` assertion, and the map/private-spelling assertions of
+    `test_the_pinned_base_still_derives_the_whole_batch`, are NOT recovered by this row — that
+    arm is `_base_is_readable`-gated on `SWEEP_BASE`, so it SKIPS on the `fetch-depth: 1`
+    `test` job the row selects, and those assertions run only at depth 0.
+    ⛔ THE COST OF THE GAP IS THE GRADED PROSE ITSELF: `_residue_block()`'s own walk is asserted
+    against the figure its docstring publishes, so a re-cut that grows or shrinks the `#:` run
+    reds that arm — and nothing else does. Without this row the first diff to notice a stale
+    figure is whichever `core`-selecting PR comes next, on rows its author never wrote. The
+    claim is written against the suite AS IT IS — the block and its extent arm are present
+    today — rather than against any episode of them being cut and restored, because naming the
+    wrong commits for such an episode is the ungraded-prose defect this row exists to catch.
+
+    The `CORE_ALSO` row is what fixes it, and both of its failure directions are graded here:
+    the row is removed (surfaces collapse), and the row is made DECORATIVE by adding this file
+    to `tier1`. ⛔ THE MECHANISM IS A UNION, NOT A SKIP: `tier1` is unioned into EVERY PR
+    selection (`files = set(tier1)` in `select()`), and THIS SUITE then survives the later
+    subtractions — `slow`, `carve`, `uri_requiring_files`, `on_demand_files` — because none of
+    them contains it, so a tier-1 membership selects this suite unconditionally. ⛔ NOT
+    "`tier1` is never subtracted": `carve` does remove tier-1 members (`test_config.py`,
+    `test_guard.py`, `test_reaper_orphan.py` are in both), which is irrelevant here only
+    because this file is in neither set. The scoping is the claim; the universal is not. ⛔ AND WHAT THAT COSTS IS THE
+    SUITE-SELECTION ASSERT ONLY: with the row
+    deleted the `core`-surface assert still reds, so the row's removal is still caught; what a
+    tier-1 join takes away is this arm's discrimination on the selection side — the suite assert
+    would pass over a row that no longer selects anything. Measured: with this file injected
+    into `tier1` the selection is unchanged (`surfaces ['core']`, suite selected) and the suite
+    is STILL selected after the `CORE_ALSO` row is also removed, while `surfaces` collapses to
+    `[]`.
+
+    Runs the selector's own CLI rather than re-deriving its rules, so it grades the wiring the
+    CI job actually uses, and it is object-free (no `fetch-depth` dependence).
+    """
+    import json
+    import subprocess as _sp
+    import sys as _sys
+
+    sel = ROOT / "tools" / "ci_selection.py"
+    # ⛔ THE SELECTOR WRITES AN AUDIT ARTIFACT ON EVERY RUN, and without this redirect it
+    # lands in the CHECKOUT (`<repo>/.ci-selection/selection.json`, `tools/ci_selection.py`
+    # `main()` — the env var is the only override). Point it at `tmp_path`, the way the
+    # sibling CLI suites do (`tests/test_run_affected.py::_run`), and assert on the landing
+    # site: with the redirect gone the file goes to the repo instead, so the assert — not
+    # the comment — is what keeps the redirection honest.
+    artifact = tmp_path / ".ci-selection"
+    done = _sp.run([_sys.executable, str(sel), "--changed-files", "tools/sdk_privatise.py"],
+                   cwd=ROOT, capture_output=True, text=True,
+                   env={**os.environ, "CI_SELECTION_ARTIFACT_DIR": str(artifact)})
+    assert done.returncode == 0, f"the selector failed on a one-file diff: {done.stderr[-800:]}"
+    assert (artifact / "selection.json").is_file(), (
+        "the selector's audit artifact is not in CI_SELECTION_ARTIFACT_DIR — the override was "
+        "dropped or shadowed, so this arm writes `.ci-selection/selection.json` into the "
+        f"checkout on every run (expected {artifact / 'selection.json'})")
+    got = json.loads(done.stdout)
+    surfaces = got.get("surfaces") or []
+    files = got.get("test_files") or []
+
+    assert "core" in surfaces, (
+        "a diff to tools/sdk_privatise.py selects no `core` surface — the `CORE_ALSO` row in "
+        f"tools/ci_selection.py is gone or shadowed; measured surfaces={surfaces}, full={got.get('full')}")
+    assert not got.get("full"), (
+        "the diff escalated to the FULL matrix — that costs the whole suite for a one-file change")
+    assert "test_sdk_privatise_sweep.py" in files, (
+        "a diff to tools/sdk_privatise.py no longer selects its own pins: "
+        f"{len(files)} test files, this one absent — the selection gap #14062 describes")
+
+    # ⛔ NON-VACUITY, FROM THE OTHER SIDE: `tier1` is unioned into EVERY PR selection, so if
+    # this file joined `tier1` it would be selected unconditionally and the SUITE-SELECTION
+    # assert above would pass with the `CORE_ALSO` row deleted. The `core`-surface assert would
+    # still red, so this is not a lost removal check — it is a lost selection check.
+    _assert_not_tier1(_load_manifest_for_test())
+
+
+def _load_manifest_for_test():
+    """The real manifest, through the selector's own loader — never a re-typed copy."""
+    import importlib.util as _iu
+    import sys as _sys
+
+    path = ROOT / "tools" / "ci_selection.py"
+    spec = _iu.spec_from_file_location("_ci_selection_for_tier1_guard", path)
+    assert spec is not None and spec.loader is not None
+    mod = _iu.module_from_spec(spec)
+    _sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod.load_manifest()
+
+
+def _assert_not_tier1(manifest):
+    """The `CORE_ALSO` row must remain what selects this suite, and the guard must not lose its
+    subject."""
+    assert "tier1" in manifest, (
+        "not a defect of this file: the manifest no longer carries 'tier1', so this non-vacuity "
+        "guard has lost its subject and would pass for the wrong reason")
+    tier1 = manifest["tier1"] or []
+    # `tier1:` holds bare FILENAMES, not `tests/`-prefixed paths — asserting the prefixed form
+    # would test nothing at all.
+    assert "test_sdk_privatise_sweep.py" not in tier1, (
+        "this file joined 'tier1' — `tier1` is UNIONED into every PR selection, so this suite "
+        "is now selected unconditionally and the suite-selection assert above no longer tests "
+        "the `CORE_ALSO` row: it would pass with the row deleted. The row is no longer what "
+        "selects it, so this pin must be RE-DERIVED rather than assumed still load-bearing")
