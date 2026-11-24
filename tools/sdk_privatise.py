@@ -1965,7 +1965,30 @@ SWEEP_NAMES = 66
 #: the branch and false of `main`. Nothing was mis-measured; the pin is only as current as the tree the
 #: cutting lane last saw, and `--check` grades a tree that keeps moving under it.
 #: `typed references still pointing at a public name: 0` here too, and `--check` exits 0 on the pair.
-SWEEP_RESIDUE = (11901, "953c70c05b55923b")
+#: ⛔ RE-CUT A THIRD TIME, ON THE FOLD OF `origin/main` `989765162f` — and the moved row is `main`'S,
+#: not this branch's: `--repin` on the RESOLVED tree prints **(11902, "3a694c6f3ff4e36f")** where
+#: `main` and this branch alike said 11901. THE MOVE IS ONE ROW, FULLY ATTRIBUTED rather than
+#: assumed: the sorted row sets were diffed PER FILE over every `.py` file `main` changed between
+#: `953c299c9b1f` (the tree the 11901 pair was cut on) and `989765162f`, using this module's own
+#: `rename_map`/`edits_for` on both blobs. Exactly ONE file moved —
+#: `tests/test_7879_record_chain.py`, 3 → 4 — and every other changed file is unchanged
+#: (`hosted_api.py` 327 → 327, `test_7949_capstone_measure.py` 11 → 11, `test_ci_selection.py`
+#: 10 → 10, `test_demo_session_read_exclusion_8290.py` 7 → 7, `probe_shape_bytes.py` 6 → 6,
+#: `graphevent_home.py` 5 → 5, `measure_graphevent_residency.py` 4 → 4,
+#: `test_13094_graphevent_home.py` 2 → 2, `activation_scorecard.py` 1 → 1, `hosted_api_cite_census.py`,
+#: `test_12184_shifted_cites.py` and `test_14192_read_wave_tool.py` 0 → 0). ITS SHAPE MOVED TOO, not
+#: only its length: `projection.g.query` 2 → 0 and `reached.update` 0 → 3 while `env.update` stays 1,
+#: so the net is +1 and the digest changes with it. The commit is `f635f9e00075` (`#14446`), the
+#: follow-up that repaired `#14434`'s rows in that same file — one review pass after the `+3` block
+#: above was written, which is exactly why a pin cut from a tree that predates it records a tree that
+#: no longer exists. THIS BRANCH CONTRIBUTES ZERO ROWS, measured the same way (`origin/main`'s
+#: `989765162f` against the RESOLVED tree, over the three files this PR touches):
+#: `tools/sdk_privatise.py` 2 → 2 and `tools/ci_selection.py` 19 → 19, while
+#: `tests/test_sdk_privatise_sweep.py` carries none on either side. So 11902 is `main`'s derivation,
+#: inherited here the way `#14423` inherited 11901 — the re-pin is the DIFFERENCE between the tree the
+#: last cut saw and the tree that merges, never a declaration of this PR's rows.
+#: `--check` exits 0 on the pair below, with `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11902, "3a694c6f3ff4e36f")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

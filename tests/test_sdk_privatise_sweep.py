@@ -252,8 +252,15 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1855 lines at this head, measured through THIS function's own
-    walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1878 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED on THIS PR's merge tree: the fold of `origin/main` `989765162f` KEPT both
+    sides' prose blocks, and the two sides' pre-merge readings were 1855 here against `main`'s
+    1808 — the 47 lines between them are this branch's own re-cut record, which `main` never
+    carried, so neither side's figure is the merged one. The RESOLVED run re-reads **1878** by
+    this walk: 1855 from the fold, plus the 23 `#:` lines this PR's own `11901` → `11902` re-pin
+    record adds above `SWEEP_RESIDUE`, so the figure is re-derived rather than carried from either
+    reading — and GRADED, see
+    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
@@ -281,16 +288,27 @@ def _residue_block() -> str:
     this walk rather than inherited from either side,
     — and the `#12039` residue re-cut below (`SWEEP_RESIDUE` `11896` → `11898`, stale ON ARRIVAL on
     `main`) appended 24 `#:` lines to `tools/sdk_privatise.py`, which took the run to 1765 (1741 +
-    the 24 that re-cut declared) — and then the `#14062` re-cut below (`SWEEP_RESIDUE` `11898` →
-    `11901`, stale ON ARRIVAL on `main` a SECOND time, and measured on `main` itself rather than on
-    a branch tree) appended a further 28 `#:` lines, and `main`'s own `#14423` fold then appended 43
-    more while its docstring moved 1765 → 1796 — TWELVE SHORT of the 1808 its walk returned, a stale
-    carry of exactly this class, RED on `main` before this rebase touched it and repaired HERE rather
-    than left for the next lander. This rebase's own fold (both sides' blocks KEPT, plus the note
-    recording that `main` had already landed the same pair) adds a further 47 `#:` lines, so the
-    figure above is RE-MEASURED by this walk on THIS tree at **1855** (1808 + the 47 this fold
-    declares) rather than carried forward or summed from either side's reading, which is what the
-    graded figure exists to force:
+    the 24 that re-cut declared). ⛔ AFTER THAT POINT THE READINGS ARE PARALLEL, NEVER A SUM — the
+    two histories grew the same block independently and this branch folded both:
+    * `main`'s own `#14423` fold appended 43 (1765 → 1808 on `main`'s OWN tree), while its docstring
+      moved only 1765 → 1796 — TWELVE SHORT, a stale carry of exactly this class, RED on `main`
+      before this branch touched it. `main` repaired that itself in `#14395` (1796 → 1808); this
+      branch did not, and does not claim to.
+    * THIS branch's `#14062` re-cut (`SWEEP_RESIDUE` `11898` → `11901`, stale ON ARRIVAL on `main`
+      a SECOND time, and measured on `main` itself rather than on a branch tree) appended 47.
+    ⛔ THE 28 IS THE DISCARDED DRAFT, NOT A FIRST INSERTION. An earlier pre-rebase draft of this
+    same re-cut carried 28 lines on the branch alone; the rewrite that produced the 47 replaced
+    them, so they were never in `main` and are not in this tree. Naming it here is the only thing
+    that survives of it, and it is named so that `1765 → +28 → +43 → +47` can never be read as a
+    chain: 1765 + 43 = 1808 is `main`'s line, 1808 + 47 = 1855 is THIS branch's, and only the
+    second is this tree.
+    This fold of `origin/main` `989765162f` keeps BOTH sides' blocks, and `main`'s three commits
+    since this branch's basis (`fb3b326`, `f635f9e`, `989765162f`) add no `#:` line to
+    `tools/sdk_privatise.py` at all — `f635f9e` moves the TREE's residue ROWS instead (11901 →
+    11902, one row, attributed in the re-pin record above `SWEEP_RESIDUE`) — so the figure above is
+    RE-MEASURED by this walk on THIS tree at **1878** (1855 from the fold + the 23 lines that
+    re-pin record adds) rather than carried forward or summed from either side's reading, which is
+    what the graded figure exists to force:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
