@@ -3061,6 +3061,111 @@ def test_losing_the_create_to_a_concurrent_writer_does_not_discard_the_winner(tm
         f"{store.discarded}")
 
 
+def test_a_caller_supplied_batch_id_cannot_escape_the_staging_root(tmp_path):
+    """⛔ `batch_id` IS A PATH COMPONENT, AND NOTHING VALIDATED IT (fix lane).
+
+    `stage_text` joins `batch_id` into `<base>/_batches/<batch_id>` and its
+    docstring claimed "no customer-supplied path component can reach the
+    filesystem". That was FALSE: `BatchCoordinator.submit` takes a caller-supplied
+    `batch_id` keyword and passes it through verbatim, and `os.path.join` does not
+    sanitise — the kernel resolves `..` at syscall time.
+
+    Measured on the pre-fix code, this exact call wrote a document OUTSIDE the
+    tenant's storage root:
+
+        stage_text(base, "../../victim", "ok-00000", "ATTACKER BYTES")
+        -> <base>/_batches/../../victim/ok-00000.md
+
+    Pinned three ways, because refusing-by-raising alone would not prove the bytes
+    stayed put: the call must refuse, nothing may appear in the outside directory,
+    and the legitimate spelling must still stage normally (a guard that broke every
+    batch would pass the first two).
+    """
+    base = tmp_path / "ingest"
+    base.mkdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "PRECIOUS.txt").write_text("unrelated tenant data")
+
+    for hostile in ("../../victim", "..", "../victim"):
+        with pytest.raises(ValueError, match="does not resolve inside"):
+            bi_module.stage_text(str(base), hostile, "ok-00000", "ATTACKER BYTES")
+
+    assert sorted(p.name for p in victim.iterdir()) == ["PRECIOUS.txt"], (
+        "a hostile batch id wrote outside the staging root: "
+        f"{sorted(p.name for p in victim.iterdir())}")
+
+    # The legitimate spelling is untouched by the guard.
+    staged = bi_module.stage_text(str(base), "batch_abc123", "batch_abc123-00000", "hello")
+    assert staged == str(base.resolve() / "_batches" / "batch_abc123" / "batch_abc123-00000.md")
+    assert (victim / "PRECIOUS.txt").read_text() == "unrelated tenant data"
+
+
+def test_discard_staged_never_deletes_outside_the_batch_root(tmp_path):
+    """⛔ THE DESTRUCTIVE HALF: THE ROLLBACK DELETED AN UNRELATED DIRECTORY.
+
+    `_discard_staged` unlinks EVERY child of the resolved directory and then
+    removes it, and its only input beyond the base is `batch_id`. Measured on the
+    pre-fix code with `batch_id="../../victim"`:
+
+        victim/PRECIOUS.txt  -> unlinked
+        victim/              -> rmdir'd
+
+    i.e. the compensating rollback in `submit` — the path that runs when an
+    acceptance FAILS — could delete data it had never written, in a directory the
+    caller named. A guard here cannot raise (the function's contract is "best
+    effort, never raises"); it must simply refuse to act.
+    """
+    base = tmp_path / "ingest"
+    (base / "_batches").mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "PRECIOUS.txt").write_text("unrelated tenant data")
+
+    bi_module._discard_staged(str(base), "../../victim")
+
+    assert victim.is_dir(), "a hostile batch id made _discard_staged remove the directory"
+    assert (victim / "PRECIOUS.txt").read_text() == "unrelated tenant data", (
+        "a hostile batch id made _discard_staged unlink unrelated data")
+
+    # …and it still cleans up after a batch it really owns.
+    bi_module.stage_text(str(base), "batch_own", "batch_own-00000", "x")
+    bi_module._discard_staged(str(base), "batch_own")
+    assert not (base / "_batches" / "batch_own").exists()
+
+
+def test_submit_refuses_a_batch_id_that_is_not_a_single_path_component(tmp_path):
+    """The boundary refusal, before ANY row or byte is written.
+
+    The sink guard alone keeps the filesystem safe, but a caller that passes
+    `batch_id="../../victim"` would then fail deep inside staging with an error
+    about a directory. It is refused at the boundary instead, and — the part that
+    matters — the refusal is raised BEFORE the store is touched, so a refused
+    submission leaves no batch row, no item row and no staged byte behind.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "PRECIOUS.txt").write_text("unrelated tenant data")
+
+    with pytest.raises(ValueError, match="not a single path component"):
+        coord.submit(ORG, ["/a.md"], contents=["LOSER"],
+                     stage_base=str(tmp_path), batch_id="../../victim")
+
+    with pytest.raises(KeyError):
+        coord.status(ORG, "../../victim")
+    assert sorted(p.name for p in victim.iterdir()) == ["PRECIOUS.txt"], (
+        "a refused id wrote into an unrelated directory: "
+        f"{sorted(p.name for p in victim.iterdir())}")
+
+    # A single-component caller-supplied id is still accepted (the guard is about
+    # SHAPE, not about forbidding caller-supplied ids).
+    batch, _items = coord.submit(ORG, ["/a.md"], contents=["ok"],
+                                 stage_base=str(tmp_path), batch_id="dup-1")
+    assert batch.batch_id == "dup-1"
+
+
 def test_the_item_cas_writes_and_both_reads_project_every_wire_field():
     """⛔ A DROPPED COLUMN IS SILENT ON A REAL ENGINE (#14415 review round 17, P2).
 
