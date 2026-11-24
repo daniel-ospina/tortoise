@@ -134,6 +134,29 @@ def _scan_key(path: Path) -> str:
 # one declared regex. The regexes are site-CLASS patterns (robust to line
 # drift); the lane intent is documented per entry.
 DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
+    # #14429 (`test_spool_drain_rehearsal.py`, landed on `main` at `69d88b7c24a`
+    # WITHOUT this triage — the same class #14318 tracks, a new instance of it):
+    # the red is `test_uri_env_mutations_declared` itself, which rides the `test`
+    # shards, and the REQUIRED `python-ci-gate` aggregates those shards, so the
+    # missing declaration blocked EVERY PR rather than only this file's lane.
+    # DELIBERATE_URI at both classes of site, and the lane intent is stated per
+    # class because the two are not the same decision:
+    #   (1) `test_serve_verb_gates_the_database_target_…` sets a PRODUCTION URI
+    #       (`bolt://api.premiselabs.co/…`) to prove `_serve` REFUSES it, then a
+    #       loopback one to prove the gate is not "refuse all" (its non-vacuity
+    #       arm). Neither is ever connected to: `_mode_knobs` is stubbed to raise
+    #       and `_run` exits on the gate before the app is imported — the
+    #       deliberately-unreachable probe class, where the URI string IS the
+    #       input under test.
+    #   (2) the five `run --mode …` arms force the DOCKER lane, because the subject
+    #       IS a live spool drain against a graph (`_live_spool`); embedded is the
+    #       lane they must not silently fall back to, which is exactly what this
+    #       guard protects. They run in the docker half and skip where nothing
+    #       serves 6379, so the declaration does not claim embedded coverage.
+    "test_spool_drain_rehearsal.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"bolt://',
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://',
+    ],
     # #12855: the stored-rows rewrite drives `main` against a TEMP embedded DB and
     # a TEMP journal — a URI redirect would fold the run onto the shared server
     # graph and the tool would rewrite somebody else's data. The delenv IS the
