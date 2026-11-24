@@ -415,14 +415,33 @@ jobs:
 
           memory = (execute or {}).get("memory") or {}
           freed = memory.get("bytes_freed")
-          freed_mb = "unmeasured" if freed is None else f"{freed / 1048576:.1f} MB"
           deleted = len([o for o in (execute or {}).get("outcome", []) if o.get("deleted")])
+          # ⛔ `used_memory` is an INSTANCE-WIDE reading, so this delta carries
+          # concurrent tenant writes and is NOT a reclaim unless THIS sweep
+          # deleted something AND the instance actually shrank. At the steady
+          # state (`deleted == 0`, the common case every 15 min) it is tenant
+          # churn, and a busy window makes it NEGATIVE — so "freed" is claimed
+          # only when it IS one. The summary below and the adjudication issue are
+          # the DURABLE record; a label asserting a reclaim the sweep did not
+          # perform is a false PASS in the only place a human reads it.
+          if freed is None:
+              memory_label, memory_value = "used_memory freed", "unmeasured"
+          elif deleted and freed > 0:
+              memory_label = "used_memory freed"
+              memory_value = f"{freed / 1048576:.1f} MB"
+          else:
+              why = ("the instance grew" if freed < 0
+                     else "no shrink measured" if deleted else "nothing deleted")
+              memory_label = ("used_memory delta (NOT a reclaim — "
+                              "concurrent tenant writes included)")
+              memory_value = f"{freed / 1048576:+.1f} MB ({why})"
 
           verdict = "adjudicate" if reasons else "green"
           (WORK / "reaper-verdict.json").write_text(json.dumps({
               "verdict": verdict, "reasons": reasons, "notes": notes,
               "total": total, "band": band, "plan_reapable": reapable,
               "deleted": deleted, "bytes_freed": freed,
+              "memory_label": memory_label, "memory_value": memory_value,
               "counts": counts, "execute_ran": execute_ran,
           }, indent=2))
           # The durable record: the same numbers the artifact carries.
@@ -434,7 +453,7 @@ jobs:
               out.write(f"- resident total: {total} (band {band})\n")
               out.write(f"- reapable before: {reapable}\n")
               out.write(f"- deleted: {deleted}\n")
-              out.write(f"- used_memory freed: {freed_mb}\n")
+              out.write(f"- {memory_label}: {memory_value}\n")
               for bucket in sorted(counts):
                   out.write(f"- {bucket}: {counts[bucket]}\n")
               out.write("\n")
@@ -454,7 +473,7 @@ jobs:
               print(f"::error::{r}")
           for n in notes:
               print(f"::warning::{n}")
-          print(f"verdict={verdict} total={total} band={band} deleted={deleted} freed={freed_mb}")
+          print(f"verdict={verdict} total={total} band={band} deleted={deleted} {memory_label}={memory_value}")
           raise SystemExit(1 if reasons else 0)
           PY
         env:
@@ -503,8 +522,6 @@ jobs:
           WORK = Path(os.environ.get("REAPER_WORKDIR") or "/tmp")
           d = json.load(open(WORK / "reaper-verdict.json"))
           counts = d.get("counts") or {}
-          freed = d.get("bytes_freed")
-          freed_mb = "unmeasured" if freed is None else f"{freed / 1048576:.1f} MB"
           lines = [
               "The scheduled test-graph reaper (#14559, `.github/workflows/test-graph-reaper.yml`)",
               "needs a human on this run. The sweep itself keeps "
@@ -520,7 +537,7 @@ jobs:
               f"| resident total | {d.get('total')} (band {d.get('band')}) |",
               f"| reapable before | {d.get('plan_reapable')} |",
               f"| deleted | {d.get('deleted')} |",
-              f"| used_memory freed | {freed_mb} |",
+              f"| {d.get('memory_label', 'used_memory')} | {d.get('memory_value', 'unmeasured')} |",
           ]
           for bucket in sorted(counts):
               lines.append(f"| {bucket} | {counts[bucket]} |")

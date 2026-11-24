@@ -111,9 +111,11 @@ version: 1
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
-# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `af40c97ca312`
-# and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
-# is why `main` alone emits this same split. ⛔ A restatement here would be graded as a second claim;
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `b665cbd619860`
+# and DOES add one fast-file registration of its own — `tests/test_14559_reaper_schedule.py`
+# (#14559, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`). So `main` alone does NOT emit this split: every
+# OTHER registration counted here is `main`'s, and that one row is what moves the bins off `main`'s
+# own reading. ⛔ A restatement here would be graded as a second claim;
 # the WHY — that the split is 0.1 s wide, that the NAME SETS are what move rather than the minute,
 # and that only the `est_seconds` partition can catch a carried figure — is stated ONCE, in the
 # "ONE CLAUSE" paragraph below. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
@@ -130,9 +132,6 @@ version: 1
 # NAME SETS on the head it landed at: at `f4eb91fd7a7a` (#14504) it took the split off the five/six
 # its own parent emitted to three/eight — `d` AND `e` leaving the worst bin — while the minute stayed
 # at 28 m, which is again why the graded claim is the set and not the minute. ⛔ Stated at the sha it
-# was MEASURED at and not as a claim about this head: later folds moved it again (this head emits the
-# six/five graded above), which is why the rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
-# at 28 m. ⛔ Stated at the sha it
 # was MEASURED at and not as a claim about this head: later folds moved it again, which is why the
 # rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: a file a PR ADDS cannot carry a junit reading yet),
@@ -146,7 +145,7 @@ version: 1
 # ⛔ ONE RESIDUAL, NAMED: the guard grades the partition and the `ceil(...)` MULTIPLIER
 # (`WATCHDOG_HEADROOM`), NOT the printed `watchdog_headroom:` ratio beside them — so the ratio is
 # re-read by hand whenever the seconds move. It moves: `2.01` at 837.9 s (1680 / 837.9 = 2.0050),
-# and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0361). A carried ratio in a graded sentence is
+# and `2.04` at this head's 825.3 s (1680 / 825.3 = 2.0356). A carried ratio in a graded sentence is
 # exactly the defect this block exists to prevent, one level below what it grades.
 #
 # ⛔ ONE CLAUSE, NOT A LEDGER — AND THE CLAUSE IS GRADED, NOT TRUSTED. The split is 0.1 s wide and
