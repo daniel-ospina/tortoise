@@ -139,9 +139,14 @@ def _undeclared_blocking(totals: dict[str, float]) -> dict[str, float]:
 #: one capture request. ⛔ Deliberately a MAGNITUDE and not the noise floor: the
 #: legs that matter here are tens to hundreds of milliseconds (the mint 552 ms
 #: before the fix; `_get_registry` 16-36 ms on this tree), while the largest
-#: UNDECLARED leg on the path (`_emit_event`, inside the provenance stamp) reads
-#: 0.51-0.92 ms and 1.20 ms under coverage — so a 1 ms bar put that leg 0.1 ms
-#: from reding a gate whose own docstring argues against timing sensitivity.
+#: UNDECLARED leg on the path WHEN THE BAR WAS SET (`_emit_event`, inside the
+#: provenance stamp) read 0.51-0.92 ms and 1.20 ms under coverage — so a 1 ms bar
+#: put that leg 0.1 ms from reding a gate whose own docstring argues against
+#: timing sensitivity. ⛔ THAT LEG IS NO LONGER ON THE PATH AND IS NOT THE BAR'S
+#: JUSTIFICATION ANY MORE: #13722 moved the stamp chain onto the capture worker,
+#: so `_emit_event` writes no census row at all (the note in `_ON_LOOP_RESIDUAL`
+#: records the move). The band is quoted because it is the reading the 5 ms
+#: margin was sized against, not because a leg of that size is on the loop today.
 #: 5 ms leaves ~4x margin over the measured overhead band and is still ~110x
 #: below the 552 ms the mint cost, i.e. every leg worth declaring is caught
 #: (#14086 review, P2).
@@ -168,65 +173,40 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # said "4 on-loop calls, 81.5 ms" for the same commits (#14086 cycle-4
     # review, F2). State a magnitude once, or not at all.
     "_get_registry": "#4451 (metering registry read inside `record_write_ops`)",
-    # The two provenance stamps in `_capture_session_impl`
-    # (`_stamp_capture_provenance` and the `_capture_stamp_targets` call beside
-    # it — cited by NAME, not line: this PR's own tail rewrite moves every
-    # `hosted_api.py` line below it) go through this ONE retry wrapper —
-    # but the stamp is JOURNAL-FIRST, so it is TWO synchronous legs per stamp on
-    # the loop and the census observes BOTH: this wrapper, and the journal
-    # `_emit_event` that precedes it (`sdk.py:11590` — re-derived after the
-    # `origin/main` `e0accb8fe6` merge moved it +31 from `11559`). Measured on FOUR
-    # consecutive runs of this test on this tree: `_emit_event` 0.51 / 0.56 /
-    # 0.83 / 0.92 ms and this wrapper 0.99–3.62 ms per row. ⛔ An earlier cut of
-    # this comment said "the census sees a single leg and not two": the second
-    # leg was there and sat under the bar, i.e. the figure was stated wider than
-    # the measurement (#14086 review, P2). Neither leg is listed separately —
-    # this entry is the declaration for the stamp, and both legs are the same
-    # owned work.
-    # ⛔ THE PREMISE THIS PARAGRAPH USED TO STATE IS WITHDRAWN, SO IT IS GONE.
-    # It read: "`_stamp_capture_provenance` is JOURNAL-FIRST (#9350) … so moving
-    # it to another thread changes which thread OWNS that lane, which is a
-    # behaviour change, not a move of WHERE the same callable runs. It needs its
-    # own measurement (#14104)." That reasoning is false and #14104's closing
-    # comment withdraws it in full: the lane identity is a `ContextVar`
-    # (`_CACHE_WRITE_AUTHORIZED`), opened inside the stamp's OWN body, and
-    # `_run_off_loop` confines contextvars by design (`_submit_off_loop` →
-    # `confine_context`, deliberately not a bare `run_in_executor`) — so
-    # relocating these changes WHERE they run and nothing else. Keeping both
-    # paragraphs in one comment block asserted P and ¬P about the same move, which
-    # is why the refuted one is replaced rather than annotated (#14086 round-2
-    # review, R2-2).
-    # ⚠️ This entry is keyed on a GENERIC retry wrapper — measured 36 call sites
-    # in `tortoise/sdk.py` (34 besides the two provenance stamps; the only other
-    # references in `tortoise/` are prose, in `exceptions.py` and `retry.py`), so
-    # it exempts any FUTURE on-loop use of it at any cost, and the size of that
-    # exemption is the number that sizes the residual. An earlier cut of this
-    # comment said "~9 other call sites", understating it ~4× (#14086 review,
-    # P2).
-    # ⛔ ITS OWNER IS AN OPEN ISSUE: #14112 off-loads the four stamp sites as ONE
-    # closure and then DELETES this entry — deleting it is what
-    # closes the generic-wrapper hole above. ⛔ An earlier cut pointed at #14104,
-    # which is CLOSED (NOT_PLANNED); an entry whose owner cannot act is a
-    # permanent unowned exemption, the one thing this table exists to prevent, and
-    # this file's contract says every entry NAMES the issue that owns removing it
-    # (#14086 round-2 review, R2-1).
-    "_graph_write_with_retry": "#14112 (the capture's four provenance stamp sites, still "
-    "inline — the issue lists them; no line number here, because this table's "
-    "figures are the ones that rot)",
+    # ⛔ THE `_graph_write_with_retry` ENTRY IS DELETED, AND THIS NOTE IS WHAT
+    # STANDS IN ITS PLACE. It read: "#14112 (the capture's four provenance stamp
+    # sites, still inline — the issue lists them)". #13722 IS that off-load: the
+    # four sites are now `_stamp_chain`'s body, handed to
+    # `_run_off_loop(_CAPTURE_EXECUTOR, _stamp_chain)` and awaited, so the stamp's
+    # journal `_emit_event` and this retry wrapper both run on the capture worker
+    # and write no census row at all. #14112's removal trigger has therefore
+    # fired, and the entry is DELETED rather than re-stated (which is the action
+    # #14112 itself named): it was keyed on a GENERIC retry wrapper — 36 call
+    # sites in `tortoise/sdk.py` — so it exempted ANY future on-loop use of it at
+    # any cost, and deleting it is what closes that hole (#14086 round-2 review,
+    # R2-1). A leg that comes BACK to the loop through the wrapper now reds the
+    # census instead of joining an unowned exemption, which is the fail-closed
+    # direction this table wants; if that red ever appears, the entry comes back
+    # with the issue that owns removing it, not with a figure.
     # NOT observed on the measured path (the checkpoint that reached it is now
     # off-loaded). Listed because the census drives ONE branch of this handler
     # and the completion gate is reached from others; an entry here is a
     # declaration about ownership, not a claim that the leg runs today.
-    # ⚠️ AND, LIKE THE `_graph_write_with_retry` ROW ABOVE, ITS SIZE IS THE
-    # PROBLEM: the verdict is keyed on the METHOD NAME alone, so this line
-    # exempts EVERY on-loop `sdk._get_proj()` on the capture path, at any cost,
-    # whatever its caller — and `_get_proj` is not a capture-specific leg
-    # (measured on this tree with `git grep -c '_get_proj('`: 395 lines under
-    # `tortoise/`, 394 besides the one `def`; 207 in `tortoise/sdk.py`, where it
-    # is defined, i.e. 206 besides that `def` — and the sibling row's 36 for
-    # `_graph_write_with_retry(` is likewise its `sdk.py` lines minus its `def`
-    # (37 with it), so compare 206 with 36 and not with the def-included 207),
-    # it is the cold
+    # ⚠️ ITS SIZE IS THE PROBLEM: the verdict is keyed on the METHOD NAME alone,
+    # so this line exempts EVERY on-loop `sdk._get_proj()` on the capture path,
+    # at any cost, whatever its caller — and `_get_proj` is not a
+    # capture-specific leg. ⛔ TWO DIFFERENT COUNTS, EACH LABELLED (review cycle 6,
+    # P2): the `git grep -c '_get_proj('` figures below are LINES, which include
+    # prose mentions and the `def`; the population the name EXEMPTS is CALL SITES,
+    # measured with an `ast` walk — 199 in `tortoise/sdk.py` and 322 across
+    # `tortoise/` at this head. An earlier cut glossed the LINE count as "the
+    # population the name exempts", and a line count OVERSTATES both figures the
+    # sentence sizes: 208 lines − the `def` = 207 lines, of which eight are prose
+    # mentions, leaving 199 call sites; and 395 lines against 322 calls tree-wide.
+    # The lines, labelled as lines: 396 under `tortoise/`, 395 besides the one
+    # `def`; 208 in `tortoise/sdk.py`, where it is defined, i.e. 207 besides that
+    # `def` (re-derived at this head after `024387f533` added a call; was
+    # 395/394 and 207/206). `_get_proj` is the cold
     # projection attach. `#4451` owns the completion-gate leg named here and
     # NOT that population; a future on-loop `_get_proj` elsewhere joins the
     # exemption silently and is then reported as `#4451`'s. Declared rather
@@ -314,13 +294,14 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     bar is `_ON_LOOP_BAR_MS` of TOTAL on-loop time for the request — two orders
     of magnitude below the 552 ms the mint cost, and set with margin over the
     probe's OWN overhead rather than at the noise floor. ⛔ It used to be 1 ms,
-    and the largest UNDECLARED leg on this path (`_emit_event`, 0.51-0.92 ms
-    measured here) sat 0.1-0.5 ms inside that: under coverage the same leg
-    measured 1.20 ms and flipped this test to FAILED on a leg the table
-    deliberately does not require — a false block in a gate whose own docstring
-    argues against timing sensitivity (#14086 review, P2). The bar is about
-    MAGNITUDE: a leg that matters is tens to hundreds of ms (the mint 552 ms,
-    `_get_registry` 16-36 ms here), so 5 ms still catches every leg worth
+    and the largest UNDECLARED leg on this path THEN (`_emit_event`, inside the
+    provenance stamp as it was before #13722 moved that chain to the capture
+    worker — 0.51-0.92 ms measured here) sat 0.1-0.5 ms inside that: under
+    coverage the same leg measured 1.20 ms and flipped this test to FAILED on a
+    leg the table deliberately does not require — a false block in a gate whose
+    own docstring argues against timing sensitivity (#14086 review, P2). The bar
+    is about MAGNITUDE: a leg that matters is tens to hundreds of ms (the mint
+    552 ms, `_get_registry` 16-36 ms here), so 5 ms still catches every leg worth
     declaring while no longer reding on the probe's own cost.
 
     Which entries the census Actually OBSERVES on the path this test drives is
@@ -330,7 +311,8 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     no UNDECLARED leg may appear at all. ⛔ An earlier cut of this paragraph
     said "ONE on-loop leg, `_get_registry`", and the table two screens up
     contradicted it in the same file ("measured 2.50 ms + 4.11 ms on the loop"
-    for `_graph_write_with_retry`) — a figure stated wider than the measurement
+    for `_graph_write_with_retry`, a row #13722 has since deleted — see the
+    deleted-entry note in `_ON_LOOP_RESIDUAL`) — a figure stated wider than the measurement
     is the same defect this cycle's reviews kept correcting, so the number is
     gone rather than re-copied (#14086 review F3).
 
@@ -632,21 +614,28 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
 def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
     """The bar is a MAGNITUDE, pinned here WITHOUT a wall clock.
 
-    `_ON_LOOP_BAR_MS` used to be 1 ms, which put the largest UNDECLARED leg on
-    this path (`_emit_event`, inside the provenance stamp) 0.1-0.5 ms inside it:
-    measured here at 0.51-0.92 ms, and at 1.20 ms under coverage, where this test
-    went FAILED on a leg the residual deliberately does not require. Loosening a
+    `_ON_LOOP_BAR_MS` used to be 1 ms. In the #10893 reading — while the
+    provenance stamp was still inline and its journal `_emit_event` therefore
+    still ran on the loop, which #13722 has since changed — the largest
+    UNDECLARED leg sat 0.1-0.5 ms inside that bar: measured here at 0.51-0.92 ms,
+    and at 1.20 ms under coverage, where this test went FAILED on a leg the
+    residual deliberately does not require. Loosening a
     bar must not become a blind spot, so both ends are pinned on synthetic
     totals: the measured probe-overhead band is NOT reported, and a leg of the
     size the census exists to catch still is.
 
     Verified non-vacuous: restoring the bar to 1.0 reds the FIRST assertion
-    (`_emit_event` at 1.2 ms comes back as unreported-but-blocking) AND the
-    census row above, whose verdict is `_undeclared_blocking` — that row is the
-    one the change exists for, since it flipped at 1 ms under coverage.
+    below (`_emit_event` at 1.2 ms comes back as unreported-but-blocking). ⛔ THE
+    SECOND HALF OF THIS PROOF IS HISTORY, NOT A LIVE ARM: restoring the bar also
+    red the CENSUS row once, because that leg was live on the loop then; #13722
+    moved the stamp chain to the capture worker, so `_emit_event` writes no census
+    row at all and no bar can flip the census over it. The live non-vacuity proof
+    for the census itself is the instrument-liveness assert (`_get_registry` must
+    appear in `totals`) plus the deleted-entry pin at the bottom of this test.
     """
     # The measured overhead band, including the coverage run that flipped the
-    # real census — noise, not work.
+    # real census in the #10893 reading (that leg has since left the loop,
+    # #13722) — noise, not work.
     assert _undeclared_blocking({"_emit_event": 1.2}) == {}
     # The bar itself is inclusive-and-reporting: anything AT it is reported.
     assert _undeclared_blocking({"a_leg_at_the_bar": _ON_LOOP_BAR_MS}) != {}
@@ -657,3 +646,10 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
     # …and a DECLARED leg is never reported, whatever it costs: the table is an
     # ownership declaration, not a budget.
     assert _undeclared_blocking({"_get_registry": 16.29}) == {}
+    # ⛔ AND THE DELETED ENTRY IS REALLY GONE (#13722): the retry wrapper the four
+    # provenance stamps were exempted through is now an UNDECLARED leg, so a stamp
+    # that returns to the loop reds the census above instead of joining an
+    # unowned exemption. Restoring the `_graph_write_with_retry` row is the edit
+    # that reverts this, and it reds HERE.
+    assert set(_undeclared_blocking({"_graph_write_with_retry": 40.0})) == {
+        "_graph_write_with_retry"}

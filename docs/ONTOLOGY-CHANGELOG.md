@@ -101,10 +101,10 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >   same note: `retract_point` still writes `retracted`), every reader treats them as ended over stored rows
 >   (#12855), and the `outdated` boolean remains a second, flag-based dead marker (#2498) that readers
 >   **including EP's currency predicate** must go on honouring.
-> - **One remaining §5 vocabulary restatement** — the problem-family note at `docs/ONTOLOGY.md:1042`
+> - **One remaining §5 vocabulary restatement** — the problem-family note at `docs/ONTOLOGY.md:1044`
 >   ("the claim point is superseded/retracted") — now reads `superseded/deprecated`. A one-word correction
 >   inside the same section the table governs, not a new rule.
-> - **§10.5's decision row** (`docs/ONTOLOGY.md:1527`, the "potentially invalidated" comparison) no longer
+> - **§10.5's decision row** (`docs/ONTOLOGY.md:1529`, the "potentially invalidated" comparison) no longer
 >   restates the six-word set; it names the four and marks the other three as read-side legacy. Its original
 >   point — belief is measured by posterior variance, not by a status word — is unchanged.
 >
@@ -183,7 +183,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >   rather than rewriting it.
 >
 > **Three residues this edit leaves, named so the owner sees them rather than inheriting them silently:**
-> §5's *Point Status Vocabulary* table and a §10.5 decision row (`docs/ONTOLOGY.md:1527`) still present the retired six words as the
+> §5's *Point Status Vocabulary* table and a §10.5 decision row (`docs/ONTOLOGY.md:1529`) still present the retired six words as the
 > model vocabulary. They fall outside the six approved hunks, and the CRITICAL RULE at
 > `docs/ONTOLOGY.md:41` forbids editing them without the owner's approval of that exact text, so
 > they are left untouched here and apply only once that approval is given on #11824.
@@ -570,7 +570,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
 > `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
 > `MATCH (p:Point {status:'live'})` idiom printed in **§5's Point Status Vocabulary**
-> (`ONTOLOGY.md:1179`) remains correct as written.
+> (`ONTOLOGY.md:1181`) remains correct as written.
 
 ---
 

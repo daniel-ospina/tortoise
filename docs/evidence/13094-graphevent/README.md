@@ -72,7 +72,7 @@ walk, no fulltext query, no EP walk, no vector query. Every one is a key lookup,
 an aggregate, a predicate delete, or the schema those depend on; those are SQL shapes paying RAM prices.
 The **serving** row is exactly one statement *in this table* — so a re-home re-points one censused read
 and not a family of them. ⚠️ That is a fact about the TABLE, not about the tree: the export endpoint's
-own whole-graph scan (`hosted_api.py:34426`) is a serving reader under this census's own class rule and
+own whole-graph scan (`hosted_api.py:34485`) is a serving reader under this census's own class rule and
 is deliberately **not censused** (`#14204`; the exclusion is stated in §7 step 4 and in the restore row's
 own `why`), so a re-point driven by this census alone would leave the export endpoint reading the old
 home. A re-home must re-point it too.
@@ -91,8 +91,8 @@ home. A re-home must re-point it too.
   say WHICH occurrence a row addresses — the `line` is that address and nothing grades it. ⚠️ Both of
   those rows are in `restore_graph`; **the export side is not censused at all** — the paged dump's node
   statement is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`) and the export endpoint's own
-  whole-graph scan is `hosted_api.py:34426` (`_export_graph_snapshot`; the `:GraphEvent` branch is
-  `:34456` and the append `:34464`), and no row carries either (`#14204`).
+  whole-graph scan is `hosted_api.py:34485` (`_export_graph_snapshot`; the `:GraphEvent` branch is
+  `:34515` and the append `:34523`), and no row carries either (`#14204`).
 * `…::test_the_census_covers_the_labels_schema_as_well_as_its_readers` — the three DDL rows exist and are
   `maintenance`; an earlier cut of this census omitted them, which is how a re-home ships a store with no
   indexes.
@@ -219,11 +219,11 @@ its text is in git history) refused to assume it and named the question. Here is
 answer, with the refutations executed rather than argued:
 
 1. **A payload-only emit writes NO journal record at all.** `_emit_event` returns before the JSONL
-   half when it carries no `point`, no `id`, and no `turns` (`sdk.py:16226`, the `return None` under the
-   comment at `:16224`, contract restated in
-   `event_store.append_event`'s own docstring: *"a payload-only emit writes one with no JSONL record
+   half when it carries no `point`, no `id`, and no `turns` (`sdk.py:16259`, the `return None` under the
+   comment at `:16257`, contract restated at `event_store.py:58` in its module docstring and again as a
+   comment at the append site (`:808`): *"a payload-only emit writes one with no JSONL record
    at all"*). This is not hypothetical: the turn hard-delete lane calls exactly that shape —
-   `sdk._emit_event("PointRetracted", _deleted_point_payload(tid))` (`sdk.py:3801`) — and the
+   `sdk._emit_event("PointRetracted", _deleted_point_payload(tid))` (`sdk.py:3831`) — and the
    surrounding comment states the split as a contract, *"Two stores, one meaning each"*.
    **Executed pin:** `tests/test_13094_graphevent_home.py::
    test_a_payload_only_emit_writes_the_store_and_no_journal_record` emits one, asserts the store holds
@@ -357,14 +357,26 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 | `docs/evidence/13094-graphevent/measure_graphevent_residency.py` + 2 JSON outputs | the residency measurement above, reproducible; it refuses any graph name outside the `probe_13094` prefix with **exit 2**, and exits **2** again when a run's schema statement did not install (`schema_complete: false` — a population measured without the schema it claims must not be quoted as one); `1` is reserved for a produced verdict, so a refusal never shares it |
 | `docs/evidence/13094-graphevent/readers.json` | the census table, as the verb emits it |
 
-**No product code changed. No graph write changed. No record read changed. Nothing deleted.**
-`git diff --name-only origin/main...HEAD -- 'tortoise/*.py'` lists two files —
-`tortoise/activation_scorecard.py` and `tortoise/hosted_api.py` — and every changed line in both is
-a `#` comment. That is MEASURED, not restated, because the line counts move with every rebase:
+**#13094 changed no product code. No graph write changed. No record read changed. Nothing deleted.**
+That is MEASURED, not restated, because the line counts move with every rebase. At THIS branch's head
+the tree carries four changed `tortoise/*.py` files and the same command prints `27` — `#13094`'s
+alone prints `0`, and the other three files are the product work of TWO PRs, only one of which is
+folded in here: `#13722`'s own stamp-chain submission (4 non-comment lines in
+`tortoise/hosted_api.py`), and `#14483`'s landing, which this branch carries because the `test (c)`
+reds it repairs are `main`'s own (`13` in `tortoise/embed_worker.py`, `10` in
+`tortoise/embed_writer_register.py`); `tortoise/activation_scorecard.py` is all-comment. None of that
+is a drift in this record, and none of it is reachable by `#13094`'s own claim — which is what the
+re-runnable form below scopes:
 `git diff origin/main -- 'tortoise/*.py' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' | grep -vc '#'`
-prints `0` at this head, so no changed body line is anything but a comment. Each block carries a
+prints `0` at this PR's own head (`#13094`'s), so no changed body line in ITS diff is anything but a
+comment. ⛔ THAT IS A CLAIM ABOUT THIS PR, NOT ABOUT THE TREE: the command diffs against whatever
+`origin/main` is NOW, so a LATER PR's own product change under `tortoise/*.py` legitimately makes it
+print a non-zero count here — that is the `27` above, TWO PRs' behavioural work and not a drift in
+this record — and the graded figures below are re-derived by `--refresh` rather than by this
+sentence. The one figure here that NO `--refresh` row and no test grades is the `27` itself, which is
+why it names the PRs it comes from instead of standing alone. Each block carries a
 count this PR re-derived
-(`160` distinct cite targets above the pivot from `724` in all, over `208` citing files —
+(`160` distinct cite targets above the pivot from `726` in all, over `208` citing files —
 `uv run python tools/hosted_api_cite_census.py --json` prints every one of those three, and
 `--check` grades the two note blocks against the same measurement, so none of them is a hand
 count), not a
@@ -394,7 +406,7 @@ remaining scope** (its comment 7065026251), in the order the constraints force:
    `read_after`: `_head_seq`'s fallback (`webhook_delivery.py:1049`), the backup footprint
    (`hosted_backup.py:892`), and the two restore-side scans (`:1333`/`:1534`). ⚠️ Neither is an
    export scan — both are in `restore_graph`, and the export side is NOT censused at all
-   (`hosted_backup.py:454` and `hosted_api.py:34426`, #14204), so a re-point driven by this census
+   (`hosted_backup.py:454` and `hosted_api.py:34485`, #14204), so a re-point driven by this census
    alone would leave the export endpoint reading the old home.
 5. **Prove it on a scratch tenant** with the `superset` verb before and after, and only then strip.
 6. **Falsifiers, stated up front:** (a) with the record short of the graph, the cutover REFUSES and
