@@ -78,9 +78,9 @@ HOW TO RUN IT (the arming the CI job uses):
         pytest tests/test_7879_record_chain.py -q
 
 Unset ⇒ 7 of the 8 legs SKIP by name; the DB-free import-graph legs
-(`test_the_runner_cannot_reach_the_cache` and the three `test_the_guard_*`
+(`test_the_runner_cannot_reach_the_cache` and the four `test_the_guard_*`
 probes that falsify its predicate) RUN either way, so an unarmed run measures
-**4 passed, 7 skipped** and is evidence about those four legs and about nothing
+**5 passed, 7 skipped** and is evidence about those five legs and about nothing
 else. The `test-record-postgres` leg gate
 (`.github/scripts/record-postgres-leg-gate.py`, #9551) fails a job whose record
 legs skip, which is what makes the ARMED run real rather than absent.
@@ -211,6 +211,20 @@ DRIVER_CLASSES = ("redis.Redis", "redis.asyncio", "redis.client")
 #: legitimate import, binds only `journal_segments`) from `import tortoise`.
 BOUND_ROOT_HANDLES = ("tortoise", "redis")
 
+#: A `from X import *` binds X's PUBLIC NAMES into this file, so for a DRIVER
+#: root it is the same handle as `import X` — `redis.__all__` carries `Redis`
+#: (measured), so `from redis import *` puts `redis.Redis(host=…, port=<graph>)`
+#: in the runner's namespace. It was GREEN until this entry existed: a star alias
+#: is neither an `ast.Import` node (so no bound root) nor a name any door matches
+#: (`_imported_modules` records it as `redis.*`).
+#:
+#: ⛔ NOT the tortoise root, deliberately — refusing `from tortoise import *`
+#: would be a false block on an import that grants no handle: `FalkorDB` and
+#: `Tortoise` are PEP 562 lazy attributes, so the star binds NEITHER (measured:
+#: the package declares no `__all__`, `FalkorDB` is popped from its globals, and
+#: `dir()` does not run `__getattr__`).
+STAR_BINDING_ROOTS = (*DRIVER_ROOTS, "redis")
+
 
 def _imported_modules(path: Path) -> set[str]:
     """Every module name ``path`` imports, INCLUDING the ``from X import Y`` form.
@@ -260,6 +274,22 @@ def _bound_root_packages(path: Path) -> set[str]:
     }
 
 
+def _star_import_roots(path: Path) -> set[str]:
+    """Roots bound by a ``from X import *`` — a star binds X's public names.
+
+    Kept apart from `_bound_root_packages` because the two spellings do NOT bind
+    the same thing for every root — see `STAR_BINDING_ROOTS`: for `redis` a star
+    binds the client, for the `tortoise` ROOT it binds no handle at all.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.module.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+        and any(alias.name == "*" for alias in node.names)
+    }
+
+
 def _reaches_cache(name: str) -> bool:
     """Does the import NAME (a module or a bound attribute spelling) reach it?"""
     return (
@@ -278,12 +308,15 @@ def _cache_reaching_imports(path: Path) -> list[str]:
     THE PREDICATE ITSELF, one import spelling at a time. Without the second
     caller every branch of this function is unexercised: the runner's imports are
     all module-form and reach no door, so deleting a whole branch (the `from X
-    import Y` alias collection, any added door, the root-binding rule) left every
-    row green — the "an assertion whose value cannot vary" failure, measured.
+    import Y` alias collection, any added door, the root-binding rule, the star
+    binding) left every row green — the "an assertion whose value cannot vary"
+    failure, measured.
     """
     hits = {name for name in _imported_modules(path) if _reaches_cache(name)}
     hits |= {root for root in _bound_root_packages(path)
              if root in BOUND_ROOT_HANDLES}
+    hits |= {root for root in _star_import_roots(path)
+             if root in STAR_BINDING_ROOTS}
     return sorted(hits)
 
 
@@ -964,3 +997,26 @@ def test_the_guard_allows_the_folds_own_imports(tmp_path):
         "named submodule, and `from redis import exceptions` binds only "
         "`exceptions` (so no `redis` root is bound) — refusing them would block "
         f"the runner itself: {_cache_reaching_imports(probe)}")
+
+
+def test_the_guard_refuses_a_star_import_from_a_driver_root(tmp_path):
+    """`from redis import *` BINDS `Redis` — measured, and GREEN until this row.
+
+    The star spelling is the one binding NEITHER collector above sees: it is not
+    an `ast.Import` node (so no bound root), and `_imported_modules` records it as
+    `redis.*`, which matches no door. `redis.__all__` carries `Redis`, so the
+    statement puts `redis.Redis(host=…, port=<graph>)` in the runner's namespace —
+    the same handle `import redis` gives, which the row above refuses.
+
+    ⛔ THE ALLOW ROW IS THE OTHER HALF, and it is why `STAR_BINDING_ROOTS` is not
+    the package root: `from tortoise import *` binds NEITHER `FalkorDB` nor
+    `Tortoise` (PEP 562 lazy attributes, absent from `dir()`, and the package
+    declares no `__all__`; measured), so refusing it would be a false block on an
+    import that cannot reach a client.
+    """
+    assert _cache_reaching_imports(
+        _probe(tmp_path, "from redis import *\n")) == ["redis"]
+    assert _cache_reaching_imports(
+        _probe(tmp_path, "from falkordb import *\n")) == ["falkordb", "falkordb.*"]
+    assert _cache_reaching_imports(
+        _probe(tmp_path, "from tortoise import *\n")) == []
