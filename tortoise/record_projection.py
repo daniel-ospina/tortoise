@@ -2330,8 +2330,12 @@ def _schema_entry(migrations_dir: Path | None) -> dict[str, Any]:
 def _entry_sql_state(entry: dict[str, Any]) -> tuple[str, bool]:
     """The concatenated migration SQL for `entry`, and whether it is COMPLETE.
 
-    ⛔ ONLY A COMPLETE READ IS MEMOISED, AND "COMPLETE" IS A PROPERTY OF THIS
-    CALL'S OWN READ (#4625 review, F1). `_read_migrations_state` skips every
+    ⛔ ONLY A COMPLETE READ IS MEMOISED, AND THAT IS THE ONLY THING THE CACHE
+    TRUSTS (#4625 review, F1). ⚠️ `complete` is NOT "a property of this call's own
+    read" — on a cache hit there is no read here at all, and the flag is `True`
+    because `entry["sql"]` is only ever ASSIGNED on the complete branch; see "THE
+    FLAG CERTIFIES THE BYTES RETURNED" below, which is the corrected statement.
+    `_read_migrations_state` skips every
     absent file, so the read is lossy in two directions: total absence yields
     `""`, and a tree that is PARTIALLY present yields a non-empty join of only the
     files that happened to be there. An entry that memoised either would freeze it
@@ -3164,10 +3168,13 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
             f"{PACKAGED_MIGRATIONS} (installed package — a wheel ships the "
             "record's migrations there)."
         )
-    # ⛔ THE SAME RULE AS `_entry_sql_state` (#4625 review): `complete` is THIS
-    # call's own read, so a map parsed from a SHORT read is never stored — not
-    # even when another thread has since memoised a complete read onto the same
-    # entry. Memoising a short column map is invisible (every record table is
+    # ⛔ THE SAME RULE AS `_entry_sql_state` (#4625 review): `complete` certifies
+    # the BYTES THIS CALL PARSED — its own read's flag, or, on a hit, the fact
+    # that `entry["sql"]` is assigned ONLY on the complete branch — so a map
+    # parsed from a SHORT read is never stored, not even when another thread has
+    # since memoised a complete read onto the same entry. ⚠️ Do NOT restate this
+    # as "this call's own read": on a hit there is no read here to have a flag.
+    # Memoising a short column map is invisible (every record table is
     # present, so the `missing` guard above cannot fire) and it would let the
     # record write a row without the absent migration's columns, which is the
     # row-drop class `#9548` exists to end.

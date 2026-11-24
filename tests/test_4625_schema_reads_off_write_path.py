@@ -874,3 +874,75 @@ def test_a_partial_tree_pays_one_parse_per_plan_not_one_per_parameter(
         assert rp.jsonb_columns() == first
     finally:
         rp._release_schema_cache()
+
+
+def test_the_completeness_is_the_reads_own_stat_not_a_later_check(monkeypatch, tmp_path):
+    """A file appearing DURING the read must leave THIS read INCOMPLETE (#4625 F1a).
+
+    ⛔ WHAT THIS PINS, and why nothing else in this file does. `_read_migrations_state`
+    decides completeness from the SAME `exists()` that decides whether to read each
+    file. The shape it replaces called `_complete(base)` AFTER the loop — a check of a
+    LATER instant than the read it certifies — so a migration copied in between the
+    last read and that check yields `True` over a join that is still short, and the
+    short join is then MEMOISED as the process's schema. Every other pin here builds
+    a static tree, and on a static tree both shapes agree (0/20, 19/20 and 20/20 all
+    answer the same either way), so the guarantee could be reverted silently.
+
+    HOW THE RACE IS MADE DETERMINISTIC: the missing migration reports ABSENT while
+    the read pass still has files to read, and PRESENT once the pass is over — i.e.
+    the file appears exactly where the defect lives, with no timing involved. The
+    per-file decision sees `False`; a post-loop `_complete()` sees `True`.
+
+    FALSIFIER (executed): replace the returned flag with `_complete(base)` and the
+    first assertion reds (`complete` is `True` over a 19-file join), while every
+    other pin in this file stays green — which is the gap this test closes.
+    """
+    source = _real_migrations()
+    tree = tmp_path / "migrations"
+    tree.mkdir()
+    # NOT the last migration: the per-file stat for it must fall while reads are
+    # still outstanding, or the two shapes answer identically and the pin is vacuous.
+    missing = rp.RECORD_MIGRATIONS[len(rp.RECORD_MIGRATIONS) // 2]
+    for name in rp.RECORD_MIGRATIONS:
+        if name != missing:
+            shutil.copy(source / name, tree / name)
+
+    reads = {"n": 0}
+    real_read_text = Path.read_text
+    real_exists = Path.exists
+
+    def counting_read_text(self, *args: Any, **kwargs: Any):
+        out = real_read_text(self, *args, **kwargs)
+        reads["n"] += 1
+        return out
+
+    def appearing_exists(self):
+        if self.name == missing and reads["n"] >= len(rp.RECORD_MIGRATIONS) - 1:
+            # The file APPEARS after the read pass chose not to read it.
+            return True
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    monkeypatch.setattr(Path, "exists", appearing_exists)
+    _, complete = rp._read_migrations_state(tree)
+
+    assert complete is False, (
+        f"`_read_migrations_state` reported the join COMPLETE over "
+        f"{reads['n']} of {len(rp.RECORD_MIGRATIONS)} migrations — `{missing}` was "
+        "absent when this read decided whether to read it, so this is the "
+        "post-loop `_complete()` shape: it certifies a LATER instant than the "
+        "bytes returned, and the short join is then memoised as the process's "
+        "schema (#4625 F1a)")
+    assert reads["n"] == len(rp.RECORD_MIGRATIONS) - 1, (
+        f"the fixture read {reads['n']} files, not "
+        f"{len(rp.RECORD_MIGRATIONS) - 1} — it did not reach the race it claims")
+
+    # POSITIVE CONTROL: the same call on a COMPLETE tree still says True, so the
+    # assertion above is not reading a fixture that can only ever answer False.
+    monkeypatch.setattr(Path, "read_text", real_read_text)
+    monkeypatch.setattr(Path, "exists", real_exists)
+    full = _tree(tmp_path / "full")
+    _, complete_full = rp._read_migrations_state(full)
+    assert complete_full is True, (
+        "a complete tree was reported INCOMPLETE — the flag is not being decided "
+        "per file at all, so the assertion above proves nothing")
