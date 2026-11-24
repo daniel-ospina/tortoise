@@ -397,7 +397,7 @@ the committed `config/ci-surfaces.yml` S=11 header block's `0.5 m` of headroom; 
 UNROUNDED terms instead gives `60 − 51.6467` = 8.35, which moves no verdict and would put this
 sentence 0.01 m away from the instrument it cites.)
 `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
-that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
+that shape — no implicit `actions/cache@` post step anywhere in the job, `~/.cache/uv` written by exactly one `actions/cache/save@` that is time-bounded, `cache-hit`-gated and preceded by a bounded `uv cache prune`, and `~/.cache/pip` restore-only (two other jobs own that key) — and it also holds this section's emitted-watchdog figure to the emission. The watchdog itself comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
 is how a constant goes stale. At the first pass FOUR rows did NOT clear it, and all four were
@@ -736,8 +736,7 @@ one run owns the pool, so every other PR waits for that run's shard set to drain
 With ONE cap for all three matrices — the choice this section makes — only `C = 3` satisfies both:
 invariant 1 forces `C >= 3` and invariant 2 forces `C <= 3`. ⛔ The two inequalities alone do NOT
 pin 3: an unequal split can satisfy them (3/2/3 holds 8 matrix slots and needs at most 3 waves, and
-`tests/test_ci_selection.py` accepted it until that arm was CUT in the B7 cut, 2026-11-23), so what
-rules those splits out is the choice of a single
+`tests/test_ci_selection.py` accepts it), so what rules those splits out is the choice of a single
 cap, not the invariants. An interval simulation over the same 9 runs — each job keeps its own
 observed start as an earliest bound, so the delta is an **upper** bound: it does not credit back
 the queue the PR no longer waits behind — gives per-PR peak / matrix-band delta:
@@ -750,12 +749,12 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 | 5 / 3 / 3 — ⛔ rejected by invariant 2 (`sum = 11 > 12 - 3`) | 10 / 12 | +8.1 m / +9.6 m |
 | unset | 11 / 18 | 0 / 0 |
 
-⛔ **The `2 / 2 / 2` row is the one candidate this section's own pin rejects.** `ceil(10 / 2)` = 5
-waves exceeds the `max_waves = 4` ceiling invariant 1 pins — the arm that pinned it
-(`tests/test_ci_selection.py::test_every_matrix_bounds_its_fan_out_below_the_measured_pool`) was
-CUT in the B7 test-bureaucracy cut (2026-11-23), so the invariant is now checked by hand. Before
-that cut, a re-derivation from a fresh measurement that picked the row with the most pool headroom
-(`8 / 9`) was redded by the pin shipped in this same section. The two rows that fail the other side are the
+⛔ **The `2 / 2 / 2` row is the one candidate this section's own invariant rejects.** `ceil(10 / 2)` = 5
+waves exceeds the `max_waves = 4` ceiling of invariant 1, so a re-derivation from a fresh measurement
+that picks the row with the most pool headroom (`8 / 9`) is rejected by invariant 1 — and by the arm
+that holds it, `::test_every_matrix_bearing_job_declares_a_fan_out_cap`: measured, `max-parallel: 2`
+reds it with `test: cap 2 over 11 shards needs 6 waves, past the measured 4-wave ceiling`. The two
+rows that fail the other side are the
 mirror case: `4 / 4 / 3` and `5 / 3 / 3` each hold 11 matrix slots, past `12 - 3 = 9`, so they fail
 invariant 2.
 
@@ -773,24 +772,23 @@ committed `durations` map (re-derived from the map, not restated: registering
 and onto the slow pool, which is the whole of the change: the `durations` weight it was given was the
 flat `DEFAULT_FAST_WEIGHT`, so the row then packed identically to no row at all (measured; the 2026-11-16 sweep has since given it a real reading). Since then the 2026-11-23 sweep re-packed the
 slow pool **up** to `8.59 m` → `17.19 m` (it read `8.18 m` → `16.36 m` at the 2026-11-16 head). The
-`test_the_documented_slow_wall_restates_the_committed_maps_own_projection` pin recomputed it, and
-`test_slow_shards_are_duration_packed_and_meet_the_wall_target` held it to
-`SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m) — both arms were CUT in the B7 test-bureaucracy cut
-(2026-11-23), so the figure below and the 20 m cap are now UNGRADED; re-derive them by hand. That constant is a documented departure from the 10 m
+`slow_wall_projection` instrument recomputes it) — and `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m)
+holds it. That constant is a documented departure from the 10 m
 per-leg guideline: a guard that stopped at the per-leg share stayed GREEN while the job's wall was
-double it, which is the false PASS that pin existed to prevent. The fast
-matrix's band was pinned at `ceil(11/3)` = **4** waves after #11576 raised `fast_shards` to 11
+double it, which is the false PASS a per-leg-share guard would let through — so the cap is a
+committed number that `tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_the_wall_target`
+compares the projection against, not a number any test gets to opine. The fast
+matrix's band is pinned at `ceil(11/3)` = **4** waves after #11576 raised `fast_shards` to 11
 (it was `ceil(10/3)` = 4 at the 10-shard shape and `ceil(9/3)` = 3 at the 9-shard measurement) — exactly the 2–4 wave band invariant 1
-protects, so that pin stayed GREEN while the accounted regression grew by a wave. That matters for
+protects, so the pin stays GREEN while the accounted regression grows by a wave. That matters for
 the arithmetic below: the `+17.9 m p50 / +23.2 m max` band delta was simulated on the 3-wave shape,
 so it is a LOWER bound on the shipped 4-wave one, not a measurement of it — re-derive before
 quoting it as the current figure. No saving is claimed on the runs where it took the full 4. The pair is what the simulation's **matrix-band end delta
 of +17.9 m p50 / +23.2 m max** (table above) records, and that — not the slow matrix's ~9 m in
 isolation — is the figure a keep-vs-rollback reading must use (see "The re-derivation cannot use
 per-job queue wait", below). Capping slow at
-5 to keep its single wave puts a PR's maximum **matrix** hold at 11 of 12 runners and fails
-invariant 2 — arithmetic, not a pin: the arm that used to check it was CUT in the B7 cut
-(2026-11-23), so re-check it by hand.
+5 to keep its single wave would put a PR's maximum **matrix** hold at 11 of 12 runners and fail
+invariant 2.
 
 ⛔ **The clock this is judged on.** `cancel-in-progress` is keyed per PR (`refs/pull/N/merge`,
 §3), so a cap protects **other** PRs from this one. It does **not** make the capped PR finish
@@ -848,18 +846,30 @@ these jobs is measured from runner pickup — the in-step watchdog is started IN
 start delayed by the cap cannot consume a shard's budget. The matrix itself is untouched (the
 shard set is still the selector's `fast_matrix` / `slow_matrix` / `carve_matrix`), and a `needs:`
 on a matrix job waits for **every** leg regardless of ordering (#5219) — so `python-ci-gate`
-cannot conclude before a shard it needs has run. Both halves are pinned, and by three separate
-pins rather than two — the caps are a different property from the two false-red halves:
+cannot conclude before a shard it needs has run. Both halves are backed by the workflow's own
+wiring, and the arithmetic behind the caps is stated above AND held by the arm the third bullet
+names — the invariants are pinned there, the NUMBER is not:
 
 - the per-shard watchdog sitting INSIDE the job, and the matrix coming from the selector rather
-  than a workflow literal →
-  `tests/test_ci_selection.py::test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard`
-  (KEPT through the B7 cut on purpose: it is the only arm that reads the required `test` job's own
-  `strategy.matrix`, and the per-shard watchdog wiring is graded beside it at
-  `::test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed`);
+  than a workflow literal → `--integrity`'s `workflow_matrix_issues()` still checks the matrix half
+  mechanically (both `test` and `test-slow` take theirs from `fromJSON(...)` and carry no literal
+  `include:` rows); the WATCHDOG half is pinned TWICE, once here and once outside this file, so
+  neither pin is safe to delete on its own —
+  `tests/test_ci_selection.py` (`test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed`)
+  parses the `Run fast test suite` step and requires its gating line to carry
+  `timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m` (a whole-file scan is not enough: the
+  identical string sits in heading comments), and
+  `tests/test_ci_last_failed.py` (`test_prephase_has_its_own_bounded_watchdog`) requires the same
+  expression on the pre-phase line and refuses a literal, so read the job itself for the shard's
+  watchdog;
 - the aggregate keying on the job id, never on a leg name → `::test_no_required_check_names_a_fast_leg`;
-- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) — their arm
-  (`::test_every_matrix_bounds_its_fan_out_below_the_measured_pool`) was CUT (B7, 2026-11-23).
+- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) — all THREE are
+  held by `::test_every_matrix_bearing_job_declares_a_fan_out_cap`: presence for every
+  matrix-bearing job (derived from the workflow, so a fourth matrix must be given a shard count and
+  a cap), the wave band against `_MAX_MEASURED_WAVES`, and the sum against
+  `pool - _RESERVED_FOR_OTHER_PRS`, where the pool is READ from THIS document's §7 row
+  (`_measured_runner_pool()` parses `runners registered / online`). Re-derive all three from the
+  pool before moving any of the three numbers.
 
 **Re-derive before moving any of the three numbers**: re-read the pool (`gh api
 repos/<owner>/<repo>/actions/runners`), and re-measure the per-shard wall with §2's command — but
@@ -867,9 +877,12 @@ NOTE that §2's command keys on `.steps[].started_at|completed_at`, so it yields
 not the within-run start stagger; the stagger (4.0–23.9 m, the 2–4 wave claim invariant 1 rests
 on) needs the JOB-level `started_at` of one run's legs (`…/runs/<id>/jobs`), which §2 never reads.
 
-If the pool grows, invariant 2 permits a larger cap — and that move is not free: the
-`measured_pool` literal in the test was the one input that had to be edited with the caps (below;
-that arm is CUT now, so it is a by-hand obligation). If
+If the pool grows, invariant 2 permits a larger cap — and that move is not free: re-read the pool,
+edit the §7 row to the fresh reading, and re-derive the caps together. There is no measured-pool
+literal in the suite to edit, because the arm READS this row: one edit here moves the bound. ⛔ The
+suite's comments beside that input quote no figure on purpose, so they cannot go stale; if you ever
+add one, correct it in the same change — nothing reads THESE comments, so nothing would red
+(a `path:line` citation in a comment IS read: `tests/test_ci_selection.py` grades one). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
 shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `4 × 10.5 m ≈ 42.0 m`
 (`ceil(11/3)` = 4 waves at `fast_shards: 11` — read it off the band pin below, not the 3-wave
@@ -883,13 +896,15 @@ the 2026-11-23 sweep, which re-packed the slow pool — they read `8.18 m`/`16.3
 2026-11-16 head), carve-out `1 × 9.54 m ≈ 9.54 m`) and compare each against that same
 matrix's uncapped band before trusting the +17.9 m figure above.
 
-⛔ **Re-measuring the pool USED to be an edit to the pin as well as a reason to move a cap.**
-`tests/test_ci_selection.py` held `measured_pool = 12` as a **literal** and asserted
-`sum(caps) <= measured_pool - reserved_for_others`. The test pins the INVARIANTS; the pool they
-are measured against is the one number in it that is measured rather than derived, so it had to
-move **in the same change as the caps**. ⛔ THAT ARM WAS CUT in the B7 test cut (2026-11-23): a
-permitted re-tune landed without the pool moving (4/4/4 against a 16-runner pool, say) now reds
-nothing, so the two edits are a by-hand obligation with no gate behind them.
+⛔ **Re-measuring the pool is a cap decision, and the suite GRADES the decision you make.** The arm
+named in the bullet above holds all three: the caps' presence, `ceil(shards/cap) <= 4`, and
+`sum(caps) <= pool - 3` with the pool read from the §7 row above — so a cap that is GONE, one
+shrunk until it invents waves, and one grown past the pool each red it. What it deliberately does
+NOT pin is WHICH permitted split you choose: it holds the invariants, not the number, so a
+re-tune (4/4/4 against a 16-runner pool, say — measured to pass: `sum 12 <= 16 - 3`, `ceil(11/4) =
+3 <= 4`) passes and needs no test edit. What a re-tune DOES need is the §7 row edited to the fresh
+reading, because that row is now the arm's input: leave it stale and the bound grades the old pool.
+Re-derive the three numbers from the fresh pool in the same change and state the arithmetic here.
 
 ⛔ **The re-derivation cannot use per-job queue wait to see the cost this creates.** This section's
 own measurement table records a per-job queue wait (`created_at → started_at`, p50 5.4 m / p95

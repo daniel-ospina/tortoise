@@ -249,6 +249,81 @@ RESIDUE_PAIR_REV = "1b82cc7063"         # the rewrite's own tree, which DERIVES 
 RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 
 
+def _residue_block() -> str:
+    """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
+
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1853 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `953c299c9b` merged into the branch,
+    which KEPT both sides' prose blocks: the pre-merge branch read 1774 and `main` 1796, so the
+    figure is re-derived here rather than carried from either side — and GRADED, see
+    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
+    moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
+    what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
+    line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
+    prose commits grew it to 1066 while this sentence still said 985, which was true at
+    `04afeb811d` and 1010 at `main` `70fbd1a27dd5` (review of #14258, P3), and this re-cut's
+    restoration of the branch's dropped blocks took the merged run to 1079, a peer's prose to 1084,
+    dropping the duplicated `#:` separator that restoration had left to 1083, the measured erratum
+    rework below to 1087, and the merge with `origin/main` `10e51693` — which KEPT both sides'
+    blocks and added the re-measure note — to 1122; THIS re-cut merges `origin/main` `0467ba32`
+    (base `70fbd1a2`) and then a PEER's own copy of that same re-cut, KEEPING both sides' blocks at
+    each merge for the same reason: the peer's copy read 1185 and then 1196 as its prose grew
+    while this lane's read 1197, and the per-line difference between the two LIVES is exactly what
+    a merged run is — so the figure above is RE-MEASURED here rather than inherited from either
+    side, and the next reflow repeats that), the fold of `origin/main` `414761ae` (which brought
+    its own `#14282` re-cut blocks AND re-cut `SWEEP_RESIDUE` on its own tree) kept both sides'
+    blocks again and took the run to 1583, the `#:` block recording that fold in
+    `tools/sdk_privatise.py` took it to 1594, and RESTORING the one `main` block the three-way
+    merge had dropped WITHOUT a conflict marker (`THE BASE FIGURE IS THE BASE **TREE's**
+    MEASUREMENT`) took it to 1607 — that block names `1b0db0489408`'s own pair, so its absence
+    orphaned that `OWN_PINS` entry and the orphan arm redded; the figure is RE-MEASURED by this
+    function's walk on the RESOLVED file, never inherited, and 1741 is the figure above,
+    — and this fold of `origin/main` `9aaaff10acd` kept BOTH sides again: `main`'s own blob read 1400
+    there (its `#14283` zero-net re-pin rewrites measured 1328, and `#14284`'s merge of `main`
+    `38f2ab7fc594` re-read 1363 on ITS tree), while the RESOLVED run here reads 1741, re-measured by
+    this walk rather than inherited from either side,
+    — and the `#12039` residue re-cut below (`SWEEP_RESIDUE` `11896` → `11898`, stale ON ARRIVAL on
+    `main`) appended 24 `#:` lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED
+    on this tree rather than carried forward from the fold's own reading, which is what the graded
+    figure exists to force - and the `#14395` fix lane's re-pin paragraph took it to 1774 on its
+    own tree, while the merge of `origin/main` `953c299c9b` (which KEPT both sides' `#:` prose)
+    re-read 1808 above, re-walked by this function and never adjusted to a carried figure:
+    AND THE ARMS GRADE ALL OF IT
+    (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
+    which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
+    and the residue section's prose is contiguous all the way up to its opening sentence — so
+    every NEGATIVE arm below has that whole surface as its grading area, and an honest edit to
+    a sentence elsewhere in it can red one. That is why the arms are windowed around the
+    sentence they police (see `_ATTRIBUTION_WINDOW`); it is not a licence to shorten the walk,
+    because the sections the arms read live hundreds of lines apart.
+
+    `test_the_residue_block_is_a_real_block_and_publishes_its_addresses` anchors the extent, so
+    a reflow that breaks the run with a blank line SCREAMS here instead of silently shrinking
+    every arm's grading surface.
+    """
+    lines = (ROOT / "tools" / "sdk_privatise.py").read_text(encoding="utf-8").splitlines()
+    # ⛔ EXACTLY ONE ASSIGNMENT, ASSERTED HERE (#14038 review, P1). The block above states the rule
+    # in its own words — "THIS RECORD CARRIES NO ASSIGNMENT, deliberately … ONE assignment, at the
+    # end of the records, cannot be shadowed by a second re-cut" — and a merge that folds two
+    # sides each carrying a record also carries BOTH assignments. Python binds the LAST one, so
+    # the file still imports the right pin, while this walk anchored on the FIRST and every arm
+    # below graded only the prose above that first pin, silently losing the newest records. The
+    # extent pin in `test_the_residue_block_is_a_real_block_and_publishes_its_addresses` cannot
+    # see this: its anchors all sit ABOVE the first pin, so the truncation is invisible to it.
+    # Anchoring on the single assignment makes a re-kept duplicate a RED here instead.
+    pins = [i for i, line in enumerate(lines) if line.startswith("SWEEP_RESIDUE = (")]
+    assert len(pins) == 1, (
+        f"tools/sdk_privatise.py carries {len(pins)} `SWEEP_RESIDUE = (` assignments, at lines "
+        f"{[n + 1 for n in pins]}; the block requires exactly ONE, at the end of the records. "
+        "Delete the dead assignment(s) and keep their `#:` prose — otherwise this walk grades "
+        "only the prose above the FIRST pin and every arm below is grading less than it claims")
+    pin = pins[0]
+    start = pin
+    while start and lines[start - 1].lstrip().startswith("#:"):
+        start -= 1
+    return "\n".join(lines[start:pin])
+
+
 def _rev_present(rev: str) -> bool:
     """Is `rev` carried by THIS clone? The `test` job is `fetch-depth: 1` (no objects)."""
     try:

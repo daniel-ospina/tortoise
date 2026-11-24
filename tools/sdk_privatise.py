@@ -1949,7 +1949,27 @@ SWEEP_NAMES = 66
 #: counter. The −2 is NOT undone: the typed rewrite is the change's point, and the census follows it.
 #: The pair below is `--repin`'s own output on THIS tree with both edits applied, never arithmetic on
 #: the last pin; `--check` exits 0 on it with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11899, "543a559f66bc5e86")
+#: ⛔ RE-CUT A FOURTH TIME IN THE `#14419` (B7) LANE'S FOLD, AND THIS ONE IS AGAIN `main`'S OWN RED,
+#: MEASURED RATHER THAN ASSUMED. The lane merged `origin/main` `148dece31973` (a descendant of the
+#: `88cd00a06879` fold it already carried) and re-measured every tree in its OWN worktree:
+#:   * `origin/main` `148dece31973`'s own tree derives **(11903, "df4f73cd9d41cdd1")** against the
+#:     **(11899, "543a559f66bc5e86")** committed right above — so `--check` exits 1 on `main` ITSELF, in
+#:     a PRISTINE detached worktree (`git status --porcelain` empty, `git ls-files --others` 0), i.e.
+#:     not a dirty measurement. That is the `#14062` recurrence a fifth time: `#14461` re-cut this pin
+#:     and its own tree is 4 rows above the number it committed. Open roots are `#14294` / `#14308`;
+#:     `surface-guard` is not in `DEFERRABLE_LEGS`, so the red travels into the REQUIRED
+#:     `python-ci-gate` for EVERY open PR — it is repaired here for that reason, not absorbed.
+#:   * the RESOLVED merge tree derives **11902 / `f904d86c`**, i.e. one row under `main`'s, and the −1
+#:     is attributed ROW BY ROW rather than waved through: `--report --base 28ca66878d… --top 5000`
+#:     was run on BOTH trees (`origin/main`'s and this one), row sets sorted and diffed, EXACTLY ONE
+#:     row differs — `window.update` **1 → 0**. That row lived in the helper `_wall_clock_cap_claims`
+#:     (`main:tests/test_ci_selection.py:15998`), which this B7 cut DELETES; the row SHAPE set goes
+#:     861 → 860, and no shape is added or absorbed in either direction.
+#: ⛔ The one vanishing row is a DELETION this PR declares; the direction the pin exists to catch is a
+#: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
+#: so no typed call site is legitimised by the re-cut. The pair below is `--repin`'s own output on THIS
+#: tree, never arithmetic on the last pin; `--check` exits 0 on it.
+SWEEP_RESIDUE = (11902, "f904d86cb6ad82f6")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
