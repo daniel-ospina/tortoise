@@ -67,20 +67,12 @@ version: 1
 # this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
 # (measured: the only `durations` lines this PR touches are comment rewrites of two existing rows,
 # `test_7949_capstone_measure.py` and `test_e2e_wrangler_prewarm.py`, whose values are unchanged), so
-# the split below is `main`'s reading too. On that merged tree — which carries `main`'s #14544, the
-# cut that took `tests/test_dod_5090_probe.py` OFF the every-PR `core` surface (NOT this PR's
-# change: its `durations` row was what put the file in `fast_pool()`, so dropping it takes the file's
-# weight out of the pool and re-packs every bin) — the verb packs six shards at 825.1 s
-# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so
-# `ceil(825.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.04`, so the two
-# agree by construction rather than by a hand re-read. Re-derive it on the tree after the next
-# fold; never carry this 825.1/825.0.
+# the split below is `main`'s reading too.
 # `8c373f59a1` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the durations
 # map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added, 0 removed,
 # against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue counts; at
 # THAT head B8 dropped `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
-# the ONE split stated below is `main`'s reading too. ⛔ THIS BRANCH'S OWN READING WAS HERE and is
+# ⛔ THIS BRANCH'S OWN READING WAS HERE and is
 # DELETED, not merged: it said one shard at 838.1 s and ten at 838.2 s, which was true of the previous
 # fold and is not true of this one — the `merge=union` driver (#5373) kept both parents' clauses, so
 # the block briefly claimed two partitions. Re-derived below with the verb.
