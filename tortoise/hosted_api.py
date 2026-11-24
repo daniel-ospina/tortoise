@@ -17709,6 +17709,18 @@ async def create_batch(body: BatchRequest,
 
     try:
         batch, items = await _run_off_loop(_BATCH_DB_EXECUTOR, _accept)
+    except _batch_ingest._BatchMaybeAccepted as exc:
+        # ⛔ "MAY HAVE BEEN ACCEPTED" IS NOT "NOTHING WAS ACCEPTED" (round 25, P1 —
+        # measured). The item rows are in `pending_batches()`' item arm and the
+        # recovery scan will adopt them, so a resend duplicates the ingest and the
+        # charge — the cross-batch dedup only matches items already `indexed`. Send
+        # the caller to the LIST surface instead.
+        _logger.warning("batch acceptance may have landed for team %s", org_id,
+                        exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="This batch may already have been accepted — check "
+                   "GET /v1/batches before sending it again.") from exc
     except _batch_ingest._BatchStoreFault as exc:
         # ⛔ A STORE FAULT IS A RETRY, NOT A MISCONFIGURATION (round 23, P2 —
         # measured). These used to reach the `ValueError` arm below and tell a
@@ -53792,7 +53804,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (726 distinct
+# ABSOLUTE line number from 208 tracked files (727 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
