@@ -73,12 +73,21 @@ run-time guard in #14528:
    `not X`, `and`/`or` over them, a conditional expression whose test — or whose
    two branches — decide it (`` X if False else Y ``, `` X if PAYLOAD else X ``,
    and an `if`-expression IN test position such as `` if (0 if True else 1): ``),
-   and a `match` case's `if` guard (`case _ if False:`). Ungraded: anything
+   a `match` case's `if` guard (`case _ if False:`), a `for`/`async for`
+   iterable (`for _ in ():` never enters its body), and a comprehension's
+   generator iterables and `if` clauses (`[await … for _ in ()]`,
+   `[await … for _ in _xs if False]`). Ungraded: anything
    `_literal_truth` answers `None` for — a run-time constant (`if _FEATURE:`), an
    unpack of a run-time value, an arbitrary call, two equal non-singleton
    literals compared by `is`, and an expression-position short circuit
    (`False and await …`), where the submission sits inside the `BoolOp` rather
-   than under an `if`/`while`/`if`-expression/match guard.
+   than under an `if`/`while`/`for`/`if`-expression/match/comprehension guard.
+   ⛔ ALSO UNGRADED, and the line is drawn at GUARDS on purpose: control flow
+   that is not a boolean expression around the body — a `return`/`raise` before
+   the submission, a `break`/`continue`, an `assert False` — is an
+   unreachable-body question an expression grader cannot answer, so it is
+   neither graded here nor implied by these arms; the run-time guard in #14528
+   is its home.
 
 ⛔ NESTING IS NOT THE PROPERTY, and a first cut of this file asserted it: the
 chain already lives in `_report_capture`, a nested `async def`, and nesting a
@@ -589,13 +598,26 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
     """`(line, source)` of every enclosing guard that is ALWAYS FALSE.
 
     ⛔ THE CRITERION IS "always false", NOT "CPython folds it away" (the header
-    states why), and the guards graded are every shape a submission can hide
-    under: an `if`/`while` test, an `if`-expression's test, and a `match` case's
-    `if` guard. The polarity comes from `_literal_truth` and nowhere else.
+    states why), and the shapes graded are the GUARDS a submission can sit under:
+    an `if`/`while` test, an `if`-expression's test, a `match` case's `if` guard,
+    a `for`/`async for` iterable, and a comprehension's generator iterables and
+    `if` clauses. The polarity comes from `_literal_truth` and nowhere else.
+
+    ⛔ THAT LIST IS THE WHOLE CLAIM, and it is enumerated rather than summarised
+    (review P2 at `343e7ce1`, measured): this docstring used to say "every shape a
+    submission can hide under" while `for _ in (): await _run_off_loop(…)` — the
+    exact silent-loss state the arm exists for, in loop form — stayed GREEN. A
+    claim of coverage the walk does not have is the defect class this PR removes,
+    so what is graded is listed, and what is NOT graded is declared: control flow
+    that is not a guard expression (a `return`/`raise` before the submission, a
+    `break`/`continue`, an `assert False`) is #14528's run-time guard, not this
+    arm's, and anything `_literal_truth` answers `None` for is ungraded by
+    construction.
 
     ⛔ `orelse` is NOT descended with the guard pushed: the else-branch of a
-    statically-false `if` is exactly the branch that RUNS, so a submission there is
-    live and must not be reported.
+    statically-false `if` is exactly the branch that RUNS, and a `for` whose
+    iterable is empty still runs its `else` (the else runs when the loop completes
+    without `break`), so a submission in either is live and must not be reported.
     """
     dead: list[tuple[int, str]] = []
 
@@ -612,6 +634,46 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
                     case_guards = [*guards, (case.guard.lineno, case.guard)]
                 for child in case.body:
                     walk(child, case_guards)
+            return
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            # ⛔ A `for` HEADER IS A GUARD TOO (review P2 at `343e7ce1`, measured):
+            # `for _ in ():` never enters its body, so a submission inside it is as
+            # unreachable as one under `while False:` — the same silent-loss state,
+            # in the loop form a fixer is most likely to write when disabling a
+            # leg. The iterable is graded by `_literal_truth`, so `()`/`[]`/`set()`
+            # are dead and `_xs`/`range(n)` are not.
+            walk(node.iter, guards)
+            for child in node.body:
+                walk(child, [*guards, (node.iter.lineno, node.iter)])
+            for child in node.orelse:
+                walk(child, guards)
+            return
+        if isinstance(
+            node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+        ):
+            # ⛔ …AND SO IS A COMPREHENSION'S CLAUSE (same finding):
+            # `[await _run_off_loop(…) for _ in ()]` builds an empty list and the
+            # submission never runs, and `… if False` filters every element. Each
+            # generator's `iter` is evaluated at its own nesting level — the first
+            # in the enclosing scope, a later one only once the earlier clauses
+            # pass — so every clause is pushed as a guard for the ELEMENT, which is
+            # the only place the submission can sit. The clause expressions
+            # themselves are walked under the guards already in force, because they
+            # run before their own condition is applied.
+            element_guards = list(guards)
+            for generator in node.generators:
+                walk(generator.iter, element_guards)
+                element_guards.append((generator.iter.lineno, generator.iter))
+                for condition in generator.ifs:
+                    walk(condition, element_guards)
+                    element_guards.append((condition.lineno, condition))
+            parts = (
+                [node.key, node.value]
+                if isinstance(node, ast.DictComp)
+                else [node.elt]
+            )
+            for part in parts:
+                walk(part, element_guards)
             return
         if isinstance(node, (ast.If, ast.While, ast.IfExp)):
             # ⛔ `IfExp` is graded too: CPython folds `X if False else Y` to `Y` and
@@ -638,6 +700,44 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
 
     walk(tree, [])
     return dead
+
+
+def _every_submission_dead_guarded(
+    tree: ast.Module, owners: set[str],
+) -> dict[str, list[tuple[int, str]]]:
+    """`owner -> every enclosing dead guard`, for owners ALL of whose submissions are dead.
+
+    ⛔ EVERY SUBMISSION, NOT ANY ONE OF THEM — and this function exists because
+    that polarity was UNOBSERVABLE in the committed suite (review P1 at
+    `343e7ce1`, measured). The previous cut inlined the decision as
+    `if per and all(per)` inside the test, and the only population it ran over was
+    the real `hosted_api.py`, which has exactly ONE submission and no enclosing
+    guard: `per == [[]]`, where `any([[]])` and `all([[]])` are both `False`. So
+    reverting the fix this PR's §1 is about — `all(per)` → `any(per)` — red no row,
+    and the false RED it removed came straight back: a functionally CORRECT tree
+    (a live awaited submission plus a leftover `if False:` duplicate beside it) was
+    reported as "EVERY submission … sits under a STATICALLY-FALSE guard … the
+    chain silently does NOT run". The fixture in
+    `test_the_dead_guard_arm_fires_only_when_every_submission_is_dead` is the
+    population the shipped module cannot supply: two submissions on one owner.
+
+    An owner is ABSENT from the result when at least one of its submissions is
+    reachable, because a dead-guarded duplicate runs nothing and is inert — it is
+    not a second way to run the chain, which is what the reference arm grades.
+    """
+    by_owner: dict[str, list[ast.AST]] = {}
+    for node in _submitted_names(tree):
+        for owner in sorted(owners):
+            if _refers_to(node, owner):
+                by_owner.setdefault(owner, []).append(node)
+    reported: dict[str, list[tuple[int, str]]] = {}
+    for name, nodes in by_owner.items():
+        per = [_dead_guards(tree, node) for node in nodes]
+        # `per` holds one list per submission and `all(per)` is the decision: every
+        # submission dead ⇒ True; one live submission (empty list) ⇒ False.
+        if per and all(per):
+            reported[name] = [guard for guards in per for guard in guards]
+    return reported
 
 
 def _unaccounted_mentions(
@@ -944,19 +1044,12 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # of them is dead-guarded. A dead duplicate beside a live submission runs
     # nothing and is therefore inert — it is not a second way to run the chain,
     # which is what the reference arm grades.
-    by_owner: dict[str, list[ast.AST]] = {}
-    for node in _submitted_names(tree):
-        for owner in sorted(owners):
-            if _refers_to(node, owner):
-                by_owner.setdefault(owner, []).append(node)
-    dead_guards = {
-        name: [guard for guards in per for guard in guards]
-        for name, per in (
-            (name, [_dead_guards(tree, node) for node in nodes])
-            for name, nodes in by_owner.items()
-        )
-        if per and all(per)
-    }
+    # ⛔ AND THE POLARITY IS PINNED, NOT JUST IMPLEMENTED (review P1 at
+    # `343e7ce1`, measured): the decision lives in
+    # `_every_submission_dead_guarded` because the shipped module — ONE unguarded
+    # submission — cannot distinguish `all` from `any`; the two-submission fixture
+    # below is that missing population, and `all`→`any` reds it.
+    dead_guards = _every_submission_dead_guarded(tree, owners)
     assert not dead_guards, (
         f"EVERY submission of {_STAMP_DOOR}'s chain sits under a STATICALLY-FALSE "
         f"guard at {dead_guards} (owner: [(line, test)]) — each of those guards is "
@@ -1397,6 +1490,95 @@ def test_dead_guards_reports_only_the_guards_that_are_always_false() -> None:
         "        g()",
     ])
     assert _dead_guards(else_branch, _call(else_branch, "g")) == []
+
+
+def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
+    """`all`, not `any`: a dead duplicate beside a live submission is INERT.
+
+    ⛔ THE PIN THE REVIEW ASKED FOR (P1 at `343e7ce1`, measured), and it needs a
+    fixture because the shipped module cannot supply the population: `hosted_api`
+    has ONE submission and no enclosing guard, so `per == [[]]` and `any` and `all`
+    agree there. That is why the decision lives in `_every_submission_dead_guarded`
+    and is measured HERE, on two submissions of one owner.
+
+    ⛔ NON-VACUOUS BOTH WAYS. Mutating the helper's `all(per)` to `any(per)`
+    reds the first assertion with `{'chain': [(3, 'False')]}` — i.e. it restores
+    exactly the false RED this PR's §1 removes: a correct tree reported as "EVERY
+    submission … sits under a STATICALLY-FALSE guard … the chain silently does NOT
+    run". Mutating it to `if per and False` reds the second, i.e. the silent-loss
+    state the arm exists for goes unreported.
+    """
+    live_plus_dead_duplicate = _tree([
+        "async def f():",
+        f"    await {_OFF_LOOP}({_OFF_LOOP_POOL}, chain)",
+        "    if False:",
+        f"        await {_OFF_LOOP}({_OFF_LOOP_POOL}, chain)",
+    ])
+    # Two submissions, one live: nothing is reported (the duplicate runs nothing).
+    assert len(_submitted_names(live_plus_dead_duplicate)) == 2
+    assert _every_submission_dead_guarded(live_plus_dead_duplicate, {"chain"}) == {}
+
+    # The only submission dead-guarded: the silent-loss state, REPORTED.
+    every_dead = _tree([
+        "async def f():",
+        "    if False:",
+        f"        await {_OFF_LOOP}({_OFF_LOOP_POOL}, chain)",
+    ])
+    assert _every_submission_dead_guarded(every_dead, {"chain"}) == {
+        "chain": [(2, "False")]}
+
+    # Every submission dead — the guards of ALL of them are named, not just the
+    # first, so the message points at each place that must be un-disabled.
+    both_dead = _tree([
+        "async def f():",
+        "    if False:",
+        f"        await {_OFF_LOOP}({_OFF_LOOP_POOL}, chain)",
+        "    if 0:",
+        f"        await {_OFF_LOOP}({_OFF_LOOP_POOL}, chain)",
+    ])
+    assert _every_submission_dead_guarded(both_dead, {"chain"}) == {
+        "chain": [(2, "False"), (4, "0")]}
+
+
+@pytest.mark.parametrize(
+    ("lines", "expected"),
+    [
+        # ─── a `for` header: an always-empty iterable never enters the body ───
+        (["def f():", "    for _ in ():", "        g()"], ["()"]),
+        (["def f():", "    for _ in []:", "        g()"], ["[]"]),
+        (["async def f():", "    async for _ in set():", "        g()"], ["set()"]),
+        (["def f():", "    for _ in _xs:", "        g()"], []),
+        # ⛔ the `else` of a `for` whose iterable is empty STILL RUNS, so that
+        # branch is live and must not be reported (the `orelse` rule, for loops).
+        (["def f():", "    for _ in ():", "        pass", "    else:", "        g()"], []),
+        # ─── a comprehension: its iterables and `if` clauses filter the element ───
+        (["def f():", "    [g() for _ in ()]"], ["()"]),
+        (["def f():", "    [g() for _ in _xs if False]"], ["False"]),
+        (["def f():", "    [g() for _x in _xs for _y in ()]"], ["()"]),
+        (["def f():", "    [g() for _ in () for _y in _ys]"], ["()"]),
+        (["def f():", "    {k: g() for k in _xs if 1 == 2}"], ["1 == 2"]),
+        (["def f():", "    [g() for _ in _xs]"], []),
+        (["def f():", "    [g() for _ in _xs if _flag]"], []),
+    ],
+)
+def test_a_loop_header_or_comprehension_clause_is_graded_as_a_guard(
+    lines: list[str], expected: list[str],
+) -> None:
+    """`for _ in ():` and `[… for _ in ()]` are dead bodies, not blind spots.
+
+    ⛔ THE PIN THE REVIEW ASKED FOR (P2 at `343e7ce1`, measured): before this arm,
+    `_dead_guards` walked `iter_child_nodes` past every `for`/comprehension, so a
+    submission moved into `for _ in ():` — the same silent-loss state as
+    `while False:`, in the loop form a fixer writes when disabling a leg — stayed
+    GREEN while the docstring claimed "every shape a submission can hide under".
+    Deleting the `For`/`AsyncFor` branch or the comprehension branch reds the rows
+    above that expect a guard; the `_xs`/`_flag` rows are the negative controls
+    that keep an undecidable clause from being read as a polarity.
+    """
+    tree = _tree(lines)
+    assert [
+        source for _line, source in _dead_guards(tree, _call(tree, "g"))
+    ] == expected
 
 
 if __name__ == "__main__":  # pragma: no cover
