@@ -95,22 +95,22 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```text
-# 61 cases — the claim protocol, the capacity rule, the falsifier, 5 CROSS-LEG
-TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-61 passed
+# 69 cases — the claim protocol, the capacity rule, the falsifier, 7 CROSS-LEG
+uv run python tools/test_lane.py run -- tests/test_14350_drain_convergence.py -q
+69 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
-TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
+uv run python tools/test_lane.py run -- tests/test_capture_spool.py \
     tests/test_14350_drain_convergence.py tests/test_12483_12487_spool_integrity.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-760 passed
+768 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-314 pass / 0 fail
+317 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -292,13 +292,23 @@ matter, which is why each is fixed at the source and not restated:
 | **P2** the Pi leg's "a HEALTHY pass clears the recorded claim fact" test still named the mutation it cannot reach (`keep previous?.claim_unavailable` on the `attempted > 0` `ok` write — the spool is EMPTY, so `attempted === 0` and that arm never executes) | **fixed and PROVEN**: the comment now names the mutant that does red it — deleting the `summary.claimHeld && !summary.claimUnavailable` clearing block in `recordOutcome`. Applied that mutant and ran the row: RED (`actual: true, expected: undefined`); restored, green. Same unattributable-catch class cycle 9 corrected on this very test. |
 | **P2** the two new Pi-leg tests called `mkfifo` unguarded, so a win32 box (or one without the binary) THROWS instead of grading — one-leg regression against the pre-existing FIFO test beside them and against both Python twins | **fixed**: both now use the file's own guard (`if (process.platform === "win32") return;` then `try { execFileSync("mkfifo", …, { stdio: "ignore" }) } catch { return; }`), matching the pre-existing test verbatim. Behaviour unchanged on Linux — the 31 `#14350`-tagged Pi cases pass. |
 
+**Cycle 12** (a fresh-context reviewer at `e2d43ad3` — the head that integrated `origin/main`) —
+1 **P1**, 2 P2. Unlike cycles 9-11 this one found a real hole in the mechanism, and it is the
+PR's OWN headline invariant that it broke:
+
+| finding | disposition |
+|---|---|
+| **P1** the "durable" fact is erased by the TARGETED pass, which never takes the claim. `recordOutcome`/`_record_capture_status` cleared it on any `attempted > 0` write, and the most frequent such pass — `only_session_id`, the SessionEnd path and the store-sync replay — takes no claim by design, so it reported neither `claim_unavailable` nor `held_claim` and wrote a fresh `ok` record with NO claim field. One `tortoise session capture` on an obstructed box wiped the warning, on the SHARED `status.json`, so this leg silenced the Python leg's reader too | **fixed on both legs, as one rule**: only a pass that HELD the claim may clear it; every other write CARRIES IT FORWARD. The record is built and written ONCE at the tail (it used to be written at four call sites, which is what made the invariant a property of whichever arm ran), and the Pi leg's policy is exported as `applyClaimPolicy` so both legs drive the SAME matrix — row for row, in `test_the_claim_policy_agrees_on_every_summary_shape` (Python) and `the claim policy agrees between both legs on every summary shape` (Pi). Four new Python cases + three Pi cases; each verified RED under the arm it names, and the carry-forward arm's removal reds the targeted-pass case on both legs. |
+| **P2** `tools/measure_drain_convergence.py` failed OPEN: a run whose processes never reached their attempt reported `winners: 0`, `bounded: true`, `supported: true` — exit 0. The `BARREN` marker that says exactly this was parsed by nobody, and the tool had **no test at all** (`git grep measure_drain_convergence -- tests/` → 0 hits), so deleting the cycle-10 verdict gate redded nothing | **fixed**: `supported` is `bounded and barren == 0 and winners == 1`; `barren` is counted from each process's own stdout; `_no_verdict` covers all three ways of measuring nothing (unbounded, barren, no winner); and `winners == 2` stays a FINDING (exit 0) — folding it into "no verdict" would silence the harness in exactly the case it exists for. Four new cases, including the end-to-end `main()` exit code; deleting the gate reds two of them. |
+| **P2-minor** `tools/sdk_privatise.py:1654` stated `--repin`'s output as `(11903, 0a80b031…)` while the pin below it said `(11911, 3e92044b…)` — the note had been inserted MID-SENTENCE during the integration, splitting "`--check` prints an" from its own "observed digest ONLY on its failure path", and quoting a pre-merge pair in the block whose subject is that an unreproducible pair sends a reader to the wrong command | **fixed**: the sentence is restored, the note follows it, and it now names the pair `--repin` actually prints on this tree. Re-derived after the cycle-12 code change too: `(11911, "3e92044bab08cc3d")`, with `--check` exiting 0 and the row sets of `origin/main` and this tree diffed — EXACTLY ONE row differs, `recorded.update` 0 → 1. |
+
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `932d74a2…`, re-cut at every byte change: for the export-only test seam, for
-  the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
-  changes, and for the MERGE of the two — a merge is a byte set neither side
+  (capture half `c139da33…` at this head, re-cut at every byte change: for the export-only
+  test seam, for the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
+  changes, for cycle 12's claim-policy extraction, and for the MERGE of them — a merge is a byte set neither side
   hashed, so the digest is always derived from the merged tree; the read half moved
   `708b6a…`→`904d2742…` because its generation MARKER moved 32→33 with the pair)
   instead of

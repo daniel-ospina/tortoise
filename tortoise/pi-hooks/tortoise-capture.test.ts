@@ -8393,8 +8393,10 @@ test("#14350: a HEALTHY pass clears the recorded claim fact (no one-way latch)",
   // (measured — `pass 1 / fail 0` with the stale field kept on the `ok` write,
   // while the Python twin redded). It now drives a REAL pass.
   //
-  // MUTATION THAT REDS THIS: delete the `summary.claimHeld && !summary.claimUnavailable`
-  // clearing block in `recordOutcome`.
+  // MUTATION THAT REDS THIS: delete the `if (summary.claimHeld)` clearing arm of
+  // `applyClaimPolicy` (cycle 12 moved the clearing there: it is ONE exported policy
+  // for both legs now, not a block inside `recordOutcome`, and the mutation named here
+  // was re-aimed at where the code actually lives — #14480 review F1).
   // ⛔ NOT "keep `previous?.claim_unavailable` on the `ok` write": this spool is EMPTY
   // ON PURPOSE (see below), so `summary.attempted === 0`, so the `attempted > 0` `ok`
   // write NEVER EXECUTES and that mutant cannot reach the assertion below. Naming it
