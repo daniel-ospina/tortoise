@@ -846,8 +846,11 @@ def test_the_schema_resolves_without_the_repo_checkout(monkeypatch, tmp_path):
         # every later schema read in this shard.
         record_projection._release_schema_cache()
 
-    # The CHECKOUT still wins where it is complete: a migration edit must be
-    # read as edited, never as the copy an install happens to carry.
+    # The CHECKOUT still WINS at RESOLUTION time — it is what gets read ONCE and
+    # then served for the life of the process. ⛔ It is no longer a per-call
+    # freshness guarantee: since #4625 the resident schema is not re-read, so an
+    # edit to these files is seen only after `_release_schema_cache()`. The
+    # assertion below checks the RESOLUTION ORDER, which is all it ever checked.
     monkeypatch.setattr(record_projection, "REPO_ROOT", REPO_ROOT)
     assert record_projection._migrations_dir() == repo_dir
 
