@@ -220,8 +220,8 @@ answer, with the refutations executed rather than argued:
 
 1. **A payload-only emit writes NO journal record at all.** `_emit_event` returns before the JSONL
    half when it carries no `point`, no `id`, and no `turns` (`sdk.py:16259`, the `return None` under the
-   comment at `:16257`, contract restated in
-   `event_store.append_event`'s own docstring: *"a payload-only emit writes one with no JSONL record
+   comment at `:16257`, contract restated at `event_store.py:58` in its module docstring and again as a
+   comment at the append site (`:808`): *"a payload-only emit writes one with no JSONL record
    at all"*). This is not hypothetical: the turn hard-delete lane calls exactly that shape —
    `sdk._emit_event("PointRetracted", _deleted_point_payload(tid))` (`sdk.py:3831`) — and the
    surrounding comment states the split as a contract, *"Two stores, one meaning each"*.

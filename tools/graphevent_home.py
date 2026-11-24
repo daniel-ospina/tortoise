@@ -40,8 +40,8 @@ managed to read.
 see the two refusals `#13083` established from the code, which are properties
 of the PRODUCER and not of any tenant's data: `_emit_event` skips the journal
 entirely when a payload-only emit carries no `point`/`id`/`turns`
-(`sdk.py:16225-16226`), and the hard-delete lane deliberately writes `PointRetracted` to the store and
-`EntityMutated` to the journal (`sdk.py:3786-3801`, "two stores, one meaning
+(`sdk.py:16258-16259`), and the hard-delete lane deliberately writes `PointRetracted` to the store and
+`EntityMutated` to the journal (`sdk.py:3815-3831`, "two stores, one meaning
 each"). ``covered`` on a tenant therefore means "this tenant's history happens to
 be reproducible", never "the producers agree".
 
@@ -415,7 +415,7 @@ GRAPH_EVENT_TYPES = frozenset({
 #:
 #: ⛔ A MAPPED TYPE IS NOT COVERAGE. `PointRetracted` (store) and `EntityMutated`
 #: (journal) are the same removal announced to two surfaces with **different
-#: payload shapes** (`sdk.py:3786-3801`: *"Two stores, one meaning each"*), so the
+#: payload shapes** (`sdk.py:3815-3831`: *"Two stores, one meaning each"*), so the
 #: payload digests can never be compared across that pair. The mapping exists so
 #: the report says "the record carries this event under another name, and its ROW
 #: coverage is not comparable" instead of the false "the record has no such type",
