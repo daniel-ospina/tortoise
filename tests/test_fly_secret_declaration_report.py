@@ -881,3 +881,33 @@ def test_a_dispatched_dry_run_files_nothing(tmp_path):
     assert "issues --method POST" not in h.calls()
     assert "DRY RUN" in out
     assert "ALPHA_SECRET" in out, "a dry run must still show the finding"
+
+
+def test_a_report_tool_only_change_selects_core_so_this_guard_actually_runs():
+    """`tools/` is in `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS a tools-only path.
+
+    MEASURED before the `CORE_ALSO` entry: `--changed-files
+    tools/fly_secret_declaration_report.py` → no surface, and `select()` takes the
+    docs-only early return, so a change to the reporter would run NONE of these
+    tests. That is the fail-OPEN direction for this file in particular: its job is
+    to decide whether a human is told that a deploy is about to be refused, so the
+    diff most worth guarding is an edit to the code that makes that decision
+    (#1349/#3332/#3616 silent-drop class). Pinned here, in the file it protects.
+    """
+    from tools import ci_selection
+
+    manifest = ci_selection.load_manifest()
+    selection = ci_selection.select(
+        ["tools/fly_secret_declaration_report.py"], "pull_request", manifest
+    )
+    assert "core" in (selection.get("surfaces") or []), selection.get("surfaces")
+    files = selection.get("test_files")
+    # ⛔ NOT a bare `return`: a branch that asserts nothing cannot red anything.
+    assert files != "ALL" or selection.get("full") is True, (
+        "test_files == 'ALL' without full=True: an unscoped 'ALL' would make this pin vacuous"
+    )
+    if files != "ALL":
+        assert "test_fly_secret_declaration_report.py" in files, (
+            "a diff to tools/fly_secret_declaration_report.py no longer selects its own "
+            "pin — the `CORE_ALSO` entry was dropped or the prefix behaviour changed"
+        )

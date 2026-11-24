@@ -7786,6 +7786,19 @@ surfaces:
   # guard tests key presence); a ZERO row packs it at weight 0. Neither is a
   # substitute for the measured value (#4259 review).
   - test_fly_secret_drift.py
+  # #14574: the SCHEDULED reader of the same registry — an undeclared Fly secret
+  # used to be invisible until a deploy was attempted (measured 2026-11-21..24: ~2
+  # days and 75+ commits behind a frozen deploy). Registered `core` beside the
+  # guard it reports on (`test_fly_secret_drift.py`), because the subjects it
+  # guards are `.github/workflows/fly-secret-declaration-drift.yml` (which matches
+  # no `SOURCE_PATTERNS` row) and `tools/fly_secret_declaration_report.py` (a
+  # `tools/` path, which `_keep_changed` DROPS — the #12363 silent-drop class, so
+  # the tool also carries a `CORE_ALSO` entry). Without this row `--integrity`
+  # reds (`manifest drift: test_fly_secret_declaration_report.py`). Hermetic: the
+  # workflow is parsed as YAML, its `run:` bodies are executed against a stub `gh`,
+  # and the reporter's Fly read is the gate's own `FLY_SECRETS_FILE` fixture seam —
+  # no Fly call, no credential, no network.
+  - test_fly_secret_declaration_report.py
   # #10488: the consent bridge's key-fingerprint halves. Registered in `core` beside the other
   # deploy-time config guards (test_fly_secret_drift.py, test_fly_machines_guard.py,
   # test_deploy_workflow.py) because the defect it closes is the SAME class one provider along: a
