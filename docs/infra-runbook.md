@@ -4968,10 +4968,10 @@ The three states (`#13610` moved the default; every one of them is a product dec
 |---|---|---|---|
 | *unset* / blank / unrecognised (**DEFAULT**) | **armed** — the record answers where coverage verifies, the graph elsewhere | **kept, and created at the next setup if missing** — `arm_is_explicit()` is false, so the setup takes `main`'s create path (`projection._ensure_indexes`: *"keep an index found, create one that is missing"*), so a store is never left with neither an in-graph index nor a record leg, and a label with no index keeps `#4997`'s WARNING | the shipped default since `#13610`. A typo is *not* an operator statement, so it reads this row, not the rollback row |
 | **`0` / `false` / `no` / `off`** | **ROLLED BACK** — the graph branches answer the dense read exactly as they did before the move | the SAME index disposition as the row above (`arm_is_explicit()` is false on both): kept, and created if missing. ⛔ **The rollback is a READ-path statement, not an index statement** — nothing is dropped, and nothing stored is lost, because the graph write was retained while coverage was unverified | **the documented revert.** Take it when the record must not answer the dense read |
-| **`1` / `true` / `yes` / `on`** (explicit truthy, `env_truthy.TRUTHY`) | armed, exactly as the default row | ⛔ **RETIRED at the next setup** — an existing `Point.embedding` HNSW index is DROPPED and never re-created | only when the record is expected to serve the dense read for the whole corpus. This is the one posture a **typo cannot** produce, and the one that changes a store's shape |
+| **`1` / `true` / `yes` / `on`** (explicit truthy, `env_truthy.TRUTHY`) | armed, exactly as the default row | ⛔ **RETIRED at the next setup** — an existing `Point.embedding` HNSW index is DROPPED and never re-created — **only with a record DSN armed**: the predicate is `VECTOR_INDEX_RETIRED ∧ record_dsn() ∧ arm_is_explicit()` (`projection.vector_index_retired()`), so on a DSN-less box `=1` drops **nothing** | only when the record is expected to serve the dense read for the whole corpus. This is the one posture a **typo cannot** produce, and the one that changes a store's shape |
 
 ```bash
-fly secrets set TORTOISE_RECORD_VECTOR_LEG=1 -a tortoise-y4mjjq     # explicit arm (retires the in-graph index at setup)
+fly secrets set TORTOISE_RECORD_VECTOR_LEG=1 -a tortoise-y4mjjq     # explicit arm (retires the in-graph index at setup — needs TORTOISE_RECORD_DSN armed)
 fly secrets set TORTOISE_RECORD_VECTOR_LEG=0 -a tortoise-y4mjjq     # THE ROLLBACK — the graph answers the dense read again
 fly secrets unset TORTOISE_RECORD_VECTOR_LEG -a tortoise-y4mjjq     # back to the shipped default (armed for the read, index KEPT)
 ```
@@ -4982,14 +4982,22 @@ while `=0` is what actually puts the dense read back on the graph. ⚠️ **Neit
 retires anything, and neither one leaves a store index-less**: both take `arm_is_explicit()`'s false
 branch, which keeps an index it finds **and creates one it is missing** — that is `main`'s posture and
 it is deliberate (`projection._ensure_indexes`'s *"keep an index found, create one that is missing"*).
-The index DISPOSITION changes on the explicit-truthy row only.
+The index DISPOSITION changes on the explicit-truthy row only — and even there it
+needs **both** other conjuncts: `vector_index_retired()` asks `VECTOR_INDEX_RETIRED`
+**and** `record_dsn()` **and** `arm_is_explicit()`, so an explicit `=1` with no record
+DSN retires nothing (`docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md`
+states the same: *"Both conditions are asked by `projection.vector_index_retired()`"* —
+quoted by symbol, not by line, per that doc's own rule).
 
 ⛔ **Arming is an OWNER action.** Nothing in the code sets it, and **no deploy sets it**. Its
 provenance is declared `fly-only:#7879` in `.github/scripts/fly-managed-secrets.txt`, which is why
 the fail-closed Fly secret-provenance gate no longer reports it as `UNDECLARED`:
 
-- ⛔ **Do not "fix" it by declaring `gh-secret:` / `fly-toml-env`, or by adding an
-  `ARGS+=(TORTOISE_RECORD_VECTOR_LEG=…)` line to `deploy-hosted.yml`.** Each of those makes the
+- ⛔ **Do not "fix" it by declaring `gh-secret:` / `fly-toml-env`, or by assigning it anywhere in the deploy payload — an
+  `ARGS+=(TORTOISE_RECORD_VECTOR_LEG=…)` line in `deploy-hosted.yml`, or an `export TORTOISE_RECORD_VECTOR_LEG=…` in
+  `entrypoint.sh`** (the image's `ENTRYPOINT`: Fly injects the secret as env at boot and `entrypoint.sh` ends in
+  `exec "$@"`, so an `export` there overrides it for the uvicorn process — with `Dockerfile.hosted`'s entrypoint
+  guard silent about it). Each of those makes the
   deploy the managing source, so the deploy would state a value on every run: `=1` retires in-graph
   indexes as a side effect of a deploy, `=0` rolls the leg back — and because `fly secrets set` is
   ADDITIVE, a value the deploy states silently re-arms an operator's rollback on the next deploy.

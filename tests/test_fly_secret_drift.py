@@ -118,6 +118,22 @@ EMPTY_LEDGER = _fixture("no-ledger.txt", "# empty\n")
 REAL_MANIFEST = REPO_ROOT / ".github" / "scripts" / "fly-managed-secrets.txt"
 REAL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 REAL_FLY_TOML = REPO_ROOT / "fly.toml"
+#: The image's ENTRYPOINT script — a provisioning surface for any env-read switch,
+#: and one NO gate reads (`check-fly-secret-drift.py` never opens it, and
+#: `.ci-checks/check-entrypoint-guards.sh` has no closed set of permitted exports).
+#: `Dockerfile.hosted` makes it the process that starts uvicorn
+#: (`ENTRYPOINT ["/entrypoint.sh"]`) and it ends in `exec "$@"`, so every `export`
+#: it makes reaches the process where `record_vector.arm_is_explicit()` reads
+#: `os.environ`. Fly injects secrets as env at BOOT, before this script runs, so a
+#: script `export` overrides them for its children (#14563 review F1).
+REAL_ENTRYPOINT = REPO_ROOT / "entrypoint.sh"
+#: The surfaces a `fly-only:` lever must not be ASSIGNED by. The deploy payload ACROSS
+#: BOTH surfaces: the workflow's steps, and the image's entrypoint script. The
+#: repo's own census of "is this switch provisioned anywhere?" names a third
+#: member (`fly.toml`) — that one is read as `[env]` KEYS by
+#: `module.fly_toml_env_keys` in each lever's own assert, because there an
+#: assignment IS the declaration and the gate refuses it directly.
+FLY_ONLY_LEVER_PAYLOAD_SURFACES = (REAL_WORKFLOW, REAL_ENTRYPOINT)
 #: The orientation table an operator reads before §2's rotation recipes. Its
 #: GitHub Actions column is a CLAIM about the manifest's `gh-secret:` names.
 REAL_RUNBOOK = REPO_ROOT / "docs" / "infra-runbook.md"
@@ -232,6 +248,39 @@ def _referenced_secret_names(workflow: Path) -> set[str]:
     satisfied for the fixture to mean what it says.
     """
     return set(re.findall(r"secrets\.([A-Za-z0-9_]+)", workflow.read_text()))
+
+
+def _env_assignment_sites(name: str, text: str) -> list[str]:
+    r"""Lines of `text` that ASSIGN `name` (`export NAME=…`, `NAME=…`, `ARGS+=(NAME=…)`).
+
+    ⛔ COMMENTS STRIPPED, with the gate's own rule (`(?:^|\s)#`), because both surfaces
+    document operator commands in exactly this shape (`#   fly secrets set NAME=…`,
+    `# REGISTRY_STREAM_KEY is deliberately NOT synced`); a comment-blind scan would red
+    a correct documentation edit and blame it for assigning the value.
+
+    ⛔ The NAME, not a value: a second site at another value is the same defect, so this
+    filters on the name alone.
+    """
+    return [
+        line
+        for line in text.splitlines()
+        if re.search(rf"\b{name}=", re.split(r"(?:^|\s)#", line)[0])
+    ]
+
+
+def _lever_payload_sites(
+    name: str, surfaces: tuple[Path, ...] = FLY_ONLY_LEVER_PAYLOAD_SURFACES
+) -> list[str]:
+    """Every `<surface>: <line>` that assigns `name`, across EVERY payload surface.
+
+    One reader for every `fly-only:` lever, so no lever can end up guarded on two of
+    the three surfaces the repo's own census names (#14563 review F1).
+    """
+    return [
+        f"{surface.name}: {line}"
+        for surface in surfaces
+        for line in _env_assignment_sites(name, surface.read_text())
+    ]
 
 
 def _run_env(
@@ -2116,6 +2165,14 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     assert "REGISTRY_STREAM_KEY" not in workflow_refs, (
         "REGISTRY_STREAM_KEY must stay OUT of the GitHub trust boundary (#661)"
     )
+    # ⛔ The PAYLOAD across BOTH surfaces, not just `secrets.…` references: neither a
+    # `NAME=` literal in `deploy-hosted.yml` nor an `export NAME=…` in `entrypoint.sh`
+    # ever appears as `secrets.NAME`, and both override the operator-set secret for
+    # everything downstream (#14563 review F1).
+    assert not _lever_payload_sites("REGISTRY_STREAM_KEY"), (
+        "the deploy ASSIGNS REGISTRY_STREAM_KEY — the value is set out-of-band by the "
+        f"operator and no deploy may state it (#661): {_lever_payload_sites('REGISTRY_STREAM_KEY')}"
+    )
     # ── #13209: the hosted READ-MODE lever, the second decision-backed exception ─
     # `TORTOISE_RECORD_SERVE` is armed by an operator (`flyctl secrets set`) and
     # reverted by the same lever (`flyctl secrets unset`) — the runbook's arming
@@ -2149,6 +2206,16 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # files and a future divergence in EITHER should red HERE — do not read it as
     # independent evidence of a second surface.
     assert record_serve not in module.workflow_secret_refs(REAL_WORKFLOW.read_text())
+    # ⛔ This one is NOT a belt: an `ARGS+=(TORTOISE_RECORD_SERVE=…)` literal in the
+    # deploy payload, and an `export TORTOISE_RECORD_SERVE=…` in `entrypoint.sh`, are
+    # both invisible to every reader above (no `secrets.X` reference, and no gate reads
+    # the entrypoint), and both make the deploy the managing source — the ruling
+    # reversed (#13209, #14563 review F1).
+    assert not _lever_payload_sites(record_serve), (
+        "the deploy ASSIGNS TORTOISE_RECORD_SERVE, so it is no longer out-of-band — "
+        "arming is an operator action and no deploy sets it (#13209): "
+        f"{_lever_payload_sites(record_serve)}"
+    )
     assert record_serve not in env_keys, (
         "TORTOISE_RECORD_SERVE is versioned in fly.toml [env], so it is NOT "
         "out-of-band any more — REVERT the [env] entry: the `fly-only:` "
@@ -2189,21 +2256,20 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         "declaration IS the recorded decision (#7879), and `fly-toml-env` would "
         "re-introduce a deploy-set value"
     )
-    # ⛔ The PAYLOAD, not `secrets.…` references: an `ARGS+=(NAME=…)` literal never
-    # appears as `secrets.NAME`, so `workflow_refs` alone cannot see the one edit
-    # that most directly reverses this declaration. Filter on the name, not on a
-    # value — a second site at another value is the same defect.
-    # ⛔ COMMENTS STRIPPED, with the gate's own rule (`(?:^|\s)#`), because
-    # `deploy-hosted.yml` documents operator commands in exactly this shape
-    # (`#   fly secrets set REGISTRY_STREAM_KEY=…`, `# … MOCK=1`); a comment-blind
-    # scan would red a correct documentation edit and blame it for assigning the
-    # value.
-    payload_sites = [
-        line for line in REAL_WORKFLOW.read_text().splitlines()
-        if re.search(rf"\b{dense_leg}=", re.split(r"(?:^|\s)#", line)[0])
-    ]
+    # ⛔ The PAYLOAD across BOTH surfaces, not `secrets.…` references: an
+    # `ARGS+=(NAME=…)` literal never appears as `secrets.NAME`, so `workflow_refs`
+    # alone cannot see the one edit that most directly reverses this declaration — and
+    # `entrypoint.sh` carries the exact idiom (`entrypoint.sh:386-387` already does
+    # `export TORTOISE_VALUE_GATE="${TORTOISE_VALUE_GATE:-1}"`), which NOTHING in this
+    # repo's gates reads. `export TORTOISE_RECORD_VECTOR_LEG="${…:-1}"` there converts
+    # the documented DEFAULT into an EXPLICIT arm, so `arm_is_explicit()` turns true
+    # with every check green and `_ensure_indexes` DROPS the in-graph HNSW index at
+    # every setup (#14563 review F1: the #4126 class, reached through the one surface
+    # the registry cannot see).
+    payload_sites = _lever_payload_sites(dense_leg)
     assert not payload_sites, (
-        "deploy-hosted.yml now ASSIGNS TORTOISE_RECORD_VECTOR_LEG, so the deploy "
+        "the deploy ASSIGNS TORTOISE_RECORD_VECTOR_LEG (deploy-hosted.yml or "
+        "entrypoint.sh), so the deploy "
         "states a product decision on every run (an explicit `1` retires in-graph "
         "indexes, `0` rolls the dense leg back) and `flycli secrets set`'s additive "
         f"semantics silently re-arm an operator's rollback: {payload_sites}. "
@@ -2245,6 +2311,47 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # check). The day this entry leaves `open_route_b` this asserts 0 — it does not
     # happen by itself.
     assert r.returncode == (1 if stale else 0), r.stdout + r.stderr
+
+
+def test_the_fly_only_payload_scan_covers_the_entrypoint_and_strips_comments(tmp_path):
+    """#14563 review F1: the pre-fix scan read ONE surface and was blind to `entrypoint.sh`.
+
+    The mutant is the plausible "helpful" edit the finding names — the exact idiom
+    `entrypoint.sh:386-387` already uses two screens above where a lane would add it:
+
+        export TORTOISE_RECORD_VECTOR_LEG="${TORTOISE_RECORD_VECTOR_LEG:-1}"
+
+    It converts the documented DEFAULT (unset → armed for the read, in-graph index
+    KEPT) into an EXPLICIT arm, so `arm_is_explicit()` turns true and `_ensure_indexes`
+    DROPS the in-graph HNSW index at every setup — with every other check green.
+
+    Both directions are pinned: the multi-surface scan SEES it, and the single-surface
+    scan this file used before the fix (the CONTROL) does not — so the test fails on the
+    pre-fix code rather than merely asserting that some scan exists.
+    """
+    name = "TORTOISE_RECORD_VECTOR_LEG"
+    mutant = f'export {name}="${{{name}:-1}}"'
+    workflow = tmp_path / "deploy-hosted.yml"
+    # The comment half: a documented operator command is NOT an assignment, and the
+    # gate's own comment grammar (`(?:^|\s)#`) is what tells them apart.
+    workflow.write_text(f"#   fly secrets set {name}=1\n")
+    entrypoint = tmp_path / "entrypoint.sh"
+    entrypoint.write_text(mutant + "\n")
+
+    assert _lever_payload_sites(name, (workflow, entrypoint)) == [
+        f"entrypoint.sh: {mutant}"
+    ]
+    # CONTROL — the pre-fix reader (workflow only) is BLIND to the mutant. If this ever
+    # starts passing, the surfaces tuple is no longer what makes the scan work and the
+    # assert above has stopped proving anything about `entrypoint.sh`.
+    assert _lever_payload_sites(name, (workflow,)) == []
+    # The wiring pin: the production tuple is what every `fly-only:` assert above calls.
+    assert REAL_ENTRYPOINT in FLY_ONLY_LEVER_PAYLOAD_SURFACES, (
+        "the payload scan dropped entrypoint.sh — it is what `Dockerfile.hosted` runs as "
+        "ENTRYPOINT and what `exec \"$@\"` propagates into the uvicorn process, so an "
+        "`export` there reaches `arm_is_explicit()` with no gate red (#14563 review F1)"
+    )
+    assert REAL_ENTRYPOINT.exists()
 
 
 # ── The #13674 line citations (#13814) ───────────────────────────────────────
