@@ -253,7 +253,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2032 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2046 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -361,6 +361,10 @@ def _residue_block() -> str:
     the movement is `-7` and the figure above is RE-MEASURED at 2032 rather than carried from the
     fold's reading. The re-pin note that records it is `#:` prose INSIDE this run, which is why
     the extent moved with the pair here instead of only with a merge,
+    — and the `#14560` re-pin note (PR #14572: a 2-ROW RISE, the direction this arm exists to
+    catch, with both rows named — `tests/test_14560_operator_vectors.py:118` and `:120`) appended
+    14 `#:` lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED on this tree at
+    2046 (2032 + those 14) rather than adjusted by arithmetic on the fold's reading,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,

@@ -1044,6 +1044,28 @@ def _require_served_restore_labels(
 #: stores, and an ungated restore is a writer that puts 37k vectors back on the next DR.
 _GATED_RESTORE_LABELS: tuple[str, ...] = ("Object", "Subject", "Event", "Source", "Point")
 
+#: Gated labels whose restore drop is HELD: their counters may keep the vector, but may
+#: not yet drop it (`#14560` review F5).
+#:
+#: ⛔ THE COUNTERS ARE AGGREGATES AND THE DELETE IS PER ROW. `#5004` forbids re-encoding
+#: a dropped restored vector, so the only sound evidence for a DELETE is "the record
+#: holds THIS row" — the PER-ID ask, which is `#13971`'s remaining work (stated at
+#: `projection/entities.py::_derived_mirror_required`: "the gate stays where it is until
+#: it lands, because the restore is the one writer whose mistake cannot be repaired
+#: afterwards"). An aggregate `record_vectors >= graph_vectors` does not prove it, which
+#: is exactly why `require_substantive` exists one level up — and it is ALSO why `:Point`
+#: is here: `#14560` made `operator`'s denominator kind-aware, so BOTH of `:Point`'s
+#: counters can now answer stop on a strong aggregate for the first time, and the label
+#: whose ~39.6k vectors are the whole reason the gate exists is not the place to open a
+#: per-row delete on aggregate evidence.
+#:
+#: ⚠️ THIS IS NOT A REVERT OF `#13971`'s GATING: the label stays in
+#: :data:`_GATED_RESTORE_LABELS`, so the strip's own writer census still asks and the
+#: strip's counterweight is untouched. Removing a label from this set
+#: is the deliberate act that follows `#13971`. It costs bytes on a rare restore; the
+#: opposite error costs the vector.
+_RESTORE_DROP_HELD: frozenset[str] = frozenset({"Point"})
+
 
 def _gated_labels_of(node_labels) -> list[str]:
     """The gated labels a restored node actually carries (order-stable, deduped)."""
@@ -1075,6 +1097,15 @@ def _restore_retires_vector(node_labels) -> bool:
     denominator was its parent `:Point` label, so that conjunct could never answer stop.
     The denominator is kind-aware now (which is what lets the strip's `:Point` gate open at
     all), so the door states the rule it actually needs.
+
+    ⛔ AND `:Point`'S DROP IS HELD ANYWAY (:data:`_RESTORE_DROP_HELD`, `#14560` review
+    F5). `require_substantive` closes the VACUOUS aggregate; the SUFFICIENT one is still
+    an aggregate, and it now reaches `:Point` for the first time — so the label the whole
+    gate exists for keeps its copy until `#13971`'s per-ID ask can answer about the row
+    the restore would delete. ⚠️ THE HOLD IS THE SCOPE STATEMENT: before `#14560`,
+    `:Point` never retired on this door because a DIFFERENT population was mis-counted,
+    which is an accident rather than a rule; the hold makes the same outcome deliberate
+    and says when it may be lifted.
     """
     from tortoise.projection.entities import _derived_mirror_required
 
@@ -1101,8 +1132,15 @@ def _restore_retires_vector(node_labels) -> bool:
         return False
     # `:Point` is ONE label serving TWO entity types (`point`, `operator`), so — exactly
     # like `:Source` — the vector may go only when BOTH counters answer stop (`#13971`).
-    if "Point" in node_labels and (_required("point") or _required("operator")):
-        return False
+    # ⛔ AND NEITHER ANSWER IS ACTED ON YET: `:Point` is HELD (`#14560` review F5), so the
+    # arm keeps the copy whatever the two aggregates say. Lifting the hold is deleting
+    # `"Point"` from `_RESTORE_DROP_HELD`, which is `#13971`'s call to make — the
+    # two-counter expression below is kept live so that lift is a one-line act.
+    if "Point" in node_labels:
+        if "Point" in _RESTORE_DROP_HELD:
+            return False
+        if _required("point") or _required("operator"):
+            return False
     return bool(_gated_labels_of(node_labels))
 
 

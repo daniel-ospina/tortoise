@@ -960,6 +960,13 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
     both = _dump({"dump_id": 1, "labels": ["Object", "Point"],
                   "props": {"id": "pt-13826-co", "content": "x",
                             "embedding": list(VEC)}})
+    # ⛔ THE HOLD IS LIFTED *HERE ONLY*, so the two-counter conjunction stays GRADED
+    # (`#14560` review F5). `:Point`'s restore drop is HELD (`hosted_backup._RESTORE_DROP_HELD`,
+    # `#13971`'s per-ID ask is outstanding), so with the real set every arm below would keep
+    # the vector for the WRONG reason and the two `keep=` arms would stop discriminating at
+    # all. The hold itself is asserted at the end of this arm, on the real set.
+    import tortoise.hosted_backup as _hb
+    monkeypatch.setattr(_hb, "_RESTORE_DROP_HELD", frozenset())
     _gate_map(monkeypatch, keep={"point"})
     result = restore_graph(proj.g, both)
     assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is not None, (
@@ -984,6 +991,20 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
         "both `:Point` halves said stop and the restore kept the graph vector")
     assert result["retired_vectors"] == 1, result
     assert result["retired_vector_labels"] == ["Object", "Point"], result
+
+    # ⛔ AND THE HOLD, ON THE REAL SET (`#14560` review F5): the SAME dump and the SAME
+    # both-stop answer, with `_RESTORE_DROP_HELD` as it ships, must KEEP the vector. This is
+    # the arm that reds if the hold is lifted without `#13971`'s per-ID ask — and it is the
+    # direction `#5004` (a dropped restored vector cannot be re-encoded) makes mandatory.
+    monkeypatch.undo()
+    _gate_map(monkeypatch, keep={""})
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    result = restore_graph(proj.g, both)
+    assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is not None, (
+        "the `:Point` restore drop is HELD until `#13971`'s per-ID ask lands — an aggregate "
+        "`record_vectors >= graph_vectors` is not evidence about the row being deleted, and "
+        "`#5004` forbids re-encoding what is dropped")
+    assert "retired_vectors" not in result, result
 
 
 def test_the_completeness_clause_asks_the_gate(sdk, monkeypatch, tmp_path):

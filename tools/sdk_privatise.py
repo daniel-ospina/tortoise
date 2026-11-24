@@ -2142,7 +2142,21 @@ SWEEP_NAMES = 66
 #: than left red because that PR moves the very tree this pin grades, and `surface-guard` is a
 #: code-measuring check on the PR's EVALUATED tree that the land rail refuses to merge red,
 #: required or not (`scripts/admin-merge.sh`, "the PR's evaluated-tree surface BLOCKS").
-SWEEP_RESIDUE = (11903, "1fb861e2c8163aec")
+#:
+#: ⛔ RE-PINNED UP 11903 -> 11905 ON `#14560` (PR #14572), AND THE 2 IS ATTRIBUTED ROW BY ROW.
+#: This is the RISING direction — the one this arm exists to catch — so the rows are named rather
+#: than waved through. Measured with this module's own `edits_for` on the PR tree: the only two
+#: untyped `.query` receivers the diff adds are `tests/test_14560_operator_vectors.py:118`
+#: (`whole = g.query(...)`) and `:120` (`kinded = g.query(...)`), both on
+#: `g = sdk._get_proj().g` — the projection's own handle, which is exactly the untyped shape a
+#: typed-reference count cannot see, and deliberate here (the case is MEASURING the graph the
+#: production path writes). 11903 + 2 = 11905, the digest moved with the count, and no other file
+#: in the PR touches a `.query`/`.update`/`.delete` receiver: the tool's `--repin` on this tree
+#: prints **(11905, "46db7b67742913cf")** and `--check` exits 0 on it. ⚠️ Without the re-pin,
+#: `surface-guard` reds where it is green on `main` — measured
+#: (`observed: (11905, …)` / `pinned: (11903, …)`), and it is in `python-ci-gate.needs`, so it reds
+#: the required aggregate.
+SWEEP_RESIDUE = (11905, "46db7b67742913cf")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
