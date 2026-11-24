@@ -155,22 +155,23 @@ version: 1
 # at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — beside the two rows #14371/#14186 registered before it)
 # the verb packs nine shards at 837.3 s (a, b, c, d, e, g, h, j, k) and two at 837.2 s (f, i), so
 # `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
+# `148dece319`, whose pool already carries #14423's `test_14350_drain_convergence.py`, #14220's
+# `test_14186_embedder_seam_batching.py`, #14038's `test_13998_capacity_notice.py`, #14429's
+# `tests/test_spool_drain_rehearsal.py` and #14371's `test_14371_offline_embed_json.py`) this PR's
+# `core` registration — `tests/test_4625_schema_reads_off_write_path.py` below, at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT` — is the ONLY `fast_pool()` addition, and the verb packs seven
+# shards at 837.5 s (a, c–e, i–k) and four at 837.4 s (b, f–h), so
+# `ceil(837.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE, which is the
 # point of quoting the names: a carried figure and a re-derived one differ in the SET, not in the
-# minute, and the minute has stood at 28 m across every reading of this pool while the seconds
-# moved under it (835.5 → 837.3 s). So NO arithmetic on the minute can catch a carried figure —
-# only the `est_seconds` partition can, which is why the sentence is GRADED below instead of
-# trusted. That map is the union of both parents' registrations plus
-# `tests/test_13998_capacity_notice.py`, landed on `main` with #14038, plus this PR's
-# `tests/test_spool_drain_rehearsal.py` (#14429, listed in shard k) — each at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`, and it matters only because it sits one main fold from rounding again.
-# Re-run `--emit-push-matrix`; never carry the last revision's minute.
-# agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
-# reading of this pool from 835.5 s to 837.3 s while the SECONDS moved under it, so NO arithmetic
-# on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
-# sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a
-# fast file is registered — the packer is greedy, so a seventh file re-packs every bin — which is
+# minute, and the minute has stood at 28 m across every reading of this pool from 835.5 s to
+# 837.5 s while the SECONDS moved under it. So NO arithmetic on the minute can catch a carried
+# figure — only the `est_seconds` partition can, which is why the sentence is GRADED below instead
+# of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered — the
+# packer is greedy, so ONE more 2.0 s row re-packed every bin here: `main`'s own emission partitions
+# nine-at-837.3 / two-at-837.2 and this tree partitions seven-at-837.5 / four-at-837.4 — which is
 # why the names are stated and graded, not only the seconds. Re-run `--emit-push-matrix` on the
 # merged tree; never carry the last revision's minute, seconds, or split.
 #
