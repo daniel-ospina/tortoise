@@ -1208,6 +1208,26 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             stores=NO_LIVE_VECTOR,  # renders the clause; the CALLER's `MERGE` names the label
         ),
     ),
+    (
+        # ⛔ THE `#14220` LANDING SHIPPED THIS WRITER WITH NO DECLARATION (#14483). The census's
+        # discovery is deliberately OVER-INCLUSIVE at the NAME level and says so, so it credits
+        # any function that produces a vector; a seam carrying a PARSER therefore arrives with no
+        # class at all, and DoD row 2 is held at PARTIAL while a writer's class and label are
+        # unknown. Declared here rather than teaching the census to guess between a parser and a
+        # writer — the register is the product's home for "named, accepted exception" (#11085).
+        "tortoise.embed_seam::_external_rows",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/embed_seam.py::_external_rows` PICKS THE VECTOR TABLE out of an external "
+            "embedding provider's answer and returns `list[list[float]]` — a response PARSER. "
+            "Its own body issues no store and names no graph label: every row it returns is "
+            "handed back to `ExternalBacking.encode`, and from there to the seam's caller, so "
+            "the value never reaches a graph write from this function (#14220 landed it as a "
+            "writer with no declaration; #14483 is that red)",
+            "#14483",
+            stores=NO_LIVE_VECTOR,  # its only assignment is the return list it builds
+        ),
+    ),
 )
 
 #: The register, frozen. `module::symbol` → :class:`WriterClass`; the same key the instrument uses.

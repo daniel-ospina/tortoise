@@ -80,41 +80,52 @@ version: 1
 # cut or carrying either side's figure — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) the verb packs five shards at 837.7 s (a, c, d, e, k) and six at
-# 837.6 s (b, f, g, h, i, j), so
-# `ceil(837.7/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# `DEFAULT_FAST_WEIGHT`) the verb packs three shards at 837.9 s (a, c, k) and eight at
+# 837.8 s (b, d, e, f, g, h, i, j) — ⛔ MEASURED ON THIS BRANCH'S HEAD, which folded `main` at
+# `2f38053601` and adds this PR's own registration; that parent alone emits five/six at
+# 837.7/837.6 and `da4b76a5851c` a seven/four at 837.5/837.4, so the split quoted here belongs
+# to no `main` sha and the attribution is not allowed to imply one — so
+# `ceil(837.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
 # differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
 # SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
-# 835.5 s to 837.7 s while the seconds moved under it. So NO arithmetic on the minute can catch a
+# 835.5 s to 837.9 s while the seconds moved under it. So NO arithmetic on the minute can catch a
 # carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
 # instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
 # `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
 # nine/two split this branch last derived (837.3/837.2) with the minute unmoved, and #14423's
-# `tests/test_14350_drain_convergence.py` sits in shard d. That map is the union of both parents'
+# `tests/test_14350_drain_convergence.py` sits in shard e at this head. That map is the union of both parents'
 # registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
-# (`--emit-push-matrix` lists it in shard i) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
+# (`--emit-push-matrix` lists it in shard j at this head) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
 # matters only because it sits one main fold from rounding again. #14407 registered
 # `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
 # `test_notify`), and that registration is part of the partition stated above — the minute did not
-# move (28 m either way), which is exactly why the SECONDS are the graded claim. Re-run
+# move (28 m either way), which is exactly why the SECONDS are the graded claim. ⛔ #13722's
+# `tests/test_13722_stamp_chain_off_loop.py` (dual `api`/`core`) is the registration that moved
+# THIS reading's NAME SETS off the five/six split the parent map emits — `d` AND `e` left the worst
+# bin and the eight below absorbed both — while the minute stayed at 28 m, which is again why the graded
+# claim is the set and not the minute. Its `durations` row states the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: a file a PR ADDS cannot carry a junit reading yet),
+# NOT the hand-picked sub-default weight the row first carried — an unmeasured figure re-packs the
+# bins and so moves THIS graded claim on a number no run measured, which is the deviation the
+# review round on this PR caught. Re-run
 # `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or split.
 # ⛔ AND THESE PARAGRAPHS ARE HISTORY, NOT A SECOND CLAIM. Every fold of `origin/main` re-derived
 # this emission and left its own reading behind, so the block accumulated five stacked restatements
 # of the same sentence — and a restatement the guard reads as `<est … stated twice>` is how a block
 # ends up claiming two partitions while looking like one. The graded clause is the ONE in the
-# paragraph above, measured on the tree that SHIPS (`main` at `da4b76a5851c`). What is kept here is
+# paragraph above, measured on THIS BRANCH'S HEAD. What is kept here is
 # only what a reader cannot get from that clause: which registrations `main` has landed at the flat
 # 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's `tests/test_14371_offline_embed_json.py`, #14434's
 # `tests/test_7879_record_chain.py`, #14220's `tests/test_14186_embedder_seam_batching.py`, #14423's
 # `tests/test_14350_drain_convergence.py`, #14038's `tests/test_13998_capacity_notice.py` and
-# #14429's `tests/test_spool_drain_rehearsal.py` (listed in shard `i`) — FIVE of them on top of
+# #14429's `tests/test_spool_drain_rehearsal.py` (listed in shard `j` at this head) — FIVE of them on top of
 # #14038's row, which the 836.4 s baseline below already counts (measured: that row is in shard c at
 # `4993fa08`, so the baseline's total includes it), and why every one of them moves the split.
 # `test_notify`) — the `core` row is registered in its own right, so the shard letter is MEASURED
-# (shard `c` at this head) rather than inferred from `test_notify`'s (shard `e`): a `core` neighbour
+# (shard `i` at this head) rather than inferred from `test_notify`'s (shard `g`): a `core` neighbour
 # sits in a different bin because the packer is greedy, and every shard letter in this block is a
 # `push_legs()` reading at the head it names, not a placement inherited from a neighbouring row.
 # The minute did not move (28 m either way), which is exactly why the SECONDS are the graded claim.
@@ -123,7 +134,7 @@ version: 1
 #
 # ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
 # figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
-# reading of this pool while the seconds moved under it (835.5 -> 837.7 s). So NO arithmetic on the
+# reading of this pool while the seconds moved under it (835.5 -> 837.9 s). So NO arithmetic on the
 # minute can catch a carried figure - only the `est_seconds` partition can, which is why the
 # sentence is GRADED above instead of trusted.
 #
@@ -138,17 +149,16 @@ version: 1
 #
 # That pool is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`,
 # landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
-# shard `i`) - each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
-# shard `i`) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
-# one main fold from rounding again.
+# shard `j` at this head) - each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only
+# because it sits one main fold from rounding again.
 # The registrations this block's own reading counts are the ones `main` has landed at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`, each with the shard `push_legs()` puts it in AT THE HEAD NAMED (a letter is
 # a measurement, never an inference from a neighbouring row): #14409's
-# `tests/test_14371_offline_embed_json.py` (shard k), #14434's `tests/test_7879_record_chain.py`
-# (shard i), #14220's `tests/test_14186_embedder_seam_batching.py` (shard f), #14423's
-# `tests/test_14350_drain_convergence.py` (shard d), #14038's
-# `tests/test_13998_capacity_notice.py` (shard i) and #14429's
-# `tests/test_spool_drain_rehearsal.py` (shard i) - FIVE of them on top of #14038's row, which the
+# `tests/test_14371_offline_embed_json.py` (shard c), #14434's `tests/test_7879_record_chain.py`
+# (shard j), #14220's `tests/test_14186_embedder_seam_batching.py` (shard g), #14423's
+# `tests/test_14350_drain_convergence.py` (shard e), #14038's
+# `tests/test_13998_capacity_notice.py` (shard j) and #14429's
+# `tests/test_spool_drain_rehearsal.py` (shard j) - FIVE of them on top of #14038's row, which the
 # 836.4 s baseline below
 # already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
 # it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
@@ -334,6 +344,14 @@ surfaces:
   # MEASURED, same selector, pre-fix. The `core` row is what covers the
   # `sentry.py`-only diff, and that is the only gap it closes.
   - test_13665_sentry_init_off_loop.py
+  # #13722: the capture provenance stamp chain's per-id record writes must run
+  # OFF the event loop. Dual-registered for the reason the off-loop guards above
+  # are: the handler that owns the chain is `tortoise/hosted_api.py`, an EXACT
+  # `api` SOURCE_PATTERNS match that REPLACES the `core` fallback — so without
+  # THIS row the pin would be asleep on the only diff that can revert the fix
+  # (`--changed-files tortoise/hosted_api.py` -> `['api','onboarding']`), and
+  # the `core` row below covers a change confined to this test file.
+  - test_13722_stamp_chain_off_loop.py
   # #10892: the served-request liveness surface. Dual-registered for the reason
   # the hosted_api.py guards above are — `GET /liveness` and its counter live in
   # `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match that REPLACES
@@ -6631,6 +6649,7 @@ surfaces:
   # exist for: a diff touching nothing but this test file must still run it,
   # and `--integrity` refuses any test file the manifest does not name.
   - test_13722_projection_open_round_trips.py
+  - test_13722_stamp_chain_off_loop.py  # #13722: stamp chain off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   # #10892: the OTHER half of the served-liveness pair (the `api` row above is
   # the first). `core` is what covers a diff touching nothing but THIS test
@@ -13277,6 +13296,7 @@ durations:
   test_13098_cypher_inventory.py: 2.0  # new in #13098 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local timing and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count is `tools/ci_selection.py --integrity`'s business. What the weight covers: the census pin's BOTH directions (`check()` exits 0 on the committed doc AND 1 on a drifted / missing / stale pin — the arm that made the pin non-vacuous), the census-vs-`rg` reconciliation including its third line, the lambda-scope regression, the shape-precedence table, the Postgres-vs-Cypher discriminator, and the harness's diff semantics (row count, three-way null, multiset for unordered, sequence for ordered, column shape, fingerprint stability) plus its refusals (no stores, inapplicable mutation, a mutation that changes nothing, a missing `psql`, a record schema that never materialises) and `_redact` on a password containing a raw `@`. Hermetic: no DB, no graph, no docker, no network, no model call.
   test_13665_sentry_init_off_loop.py: 2.5  # new in #13665; The row must EXIST, not merely default ("a default is not a reading"): the `api` registration above also puts the file in `fast_pool()`, and `--integrity`'s 0.90 coverage ratio stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. What the weight covers, and the one arm that is NOT hermetic: five arms are pure in-process (a ticker counting `asyncio` wake-ups while the SDK init is stubbed to sleep — the fix arm asserting the loop keeps serving and its ON-LOOP control asserting the same stub starves it, which is what stops the pair from passing vacuously; the second call returning without a SECOND executor hand-off, asserted on a counted `asyncio.to_thread`; the no-DSN gate short-circuiting BEFORE that hand-off, so no thread is submitted at all — also counted, which is what catches the gate sliding back inside `init()`, onto the worker; and two OVERLAPPING calls serialising on the worker's `_init_lock`, so `sentry_sdk.init` still runs once — the loop-side fast path cannot cover that pair, because the coroutine suspends at the hand-off before `_enabled` is set). The sixth arm drives the REAL hosted lifespan through `TestClient` entry to assert WHICH init the startup half awaits, so it pays that lifespan (the #2850 liveness arming, the MCP session manager, the bounded boot sweeps) — the cost this bound is sizing. Nothing here calls the network, a model, `gh`, or a graph the fixture does not own; the lifespan's own store probes are the same ones every `TestClient(ha.app)` case in this suite pays. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority) — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
   test_13722_projection_open_round_trips.py: 0.4  # new in #13722; The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. What the weight covers: the probe's STATEMENT, without a database (exactly ONE graph query, no aggregate over the graph, still a node traversal so the fail-loud arm survives, and `_probe_error` still retained on a raise), the MUTANT that proves the aggregate detector still rejects the statement #13722 removed, and — against the real store — #13722's own metric: a steady-state projection open bounded at 12 wire commands, a trivial read exactly 1, no aggregating graph query inside an open, and the probe flat (not O(n)) on a 50k-node graph; plus the scaling arm's OWN sampling, asserted on call order — the two sizes AND the control are timed in one interleaved pass, so a ratio cannot be measured across a load drift (a helper that sampled each quantity in its own sequential block reds it, which is what stops a false red on a correct fix from being designed back in); and the #7949 capstone probe's `pointKind` cite, re-derived from the fragment it quotes rather than from the +30-line delta this PR's own insert made to every cite below it (a cite is pinned to its content). ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from (the #3400/#4348 rule); the count is `tools/ci_selection.py --integrity`'s business — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
+  test_13722_stamp_chain_off_loop.py: 2.0  # new in #13722 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this row takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a hand-picked local figure, which this map forbids as a SHARD-LAYOUT input — the bins are re-packed greedily, so an unmeasured weight moves the graded `fast_shards` partition. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. What the weight covers: ONE DB-free AST pin over `tortoise/hosted_api.py` — no database, no graph, no model, no network, no session fixture — asserting that every `_stamp_capture_provenance` call's innermost enclosing function is (1) handed to `_run_off_loop(_CAPTURE_EXECUTOR, ...)`, (2) awaited, and (3) a sync `def` (an `async def` there resolves to an unawaited coroutine and the chain never runs); it reds on the pre-fix shape, measured on a worktree at `origin/main`. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from (the #3400/#4348 rule) — and no prior sweep included the file, hence the flat default above.
   test_13629_entity_vector_retire.py: 24.7  # new in #13629; The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file; the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because the entry-rule pin iterates an EXPLICIT tuple and cannot see a file nobody listed. What the weight covers, hermetic (a fake graph answers `ro_query`/`query` in-process and the record leg is a monkeypatched reader — no DSN, no graph, no Postgres, no network, no model call): the census's three numbers per label PRINTED INCLUDING a zero `graph_only`, a graph-only vector refusing the label by name, an unkeyed vector-bearing node counted as graph-only (a strip that skipped it would delete the only copy), the truncated-page refusal that makes FalkorDB's silent `RESULTSET_SIZE` shortfall loud, and the record-side rule that `embedding IS NOT NULL` is NOT the parity test (`embedding_vec` is); plus the stripper's OWN refusals, each its own published token — no plan, no digest, a plan edited after it was printed, a stale plan named by its delta, a graph-only node leaving BOTH stores untouched, a live writer (`REFUSE_WRITE_STILL_EMITS`, fail-closed when the gate symbol is absent or raises), target drift, and an empty plan refused rather than reported as a finished retirement — and the batched `REMOVE` reporting the count it actually removed. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from (the #3400/#4348 rule); `tools/ci_selection.py --integrity` is the authority — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
   test_13826_write_gate.py: 2.0  # new in #13826 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this row takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file; the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because the entry-rule pin iterates an EXPLICIT tuple and cannot see a file nobody listed (`#13110`'s round-5 review recorded that exact variant surviving a round). ⛔ The row EXISTS because the #13854 review found the registration missing entirely while this row's siblings already carried theirs — a file that is in no surface is never SELECTED, so its 11 falsifiers were dead weight rather than merely mis-packed. What the weight covers — NOT uniformly hermetic, and this row says which half is which: most cases drive a writer's own entry point with `mirror_required` monkeypatched on BOTH arms (no DSN, no model call, no network), while the folds (`_upsert_document`/`_upsert_event`/`_upsert_source`) and the `restore_graph` arms build a REAL embedded graph (`FalkorProjection` on a throwaway target), which on a URI-set lane is REDIRECTED to the server the run was given by the epic-#1647 class-level redirect. What they assert: that every writer of a coverage-gated label (`object`/`subject`/`event`/`document`/`source`) asks the ONE predicate and, on the stop arm, keeps the ROW while never writing the VECTOR; that `_update_entity` asks PER LABEL on a per-label copy (an `object`-KEEP + `subject`-STOP write must not lose the vector, the "vector in neither store" state the gate's conservatism forbids); that `:Source` retires only when BOTH `document` and `source` answer stop; that `:Point` IS gated (`#13971`) but only at the writers where its graph copy is redundant — the SDK door and the DR restore — while the journal fold and the two sole-carrier lanes (the capture turn write, the pass-1b snapshot restore) deliberately do not ask, so the stripper refuses `:Point` and names them; that a retrieval repair and the session indexer CLI both ask the gate; and that the DR restore pops per label so both write passes see ONE decision and REPORTS what it retired under `retired_vectors`/`retired_vector_labels`. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_14001_strip_gate_fail_closed.py: 2.0  # new in #14001 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this row takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight; it is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because the entry-rule pin iterates an EXPLICIT tuple and cannot see a file nobody listed. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. What the weight covers, hermetic (no DSN, no graph, no Postgres, no network, no model call): the POLARITY itself — an INVENTED key shape (an f-string key stored through `props.__ior__(dict([(k, vec)]))`) must REFUSE, with the test asserting that the store RECOGNISER abstains on it (so the row cannot go vacuous); three further unmodelled key families refused on the same default; every shape the consolidated issues measured (`#13864`'s folding key expression, `#13910`'s const-indexed clause literal, `#13915`'s `reversed(...)` wrapper, `#13920`'s unbound `.keys()` and `.values()`-as-key source, `#13936`'s index-1 pair-with-extras) asserted through the gate AND through the RUNTIME ORACLE with the two verdicts with the ORACLE as the authority on whether the gate had to refuse (one direction: a row that lands may never be certified, and over-refusal is permitted), plus a vacuity guard that every such row really stores the vector; the closure's refusing DEFAULT (`None`) on five unmodelled expression families; that the refusal NAMES the unmatched condition; that the honest write-stops (`#13617`'s encode guard, the dict writer's `pop`, `dict(ev)` + `pop`, a non-property comprehension key, a constant value) still CERTIFY; that a recognised literal store is still refused by the recogniser (the inversion may add refusals, never acceptances); and that the tool's own documentation states which of `#14001`'s four defences it implements and names `#13826`/`#13806` as the population this gate does NOT close. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from (the #3400/#4348 rule); `tools/ci_selection.py --integrity` is the authority.

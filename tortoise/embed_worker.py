@@ -55,6 +55,8 @@ import sys
 import threading
 import time
 
+from tortoise.env_truthy import is_truthy
+
 _logger = logging.getLogger(__name__)
 
 #: How often the parent-liveness check runs when no request is in flight. The
@@ -75,9 +77,15 @@ ENV_WORKER_REQUIRE_PEER = "TORTOISE_EMBED_WORKER_REQUIRE_PEER"
 
 
 def _require_peer() -> bool:
-    """Whether an unverifiable peer must be REFUSED rather than allowed."""
-    return (os.environ.get(ENV_WORKER_REQUIRE_PEER) or "").strip().lower() in {
-        "1", "true", "yes", "on"}
+    """Whether an unverifiable peer must be REFUSED rather than allowed.
+
+    ⛔ THE ONE VOCABULARY, NOT A LOCAL COPY (#4097). The set here used to be a
+    literal `{"1", "true", "yes", "on"}` — byte-identical to `env_truthy.TRUTHY`
+    and still a second declaration of it, which is the drift `test_env_truthy.py`
+    exists to refuse. `is_truthy` reads the same vocabulary and the same way
+    (unset/blank/falsy/garbage -> False), so the answer is unchanged.
+    """
+    return is_truthy(os.environ.get(ENV_WORKER_REQUIRE_PEER))
 
 
 def _peer_uid(conn: socket.socket) -> int | None:
