@@ -1573,7 +1573,8 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
     #
     # ⛔ `tortoise-pricing.js` ONLY — the PAGE does not belong in this loop, and an
     # earlier revision of it listed the page anyway (#14406 review round 5,
-    # finding 2). The pages loop 40 lines above already pins
+    # finding 2). The pages loop in `test_the_site_icon_set_and_card_select_the_
+    # guard_that_reads_their_bytes` — THIS test, above — already pins
     # `website/tortoise-for-product-teams.html` with the same three assertions
     # (`surfaces == ['onboarding']`, `test_website_static.py` present,
     # `slow_run is False`), and its `website/*.html` glob cannot miss a page — so
