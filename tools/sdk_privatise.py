@@ -1931,8 +1931,11 @@ SWEEP_NAMES = 66
 #: reason: `--repin` on the resolved tree prints **11901 / `953c70c05b55923b`** where the
 #: pin said 11898, and a detached worktree at `origin/main` measures the IDENTICAL pair
 #: (11901 / `953c70c0`), so this branch contributes zero rows and the drift arrived on
-#: `main` between the two folds — the same class as the paragraph above, and the same
-#: repair (a tree that does not match its pin reds every PR that merges it).
+#: `main` between the two folds — the same class as the paragraph above, and under the EQUALITY
+#: gate this block then described it was the same repair (a tree that did not match its pin redded
+#: every PR that merged it). ⛔ THAT REPAIR NO LONGER EXISTS: after `#14548` the pin is a historical
+#: reading, `--check` never compares it, and a tree that does not match it reds nothing — the red is
+#: now the COUNT growing against the check-time baseline, which no pasted pair can clear.
 #: RE-CUT (11896, "ea44c5f732d2a97d") → (11898, "8cf59d52af09e536") on the `#12039` witness-budget PR,
 #: and the SOURCE IS `main`'S TREE, NOT ITS PIN — the `#14062` recurrence, measured again rather than
 #: assumed: `origin/main` `4993fa083f3f` derives **11898** on its OWN tree (`--repin`, run in a
@@ -2156,15 +2159,23 @@ SWEEP_NAMES = 66
 #: to 11910. The suite's conflict was a pure double-append at EOF — `main` added
 #: `test_a_tool_only_diff_selects_this_suite`, this branch added the ratchet arms, one anchor — so
 #: BOTH are kept and neither arm is lost.
-#: ⛔ THE PIN ITSELF DOES NOT MOVE, AND THAT IS A MEASUREMENT RATHER THAN AN ASSUMPTION: `--check` on
-#: this rebased tree reports **(11910, "3216395d35345904")** — the pair `main` commits and the pair
-#: this branch read before the rebase — with `typed references still pointing at a public name: 0`.
+#: ⛔ THE PIN ITSELF DOES NOT MOVE, AND THAT IS A MEASUREMENT RATHER THAN AN ASSUMPTION: `--repin` on
+#: this rebased tree printed **(11910, "3216395d35345904")** — the pair `main` commits and the pair
+#: this branch read before the rebase — and the ratchet line read `untyped receivers: 11910 now vs
+#: 11910 on the baseline (…, the merge base with origin/main) — equal to the baseline` with `typed
+#: references still pointing at a public name: 0`. ⛔ `--check` IS NOT THE EVIDENCE FOR IT, and
+#: reading its exit as such is the defect this sentence used to carry: a GREEN `--check` interpolates
+#: this CONSTANT (`main()` prints `recorded pin (historical, no longer required)` from
+#: `SWEEP_RESIDUE` itself, never from the tree), so its exit 0 says the COUNT did not exceed the base
+#: point and nothing at all about the pair — `--repin` is the verb that attributes a pair to a tree.
 #: A rebase does not change the tree's contents relative to its base, so nothing is inherited from
-#: either parent here; the agreement is a reading of THIS tree.
+#: either parent here; the reading is of THIS tree.
 #: ⛔ THE 2-ROW GAP BETWEEN THIS PAIR AND THE BRANCH'S ORIGINAL PRE-FOLD 11912 IS ATTRIBUTED ROW BY
 #: ROW, not waved through: the branch's earlier tree carried the two `_JSONB_CACHE.update({...})`
-#: rows `#4625` retires (measured `git grep -c '_JSONB_CACHE.update'` → **2** on that tree, **0** on
-#: `origin/main`), which is exactly the pair the block above already accounts for. Adopting main's
+#: rows `#4625` retires (measured `git grep -c '_JSONB_CACHE.update' -- 'tortoise/*.py'` → **2** on
+#: `2cccf90f4dd4`, **0** on `origin/main`; ⛔ THE PATHSPEC IS PART OF THE CITATION — unscoped, the same
+#: command also matches the prose and test text that NAME the call, and returns 2 and 5, never 0),
+#: which is exactly the pair the block above already accounts for. Adopting main's
 #: deletion is what makes this tree read main's count; nothing fell unaccounted in either direction.
 #:
 #: ⛔ RE-PINNED DOWN 11910 -> 11903 ON THE `#14544` CUT, AND THE 7 IS ATTRIBUTED ROW BY ROW. That

@@ -256,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2069 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2080 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -361,12 +361,17 @@ def _residue_block() -> str:
     than on `origin/main`). The rebase ALSO added the paragraph that restates the mechanism — the
     pin is a historical reading and every `--check` exit recorded in the run is a PRE-RATCHET
     reading — which is prose INSIDE the walked run, so the figure was RE-MEASURED by that walk on
-    the rebased file and was not inherited from the pre-rebase `2019` or from either side's
-    published numeral, and the pair did NOT follow the run: `--check` on that rebased tree reported
-    `(11910, "3216395d35345904")`, byte-identical to the pair `main` commits, because this change
+    the rebased file and was not inherited from the pre-rebase branch head `e4c5c623cf7c`'s `1957`,
+    from `origin/main`'s `2032`, or from the `2019` an INTERMEDIATE fold published — and the pair did
+    NOT follow the run: `--repin` on that rebased tree printed `(11910, "3216395d35345904")`,
+    byte-identical to the pair `main` commits (⛔ NOT `--check`'s report, which is the defect this
+    clause used to carry: a green `--check` interpolates the recorded CONSTANT and reads no pair from
+    the tree at all), because this change
     adds no row — the 11912 the branch once carried sat 2 above it only while the branch still
-    held the two `_JSONB_CACHE.update` rows `#4625` retires (measured 2 on that tree, 0 on
-    `origin/main`), and that pair is what adopting main's deletion removes;
+    held the two `_JSONB_CACHE.update` rows `#4625` retires (measured `git grep -c
+    '_JSONB_CACHE.update' -- 'tortoise/*.py'` → 2 on `2cccf90f4dd4`, 0 on `origin/main`; ⛔ the
+    pathspec is part of the citation — unscoped, the same command also matches the prose that NAMES
+    the call and returns 2 and 5), and that pair is what adopting main's deletion removes;
     — and THEN `origin/main`'s own fold of `6a02515d14ad` kept BOTH sides' blocks once more (each
     side had appended its own re-cut record above the SAME assignment, so every conflicted hunk was
     prose), and that resolution kept both verbatim rather than trimming the run to one side's
@@ -384,6 +389,11 @@ def _residue_block() -> str:
     re-pin instructions restated) is prose INSIDE the run. The pair did not follow the run —
     `--repin` on the resolved tree prints `(11903, "1fb861e2c8163aec")`, byte-identical to the
     pair `main` commits, because this change adds no untyped receiver of its own,
+    — and the FIX ROUND that closed this round's four claims (a `--check` report asserted as a
+    MEASUREMENT, a present-tense rule that a tree/pin mismatch reds every PR, a `2019` named as the
+    PRE-REBASE figure, and an unscoped `git grep -c` citation) added 11 `#:` lines INSIDE the run,
+    so the figure above is RE-MEASURED by this walk on the current file (`2069` -> `2080`) rather
+    than adjusted by arithmetic on the last reading,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
