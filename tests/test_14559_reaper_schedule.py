@@ -333,6 +333,36 @@ class TestVerdict:
         # cost is honest about.
         assert "used_memory freed: 2.9 MB" in summary
 
+    # ⛔ `freed` is a CLAIM, and `used_memory` is an INSTANCE-WIDE reading: at the
+    # steady state the delta is concurrent tenant churn, and a busy window makes
+    # it NEGATIVE. Claiming a reclaim the sweep did not perform is a false PASS in
+    # the durable ledger — the only place a human reads this — so the label is
+    # graded here rather than trusted.
+    def test_a_zero_deletion_tick_never_claims_a_reclaim(self, tmp_path):
+        """The common case every 15 min deletes nothing; the delta is churn."""
+        done, record, summary = _verdict(
+            tmp_path, plan=_plan(reapable=0, total=120),
+            verify=_plan(reapable=0, total=120),
+            execute=_execute(deleted=0, freed=5_000_000))
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert record["deleted"] == 0
+        assert "used_memory freed" not in summary, (
+            "a sweep that deleted NOTHING claimed a reclaim; the delta it read is "
+            f"concurrent tenant churn. summary={summary!r}")
+        assert "NOT a reclaim" in summary
+        assert "nothing deleted" in summary
+
+    def test_a_growing_instance_reads_as_a_delta_not_a_negative_free(self, tmp_path):
+        """`freed -11.4 MB` is not a sentence — growth must read as growth."""
+        done, _record, summary = _verdict(
+            tmp_path, plan=_plan(reapable=1), verify=_plan(reapable=0),
+            execute=_execute(deleted=1, freed=-12_000_000))
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "used_memory freed" not in summary, (
+            f"a GROWTH was reported as a free. summary={summary!r}")
+        assert "the instance grew" in summary
+        assert "-11.4 MB" in summary
+
     def test_a_residue_after_the_sweep_is_a_failure(self, tmp_path):
         done, record, _ = _verdict(
             tmp_path, plan=_plan(reapable=1), verify=_plan(reapable=1),
