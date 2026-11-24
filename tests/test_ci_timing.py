@@ -6736,7 +6736,8 @@ def test_a_partial_census_cannot_discount_a_weight_but_a_whole_one_can(
 # that a file with a CI reading has no CI reading (`test_hermetic_egress_guard.py`
 # 2.0 -> 0.1 still saying "it takes the #3400 flat 2.0s default"), which reddened
 # tests/test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value
-# (cut in the B7 test-bureaucracy cut, 2026-11-23) and
+# (cut by `#14439`'s re-cut on 2026-11-23 — NOT by the B7 cut, which left it in place — and
+# RESTORED by `#14481`, so it grades this again) and
 # tests/test_tool_risk_tiers.py::...::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it.
 _UNMEASURED_NOTE_MANIFEST = """\
 surfaces:
@@ -7046,8 +7047,9 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # dominant shape is the PREAMBLE for the row below, so almost every indented block
 # in it opens a note of its own; re-derive both figures at your own head),
 # and the guard that judges a written map joined them before judging (the
-# `_durations_row_comments` helper in `tests/test_ci_selection.py`, removed with
-# its arms in the B7 cut, 2026-11-23). The renderer used to reason about the row-line
+# `_durations_row_comments` helper in `tests/test_ci_selection.py`, removed with its
+# arms by `#14439`'s re-cut on 2026-11-23 — NOT by the B7 cut, which left it in place —
+# and RESTORED by `#14481`, so it grades this again). The renderer used to reason about the row-line
 # FRAGMENT only, so a cut on the fragment dropped half a sentence and
 # `_balance_cut_parens` — seeing an unclosed `(` whose `)` sat on a continuation —
 # deleted the OPENER. The real casualty, at the 2026-11-02 head:
