@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14219-batches-1795460371-p2344678-71a7fcbf",
+  "_sha": "73e53a8495dd980dd240391f0726c0ed0cde1126",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14219-batches.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/14219-batches"
+    },
+    {
+      "kind": "sha",
+      "value": "abf5fefeb95163a43b7027b7f3eba665a3e3f417"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14219-batches"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 36036,
+  "ended_at": 1795496407,
+  "exit_code": 143,
+  "heartbeat_at": 1795496407,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14219-batches-1795460371-p2344678-71a7fcbf",
+  "lease_until": 1795533007,
+  "pid": 2344678,
+  "reason": "bound:exceeded-wallclock",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795460371,
+  "state": "FAILED",
+  "tag": "14219-batches",
+  "worktree": "/home/cmux/tortoise/.worktrees/14219-batches"
+}
