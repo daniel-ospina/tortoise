@@ -1980,7 +1980,7 @@ SWEEP_NAMES = 66
 #: before it. The arithmetic is stated only as a CROSS-CHECK against those two
 #: measurements, never as the source; each figure is `--repin`'s own output on its own
 #: tree, and the pair below is the only one this commit publishes.
-SWEEP_RESIDUE = (11914, "4732a51728684cca")
+SWEEP_RESIDUE = (11911, "5f91ee836978c431")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
