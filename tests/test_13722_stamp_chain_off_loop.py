@@ -52,14 +52,18 @@ this one would also need a real Postgres). It asserts, for EVERY
    difference is deliberate: a fixer disables a leg by making the guard false, so
    `[]` / `{}` / `{*()}` are as dead as `False` even though CPython evaluates them
    at run time (`dis` folds only a literal constant such as `False` / `0` / `()`).
-   Graded: falsy and EMPTY-collection literals (a `*`/`**` unpack does not make a
-   collection non-empty), signed numeric literals (`-0.0`), `not X`, `and`/`or`
-   over them, and a conditional expression whose test or chosen branch is decided
-   (`` X if False else Y ``, and an `if`-expression IN test position such as
-   `` if (0 if True else 1): ``). Ungraded and stated as such: a run-time constant
-   (`if _FEATURE:`), and an expression-position short circuit
-   (`False and await …`), where the submission sits inside the `BoolOp` rather
-   than under an `if`/`while`/`if`-expression.
+   Graded, i.e. decided by `_literal_truth`: falsy and empty-collection literals
+   (an unpack is decided by its OPERAND, so `{*()}` is empty and `{*{1}}` is not),
+   signed numeric literals (`-0.0`), `f''`, a zero-argument builtin constructor
+   (`set()`, `dict()`, `list()`, …), a comparison of literals (`1 < 0`, `1 == 2`),
+   `not X`, `and`/`or` over them, a conditional expression whose test — or whose
+   two branches — decide it (`` X if False else Y ``, `` X if PAYLOAD else X ``,
+   and an `if`-expression IN test position such as `` if (0 if True else 1): ``),
+   and a `match` case's `if` guard (`case _ if False:`). Ungraded: anything
+   `_literal_truth` answers `None` for — a run-time constant (`if _FEATURE:`), an
+   unpack of a run-time value, an arbitrary call, and an expression-position short
+   circuit (`False and await …`), where the submission sits inside the `BoolOp`
+   rather than under an `if`/`while`/`if`-expression/match guard.
 
 ⛔ NESTING IS NOT THE PROPERTY, and a first cut of this file asserted it: the
 chain already lives in `_report_capture`, a nested `async def`, and nesting a
@@ -103,6 +107,8 @@ per-record statements) would move it, and this file must not red when it does.
 from __future__ import annotations
 
 import ast
+import operator
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -112,6 +118,27 @@ HOSTED_API = Path(__file__).resolve().parent.parent / "tortoise" / "hosted_api.p
 
 #: The stamp door the chain calls (imported at module scope by `hosted_api`).
 _STAMP_DOOR = "_stamp_capture_provenance"
+
+#: The binary comparison operators a literal `Compare` can carry, as Python
+#: functions — so `1 < 0` is decided by EVALUATION rather than by shape.
+_COMPARE_OP = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.Is: operator.is_,
+    ast.IsNot: operator.is_not,
+    ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
+}
+
+#: Zero-argument builtin constructors whose result is always EMPTY (falsy).
+_EMPTY_CONSTRUCTORS = frozenset({
+    "set", "frozenset", "dict", "list", "tuple", "str", "bytes", "int",
+    "float", "complex", "bool",
+})
 
 #: The off-loop submission helper and the pool it must be given.
 _OFF_LOOP = "_run_off_loop"
@@ -333,11 +360,54 @@ def _literal_truth(node: ast.expr) -> bool | None:
             return bool(ast.literal_eval(node))
         except (ValueError, TypeError, SyntaxError):
             return None
+    if isinstance(node, ast.JoinedStr):
+        # `f''` has no values and is always the empty string; `f'{x}'` is not
+        # decidable without evaluating `x`.
+        return False if not node.values else None
+    if isinstance(node, ast.Call):
+        # ⛔ A ZERO-ARG BUILTIN CONSTRUCTOR IS A LITERAL IN DISGUISE: `if set():`
+        # and `if dict():` are always falsy, and they are just as plausible a
+        # "disable" as `if {}:` — measured GREEN before this arm existed. Any
+        # argument, or any other callee, is undecidable.
+        if (
+            not node.args and not node.keywords
+            and isinstance(node.func, ast.Name)
+            and node.func.id in _EMPTY_CONSTRUCTORS
+        ):
+            return False
+        return None
+    if isinstance(node, ast.Compare):
+        # A comparison of LITERALS is decided at all heads (`1 < 0` is never true),
+        # even though CPython does not fold it — the criterion is "always false",
+        # not "folded". `ast.literal_eval` alone does NOT accept a `Compare`, so the
+        # operands are evaluated here and the chain applied explicitly; a chained
+        # comparison (`0 < x < 1`) is evaluated pairwise, as Python does.
+        try:
+            left = ast.literal_eval(node.left)
+            rights = [ast.literal_eval(c) for c in node.comparators]
+        except (ValueError, TypeError, SyntaxError):
+            return None
+        comparators = [_COMPARE_OP.get(type(op)) for op in node.ops]
+        if any(fn is None for fn in comparators):
+            return None
+        answer = True
+        for fn, right in zip(comparators, rights, strict=True):
+            try:
+                if not fn(left, right):  # type: ignore[misc]
+                    answer = False
+                    break
+            except TypeError:
+                return None
+            left = right
+        return answer
     if isinstance(node, ast.IfExp):
         behaviour = _literal_truth(node.test)
-        if behaviour is None:
-            return None
-        return _literal_truth(node.body if behaviour else node.orelse)
+        if behaviour is not None:
+            return _literal_truth(node.body if behaviour else node.orelse)
+        # Both branches deciding the SAME polarity decide the expression, whatever
+        # the test is: `X if PAYLOAD else Y` with X and Y both false is always false.
+        body, orelse = _literal_truth(node.body), _literal_truth(node.orelse)
+        return body if body is not None and body == orelse else None
     if isinstance(node, ast.BoolOp):
         values = [_literal_truth(v) for v in node.values]
         if isinstance(node.op, ast.And):
@@ -363,11 +433,6 @@ def _statically_false(test: ast.expr) -> bool:
     return _literal_truth(test) is False
 
 
-def _statically_true(test: ast.expr) -> bool:
-    """The positive polarity of `_literal_truth` — `not X` needs it."""
-    return _literal_truth(test) is True
-
-
 def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
     """`(line, source)` of every enclosing `if`/`while` that folds to false.
 
@@ -378,6 +443,19 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
     dead: list[tuple[int, str]] = []
 
     def walk(node: ast.AST, guards: list[tuple[int, ast.expr]]) -> None:
+        if isinstance(node, ast.Match):
+            # ⛔ A `case _ if False:` GUARD IS A DISABLE TOO (Python 3.12 shape, and
+            # measured: the body's submission is never reached while the pin stayed
+            # green). Each case's guard applies to that case's body only.
+            walk(node.subject, guards)
+            for case in node.cases:
+                case_guards = guards
+                if case.guard is not None:
+                    walk(case.guard, guards)
+                    case_guards = [*guards, (case.guard.lineno, case.guard)]
+                for child in case.body:
+                    walk(child, case_guards)
+            return
         if isinstance(node, (ast.If, ast.While, ast.IfExp)):
             # ⛔ `IfExp` is graded too: CPython folds `X if False else Y` to `Y` and
             # drops the `X` branch, so a submission in `X` is as gone as one under a
@@ -544,17 +622,8 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # docstring mentioning the name in this module reds too — fail-closed on
     # purpose: a name worth mentioning is a name worth grading, and the message
     # says so.
-    unaccounted = {}
-    for owner in sorted(owners):
-        graded = (
-            [line for line, _submitted in _off_loop_references(tree, owner)]
-            + [node.lineno for node in ast.walk(tree)
-               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-               and node.name == owner]
-        )
-        occurrences = HOSTED_API.read_text(encoding="utf-8").count(owner)
-        if occurrences != len(graded):
-            unaccounted[owner] = (occurrences, len(graded))
+    unaccounted = _unaccounted_mentions(
+        tree, owners, HOSTED_API.read_text(encoding="utf-8"))
     assert not unaccounted, (
         f"{_STAMP_DOOR}'s chain is named {unaccounted} time(s) in "
         f"{HOSTED_API.name} (textual, graded AST node) — the extra mention builds "
