@@ -710,6 +710,12 @@ _PRICING_INIT_RE = re.compile(
 #: A `function` head, whose body the stray-call scan must not read as top level.
 _FUNCTION_HEAD_RE = re.compile(r"\bfunction\b[^\n{]*\{")
 
+#: A single px length inside a `border` shorthand (`1px`, `2.5px`) — the only
+#: unit the CTA-baseline compensation relation can do arithmetic on. A border
+#: written in `rem`/`em`/`thin` does not match, so the relation FAILS rather
+#: than comparing a number to a keyword (#14406 review round 11).
+_BORDER_WIDTH_PX = re.compile(r"([0-9]+(?:\.[0-9]+)?)px")
+
 
 def _without_function_bodies(code: str) -> str:
     """`code` with every `function …(…) { … }`, head included, removed.
@@ -4330,22 +4336,50 @@ def _css_tokens(value: str) -> list[str]:
 def _css_block_end(prop: str, value: str) -> str:
     """The value `prop` gives the BLOCK-END (bottom) side of the box.
 
-    Both shorthands are ordered box-side lists, so the token that lands on
-    block-end is positional: for `padding-block` one value sets both sides and
-    two are `(start, end)`; for `padding`, one value sets all four sides, two are
-    `(block, inline)`, three are `(block-start, inline, block-end)` and four are
-    `(block-start, inline-end, block-end, inline-start)` — so block-end is the
-    THIRD token for 3 and 4 values and the FIRST otherwise. `SLACK_PROPS` uses
-    the same rule for `margin`/`margin-block`'s block-START side (first token).
+    Both box-side families are ordered lists, so the token that lands on
+    block-end is positional: for `padding-block`/`margin-block` one value sets
+    both sides and two are `(start, end)`; for `padding`/`margin`, one value sets
+    all four sides, two are `(block, inline)`, three are `(block-start, inline,
+    block-end)` and four are `(block-start, inline-end, block-end, inline-start)`
+    — so block-end is the THIRD token for 3 and 4 values and the FIRST otherwise.
+    `SLACK_PROPS` uses the same rule for `margin`/`margin-block`'s block-START
+    side (first token).
+
+    The MARGIN family is read by the same rule (#14406 review round 11):
+    `margin-bottom: auto` (or `margin-block-end: auto`, or `margin: auto`)
+    SHARES the card's free space with the pinned `margin-top: auto`, so the CTA
+    is centred in each card's leftover instead of pushed to its bottom — and
+    each card has a different leftover, so the four baselines split with every
+    other row in the class GREEN (measured).
     """
-    if prop not in ("padding", "padding-block"):
+    if prop not in ("padding", "padding-block", "margin", "margin-block"):
         return value
     tokens = _css_tokens(value)
     if not tokens:
         return value
-    if prop == "padding-block":
+    if prop in ("padding-block", "margin-block"):
         return tokens[-1] if len(tokens) > 1 else tokens[0]
     return tokens[2] if len(tokens) >= 3 else tokens[0]
+
+
+def _css_align_keyword(prop: str, value: str) -> str:
+    """The `align-items`/`align-self` keyword `prop` sets on the subject.
+
+    `place-items` / `place-self` are the shorthands for `align-items` +
+    `justify-items` / `align-self` + `justify-self`, and ONE value sets both —
+    so `place-items: center` re-centres the grid's boxes exactly as
+    `align-items: center` does, and a reader that only queried the longhand
+    would be blind to it. The ALIGN half comes FIRST; a `safe`/`unsafe` position
+    keyword prefixes the half it belongs to rather than replacing it (MDN,
+    "place-items"), so it is skipped rather than returned.
+    """
+    tokens = [t.lower() for t in _css_tokens(value)]
+    if not tokens:
+        return value.strip().lower()
+    head = tokens[0]
+    if head in ("safe", "unsafe") and len(tokens) > 1:
+        return tokens[1]
+    return head
 
 
 #: Every property that can SET `flex-direction` on one element. `flex-flow` is
@@ -11905,6 +11939,83 @@ class TestProductTeamsPricingCardCtaBaseline:
     #: refused with `margin: 0` — which is correct, it splits the baselines.
     SLACK_PROPS = ("margin-top", "margin-block-start", "margin", "margin-block")
 
+    def test_the_grid_keeps_the_four_boxes_one_height(self):
+        """`.pricing-grid`'s `align-items: stretch` is LOAD-BEARING for the one baseline.
+
+        The class docstring states the precondition and nothing asserted it: the
+        boxes were "never the problem" because the grid's DEFAULT
+        `align-items: stretch` gives all four of them one height, and the defect
+        was only where the CTA sat INSIDE its box. Once the boxes stop being
+        equal height, `margin-top: auto` pushes each button to its OWN card's
+        bottom and the baselines separate again — the exact #13645 item 6
+        signature, back, from a one-word edit.
+
+        Measured (#14406 review round 11) — each of these left ALL SEVEN rows of
+        this class GREEN while the rendered CTAs split:
+
+            .pricing-grid { align-items: center }      boxes to content height
+            .pricing-grid { align-items: flex-start }  tops aligned, bottoms not
+            .pricing-card { align-self: flex-start }   the popular card alone
+            .pricing-grid { place-items: center }      the same, via the shorthand
+
+        `align-items: center` on a pricing grid is the single most likely
+        "tidy the cards up on a laptop" edit, so it is pinned rather than
+        trusted. `normal` is allowed beside `stretch` because it behaves as
+        `stretch` on a flex container; anything else, and any value this reader
+        cannot classify, reds.
+        """
+        css = _product_teams_html()
+        for compound, prop, allowed in (
+                (".pricing-grid", "align-items", {"stretch", "normal"}),
+                (".pricing-grid", "place-items", {"stretch", "normal"}),
+                (".pricing-card", "align-self", {"auto"}),
+                (".pricing-card", "place-self", {"auto"})):
+            bad = [(prelude, value)
+                   for prelude, value in _css_reaching_decls(css, prop, compound)
+                   if _css_align_keyword(prop, value) not in allowed]
+            assert bad == [], (
+                f"a rule that can select `{compound}` declares "
+                f"`{prop}: {bad[0][1] if bad else ''}`, so the four pricing "
+                "boxes stop sharing one height and `margin-top: auto` aligns "
+                "each CTA to its OWN card's bottom — three baselines 70.2px "
+                "apart at 1440x900 (#13645 item 6), with every other row in "
+                "this class still GREEN")
+
+    def test_no_rule_gives_the_cta_a_block_end_margin(self):
+        """The CTA's block-END margin must stay 0 — `auto` there SHARES the slack.
+
+        `SLACK_PROPS` pins the block-START half, because that is what
+        `margin-top: auto` is. But a second `auto` on the block-END side does not
+        add to it — the two `auto` margins SPLIT the card's free space, so the
+        button is centred in each card's leftover instead of pushed to its
+        bottom. Each card's leftover differs (that is the whole premise of item
+        6), so the four baselines split again.
+
+        Measured (#14406 review round 11) — each left ALL SEVEN rows of this
+        class GREEN while the rendered CTAs split:
+
+            .pricing-card .btn { margin-top: auto; margin-bottom: auto }
+            .pricing-card .btn { margin-top: auto; margin-block-end: auto }
+
+        This is the INVERSE of `SLACK_PROPS` on purpose: there `auto` is the
+        pinned value and any other reds; here `auto` is the only refused one.
+        Sharing the loop would have made the same word mean both things.
+        """
+        css = _product_teams_html()
+        bad = [(prop, value, prelude)
+               for prop in ("margin-bottom", "margin-block-end",
+                            "margin", "margin-block")
+               for prelude, value in _css_reaching_decls(
+                   css, prop, ".btn")
+               if _css_block_end(prop, value).strip().lower() == "auto"]
+        assert bad == [], (
+            "a rule that can select `.pricing-card .btn` gives the CTA an "
+            f"`auto` block-END margin (`{bad[0][0]}: {bad[0][1]}`, "
+            f"{bad[0][2]!r}), and the two `auto` margins SPLIT the card's free "
+            "space rather than stacking — so the button centres in each card's "
+            "own leftover and the four baselines split (#13645 item 6), with "
+            "every other row in this class still GREEN")
+
     def test_no_other_rule_takes_the_ctas_slack(self):
         """The card CTA's ONLY vertical slack is the pinned `margin-top: auto`.
 
@@ -12003,11 +12114,53 @@ class TestProductTeamsPricingCardCtaBaseline:
         cascade = _css_block_end_cascade(css, ".pricing-card")
         assert cascade, "no rule sets the pricing card's block-END inset"
         prelude, prop, winner = cascade[-1]
-        assert winner == "calc(1.75rem - 1px)", (
+
+        # ⛔ THE LITERAL IS DERIVED, NOT REMEMBERED (#14406 review round 11).
+        # Pinning `calc(1.75rem - 1px)` as a string made the row a claim about a
+        # constant instead of about the RELATION the constant exists to encode:
+        # the popular card's bottom inset is the base card's, less the extra
+        # border width its 2px border eats. Measured — with the literal pinned
+        # and ALL SEVEN rows GREEN:
+        #
+        #   .pricing-card { padding: 2rem }            popular CTA 4px LOW
+        #   .pricing-card.popular { border: 3px … }     popular CTA 1px HIGH
+        #
+        # Both are "a mystery number left behind by an edit above it", which is
+        # the failure the pin was written to prevent. Read the two numbers the
+        # `1px` is the DIFFERENCE OF, and require the winner to be their relation.
+        def _border_px(body: str, where: str) -> float:
+            value = _effective_decl(body, "border") or ""
+            widths = [_BORDER_WIDTH_PX.fullmatch(t)
+                      for t in _css_tokens(value)]
+            widths = [m for m in widths if m]
+            assert widths, (
+                f"`{where}` declares `border: {value}`, whose bottom width "
+                "cannot be read as px — the compensation relation below needs "
+                "it, so an unreadable border is a FAIL, not a skip")
+            return float(widths[0].group(1))
+
+        base_card = [body for body, inside_media
+                     in _css_rules_with_scope(css, ".pricing-card")
+                     if not inside_media][-1]
+        base_pad = _css_block_end(
+            "padding", _effective_decl(base_card, "padding") or "")
+        extra_px = _border_px(popular[-1], ".pricing-card.popular") \
+            - _border_px(base_card, ".pricing-card")
+        assert extra_px > 0, (
+            "the popular card's bottom border is not WIDER than its siblings', "
+            f"so the 1px compensation this row exists for is stale (measured "
+            f"{extra_px:g}px, expected a positive difference)")
+        expected_pad = f"calc({base_pad} - {extra_px:g}px)"
+
+        assert winner == expected_pad, (
             f"the declaration that WINS the popular card's bottom inset is "
-            f"`{prop}: {winner}` ({prelude!r}), not the 1px compensation, so its "
-            "CTA sits 1px above the other three (measured 744.78 vs 745.78 at "
-            "1440x900 — #13645 item 6). The losing declarations, weakest first: "
+            f"`{prop}: {winner}` ({prelude!r}), not the compensation that makes "
+            f"the four y values EQUAL. Its 2px border eats {extra_px:g}px more of "
+            f"the content box at the bottom than its siblings' 1px, so its inset "
+            f"must be the base card's block-end padding ({base_pad!r}) less that "
+            f"difference: `{expected_pad}`. Measured at 1440x900, a mismatch "
+            "moves this CTA off the shared baseline (744.78 vs 745.78 is ONE "
+            "pixel — #13645 item 6). The losing declarations, weakest first: "
             f"{cascade[:-1]!r}")
 
     def test_no_rule_resets_the_cards_declarations_with_all(self):
