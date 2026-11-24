@@ -88,14 +88,14 @@ version: 1
 # `tests/test_spool_drain_rehearsal.py` `core` with its own flat row, on top of #14350's
 # `tests/test_14350_drain_convergence.py`, #14220's `tests/test_14186_embedder_seam_batching.py`
 # and #14371's `tests/test_14371_offline_embed_json.py` — the last three at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) the verb packs nine shards at 837.3 s (a, b, c, d, e, g, h, j, k) and two
-# at 837.2 s (f, i), so `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the
-# SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
-# `watchdog_headroom: 2.01`, so the two agree by construction rather than by a hand re-read.
+# `DEFAULT_FAST_WEIGHT`) — see the emission stated ONCE, in the paragraph above. This side's
+# figures are the reading of ITS OWN tree and are superseded on the merged tree, so they are
+# history here and are NOT restated as a claim: a second clause is exactly what the guard
+# grades as `<est … stated twice>`, and it was red on this tree.
 #
 # ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
 # figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
-# reading of this pool while the seconds moved under it (835.5 → 837.3 s). So NO arithmetic on the
+# reading of this pool while the seconds moved under it (835.5 → 837.5 s). So NO arithmetic on the
 # minute can catch a carried figure — only the `est_seconds` partition can, which is why the
 # sentence is GRADED below instead of trusted.
 #
