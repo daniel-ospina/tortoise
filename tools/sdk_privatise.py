@@ -2169,18 +2169,18 @@ SWEEP_NAMES = 66
 #: census-VISIBLE shapes (#14422: its fifteen statements go through an injected callable, so
 #: `self._query(` matches no door predicate). A FALLING pin cannot hide a new untyped reference,
 #: which is the direction this arm exists to catch; every parent record above stays verbatim.
-#: ⛔ `main`'S OWN RECORDS FROM THE FOLD OF `origin/main` `e66997b81e76`, KEPT VERBATIM —
-#: the distinct paragraphs this branch's resolution did not already carry (146 lines, in
-#: `main`'s own order, no figure added or moved). The pair below is still `--repin`'s own
-#: output on THIS resolved tree; these lines are the parent's provenance for it.
+#: ⛔ `main`'S OWN RECORDS FROM THE FOLD OF `origin/main` `e66997b81e76`, KEPT VERBATIM EXCEPT
+#: ONE SENTENCE `#14547` CORRECTED — restoring this block wholesale from `main` would revert
+#: that fix. 146 lines of `main`'s own paragraphs, in its order, no figure added or moved; the
+#: pair below is `--repin`'s own output on THIS resolved tree, never a parent's.
 #: ⚠️ THIS PR (#14480) MOVED THE PIN BY ONE FROM ITS OWN LINE — stated because the pin's own note
 #: says a count that moves without a named cause is the drift it exists to catch: the durable
 #: `claim_unavailable` record writes `recorded.update(keep)` in `capture_spool`'s self-heal
 #: (`tortoise/capture_spool.py:4107`, the one new untyped `.update(` receiver in this diff), so
 #: `--repin` on the tree being merged prints **(11911, "3e92044bab08cc3d")**. Re-derived by RUNNING
 #: the tool on that tree, never by arithmetic on the delta. ⛔ THAT PAIR IS `#14480`'s MERGE TREE, NOT
-#: THIS ONE's: `#14445`'s re-cut merged with `origin/main` `2cccf90f4dd4` — `--repin` there read
-#: (11912, "73827c80583e139f"). ⛔ SUPERSEDED since: the note below owns this tree's pair.
+#: THIS ONE's: `#14445`'s re-cut merged with `origin/main` `2cccf90f4dd4` — whose tree reads
+#: (11912, "73827c80583e139f"). ⛔ SUPERSEDED: the `e66997b81e76` fold note ABOVE owns this pair.
 #: ⛔ RE-PINNED FROM `main`'S DRIFT BY THE `#14342 D1` LANE (#14350, PR #14423), and THIS BRANCH'S
 #: OWN CONTRIBUTION IS ZERO ROWS — measured on three trees, not inferred from a difference.
 #: That lane merges `origin/main` `0fbfbb5b210c` into `fix/14342-d1-drain`, re-cuts the pin on the
