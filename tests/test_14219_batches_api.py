@@ -2234,6 +2234,46 @@ def test_a_configured_but_unwritable_root_is_refused_before_the_ack_gate(
     assert r.json()["detail"].startswith("Batch storage is unavailable"), r.json()
 
 
+def test_a_root_that_can_be_created_but_not_written_is_refused_before_the_ack_gate(
+        client, monkeypatch, tmp_path):
+    """⛔ ROUND-18 REVIEW P2: the round-17 pin never reached the WRITE it exists for.
+
+    `test_a_configured_but_unwritable_root_is_refused_before_the_ack_gate` makes
+    `os.makedirs` raise, so `_batch_staging_writable` fails at the DIRECTORY and
+    never reaches `mkstemp` / `os.write`. Deleting those two lines — i.e. removing
+    "prove a byte can be written", the whole point of the round-17 fix — left that
+    pin GREEN, so the half that motivated the fix was unpinned.
+
+    It matters because `exist_ok=True` makes the mkdir succeed on exactly the
+    conditions the check exists for: a full disk, an exhausted quota, a read-only
+    mount whose root already exists. In all three the mkdir is a no-op and it is
+    the WRITE that is refused. Here the directory is created first (mkdir a no-op)
+    and only the probe's own 1-byte payload raises ENOSPC.
+    """
+    base = tmp_path / "ingest"
+    (base / ORG_ID / "_batches").mkdir(parents=True)
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
+
+    real_write = ha.os.write
+
+    def _no_space(fd, data):
+        # ONLY the probe's payload: everything else in the request still writes, so
+        # this cannot pass by breaking the response rather than the check.
+        if data == b"p":
+            raise OSError(28, "No space left on device")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(ha.os, "write", _no_space)
+
+    items = [{"ref": f"/d/{i}.md", "text": "hello"} for i in range(60)]
+    r = client.post("/v1/batches", json={"items": items})
+    assert r.status_code == 503, (
+        "a root that can be created but not written was answered "
+        f"{r.status_code} — the write probe was skipped or its refusal ignored: "
+        f"{r.text[:200]}")
+    assert r.json()["detail"].startswith("Batch storage is unavailable"), r.json()
+
+
 def test_inline_text_with_no_storage_is_refused_before_the_ack_gate(client,
                                                                    monkeypatch):
     """⛔ ROUND-11 REVIEW P2: the staging check ran AFTER the acknowledgement gate.
