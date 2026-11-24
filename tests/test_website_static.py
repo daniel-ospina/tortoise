@@ -3694,7 +3694,7 @@ def _effective_decl(body: str, prop: str) -> str | None:
 
 
 def _css_last_declaring_body(css: str, selector: str, prop: str) -> str | None:
-    """The LAST non-media rule naming `selector` that DECLARES `prop` — or None.
+    """The LAST rule APPLYING AT DESKTOP that names `selector` and DECLARES `prop`.
 
     This is the body a caller should hand to `_effective_decl`, and the
     difference from `_css_rules_with_scope(...)[-1]` is not cosmetic: `[-1]` is
@@ -3724,9 +3724,38 @@ def _css_last_declaring_body(css: str, selector: str, prop: str) -> str | None:
     appended `.pricing-card { display: block }` is therefore still the owner and
     still reds (measured: RED before and after this reader).
     """
-    declaring = [body for body, inside_media
-                 in _css_rules_with_scope(css, selector)
-                 if not inside_media and _effective_decl(body, prop) is not None]
+    # ⛔ "NON-MEDIA" IS THE WRONG AXIS; the CONDITION is (#14406 review round 16).
+    # This reader used to keep only rules at TOP LEVEL, so a `@media` block that
+    # applies at the very viewport every measurement here is taken at (1440x900)
+    # was invisible — the mirror of round 6's finding, which fixed the same
+    # prefix confusion in `_css_desktop_rules` and never reached this reader.
+    # Measured on the tree at `2d1958c1b9bb` — each mutant APPENDED inside the
+    # page's `<style>` block (after every base rule, the only position where a
+    # media rule actually wins the 1440x900 cascade), the CTA class's 9 rows
+    # run, then the page restored byte-identically (`sha256 d74e7c9dd20d`):
+    #
+    #   @media (min-width: 1200px) { .pricing-card.popular { border: 3px solid #f00 } }
+    #   @media (min-width: 1200px) { .pricing-card { padding: 2rem } }
+    #        -> 9 passed / 9 passed — GREEN over a page whose inset is derived
+    #           from a base rule the browser no longer applies (fail-OPEN).
+    #
+    # A third shape, `@media (min-width: 1200px) { .pricing-card.popular {
+    # padding-bottom: 1.75rem } }`, was ALREADY RED before this fix — the
+    # popular row resolves the whole `padding` family through
+    # `_css_block_end_cascade`, which has been media-aware since round 5. The
+    # two reads that were not are the ones below.
+    # already answers exactly this question — it keeps a media rule whose
+    # THRESHOLD can apply at desktop (and fails closed on a `not`, an
+    # uncomparable unit, or a query list) — so the reader resolves through it
+    # instead of re-deciding what `inside_media` means. The page's own hatches
+    # (`max-width: 760px` / `360px`, `max-height: 820px`) stay excluded, so a
+    # correct page is not red for stacking its cards on a phone.
+    wanted = {part.strip() for part in selector.split(",")}
+    declaring = [
+        body for prelude, body, _condition in _css_desktop_rules(css)
+        if wanted.issubset({p.strip() for p in prelude.split(",")})
+        and _effective_decl(body, prop) is not None
+    ]
     return declaring[-1] if declaring else None
 
 
@@ -12877,6 +12906,90 @@ class TestCssDesktopReachAndSpecificity:
             "an appended `.pricing-card { border: … }` is no longer read as the "
             "owner of `border`, so the popular card's compensation relation "
             "would be derived from the border the page no longer has")
+
+    def test_the_owner_reader_sees_a_desktop_media_block_and_skips_a_narrow_hatch(self):
+        """A media CONDITION, not `inside_media`, decides what owns the property.
+
+        `_css_last_declaring_body` kept only rules at TOP LEVEL, so an override
+        written inside `@media (min-width: 1200px) { … }` — which a browser
+        applies at the 1440x900 viewport every measurement in this PR is taken
+        at — was invisible to it. Measured (#14406 review round 16) at
+        `2d1958c1b9bb`, each mutant appended inside the page's `<style>` (after
+        every base rule, the position where it really wins the cascade), the
+        nine rows of `TestProductTeamsPricingCardCtaBaseline` run, the page
+        restored byte-identically (`sha256 d74e7c9dd20d`):
+
+            @media (min-width: 1200px) { .pricing-card.popular { border: 3px solid #f00 } }
+            @media (min-width: 1200px) { .pricing-card { padding: 2rem } }
+                -> 9 passed / 9 passed (fail-OPEN) before this fix, 1 failed / 1 failed after.
+
+        The third shape that looked like the same defect — a media
+        `padding-bottom: 1.75rem` on the popular card — was ALREADY RED at that
+        head: the popular row resolves the `padding` family through
+        `_css_block_end_cascade`, which is media-aware since round 5. Only the
+        reads that go through this helper were blind.
+
+        This is round 6's finding one reader out: that round fixed the same
+        `max-` prefix confusion in `_css_desktop_rules` and left this reader
+        re-deciding `inside_media` for itself.
+        """
+        # The reader IS the helper the rest of the family derives from, so a
+        # change here moves `_popular_border_extra_px` and
+        # `_expected_popular_block_end_pad` with it — asserted on the helper,
+        # not only on the body text.
+        assert _popular_border_extra_px(_product_teams_html()) == 1.0, (
+            "the shipped page's popular card eats exactly one extra border "
+            f"pixel; the helper derives {_popular_border_extra_px(_product_teams_html()):g}")
+
+        desktop_media = self._page_with(
+            "@media (min-width: 1200px) { .pricing-card.popular { border: 3px solid #f00 } }")
+        assert _popular_border_extra_px(desktop_media) == 2.0, (
+            "a `min-width: 1200px` block applies at the measured 1440x900 "
+            "viewport, so the popular card's border is 3px there and the "
+            f"compensation must be 2px; the reader derives "
+            f"{_popular_border_extra_px(desktop_media):g}. Before this fix it "
+            "derived 1px and every row stayed GREEN over a page whose CTA was "
+            "off the baseline (#14406 review round 16, measured)")
+        assert _expected_popular_block_end_pad(desktop_media) == "calc(1.75rem - 2px)", (
+            "the derived inset still subtracts the base 1px while the browser "
+            "applies a 3px border, so the relation the row pins is stale: "
+            f"{_expected_popular_block_end_pad(desktop_media)!r}")
+
+        # …and the base inset, not only the border: this is the second measured
+        # fail-open, and it goes through the OTHER helper (`_css_block_end` on
+        # `padding`) so pinning the border alone would leave it open.
+        base_pad_media = self._page_with(
+            "@media (min-width: 1200px) { .pricing-card { padding: 2rem } }")
+        assert _expected_popular_block_end_pad(base_pad_media) == "calc(2rem - 1px)", (
+            "a `min-width: 1200px` block that moves the base card's inset to "
+            "2rem applies at 1440, so the popular card's compensation must be "
+            f"derived from 2rem; the helper derives "
+            f"{_expected_popular_block_end_pad(base_pad_media)!r} (measured "
+            "GREEN over the split baseline before this fix, #14406 review "
+            "round 16)")
+
+        # A `max-width` at or ABOVE the desktop floor applies at 1440 too —
+        # inclusive, and 1440 is the measured viewport (round 6, finding 4).
+        at_floor = self._page_with(
+            "@media (max-width: 1440px) { .pricing-card.popular { border: 3px solid #f00 } }")
+        assert _popular_border_extra_px(at_floor) == 2.0, (
+            "`max-width: 1440px` INCLUDES 1440, so this block owns the border "
+            "at the measured viewport; reading it as a narrow hatch is the "
+            "round-6 defect in this reader")
+
+        # …and the direction that must NOT move: the page's own viewport
+        # hatches cannot apply at 1440, so they cannot become the owner. A
+        # reader that reds a correct phone layout is the guard a maintainer
+        # deletes.
+        for hatch, expected in (
+                ("@media (max-width: 760px) { .pricing-card.popular { border: 9px solid #f00 } }", 1.0),
+                ("@media (max-height: 820px) { .pricing-card.popular { border: 9px solid #f00 } }", 1.0)):
+            mutated = self._page_with(hatch)
+            assert _popular_border_extra_px(mutated) == expected, (
+                f"`{hatch}` cannot apply at 1440x900, so the shipped "
+                f"compensation is still correct there; the reader derives "
+                f"{_popular_border_extra_px(mutated):g} instead of {expected:g} "
+                " — a FALSE RED on a page that renders as designed")
 
     def test_a_type_qualified_override_of_the_popular_cards_inset_wins_the_cascade(self):
         """`section .pricing-card.popular` is (0,2,1) — a browser applies it.
