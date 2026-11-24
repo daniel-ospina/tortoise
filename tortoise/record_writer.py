@@ -2975,6 +2975,15 @@ _UNCUT_OBSERVATIONS = 0
 #: exists for. Folding them together would report an operator's sanctioned action
 #: as a deployment-wide defect that never clears (the halt is deliberate and
 #: persists), i.e. a false red on `/health` for the life of the process.
+#:
+#: ⛔ "KEEPS ITS APPEND" IS NOT THE DISCRIMINATOR ON ITS OWN — a `seeded` graph
+#: keeps its append too, so that test does not separate the two modes (#14587
+#: review, reasoning note). The line that DOES separate them: `halted` is a
+#: decision an OPERATOR took on a graph whose row EXISTS, while an un-armed graph
+#: (`seeded`, `no_cursor_row`, a failed provision) is an incomplete CUTOVER — the
+#: gap this registry exists to surface. Both states stay visible on their own keys
+#: ('armed_but_halted' vs 'armed_but_uncut'), so nothing is hidden by the split;
+#: do NOT "fix" the asymmetry by folding `seeded` out of `armed_but_uncut`.
 _UNCUT_HALTED: dict[str, str] = {}
 _UNCUT_GUARD = threading.Lock()
 
