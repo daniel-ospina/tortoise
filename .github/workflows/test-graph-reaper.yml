@@ -159,15 +159,33 @@ jobs:
       # Scheduled runs always execute; a manual dispatch may rehearse.
       REAPER_EXECUTE: ${{ github.event_name == 'schedule' || inputs.execute }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Every report this job writes goes here (`runner.temp`, not a bare /tmp):
-      # one directory the artifact step can name, and a seam a test can point at
-      # its own tmp dir instead of racing a shared /tmp.
-      REAPER_WORKDIR: ${{ runner.temp }}
+      # ⛔ NOT here: `REAPER_WORKDIR` is populated by the step below, because the
+      # `runner` context is illegal in a job-level `env:` block (see that step).
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      # ⛔ WHY THIS IS A STEP AND NOT A JOB-LEVEL `env:` LINE. Every report this
+      # job writes goes into `runner.temp` — one directory the artifact step can
+      # name, and a seam a test can point at its own tmp dir instead of racing a
+      # shared /tmp. But `runner` is NOT a legal context in
+      # `jobs.<job_id>.env`: the permitted set there is github/inputs/matrix/
+      # needs/secrets/strategy/vars, so `REAPER_WORKDIR: ${{ runner.temp }}` is
+      # refused when the run is SET UP (actions/runner#2204; actionlint says
+      # `context "runner" is not allowed here`) — every tick would die BEFORE the
+      # plan pass, so the schedule would exist and never once run. `RUNNER_TEMP`
+      # IS a real environment variable on every step, so the seam is populated at
+      # the step level, where its value exists, and inherited by every step below
+      # through `GITHUB_ENV`.
+      - name: Report directory (the seam, populated where its value exists)
+        run: |
+          set -euo pipefail
+          # Fail closed instead of writing `/reaper-plan.json` at the root of the
+          # runner's filesystem: an unset workdir is never a clean sweep either.
+          [ -n "${RUNNER_TEMP:-}" ] || { echo "::error::RUNNER_TEMP is unset — refusing to run with an unset report directory"; exit 1; }
+          echo "REAPER_WORKDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
       # `.github/scripts/auto-file-issue.sh` files the adjudication issue through

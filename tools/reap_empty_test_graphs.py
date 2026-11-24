@@ -679,10 +679,7 @@ def _used_memory(proj) -> int | None:
         # connection (falkordb >= 1.x) and the client's own `.info()` (older /
         # duck-typed handles).
         conn = getattr(proj.db, "connection", None)
-        if conn is not None:
-            info = conn.info("memory")
-        else:
-            info = proj.db.info("memory")
+        info = conn.info("memory") if conn is not None else proj.db.info("memory")
     except Exception:
         return None
     if not isinstance(info, dict):

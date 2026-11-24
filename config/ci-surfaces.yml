@@ -8449,23 +8449,20 @@ surfaces:
   # without this line `test_integrity_covers_all_test_files` fails — every
   # tests/**/test_*.py must be classified (the scope-v5 drift trap).
   - test_install_reaper_schedule.py
+  # #14559: the SCHEDULE for `tools/reap_empty_test_graphs.py` — a job that
+  # DELETES graphs on the production instance. Registered `core` beside its
+  # scheduling sibling above, because the subjects it guards are
+  # `.github/workflows/test-graph-reaper.yml` (which matches no `SOURCE_PATTERNS`
+  # row) and `tools/reap_empty_test_graphs.py` (a `tools/` path, which
+  # `_keep_changed` DROPS — the #12363 silent-drop class). Without this row
+  # `--integrity` reds (`manifest drift: test_14559_reaper_schedule.py`, measured
+  # on PR #14565); without the `CORE_ALSO` row for the tool a tool-only diff
+  # selects NO surface and these pins never run. Hermetic: the workflow is parsed
+  # and its `run:` bodies are executed as shell against tmp dirs, no graph and no
+  # docker.
+  - test_14559_reaper_schedule.py
   - test_reaper.py
   - test_reaper_orphan.py
-  # #14559: the SCHEDULE for the empty-test-graph reaper — the workflow's shape
-  # (trigger set, cadence, scopes, band), the absence of every widener flag, and
-  # two of its run bodies EXECUTED as shell (the credential guard, the verdict).
-  # ⛔ Registered for the same reason the `#4299` line above records: every
-  # `tests/**/test_*.py` must be classified (`test_integrity_covers_all_test_files`
-  # — `--integrity` reported `manifest drift: ['test_14559_reaper_schedule.py']`
-  # while it was missing, which is the `manifest-integrity` job's own red).
-  # ⛔ NEITHER SUBJECT IS A NAMED SURFACE, so nothing else can select it: the
-  # workflow it pins (`.github/workflows/test-graph-reaper.yml`) matches no
-  # SOURCE_PATTERNS row and falls to the full matrix by fail-closed default, and
-  # `tools/reap_empty_test_graphs.py` matches none either — a tools-only diff
-  # selects `surfaces: []` and would run NEITHER this pin nor its sibling.
-  # `core` is the fallback the splitter uses for exactly this case. Hermetic: the
-  # scripts run as `bash -c` against JSON fixtures, no DB, no graph, no network.
-  - test_14559_reaper_schedule.py
   # #3767: the reaper's ownership claim (name/containment is not ownership).
   # Hermetic (raw unix sockets + monkeypatches, no embedded DB) and grouped with
   # its siblings; `tortoise/embedded_reaper.py` changes select the `core` surface.
