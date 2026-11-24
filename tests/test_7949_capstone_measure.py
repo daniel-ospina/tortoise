@@ -5991,7 +5991,7 @@ class _ManifestShapeError(RuntimeError):
     """
 
 
-#: The epic bundle's documents and the two sources its re-derived cites name.
+#: The epic bundle's documents and the sources its re-derived cites name.
 #: ⛔ NEITHER side is in the bundle sweep: `_BUNDLE_DOCS` carries the bundle's own six
 #: documents, so `00-plan.md`, `03-test-design.md` and `RECONCILE-A1-A2-A5.md` were
 #: swept by NOTHING, and `search_engine.py` is in neither `_BUNDLE_SOURCES` nor
@@ -6001,7 +6001,7 @@ class _ManifestShapeError(RuntimeError):
 #: ORPHANED by the B4 test-volume cut (2026-11-23, #14439 — that diff deleted its
 #: only reader, `*_BUNDLE_TOOL_SOURCES.items()`) and then DELETED by #14482's
 #: orphan sweep (2026-11-24, "delete the 81 names the volume cut orphaned") —
-#: HOURS later, not a day, and the two DATES differ only by the committer's
+#: 1 h 43 m later, not a day, and the two DATES differ only by the committer's
 #: `-0500` offset (in UTC both are 2026-11-24), so date each event on its own
 #: commit rather than trusting one date to cover both. ⚠️ Two events, two
 #: commits: dating the CUT alone points a reader at
