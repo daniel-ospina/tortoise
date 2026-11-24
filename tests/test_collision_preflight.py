@@ -843,9 +843,11 @@ def _wait_for_grandchild(pid: int, timeout: float = 5.0) -> bool:
 def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
     """Block until `/proc/<pid>/cwd` reads back with the ` (deleted)` suffix."""
     deadline = time.monotonic() + timeout
+    ever_read = False
     while time.monotonic() < deadline:
         try:
             raw = os.readlink(f"/proc/{pid}/cwd")
+            ever_read = True
         except OSError:
             raw = ""
         if raw.endswith(" (deleted)"):
@@ -855,10 +857,20 @@ def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
     # identity line it made a different failure on every run and the exemption engine's
     # `pr <= main` subset test then never matched. The dead lane's own words ride the
     # continuation, where `_dead_lane_note(pid)`'s caller keeps them out of the signature.
+    # ⛔ AND THE CONTINUATION MUST NOT ASSERT A STATE THIS LOOP NEVER ESTABLISHED
+    # (#14506 review, P2): `OSError` here is a DEAD pid (ENOENT) as readily as a `/proc`
+    # this reader cannot see (EACCES, `hidepid`) — collapsing both into "still readable"
+    # sent triage after a permissions theory when the fixture's child had simply died.
+    state = (
+        "its cwd was READABLE at the deadline but never gained the ` (deleted)` suffix — "
+        "the fixture's `rmdir` did not take"
+        if ever_read else
+        "its `/proc` entry could not be read at any sample — a child that DIED, or a `/proc` "
+        "this reader cannot see")
     raise AssertionError(
         "`/proc/<pid>/cwd` never read back as deleted — the fixture cannot model a live "
-        "`pi` whose cwd is unreadable, so this run proves nothing\n"
-        f"pid {pid} was still readable after {timeout:.1f}s{_dead_lane_note(pid)}")
+        f"`pi` whose cwd is unreadable, so this run proves nothing\npid {pid}: {state}"
+        f"{_dead_lane_note(pid)}")
 
 
 #: A `ps` that hides the BOX's UNATTRIBUTABLE `pi` rows from this suite.
@@ -1215,6 +1227,17 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
+        # ⛔ THE STDERR REGISTRY IS PER-TEST STATE, NOT PER-SESSION (#14506 review, P2).
+        # It is keyed by pid and `_fake_lane` registers an entry for EVERY lane, while only
+        # the arms that inspect their own entry ever popped one — so the documented
+        # `""`-for-a-pid-this-suite-did-not-spawn contract degraded to "until that number is
+        # reused", and each lane arm held an open fd on an unlinked spool for the rest of
+        # the run. A stale entry would hand a later arm's DEAD FIXTURE a cause from another
+        # child; clearing here keeps the contract true for the whole file.
+        while _FAKE_LANE_STDERR:
+            _pid, _spool = _FAKE_LANE_STDERR.popitem()
+            with suppress(OSError, ValueError):
+                _spool.close()
 
     # ── fixtures ────────────────────────────────────────────────────────────
 
