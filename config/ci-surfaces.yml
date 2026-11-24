@@ -216,7 +216,7 @@ version: 1
 #
 # The 1.25x balance band is enforced by `--integrity`'s `workflow_halves_issues()`, which recomputes
 # the ratio from the committed map (the `test_real_workflow_halves_are_consistent` arm that used to
-# sit beside it went with the durations-map arithmetic cut (#14419)). The old "single-file floor" argument is
+# sit beside it went with the durations-map arithmetic cut (#14419). The old "single-file floor" argument is
 # RETIRED: it rested on `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
 # file — so extra shards do keep reducing max(shard). The lane-parity contract above cannot hold a
 # MINIMUM either way: it requires a SUPERSET of main's labels, so it forbids a SHRINK and is what
