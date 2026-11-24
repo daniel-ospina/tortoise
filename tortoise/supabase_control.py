@@ -4328,6 +4328,18 @@ def _provision_default_graph_record(org_id: str, graph_id: str) -> None:
     operator. `provision_graph_record` is idempotent (`active` ⇒ no-op), so the
     repeat costs one scoped read.
 
+    ⛔ IT HEALS THE PRE-EXISTING GRAPH TOO, and that is why the floor is not this
+    caller's business: `default_graph_id_for_credential` only reaches the mint
+    arm when `default_graph_row_for` found no row, but the SHORT-CIRCUIT arm runs
+    for a graph that already exists and may carry a journal this hook never
+    accounted for. The hook derives its floor from
+    `record_allocator.JOURNAL_COUNT_SQL` in the same tenant-scoped transaction, so
+    a graph with journal lines `1..N` seeds to `N` — the count is how many
+    positions already exist. A hard-coded `0` here would refuse exactly the
+    population this arm exists to heal (`SeedRefused(reason="divergence")`, with
+    text claiming the record holds positions the journal cannot reproduce, which
+    is false for a healthy pre-existing graph).
+
     ⛔ BEST-EFFORT, and this one is not even a choice: this function's caller
     (`_mint_default_graph_row_best_effort`) exists because `#10025` F1 forbids
     failing the caller — the provisioning RPC's own data-plane graph is already

@@ -8604,7 +8604,8 @@ def _record_health() -> dict:
                 # #14582: present-and-null for the same reason as every key above
                 # — a missing key must not read as "no uncut graphs".
                 "armed_but_uncut": None,
-                "armed_but_uncut_untracked": None,
+                "armed_but_uncut_untracked_observations": None,
+                "armed_but_halted": None,
                 "armed_but_uncut_reasons": None,
                 # Present-and-null for the same reason (#12943): a missing key
                 # must not read as "the cache is fine".
@@ -8668,7 +8669,8 @@ def _record_health() -> dict:
         # a graph id is a customer's own name for a tenant (`_change_feed_health`
         # states the same rule). Counts and reasons only.
         "armed_but_uncut": None,
-        "armed_but_uncut_untracked": None,
+        "armed_but_uncut_untracked_observations": None,
+        "armed_but_halted": None,
         "armed_but_uncut_reasons": None,
         # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
         # is "not evaluated" (the counter snapshot could not be read); ``False``
@@ -8757,8 +8759,9 @@ def _record_health() -> dict:
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
         block["armed_but_uncut"] = uncut["armed_but_uncut"]
-        block["armed_but_uncut_untracked"] = uncut[
-            "armed_but_uncut_untracked"]
+        block["armed_but_uncut_untracked_observations"] = uncut[
+            "armed_but_uncut_untracked_observations"]
+        block["armed_but_halted"] = uncut["armed_but_halted"]
         block["armed_but_uncut_reasons"] = uncut_reasons
         block["cache_leg_failures"] = cache_leg
         block["cache_write_targets"] = cache_targets
@@ -8902,8 +8905,14 @@ def _record_health() -> dict:
     # folding it into a window would be a second, weaker statement of the same
     # thing. ``ok`` is the cumulative channel it belongs on, exactly like a
     # malformed DSN above.
+    # ``armed_but_halted`` is deliberately NOT in this fold: a `halted` row is an
+    # OPERATOR's decision (the documented remedy for a duplicate position), and in
+    # that mode `record_owns_position` returns False so the JSONL append is KEPT —
+    # nothing is lost. Folding it in would let a sanctioned halt red the deployment
+    # permanently, and a halt does not clear on its own, so that red would be
+    # indistinguishable from a real one. It is still PUBLISHED, on its own key.
     uncut_count = block.get("armed_but_uncut")
-    uncut_untracked = block.get("armed_but_uncut_untracked")
+    uncut_untracked = block.get("armed_but_uncut_untracked_observations")
     if (block["armed"] and isinstance(uncut_count, int)
             and isinstance(uncut_untracked, int)
             and (uncut_count + uncut_untracked) > 0):
@@ -31152,10 +31161,18 @@ def _provision_graph(org: dict, name: str,
         # per-endpoint call site is how the NEXT create path ships without one.
         #
         # It provisions BOTH arms: on Supabase, `insert_graph` persisted this id
-        # above; on the registry the `:Graph` node exists. A brand-new graph has
-        # an empty journal, so `enumerated_floor=0` is the door's own fact — and
-        # the seed's SQL guard REFUSES rather than seeds if the record already
-        # holds a position for this id.
+        # above; on the registry the `:Graph` node exists. The FLOOR is DERIVED by
+        # the hook from the record's own journal enumeration (never assumed `0`),
+        # and `SEED_SQL`'s guard REFUSES rather than seeds when the two disagree.
+        #
+        # ⚠️ THIS FUNCTION IS SYNC AND CALLED FROM `async` ENDPOINTS, so the hook's
+        # connect blocks the loop exactly as the control-plane calls above it
+        # already do. What the hook adds is a DEPENDENCY THAT CAN TIME OUT, so its
+        # connect is bounded by `record_writer.PROVISION_CONNECT_TIMEOUT_SECONDS`
+        # (3 s, not the live door's 10) — a record outage must not cost a create
+        # endpoint the full live-path budget. Moving the whole mint off the loop is
+        # the larger fix and is NOT taken here: it would change the locking story of
+        # a 55-line flow this PR otherwise does not touch.
         _provision_graph_record(org["id"], graph["id"])
         result = {
             "graph": {

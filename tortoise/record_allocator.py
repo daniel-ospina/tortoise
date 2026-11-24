@@ -534,7 +534,8 @@ def seed(conn: Any, *, org_id: str, graph_id: str,
 # ── the creation hook ───────────────────────────────────────────────────────
 
 def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
-                           enumerated_floor: int = 0) -> ProvisionedRecord:
+                           enumerated_floor: int | None = None
+                           ) -> ProvisionedRecord:
     """Give a graph that was just CREATED the counter row it needs — the
     creation hook `#14582` names, and the plan's `§A7.8` item 8. (#14582)
 
@@ -555,12 +556,18 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
     * a fresh graph (`row_max = 0`, `floor = 0`) → `seq = 0`, then `active`;
     * `row_max > floor` → :class:`SeedRefused` with `reason="divergence"`
       PROPAGATES: the record holds positions this journal cannot reproduce, so
-      the graph is REFUSED, never silently seeded (#12894's divergence rule).
-      ⛔ The default `enumerated_floor=0` is what makes this reachable from a
-      creation door: a graph that is genuinely new enumerates an empty journal,
-      so anything the record already holds for that id is a disagreement, and the
-      SQL's own guard (`row_max <= floor`) is the falsifier — not a number this
-      function guesses;
+      the graph is REFUSED, never silently seeded (#12894's divergence rule);
+    * ⛔ **THE FLOOR IS DERIVED, NOT ASSUMED** when the caller does not pass one:
+      it is :data:`JOURNAL_COUNT_SQL` for this graph, which is the seed's own
+      quantity ("how many positions already exist"), read in the same
+      tenant-scoped transaction. A door must not have to know it: a brand-new
+      graph enumerates 0, and a graph that PREDATES the hook (the default row's
+      credential self-heal, a graph whose hook failed) enumerates N — and a
+      hard-coded `0` would refuse that second population as `divergence` with
+      text that is false ("the record claims positions this journal cannot
+      reproduce") when the journal holds exactly those positions. Deriving it is
+      also what keeps this function honest when it is called on a graph that is
+      older than the call site assuming it is new;
     * already `{MODE_ACTIVE}` → an idempotent NO-OP (`already_cut_over`), because
       `seed` refuses to re-base a live allocator and a door that is re-entered
       must not fail;
@@ -594,9 +601,23 @@ def provision_graph_record(conn: Any, *, org_id: str, graph_id: str,
         return ProvisionedRecord(
             org_id=org_id, graph_id=graph_id, seq=existing[0],
             mode=existing[1], already_cut_over=True, seeded=False)
+    floor = enumerated_floor
+    if floor is None:
+        # ⛔ DERIVED, IN THIS TRANSACTION, FROM THE RECORD'S OWN ENUMERATION.
+        # `scope_tenant` is transaction-local, so the count is read under the
+        # tenant this connection is already bound to — or, on a connection that
+        # has not been scoped yet, under no tenant at all, in which case RLS
+        # yields ZERO rows and the seed below refuses rather than seeding a
+        # number nobody measured (fail-closed: `MAX(seq) <= 0` is false for any
+        # graph that already has journal lines).
+        scope_tenant(conn, org_id)
+        with conn.cursor() as cur:
+            cur.execute(JOURNAL_COUNT_SQL, (org_id, graph_id))
+            count_row = cur.fetchone()
+        floor = int(count_row[0]) if count_row else 0
     try:
         result = seed(conn, org_id=org_id, graph_id=graph_id,
-                      enumerated_floor=enumerated_floor)
+                      enumerated_floor=floor)
     except SeedRefused as exc:
         if exc.reason != "armed":
             raise

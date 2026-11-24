@@ -567,6 +567,18 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     seeded = refused = armed = 0
     for graph_id in graphs:
+        # ⛔ RE-SCOPE EVERY ITERATION, AND THIS IS NOT DEFENSIVE. `scope_tenant`
+        # sets a TRANSACTION-LOCAL GUC and `set_config(..., true)` ends with the
+        # transaction: the per-graph `commit()` below clears it, and so does a
+        # `ROLLBACK TO SAVEPOINT` taken after `seed()` re-scoped inside the
+        # savepoint. Without this line, every graph AFTER the first reads
+        # `journal_event` under NO tenant — RLS answers ZERO rows — so it reports
+        # `journal_count: 0` and is then REFUSED `divergence` by the seed (which
+        # re-scopes and sees the truth), with a printed remedy
+        # (`--enumerated-floor 0`) that the same guard refuses. The measured
+        # shape: an org with 3 uncut graphs heals ONLY the first one per run and
+        # is falsely accused of divergence for the rest (#14582 review P1-1).
+        ra.scope_tenant(conn, args.org_id)
         with conn.cursor() as cur:
             cur.execute(ra.JOURNAL_MAX_SQL, (args.org_id, graph_id))
             max_row = cur.fetchone()

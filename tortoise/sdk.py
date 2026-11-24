@@ -51481,30 +51481,29 @@ class TortoiseSDK:
             params={"gid": gid, "tid": org_id, "name": name,
                     "kind": kind, "ns": ns, "now": now},
         )
-        # ⛔ #14582: THE CREATION HOOK, REGISTRY ARM ONLY. This is the door that
-        # mints a DURABLE graph id in registry mode (selfhost / embedded), and
-        # the pointer of that population: `team_create`'s default graph, the
-        # agent-signup default graph, and `create_memory_graph` (SDK row 29) all
-        # land here. A brand-new graph has an empty journal, so floor 0 is the
-        # door's own fact; the seed's SQL guard refuses rather than seeds if the
-        # record already holds a position for this id.
+        # ⛔ #14582: NOT HOOKED, AND BOTH ARMS ARE FINDINGS RATHER THAN OMISSIONS
+        # — the creation hook (`record_writer.provision_graph_record`) is NOT
+        # called from this method, on purpose:
         #
-        # ⛔ NOT IN THE SUPABASE ARM ABOVE, and that is a CENSUS FINDING rather
-        # than an omission: there, this method persists NOTHING (it returns a
-        # deterministic id derived from `org:name`) and the id it returns is not
-        # the id `hosted_api._provision_graph` actually inserts (`g_<short>`).
-        # Provisioning here would seed a counter row for a graph that will never
-        # exist — so the hosted lane is hooked where its row is minted.
-        try:
-            from tortoise.record_writer import provision_graph_record
-
-            provision_graph_record(org_id=org_id, graph_id=gid)
-        except Exception:
-            _logger.error(
-                "graph %s (%s) was created but its record cursor could NOT be "
-                "provisioned — every record it writes is refused until it is "
-                "seeded: `uv run python tools/record_allocator_cli.py "
-                "backfill --org-id %s`", gid, org_id, org_id, exc_info=True)
+        # * THE SUPABASE ARM above persists NOTHING: it returns a deterministic id
+        #   derived from `org:name`, and the id that actually lands is the one
+        #   `hosted_api._provision_graph` mints (`g_<short_id()>`). Provisioning
+        #   here would seed a counter row for an id that never exists (#14582 F1).
+        # * THE REGISTRY ARM here is a graph the RECORD CANNOT FILE: `record_cursor`
+        #   carries `(org_id, graph_id) REFERENCES public.graphs (org_id, id)`,
+        #   and registry graphs are never inserted into `public.graphs` — the
+        #   invariant `record_writer.current_record_tenant` states and refuses to
+        #   violate ("installing one would displace a correctly declared
+        #   single-tenant pair with a value the FK cannot satisfy"). Calling the
+        #   hook here would therefore fail on EVERY create (FK 23503), log a
+        #   warning each time, and publish a permanently-red
+        #   `record.armed_but_uncut` for a deployment that has no gap (#14582 F3).
+        #
+        # So the hooks live where a control-plane row is minted: `hosted_api._provision_graph`
+        # and `supabase_control.ensure_default_graph_row`. A selfhost deployment
+        # that arms the record without a control plane is out of its reach by
+        # construction, not by oversight — `tests/test_14582_creation_hook.py`
+        # pins both arms' absence so this note cannot silently rot.
         return {"graph_id": gid, "name": name, "kind": kind, "namespace": ns}
 
     def create_memory_graph(self, org_id: str, name: str, *,

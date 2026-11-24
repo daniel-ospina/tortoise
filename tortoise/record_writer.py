@@ -239,6 +239,8 @@ __all__ = [
     "RecordWriter",
     "armed_but_uncut",
     "armed_but_uncut_reasons",
+    "clear_uncut_graph",
+    "current_record_tenant",
     "dsn_fingerprint",
     "is_usable_tenant",
     "live_write_refusal",
@@ -251,6 +253,7 @@ __all__ = [
     "record_tenant",
     "record_tenant_effective",
     "record_tenant_for",
+    "reset_uncut_graphs",
     "single_tenant_declared",
     "use_record_tenant",
     "write_live_record",
@@ -370,6 +373,15 @@ CONNECT_TIMEOUT_SECONDS = 10
 #: caller gets a fresh connect (see ``_take_idle_connection``) — so expiring one
 #: costs a reconnect, never a surfaced error. A DSN that sets its own
 #: ``idle_in_transaction_session_timeout`` WINS, for the same reason
+#: How long the CREATION HOOK may spend connecting to the record, in seconds.
+#: ⛔ SHORTER THAN THE LIVE DOOR'S :data:`CONNECT_TIMEOUT_SECONDS` (10), on
+#: purpose: the hook runs on a graph-creation REQUEST, and in `hosted_api` that
+#: request calls a SYNC function from an `async` endpoint, so the wait blocks the
+#: worker's event loop (including a co-located `/health`). A record outage at
+#: creation must cost the user a bounded pause, not the live path's full budget —
+#: the graph is created either way and `/health` publishes the gap.
+PROVISION_CONNECT_TIMEOUT_SECONDS = 3
+
 #: :data:`CONNECT_TIMEOUT_SECONDS` defers to a ``connect_timeout`` the operator
 #: named.
 IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 60
@@ -1064,7 +1076,8 @@ def _refused_tenant_env_note() -> str:
     )
 
 
-def _default_connect(dsn: str) -> Any:
+def _default_connect(dsn: str, *,
+                     connect_timeout: int | None = None) -> Any:
     """Open the record's connection. The ONE place a driver choice lives.
 
     Lazily imported so importing this module needs no driver (the DB-free pin,
@@ -1122,7 +1135,8 @@ def _default_connect(dsn: str) -> Any:
         # The operator bounded it already; do not replace their number.
         pass
     else:
-        connect_kwargs["connect_timeout"] = CONNECT_TIMEOUT_SECONDS
+        connect_kwargs["connect_timeout"] = (connect_timeout
+                                             or CONNECT_TIMEOUT_SECONDS)
     # ⛔ EVERY connect carries the parked-handle bound (#9558 review cycle 4,
     # P1), because the handle it opens can be PARKED later and the bound has to
     # be on the session, not on the call that happened to create it. `options`
@@ -2904,7 +2918,13 @@ def record_owns_position(*, tenant: tuple[str, str] | None = None,
     # record leg was off). No tenant identifiers are published; see
     # :func:`armed_but_uncut`.
     usable = row is not None and row[1] == active
-    if not usable:
+    if usable:
+        # ⛔ THE SAME READ THAT OBSERVES THE GAP OBSERVES ITS REPAIR. Without
+        # this the registry is a LATCH: a graph an operator healed would keep
+        # `/health` non-`ok` for the life of the process (see
+        # :func:`clear_uncut_graph`).
+        clear_uncut_graph(resolved[0], resolved[1])
+    else:
         reason = "no_cursor_row" if row is None else f"mode_{row[1]}"
         note_uncut_graph(resolved[0], resolved[1], reason=reason)
         _warn_uncut_graph(resolved[0], resolved[1], reason=reason)
@@ -2924,13 +2944,25 @@ def record_owns_position(*, tenant: tuple[str, str] | None = None,
 #: state fed from the write path, so it must be bounded: a per-graph label is
 #: unbounded cardinality (the same rule `cache_leg.cache_write_targets` states for
 #: the same reason). Past the cap the observation is still COUNTED
-#: (`armed_but_uncut_untracked`), so nothing is lost — only the distinctness is.
+#: (`armed_but_uncut_untracked_observations`), so nothing is lost — only the
+#: distinctness is.
 UNCUT_GRAPH_CAP = 32
 
 _UNCUT_GRAPHS: dict[str, str] = {}
 _UNCUT_REASONS: dict[str, int] = {}
 _UNCUT_OBSERVATIONS = 0
 _UNCUT_UNTRACKED = 0
+#: Graphs whose row exists but is `halted` — SEEN, reported, and deliberately NOT
+#: folded into `armed_but_uncut`. ⛔ The two are different populations and the
+#: difference decides whether a graph is losing anything: `halted` is the state an
+#: OPERATOR chose (`record_allocator.raise_named`'s remedy for a duplicate
+#: position), and in it `record_owns_position` returns False, so
+#: `live_write.write` KEEPS the JSONL append — the graph loses nothing. A graph
+#: with NO row is one the hook never reached, and that is the gap this registry
+#: exists for. Folding them together would report an operator's sanctioned action
+#: as a deployment-wide defect that never clears (the halt is deliberate and
+#: persists), i.e. a false red on `/health` for the life of the process.
+_UNCUT_HALTED: dict[str, str] = {}
 _UNCUT_GUARD = threading.Lock()
 
 
@@ -2946,10 +2978,20 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
     path) or a provisioning outcome (`provision_failed`,
     `provision_refused:<reason>`, `malformed_dsn`). A tenant already tracked has
     its reason REPLACED — the newest observation is the current one.
+
+    ⛔ `mode_halted` DOES NOT LAND HERE. See :data:`_UNCUT_HALTED`: a halted graph
+    keeps its JSONL append and is an operator's decision, so it is published on
+    its own key instead of being reported as an uncut graph.
     """
     global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED
     try:
         key = f"{org_id}\u0000{graph_id}"
+        if reason == f"mode_{record_projection.MODE_HALTED}":
+            with _UNCUT_GUARD:
+                _UNCUT_HALTED[key] = reason
+                if len(_UNCUT_HALTED) > UNCUT_GRAPH_CAP:
+                    _UNCUT_HALTED.pop(next(iter(_UNCUT_HALTED)))
+            return
         with _UNCUT_GUARD:
             _UNCUT_OBSERVATIONS += 1
             _UNCUT_REASONS[reason] = _UNCUT_REASONS.get(reason, 0) + 1
@@ -2957,6 +2999,28 @@ def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
                 _UNCUT_GRAPHS[key] = reason
             else:
                 _UNCUT_UNTRACKED += 1
+    except Exception:  # noqa: BLE001, RUF100 - observability must not fail a write
+        pass
+
+
+def clear_uncut_graph(org_id: str, graph_id: str) -> None:
+    """Forget `(org_id, graph_id)` — it was OBSERVED cut over (or provisioned).
+
+    ⛔ WITHOUT THIS THE REGISTRY IS A LATCH, AND A LATCH IS NOT A HEALTH SIGNAL.
+    Every entry is fed from an observation, so the SAME place that observes the
+    gap observes its repair: `record_owns_position` reads the row on every armed
+    write, so a graph an operator healed stops appearing uncut on its next write,
+    and :func:`provision_graph_record` clears it on success. A field that could
+    only ever be added to would pin `/health` non-`ok` for the life of the
+    process over a graph that was fixed an hour ago — the failure mode this
+    module's health contract names for cumulative counters, and it would turn the
+    compensation for best-effort provisioning into a permanent false red.
+    """
+    try:
+        key = f"{org_id}\u0000{graph_id}"
+        with _UNCUT_GUARD:
+            _UNCUT_GRAPHS.pop(key, None)
+            _UNCUT_HALTED.pop(key, None)
     except Exception:  # noqa: BLE001, RUF100 - observability must not fail a write
         pass
 
@@ -2975,14 +3039,22 @@ def armed_but_uncut() -> dict[str, int]:
     `tools/record_allocator_cli.py sweep|backfill`.
 
     `armed_but_uncut` is exact up to :data:`UNCUT_GRAPH_CAP` distinct graphs;
-    `armed_but_uncut_untracked` counts the observations past that cap, so the two
-    together can never read as "none" when there are some.
+    `armed_but_uncut_untracked_observations` counts the OBSERVATIONS past that cap
+    — ⛔ observations, not graphs, which is what its name says: it increments once
+    per write to an untracked graph, so reading it as a graph count would size an
+    incident wrongly. The two together can never read as "none" when there are
+    some.
+
+    `armed_but_halted` is a SEPARATE population and is NOT part of
+    `armed_but_uncut`: a `halted` row is an operator's decision and that graph
+    keeps its JSONL append (`record_owns_position` → False), so it loses nothing.
     """
     with _UNCUT_GUARD:
         return {
             "armed_but_uncut": len(_UNCUT_GRAPHS),
-            "armed_but_uncut_untracked": _UNCUT_UNTRACKED,
+            "armed_but_uncut_untracked_observations": _UNCUT_UNTRACKED,
             "armed_but_uncut_observations": _UNCUT_OBSERVATIONS,
+            "armed_but_halted": len(_UNCUT_HALTED),
         }
 
 
@@ -2997,6 +3069,7 @@ def reset_uncut_graphs() -> None:
     global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED
     with _UNCUT_GUARD:
         _UNCUT_GRAPHS.clear()
+        _UNCUT_HALTED.clear()
         _UNCUT_REASONS.clear()
         _UNCUT_OBSERVATIONS = 0
         _UNCUT_UNTRACKED = 0
@@ -3043,7 +3116,8 @@ def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
 
 
 def provision_graph_record(*, org_id: str, graph_id: str,
-                           enumerated_floor: int = 0) -> dict[str, Any]:
+                           enumerated_floor: int | None = None
+                           ) -> dict[str, Any]:
     """The CREATION HOOK the doors call (#14582): give a new graph its counter row.
 
     Called from every graph-creation door the census found
@@ -3072,11 +3146,16 @@ def provision_graph_record(*, org_id: str, graph_id: str,
        transaction (`record_allocator.provision_graph_record` does not commit),
        so a graph is never left in the state that allocates nothing.
 
-    The floor defaults to `0` because the door's own fact is that it JUST minted
-    the id: a brand-new graph enumerates an empty journal. ⛔ That is not a guess
-    and it is not trusted — `SEED_SQL` refuses when the record already holds a
-    position above the floor (`SeedRefused(reason="divergence")`), so a graph id
-    the record has seen before is REFUSED rather than silently seeded.
+    The floor is DERIVED unless the caller passes one: `record_allocator`
+    reads `JOURNAL_COUNT_SQL` for this graph in the same tenant-scoped
+    transaction, which is the seed's own quantity ("how many positions already
+    exist"). ⛔ A door must NOT have to know it, and a hard-coded `0` would be
+    WRONG for a graph that is older than the call site assuming it is new — the
+    default row's credential self-heal reaches a graph that may predate this hook,
+    and its journal holds exactly the positions a floor of `0` claims cannot
+    exist. Either way the number is not trusted: `SEED_SQL` refuses
+    (`SeedRefused(reason="divergence")`) when the journal's `MAX(seq)` exceeds the
+    enumeration, so a real disagreement is REFUSED rather than silently seeded.
     """
     from . import record_allocator as ra
 
@@ -3097,7 +3176,8 @@ def provision_graph_record(*, org_id: str, graph_id: str,
 
     connection: Any | None = None
     try:
-        connection = _default_connect(dsn)
+        connection = _default_connect(
+            dsn, connect_timeout=PROVISION_CONNECT_TIMEOUT_SECONDS)
         outcome = ra.provision_graph_record(
             connection, org_id=org_id, graph_id=graph_id,
             enumerated_floor=enumerated_floor)
@@ -3133,6 +3213,8 @@ def provision_graph_record(*, org_id: str, graph_id: str,
                 "`record_allocator_cli.py backfill --org-id <org>`",
                 org_id, graph_id, type(exc).__name__, _bounded_cause(exc))
             return {"provisioned": False, "reason": "commit_failed"}
+        # The graph IS cut over now, so any earlier observation of it is stale.
+        clear_uncut_graph(org_id, graph_id)
         return {
             "provisioned": True,
             "graph_id": graph_id,
