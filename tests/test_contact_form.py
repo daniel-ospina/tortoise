@@ -34,8 +34,8 @@ Guards the contract the form exists to honour:
   4. THE FORM IS SURFACED, AND `hello@` IS VISIBLE. `/contact` is a real page,
      linked from the company landing page, the product footer, the FAQ footer
      and the docs next-steps, and the trailing-slash / .html variants redirect
-     to it. The decided address is shown plainly on the outside surface (lede
-     and direct-mailto fallback), not hidden behind an error path.
+     to it. The decided address is shown plainly on the outside surface (the
+     direct-mailto fallback below the form), not hidden behind an error path.
   5. THE TRANSPORT IS A SINGLE SEAM, WIRED AT THE EXISTING INTAKE. One
      submission becomes one item in the intake's own envelope
      `{source, source_item_id, payload}` — posted, with `x-inbound-secret`, to
@@ -564,8 +564,8 @@ def test_the_confirmation_promises_no_reply() -> None:
         "the success fallback must be exactly the reviewed literal — a concatenation "
         "or a computed string there is visitor-facing text no promise scan can read"
     )
-    # The whole PAGE is visitor-facing, not just its script: the static copy, the
-    # lede and the noscript fallback are what a JS-off reader sees, and appending
+    # The whole PAGE is visitor-facing, not just its script: the static copy and
+    # the noscript fallback are what a JS-off reader sees, and appending
     # a promise to the noscript paragraph kept the suite green when this scan
     # started at `<script>` (cycle-4 review). Rendered as a browser reads it —
     # scripts and styles dropped, tags to spaces, entities unescaped, whitespace
@@ -1122,15 +1122,28 @@ def test_contact_page_posts_to_the_function() -> None:
 
 def test_hello_is_visible_plainly_on_the_outside_surface() -> None:
     """The owner ruling: where an outside surface shows an address it is
-    `hello@`. It must be visible up front, not only in an error path."""
+    `hello@`. It must be visible up front, not only in an error path.
+
+    The header lede that used to carry the address was removed by the owner's
+    copy edit (the page now opens with the h1 and the form), so this pins the
+    always-rendered "Prefer email?" line below the form — the one place a
+    visitor sees the address without submitting — rather than the element that
+    was deleted. A pin anchored on `.lede` would now fail for the copy edit's
+    own reason, and a pin over the whole page would pass on nothing but the
+    error prose the ruling exists to exclude.
+    """
     html = _src(CONTACT_HTML)
-    # Visible in the lede — before the form, outside any error/fallback block.
-    lede = html[html.index('class="lede"') : html.index("<main>")]
-    assert CONTACT_TO in lede, "the decided address must be visible up front"
-    assert f'href="mailto:{CONTACT_TO}"' in lede, "the up-front address must be actionable"
-    # And as the direct-mailto fallback below the form.
+    # Rendered on load, outside `contact-msg` / `contact-error` (the two nodes
+    # the script writes an outcome into).
     fallback = html[html.index('class="fallback"') : html.index("<noscript>")]
-    assert f'href="mailto:{CONTACT_TO}"' in fallback, "the fallback must name the decided address"
+    # Anchor on the ANCHOR TEXT, not the raw slice: the slice contains the
+    # `href="mailto:hello@…"` that the next line requires, so a bare
+    # `CONTACT_TO in fallback` is strictly implied by it and can never fire on
+    # its own — `<a href="mailto:hello@…">email us</a>` (no visible address, the
+    # exact thing this pin exists to catch) stayed green. Matching the closing
+    # `>`/`</a>` boundary measures the text a visitor reads.
+    assert f">{CONTACT_TO}</a>" in fallback, "the decided address must be visible up front"
+    assert f'href="mailto:{CONTACT_TO}"' in fallback, "the up-front address must be actionable"
     # No other address may be shown on the outside surface.
     assert "support@" not in html
 
