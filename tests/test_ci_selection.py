@@ -14242,11 +14242,13 @@ def test_the_emission_block_guard_is_not_vacuous():
     # is at "no reachable commit" — which is also false, so the correction repeated the very
     # defect it was removing. Both halves are reachable today, measured with this module's own
     # helpers: `dc42c55baa` (on `integration/14296-on-new-main`) is the RANGE-with-semicolon
-    # spelling — four parsed groups but FIVE unreadable shard-figure sentences, the fail-open this
-    # arm exists for — and `4b7e6ecaed`, this PR's own `merge=union` of `origin/main` (an ancestor
-    # of this head), states four groups from two parents' readable clauses with no conflict
-    # markers. The `spliced` fixture below is a HAND-BUILT string, not a checkout of either;
-    # the commits are named so the arm is motivated by a shape a reader can go and check.
+    # spelling — FOUR clauses parse against FIVE shard-figure sentences, so exactly one figure
+    # there is graded by nothing (`_EMISSION_UNREAD_SENTENCE_RE` also matches the tail of every
+    # readable clause, so this arm's two counts agree only when EVERY sentence parses) — and
+    # `4b7e6ecaed`, this PR's own `merge=union` of `origin/main` (an ancestor of this head),
+    # states four groups from two parents' readable clauses with no conflict markers. The
+    # `spliced` fixture below is a HAND-BUILT string, not a checkout of either; the commits are
+    # named so the arm is motivated by a shape a reader can go and check.
     spliced = _emission_block_header(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s "
         "(f, g, i),\n"
