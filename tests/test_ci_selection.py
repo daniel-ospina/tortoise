@@ -21933,12 +21933,14 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 #
 # `_CUT_CLAIM_FILES` is the SCOPE of that scan, so it is the list the paragraph
 # above is accountable to: one entry per recurrence, the plan ledger's Step-4
-# ledger included (measured at this head: `_cut_claims()` returns 9 rows overall and
-# none contradicts; 7 of them sit in the ledger — its 5 Step-4 verdicts plus 2
-# incidental backticked words, `main` and `ValueError`, that the "`CUT` follows the
-# name" window also matches). ⚠️ Count the ROWS, not the verdicts: `#14481`'s
-# `fb21c37aa298` message says "6 verdicts" while enumerating 5, which is the same
-# off-by-something a count quoted from prose produces — the helper is the instrument.
+# ledger included (measured with the HELPER, not by counting prose: `_cut_claims()`
+# returns 6 rows at this head, none contradicting, and 5 of them sit in the ledger.
+# ⚠️ The other three an unfiltered scan counted were never verdicts on an arm — the sha
+# `e6b3cf2908`, `main` and `ValueError` — which is why the capture is now filtered to
+# the shapes that can contradict. ⚠️ And count the ROWS the helper returns, not the
+# verdicts a commit message enumerates: `fb21c37aa298`'s message says "6 verdicts"
+# while enumerating 5, which is the off-by-something a count quoted from prose
+# produces — the helper is the instrument.
 # A file added here with no verdicts is harmless; a recurrence left out is a
 # verdict with no grader, which is how each of the four defects survived a round.
 # Added at the `a2daaa9eba` review round, proved non-vacuous: deleting
@@ -21948,6 +21950,21 @@ _CUT_CLAIM_WINDOW = 200
 _CUT_CLAIM_RESTORED_SPAN = 400
 _CUT_CLAIM_RESTORED_RE = re.compile(r"RESTORED|restored")
 _CUT_CLAIM_NAME_RE = re.compile(r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z]\w*)`")
+#: ⛔ THE WRAP IS PART OF THE NAME, NOT A BREAK IN IT. A long name is often backticked
+#: across a comment's line break — `` `…_and_meet_the_` `` then `` `wall_target` `` — which an
+#: unbroken-token pattern cannot see: measured on `origin/main`'s PRE-FIX
+#: `slow_wall_projection` docstring, the verbatim defect this PR corrects was the ONE claim
+#: of six the scan missed, i.e. the false-PASS class this pin exists to forbid, one level up.
+#: The two halves are JOINED before comparison, and the pattern requires an identifier chunk
+#: immediately on each side of the break so it cannot swallow unrelated text between two
+#: distant backticks (measured: a `(?:\s*\n\s*#?\s*\w+)*` form matched whole sentences,
+#: produced a non-name, and silently dropped six real claims).
+_CUT_CLAIM_WRAPPED_RE = re.compile(
+    r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z][A-Za-z0-9_]*)\n\s*#?\s*([A-Za-z][A-Za-z0-9_]*)`")
+#: AND ONLY A SHAPE THAT CAN CONTRADICT IS A CLAIM. `live` is this file's own `def`s, so a
+#: captured token that is neither `test_…` nor a private helper is not an arm — it was a sha,
+#: `main`, `ValueError` — and counting it inflated the plan-ledger figure below.
+_CUT_CLAIM_ARM_RE = re.compile(r"^(?:test_\w+|_[A-Za-z]\w*)$")
 _CUT_CLAIM_FILES = (
     "tools/ci_timing.py",
     "tools/ci_selection.py",
@@ -21981,8 +21998,12 @@ def _cut_claims() -> list[tuple[str, int, str, bool]]:
     claims = []
     for rel in _CUT_CLAIM_FILES:
         text = (REPO / rel).read_text(encoding="utf-8")
-        for m in _CUT_CLAIM_NAME_RE.finditer(text):
-            name = m.group(1)
+        found = [(m, m.group(1)) for m in _CUT_CLAIM_NAME_RE.finditer(text)]
+        found += [(m, m.group(1) + m.group(2))
+                  for m in _CUT_CLAIM_WRAPPED_RE.finditer(text)]
+        for m, name in sorted(found, key=lambda pair: pair[0].start()):
+            if not _CUT_CLAIM_ARM_RE.match(name):
+                continue
             window = text[m.end():m.end() + _CUT_CLAIM_WINDOW]
             if not re.search(r"\bCUT\b", window):
                 continue
@@ -22013,6 +22034,19 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         "(the durations arithmetic this PR restored, and the arms B7 really did "
         "take), so this is the scan going blind — a renamed verdict word or file — "
         f"not a tree with nothing to check. claims={claims!r}")
+    # ⛔ AND THE WRAP MUST BE READ, not skipped. `origin/main`'s pre-fix
+    # `slow_wall_projection` sentence backticked this arm across a line break, and an
+    # unbroken-token scan called it clean — the false-PASS this pin exists to forbid.
+    # Synthetic on purpose: it pins the READ, not the current prose.
+    wrapped = ("\u2026 WERE THE B7-CUT ARMS (`test_slow_shards_are_duration_packed_and_meet_the_\n"
+               "    wall_target` and the arithmetic around it, CUT 2026-11-23)")
+    joined = [m.group(1) + m.group(2) for m in _CUT_CLAIM_WRAPPED_RE.finditer(wrapped)]
+    assert joined == ["test_slow_shards_are_duration_packed_and_meet_the_wall_target"], (
+        "the wrapped-name read went blind, so a verbatim re-introduction of the "
+        f"pre-fix sentence would pass this pin: got {joined!r}")
+    assert _CUT_CLAIM_ARM_RE.match(joined[0]), (
+        "the joined name must survive the arm-shape filter, or the wrap is read and "
+        "then discarded")
     contradictions = [c for c in claims if c[3]]
     assert not contradictions, (
         "these records call an arm CUT while `tests/test_ci_selection.py` defines "
