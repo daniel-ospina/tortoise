@@ -62,9 +62,11 @@ version: 1
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
 # `main` at `6a02515d14ad`, and the pool it emits is the union of BOTH parents' registrations —
-# that `main`'s own `core` row for `tests/test_4625_schema_reads_off_write_path.py`, plus this
-# PR's own `tests/test_14033_state_cue_gap.py` — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`,
-# because a file a PR ADDS cannot carry a junit reading yet. On that merged tree the verb packs
+# ⛔ `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
+# `tests/test_14033_state_cue_gap.py` are BOTH `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, and
+# this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
+# (measured: the only `durations` line this PR touches is a comment rewrite of an existing row), so
+# the split below is `main`'s reading too. On that merged tree the verb packs
 # one shard at 838.1 s (g) and ten at
 # 838.2 s (a, b, c, d, e, f, h, i, j, k), so
 # `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
@@ -88,8 +90,8 @@ version: 1
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
 # which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `6a02515d14ad`
-# and adds this PR's own registration only
-# (`tests/test_14033_state_cue_gap.py`, which the same emission puts in shard `f`). A restatement
+# and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
+# is why `main` alone emits this same split. A restatement
 # here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
 # reads every `N at X.X s (names)` sentence in this block, so a repeated figure reports as
 # `<est … stated twice>` and reds the required leg. ⛔ The split is 0.1 s WIDE and the NAME SETS
@@ -135,7 +137,7 @@ version: 1
 # stacked restatements of the same sentence; a fold that splices two sides of it is read by the
 # guard as `<est … stated twice>` / `<ceil stated 2 times>`, i.e. a block claiming two partitions
 # while looking like one — measured on THIS fold, where `main`'s re-emission and this branch's
-# arrived side by side and the guard red `1 failed` at the merged head (837.9/837.8 beside
+# arrived side by side and the guard red `1 failed` at the merged head (838.1/838.0 beside
 # 838.1/838.2). Every earlier reading is therefore HISTORY, stated WITHOUT a name list so it cannot
 # be read as a second claim.
 #
@@ -151,21 +153,13 @@ version: 1
 # at 28 m across every one of those readings while the seconds moved under it (835.5 s to 838.2 s),
 # so NO arithmetic on the minute can catch a carried figure: only the `est_seconds` partition can,
 # which is why the sentence is GRADED below instead of trusted.
-# The registrations this reading counts are the ones `main` has landed at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`, each with the shard `push_legs()` puts it in AT THE HEAD NAMED (a letter is
-# a measurement, never an inference from a neighbouring row): #14409's
-# `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`,
-# #14220's `tests/test_14186_embedder_seam_batching.py`, #14423's
-# `tests/test_14350_drain_convergence.py`, #14038's
-# `tests/test_13998_capacity_notice.py` and #14429's
-# `tests/test_spool_drain_rehearsal.py`, plus #14407's dual `api`/`core` registration of
-# `tests/test_14407_alert_delivery.py` and #13722's dual `api`/`core` registration of
-# `tests/test_13722_stamp_chain_off_loop.py` — and EVERY one of them re-partitions every bin,
-# because the packer is greedy: ONE new 2.0 s file re-packs the whole map, which is why the NAMES
-# are quoted and graded, not only the seconds. A file a PR ADDS carries the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: it cannot have a junit reading yet), NOT a
-# hand-picked sub-default weight — an unmeasured figure re-packs the bins and so moves a graded
-# claim on a number no run measured.
+# The registrations this reading counts are enumerated ONCE, below — ⛔ NOT re-listed here, and with
+# NO per-file shard letter (the paragraph after it says why a letter rots). A file a PR ADDS carries
+# the flat 2.0 s `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: it cannot have a junit reading yet),
+# NOT a hand-picked sub-default weight — an unmeasured figure re-packs the bins and so moves a graded
+# claim on a number no run measured. EVERY one of them re-partitions every bin, because the packer is
+# greedy: ONE new 2.0 s file re-packs the whole map, which is why the NAMES are quoted and graded,
+# not only the seconds.
 #
 # ⛔ NO PER-FILE SHARD LETTER IS RECORDED HERE ANY MORE. This block used to state, per registration,
 # which shard `push_legs()` put that file in ("a letter is a measurement, never an inference"), and
@@ -216,15 +210,6 @@ version: 1
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not from the pre-suite
 # terms (those are measurements and file facts).
 #
-# The 1.25x balance band is enforced by `--integrity`'s
-# `workflow_halves_issues()`, which recomputes the ratio from the committed map;
-# the `test_real_workflow_halves_are_consistent` arm that used to sit beside it
-# went with the durations-map arithmetic cut (#14419) and has not returned. The old
-# "single-file floor" argument is RETIRED: it rested on
-# `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
-# file — so extra shards do keep reducing max(shard). The lane-parity contract
-# above cannot hold a MINIMUM either way: it requires a SUPERSET of main's
-# labels, so it forbids a SHRINK and is what PERMITS 11, not what caps it at 10.
 # The 1.25x balance band is enforced by `--integrity`'s `workflow_halves_issues()`, which recomputes
 # the ratio from the committed map (the `test_real_workflow_halves_are_consistent` arm that used to
 # sit beside it went with the durations-map arithmetic cut). The old "single-file floor" argument is
