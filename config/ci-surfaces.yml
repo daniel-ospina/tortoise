@@ -8443,6 +8443,18 @@ surfaces:
   # without this line `test_integrity_covers_all_test_files` fails — every
   # tests/**/test_*.py must be classified (the scope-v5 drift trap).
   - test_install_reaper_schedule.py
+  # #14559: the SCHEDULE for `tools/reap_empty_test_graphs.py` — a job that
+  # DELETES graphs on the production instance. Registered `core` beside its
+  # scheduling sibling above, because the subjects it guards are
+  # `.github/workflows/test-graph-reaper.yml` (which matches no `SOURCE_PATTERNS`
+  # row) and `tools/reap_empty_test_graphs.py` (a `tools/` path, which
+  # `_keep_changed` DROPS — the #12363 silent-drop class). Without this row
+  # `--integrity` reds (`manifest drift: test_14559_reaper_schedule.py`, measured
+  # on PR #14565); without the `CORE_ALSO` row for the tool a tool-only diff
+  # selects NO surface and these pins never run. Hermetic: the workflow is parsed
+  # and its `run:` bodies are executed as shell against tmp dirs, no graph and no
+  # docker.
+  - test_14559_reaper_schedule.py
   - test_reaper.py
   - test_reaper_orphan.py
   # #3767: the reaper's ownership claim (name/containment is not ownership).

@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -110,6 +110,56 @@ class TestScheduleShape:
         # to silence a finding.
         header = WORKFLOW.read_text(encoding="utf-8")
         assert "1.46 MB" in header and "292 MB" in header
+
+    # The contexts GitHub permits in `jobs.<job_id>.env` — actionlint's own list,
+    # quoted from a live failure: "context \"runner\" is not allowed here.
+    # available contexts are \"github\", \"inputs\", \"matrix\", \"needs\",
+    # \"secrets\", \"strategy\", \"vars\"" (plus `env`, which the docs allow).
+    JOB_ENV_CONTEXTS = frozenset(
+        {"github", "env", "vars", "inputs", "matrix", "needs", "secrets", "strategy"})
+
+    def test_job_level_env_uses_only_contexts_that_are_legal_there(self):
+        """⛔ `runner` is NOT one of them (actions/runner#2204).
+
+        `REAPER_WORKDIR: ${{ runner.temp }}` in a job-level `env:` block does not
+        fall back to an empty string — the expression is refused when the run is
+        SET UP, so every tick dies before the plan pass and the feature never runs
+        at all. Measured red on PR #14565 (actionlint 1.7.12, `workflow-lint`):
+        ".github/workflows/test-graph-reaper.yml:152:27: context \"runner\" is not
+        allowed here". This grades the WHOLE block, so the next such line is caught
+        before it ships rather than on the first scheduled tick.
+        """
+        for key, value in _doc()["jobs"]["reap"]["env"].items():
+            for expr in re.findall(r"\$\{\{(.*?)\}\}", str(value), re.S):
+                for ctx in re.findall(r"\b([a-z_][a-z0-9_]*)\s*\.", expr):
+                    assert ctx in self.JOB_ENV_CONTEXTS, (
+                        f"{key}: `{ctx}.` is not an allowed context in a job-level "
+                        f"`env:` block — the run is refused at setup ({value})")
+
+    def test_the_report_directory_seam_is_populated_where_its_value_exists(self):
+        """The seam must still be ONE directory the artifact step names, set from
+        `RUNNER_TEMP` (a real environment variable on every step) and inherited by
+        every consumer — not repeated per step, and never left to a bare `/tmp`."""
+        job = _doc()["jobs"]["reap"]
+        assert "REAPER_WORKDIR" not in job["env"], (
+            "REAPER_WORKDIR is back in the job-level env: — `runner` is not a legal "
+            "context there, so the schedule would die at setup")
+        steps = job["steps"]
+        names = [s.get("name", s.get("uses", "?")) for s in steps]
+        populated = [i for i, s in enumerate(steps)
+                     if "REAPER_WORKDIR=$RUNNER_TEMP" in str(s.get("run", ""))
+                     and "GITHUB_ENV" in str(s.get("run", ""))]
+        assert len(populated) == 1, names
+        # Every step that READS the seam must come after the step that sets it.
+        for reader, needle in {
+                "Plan (dry run": "$REAPER_WORKDIR",
+                "Execute (": "$REAPER_WORKDIR",
+                "Verify (": "$REAPER_WORKDIR",
+                "Verdict ": "REAPER_WORKDIR",
+        }.items():
+            at = next(i for i, n in enumerate(names) if n.startswith(reader))
+            assert at > populated[0], (reader, at, populated[0], names)
+            assert needle in str(steps[at].get("run", "")), (reader, needle)
 
 
 # ── 2. the schedule must not widen a gate ────────────────────────────────────
@@ -309,7 +359,7 @@ class TestVerdict:
         """`refused-unreadable` means the sweep is partly BLIND — a defect in the
         sweep, so it fails. `refused-unresolved` is the tool working as designed,
         so it is a WARNING and the run stays green."""
-        done, record, summary = _verdict(
+        done, record, _summary = _verdict(
             tmp_path, plan=_plan(reapable=1, unreadable=1),
             verify=_plan(reapable=0, unreadable=1), execute=_execute(deleted=1))
         assert done.returncode != 0
@@ -353,3 +403,30 @@ class TestVerdict:
         assert done.returncode == 0
         assert record["bytes_freed"] is None
         assert "unmeasured" in summary
+
+
+# ── 5. the file must actually RUN on the diffs it guards ─────────────────────
+
+def test_a_reap_tool_only_change_selects_core_so_this_guard_actually_runs():
+    """`tools/` is in `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS a tools-only
+    path and `select()` takes the docs-only early return. MEASURED before the
+    `CORE_ALSO` entry, on this PR's own head: `--changed-files
+    tools/reap_empty_test_graphs.py` → `surfaces: []`, so the change to the tool's
+    `used_memory` delta ran on NOTHING — and this is the fail-OPEN direction for
+    this tool in particular: the workflow hands it a production FalkorDB instance
+    with delete authority, so the diff most worth guarding is an edit to the code
+    that decides what gets deleted. This pins the entry that closes it, in the
+    file it protects (#1349/#3332/#3616 silent-drop class).
+    """
+    from tools import ci_selection
+
+    manifest = ci_selection.load_manifest()
+    selection = ci_selection.select(
+        ["tools/reap_empty_test_graphs.py"], "pull_request", manifest)
+    assert "core" in (selection.get("surfaces") or []), selection.get("surfaces")
+    files = selection.get("test_files")
+    if files == "ALL":
+        return
+    assert "test_14559_reaper_schedule.py" in files, (
+        "a diff to tools/reap_empty_test_graphs.py no longer selects its own pin — "
+        "the `CORE_ALSO` entry was dropped or the prefix behaviour changed")
