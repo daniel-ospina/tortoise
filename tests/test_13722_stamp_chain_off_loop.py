@@ -48,6 +48,15 @@ submission at all) reds 1; a submission to a different pool reds 1; dropping the
 `await` (`asyncio.ensure_future`, a bare un-awaited `_run_off_loop(...)`) reds 2;
 turning the containing function into a coroutine function reds 3.
 
+⛔ THE ARMS ARE ASSERTED IN THAT ORDER, and the order is load-bearing. Property 3
+is checked LAST on purpose: the PRE-#13722 chain lives in `_report_capture`, a
+nested `async def`, so a plain revert satisfies "the owner is an `async def`" and
+a 3-check written first reds THERE — reporting "the chain silently does NOT run"
+about a shape where it runs, inline on the loop, which is the 53 s wedge. The
+submission arm must speak first for a revert; the `async def` arm must only speak
+once submission and await hold (an `async def` that IS submitted and awaited still
+reaches it, so nothing is lost by the reorder).
+
 WHAT IT DELIBERATELY DOES NOT PIN. The number of round trips per record. That
 number is a property of `record_projection.replay`'s plan and is measured (not
 asserted) by `tests/test_9558_record_write_cost.py`'s prologue assertion and by
@@ -213,23 +222,6 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         "of the chain could run on the event loop unseen. Rename it, or re-derive "
         "this pin to key on the definition node (#13722)")
 
-    # ⛔ SYNC, NOT `async def` (review finding 3): `_run_off_loop` hands `fn` to
-    # `_submit_off_loop`, which runs it SYNCHRONOUSLY inside the worker
-    # (`monitoring.confine_context`'s `ctx.run(fn, ...)`). Given a coroutine
-    # function it returns an unawaited coroutine OBJECT — the future resolves to
-    # that object, `_run_off_loop` returns it, and the chain never executes: no
-    # record, no append, no warning, and every assertion below still passes.
-    async_owners = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name in owners
-    }
-    assert not async_owners, (
-        f"the stamp chain lives in {sorted(async_owners)}, an `async def` — "
-        f"{_OFF_LOOP} runs its callable SYNCHRONOUSLY in the worker, so an "
-        "async one is never awaited and the chain silently does NOT run "
-        "(#13722)")
-
     for owner in sorted(owners):
         assert (_OFF_LOOP_POOL, owner) in submitted, (
             f"{_STAMP_DOOR} is called from {owner!r}, which no function of "
@@ -244,6 +236,34 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
             "submission is never awaited — the handler's own `except` is what "
             "keeps a stamp failure non-fatal (#8501/#1529), and a detached task "
             "moves that failure where nothing reports it (#13722)")
+
+    # ⛔ SYNC, NOT `async def` (review finding 3) — ASSERTED LAST ON PURPOSE
+    # (cycle-10 finding 1, falsified against `origin/main`): `_run_off_loop` hands
+    # `fn` to `_submit_off_loop`, which runs it SYNCHRONOUSLY inside the worker
+    # (`monitoring.confine_context`'s `ctx.run(fn, ...)`). Given a coroutine
+    # function it returns an unawaited coroutine OBJECT — the future resolves to
+    # that object, `_run_off_loop` returns it, and the chain never executes: no
+    # record, no append, no warning, and every assertion above still passes, which
+    # is why this arm is the ONLY thing that catches it.
+    #
+    # ⛔ WHY IT CANNOT GO FIRST: the pre-#13722 chain lives in `_report_capture`, a
+    # nested `async def`, so checking this before the submission arm made a plain
+    # REVERT red here with "the chain silently does NOT run" — the opposite of what
+    # a revert does (it runs, inline on the loop, which is the 53 s wedge) — and
+    # pointed a fixer at `_report_capture`'s signature instead of at the lost
+    # submission. Asserting it after submission+await costs no coverage: an
+    # `async def` that IS submitted and awaited passes the two arms above and still
+    # reds here (mutation-verified).
+    async_owners = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in owners
+    }
+    assert not async_owners, (
+        f"the stamp chain lives in {sorted(async_owners)}, an `async def` — "
+        f"{_OFF_LOOP} runs its callable SYNCHRONOUSLY in the worker, so an "
+        "async one is never awaited and the chain silently does NOT run "
+        "(#13722)")
 
 
 if __name__ == "__main__":  # pragma: no cover
