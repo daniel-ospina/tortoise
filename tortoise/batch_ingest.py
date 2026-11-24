@@ -822,11 +822,19 @@ class InMemoryBatchStore:
     def put_batch_if_state(self, batch: Batch,
                            expected: Collection[BatchState]) -> bool:
         # Atomic under the same lock as `put_batch`: compare and write together.
+        # ⛔ The RECORD's identity (`estimate`, `corpus_name`) is preserved from
+        # the stored row, not taken from the caller (#14415 recut review, P1):
+        # `_resume_batch` passes a Batch built from an orphan-item snapshot, so
+        # copying it wholesale erased the estimate an acceptance had just
+        # written. A state transition writes state.
         with self._lock:
             current = self._batches.get((batch.org_id, batch.batch_id))
             if current is None or current.state not in expected:
                 return False
-            self._batches[(batch.org_id, batch.batch_id)] = _copy_batch(batch)
+            written = _copy_batch(batch)
+            written.estimate = dict(current.estimate)
+            written.corpus_name = current.corpus_name
+            self._batches[(batch.org_id, batch.batch_id)] = written
             return True
 
     def put_batch(self, batch: Batch) -> None:
@@ -1076,21 +1084,34 @@ class GraphBatchStore:
 
     def put_batch_if_state(self, batch: Batch,
                            expected: Collection[BatchState]) -> bool:
-        """A compare-and-set on the BATCH row — `MATCH … state IN $expect`."""
+        """A compare-and-set on the BATCH row — `MATCH … state IN $expect`.
+
+        ⛔ THIS WRITES STATE, NOT THE RECORD'S IDENTITY (#14415 recut review,
+        P1). It used to `SET b.estimate_json=$estimate, b.corpus_name=$corpus`
+        from the CALLER's object, and the caller is `_resume_batch`, which builds
+        its `Batch` from an orphan-item snapshot when the batch row had not been
+        written yet. So an acceptance landing between that snapshot and this CAS
+        was MATCHED (`submit()` writes `ACCEPTED`) and then OVERWRITTEN with the
+        empty estimate — the arithmetic owner §4 requires on the record, erased
+        permanently, with nothing that re-derives it, and `GET /v1/batches`
+        reporting `estimate: {}`. No caller of this method mutates `estimate` or
+        `corpus_name` before calling it (verified: zero assignments to either
+        outside the two writers that own them), so a state transition has no
+        business rewriting them. The columns are written by `put_batch` alone —
+        the acceptance that owns the estimate and the orphan adoption that has
+        none to lose.
+        """
         rows = self._q(
             f"MATCH (b:{BATCH_LABEL} {{id:$bid, org_id:$org}}) "
             "WHERE b.state IN $expect "
             "SET b.state=$state, b.updated_at=$updated, "
-            "    b.cancelled_at=$cancelled_at, b.cancel_reason=$cancel_reason, "
-            "    b.estimate_json=$estimate, b.corpus_name=$corpus "
+            "    b.cancelled_at=$cancelled_at, b.cancel_reason=$cancel_reason "
             "RETURN b.id",
             {"bid": batch.batch_id, "org": batch.org_id,
              "expect": [str(e) for e in expected],
              "state": str(batch.state), "updated": batch.updated_at,
              "cancelled_at": batch.cancelled_at,
-             "cancel_reason": batch.cancel_reason,
-             "estimate": _json_dumps(batch.estimate),
-             "corpus": batch.corpus_name},
+             "cancel_reason": batch.cancel_reason},
         )
         return bool(rows)
 
