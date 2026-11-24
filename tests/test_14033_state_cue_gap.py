@@ -239,11 +239,14 @@ def test_a_constraint_is_still_not_dropped_in_silence():
 def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
     """All six guards of `is_predicate` have a pinned falsifier.
 
-    ⛔ A pin has to be able to reach the guard it pins. The `what is the payment
-    terms clause given the contract was archived` row of ``NOT_SELECTED`` is
-    refused by the START anchor (`^is`), so it cannot detect the tail anchor or
-    the NP bound at all; the strings below are the ones that go red when a guard
-    is removed:
+    ⛔ A pin has to be able to reach the guard it pins. The
+    `is the payment terms clause given the contract was archived` row of
+    ``NOT_SELECTED`` (``tests/test_13557_13558_reachable_reads.py``) is refused
+    by the NP STOP — `the` — and by nothing else: measured, relaxing the start
+    anchor, dropping the tail anchor and widening the word bound all leave it
+    refused, and only dropping `_NP_STOP` routes it. So it cannot pin any of the
+    other guards, and the strings below are the ones that go red when a guard is
+    removed:
 
     * dropping the tail anchor routes `is the report archived in S3` — a lookup
       whose ending is not the whole predicate;
@@ -405,7 +408,52 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     "is the plan still to be cancelled",
     # disjunction
     "is the ticket still open or cancelled",
+    # the CONTRACTION spelling — `n't` is a SUFFIX inside the token, so a bare
+    # `n't` alternative stopped only the literal word and these routed
+    "is the plan isn't cancelled",
+    "is the report wasn't archived",
+    "is the ticket hasn't been archived",
+    "is the api doesn't work retired",
+    # an ADJUNCT/CLAUSE LINKER — the ending is inside the adjunct, so the
+    # question's predicate is `safe` / `accurate` / the policy's applicability
+    "is the data safe once archived",
+    "is the report still accurate once archived",
+    "is the policy unless bookings were cancelled",
+    "is the report accurate since archived",
+    "is the report accurate whereas archived",
+    "is the data safe whenever archived",
+    "is the policy valid whether archived",
+    # an `of`-COMPLEMENT whose head is the ending word: the question is about
+    # the LIST, and the ending modifies the complement
+    "is the list of retired services archived",
+    "is the number of cancelled claims archived",
+    "is the total of cancelled claims archived",
+    "is the rate of cancelled bookings archived",
 )
+
+#: …and the recall the same stop words must NOT cost: the frame words are
+#: ordinary noun modifiers and `of`-complements over LIVE records are real
+#: questions. Each of these routes at this head and refuses if the corresponding
+#: stop alternative is widened past the frame it is about.
+STOP_WORDS_KEEP_THIS_RECALL = (
+    "is the go to market plan archived",
+    "is the past due invoice archived",
+    "is the point to point integration archived",
+    "is the board of directors report archived",
+    "is the list of open tickets archived",
+)
+
+
+@pytest.mark.parametrize("query", STOP_WORDS_KEEP_THIS_RECALL)
+def test_the_predicate_stop_words_do_not_cost_this_recall(query):
+    from tortoise.state_intent import detect_state_question
+
+    got = detect_state_question(query)
+    assert got.population is not None, (
+        f"{query!r} keeps the relevance read — the stop word that refuses its "
+        f"neighbouring failure spelling (`to`/`due`/`of`) must only apply in the "
+        f"FRAME it is about, or a real state question answers `0 rows` (the "
+        f"relevance read excludes terminal statuses)")
 
 
 @pytest.mark.parametrize("query", MODIFIED_PREDICATE_STAYS_OUT)

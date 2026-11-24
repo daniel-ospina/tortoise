@@ -181,11 +181,19 @@ _ENDING_WORDS = (
 #: * DISJUNCTION (`or`) — `is the ticket still open or cancelled` asks about two
 #:   states at once, and one population cannot answer both.
 #:
-#: ⛔ NO RECALL IS LOST BY THIS, and that is measured rather than assumed: the
-#: AFFIRMATIVE temporal modifiers stay in the run, so `is the claim already
-#: archived`, `is the ticket still archived` and `is the report already withdrawn`
-#: still route. Adding `yet|still|already` as well would close the same class and
-#: additionally refuse those three, so this is the narrower list.
+#: ⛔ NO RECALL IS LOST IN THE AFFIRMATIVE-MODIFIER CLASS, and that is measured
+#: rather than assumed: `is the claim already archived`, `is the ticket still
+#: archived` and `is the report already withdrawn` still route, and adding
+#: `yet|still|already` as well would close the same class while refusing those
+#: three — so this is the narrower list. ⛔ AND THE COST IS STATED, because a
+#: linker word is also an ordinary NOUN: `is the do while loop deprecated` and
+#: `is the before after comparison archived` keep the relevance read now. They are
+#: rare spellings and the alternative is a polarity-inverted answer to a negation,
+#: so the trade is taken here rather than hidden; the FRAME words (`to|due|
+#: scheduled|going|about` introducing `be`) and the `of`-complement apply only in
+#: their frame, which is why `is the go to market plan archived` and
+#: `is the list of open tickets archived` still route
+#: (``STOP_WORDS_KEEP_THIS_RECALL``).
 #: ⛔ IT APPLIES FROM THE SECOND WORD ON, never to the head noun: `it` and `us`
 #: are ordinary head nouns in this product's own vocabulary (`is our IT platform
 #: retired`, `is the US footprint archived`), and the head-noun slot is not a
@@ -232,7 +240,14 @@ _NP_STOP = (
     # above: each one changes what the question asks, and a negated predicate is
     # answered with the polarity-INVERTED population)
     r"|not|never|neither|nor|longer"
-    r"|to|be|going|about|due|scheduled"
+    r"|be"
+    # ⛔ FUTURITY/INTENT is a FRAME, not a word list: `to|going|about|due|scheduled`
+    # are ordinary noun modifiers elsewhere (`is the go to market plan archived`,
+    # `is the past due invoice archived`, `is the point to point integration
+    # archived`) and refusing them cost that recall, so they stop the run only
+    # where they introduce the predicate (`… to be retired`, `… due to be
+    # cancelled`).
+    r"|(?:to|going|about|due|scheduled)\s+(?:to\s+)?be\b"
     r"|or"
     # ⛔ AND AT A CLAUSE LINKER / ADJUNCT MARKER, which is the same defect one
     # grammar step further out: the ending there is inside an ADJUNCT, so the
@@ -241,8 +256,20 @@ _NP_STOP = (
     # archived`, and `is the policy unless bookings were cancelled` (whose own
     # finite verb `were` sat inside the run). Measured on the head that already
     # carried the negation/futurity/disjunction list: all three still routed.
-    r"|n't|unless|once|if|before|after|until|while|because|although|though"
-    r"|each|every|both|either|another|several|many|most|few|none)\b)"
+    # ⛔ THE CONTRACTION IS A SUFFIX, not a token: `_NP_STOP` is a negative
+    # lookahead evaluated at a TOKEN START, so a bare `n't` alternative stopped
+    # only the literal word — `is the plan isn't cancelled`, `is the report wasn't
+    # archived` and `is the ticket hasn't been archived` all routed and were
+    # served the polarity-INVERTED population. `[a-z0-9'-]*n't` matches the token
+    # that carries it.
+    r"|[a-z0-9'-]*n't"
+    r"|unless|once|if|before|after|until|while|because|although|though"
+    r"|as|since|whenever|whereas|whether"
+    r"|each|every|both|either|another|several|many|most|few|none"
+    # ⛔ AND AT AN `of`-COMPLEMENT WHOSE HEAD IS THE ENDING WORD (`is the list of
+    # retired services archived`): the question is about the LIST, and the ending
+    # modifies the complement, so the head noun is not the thing that ended.
+    rf"|of\s+(?:{_ENDING_WORDS}))\b)"
 )
 
 #: …and the BASE forms of the same words, which is what do-support selects
