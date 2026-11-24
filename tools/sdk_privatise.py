@@ -1688,7 +1688,7 @@ SWEEP_NAMES = 66
 #: because Python binds the LAST while a first-anchored walk grades only the prose above the FIRST).
 #: ⛔ THE ATTRIBUTION THE PARAGRAPH ABOVE LEAVES UNSTATED, MEASURED RATHER THAN GUESSED — and the
 #: record of what the merge COMMITTED against what its own tree derives. `c3d33f9e1a39` committed
-#: `SWEEP_RESIDUE = (11860, '6051234d8dab29c8')`, and `--check` AT THAT COMMIT prints observed
+#: `SWEEP_RESIDUE = (11911, '270de036aa1b72b7')`, and `--check` AT THAT COMMIT prints observed
 #: `(11870, '6da40999bb5162fa')` against that committed pair and exits **1** — so the committed
 #: pair was not the tree's reading, and the required `surface-guard` job (a `` `needs:` `` arm of
 #: `python-ci-gate`) graded RED under it. The same observed pair is printed at
