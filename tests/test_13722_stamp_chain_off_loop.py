@@ -1185,7 +1185,9 @@ def test_literal_truth_decides_the_shapes_the_dead_guard_arm_relies_on(
     never run — the silent-loss state the arm exists to refuse. The `{*…}`/
     `{**…}` rows are the P2-1 fix, which read a spread from its operand instead of
     treating it as empty. The `0 if _x else 0` / `1 if _x else 1` rows pin the
-    branch-agreement arm (deleting its two lines reds them and nothing else), and
+    branch-agreement arm (deleting its two lines reds them AND
+    `test_an_if_expression_guard_is_graded_as_a_guard`, whose dead leg is built from
+    the same `0 if _x else 0` — measured: 3 failed), and
     `0 if _x else 1` is its control: disagreeing branches stay undecidable. The
     `None` rows pin the other direction: nothing may grade a run-time value, or a
     correct tree reds with a false diagnosis.
