@@ -2782,7 +2782,8 @@ def test_duplicate_of_round_trips_through_the_production_store():
             self.params.append(dict(params or {}))
 
             class _Res:
-                result_set: list = []
+                def __init__(self) -> None:
+                    self.result_set: list = []
 
             return _Res()
 
