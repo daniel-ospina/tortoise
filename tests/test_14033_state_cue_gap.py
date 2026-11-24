@@ -272,11 +272,13 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       to an adjunct clause and the question's predicate is `safe` / `accurate` /
       the policy's applicability, so the run would swallow it;
     * the PREDICATE-MODIFIER stop is the sixth guard, and its falsifier is the
-      twelve measured rows of
-      :func:`test_a_modified_predicate_is_not_the_question_asked` — dropping the
-      `not|never|…|or` line routes the negated / future / disjunctive predicate
-      class, which answers the question with the POLARITY-INVERTED (or a
-      not-yet-existing) population;
+      NINETEEN measured rows of
+      :func:`test_a_modified_predicate_is_not_the_question_asked` (the count is
+      the tuple's own length, not the review's twelve: eleven NEGATED — seven
+      plain, four correlative/`no longer`/`any longer` — seven FUTURE and one
+      DISJUNCTIVE) —
+      dropping the `not|never|…|or` line routes that class, which answers the
+      question with the POLARITY-INVERTED (or a not-yet-existing) population;
     * relaxing the START anchor (`^(?:is|are|was|were)` →
       `(?:^|\\b)(?:is|are|was|were)`) routes the two NESTED
       clauses at the end of this loop — measured, with that one edit, nothing
