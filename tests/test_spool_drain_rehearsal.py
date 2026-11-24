@@ -809,3 +809,26 @@ def test_org_id_tail_is_twelve_characters_where_decimal_is_not() -> None:
     assert overflowing, (
         "no swept nonce reaches the decimal overflow, so this pin cannot show "
         "that the hex field is what fixes the shape")
+
+def test_the_uri_gate_parses_the_host_instead_of_matching_a_substring() -> None:
+    """#14442: a PASSWORD containing `localhost:` let a production target through.
+
+    The gate asked whether the raw URI *contained* `localhost:`/`127.0.0.1:`
+    anywhere, so `bolt://u:localhost:x@falkordb.prod:6379/g` was ACCEPTED and the
+    drain wrote to `falkordb.prod` — a fail-open in the only enforcement of
+    recorded decision 2. The check is now on the parsed hostname, exactly.
+    """
+    # the reported bypass: loopback text in the USERINFO, a real host elsewhere
+    for uri in ("bolt://u:localhost:x@falkordb.prod:6379/g",
+                "docker://:pw@127.0.0.1:6379@falkordb.prod/g",
+                "bolt://127.0.0.1.evil.com:6379/g",
+                "bolt://localhost.evil.com:6379/g"):
+        with pytest.raises(SystemExit) as exc:
+            rehearsal._gate_uri(uri)
+        assert "non-loopback" in str(exc.value), (uri, exc.value)
+    # non-vacuity: the three forms the tool actually uses still pass, so the row is
+    # not just asserting that everything is refused.
+    for uri in ("bolt://localhost:6379/g",
+                "docker://:pw@127.0.0.1:6379/tortoise_test_matrix",
+                "docker://:pw@[::1]:6379/g"):
+        assert rehearsal._gate_uri(uri) == uri

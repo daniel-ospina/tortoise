@@ -97,6 +97,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SPOOL = Path.home() / ".tortoise" / "capture-spool"
@@ -164,10 +165,19 @@ def _gate_uri(uri: str | None) -> str:
     low = uri.lower()
     if "api.premiselabs.co" in low or "live-v5" in low:
         raise SystemExit(f"refusing a production target in TORTOISE_DB_URI: {uri!r}")
-    if not re.search(r"@?(localhost|127\.0\.0\.1|::1)[:/]", low.replace("docker://", "").replace("bolt://", "")):
-        # `docker://:pw@127.0.0.1:PORT/graph` and `bolt://localhost:PORT` both match;
-        # anything else is not a target this rehearsal will write to.
-        raise SystemExit(f"refusing a non-loopback FalkorDB target: {uri!r}")
+    # ⛔ THE HOST IS PARSED, NEVER SUBSTRING-MATCHED (#14442). The old test asked
+    # whether the raw URI *contained* `localhost:`/`127.0.0.1:` anywhere — so a
+    # PASSWORD or query string carrying it let a production target through:
+    # `bolt://u:localhost:x@falkordb.prod:6379/g` was ACCEPTED, and the drain then
+    # wrote to `falkordb.prod`. That is a fail-open in the only enforcement of
+    # recorded decision 2, so the check is on the parsed HOSTNAME, exactly.
+    host = (urlsplit(uri).hostname or "").strip("[]").lower()
+    if host not in ("localhost", "127.0.0.1", "::1"):
+        # `docker://:pw@127.0.0.1:PORT/graph` and `bolt://localhost:PORT` both pass;
+        # anything else — including a host that merely LOOKS loopback — is refused.
+        raise SystemExit(
+            f"refusing a non-loopback FalkorDB target: {uri!r} (parsed host "
+            f"{host or '<none>'!r}; the URI must name localhost / 127.0.0.1 / ::1)")
     return uri
 
 
