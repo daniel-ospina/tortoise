@@ -1037,12 +1037,20 @@ def test_a_tool_only_diff_selects_this_suite():
     ⛔ WITHOUT THIS THE PIN'S OWN GUARDS SLEEP ON THE ONLY DIFF THAT CAN BREAK THEM. `tools/`
     is a flat `NON_PYTHON_PREFIXES` entry in `tools/ci_selection.py`, and this tool has no
     `SOURCE_PATTERNS` bridge, so the changed-file filter answers `surfaces: []` — and a PR that
-    edits ONLY `SWEEP_RESIDUE` or its `#:` record then runs none of the arms below. Measured
+    edits ONLY `SWEEP_RESIDUE` or its `#:` record then runs none of this suite's arms. Measured
     before the `CORE_ALSO` row: `--changed-files tools/sdk_privatise.py` → `surfaces: []`,
     `full: false`, 106 test files, THIS FILE ABSENT. `--check` (the required `surface-guard`
-    step) is not a substitute: it compares the `(rows, digest)` pair and never reads the prose.
-    So the first diff to notice a bad re-cut was whichever `core`-selecting PR came next — on
-    rows its author never wrote.
+    step) is not a substitute: it compares the `(rows, digest)` pair and nothing else.
+
+    ⛔ WHAT THAT LEAVES UNGRADED, named exactly — the loose version of this paragraph is
+    false: the pin's SHAPE (rows > 0, and a digest separating SHAPES and COUNTS), the
+    vacuous-map REFUSAL (an empty map must exit 2 — a `--check` that stopped refusing would
+    make `surface-guard` pass VACUOUSLY), the `SWEEP_NAMES == 66` non-vacuity floor, the
+    scope-local typing arms and the refspec arms. ⛔ AND NOT "the next `core`-selecting PR
+    reds on the prose": `#14439` (B8, `8c373f59a15b`) cut this suite from 36 arms to 11 and
+    deleted `_residue_block()` together with the published-extent and prose grading, so no
+    prose arm remains to catch that. That cut is `main`'s decision and is NOT restored here;
+    this arm pins the SELECTION of the 11 arms that survive.
 
     The `CORE_ALSO` row is what fixes it, and both of its failure directions are graded here:
     the row is removed (surfaces collapse), and the row is made DECORATIVE by adding this file

@@ -1794,12 +1794,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `test_sdk_privatise_sweep.py` ABSENT. `tools/` is a flat `NON_PYTHON_PREFIXES`
              # entry and this file has no `SOURCE_PATTERNS` bridge, so a diff that edits ONLY
              # the residue pin runs none of the arms that grade it
-             # (`test_the_residue_pin_is_a_reading_of_the_whole_set`, the `OWN_PINS` refspec
-             # arms). The required `surface-guard` job cannot see the gap either: it runs
-             # `--check`, the `(rows, digest)` pair, never the suite. Measured, this is how a
-             # re-cut lands prose that disagrees with the block it describes, reding the NEXT
-             # `core`-selecting PR on rows its author did not write. With the entry:
-             # `surfaces=['core']` and the suite is selected. Pinned by
+             # (`test_the_residue_pin_is_a_reading_of_the_whole_set`,
+             # `test_every_addressed_rev_names_a_fetchable_refspec`).
+             # ⛔ WHAT THE GAP IS, EXACTLY — the loose version of this comment is FALSE: the
+             # required `surface-guard` step runs `--check`, which DOES compare the
+             # `(rows, digest)` pair against the tree, so a stale PAIR reds there and does not
+             # need this row. What a `tools/sdk_privatise.py`-only diff leaves ungraded is the
+             # pin's SHAPE (rows > 0, and a digest that separates SHAPES and COUNTS, not only
+             # counts), the vacuous-map REFUSAL (an empty map must exit 2 — a `--check` that
+             # stopped refusing would make surface-guard pass VACUOUSLY), the
+             # `SWEEP_NAMES == 66` non-vacuity FLOOR, the scope-local typing arms and the
+             # refspec arms.
+             # ⛔ SCOPED TO WHAT SURVIVES: `#14439` (B8, `8c373f59a15b`) cut this suite from
+             # 36 arms to 11 and deleted `_residue_block()` together with the published-extent
+             # and prose grading. That is `main`'s decision and this row does NOT restore it —
+             # and nor can "a re-cut lands prose that disagrees … reding the NEXT
+             # `core`-selecting PR" still happen, because no prose arm remains to red. With the
+             # entry: `surfaces=['core']` and the suite is selected. Pinned by
              # tests/test_sdk_privatise_sweep.py::test_a_tool_only_diff_selects_this_suite.
              "tools/sdk_privatise.py",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
