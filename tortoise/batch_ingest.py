@@ -652,6 +652,23 @@ class BatchStore(Protocol):
 
     def put_batch(self, batch: Batch) -> None: ...
 
+    def put_batch_if_absent(self, batch: Batch) -> bool:
+        """Create the row ONLY if the key is absent; returns whether it wrote.
+
+        ⛔ AN ADOPTION IS A CREATE, NOT A WRITE (#14415 review round 11, P2).
+        `_resume_batch` adopts orphan ITEM rows (a submit that wrote items and
+        died before its batch row), and it built the batch row from that snapshot
+        and wrote it with a plain `put_batch` — a `MERGE … SET` of state,
+        created_at, updated_at, estimate_json, cancelled_at, cancel_reason and
+        corpus_name. The re-read above narrows that window to two statements; it
+        does not close it, so an acceptance landing in between had its estimate
+        and corpus_name BLANKED (owner §4's arithmetic gone from the record) and
+        the row relabelled `resuming` over work that never stopped. Every other
+        writer of this row is a compare-and-set; a create has no state to compare,
+        so it compares ABSENCE instead.
+        """
+        ...
+
     def put_batch_if_state(self, batch: Batch,
                            expected: Collection[BatchState]) -> bool:
         """Write ``batch`` only while the stored row is still in ``expected``.
@@ -840,6 +857,14 @@ class InMemoryBatchStore:
     def put_batch(self, batch: Batch) -> None:
         with self._lock:
             self._batches[(batch.org_id, batch.batch_id)] = _copy_batch(batch)
+
+    def put_batch_if_absent(self, batch: Batch) -> bool:
+        with self._lock:
+            key = (batch.org_id, batch.batch_id)
+            if key in self._batches:
+                return False
+            self._batches[key] = _copy_batch(batch)
+            return True
 
     def get_batch(self, org_id: str, batch_id: str) -> Batch | None:
         with self._lock:
@@ -1081,6 +1106,37 @@ class GraphBatchStore:
              "cancel_reason": batch.cancel_reason,
              "corpus": batch.corpus_name},
         )
+
+    def put_batch_if_absent(self, batch: Batch) -> bool:
+        """⛔ CREATE-IF-ABSENT: `MERGE … ON CREATE SET` (#14415 review round 11, P2).
+
+        `MERGE` matches the key, so an existing row is LEFT ALONE — no `SET` runs
+        at all, which is what makes this safe for an adoption racing a real
+        acceptance. A blind `SET` (what `put_batch` does) overwrote the ACK's
+        `estimate`/`corpus_name` with an orphan snapshot's empties.
+
+        Returns False when the row already existed, so the caller knows to re-read
+        rather than trust its own object.
+        """
+        rows = self._q(
+            f"MERGE (b:{BATCH_LABEL} {{id:$bid, org_id:$org}}) "
+            "ON CREATE SET b.state=$state, b.created_at=$created, "
+            "    b.updated_at=$updated, b.estimate_json=$estimate, "
+            "    b.cancelled_at=$cancelled_at, b.cancel_reason=$cancel_reason, "
+            "    b.corpus_name=$corpus "
+            "RETURN b.state",
+            {"bid": batch.batch_id, "org": batch.org_id,
+             "state": str(batch.state), "created": batch.created_at,
+             "updated": batch.updated_at,
+             "estimate": _json_dumps(batch.estimate),
+             "cancelled_at": batch.cancelled_at,
+             "cancel_reason": batch.cancel_reason,
+             "corpus": batch.corpus_name},
+        )
+        # `RETURN b.state` comes back for BOTH paths, so the verdict is the row's
+        # identity against ours: a pre-existing row in a state we did not write
+        # means the create lost.
+        return not rows or str(rows[0][0]) == str(batch.state)
 
     def put_batch_if_state(self, batch: Batch,
                            expected: Collection[BatchState]) -> bool:
@@ -2373,7 +2429,16 @@ class BatchCoordinator:
             # "work stopped, not charged" over a batch they were charged for.
             # The record is the truth, so it is reported unchanged (and a repeat
             # cancel is idempotent rather than a rewrite).
-            return batch, items
+            #
+            # ⛔ AND THE ROWS ARE RE-READ (#14415 review round 11, P2). `items`
+            # is the snapshot taken above; `_bill` writes tokens with
+            # `add_item_tokens`, which changes NO compared field, so a peer's
+            # accumulation can land on a row this call already read as terminal —
+            # and `status_body()` then summed the snapshot, reporting
+            # `tokens_spent: 0` beside a ledger that was charged. Both arms that
+            # return without writing re-read for the same reason the `not stopped`
+            # arm does.
+            return batch, self._store.items(org_id, batch_id)
         if items and not any(not item.terminal for item in items):
             # ⛔ THE GUARD IS ON REMAINING WORK, NOT ON THE BATCH ROW (#14415
             # review round 2, B2). The row can LAG its items — `settle()`'s write
@@ -2383,7 +2448,8 @@ class BatchCoordinator:
             # exactly that record `cancelled`: B3's wrong outcome, reached without
             # any injected fault. There is nothing left to stop, so DERIVE the
             # truth instead of inventing a cancel over it.
-            return self.settle(org_id, batch_id), items
+            return self.settle(org_id, batch_id), self._store.items(org_id,
+                                                                    batch_id)
         stamp = self._now()
         # ⛔ THE `queued` CLASS IS STOPPED BY ONE STATEMENT, NOT ONE PER ITEM
         # (#14415 review round 7, P2). The loop below did `get_item` +
@@ -2520,8 +2586,8 @@ class BatchCoordinator:
         document dropped — the exact defect the arm was added to close). "First
         scan" is not "boot" either: `_BATCH_SCAN` evicts, and an evicted tenant
         re-enters that arm mid-life. So the window is not optional here: a FRESH
-        claim is never touched by ANY caller, and it is settled by a later scan
-        once it is stale — which is the ONE rule this file states, with no
+        claim is settled by NO caller that has not PROVED the holder is gone, and
+        it is settled by a later scan once it is stale — which is the ONE rule this file states, with no
         exception left to get wrong.
         """
         # ⛔ RESOLVED AT CALL TIME, not bound at import (review round 11, LOW):
@@ -2691,18 +2757,27 @@ class BatchCoordinator:
             # writers of this row were each hardened to a compare-and-set; this one
             # is hardened by not writing over a row that has since appeared.
             #
-            # DECLARED RESIDUAL: a re-read NARROWS this window rather than closing
-            # it — a write landing between this read and the one below still loses.
-            # The atomic form is an insert-if-absent (`MERGE ... ON CREATE SET`)
-            # on the store protocol, which this fix does not add; the window is now
-            # this thread's own two statements instead of the whole acceptance loop.
             batch = self._store.get_batch(org_id, batch_id)
             if batch is None:
-                batch = Batch(batch_id=batch_id, org_id=org_id,
-                              state=BatchState.RESUMING,
-                              created_at=orphan_items[0].updated_at,
-                              updated_at=orphan_items[0].updated_at)
-                self._store.put_batch(batch)
+                # ⛔ THE ADOPTION IS A CREATE-IF-ABSENT, NOT A WRITE (#14415 review
+                # round 11, P2). The re-read above narrows the window to two
+                # statements; it does not close it, and the write that closed it
+                # was a blind `put_batch` (`MERGE … SET` of state, created_at,
+                # estimate_json and corpus_name) — so an acceptance landing in
+                # between had its estimate and corpus BLANKED (owner §4's
+                # arithmetic gone from the record) and the row relabelled
+                # `resuming` over work that never stopped. `MERGE … ON CREATE SET`
+                # cannot touch an existing row, and the verdict tells this thread
+                # whether to trust its own object.
+                adopted = Batch(batch_id=batch_id, org_id=org_id,
+                                state=BatchState.RESUMING,
+                                created_at=orphan_items[0].updated_at,
+                                updated_at=orphan_items[0].updated_at)
+                if not self._store.put_batch_if_absent(adopted):
+                    # The acceptance won the race: its row is the record.
+                    batch = self._store.get_batch(org_id, batch_id) or adopted
+                else:
+                    batch = adopted
         if batch.state is BatchState.CANCELLED:
             # A cancelled batch is NOT resumed: the customer stopped it, and a
             # restart is not a reason to spend their allowance. But an item left

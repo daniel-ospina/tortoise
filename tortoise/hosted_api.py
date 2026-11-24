@@ -17480,6 +17480,23 @@ async def create_batch(body: BatchRequest,
                                "seconds.",
                 }) from None
 
+    # ⛔ INLINE TEXT WITH NOWHERE DURABLE TO PUT IT IS REFUSED **HERE TOO**
+    # (#14415 review round 11, P2). The staging check ran after the
+    # acknowledgement gate, so a body of ≥47 inline-text items on a server with
+    # `TORTOISE_INGEST_BASE_DIR` unset was answered 402 "re-send with
+    # acknowledge_overage=true" — and the re-send then 503'd, because there is no
+    # org root to stage the bytes under. An acknowledgement collected for work that
+    # can never run is the same defect the URL check above was moved in front of
+    # that gate to close; the 503 test beside it uses a ONE-item body, so the gate
+    # never ran and the ordering was unpinned.
+    if any(it.text is not None for it in body.items) and _batch_org_root(
+            org_id) is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Batch storage is unavailable on this server — send items as "
+                   "paths under the configured document storage instead. "
+                   "Nothing was accepted and nothing was charged.")
+
     # ⛔ AN ITEM THAT NAMES A URL IS REFUSED **HERE**, NOT LATER (#14415 review
     # round 5, P2). The model's docstring used to promise a fetch, then (round 4)
     # promised a refusal — and neither existed: `ref` was copied verbatim into
@@ -53630,7 +53647,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (730 distinct# ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
+# ABSOLUTE line number from 208 tracked files (731 distinct# ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
 # `extractor_v2` keeps its late helpers at the bottom. Both figures above are
