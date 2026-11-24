@@ -899,16 +899,6 @@ silently-empty cell.
 | `lme_session_index` | `ingest_haystack`, `_write_v2_phase_a`, `_rebuild_all_replay` |
 | `lme_source_session_id` | `ingest_haystack`, `_write_v2_phase_a`, `_rebuild_all_replay` |
 
-**The in-flight extraction phase pair (#14232).** `capture_extraction_phase` /
-`capture_extraction_phase_at` are the only two properties on `:Session` that
-describe work **in progress** rather than an outcome: `queued` at accept,
-`extracting` once a worker enters the model call, and CLEARED by the same `SET`
-that records `capture_ok`, so a terminal row carries no phase at all — the read
-path publishes them as a qualifier beside the extraction status and omits them
-(absent, never `null`). That is why `_report_capture` appears in both rows: it
-owns the outcome and the phase's clear, in one terminal path and with no third
-sentinel.
-
 **Who is an owner in this table.** A writer owns a property when it carries a
 `SET <alias>.<prop>` clause for it. A property used only as a `MERGE` key is **not** attributed
 — so the `id` row names `rebuild_all` (whose `SET s += $props` restores the whole
