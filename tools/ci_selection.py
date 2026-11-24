@@ -1996,22 +1996,13 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # core pool is the lowest-cost leg it can run in. Pinned by
              # tests/test_ci_selection.py::test_batch_review_tool_change_selects_core_not_tier1.
              "tools/batch_review.py",
-             # #10465 review P1: tools/dod_5090_probe.py owns
-             # tests/test_dod_5090_probe.py (registered `core` + `eval`), but
-             # `tools/` is a flat NON_PYTHON_PREFIXES entry and NO SOURCE_PATTERNS
-             # row matches the instrument — so a probe-only change filtered to
-             # `changed == []`, took the docs-only early return and ran 70
-             # unrelated files. Measured before this entry:
-             # `select(["tools/dod_5090_probe.py"])` -> surfaces=[], full=False,
-             # 70 files, test_dod_5090_probe.py ABSENT. That matters more than the
-             # usual silent drop: the instrument's whole deliverable is a count a
-             # reader QUOTES into an epic body, so the diff that hard-wires
-             # `count_embed_predicates` to 1 (turning the falsifier into
-             # machinery) would merge with every pin that catches it green-by-
-             # omission. Same #1349/#3332/#3616/#4309 class as the entries
-             # around it. Pinned by
-             # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
-             "tools/dod_5090_probe.py",
+             # ⛔ `#5090`'s DoD probe (`tools/dod_5090_probe.py`) is deliberately ABSENT from
+             # CORE_ALSO. Its `core` registration was removed because the suite grades
+             # whether `docs/` and their status words AGREE — bookkeeping — and that ran it
+             # on every PR. A `tools/`-only diff now takes the tier-1 smoke fallback
+             # (`NON_PYTHON_PREFIXES`); that is intended. The suite still runs on an `eval`
+             # diff (its `encode_for_row` seam) and directly:
+             # `pytest tests/test_dod_5090_probe.py`.
              # #13108/#13121 review F4: tools/dense_leg_probe_13108.py owns
              # tests/test_dense_leg_probe_13108.py (registered `core`), and the
              # same flat `tools/` swallow applies: a probe-only change filters to
@@ -2103,7 +2094,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # diff that could weaken the check (its discovery globs, its three verdict
              # words, its `COULD NOT BE READ` refusal, its scrub of the ambient env) with
              # every falsifier asleep. Same remedy and same class as the
-             # `tools/dod_5090_probe.py` entry directly above (#10465 review P1).
+             # `tools/batch_review.py` entry above (#9790).
              "tools/embed_switch_gate.py",
              # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
              # `core`-registered, but `tools/` is swallowed by
