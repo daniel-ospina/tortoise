@@ -4711,7 +4711,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 32}
+                             "pi": 33}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4777,6 +4777,15 @@ def test_shipped_install_contract_generations(harness):
     quota)`) instead of a silent per-item backoff, and the extension prints a
     per-box health line.  A generation-4 install still carries the unbounded
     drain that filled the spool on agent-infra#2100, so it must read as STALE.
+    #14350 (D1 of #14342) then moved `pi` 32→33: the seam takes the spool's
+    drain CLAIM (one drainer per box, across both legs) and a
+    `capture_capacity_saturated` refusal no longer charges the entry — it ends
+    the pass and records `blocked`. A pre-#14350 install keeps draining
+    concurrently with the Python leg and keeps charging the box's refusals to
+    per-entry backoff, which is the 908-entry / attempts-10-17 shape the epic
+    starts from, so it must read as STALE. The `tortoise-volunteer.ts` marker
+    moves with it because `contract_version_for("pi")` grades the PAIR as one
+    contract.
     Those
     numbers are a reviewed decision, not a detail, so they are pinned once and
     explicitly.
@@ -4824,7 +4833,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     artifact, move the generation, update this pair — all three in one commit").
     What is never rewritten is a SHIPPED entry in ``_GENERATION_DIGESTS``.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 32
+    assert hook_install.read_hook_version(_PI_SRC) == 33
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4914,8 +4923,49 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: `modified-artifact` ("local edit"). The READ half moves its header only (its
 #: behaviour is untouched) because `contract_version_for('pi')` grades the pair
 #: as ONE contract.
+#: ⚠️ Generation 33 is INTRODUCED BY this change (#14350) and has never shipped,
+#: so its recorded digest in both maps below is the digest of the bytes at THIS
+#: head — updated in place during the PR rather than spending a generation 34 on
+#: a refinement of the same unreleased seam. From the moment 33 appears on main,
+#: the entries are frozen: the next byte change needs a NEW generation.
+#: ⚠️ 33's CAPTURE digest has been re-cut ELEVEN times under that same never-shipped
+#: exception, and the count is stated because THIS note is what a later re-pinner
+#: reads to justify reusing 33: measured with
+#: `for c in $(git rev-list --reverse origin/main..HEAD); do git show "$c:tortoise/pi-hooks/tortoise-capture.ts" | sha256sum; done | sort -u`
+#: over this branch's 25 commits, the shipped file takes TWELVE distinct forms —
+#: `3660e09d`, `2416b186`, `15393a96`, `a2314416`, `a97a8a0a`, `5a47bb65`,
+#: `d0e8e41d`, `35235567`, `2d011c33`, `442d76f5`, `72d2cf62`, and this head's — because
+#: the PR has been through eight review cycles and every one of them moved shipped
+#: bytes. Several of those re-cuts are BEHAVIOUR, not comments, and the digest covers
+#: them because it is the `sha256` of the whole file (graded at
+#: `test_a_shipped_pi_seam_byte_change_moves_the_generation`):
+#:   * `c214f341` — the two legs' clock units unified (`CLAIM_VERSION` 1 → 2);
+#:   * `e3577f40` — a claim we cannot READ is honoured, never deleted;
+#:   * `7ed7ca32` — reads `lstat`-gated (the FIFO hang) and the lease format guarded;
+#:   * `9bc74585` — `release` reads the token BEFORE moving anything;
+#:   * `9550ea60` — `clearUnusableClaimPath` discriminates `isDirectory()` (a FIFO
+#:     could never be removed: a permanent drain block) and the release order is
+#:     graded on the CALL;
+#:   * this head — the release-ordering test seam, and the Pi leg's symlink case.
+#: ⛔ Reusing an unreleased generation for a behaviour fix is the same exception, not
+#: a licence, and it does NOT generalise: from the moment 33 reaches `main` the
+#: entries are FROZEN and the next byte change needs a NEW generation. The READ half
+#: is untouched throughout (`904d2742…`), exactly as generation 31's re-cut did.
+#: ⚠️ …and the list above STOPS at `9bc74585`, because the next byte change was not a
+#: commit on either side: it was the MERGE of the two lanes' cycles. ⛔ A MERGE IS A
+#: BYTE SET NEITHER PARENT HASHED, so no row above describes the bytes this pin names
+#: — the digest is re-derived from the merged tree on every merge
+#: (`sha256sum tortoise/pi-hooks/tortoise-capture.ts`), never carried over from
+#: either side. A pin that survives a merge unexamined is a pin nobody derived.
+#: ⚠️ …and a FIFTH at the cycle-7 review's own fix: the Pi leg gained the cause
+#: `acquireDrainClaim` could not previously NAME (an UNCLEARABLE obstruction at the
+#: claim path is not a holder — it reports `state.obstruction`, the caller runs the
+#: pass UNCLAIMED and prints the reason, where it used to report a phantom
+#: `heldByClaim` for every pass, forever), plus the `takedown` seam `renew`'s CAS
+#: test drives. Both move BEHAVIOUR on shipped bytes, so the digest moved with them
+#: — derived from this tree, never carried.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    32, "3660e09dd73a13251c9cb87587ba7e4d00c52503a50aa6e22c1424154009779c")
+    33, "746075470aab91f1cbf96b117183a713988bac92745e074a27077bb27a2a00aa")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5079,6 +5129,33 @@ _GENERATION_DIGESTS = {
     # generation-31 copy must read STALE ("reinstall"), never
     # `modified-artifact` ("local edit").
     32: "3660e09dd73a13251c9cb87587ba7e4d00c52503a50aa6e22c1424154009779c",
+    # Generation 33 (#14350, D1 of #14342): BEHAVIOUR MOVED on shipped bytes —
+    # the drain takes the spool's cross-process CLAIM (one drainer per box,
+    # across both legs), a `capture_capacity_saturated` refusal no longer charges
+    # the entry's `attempts` but ends the pass and records `blocked`, and a
+    # capacity refusal is now named on the health line. A generation-32 install
+    # keeps draining concurrently with the Python leg and keeps charging the
+    # box's refusals to per-entry exponential backoff — the 908-entry /
+    # attempts-10-17 shape #14342 starts from — so it must read STALE.
+    # ⛔ RE-CUT IN PLACE, before it shipped: this same unmerged generation gained the
+    # cycle-6 review's two Pi-leg fixes — `clearUnusableClaimPath` now discriminates
+    # on `isDirectory()` (`rmdirSync` raised `ENOTDIR` on a FIFO/socket, so the arm
+    # that was supposed to clear corruption answered `false` and the object could
+    # never be removed: a permanent drain block), and `release()` reads our token
+    # before it moves anything. Generation 33 has never been on `main`, so no
+    # installed copy carries it and no "local edit" verdict can be falsified — the
+    # one rewrite the rule below permits (#14423 cycle-6 review, P1+P2).
+    # ⛔ AND ONE MORE, from the cycle-7 review: `acquireDrainClaim` gained an
+    # injectable `takedown` seam so THIS leg's release ORDER can be graded on the
+    # CALL, as the Python twin grades it by monkeypatching `_takedown`. The
+    # byte-indistinguishability that made the first attempt vacuous (rename + link
+    # preserves inode, mtime and content) is why the order has to be observed at the
+    # call site rather than at the filesystem.
+    # ⛔ AND THE MERGE-GATE REVIEW'S RUNTIME FINDING: `reclaim` — the compare-and-swap
+    # that re-arms a lease which lapsed during the pass's own unbounded whole-spool
+    # scan, on both legs. A behaviour change on shipped bytes, and the digest moves
+    # with it; 33 still has never shipped, and freezes the moment it reaches `main`.
+    33: "746075470aab91f1cbf96b117183a713988bac92745e074a27077bb27a2a00aa",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -5308,13 +5385,17 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # population and its fourth writer disposition moved; the read half's
     # behaviour is untouched.
     32: "708b6a21854982d607610e15da4e7de2c3ff6071102ba0c05726817c8d2493b5",
+    # Generation 33 (#14350): header only, same reason — one seam, one contract
+    # number. The capture half takes the drain claim and stops charging capacity
+    # refusals to entries; the read half's behaviour is untouched.
+    33: "904d2742abf6a167ac8f5f437ae9c23c5d129b269ddd03fcc8dbe150aa195200",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    32, "708b6a21854982d607610e15da4e7de2c3ff6071102ba0c05726817c8d2493b5")
+    33, "904d2742abf6a167ac8f5f437ae9c23c5d129b269ddd03fcc8dbe150aa195200")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():
