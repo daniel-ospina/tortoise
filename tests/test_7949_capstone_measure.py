@@ -60,9 +60,6 @@ PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
 PREREG = _REPO / "docs/evidence/7949-capstone/preregistration.json"
 SCORES = _REPO / "docs/evidence/9889/e1-e2-scores.json"
 SCORES_PROBE = (_REPO / "docs/evidence/7949-capstone/probes/e1_e2_scores.py")
-#: The SUPERSEDED artifact. It is still in the tree — it is a record of what a
-#: one-arm run measured — but no row may cite it any more (`#9889` item 5).
-E1E2 = _REPO / "docs/evidence/7949-capstone/e1-e2.log"
 
 
 #: `sdk.py` as text — read ONCE, so every derivation below sees the same bytes.
@@ -5305,15 +5302,6 @@ _BUNDLE_SIBLING_SOURCES = {
     "entities": "projection_entities",
 }
 
-# The GATE the bundle audits, which the bundle also cites by number. Kept OUT of
-# `_BUNDLE_SOURCES` on purpose: neither pattern reaches `tools/capstone_verdict_
-# check.py` (`_BUNDLE_CITE` matches `sdk|edges|extractor_v2`, the sibling pattern
-# matches `projection/__init__|entities`), so putting a key here would imply the
-# sweep proper reads it when it cannot. These are read by `test_the_bare_continuation_cites_name_what_they_say`
-# instead, by phrase — the same mechanism the bare `:NNNN` continuations need.
-_BUNDLE_TOOL_SOURCES = {
-    "capstone_verdict_check": _REPO / "tools/capstone_verdict_check.py",
-}
 
 # `docs/00_index.md` is a shared router of ~140 table rows, so only the ROW that
 # names this bundle is swept: another epic's row citing `sdk.py` must not red the
@@ -5849,7 +5837,8 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
 #:     never hold at end-of-input: `— 145 %` was read as a line cite. It is matched
 #:     OUTSIDE the boundary group now.
 #:   * the list had no time units, so `— 166 hours` was a cite.
-#: Both measured with `_MANIFEST_CITE` against `config/ci-surfaces.yml — <n> <unit>`.
+#: Both were measured with `_MANIFEST_CITE` against `config/ci-surfaces.yml — <n> <unit>`; that
+#: regex was CUT in the B4 test-volume cut (2026-11-23), so re-deriving them is by hand now.
 #:
 #: ⛔ THE LIST IS CLOSED, AND THAT IS THE FALSE-RED SIDE OF THIS GUARD — a MISSED unit
 #: does not weaken the pin, it REFUSES CORRECT PROSE. Each was RED BEFORE its unit word was
@@ -5894,7 +5883,7 @@ _UNIT_POSITION_WORDS = r"lines|rows|entries"
 #: separates them, so the alternative is punctuation/end-anchored rather than a word.
 #: ⚠️ `of the manifest|file` IS A DELIBERATE OVER-CATCH, not a positional tell (#12369
 #: review, P3): `` — 155 lines of the file `` reads as a COUNT and is matched anyway
-#: (`_MANIFEST_CITE` → True, measured). Over-catching is the tolerated direction on
+#: (`_MANIFEST_CITE` → True, measured before the B4 cut). Over-catching is the tolerated direction on
 #: the doc-wide arm — the cost is a false red a maintainer rewrites, against a miss
 #: that ships the rot — and a count and a position are not separable there, so the
 #: alternative is kept and NAMED rather than presented as a discriminator.
@@ -5954,16 +5943,6 @@ _GAP = r"(?:(?!\.\w)[^|]){0,400}?"
 _RANGE_NUMS = (r"(?<![\d,-])\d{1,5}(?:,\d{3})*\s*[-–—]\s*\d{1,5}(?:,\d{3})*"
                rf"{_UNIT}(?![\d.])(?!-\d)")
 
-#: A bare line cite with NO filename binding — the form this module documents as
-#: invisible to every sweep. Applied to the ONE sentence the claim lives on, where
-#: any number in cite position is a finding whether or not it names the file; it is
-#: therefore LOOSE on purpose (it also matches a file-bound ``:NNNN``, because the
-#: separator sits immediately before the digits). It is not a duplicate of the
-#: doc-wide arm, which is the other way round: STRICT about being bound to the
-#: manifest, but read over the whole document. A bare `` :NNNN `` is caught on that
-#: sentence by this arm and nowhere else; a manifest-bound cite anywhere else in the
-#: document is caught by the arm above.
-_LINE_CITE = re.compile(rf"{_SEP}\s*{_WRAP}{_NUM}{_WRAP}")
 
 #: ⛔ THE BINDING MUST INCLUDE THE NAME THE DOCUMENT ACTUALLY USES. The document
 #: names the manifest BOTH ways: ``config/ci-surfaces.yml`` in the intro prose and in
@@ -5977,85 +5956,8 @@ _LINE_CITE = re.compile(rf"{_SEP}\s*{_WRAP}{_NUM}{_WRAP}")
 #: sentence with the literal filename was RED. That is the exact rot this arm
 #: removes, re-armable in the document's own words — measured, then closed here.
 _MANIFEST = r"(?:ci-surfaces\.ya?ml|the\s+manifest)"
-#: ⛔ THE SECOND ARM NEEDS `(?<![\w.])` IN FRONT OF ITS SEPARATOR. Without it
-#: ``sdk.py:9612`` — a legit cite of ANOTHER file that merely happens to sit before
-#: the manifest's name — matched as a manifest cite, and the pin accused the author of
-#: a line-number cite they never wrote:
-#:
-#:     the loader (`sdk.py:9612`) reads `config/ci-surfaces.yml` on every run
-#:
-#: Measured True before this guard, False after; a cite of THIS file in this order is
-#: written ``… `:9987`, see `config/ci-surfaces.yml```, so its separator follows
-#: whitespace or a wrapper character, while `sdk.py`'s colon follows a letter.
-#: ⛔ THE POSITIONAL SHAPE, ADDED BECAUSE THE SUBSET ABOVE CANNOT SEE IT (#12369
-#: review, P2). A line POSITION written with a unit noun — `the entry sits 9987 lines
-#: into the manifest`, `on 9987 lines`, `9987 rows down` — reads as `number + unit`
-#: to `_NUM`, i.e. a COUNT, so every one of those was GREEN while `:9987` was RED.
-#: ⛔ AND THE BLANKET FIX IS NOT AVAILABLE: making `lines`/`rows` non-units
-#: doc-wide refused `— 155 lines of rows`, which this file pins as CORRECT PROSE
-#: (a count is not a cite). So the discriminator is the POSITIONAL TAIL — `into`,
-#: `down`, `deep`, `below`, `above`, `up`, `from the top|bottom`, clause-final `in` —
-#: which a count does not carry, PLUS the deliberate over-catch `of the manifest|file`
-#: (a count and a position are not separable there; the tolerated direction is the
-#: false red, not the miss). ⚠️ RESIDUAL, stated: the tail list is CLOSED, so a
-#: positional phrase with an unlisted tail (`9987 lines up from the bottom` before
-#: `up` was added — measured GREEN at `9c8348767e`) is not caught HERE, and the
-#: neighbour arm cannot take it when the same line also names another source file,
-#: because that exemption is an early return as wide as the line. On a line naming no
-#: other file the neighbour arm IS strict (`_bare_number_hits_neighbour` →
-#: `_LEADING_NUM_NO_POSITION`) and catches every tail spelling; the gap is exactly the
-#: intersection of those two exemptions. A bare `9987 lines` with no tail is ambiguous
-#: with a count and is not caught here either; on the CLAIM sentence it is, because
-#: that arm has no count exemption at all.
-_MANIFEST_CITE = re.compile(
-    rf"{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_NUM}{_WRAP}"
-    rf"|(?<![\w.]){_SEP}\s*{_WRAP}{_NUM}{_WRAP}{_GAP}{_MANIFEST}"
-    rf"|{_WRAP}{_LEADING_NUM}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
-    rf"|{_MANIFEST}{_GAP}{_SEP}\s*{_WRAP}{_RANGE_NUMS}{_WRAP}"
-    rf"|{_WRAP}{_RANGE_NUMS}{_WRAP}\s*{_SEP}{_GAP}{_MANIFEST}"
-    rf"|{_MANIFEST}{_GAP}{_WRAP}{_LEADING_NUM_NO_POSITION}{_WRAP}"
-    rf"\s*(?:lines?|rows?|entries?)\s*{_POSITION_TAIL}\b"
-    rf"|{_WRAP}{_LEADING_NUM_NO_POSITION}{_WRAP}\s*(?:lines?|rows?|entries?)\s*{_POSITION_TAIL}\b"
-    rf"{_GAP}{_MANIFEST}"
-)
 
 
-#: A bare NUMBER in cite position with no separator and no filename binding — the
-#: form a maintainer produces when trimming the recorded history down to its number
-#: ("the entry read 9943 before the last re-derivation"). `_LINE_CITE` above needs a
-#: separator beside the number, so this passed it AND the doc-wide arm.
-#:
-#: ⛔ IT REFUSES A DIGIT-HEAVY HEAD — EXACTLY, NOT "A HEAD". A hex head whose
-#: first three characters happen to be digits is refused (`9828250732`,
-#: `12345678`); a head that opens with a letter is NOT (`1a0ace24`, `e59e6076`),
-#: because `_NUM` needs `\d{3,}` behind a non-word character. Measured, and pinned
-#: below, rather than claimed wider than the regex is: the contract this arm
-#: actually enforces is "a bare run of 3+ digits", and a hex head that begins with
-#: two or fewer digits slips it. The sentence on the claim line is still guarded
-#: against the HISTORY form this matters for (`read 9943`, `was 9943`).
-#:
-#: ⛔ AND THE POLICY BEHIND THAT IS UNCHANGED (the bundle's own D5 keeps the
-#: head-qualified history AT THE PIN), so the document carries neither a line number
-#: nor a head. An earlier cut of the failure message told a maintainer to "describe
-#: the history by head", i.e. it prescribed the form this arm refuses — the MESSAGE
-#: was wrong, and it now says what the policy says. The `.` in the lookbehind is
-#: load-bearing in its own right: without it a DECIMAL FRAGMENT is read as an integer
-#: (`1.093 %` matched `093`).
-#: ⛔ THIS ARM READS A POSITION, SO `lines`/`rows` ARE NOT UNITS TO IT. With the
-#: shared `_UNIT` they were, and every spelling of a line position written with a unit
-#: noun passed: `the entry sits 9987 lines into the manifest`, `9987 rows`, `at 9987
-#: lines`, `9987 rows down` were ALL GREEN while `:9987` was RED — the same guard
-#: giving opposite verdicts for the same claim, on the one sentence whose contract says
-#: it carries no number at all. `_LEADING_NUM_NO_POSITION` closes that whole class
-#: rather than adding the four spellings to a list. Residual, stated: a genuine COUNT
-#: whose noun is `lines`/`rows` is now refused too (`— 155 lines`), on the CLAIM
-#: sentence AND on every neighbour line — `_bare_number_hits_neighbour` calls this
-#: same matcher, so "it is the only sentence this arm reads" would be false. The
-#: cost is a FALSE RED on a genuine line/row count in that population, which is the
-#: direction this pin prefers: a count does not belong on a line that states where
-#: the entry is. ⚠️ `entries` is in `_UNIT_POSITION_WORDS`, NOT `_UNIT_WORDS`, so a
-#: `… 898 entries` tail is refused here while `… 166 s` is not.
-_BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
 #: ⛔ ONE MATCHER NOW, AND IT IS THE STRICT ONE — on BOTH surfaces. The CLAIM
 #: sentence asks "is any number here?" and its contract is that the answer is no; a
 #: NEIGHBOUR line asks the same question of the same claim, so `_bare_number_hits_
@@ -6073,59 +5975,10 @@ _BARE_NUM = re.compile(_LEADING_NUM_NO_POSITION)
 #: ORDINAL (`— its 9987th line`) is caught by the strict pattern too, which is why
 #: one matcher loses none of the class that matters.
 
-#: ⛔ A LONE FOUR-DIGIT 19xx/20xx RUN IS A YEAR AS OFTEN AS A LINE NUMBER, and the bare
-#: arm cannot tell them apart — so it refuses the year rather than punishing prose that
-#: dates itself ("the block was reviewed in 2026"). Discriminating power is not lost: the SEPARATOR
-#: arms still catch `:2026`, `at 2026` and `line 2026`, because a cite is written with a
-#: separator and a year is not. Residual, stated: a line number of exactly 2026 written
-#: with no separator is indistinguishable from a year and is not caught here.
-_BARE_YEAR = re.compile(r"^(?:19|20)\d{2}$")
-
 
 #: The block's own names. A line carrying one of these is a line that TALKS ABOUT the
 #: block, and it is the population the neighbour arm scans.
 _BLOCK_WORDS = re.compile(r"carve[_-]?out|carve out|\b(?:entry|block|manifest)\b")
-#: ⛔ …AND THE MANIFEST'S OWN FILENAME BELONGS IN THE POPULATION, because this arm's
-#: RULE is that no manifest line cite may appear anywhere in the document, and
-#: `_MANIFEST` already treats `ci-surfaces.yml` as the manifest — while
-#: this gate did not, so the loop below `continue`d before `_neighbour_number_strays`
-#: ever ran on the most natural such line (#12369 review, P2, measured GREEN):
-#:
-#:     Re-derived again: `config/ci-surfaces.yml` — its 9987th line at this head.
-#:
-#: The identical sentence with the WORD "manifest" instead of the filename was
-#: scanned and red, which is the inconsistency: one vocabulary admitted, the other
-#: not, for the same file. An ORDINAL (`9987th line`) is unambiguously a POSITION —
-#: not the count-ambiguous `number + lines` residual the regex states — so a line
-#: naming this file must be scanned whatever spelling follows.
-_BLOCK_WORDS_WITH_MANIFEST = re.compile(
-    rf"(?:{_BLOCK_WORDS.pattern})|{_MANIFEST}")
-#: ⛔ …AND SO DOES A LINE THAT NAMES THE ENTRY. The block's own vocabulary is only
-#: half the population: the most natural way to put the number back names the FILE,
-#: not the block —
-#:
-#:     The row `test_pack_logic_writeprobe_11083.py` sits at `:9987` on this head.
-#:     The write-probe row sits at `:9987` on this head.
-#:     The row `test_pack_logic_writeprobe_11083.py` sits at 9987 on this head.
-#:
-#: — all three measured GREEN while gating on `_BLOCK_WORDS` alone, because none of
-#: them carries `carve_out`/`entry`/`block`/`manifest`. The stems are the entry's own
-#: name in the three spellings the document and the bundle use for it.
-_ENTRY_STEMS = re.compile(r"writeprobe|write[-_ ]?probe|pack[-_ ]?logic|11083")
-
-
-#: …and a line that names ANOTHER source file is that file's, not this claim's: see
-#: `_neighbour_number_strays` for the measurement that made this necessary.
-_OTHER_FILE = re.compile(r"[\w/]+\.(?:py|ya?ml|json|md)\b")
-#: ⛔ BUT `config/ci-surfaces.yml` IS THE FILE THIS CLAIM IS ABOUT — it is never
-#: "another file". Without this subtraction the exemption was one file too WIDE and
-#: re-opened the hole the arm exists for (measured): a neighbour line that re-typed
-#: the number AND named the manifest was scanned by NEITHER arm —
-#: ``The `carve_out:` entry sits in `config/ci-surfaces.yml` and read 9943 before the
-#: last re-derivation.`` returned NO strays, and the strict arm did not see it either
-#: because the bare form has no separator. So the manifest's own name is removed
-#: before the other-file test, which is what makes "another file" mean another file.
-_MANIFEST_FILE = re.compile(r"[\w/]*ci-surfaces\.ya?ml")
 
 
 class _ManifestShapeError(RuntimeError):
@@ -6142,7 +5995,7 @@ class _ManifestShapeError(RuntimeError):
 #: ⛔ NEITHER side is in the bundle sweep: `_BUNDLE_DOCS` carries the bundle's own six
 #: documents, so `00-plan.md`, `03-test-design.md` and `RECONCILE-A1-A2-A5.md` were
 #: swept by NOTHING, and `search_engine.py` is in neither `_BUNDLE_SOURCES` nor
-#: `_BUNDLE_TOOL_SOURCES`. Every number below was verified by READING, which is why
+#: `_BUNDLE_TOOL_SOURCES` before both were CUT in the B4 test-volume cut. Every number below was verified by READING, which is why
 #: four of them were still wrong when the commit that re-derived them landed.
 _EPIC_CITE_DOCS = {
     "RECONCILE-A1-A2-A5.md":
@@ -6208,7 +6061,7 @@ _EPIC_CITE_DOCS = {
     # the same markdown line — `:191`, `:4201-4208`, `:4209-4230` — in two files that no row
     # scoped to THIS document, and no `_EPIC_CITE_SOURCES` key, named at all (`capstone_verdict_check`
     # DID have a source key and rows — in `E1-E5-PROOFS.md` and `docs/00_index.md` — but
-    # `_BUNDLE_TOOL_SOURCES`' phrase sweep reads `_BUNDLE_DOCS`, which does not contain
+    # `_BUNDLE_TOOL_SOURCES`' phrase sweep (CUT in the B4 cut) read `_BUNDLE_DOCS`, which does not contain
     # this file, so none of them could read it). MEASURED at `8e86c7e108` (413 collected there): mutating all three at once left this file 413
     # GREEN. They are pinned on the three rows below; the nine above are the nine-cell
     # population and the whole paragraph states twelve. A document this bundle EDITS is a document this
@@ -6308,63 +6161,12 @@ _EPIC_CITE_SOURCES = {
     # offset.
     "relation_write": _REPO / "tortoise/relation_write.py",
     # ⛔ THE TWO `tools/` SOURCES D5 CITES BY NUMBER (#12569 review round 7, P1). Neither is
-    # reachable through `_BUNDLE_TOOL_SOURCES`' phrase arm: that arm reads the `_BUNDLE_DOCS`
+    # reachable through `_BUNDLE_TOOL_SOURCES`' phrase arm (CUT in the B4 cut): that arm read the `_BUNDLE_DOCS`
     # population, which does not contain `05-verify.md` at all — so a `tools/` number stated in
     # THIS paragraph had no reader of any kind, which is what the round-7 mutation measured.
     "capstone_verdict_check": _REPO / "tools/capstone_verdict_check.py",
     "capstone_preregistration": _REPO / "tools/capstone_preregistration_check.py",
 }
-
-
-#: A TABLE-ROW finding is one a `_pin_row_failures` row emitted, and it names the
-#: SOURCE LINE the row pins; a BLOCK/DOCUMENT finding names the sentence or the block
-#: and carries no such cite. The arm table below needs that split, because
-#: `pytest.raises(AssertionError)` cannot tell them apart.
-#:
-#: ⛔ `_pin_row_failures` EMITS FIVE LINE-FINDING SHAPES, and the pattern must match
-#: all five (#13033 review P1, P2 — the fourth is the unregistered-source-key finding,
-#: which a fix in round 6 ADDED without teaching this pattern about it, reproducing the
-#: very misclassification it was fixing; the FIFTH is the ungradeable-kind finding,
-#: added in round 8 right beside the guard whose comment says such a row "is reported
-#: as the row's own defect" — and left unclassified, so `_block_findings` called it a
-#: BLOCK finding and the arm table below could be satisfied by that unrelated row red.
-#: MEASURED at round 12 by driving the producer, not by reading the pattern). It used to match the literal `(cited by <doc>)`
-#: tail; when that tail moved to `_cite_failure` (`<doc> cites <source>:<n> …`), to the
-#: bare-continuation arm (`<doc>: the sentence containing … does not cite :<n>`), and
-#: to the scoping-phrase arm (`<doc>: the scoping phrase … occurs <n> time(s)`), the
-#: pattern matched NONE of them — so `_block_findings` returned every finding, the
-#: baseline below false-REDded the moment a row went stale (naming the block arms for a
-#: row's red) and the table's `assert findings` became satisfiable by a row alone.
-#:   * the source-label class MUST admit `-`: `ci_surfaces` labels as
-#:     `config/ci-surfaces.yml` (a real `_EPIC_CITE_SOURCES` path), and a `[\w./]`
-#:     class silently classified that row's findings as block findings;
-#:   * the unregistered-source-key arm (`<doc>: this row's SOURCE key '…' is not in the
-#:     source map, so the cite at :<n> cannot be resolved`) is a `_pin_row_failures`
-#:     finding and must be matched, or `_block_findings` reports a ROW problem as a
-#:     BLOCK one — false-redding the baseline with the wrong diagnosis;
-#:   * the scoping-phrase arm MUST be qualified to `— this pin needs`, because a BLOCK
-#:     producer emits the SAME shape (`_section_entries`: `<doc>: the scoping phrase
-#:     '…' occurs <n> time(s) — this claim needs exactly one line`). Unqualified, that
-#:     block finding matched here, `_block_findings` DROPPED it, and the baseline below
-#:     passed while the arm table was satisfied by it — the split failing in the
-#:     direction that hides a red instead of inventing one (#13033 review round 6);
-#:   * the ungradeable-kind arm (`<doc>: the row for '<sentence>' names anchor kind
-#:     '<kind>', which this pin cannot grade`) is a `_pin_row_failures` finding for the
-#:     same reason: classified as a block finding it false-REDs the baseline (naming
-#:     the block arms for a row defect) and can satisfy an arm-table case.
-#:   * `_bundle_sweep`'s `- <cite> (<label>): <source>:<n> reads …` shape is
-#:     deliberately NOT matched — it was a BLOCK finding before this split existed and
-#:     stays one.
-#: `test_the_line_and_block_findings_are_told_apart` DRIVES THESE PRODUCERS rather than
-#: matching copies of their prose, so the next re-wording cannot take the guard quiet
-#: again.
-_ROW_FINDING = re.compile(
-    r"- \S+ cites [\w./-]+:\d+"
-    r"|- \S+: the sentence containing .* does not cite :\d+"
-    r"|- \S+: the scoping phrase .* occurs \d+ time\(s\) — this pin needs"
-    r"|- \S+: this row's SOURCE key .* is not in the source map"
-    r"|- \S+: the row for .* names anchor kind .* which this pin cannot grade"
-)
 
 
 #: A BARE line cite — `` `:NNNN` `` / `` `:NNNN-NNNN` `` with no file in front of
@@ -6964,51 +6766,6 @@ def test_the_pre_registration_cites_the_state_value_carve_out_extent():
         f"tortoise/extractor_v2.py:{start}-{end} — §7's two E2a exclusions are "
         "argued against that text, so a cite that lands anywhere else hands the "
         "auditor a rule it cannot find")
-
-
-#: A bare CONTINUATION cite in either backtick spelling: the probes are
-#: docstrings, so they write ``:13334`` (RST) where the markdown writes `:13334`.
-_BARE_CONTINUATION = re.compile(r"`{1,2}(:\d+(?:-\d+)?)`{1,2}")
-
-#: The two documents that print the entry-point pair — the `def` cite AND the
-#: `:N` continuation naming the CALL. `E1-E5-PROOFS.md`, `docs/00_index.md` and
-#: `EXTRACTOR-V4-ARCHITECTURE.md` never restate the pair, so they are not this
-#: leg's business (their own prefixed cites are swept above).
-_ENTRY_POINT_DOCS = (
-    ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
-    ("probes/capstone_run.py",
-     _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"),
-)
-
-
-# ── A cite into the RUN probe by NUMBER is unpinnable, so it must not be written ──
-#
-# `_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` and `_BUNDLE_TOOL_SOURCES`
-# names only the GATE, so a `probes/capstone_run.py:<line>` cite is read by NO
-# sweep in this file: not resolved, and — unlike a bare `:NNNN` continuation —
-# not even reported `unmatched`, because it carries a file name the sweep never
-# looks for. The bundle's own convention for a number in that position is
-# the README's *"written here WITHOUT the `file:line` form on purpose … do NOT
-# follow them as pointers at this head"* paragraph: the SYMBOL is authoritative, the
-# line is a convenience nothing re-derives. Cited by SENTENCE, and with NO typed
-# range at all: that paragraph's bounds move with every insertion above it, and a
-# number in this position had already walked three times — so the SYMBOL carries
-# the identity and the range is deliberately not restated here.
-#
-# Measured provenance, stated exactly (the previous revision of this comment
-# misstated both halves, and this file's own docstring below contradicted it):
-# the README's sentence carried `capstone_run.py:813`, and `74d7d1f5e` re-pointed
-# it at the SYMBOL — `git log -S'capstone_run.py:19' -- docs/evidence/
-# 7949-capstone/README.md` returns NO commit, so the README never carried `:19`.
-# The `capstone_run.py:19` / `README.md:615` pair belongs to the SAME class one
-# file over: `4fbd69844` (main) recorded it in
-# `tests/test_7949_capstone_verdict_check.py`'s entry-point paragraph, and this
-# branch's `ef8d1ac08` dropped those two numbers from that paragraph — because it
-# outlived two heads and a quoted number IS the drift the paragraph describes.
-_PROBE_NUMERIC_CITE = re.compile(r"capstone_run\.py:(\d+)")
-
-#: The line this leg holds the README to, BY SYMBOL (never by a typed number).
-_PROBE_ENTRY_POINT_FALLBACK = 'required = run.get("steps_required") or list(STEPS)'
 
 
 # ── E2's blocker names the LIVE half, not the closed render issue ─────────
@@ -12057,34 +11814,6 @@ def test_the_control_arm_definition_names_the_frozen_records_divergence():
         "sentence")
 
 
-_CITE_QUALIFIER_PATTERN = (
-    # ⛔ A RANGE CARRIES ITS QUALIFIER TOO. `:12944-12945` at `<sha>` is a base-qualified
-    # cite in the spelling §2 ALREADY USES twice (`extractor_v2.py:11731-11732` at
-    # `80c912244`, `:12302-12303` at `d69faaf38`), and without the
-    # optional `(?:-\d+)?` tail the helper reported BOTH of them as UNQUALIFIED — a
-    # false BLOCK of a conformant edit whose own message told the author to add the base
-    # they had already added (measured by a fresh-context review at `f885a51663`).
-    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:18637-18661`
-    # (`A2`'s mint seam) is printed UNQUALIFIED in the record, and that is not a false
-    # block — the range arm below reads the range OUT OF THE RECORD and asserts both of its
-    # endpoints against `tortoise/sdk.py`, so this cite is pinned by derivation instead of
-    # by a base. §2's range cites are not uniform: two carry a base, this one carries a pin
-    # of a different shape.
-    # The tail admits digits-dash-digits and NOTHING else: a bare `:12944-12945` still
-    # yields no qualifier and still reds, so the range spelling cannot become a false
-    # PASS — the qualifier is what this group captures, never the tail. ⛔ AND BOTH
-    # ENDPOINTS ARE SITES: `_unqualified_number_cites` reads its sites from the same range
-    # grammar, so a bare `:12943-12944` reds for 12944 too — a range whose TRAILING member
-    # is the live line rots exactly like a bare cite of it, and matching only `:<n>` left
-    # that half uncovered (measured by a fresh-context review at `35a53c4ccc`).
-    # The bound is 40, not 24, because the base predicate both call sites use is
-    # `[0-9a-f]{7,40}`: at `{0,24}` a full 40-char sha in the PARENTHESISED spelling never
-    # matched `\s*[,)]` and was reported UNQUALIFIED — a false block that told the author to
-    # add the base they had already written in the other spelling (measured, same review).
-    r":(\d+)(?:-(\d+))?`?(?:\s*\bat\b\s*([^\s,;)\]]{0,40})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,40})\s*[,)])"
-)
-
-
 #: `capstone_measure.py:N` cites that live in files this bundle does NOT sweep, with the
 #: SYMBOL each one claims is at `:N`. The NUMBER is never typed here — it is read out of the
 #: citing file by the pattern below — so this table cannot itself go stale in the direction
@@ -12211,312 +11940,11 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
 # The pin is structural rather than numeric (no count, no line number): every
 # table row in the document must carry its own header's cell count.
 
-_TABLE_ROW_RE = re.compile(r"^\|.*\|$")
-_TABLE_DELIM_RE = re.compile(r"^[:\- ]+$")
-
-
-#: Readings this row carried that a MEASUREMENT refuted, each kept beside the measurement
-#: that killed it (#13794). ⛔ An ABSENCE pin, deliberately: the three defects below are
-#: PROSE, so there is no tree line to bind them to, and the only rot-proof assertion is
-#: that the refuted reading is not stated again. ⛔ The rule is QUOTING, not the literal's
-#: shape: this document family marks a retraction by QUOTING the wording it deletes
-#: (`… the sentence an earlier cut carried here, "X", is DELETED …`), so every
-#: double-quoted span is stripped before the test and only an UNQUOTED occurrence counts
-#: as the claim coming BACK. That is deliberately symmetric across all three entries —
-#: binding one entry to an "asserting frame" while the others stay bare is what made two
-#: of them red on a correct, quoted retraction (#13809 review, P2; reproduced).
-#: ⛔ STATED LIMITS, four, each MEASURED at `3719864ec9` (#13809 review):
-#: (a) an assertion written INSIDE double quotation marks is not caught — that is what the
-#:     strip is FOR; and (b) the strip recognises DOUBLE quotes only, so a retraction marked
-#:     with single quotes or with typography that the word match still sees REDS this pin on a
-#:     CORRECT repair (measured: `'AND THE BOX IS NO LONGER SHALLOW' … DELETED` -> `1 failed`).
-#:     The convention is therefore stated rather than assumed: **mark a retraction by
-#:     double-quoting the wording you delete**, which is what this row's own repair does, and
-#:     the assertion text says so at the point of failure, where the author who hits it needs
-#:     it. An earlier cut of this comment called that trade "never redding a repair", and that
-#:     was FALSE — the single-quote spelling is a correct edit and it reds.
-#: (c) the pin fires on the WORDING and not on grammatical mood — a conditional "after the
-#:     unshallow, the box is no longer shallow" is refused, so say it about the CLONE (cycle
-#:     4); and (d) the two SUBJECT-BOUND entries pin a reading WITH its subject, so a
-#:     restatement that drops the number is a different claim and is out of scope (cycle 4).
-#: ⛔ And the row must be BALANCED: an odd number of `"` fails the pin rather than being
-#: mis-parsed, because the strip pairs quotes POSITIONALLY and one unpaired quote swallowed
-#: 3,943 characters of the row in a MEASURED false pass — the claim came back unquoted and
-#: the suite stayed green (cycle 4).
-#: ⛔ No literal `hosted_api.py:<n>` token is spelled here: the census greps every tracked
-#: file, so one would join the population it measures.
-_D5_REFUTED_READINGS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (
-        # ⛔ An entry is a TUPLE of fragments and fires only when EVERY one is present, so
-        # a reading can be bound to its SUBJECT without binding it to a frame. This entry
-        # and the next need that: their predicate ("is a bare # comment marker", "a
-        # DIFFERENT call site") is true of OTHER lines too, so the predicate alone refused
-        # correct prose — measured: `:12221` is a DIFFERENT call site from the import at
-        # `:12168` is TRUE and was RED — the false red this entry took until cycle 4 bound
-        # it to its SUBJECT (#13809 review, cycle 4, P2). No glyph, case or spacing is
-        # part of a fragment: `_d5_words` reduces each side to a word sequence.
-        ("14471", "is a bare `#` comment marker"),
-        "measured at `origin/main`: `:14471` is a docstring line in "
-        "`tortoise/hosted_api.py` and a code line in `tortoise/sdk.py` — neither is a "
-        "comment marker (#13794 review, P2). Keep the half that IS true, and keep it "
-        "SCOPED: no cite TOKEN for that line **with the `hosted_api.py` prefix** exists on "
-        "`main` — while one WITHOUT that prefix does, in "
-        "`docs/scoping/3863-surface-enumeration.json` — so a prefix-scoped grep is not a "
-        "tree-wide count, which is the error the D5 row itself retracts (#13489 review, "
-        "P2). ⛔ The token is deliberately not spelled here: the census greps every "
-        "tracked file, so one would join the population it measures",
-    ),
-    (
-        # ⛔ No frame and no typography, but subject-BOUND (see entry 1): the CONNECTIVE
-        # is not part of the reading, which is the rule entry 3 applies below — measured
-        # in cycle 2, when ``, a `` welded to this literal meant the `is`, `—` and `,`
-        # spellings of the SAME refuted claim all read GREEN (#13809 review, P2) — while
-        # the NUMBER is part of it, because without the number the predicate reds a true
-        # sentence about another call site (cycle 4, P2 — MEASURED). Residual: a
-        # restatement that drops the number is out of scope, which is a different claim.
-        ("45728", "a DIFFERENT call site"),
-        "measured rather than carried: the import-list hit is what "
-        "`grep -n 'subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,' "
-        "tortoise/sdk.py` prints (a NAME in an import list, not a call), and the "
-        "call sites are what `grep -n 'subject_binding_available(' tortoise/sdk.py` "
-        "prints — ⛔ no line number is typed here, because the number this note "
-        "used to carry rotted to a docstring line while the import list itself "
-        "moved: the same grep prints `:45867` at `1a193d4c39`, and printed "
-        "`:45728` at `09f5c99afd` — the head that wrote that PIN, ⛔ not the head "
-        "that wrote this note (`d6a3c93308`), which already printed `:45867` — "
-        "which is the same correction the D5 cell now records "
-        "(#13794 measurement, P2; #13853 review, P2; #13853 review at "
-        "`1a193d4c39`, P2: the first cut of this parenthesis named the wrong head)",
-    ),
-    (
-        # ⛔ No frame and no case dependence: the READING is what is pinned, so the entry
-        # carries neither the refuted sentence's connective nor its capitalisation. The
-        # quote-strip below is what keeps a marked, QUOTED retraction from redding this
-        # pin, so no entry needs a frame — and giving only SOME entries one is precisely
-        # the asymmetry that broke it. ⛔ The connectives are NOT part of the reading, and
-        # keeping one was a FALSE PASS (#13809 review, P2 — MEASURED: with `, so` still
-        # on this literal, an unquoted `AND THE BOX IS NO LONGER SHALLOW.` and its
-        # lowercase form both read GREEN, i.e. the refuted claim could come back in prose
-        # and the pin would not fire). One fragment, because its subject IS the wording.
-        ("the box is no longer shallow",),
-        "measured on the clone this row was repaired on: "
-        "`git rev-parse --is-shallow-repository` -> `true` and "
-        "`git merge-base 2584a86ec1 origin/main` -> rc=1, so the unshallow is a REPAIR a "
-        "reader may perform, never a state this row may assert — shallowness is a "
-        "property of the clone (#13794 measurement, P2)",
-    ),
-)
-
-
-#: A double-quoted span, stripped before the absence test: in this document family that
-#: is how a RETRACTION marks the wording it deletes, so a quotation is never an assertion.
-#: ⛔ Typography is not part of a READING, so the match is on the WORD SEQUENCE and not on
-#: the glyphs — markdown emphasis, code formatting, hyphens and spacing are all typography.
-#: Each way of keeping them was a measured false pass, in successive cycles: a literal with
-#: the backticks kept missed `and :14471 is a bare # comment marker` (cycle 2), and one with
-#: the glyphs intact still missed `a DIFFERENT **call site**`, `the box is **no longer
-#: shallow**`, `a bare **#** comment marker`, `the box is — no longer shallow` and
-#: `a DIFFERENT call-site` (cycle 3) — every one of them the SAME words, which is the same
-#: claim, which is what this pin exists to catch (#13809 review, P2 — MEASURED). A guard
-#: that only catches the exact typography of one head is the false pass it exists to
-#: prevent.
-_D5_QUOTED_SPAN = re.compile(r'"[^"]*"')
-_D5_WORD = re.compile(r"[^\W_]+")
-
-
-#: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
-#: below had NO reader before this pin, which is why it rotted while the suite was green
-#: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 298 cite-shaped tokens at
-#: this head, so any
-#: occurrence satisfied every row — including the historical ones — and a number asserted
-#: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
-#: rows bind the ANCHOR PROSE to the tree instead of the number to the line, so a
-#: stale-current claim reds here. Each entry is
-#: (the claim's own binding label, its regex with a named `n` group,
-#:  the `_EPIC_CITE_SOURCES` key, the fragment the cited line must carry).
-#:
-#: ⛔ SCOPE, stated because an over-claim here was CAUGHT BY REVIEW (#13602, cycle 2): the
-#: `_honours` clauses are NOT repeated here. D5 states that symbol FOUR times, in four
-#: currency spellings, and ALL FOUR already have readers — the derived-literal arm asserts
-#: each of the four (`_honours_line = next(...)`, then the `for _claim in (` loop over it), and
-#: the `05-verify.md` pin row that reaches the `is at` one independently. Repeating them would
-#: add no failure mode and would leave this file asserting twice, in contradictory terms,
-#: whether that clause ever had a reader. ⛔ NO LINE NUMBERS in that sentence: it used to type
-#: the arm's range and its `next(...)` line, and that locator rotted silently when an
-#: `origin/main` merge moved the arm — NOTHING redded, because no sweep reads a
-#: `tests/…:<line>` token, which is the exact rot the D5 cell prescribes against. The arm is
-#: named by `_honours_line` instead. THREE things here are new coverage: the
-#: `dedup_reviewed IS NULL` clause below, the three-anchor sentence in `_D5_TRIPLE_RE`
-#: (whose distinct failure mode is a number swapped onto ANOTHER anchor's slot, which no
-#: per-line row can see), and the quota-guard row added for #13845, whose failure mode is
-#: a number that IS on D5's line but belongs to a clause about a different file.
-_D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
-    (
-        "the file's ONLY `dedup_reviewed IS NULL`",
-        r"the file's ONLY `dedup_reviewed IS NULL`, at `:(?P<n>\d+)` at THIS head",
-        "sdk",
-        "n.dedup_reviewed IS NULL",
-    ),
-    # ⛔ THE `+21` CUT'S OWN RE-POINTED PAIR, BOUND TO THE SENTENCES THAT CARRY IT (#14183
-    # review, cycle 5, P3 — MEASURED). That cut re-pointed the paragraph's address and inserted
-    # the `f"session entity-linking failed: …"` address, and NO entry named either: reverting
-    # them to the pre-delta addresses left this file's whole D5 selection GREEN. That is the
-    # class #13879 / #13956 named one layer up — a row whose own thesis is that a typed line
-    # number rots cannot ship its newest corrections unread. Each regex binds the number to the
-    # sentence that gives it its meaning, and the needle is that line's own text, so the number
-    # and the content it describes are graded by the same arm.
-    (
-        'the `f"session entity-linking failed: …"` line',
-        r'`f"session entity-linking failed[^`]*` line sits at `:(?P<n>\d+)`',
-        "sdk",
-        'f"session entity-linking failed:',
-    ),
-    (
-        "the paragraph the cut quoted (`whose payload points ALL fold as PARAPHRASE noops`)",
-        r"`whose payload points ALL fold as PARAPHRASE noops`\) is at `:(?P<n>\d+)`",
-        "sdk",
-        "# whose payload points ALL fold as PARAPHRASE noops",
-    ),
-    # ⛔ THE GATE'S ADDRESS, BOUND THROUGH THE ARITHMETIC THAT PRODUCES IT (#14183 review, cycle 6,
-    # P2 — MEASURED). The row states that address twice and BOTH times as the result of an
-    # expression, and no entry named it: `grep -c 20412 <this file>` was `0`, so restoring the
-    # pre-`+21` value kept every arm green — the two anchors above had readers and the gate they
-    # are compared against did not. Each sibling row binds a `sits at \`:N\`` address; this one
-    # binds through the phrase that carries the number, which is why the pattern is arithmetic
-    # rather than a colon-token. The needle is still the line's own text, so the number and the
-    # statement it describes are graded by the same arm.
-    (
-        'the `if meta.get("route"):` gate (via `20290 + 155`)',
-        r'`20290 \+ 155 = (?P<n>\d+)` for the `if meta\.get\("route"\):` gate',
-        "sdk",
-        'if meta.get("route"):',
-    ),
-    # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
-    # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 298 cite-shaped `:N` tokens at this head (re-derived from the row this branch
-    # ships, at the merge that brought `origin/main` in; measured here with
-    # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
-    # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
-    # was "read" from an unrelated clause denoting a
-    # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20311` too), while the
-    # sentence's own guard number stayed at the stale `:20245` and nothing graded it. This
-    # regex binds the number to the sentence that gives the number its meaning, so a future
-    # `+N` above `org_info` reds the CLAIM instead of pairing a fresh number with a rotted
-    # one. Anchors: `is <symbol>` then `at THIS head`, which is exactly how the row states a
-    # current-tense address.
-    (
-        "the quota guard `if count + est > max_points:`",
-        r"and `:(?P<n>\d+)` is `if count \+ est > max_points:` at THIS head",
-        "hosted_api",
-        "if count + est > max_points:",
-    ),
-    # ⛔ THE `sdk.py` IMPORT'S *OTHER* HIT, bound to the sentence that states it (#13879
-    # review, P2). The row says the registry-import grep ALSO hits a name in a DIFFERENT
-    # import list — ⛔ **not a call site** — and that second address was graded by NOTHING:
-    # reverting it to a pre-fix value reddened no arm at all, which is the class this tuple
-    # exists to close. The needle is that line's own text, so the number and the content it
-    # describes are read by the same regex. ⛔ The pair is HEAD-RELATIVE, so the head it was READ
-    # at travels with it: the grep `-n 'subject_binding_available,'` prints `12175` and `46094` on
-    # `tortoise/sdk.py` at `ae26adf963c` (2026-11-20), and `main` named the second at `:45867` at
-    # that same commit, 227 lines off its then-value. ⛔ THIS HEAD'S pair is deliberately NOT typed
-    # here: the document sentence states both addresses and TWO rows grade them from THERE — this
-    # one for the `also hits` half, the import-address row below for the other — so the figure needs
-    # one home, not two; a copy in a comment is a figure nothing reads, which is the class this file
-    # exists to close.
-    (
-        "the `sdk.py` import's OTHER hit",
-        r"the same grep also hits `:(?P<n>\d+)`",
-        "sdk",
-        "subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,",
-    ),
-    # ⛔ THE *OTHER* HALF OF THAT SAME PAIR, graded as its own claim (#14183 review, cycle 13 —
-    # MEASURED). The row above reads only the `also hits` address; the document sentence also
-    # states the IMPORT'S address in the same breath, and nothing read it — pointing it at a
-    # NEIGHBOURING import in the same file left the whole covering set GREEN. One row per spelling,
-    # never a second ungraded number: that is the rule this tuple exists to enforce, applied to the
-    # sentence that already broke it once.
-    # ⛔ RESIDUAL, NAMED RATHER THAN IMPLIED: the needle is a SUBSTRING, and the sibling address's
-    # line carries this same token as its PREFIX (it is the dual import), so an edit that pointed
-    # this claim at THAT line instead would satisfy the needle. Accepted, because the alternative —
-    # an exact-whole-line needle — reds on any reformat of a line this PR does not own, and the
-    # direction left open needs the address to become a DIFFERENT import LIST, not merely stale.
-    (
-        "the `subject_binding_available,` import address",
-        r"\(the import at `:(?P<n>\d+)`",
-        "sdk",
-        "subject_binding_available,",
-    ),
-    # ⛔ THE TWO `sed -n '<n>p'` QUOTES F1 CORRECTED, AND THE REASON THEY ARE HERE
-    # (#13956 review, F1 — MEASURED). F1 re-pointed them from `'19560p'`/`'25346p'` to
-    # `'19732p'`/`'25563p'` and left NO reader behind: reverting either number to its
-    # pre-fix value kept this file's whole D5 selection green, because no entry named it
-    # and a `_pin_row_failures` row is satisfied by ANY `:N` on the line. A row whose own
-    # thesis is that a typed line number rots cannot ship its newest corrections unread —
-    # that is the class #13879 review named when a reverted address "reddened no arm at
-    # all". The pattern binds the QUOTED TEXT to the number, so the number and the
-    # fragment it is supposed to denote are read by the same regex.
-    (
-        "the replay-skips-capture `sed -n` quote",
-        r"`sed -n '(?P<n>\d+)p' tortoise/sdk\.py` is `# capture — a REPLAY",
-        "sdk",
-        "capture — a REPLAY of an existing session_id SKIPS them, exactly",
-    ),
-    (
-        "the `# then resolved to the row it replaced.` `sed -n` quote",
-        r"`sed -n '(?P<n>\d+)p' tortoise/sdk\.py` is `# then resolved to the row it replaced",
-        "sdk",
-        "then resolved to the row it replaced",
-    ),
-)
-
-#: The labels `_D5_CURRENT_CLAIMS` must still carry, one per entry. Compared as a SET, never
-#: as a count: a count in a comment about a list that grows is the head-bound figure this
-#: file forbids, while a set reds on BOTH a dropped entry and a duplicated label.
-#: ⛔ WHY THIS EXISTS AT ALL (#13879 review, cycle 2 — MEASURED): the tuple's only reader
-#: UNTIL this census was the loop in `test_the_D5_current_head_anchors_are_the_lines_they_name`,
-#: so it walks whatever entries it FINDS and a SHORTER tuple is silently green. Deleting the
-#: I7 `nodes_used` entry left `len(_D5_CURRENT_CLAIMS)` at 4 with no red anywhere, so the
-#: loop's own remediation text ("re-derive the sentence …, do not drop it") enforced
-#: nothing, and the one direction a reviewer or fixer under pressure can take — convert a
-#: graded present-tense number back to an ungraded one — had no gate at all.
-_D5_CURRENT_CLAIM_LABELS = frozenset({
-    "the file's ONLY `dedup_reviewed IS NULL`",
-    "the quota guard `if count + est > max_points:`",
-    "the `sdk.py` import's OTHER hit",
-    "the `subject_binding_available,` import address",
-    'the `f"session entity-linking failed: …"` line',
-    "the paragraph the cut quoted (`whose payload points ALL fold as PARAPHRASE noops`)",
-    'the `if meta.get("route"):` gate (via `20290 + 155`)',
-    "the replay-skips-capture `sed -n` quote",
-    "the `# then resolved to the row it replaced.` `sed -n` quote",
-})
-
-
-#: The one D5 clause that states THREE current anchors in one sentence. Kept separate
-#: because its shape (three numbers, three named anchors) is what makes it checkable: the
-#: number and the anchor it is attached to are read by the SAME regex, so a re-point that
-#: moves one number onto another anchor's slot reds.
-_D5_TRIPLE_RE = re.compile(
-    r"`:(?P<a>\d+)` / `:(?P<b>\d+)` / `:(?P<c>\d+)` at THIS head — the three anchors "
-    r"`(?P<fa>[^`]+)`, `(?P<fb>[^`]+)` and `(?P<fc>[^`]+)` respectively")
-
-
-#: The D5 clause that states a `the ONLY …` population of TWO numbers:
-#: ``the only `AND o.eventId IS NULL` literals are at `:19840` and `:19908```.
-#: ⛔ Kept as its own arm rather than a `_D5_CURRENT_CLAIMS` entry because that tuple
-#: carries ONE named `n` per entry and this claim has TWO failure modes: either number
-#: going stale, and a THIRD hit appearing while the row still calls the pair the ONLY
-#: ones (`grep -n 'AND o.eventId IS NULL' tortoise/sdk.py` is the command the row itself
-#: hands the reader, so the row's population claim is checkable against the same grep).
-_D5_ONLY_LITERAL_RE = re.compile(
-    r"the only `(?P<literal>[^`]+)` literals are at `:(?P<a>\d+)` and `:(?P<b>\d+)`")
-
 
 #: The TWO D5 clauses that state a PAIR of current addresses, each pair named by the
 #: sentence itself — and neither had a reader (#13956 review, MEASURED twice).
 #:
-#: ⛔ WHY THEY ARE NOT `_D5_CURRENT_CLAIMS` ENTRIES: that tuple carries ONE named `n` per
+#: ⛔ WHY THEY ARE NOT `_D5_CURRENT_CLAIMS` ENTRIES (that tuple was CUT in the B4 cut): it carried ONE named `n` per
 #: entry, and each of these clauses asserts TWO numbers in one sentence, so a per-entry row
 #: could grade at most half of it — and a half-graded pair is exactly the state that let both
 #: of these ship unread. Each entry is (label, a pattern naming `a` and `b`, the
@@ -12544,41 +11972,6 @@ _D5_ONLY_LITERAL_RE = re.compile(
 #: it". The needle's whole discriminating power IS uniqueness, so the arm requires the single
 #: hit it names and reports the extras when they appear.
 _D5Needle = str | tuple[str, ...]
-
-
-_D5_PINNED_PAIRS: tuple[tuple[str, str, str, _D5Needle, _D5Needle], ...] = (
-    (
-        "the alreadyDecided / _dedup_content_candidates pair",
-        r"the same two symbols read `:(?P<a>\d+)` and `:(?P<b>\d+)`",
-        "sdk",
-        '"IMPL", pid, [prior], label="alreadyDecided",',
-        "def _dedup_content_candidates",
-    ),
-    (
-        "the _extract_session_llm docstring / empty-gate return dict pair",
-        r"is at `:(?P<a>\d+)`, and the empty-gate return dict beside it "
-        r"\(`[^`]+`\) is at `:(?P<b>\d+)`",
-        "sdk",
-        "Runs the two-stage LLMExtractor on the conversation transcript",
-        (
-            '"provider": None, "route": None, "failover_used": False,',
-            '"errors": ["no extractable content — empty or blank conversation"],',
-            '"warnings": [], "mode": "empty", "stats": {},',
-        ),
-    ),
-)
-
-#: The labels `_D5_PINNED_PAIRS` must still carry, one per entry. ⛔ THE SAME REASON
-#: `_D5_CURRENT_CLAIM_LABELS` EXISTS (#13879 review, cycle 2), and it cost one review round to
-#: learn it here too (#14003 review, round 2, P2 — MEASURED): the table's only reader walks
-#: whatever entries it FINDS, so DELETING an entry returns that pair to unread with NO red
-#: anywhere — and the pair-2 entry is the harder one to restore, so it is the one a lane under
-#: merge pressure drops. Compared as a SET (a drop and an undeclared addition both red) plus a
-#: LENGTH arm (the set comparison alone cannot see a duplicate).
-_D5_PINNED_PAIR_LABELS = frozenset({
-    "the alreadyDecided / _dedup_content_candidates pair",
-    "the _extract_session_llm docstring / empty-gate return dict pair",
-})
 
 
 #: ⛔ THE `docs/00_index.md` FILE-TABLE ROW'S OWN FOUR PRESENT-TENSE ANCHORS (#14386 review, P1).
@@ -12711,7 +12104,7 @@ _INDEX_ROW_ANCHORS: tuple[_IndexRowAnchor, ...] = (
 )
 
 #: The labels `_INDEX_ROW_ANCHORS` must still carry, one per entry — the same census discipline
-#: `_D5_CURRENT_CLAIM_LABELS` / `_D5_PINNED_PAIR_LABELS` apply (#13879 / #14003 review), for the
+#: `_D5_CURRENT_CLAIM_LABELS` / `_D5_PINNED_PAIR_LABELS` applied before the B4 cut (#13879 / #14003 review), for the
 #: same reason: the table's reader walks whatever entries it FINDS, so DELETING one converts a
 #: graded present-tense number back to an ungraded one with NO red anywhere, which is exactly the
 #: defect this arm was added to close.

@@ -14749,7 +14749,6 @@ def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
         _test_job_cache_overrides_block(inside, prune_name)
 
 
-
 def test_the_cache_key_scan_reads_restore_keys_and_not_key_alone():
     """#11065 cycle 8 (P2): a cache guard is only as wide as the fields it reads.
 
