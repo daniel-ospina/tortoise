@@ -58,8 +58,8 @@ version: 1
 # 2026-11-16 sweep and the two rows that followed it.)
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
-# `main` at `b665cbd619860`, and the pool it emits is the union of BOTH parents' registrations —
-# ⛔ `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
+# `main` at `b665cbd619860`, and the pool it emits is the union of BOTH parents' registrations.
+# ⛔ NOT `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
 # `tests/test_14033_state_cue_gap.py` are BOTH `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, and
 # this PR DOES add one fast-file registration of its own — `tests/test_14559_reaper_schedule.py`,
 # #14559's schedule fixture (it was UNCLASSIFIED, which `--integrity` reported as manifest drift),
@@ -195,13 +195,16 @@ version: 1
 # A dual registration is exactly the case where a neighbour's bin tells you nothing, which is why the
 # rule is to read the letter off the verb rather than to remember a pairing.
 #
-# The registrations the reading above counts are `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows:
+# The registrations the reading above counts are all at the flat 2.0 s `DEFAULT_FAST_WEIGHT`. These
+# are `main`'s:
 # #14409's `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`,
 # #14220's `tests/test_14186_embedder_seam_batching.py`, #14423's
 # `tests/test_14350_drain_convergence.py`, #14038's `tests/test_13998_capacity_notice.py`, #14429's
 # `tests/test_spool_drain_rehearsal.py`, #14471's `tests/test_13526_quota_refusal_figures.py`,
 # #14407's `tests/test_14407_alert_delivery.py` and #14504's
-# `tests/test_13722_stamp_chain_off_loop.py`. EVERY one of them re-partitions every bin, which is
+# `tests/test_13722_stamp_chain_off_loop.py`
+# — ⛔ PLUS this PR's own `tests/test_14559_reaper_schedule.py` (#14559), the ONE counted row that is
+# NOT `main`'s, and the reason the split above is this tree's rather than `main`'s. EVERY one of them re-partitions every bin, which is
 # why the split is quoted and not only the worst figure — and why the minute, which has NOT moved
 # (28 m at every reading from 825.1 s to 838.2 s), could never be the operand that catches a
 # carried one.
@@ -2029,11 +2032,17 @@ surfaces:
   # #13205: the tenant-graph PROVISIONING class — the name composer's double
   # prefix (`team_team_…`), the hard-delete purge dropping only the org's
   # default graph while its custom `org_{id}_{gid}` graphs outlived the row, and
-  # `tools/reap_empty_test_graphs.py`'s refusals. Owned by `api` because every
-  # file it guards (`tortoise/sdk.py`'s `_derive_graph_name`,
-  # `tortoise/hosted_api.py`'s `_org_graph_names`/`_purge_deleted_orgs`) is an
-  # `api` SOURCE_PATTERN match — the same #2938 silent-drop reasoning as the
-  # `__main__.py` pair above.
+  # `tools/reap_empty_test_graphs.py`'s refusals. Registered on `api` for its ORIGINAL
+  # subjects — `tortoise/sdk.py`'s `_derive_graph_name` and
+  # `tortoise/hosted_api.py`'s `_org_graph_names`/`_purge_deleted_orgs`, both `api`
+  # SOURCE_PATTERN matches (the #2938 silent-drop reasoning) — and ⛔ ALSO on
+  # `core` below, because this PR gave that file a FOURTH guarded subject,
+  # `tools/reap_empty_test_graphs.py`, which matches NO `SOURCE_PATTERNS` row: a
+  # `tools/` path is in `NON_PYTHON_PREFIXES`, so the `api` row alone left the
+  # reaper's own 97 tests (its four refusals and `TestMemoryDelta`) UNRUN on a
+  # reap-tool-only diff — the fail-open direction that file's own comment names.
+  # Dual registration is the #14407 precedent, and `fast_pool()` carries it once,
+  # so the graded partition is unmoved by the second row.
   - test_13205_graph_provision_leak.py
   # #13224: the create-path write bound (`encode_for_row`'s bounded wait for a COLD
   # embedder), measured from OUTSIDE the handler — `POST /v1/subjects` answers 200 and stays
@@ -8508,6 +8517,12 @@ surfaces:
   # and its `run:` bodies are executed as shell against tmp dirs, no graph and no
   # docker.
   - test_14559_reaper_schedule.py
+  # ⛔ #13205's own suite, made selectable by the reap-tool entry above: it is
+  # the ONLY file that pins `tools/reap_empty_test_graphs.py` (the four refusals
+  # and this PR's `TestMemoryDelta`); `test_14559_reaper_schedule.py` never
+  # imports the tool, it parses the workflow. `fast_pool()` carries it once, so
+  # the graded partition is unmoved — measured with the row added.
+  - test_13205_graph_provision_leak.py
   - test_reaper.py
   - test_reaper_orphan.py
   # #3767: the reaper's ownership claim (name/containment is not ownership).
