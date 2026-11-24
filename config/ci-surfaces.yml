@@ -75,6 +75,37 @@ version: 1
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
 # well, so `fast_pool()` still carries it (measured at this head, weight 90.0) and dropping a `core`
 # row cannot move a bin.
+# `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, the
+# union packs a worst shard at 840.2 s where either side alone packed 840.0 s,
+# and `shard_watchdog_minutes()` rounds 840.2/60 x 2.0 up to 29 m — 0.2 s of
+# packing crosses a whole watchdog minute. At 29 m the arm-2 SUM is 60.64 m,
+# x 1.5 = 90.96 m against the 90 m cap (RED, where BOTH parents pass). At S=11
+# the map as #11576 shipped it packed the worst shard at 782.0 s -> 27 m, i.e. 58.64 x 1.5 =
+# 87.96 m: 2.04 m of real headroom rather than the 0.54 m S=10 was clearing by. (The
+# 2026-11-16 sweep and the two rows that followed it.)
+# ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
+# tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
+# `main` at `af40c97ca312`, and the pool it emits is the union of BOTH parents' registrations —
+# ⛔ `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
+# `tests/test_14033_state_cue_gap.py` are BOTH `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, and
+# this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
+# (measured: the only `durations` lines this PR touches are comment rewrites of two existing rows,
+# `test_7949_capstone_measure.py` and `test_e2e_wrangler_prewarm.py`, whose values are unchanged), so
+# the ONE split stated below is `main`'s reading too. ⛔ THIS BRANCH'S OWN READING WAS HERE and is
+# DELETED, not merged: it said one shard at 838.1 s and ten at 838.2 s, which was true of the previous
+# fold and is not true of this one — the `merge=union` driver (#5373) kept both parents' clauses, so
+# the block briefly claimed two partitions. Re-derived below with the verb.
+# On THIS merged tree (`main` at
+# `af40c97ca312` folded in) the verb packs six shards at 825.1 s
+# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so
+# `ceil(825.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.04`, so the two
+# agree by construction rather than by a hand re-read. Re-derive it on the tree after the next fold;
+# never carry this 825.1/825.0. ⛔ The CAUSAL story this sentence used to carry is DELETED because it
+# is false at this tree: it said removing `tests/test_dod_5090_probe.py` from the `core` surface took
+# that file's weight out of the pool — but the file is registered on the `eval` surface, so
+# `fast_pool()` still carries it and dropping a `core` row would not move the bin. The FIGURES above
+# were re-derived with the verb, and the verb is the only thing that made them true.
 #
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, above, in ONE
 # form. A fold that splices two re-derivations in makes the guard read `<est stated twice>` /
@@ -85,6 +116,65 @@ version: 1
 # `git log` holds each fold's own figures on the commit that measured them. The MINUTE has stood at 28 m at every reading since
 # the 2026-11-23 sweep, so NO arithmetic on the minute can catch a carried figure — only the
 # `est_seconds` partition can, which is why the sentence above is GRADED rather than trusted.
+# `8c373f59a15ba` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
+# durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
+# 0 removed), the #7949 capstone prose, and the privatise residue counts; at THAT head B8 dropped
+# `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
+# ⛔ THIS PR neither carries nor re-cuts that file: `git diff origin/main HEAD --
+# tests/test_sdk_privatise_sweep.py` is EMPTY at this head, so the arm is `main`'s and the extent it
+# publishes is graded by the arm itself. ⛔ The live clause that stood here — "because THIS PR
+# re-cuts that file's pin, its fold KEEPS the branch's copy of it" — was re-spliced back by the
+# `merge=union` fold (#5373) AFTER being deleted, which is why it is deleted again here and why the
+# paragraph below records it as retracted. ⛔ NO extent FIGURE is stated: the one that may be
+# trusted is the one `_residue_block`'s docstring publishes, graded against its
+# own walk by `tests/test_sdk_privatise_sweep.py::test_the_extent_figure_is_the_walks_own_count`
+# (post-merge review of #14459, P3: this sentence read as a measurement of "the resolved tree" while
+# describing a run that had already moved — nothing in this file grades an extent, so a figure here
+# can only be history). ⛔ THREE earlier revisions of this paragraph were false here, and they are
+# recorded rather than quietly dropped: one credited `da4b76a5851c` (a #13526 quota-report commit,
+# NOT this fold); one claimed "this PR re-cuts that file's pin … 1915 → 1921"; and the fix for the
+# second deleted those FIGURES while leaving the causal clause ("because THIS PR re-cuts that file's
+# pin, its fold KEEPS the branch's copy of it") standing — which still asserted the re-cut this
+# block's own refutation denies. That clause is gone now, so the paragraph states ONE provenance.
+# (folded over the #14371, #14186, #14434, #13998, #14350, #14423, #14429 and #14446 `core` rows
+# that are all in the map, plus #14407's
+# own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
+# paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `af40c97ca312`
+# and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
+# is why `main` alone emits this same split. ⛔ THE WHY IS NOT RECITED HERE: the "why the minute
+# cannot be the operand, and why a restatement would be graded as a second claim" reasoning is in
+# the "ONE CLAUSE" paragraph below, and stating it here as well would make its own "ONCE" false —
+# which is the defect this line exists to stop repeating. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
+# the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
+# `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
+# nine/two split this branch last derived (837.3/837.2) with the minute unmoved — and #14423's
+# `tests/test_14350_drain_convergence.py` is packed in that same pool. Every fast file counted here is a
+# `main` registration at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (#14038's
+# `tests/test_13998_capacity_notice.py` among them), and the pool matters only because it sits one
+# landing away from rounding the minute up again. #14407 registered
+# `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
+# `test_notify`), and that registration is part of the partition stated above. ⛔ #13722's
+# `tests/test_13722_stamp_chain_off_loop.py` (dual `api`/`core`) is a registration that MOVED the
+# NAME SETS on the head it landed at: at `f4eb91fd7a7a` (#14504) it took the split off the five/six
+# its own parent emitted to three/eight — `d` AND `e` leaving the worst bin — while the minute stayed
+# at 28 m. ⛔ Stated at the sha it
+# was MEASURED at and not as a claim about this head: later folds moved it again, which is why the
+# rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: a file a PR ADDS cannot carry a junit reading yet),
+# NOT the hand-picked sub-default weight the row first carried — an unmeasured figure re-packs the
+# bins and so moves THIS graded claim on a number no run measured, which is the deviation the
+# review round on this PR caught. Re-run
+# `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or split.
+# ⛔ WHAT IS KEPT BELOW IS HISTORY, NOT A SECOND CLAIM: which registrations this reading counts, and
+# the direction the readings have travelled. The rule that a restatement would be graded as a second
+# claim is stated ONCE, in the "ONE CLAUSE" paragraph.
+# ⛔ ONE RESIDUAL, NAMED: the guard grades the partition and the `ceil(...)` MULTIPLIER
+# (`WATCHDOG_HEADROOM`), NOT the printed `watchdog_headroom:` ratio beside them — so the ratio is
+# re-read by hand whenever the seconds move. It moves: `2.01` at 837.9 s (1680 / 837.9 = 2.0050),
+# and `2.04` at this head's 825.1 s (1680 / 825.1 = 2.0361, rounded to the printed 2.04). A carried ratio in a graded sentence is
+# exactly the defect this block exists to prevent, one level below what it grades.
 #
 # ⛔ NO PER-FILE SHARD LETTER IS RECORDED HERE. A letter is a measurement of the greedy packer, so
 # it is false one fold later and no test reads it; a sweep that deleted seven of eight false letters
