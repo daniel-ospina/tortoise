@@ -362,9 +362,7 @@ FUNNEL_QUERY = (
 # ``hosted_api.py:<line>`` cite in the tracked tree: **158** distinct cite
 # targets have a line number LARGER than 28249 (28446 … 99999) and those are the
 # ones that shift; **572** have a number smaller than it (26 … 28246) and cannot
-# move. (731 distinct targets in all — the remainder is 28249 itself, which this# very comment names. NEVER re-take these by hand — that is how they went wrong
-# twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every
-# figure in this note AND the list-helper's in one command whenever
+# move. (731 distinct targets in all — the remainder is 28249 itself, which this# very comment names. NEVER re-take these by hand — that is how they went wrong# twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every# figure in this note AND the list-helper's in one command whenever
 # ``hosted_api.py`` gains or loses a line above the pivot, and ``--check`` (run
 # nightly on main by `.github/workflows/main-health-nightly.yml`) reds when one is
 # stale. ⛔ These figures are NOT pinned by a tree-wide
