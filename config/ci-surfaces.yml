@@ -61,7 +61,7 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
-# `14b8322eb271` folded in over `#14472`'s merge base, after the `#14419` B7 cut took the
+# `b665cbd61986` folded in over `#14472`'s merge base, after the `#14419` B7 cut took the
 # durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool, plus
 # this PR's OWN rows in `fast_pool()` (`tests/test_14219_batch_ingest.py` and
 # `tests/test_14219_batches_api.py`, `core` + `api`, each at the flat 2.0 s
@@ -92,8 +92,8 @@ version: 1
 # #14038) and this PR's own rows. Re-run `--emit-push-matrix` on the MERGED tree; never carry the
 # last revision's minute, seconds, or split.
 # Re-run `--emit-push-matrix`; never carry the last revision's minute.
-# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
-# `88cd00a068`, whose #14428 cut B2 down to `tests/test_12184_shifted_cites.py`, whose #14446
+# MERGES INTO, never carried from the branch that first wrote it. On an EARLIER fold's merged tree
+# (`main` at `88cd00a068`, whose #14428 cut B2 down to `tests/test_12184_shifted_cites.py`, whose #14446
 # repaired #7879's record-chain arm, and whose #14429 registered
 # `tests/test_spool_drain_rehearsal.py` `core` with its own flat row, on top of #14350's
 # `tests/test_14350_drain_convergence.py`, #14220's `tests/test_14186_embedder_seam_batching.py`
@@ -144,10 +144,11 @@ version: 1
 # than re-pointed, because two spellings of one emission is the failure and re-pointing a duplicate
 # leaves the shape.)
 # MERGES INTO, never carried from the branch that first wrote it. The one thing this paragraph keeps
-# is the CAUSE of the last move and not its figure: `main` `6a02515d14ad` folded in, MINUS this PR's
-# own removal of `tests/test_dod_5090_probe.py` from the `core` surface — that row is what put the
-# file in `fast_pool()`, so dropping it takes the file's weight out of the pool and re-packs every
-# bin. ⛔ The re-packed partition, its `ceil(...)` and the minute are stated ONCE, in the paragraph
+# is the CAUSE of the last move and not its figure — and that cause is THIS PR's own two `core` +
+# `api` registrations, never `tests/test_dod_5090_probe.py`'s `core` removal: that file is still
+# registered on `eval`, so `fast_pool()` still carries it and dropping a `core` row cannot move a
+# bin. (The correction, with its measurement, is stated above.) ⛔ The re-packed partition, its
+# `ceil(...)` and the minute are stated ONCE, in the paragraph
 # above, and are graded there; this spot deliberately states NO figure, because a second spelling
 # here is exactly the `<est stated twice>` shape the guard reds on.
 # ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
@@ -156,8 +157,8 @@ version: 1
 # only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged tree; never carry
 # the last revision's minute, seconds, or split.
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
-# tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
-# `main` at `14b8322eb271`, and the pool it emits contains BOTH parents' registrations PLUS this
+# tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head's merge
+# base is `main` `b665cbd61986`, and the pool it emits contains BOTH parents' registrations PLUS this
 # PR's own two fast-pool files. ⛔ THE "THIS PR ADDS NO FAST-FILE REGISTRATION" CLAIM THAT STOOD HERE
 # IS DELETED, not carried: it was true of `main`'s own lane and false the moment it was folded into
 # this PR, which registers `tests/test_14219_batch_ingest.py` and
@@ -227,39 +228,26 @@ version: 1
 # second statement of one fact — the duplicate the guard reds on, which is what a merge of two
 # re-derivations produces (measured, this fold). Its derivation and minute are deleted with it, so
 # the block carries exactly ONE `ceil` operand.
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# `DEFAULT_FAST_WEIGHT`) the verb split the pool into a slowest shard reading 838.1 seconds (shard `a`)
-# and 838.0 seconds for the other ten — ⛔ MEASURED ON AN EARLIER HEAD, which sat on
-# `main` at `59a08fdb8b40` and adds this PR's own registration only
-# (`tests/test_14033_state_cue_gap.py`), so that head's
-# operand (838.1/60 x 2) rounded up to 28 m too — ⛔ spelled WITHOUT the `ceil(...)` form, so the
-# block carries exactly ONE graded operand: the one at the top of this block, re-derived on this
-# fold's tree, and this sentence is a HISTORICAL record that grades nothing —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
-# agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
-# `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
-# paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
-# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `2cccf90f4dd4`
-# and adds this PR's own registration only
-# (`tests/test_14033_state_cue_gap.py`). A restatement
-# here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
-# reads every `N at X.X s (names)` sentence in this block, so a repeated figure reports as
-# `<est … stated twice>` and reds the required leg. ⛔ The split is 0.1 s WIDE and the NAME SETS
-# differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
-# SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
-# 835.5 s to 838.1 s while the seconds moved under it. So NO arithmetic on the minute can catch a
-# carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED at the
-# top of this block instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
-# 835.5 s to 837.9 s while the seconds moved under it. So NO arithmetic on the minute can catch a
-# 835.5 s to 838.2 s while the seconds moved under it. So NO arithmetic on the minute can catch a
-# carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
-# instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
-# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `af40c97ca312`
-# and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
-# is why `main` alone emits this same split. ⛔ A restatement here would be graded as a second claim;
-# the WHY — that the split is 0.1 s wide, that the NAME SETS are what move rather than the minute,
-# and that only the `est_seconds` partition can catch a carried figure — is stated ONCE, in the
-# "ONE CLAUSE" paragraph below. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
+# ⛔ THIS REGION IS HISTORY, NOT THIS TREE'S EMISSION: an earlier fold measured a slowest shard at
+# 838.1 s and 838.0 s for the other ten — ⛔ MEASURED ON AN EARLIER HEAD, which sat on `main` at
+# `59a08fdb8b40`, and its derivation is deleted with it so the block carries exactly ONE graded
+# operand: the one at the top of this block, re-derived on this fold's tree. ⛔
+# `tests/test_14033_state_cue_gap.py` is NOT this PR's registration at any head — it is `main`'s
+# flat 2.0 s row, still in the pool (stated above); an earlier cut of this paragraph attributed it
+# to this PR and is CORRECTED rather than re-pointed.
+# ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE, and this
+# paragraph is the fold's PROVENANCE only: which registrations the single graded clause counts, and
+# on which tree. It names THIS head's merge base — `main` `b665cbd61986` — and THIS PR's own two
+# fast-pool registrations (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`, on
+# `core` + `api`), which is why `main` alone does NOT emit this same split. ⛔ An earlier cut of this
+# spot spliced two parents' copies together and asserted BOTH "adds no fast-file registration of its
+# own" and "adds this PR's own registration only (`tests/test_14033_state_cue_gap.py`)" — the first
+# is false about THIS PR and the second is false about that file, which is `main`'s flat 2.0 s row
+# (stated above). Both are CORRECTED here rather than re-pointed: two spellings of one fact is the
+# failure, and re-pointing a duplicate leaves the shape. ⛔ The WHY — the 0.1 s width, the NAME SETS
+# moving rather than the minute, and only the `est_seconds` partition catching a carried figure — is
+# stated ONCE, in the "ONE CLAUSE" paragraph above. A restatement here would be graded as a SECOND
+# claim. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
 # `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
 # nine/two split this branch last derived (837.3/837.2) with the minute unmoved — and #14423's
