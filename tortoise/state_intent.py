@@ -148,6 +148,23 @@ _ENDING_WORDS = (
     r"|ended"
 )
 
+#: One word of the subject NP.
+#: ⛔ A hyphen or an apostrophe is an ordinary spelling INSIDE a head noun
+#: (`company's`, `all-hands`, `e-mail`), not a clause boundary — a `[a-z0-9]+` run
+#: refuses those spellings and answers `0 rows`, because the relevance read
+#: excludes terminal statuses.
+#:
+#: ⛔ AND THE CLASS IS EVERY APOSTROPHE AND EVERY LETTER, not the ASCII ones: the
+#: smart apostrophe in `company’s` (U+2019 — what macOS/iOS/Word produce when prose
+#: is pasted into a search box) and an accented head noun (`naïve`, `café`) are the
+#: same ordinary spellings the paragraph above is about, and an ASCII-only
+#: `[a-z0-9'-]*` answered `0 rows` for each (measured, PR #14491 review P2) — the
+#: #14033 fallthrough, in the spelling a real caller is most likely to send.
+#: Admitting the full letter class costs nothing here because
+#: `detect_state_question` LOWERCASES and whitespace-collapses the query before any
+#: shape is tried, so no case-folding assumption is smuggled in.
+_NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
+
 #: What a ``is_predicate`` subject NP's word run may NOT cross. A word run alone
 #: admits a relative clause whose own finite verb then reads as the question's
 #: predicate, and there are TWO spellings of that clause:
@@ -170,7 +187,9 @@ _ENDING_WORDS = (
 #: PREDICATE, and each of the three classes below changes what the question asks.
 #: Measured before this guard (PR #14491 review, P1/P2) — every row routed:
 #:
-#: * NEGATION (`not`, `never`, `neither`, `nor`, `longer`) — `is the plan not
+#: * NEGATION (`not`, `never`, `neither`, `nor`, `longer`, the contracted
+#:   auxiliaries matched as the SUFFIX `…n't`, and the approximatives
+#:   `hardly`/`barely`/`scarcely`/`rarely`) — `is the plan not
 #:   cancelled` was answered with the population of CANCELLED records, the
 #:   polarity-INVERTED answer, which is the #14033 defect class exactly. `no`
 #:   is left in the run by the residual below (it is an ordinary noun modifier),
@@ -185,15 +204,18 @@ _ENDING_WORDS = (
 #:   `is the v2 api to be retired` asks about something that has NOT ended, and
 #:   the ended population can only answer it with records that have;
 #:   `is the report being archived` is an action in flight, which the population
-#:   cannot represent at all. ⛔ THE INFINITIVE IS STOPPED BY `to` ALONE, and the
-#:   narrower list is measured rather than assumed: `be|going|about|due|scheduled`
-#:   were stop words in the round-8 cut, and every one of its futurity rows still
-#:   refuses without them (`to` sits between the head noun and the ending in each),
-#:   while keeping them refuses two ordinary spellings for no closure at all —
+#:   cannot represent at all. ⛔ THE INFINITIVE IS STOPPED BY THE FRAME
+#:   `to|going|about|due|scheduled (to) be`, and the FRAME is the load-bearing
+#:   part: measured, dropping it (with `being` left in the list) routes all six
+#:   pinned futurity rows, while a bare `be` alternative routes nothing it alone
+#:   can reach — every infinitive that survives to this tail anchor carries the
+#:   marker in front of it. So the frame is what does the work and `be` is
+#:   deliberately NOT a separate stop word (it would be an un-falsifiable
+#:   alternative and, worse, would refuse `is the be all plan archived`-class
+#:   head nouns for no closure). The words are kept INSIDE the frame because
+#:   `due`/`going` are ordinary head-noun modifiers in the second slot:
 #:   `is the annual due diligence report archived` and `is the current going
-#:   concern note archived`, where `due`/`going` are head-noun modifiers in the
-#:   second slot. `be` on its own had no falsifier at all: every infinitive that
-#:   can reach this tail anchor already carries `to`;
+#:   concern note archived` still route;
 #: * DISJUNCTION (`or`) — `is the ticket still open or cancelled` asks about two
 #:   states at once, and one population cannot answer both.
 #:
@@ -244,22 +266,6 @@ _ENDING_WORDS = (
 #:   shape that could go either way does not fire. The cost is not new either:
 #:   `is_predicate` did not exist on the base module, which refused the same
 #:   string. It is disclosed here so a later round does not present it as a find.
-#:
-#: ⛔ A hyphen or an apostrophe is an ordinary spelling INSIDE a head noun
-#: (`company's`, `all-hands`, `e-mail`), not a clause boundary — a `[a-z0-9]+` run
-#: refuses those spellings and answers `0 rows`, because the relevance read
-#: excludes terminal statuses.
-#:
-#: One word of the subject NP. ⛔ AND THE CLASS IS EVERY APOSTROPHE AND EVERY
-#: LETTER, not the ASCII ones: the smart apostrophe in `company’s` (U+2019 — what
-#: macOS/iOS/Word produce when prose is pasted into a search box) and an accented
-#: head noun (`naïve`, `café`) are the same ordinary spellings the paragraph above
-#: is about, and an ASCII-only `[a-z0-9'-]*` answered `0 rows` for each (measured,
-#: PR #14491 review P2) — the #14033 fallthrough, in the spelling a real caller is
-#: most likely to send. Admitting the full letter class costs nothing here
-#: because `detect_state_question` LOWERCASES and whitespace-collapses the query
-#: before any shape is tried, so no case-folding assumption is smuggled in.
-_NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 
 _NP_STOP = (
     r"(?!(?:that|which|who|whom|whose|where|when"
@@ -286,12 +292,12 @@ _NP_STOP = (
     # cancelled`, `… hardly been cancelled`) and leaves it in the run everywhere
     # else, so this closure costs NO recall — which is why it is taken here while
     # the other dual-use words (`all|some|any|no`) stay disclosed residuals.
-    rf"|(?:hardly|barely|scarcely|far\s+from|anything\s+but)"
+    rf"|(?:hardly|barely|scarcely|rarely|far\s+from|anything\s+but)"
     rf"(?=\s+(?:{_NP_WORD}\s+)?(?:{_ENDING_WORDS}))"
     # `being` is the PROGRESSIVE and is a separate token from the infinitive
     # frame below, because no frame marker sits in front of it:
     # `is the plan being cancelled`, `is the report still being archived`.
-    r"|be|being"
+    r"|being"
     # ⛔ FUTURITY/INTENT is a FRAME, not a word list: `to|going|about|due|scheduled`
     # are ordinary noun modifiers elsewhere (`is the go to market plan archived`,
     # `is the past due invoice archived`, `is the point to point integration
@@ -314,6 +320,22 @@ _NP_STOP = (
     # served the polarity-INVERTED population. `[a-z0-9'-]*n't` matches the token
     # that carries it.
     r"|[a-z0-9'-]*n't"
+    # ⛔ THE APPROXIMATIVE NEGATIONS ARE THE SAME POLARITY CLASS — `hardly
+    # archived` / `barely archived` answer the question with the population of
+    # records that HAVE ended, which is the inversion the negation stop exists to
+    # refuse. They are covered by the POSITIONAL arm above, which also carries
+    # `rarely`, `far from` and `anything but`.
+    # ⛔ THEY ARE **NOT** FLAT STOP WORDS, and the flat form is a measured RECALL
+    # LOSS rather than a closure: each is also an ordinary modifier INSIDE the NP,
+    # and `_NP_STOP` applies from slot 2 on, so a flat word refuses
+    # `is the old barely visible notice archived`, `is the legacy scarcely used
+    # endpoint retired` and `is the current hardly used service archived` — three
+    # real state questions the relevance read answers `0 rows` (measured on this
+    # head, PR #14491 reconciliation). The in-slot spellings that made the flat
+    # cut look free (`is the barely visible notice archived`) only pass because
+    # the negator lands in the HEAD-noun slot, where the stop never applies at
+    # all — that is not a general property. `will` stays a residual
+    # (`estate will probate`) rather than a stop word.
     r"|unless|once|if|before|after|until|while|because|although|though"
     r"|as|since|whenever|whereas|whether"
     r"|each|every|both|either|another|several|many|most|few|none"
@@ -626,6 +648,8 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `is the policy when a booking is cancelled` all refuse. The tail anchor, the
     # NP bound, the NP stop and the start anchor are each pinned by a falsifier
     # that reaches it in `tests/test_14033_state_cue_gap.py`; the `what is …` row
+    # of `NOT_SELECTED` cannot exercise any of them, because the start anchor
+    # (`^(?:is|are|was|were)`) never reaches it.
     # ⛔ AND THE SUBJECT RUN STOPS AT A PREDICATE MODIFIER (PR #14491 review,
     # P1/P2): a `not`/`never` in the run INVERTS the question — `is the plan not
     # cancelled` was served the CANCELLED records — and a futurity (`to be
@@ -633,8 +657,6 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # the ended population cannot represent. All three classes are pinned in
     # `tests/test_14033_state_cue_gap.py`, and the affirmative temporal modifiers
     # (`already`, `still`) stay in the run so their spellings still route.
-    # of `NOT_SELECTED` cannot exercise any of them, because the start anchor
-    # (`^(?:is|are|was|were)`) never reaches it.
     # ⛔ THE COPULA IS THE WHOLE be-PARADIGM, not `is` alone: `was the onboarding
     # flow retired?`, `are our endpoints deprecated` and `were the claims
     # retracted` are the same question in another tense/number, and refusing them
