@@ -241,9 +241,10 @@ class TestCreatePointRetrySafety:
         """STRONGER than `test_the_success_hint_never_prints_a_url_credential` on
         two axes it leaves open — and WEAKER on a third, so it does not replace it.
 
-        That test (added by `f7d769fb66e6`) asserts TWO things: `"…password" not in
-        out` AND `"/v1/search?q=" in out` (the path must survive — a `***`-redacted
-        URL satisfies it, so it does not cover the host). What it leaves open:
+        That test (added by `f7d769fb66e6`) asserts TWO things:
+        `assert "sup3rsecretpw" not in out` AND `assert "/v1/search?q=" in out`
+        (the path must survive — a `***`-redacted URL satisfies it, so it does not
+        cover the host). What it leaves open:
           * the USER half — measured: masking only the password (`:pw@` → `:***@`,
             user kept) leaves that test GREEN (30 passed) and reds this one at
             `"svc:"`;
