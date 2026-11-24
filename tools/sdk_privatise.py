@@ -1652,9 +1652,12 @@ SWEEP_NAMES = 66
 #: ⚠️ THIS PR (#14480) MOVED THE PIN BY ONE FROM ITS OWN LINE — stated because the pin's own note
 #: says a count that moves without a named cause is the drift it exists to catch: the durable
 #: `claim_unavailable` record writes `recorded.update(keep)` in `capture_spool`'s self-heal
-#: (`tortoise/capture_spool.py:4107`, the one new untyped `.update(` receiver in this diff), so
-#: `--repin` on the tree being merged prints **(11911, "3e92044bab08cc3d")**. Re-derived by RUNNING
-#: the tool on that tree, never by arithmetic on the delta.
+#: (`tortoise/capture_spool.py:4107`, the one new untyped `.update(` receiver in this diff). ⛔ AND
+#: THE TREE THAT ACTUALLY LANDED IS NOT THE BRANCH HEAD: `2cccf90f4dd4`, #14480's MERGE commit,
+#: COMMITS `(11911, "3e92044bab08cc3d")` while ITS OWN TREE derives **(11912, "73827c80583e139f")**,
+#: measured by RUNNING `--repin` on a pristine worktree at that rev rather than by arithmetic on the
+#: delta — so `main` went red AT that merge and stayed red until #4625's fold re-derived the pin on
+#: ITS own tree (the block above `SWEEP_RESIDUE` measures both sides of that).
 #: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
 #: and diffed, and EXACTLY ONE row differs
 #: out of an UNCHANGED 856-row SHAPE set on both sides:
