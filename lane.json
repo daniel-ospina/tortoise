@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-14504-1795526335-p719766-8963ed2e",
+  "_sha": "0c424d35fe9f7f108c142d992794fb2116e8581d",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-14504.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/13722-pin-dead-guard-scope"
+    },
+    {
+      "kind": "sha",
+      "value": "4f9e229b8b8fd611ff83fa7398337bff5c593e3b"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/fix-14504"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 28335,
+  "ended_at": 1795554670,
+  "exit_code": 0,
+  "heartbeat_at": 1795554670,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-14504-1795526335-p719766-8963ed2e",
+  "lease_until": 1795591270,
+  "pid": 719766,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795526335,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-14504",
+  "worktree": "/home/cmux/tortoise/.worktrees/fix-14504"
+}
