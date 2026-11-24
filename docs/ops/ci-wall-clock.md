@@ -879,10 +879,9 @@ on) needs the JOB-level `started_at` of one run's legs (`…/runs/<id>/jobs`), w
 
 If the pool grows, invariant 2 permits a larger cap — and that move is not free: re-read the pool,
 edit the §7 row to the fresh reading, and re-derive the caps together. There is no measured-pool
-literal in the suite to edit, because the arm READS this row: one edit here moves the bound. ⛔ What
-that edit does NOT do is update the suite's own COMMENTS beside the input, which quote the shipped
-figures (`12 / 12`, `sum <= 12 - 3 = 9`) — commentary, not inputs; on a re-tune they read stale and
-nothing reds, so correct them in the same change. If
+literal in the suite to edit, because the arm READS this row: one edit here moves the bound. ⛔ The
+suite's comments beside that input quote no figure on purpose, so they cannot go stale; if you ever
+add one, correct it in the same change — nothing reads a comment, so nothing would red. If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
 shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `4 × 10.5 m ≈ 42.0 m`
 (`ceil(11/3)` = 4 waves at `fast_shards: 11` — read it off the band pin below, not the 3-wave
