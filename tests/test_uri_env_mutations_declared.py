@@ -148,11 +148,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #       and `_run` exits on the gate before the app is imported — the
     #       deliberately-unreachable probe class, where the URI string IS the
     #       input under test.
-    #   (2) the five `run --mode …` arms force the DOCKER lane, because the subject
-    #       IS a live spool drain against a graph (`_live_spool`); embedded is the
-    #       lane they must not silently fall back to, which is exactly what this
-    #       guard protects. They run in the docker half and skip where nothing
-    #       serves 6379, so the declaration does not claim embedded coverage.
+    #   (2) the five `run --mode …` arms set a `docker://` URI as the LANE CONTROL
+    #       for the cost/provenance guards, but the module is documented HERMETIC
+    #       ("no FalkorDB, no docker, no server" — its own docstring) and every one
+    #       of these five runs under `_stub_one_mode`, which replaces the drain with
+    #       a recorder; `_live_spool` only writes three entries into a tmpdir. So
+    #       these sites reach NO graph and do NOT skip where nothing serves 6379:
+    #       the URI string is a test INPUT, never a live backend. Corrected on
+    #       measurement (`ast`: enclosing function of each of the 5 lines calls
+    #       `_stub_one_mode`) — the entry first said they were live drains.
+    # All seven sites use the `monkeypatch` fixture, so all seven auto-restore
+    # (the #2084 restoration arm needs no `mp.undo` here).
     "test_spool_drain_rehearsal.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"bolt://',
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://',
