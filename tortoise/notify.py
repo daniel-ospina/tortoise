@@ -187,14 +187,20 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #: episode (one per crossing for an alternating rule, which is the pre-fix rate),
 #: and that window is the ceiling only for a CONTINUOUSLY breaching subject — or
 #: for an episode end the engine cannot observe, where the armed window FOLDS the
-#: new episode (the residual below). On the STORE path nothing re-arms per
-#: crossing: the release is gated on the store's ``SKIPPED_WINDOW``, unsatisfied
-#: until ``DR_RECOVERY_STREAK`` consecutive clean observations, so an alternating
-#: rule stays inside the window there and the 24h bound holds (measured: 24
-#: alternating evaluations over 36h = 2 pushes store-side, 12 no-channel).
-#: ``abuse_suspended`` is in neither arm: ``_episode_delivery_kinds()`` excludes
-#: it by policy, so its window is NEVER re-armed early — a second operator
-#: suspension of the same subject inside 24h is not delivered at all.
+#: new episode (the residual below). On the STORE path the release is gated on the
+#: store's ``SKIPPED_WINDOW``, unsatisfied until ``DR_RECOVERY_STREAK`` consecutive
+#: clean observations — so WHERE THAT GATE APPLIES an alternating rule stays
+#: inside the window and the 24h bound holds (measured, default config: 24
+#: alternating evaluations over 36h = 2 pushes store-side, 12 no-channel). It is
+#: not a universal: a resolve leg that raises or answers ``CloseCooldown`` leaves
+#: ``skipped_window`` false and pops the ledger at every episode end (measured: 6
+#: crossings = 6 messages), and ``ALERT_RECOVERY_STREAK=1`` does the same.
+#: ``abuse_suspended`` is in neither arm: ``_episode_delivery_kinds()`` excludes it
+#: by policy, so NO EPISODE END re-arms its window. It is still re-armed by the
+#: kind-agnostic per-outcome releases (a LIFTED suppression, a deferred filing),
+#: so a second suspension of the same subject inside 24h is NORMALLY folded and
+#: is DELIVERED after one of those releases — measured: a suspension whose
+#: incident read raises, then a second in the same window, sent TWO messages.
 #:
 #: INCIDENT kinds: the normal path is the store's create-once lifecycle — the
 #: episode's first message is the store's own push, and this window is the
@@ -1142,8 +1148,8 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
     # one can never inherit it.
     re_arm = (
         ", RE-ARMED by a confirmed episode end ON THE NO-INCIDENT-CHANNEL PATH"
-        " (with a store, the release is gated on its `SKIPPED_WINDOW` until the"
-        " recovery window is satisfied, so the 24h limit holds there) — a rule"
+        " (with a store, the release is gated on its `SKIPPED_WINDOW` while that"
+        " gate applies, so the 24h limit holds there) — a rule"
         " that FLAPS therefore pages once per episode in that shape, one message"
         " per crossing, which is the pre-#14407 rate (this path's gain is"
         " attribution and the continuous-breach rate, not flapping volume),"

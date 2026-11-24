@@ -1474,11 +1474,13 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
 
     ``_deliver_unattributed`` is reached for EVERY member of
     :data:`ABUSE_INCIDENT_KINDS`, but only a kind in
-    :func:`_episode_delivery_kinds` can be re-armed at all: ``abuse_suspended`` is
-    deliberately EXCLUDED from :data:`_EPISODE_INCIDENT_KINDS` (it records an
-    operator decision, not a rule's flag window), which its own runbook row states
-    as policy (``docs/ops/registry-backup-dr.md``: *"its delivery window is never
-    re-armed early"*).
+    :func:`_episode_delivery_kinds` can be re-armed BY AN EPISODE END:
+    ``abuse_suspended`` is deliberately EXCLUDED from
+    :data:`_EPISODE_INCIDENT_KINDS` (it records an operator decision, not a rule's
+    flag window). ⛔ Its window is NOT therefore "never re-armed": the
+    kind-agnostic per-outcome releases (a lifted suppression, a deferred filing)
+    re-arm any kind, measured delivering a second message inside one window — so
+    what this test pins is the CLAUSE's scope, not an unbreakable limit.
 
     Pre-fix the same sentence claimed "RE-ARMED by a confirmed episode end … a rule
     that FLAPS pages once per episode" for all three kinds, so an operator
