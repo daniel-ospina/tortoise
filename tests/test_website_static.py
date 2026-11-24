@@ -12038,6 +12038,17 @@ class TestProductTeamsCopy:
             "the compute beat's title carries a `.beat-num`. The numbered beats "
             "are the three STEPS (01/02/03); this one is a claim, and a number "
             "on it would invent a fourth step")
+        # ⛔ POSITION, not just presence (#14406 review round 17). `re.search`
+        # above accepts the title ANYWHERE in the beat, so moving it BELOW the
+        # claim — the one placement that reinstates the defect item 2 exists to
+        # fix — left the whole website guard GREEN (measured: 209 passed). The
+        # docstring says it: "the beat opens on a TITLE, not on the claim".
+        claim = re.search(r"<p\b", compute)
+        assert claim and compute.index("<h2") < claim.start(), (
+            "#beat-compute's <h2> comes AFTER the claim. #13645 item 2 exists "
+            "because the claim read as a continuation of the intro above it; a "
+            "title below it leaves exactly that defect in place, with the copy "
+            "rows and the heading outline all still green")
 
     def test_the_outcomes_grid_carries_the_pdfs_six_labels_in_row_order(self):
         compute = _element_by_id(_product_teams_html(), "beat-compute")
@@ -12110,6 +12121,18 @@ class TestProductTeamsCopy:
         spelling that comes back.
         """
         served = _served(_product_teams_html())
+        # ⛔ AND THE RETITLE IS PINNED BY PRESENCE, not only by the `STEPS`
+        # comparison (#14406 review round 17). `STEPS` compares the page TO a
+        # constant on that class, so reverting the page's `· Reason & Learn` to
+        # the PDF's `· Reason` AND the constant together left every row green
+        # (measured: 763 passed) — the pair-revert this row exists to close, and
+        # the other two text edits already red on it. `_served` keeps the entity
+        # literal, so the pin is on the served bytes.
+        assert "Reason &amp; Learn" in served, (
+            "step 03's heading does not read '… · Reason & Learn'. The owner "
+            "retitled it on 2026-11-23 (#13645 item 4) — with no presence pin, "
+            "reverting the page AND `STEPS` together stays green, which is the "
+            "pair-revert these pins exist to close")
         # The compute beat is where the ruled typo pair still lives.
         for typo in ("make decision with superintelligence",):
             assert typo not in served, (
