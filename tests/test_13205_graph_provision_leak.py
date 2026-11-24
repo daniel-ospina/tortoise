@@ -1573,3 +1573,102 @@ class TestReaperExecute:
         assert [o["graph"] for o in doc["outcome"]] == ["org_o1"]
         assert deleted == ["org_o1"]
         assert rc == 0
+
+
+class TestMemoryDelta:
+    """#14559: `--execute` reports what the sweep RECLAIMED, measured by deleting.
+
+    The module docstring is explicit that the per-graph cost is only visible on
+    DELETE (1.46 MB measured; a create-probe's 346 KiB is a false negative), so
+    the only honest freed figure is the instance's `used_memory` before minus
+    after — an INSTANCE-WIDE delta, with concurrent tenant writes in it. These
+    tests pin the three properties that matter: it is read from the store, it is
+    reported, and an unreadable reading is `None` (never 0, which would be minted
+    downstream as "freed nothing").
+    """
+
+    @staticmethod
+    def _proj(used: list[int]):
+        class _Conn:
+            def info(self, section=None):
+                # A shape the client really returns: strings from redis.
+                return {"used_memory": str(used.pop(0)),
+                        "maxmemory": "0"}
+
+        class _DB:
+            connection = _Conn()
+
+        return type("P", (), {"db": _DB()})()
+
+    def test_used_memory_reads_the_instance_figure(self):
+        proj = self._proj([841_400_000])
+        assert reaper._used_memory(proj) == 841_400_000
+
+    def test_a_handle_with_no_readable_memory_answers_None_never_zero(self):
+        class _DB:
+            pass
+
+        proj = type("P", (), {"db": _DB()})()
+        assert reaper._used_memory(proj) is None
+
+    def test_a_failing_read_is_None(self):
+        class _Conn:
+            def info(self, section=None):
+                raise RuntimeError("NOPERM")
+
+        proj = type("P", (), {"db": type("D", (), {"connection": _Conn()})()})()
+        assert reaper._used_memory(proj) is None
+
+    def test_a_missing_field_is_None(self):
+        class _Conn:
+            def info(self, section=None):
+                return {"maxmemory": "0"}
+
+        proj = type("P", (), {"db": type("D", (), {"connection": _Conn()})()})()
+        assert reaper._used_memory(proj) is None
+
+    def test_execute_reports_the_before_minus_after_delta(self, monkeypatch, capsys):
+        import json as _json
+
+        deleted: list[str] = []
+
+        class _Graph:
+            def __init__(self, name):
+                self.name = name
+
+            def delete(self):
+                deleted.append(self.name)
+
+        proj = self._proj([841_400_000, 625_000_000])
+
+        class _Proj:
+            db = type("D", (), {"select_graph": lambda self, n: _Graph(n),
+                                "connection": proj.db.connection})()
+
+        monkeypatch.setattr(reaper, "build_report", lambda **kw: _real_report(
+            type("P", (), {"db": type("D", (), {
+                "list_graphs": lambda self: [
+                    "org_o1", "org_customer", "orphan"]})()})()))
+        monkeypatch.setattr(reaper, "_read_handle", lambda: _Proj())
+        rc = reaper.main(["--json", "--execute"])
+        doc = _json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert deleted == ["org_o1"]
+        assert doc["memory"] == {
+            "used_before": 841_400_000,
+            "used_after": 625_000_000,
+            "bytes_freed": 216_400_000,
+        }
+
+    def test_a_dry_run_reports_no_memory_block_at_all(self, monkeypatch, capsys):
+        """The dry run never builds a handle, so it has nothing to measure — and
+        inventing a 0 there would read as a measurement."""
+        import json as _json
+
+        monkeypatch.setattr(reaper, "build_report", lambda **kw: _real_report(
+            type("P", (), {"db": type("D", (), {
+                "list_graphs": lambda self: ["org_o1"]})()})()))
+        monkeypatch.setattr(reaper, "_read_handle", _boom)
+        assert reaper.main(["--json"]) == 0
+        doc = _json.loads(capsys.readouterr().out)
+        assert "memory" not in doc

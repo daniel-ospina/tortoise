@@ -52,29 +52,26 @@ version: 1
 # attributed to the wrong landing, so a figure here would be a carried number under an attribution
 # that does not hold. The figures live in the commits that measured them; what is kept is the
 # direction, which is what justifies the number: the 2026-11-16 sweep packed the eleven shards to
-# 23 m, #12926's own `10.0 s` row moved that to 24 m, a later landing moved it to 25 m, and the
+# 23 m, `#12926`'s own `10.0 s` row moved that to 24 m, a later landing moved it to 25 m, and the
 # 2026-11-23 sweep took it to the 28 m this block grades.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
-# `b665cbd61986` folded in over `#14472`'s merge base, after the `#14419` B7 cut took the
+# `10f0107689b9` folded in over `#14565`'s merge base, after the `#14419` B7 cut took the
 # durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool, plus
-# this PR's OWN rows in `fast_pool()` (`tests/test_14219_batch_ingest.py` and
-# `tests/test_14219_batches_api.py`, `core` + `api`, each at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) plus THIS fold's own row (`tests/test_14560_operator_vectors.py`, `core`,
-# at the same flat 2.0 s) — the verb packs all eleven shards at 825.6 s
-# (a, b, c, d, e, f, g, h, i, j, k), so `ceil(825.6/60 x 2)` = 28 m governs (a shard's job-level
-# wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
+# this PR's OWN row in `fast_pool()` (`tests/test_14560_operator_vectors.py`, `core`, at the flat
+# 2.0 s `DEFAULT_FAST_WEIGHT`) — the verb packs two shards at 825.7 s (c, d) and nine at 825.8 s
+# (a, b, e, f, g, h, i, j, k), so `ceil(825.8/60 x 2)` = 28 m governs (a shard's job-level wall
+# clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 28` with
 # `watchdog_headroom: 2.03`, so the two agree by construction rather than by a hand re-read.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE, and the move is THIS PR's: measured with the verb on
-# each tree's own map, `main` `b665cbd61986` alone packs six shards at 825.1 s and five at 825.0 s —
-# quoted WITHOUT name lists on purpose, because a name list would parse as a second clause and red
-# the guard — so no parent's figure may be carried here, and none is. The delta is measurable and
-# small: `fast_pool()` holds 1330 files at this head against 1329 on `main`, and the additions are
-# the two rows `#14219` landed (`tests/test_14219_batch_ingest.py` and
-# `tests/test_14219_batches_api.py`) plus THIS fold's `tests/test_14560_operator_vectors.py`, whose
-# 2.0 s row is what re-packs the two bins into one: at 1329 files the pool split b and g onto
-# 825.5 s against the other nine at 825.4 s, and +2.0 s of pool moves every shard onto the same
-# 825.6 s. Re-derived on THIS tree with
+# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: measured with the verb against `origin/main`
+# `10f0107689b9`'s own map, that tree alone packs eleven shards at 825.6 s — quoted WITHOUT a name
+# list on purpose, because a second clause would parse as a claim about THIS tree and red the
+# guard — so no parent's figure may be carried here, and none is. The delta is measurable and
+# small: `fast_pool()` holds 1331 files at this head against 1330 on `main`, and the ONE addition
+# is this PR's `tests/test_14560_operator_vectors.py`. ⛔ `#14415`'s two rows
+# (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`) and `#14559`'s
+# `tests/test_14559_reaper_schedule.py` are `main`'s at this head, NOT this PR's: each was that
+# PR's own addition and each landed before this fold. Re-derived on THIS tree with
 # `--emit-push-matrix`, never adjusted by arithmetic from either parent's reading.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
 # `tests/test_dod_5090_probe.py` from the `core` surface: that file is registered on `eval` as
@@ -1953,11 +1950,18 @@ surfaces:
   # #13205: the tenant-graph PROVISIONING class — the name composer's double
   # prefix (`team_team_…`), the hard-delete purge dropping only the org's
   # default graph while its custom `org_{id}_{gid}` graphs outlived the row, and
-  # `tools/reap_empty_test_graphs.py`'s refusals. Owned by `api` because every
-  # file it guards (`tortoise/sdk.py`'s `_derive_graph_name`,
-  # `tortoise/hosted_api.py`'s `_org_graph_names`/`_purge_deleted_orgs`) is an
-  # `api` SOURCE_PATTERN match — the same #2938 silent-drop reasoning as the
-  # `__main__.py` pair above.
+  # `tools/reap_empty_test_graphs.py`'s refusals. Registered on `api` for its ORIGINAL
+  # subjects — `tortoise/sdk.py`'s `_derive_graph_name` and
+  # `tortoise/hosted_api.py`'s `_org_graph_names`/`_purge_deleted_orgs`, both `api`
+  # SOURCE_PATTERN matches (the same #2938 silent-drop reasoning as the
+  # `__main__.py` pair above) — and ⛔ ALSO on `core` below, because this PR gave
+  # that file a FOURTH guarded subject, `tools/reap_empty_test_graphs.py`, which
+  # matches NO `SOURCE_PATTERNS` row: a `tools/` path is in `NON_PYTHON_PREFIXES`,
+  # so the `api` row alone left the reaper's own 91 tests (its four refusals and
+  # `TestMemoryDelta`; measured at this head with `--collect-only`, never carried)
+  # UNRUN on a reap-tool-only diff — the fail-open direction that file's own
+  # comment names. Dual registration is the #14407 precedent, and `fast_pool()`
+  # carries it once, so the graded partition is unmoved by the second row.
   - test_13205_graph_provision_leak.py
   # #13224: the create-path write bound (`encode_for_row`'s bounded wait for a COLD
   # embedder), measured from OUTSIDE the handler — `POST /v1/subjects` answers 200 and stays
@@ -8433,6 +8437,24 @@ surfaces:
   # without this line `test_integrity_covers_all_test_files` fails — every
   # tests/**/test_*.py must be classified (the scope-v5 drift trap).
   - test_install_reaper_schedule.py
+  # #14559: the SCHEDULE for `tools/reap_empty_test_graphs.py` — a job that
+  # DELETES graphs on the production instance. Registered `core` beside its
+  # scheduling sibling above, because the subjects it guards are
+  # `.github/workflows/test-graph-reaper.yml` (which matches no `SOURCE_PATTERNS`
+  # row) and `tools/reap_empty_test_graphs.py` (a `tools/` path, which
+  # `_keep_changed` DROPS — the #12363 silent-drop class). Without this row
+  # `--integrity` reds (`manifest drift: test_14559_reaper_schedule.py`, measured
+  # on PR #14565); without the `CORE_ALSO` row for the tool a tool-only diff
+  # selects NO surface and these pins never run. Hermetic: the workflow is parsed
+  # and its `run:` bodies are executed as shell against tmp dirs, no graph and no
+  # docker.
+  - test_14559_reaper_schedule.py
+  # ⛔ #13205's own suite, made selectable by the reap-tool entry above: it is
+  # the ONLY file that pins `tools/reap_empty_test_graphs.py` (the four refusals
+  # and this PR's `TestMemoryDelta`); `test_14559_reaper_schedule.py` never
+  # imports the tool, it parses the workflow. `fast_pool()` carries it once, so
+  # the graded partition is unmoved — measured with the row added.
+  - test_13205_graph_provision_leak.py
   - test_reaper.py
   - test_reaper_orphan.py
   # #3767: the reaper's ownership claim (name/containment is not ownership).
@@ -10135,6 +10157,27 @@ surfaces:
   # and a revert of `_result_id`/`compare()` would otherwise ship with CI green
   # (the false PASS the pin exists to remove).
   - test_14192_read_wave_tool.py
+  # #14560: the OPERATOR slice's population and denominator, MEASURED on a real graph —
+  # a pure `create_operator` carries no `embedding` in either store, a hybrid
+  # (`create_point(op_type=…)`) carries one in BOTH, and `_label_vector_count("operator")`
+  # reads the SLICE rather than the whole `:Point` label. ⛔ `core` IS THE LOAD-BEARING ROW and
+  # the `sdk` row further down is NOT a substitute for it: the file's subjects are
+  # `tortoise/record_vector.py` and `tortoise/projection/`, and NEITHER matches a
+  # `SOURCE_PATTERNS` entry — such a diff takes the `core` FALLBACK, so a registration on
+  # another surface leaves these pins asleep on the one change class that can break them.
+  # ⛔ THE FIRST CUT SHIPPED THE FILE IN NO SURFACE AT ALL: `--integrity` redded the required
+  # `manifest-integrity` leg with `['test_14560_operator_vectors.py']` — and the expensive half
+  # is that `select()` computes `test_files` FROM the surfaces, so the whole "measured on a real
+  # engine" evidence this change rests on ran in no CI leg (`MEMORY.md` `[ci-manifest]`).
+  # ⛔ AND TWO MERGE RESOLUTIONS SINCE LANDED THIS ROW ON `sdk` ALONE, which leaves
+  # `--integrity` GREEN (the file IS classified, just on a surface no `record_vector.py` diff
+  # selects) while the `core`-selected diffs stop running it — the same defect in its SILENT
+  # form. That is why this note names the SELECTION mechanism and not just the registration:
+  # `--integrity` is a classification check, and a mis-surface passes it.
+  # ⛔ NOT `uri_requiring`: the live-URI skip is inside the `sdk` FIXTURE
+  # (`_skip_unless_live_uri()`), so the module still COLLECTS on a URI-less leg —
+  # `uri_requiring` is for modules that skip at IMPORT.
+  - test_14560_operator_vectors.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
@@ -11436,9 +11479,15 @@ surfaces:
   # #14560: the OPERATOR slice's population and denominator, MEASURED on a real graph —
   # a pure `create_operator` carries no `embedding` in either store, a hybrid
   # (`create_point(op_type=…)`) carries one in BOTH, and `_label_vector_count("operator")`
-  # reads the SLICE rather than the whole `:Point` label. `core` because its subjects
-  # (`tortoise/record_vector.py`, `tortoise/projection/`) have no `SOURCE_PATTERNS`
-  # entry, so a diff to the seam collects nowhere else. ⛔ The first cut of this PR shipped
+  # reads the SLICE rather than the whole `:Point` label. DUAL-REGISTERED, and the SPLIT IS
+  # MEASURED rather than assumed, because the two rows are not equal evidence: a diff to the
+  # seam — `tortoise/record_vector.py` or `tortoise/projection/engine.py`, neither of which has
+  # a `SOURCE_PATTERNS` entry — selects surfaces `['core']` and DOES collect this file, and
+  # `core` is the only row that does that; a doors diff (`tortoise/sdk.py`) is a
+  # `SHARED_MODULES` entry and answers `test_files: ALL` whatever rows sit on `sdk`. So this
+  # `sdk` row is insurance and the `core` row above is the load-bearing one — the first cut of
+  # this PR shipped the file in NO surface at all, which is the defect `core` closes.
+  # ⛔ The first cut of this PR shipped
   # the file in NO surface at all: `--integrity` redded the required
   # `manifest-integrity` leg with `['test_14560_operator_vectors.py']`, and — the
   # expensive half — `select()` computes `test_files` FROM the surfaces, so the whole
@@ -15872,6 +15921,16 @@ durations:
   test_13084_ram_cap.py: 2.4
   test_13084_ram_window_census.py: 0.1
   test_13205_graph_provision_leak.py: 0.2
+  # #14559 (new file): a PR-added file takes the header's flat `DEFAULT_FAST_WEIGHT`,
+  # not a hand-picked reading. `--integrity` cannot see a missing row, so this line
+  # is what records the weight. What the weight covers, hermetically: the reaper
+  # schedule's trigger set / 15-minute cadence / scopes / band, the absence of every
+  # widener flag, and TWO of the workflow's `run:` bodies executed as `bash -c`
+  # against the tool's own JSON report shape — the credential guard (each secret
+  # missing in turn) and the verdict step (every arm that must fail, plus the
+  # rehearsal arms that must not). No docker, no DB, no graph, no model call.
+  # ⛔ The CASE COUNT is deliberately not quoted — `--integrity` is the authority.
+  test_14559_reaper_schedule.py: 2.0
   test_13220_record_label_embeddings.py: 1.8
   test_13224_cold_embedder_write_bound.py: 78.8
   test_13302_ended_read.py: 2.5

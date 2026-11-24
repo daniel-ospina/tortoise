@@ -113,13 +113,21 @@ class _Journal:
 
 
 def _graph_vector_counts(sdk) -> tuple[int, int]:
-    """``(whole :Point label, operator-kind subset)``, both vector-bearing."""
-    g = sdk._get_proj().g
-    whole = g.query("MATCH (n:Point) WHERE n.embedding IS NOT NULL "
-                    "RETURN count(n)").result_set[0][0]
-    kinded = g.query(f"MATCH (n:Point) WHERE n.embedding IS NOT NULL "
-                     f"AND {_OPERATOR_KIND} RETURN count(n)").result_set[0][0]
-    return int(whole), int(kinded)
+    """``(whole :Point label, operator-kind subset)``, both vector-bearing.
+
+    ⛔ READ THROUGH THE PROJECTION'S OWN DENOMINATOR, not a raw ``.g.query`` (the `#14560`
+    review's F2 residue): `tools/sdk_privatise.py`'s sweep charges every untyped ``x.query``
+    receiver, and it is a RATCHET — a new one reds the required `surface-guard` leg and the
+    sanctioned repair is "type the receiver, or convert the call", NOT a re-pin. Naming the
+    handle `sdk_g` would satisfy that sweep's spelling heuristic and then REWRITE
+    `sdk_g.query(` into the SDK's private name, which is wrong here: `g` is a FalkorDB graph
+    handle, not the SDK. So this census goes through `_label_vector_count` — the production
+    door these very tests grade — and the POPULATION claim rests where it belongs, on the
+    per-node read-back and the journal snapshot / INSERT column list below, which observe the
+    graph and the fold directly rather than re-counting them.
+    """
+    proj = sdk._get_proj()
+    return proj._label_vector_count("point"), proj._label_vector_count("operator")
 
 
 def _point_insert_columns(record: dict) -> str:

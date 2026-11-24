@@ -992,15 +992,29 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
     assert result["retired_vectors"] == 1, result
     assert result["retired_vector_labels"] == ["Object", "Point"], result
 
-    # ⛔ AND THE HOLD, ON THE REAL SET (`#14560` review F5): the SAME dump and the SAME
-    # both-stop answer, with `_RESTORE_DROP_HELD` as it ships, must KEEP the vector. This is
-    # the arm that reds if the hold is lifted without `#13971`'s per-ID ask — and it is the
-    # direction `#5004` (a dropped restored vector cannot be re-encoded) makes mandatory.
-    monkeypatch.undo()
+    # ⛔ THE HOLD ON THE REAL SET is its OWN test (`test_the_Point_restore_drop_is_HELD`):
+    # grading it here needs `monkeypatch.undo()` and a fourth graph wipe, and a test that
+    # reaches for a raw `proj.g.query` to set up its state is an untyped receiver the
+    # `sdk_privatise` RATCHET charges — a required leg (`surface-guard`) reds and there is
+    # no pin to re-cut. A fresh graph per test is the cheaper setup AND the cleaner arm.
+
+
+def test_the_Point_restore_drop_is_HELD(proj, monkeypatch):
+    """`:Point`'s restored vector is KEPT even when BOTH counters answer stop (`#14560` F5).
+
+    `#13971`'s per-ID ask is outstanding, so `_RESTORE_DROP_HELD` holds this label: an
+    aggregate `record_vectors >= graph_vectors` is not evidence about the individual row a
+    restore would delete, and `#5004` (a dropped restored vector cannot be re-encoded) makes
+    a wrong drop unrecoverable. This arm REDS the moment the hold is lifted — it is the
+    counterweight to the conjunction arms above, which lift the hold only to grade
+    themselves, and it runs on the REAL set with nothing lifted.
+    """
+    dump = _dump({"dump_id": 1, "labels": ["Object", "Point"],
+                  "props": {"id": "pt-13826-held", "content": "x",
+                            "embedding": list(VEC)}})
     _gate_map(monkeypatch, keep={""})
-    proj.g.query("MATCH (n) DETACH DELETE n")
-    result = restore_graph(proj.g, both)
-    assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is not None, (
+    result = restore_graph(proj.g, dump)
+    assert _prop(proj.g, "(n:Point {id:'pt-13826-held'})", "embedding") is not None, (
         "the `:Point` restore drop is HELD until `#13971`'s per-ID ask lands — an aggregate "
         "`record_vectors >= graph_vectors` is not evidence about the row being deleted, and "
         "`#5004` forbids re-encoding what is dropped")

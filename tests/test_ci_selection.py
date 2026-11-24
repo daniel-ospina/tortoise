@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import itertools
 import json
 import os
 import re
@@ -9203,6 +9204,202 @@ def _emission_block_header(manifest_text: str) -> str:
     return re.sub(r"\n\s*#\s?", " ", header)
 
 
+#: `merge=union` (#5373) applies BOTH parents' hunks with NO conflict marker, so a fold of two
+#: re-derivations splices this block into a second copy of itself and every gate stays green —
+#: nothing grades this block's prose. Measured 2026-11-24 on the `45dd35ba9a` fold: THREE passages
+#: arrived twice (the `8c373f59a1` provenance paragraph, the "stated at the sha" sentence, and the
+#: ratio line — the last carrying TWO figures, `2.0361` beside `2.0362`, which is the tell). The
+#: fold's block states `_emission_block_header` length 19,059 chars and **10 repeated spans** — the
+#: 5 maximal fragments each copy splits into, x 2 copies, from 3 passages (two of them diverge
+#: inside the repeated region, so each copy splits there) — against **0 duplicate non-trivial
+#: lines**, which is why a line-level recipe saw nothing and every existing arm stayed green: none
+#: of the three is a shard-figure sentence.
+#:
+#: A splice is a REPEATED LONG SPAN, so the detector is one: a `_SPLICE_SHINGLE_WORDS`-word window
+#: that occurs twice in the block. LINE matching cannot see it — the two copies re-wrap, which is why
+#: five earlier de-splices were found by reviewers reading the block rather than by a check. SENTENCE
+#: matching cannot either — the splice lands mid-sentence, which is what leaves a severed fragment
+#: like "…flat 2.0 s at 28 m." behind. A DOUBLE-QUOTED span is masked first, because this block
+#: legitimately quotes clauses (the record of a dead claim is not a live second claim).
+#: ⛔ The masking is therefore DELIBERATE and its cost is named: a duplicate INSIDE a double-quoted
+#: span is ungraded by this arm (measured on the block at THIS head: its longest quoted span is 14
+#: words, and repeating it returns `0` spans). That is accepted — a quotation recorded twice claims
+#: nothing new, so it can red no figure — and it is stated rather than left as a hole, because the
+#: case it excludes is the one this block deliberately quotes. ⛔ At this head the mask is not
+#: load-bearing either way: UNMASKED the block states 0 repeats too (measured), because `main`'s
+#: #14415 cut the 2 × 13-word quoted pair that once made it bite. It is kept because that pair is a
+#: shape a future fold can re-introduce, and the `quoted` fixture below grades the rule directly.
+#:
+#: ⛔ 10 IS MEASURED, NOT CHOSEN — and the measurement is the guard's own false negative, taken on
+#: the block that the spliced fold carried: it stated ONE instruction verbatim twice ("never carry
+#: the last revision's minute, seconds, or split." — `grep -c` on that block returned exactly 2, in
+#: the per-registration and the `--emit-push-matrix` paragraphs), so a 9-word window red on CLEAN
+#: prose — **2 spans, one per copy** — and 10 was the smallest window on which the guard was quiet
+#: over that tree (**0**, and 0 again at 11). A span is counted PER COPY, so the 2 at window 9 were
+#: one instruction seen twice, not two defects. ⛔ THAT INSTRUCTION IS NOT IN THE BLOCK AT THIS HEAD:
+#: `main`'s #14415 cut took it out (`grep -c` on `config/ci-surfaces.yml` returns 0), so the sweep on
+#: this head is **0 at every window from 8 to 12** (measured), not 0-because-10. The threshold stays
+#: 10 because that is the calibrated value for the shape that produced the false positive — and the
+#: false-positive edge is still measurably below it AT THIS HEAD: at window 7 this block reds on **2
+#: legitimate spans of 7 words** (measured), so lowering the bound to "catch more" is a measured
+#: false positive on clean prose, not a hypothetical one. The cost is that a repeated span SHORTER than the
+#: window — and a header with fewer than this many words at all — is silently ungraded here, which
+#: is why the arm below asserts the real block is long enough to be gradable rather than trusting
+#: this bound. A DIVERGENT pair is a DIFFERENT residual, not a shorter one: the repeats stop at the
+#: token the copies disagree on, so the span covers their COMMON PREFIX only (measured on the
+#: spliced fold `14b8322eb2`: an 11-word span against ~30-word copies) and is exact only while the
+#: copies AGREE. That span locates the seam but is NOT a deletion unit there — deleting it severs
+#: both copies and leaves the block holding an unreadable `2.0361).` fragment beside the duplicated
+#: tail, with this guard GREEN over it (measured). `_splice_divergences` names the differing token
+#: so the repair is a reconciliation rather than a deletion. Recorded so the next reader does not
+#: lower it to "catch more" and conclude the guard is broken on a clean block.
+_SPLICE_SHINGLE_WORDS = 10
+#: The gap a DIVERGENT pair is read across. `merge=union` keeps both sides of one edited LINE, so the
+#: canonical artefact is one sentence stated twice with a single token differing (`1680 / 825.1 =
+#: 2.0361` beside `… = 2.0362` — measured on the spliced fold, where the second digit is the wrong
+#: one). `_splice_divergences` reports the two tokens that disagree when the copies are otherwise the
+#: same claim, and its three bounds all answer ONE question — "is this the same sentence twice, or
+#: two different sentences that happen to start alike?": `_SPLICE_DIVERGENCE_MAX_GAP_WORDS` is how
+#: much may differ (a figure, a shard letter, a count), `_SPLICE_DIVERGENCE_RESYNC_WORDS` is how much
+#: must AGREE again afterwards (the discriminator — two IDENTICAL copies placed side by side also
+#: diverge once the first copy ends, but do not re-agree), and `_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS`
+#: bounds the read on the ~1,950-word block this head carries (measured: 1,948 words; the spliced
+#: fold's block was ~2,950). jscpd's clone taxonomy draws the same line: divergent
+#: copies are reported as separate EXACT clones, and merging across a gap is opt-in there
+#: (`--max-gap-lines`), reported as a `similar` clone WITH its similarity score.
+#:
+#: ⛔ IT NAMES NO TOKEN OUTSIDE A BAND, and the band is a NAMED residual rather than a surprise: the
+#: reporter reads only the words AFTER a repeated shingle, and it demands `RESYNC` agreeing words
+#: after the difference. So a divergence inside a copy's first `_SPLICE_SHINGLE_WORDS` (10) words, or
+#: within `RESYNC` (6) words of its end, is never named — and a copy of 16 words or fewer can never
+#: be named at all (band ≈ word index `[10, len-7)`). Measured on 17-word copies with one figure
+#: changed: index 1 -> `[]`, index 5 -> `[]`, index 10 -> `('2.0361', '2.0362')`, index 12 -> `[]`.
+#: A difference of WIDTH (an insertion or a deletion) is likewise never named, because both tails are
+#: indexed with the same gap. This field is DIAGNOSTIC ONLY — the arm reds and reports the spans
+#: either way — so the board is stated instead of being closed by widening the bounds, which would
+#: start naming two different sentences that merely begin alike. The real spliced tree (34-word
+#: copies, difference at word 12) sits inside the band, which is why every fixture and the recorded
+#: `14b8322eb2` measurement name their token.
+_SPLICE_DIVERGENCE_MAX_GAP_WORDS = 3
+_SPLICE_DIVERGENCE_RESYNC_WORDS = 6
+_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS = 80
+_QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
+
+
+def _splice_shingle_positions(header: str) -> tuple[str, dict[str, list[int]]]:
+    """The block as one flat string, plus the WORD positions of every window stated twice.
+
+    Both readers below need the same subject — double-quoted spans masked (the block legitimately
+    quotes clauses; its honesty is a quotation), comment line breaks joined (a splice re-wraps, so a
+    break is presentation), whitespace collapsed — and the same window, so one enumeration keeps
+    their notions of "repeat" from drifting apart.
+
+    ⛔ QUOTE PARITY IS A FAIL-CLOSED PRECONDITION, not a convenience. `"[^\"]*"` pairs quotes ACROSS
+    the whole block, so ONE duplicated line carrying an odd number of `"` flips the parity for
+    every quote after it: previously-masked quoted prose becomes LIVE and most live prose becomes
+    MASKED. Measured at `d8fd31c268c5a` — where 10 of the block's lines carried an odd quote count;
+    **4 of the 161 lines do at this head** (12 quotes, even) — with a fold that duplicates one such
+    line and the ratio line:
+
+        parity even -> the duplicated ratio line is reported (2 spans of 25 words)
+        parity ODD  -> the ratio line is NOT reported; the 2 reported spans are the block's own
+                       legitimate quoted RETRACTION; 1,775 of 2,992 words end up masked
+        ...and after the message's own "delete the reported span" is obeyed -> `[]`, with the
+        ratio line STILL stated twice and severed: a false PASS over a live splice, reached by
+        following this arm's remediation.
+
+    So an odd count RAISES rather than de-splicing around the mis-pairing — the parity is itself the
+    splice tell, and a guard that answers "no splice" on a spliced tree is worse than no guard.
+    """
+    quotes = header.count('"')
+    if quotes % 2:
+        raise AssertionError(
+            f"the `fast_shards` header block carries an ODD number of double quotes ({quotes}) — a "
+            "`merge=union` fold duplicated a line that OPENS a quoted clause, which re-pairs every "
+            "quote after it and makes the masked spans meaningless. Re-derive the block with "
+            "`--emit-push-matrix`; do not de-splice around it.")
+    masked = _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
+    flat = re.sub(r"\s+", " ", masked).strip()
+    words = flat.split()
+    window = _SPLICE_SHINGLE_WORDS
+    positions: dict[str, list[int]] = {}
+    for i in range(len(words) - window + 1):
+        positions.setdefault(" ".join(words[i:i + window]), []).append(i)
+    return flat, {s: p for s, p in positions.items() if len(p) > 1}
+
+
+def _repeated_header_spans(header: str) -> list[str]:
+    """Long spans this block states twice — a `merge=union` splice, or a claim stated twice."""
+    flat, repeated = _splice_shingle_positions(header)
+    # ⛔ EVERY occurrence, not just the first — `flat.find` reports one position per repeated
+    # shingle, so a passage stated THREE times reported copy 1 whole and copy 2's first
+    # `window - 1` words, stopping short of its end. Detection was still correct, but the span this
+    # returns is the unit the failure message tells a maintainer to keep ONE of, and deleting a
+    # truncated span leaves a severed fragment behind — the artefact this arm exists to catch.
+    # Overlapping shingles within one copy merge into that copy's extent below: EXACT while the
+    # copies agree, and stopping at the differing token when they DIVERGE (`_splice_divergences`
+    # names that token, because there the span locates the seam but is not a deletion unit).
+    spans: list[tuple[int, int]] = [
+        (m.start(), m.start() + len(s))
+        for s in repeated
+        for m in re.finditer(re.escape(s), flat)]
+    if not spans:
+        return []
+    spans.sort()
+    merged: list[list[int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [flat[s:e] for s, e in merged]
+
+
+def _splice_divergences(header: str) -> list[tuple[str, str]]:
+    """The tokens two copies of one claim DISAGREE on — the figure a divergent splice hides.
+
+    `merge=union` keeps both sides' lines, so when two re-derivations edited the same VALUE the
+    block ends up stating the sentence twice with one token differing (`2.0361` beside `2.0362`,
+    measured on the spliced fold `14b8322eb2`, where the second digit is the wrong one).
+    `_repeated_header_spans` reports such a pair as their COMMON PREFIX — 11 words against ~30-word
+    copies — because the repeats stop at the differing token, so that span LOCATES the seam and is
+    not a deletion unit: deleting it severs both copies. This names the divergence instead, which is
+    the tell the arm's message already asks a maintainer to look for.
+
+    The discriminator is RE-AGREEMENT: the tails agree up to a gap of at most
+    `_SPLICE_DIVERGENCE_MAX_GAP_WORDS`, then agree again for `_SPLICE_DIVERGENCE_RESYNC_WORDS`. Two
+    identical copies placed side by side also diverge once the first copy ends (one tail continues
+    into the second copy, the other into the text after it) and do NOT re-agree, which is what keeps
+    an exact duplicate from being reported as a figure to reconcile.
+    """
+    flat, repeated = _splice_shingle_positions(header)
+    words = flat.split()
+    window = _SPLICE_SHINGLE_WORDS
+    found: list[tuple[str, str]] = []
+    for positions in repeated.values():
+        for first, second in itertools.pairwise(positions):
+            left = words[first + window:first + window + _SPLICE_DIVERGENCE_LOOKAHEAD_WORDS]
+            right = words[second + window:second + window + _SPLICE_DIVERGENCE_LOOKAHEAD_WORDS]
+            agreed = 0
+            while agreed < min(len(left), len(right)) and left[agreed] == right[agreed]:
+                agreed += 1
+            if agreed >= min(len(left), len(right)):
+                # The tails agree over the whole read — identical copies, or a divergence further
+                # out than the lookahead. Either way this window names no differing token.
+                continue
+            for gap in range(1, _SPLICE_DIVERGENCE_MAX_GAP_WORDS + 1):
+                tail_left, tail_right = left[agreed + gap:], right[agreed + gap:]
+                resync = min(len(tail_left), len(tail_right), _SPLICE_DIVERGENCE_RESYNC_WORDS)
+                if resync < _SPLICE_DIVERGENCE_RESYNC_WORDS:
+                    break
+                if tail_left[:resync] == tail_right[:resync]:
+                    pair = (left[agreed], right[agreed])
+                    if pair not in found:
+                        found.append(pair)
+                    break
+    return sorted(found)
+
+
 def _emission_block_claims(
         manifest_text: str) -> tuple[dict[float, set[str]], float, int] | None:
     """Read the `fast_shards` header block's stated emission.
@@ -9370,6 +9567,180 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         "neighbours are graded by this test — re-spell it as `N shards at S.S s "
         "(names)`, or delete it. A rebase that splices two re-derivations is how it "
         "gets there.")
+
+
+def test_the_fast_shards_header_block_states_no_span_twice():
+    """#14481: a fold must not splice this block into a second copy of itself.
+
+    The block names the mechanism in its own words — "a claim that must be re-derived on every fold
+    and is graded by nothing is a claim that rots, so what survives is the RULE rather than the
+    values" (the per-file shard letter, `config/ci-surfaces.yml` §"NO PER-FILE SHARD LETTER") — and
+    a `merge=union` fold is exactly a claim arriving twice. ⛔ That quotation is read off the JOINED
+    block (`_emission_block_header`), which is the subject this arm grades: the sentence wraps across
+    two comment lines in the file, so a line-based `grep` finds its halves and neither the whole.
+    Measured: THREE passages arrived twice on the `45dd35ba9a` fold while every arm stayed GREEN: the
+    fold applies both parents' hunks, raises no conflict marker, and the duplicated span is prose
+    rather than a shard figure, so `test_the_fast_shards_header_block_states_the_measured_emission`
+    reads the one graded clause and passes. The de-splice rounds used a rule of their own — "no
+    duplicated non-trivial LINE in the header block" — and it MISSED ALL THREE (measured at that
+    fold: 0 duplicate non-trivial lines against 10 repeated spans), because both copies re-wrap onto
+    different lines; that rule is graded below instead of remembered.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    # ⛔ NON-VACUITY ON THE REAL BLOCK, not only on the fixtures: a header with fewer words than the
+    # repeated-span window makes `_repeated_header_spans` return `[]` for ANY content, so the guard
+    # below would be decoration on the one file it exists to grade. This block is ~1,950 words at
+    # this head (measured: 1,948; the spliced fold's was ~2,950), so the floor is roughly 19x below
+    # it — not a tuned value.
+    assert len(header.split()) > _SPLICE_SHINGLE_WORDS * 10, (
+        f"the `fast_shards` header block is {len(header.split())} words — too short for a "
+        f"{_SPLICE_SHINGLE_WORDS}-word repeated-span window to grade anything, so the arm below "
+        "would pass on any content")
+    repeated = _repeated_header_spans(header)
+    assert not repeated, (
+        "the `fast_shards` header states the same span twice, which is what a `merge=union` "
+        f"fold (#5373) leaves behind when both parents rewrote it: {repeated!r}. Keep ONE copy — "
+        "the newer spelling usually wins — and where the copies DISAGREE on a FIGURE the figure "
+        "is the tell. ⛔ A reported span is a copy's full extent while the copies AGREE; a "
+        "DIVERGENT pair stops at the differing token, so there it LOCATES the seam and is not a "
+        "deletion unit (deleting it severs both copies and would leave this guard green over the "
+        f"fragments). This block's differing token(s): {_splice_divergences(header)!r} — "
+        "reconcile those, then re-derive the emission with the verb rather than around the splice.")
+    # NON-VACUITY: the shape measured on `45dd35ba9a`, RE-WRAPPED — so a line-level check calls
+    # this clean and the guard above would be decoration. Both copies are the same claim; only the
+    # FIRST copy's line breaks differ, which is exactly how the real splice hid.
+    # ⛔ The re-wrap is GRADED below, never asserted in this comment. Measured on this arm's own
+    # pre-fix fixture: both copies were line-for-line IDENTICAL (three duplicate `#` lines), so the
+    # very check the comment claimed to defeat caught it — while the real spliced base `14b8322eb2`
+    # carries ZERO duplicate lines and ten repeated spans (five maximal fragments per copy). The
+    # fixture proved the opposite of its own comment, in a PR whose thesis is that a claim graded by
+    # nothing rots.
+    spliced_raw = (
+        "# the verb packs six shards at 825.1 s (a, b, g, i, j, k) and\n"
+        "# five at 825.0 s (c, d, e, f, h), so `ceil(825.1/60 x 2)` = 28 m\n"
+        "# governs (a shard's job-level wall clock is the SLOWEST\n"
+        "# the verb packs six shards at 825.1 s\n"
+        "# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so\n"
+        "# `ceil(825.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST\n"
+        "\nfast_shards: 11\n")
+    spliced = _emission_block_header(spliced_raw)
+    assert _repeated_header_spans(spliced), (
+        "a re-wrapped duplicate of the same sentence was not read — the pattern has been "
+        "narrowed into silence, so the sibling arm is decoration")
+    fixture_lines = [ln.lstrip("# ").strip() for ln in spliced_raw.splitlines()
+                     if ln.strip().startswith("#")]
+    duplicate_lines = {ln for ln in fixture_lines
+                       if len(ln.split()) > 3 and fixture_lines.count(ln) > 1}
+    assert not duplicate_lines, (
+        "the non-vacuity fixture's two copies share a line VERBATIM, so a line-level check would "
+        f"catch this shape and the arm proves nothing about the re-wrapped one: {duplicate_lines!r}. "
+        "Re-wrap one copy — the real splice's copies differ line for line (measured at the spliced "
+        "base `14b8322eb2`: 0 duplicate lines, 10 repeated spans).")
+    # ⛔ EVERY copy is reported, not only the first — the property the failure message's instruction
+    # ("keep ONE copy" … "delete the reported span") actually depends on, and the one `finditer`
+    # introduced. Two copies of a 12-word passage re-wrapped onto different lines must come back as
+    # TWO spans of 12 words each; a first-occurrence-only reader (the pre-`finditer` `flat.find`)
+    # returns ONE, and the message would then tell a maintainer to delete a span that stops short of
+    # its own end. Contiguously, three copies merge into ONE 36-word span, where first-occurrence-only
+    # yields a severed 21-word fragment (copy 1 whole, then `window - 1` = 9 words of copy 2) — the
+    # exact artefact this arm exists to catch. Padding tokens are UNIQUE so the pad cannot manufacture
+    # a repeat of its own.
+    _copy12 = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+    _pad_a = " ".join(f"pa{i}" for i in range(40))
+    _pad_b = " ".join(f"pb{i}" for i in range(40))
+
+    def _spans_for(body: str) -> list[str]:
+        return _repeated_header_spans(_emission_block_header(f"# {body}\n\nfast_shards: 11\n"))
+
+    two_copies = _spans_for(f"{_pad_a} {_copy12}\n# s1 s2 s3\n# {_copy12} {_pad_b}")
+    assert [len(s.split()) for s in two_copies] == [12, 12], (
+        "a passage stated twice must be reported TWICE, one span per copy, each its full 12 words — "
+        f"got {[len(s.split()) for s in two_copies]} word(s) per span: {two_copies!r}. Reporting "
+        "only the first occurrence makes the arm's own 'delete the reported span' instruction "
+        "truncate the survivor")
+    three_copies = _spans_for(f"{_pad_a} {_copy12} {_copy12} {_copy12} {_pad_b}")
+    assert [len(s.split()) for s in three_copies] == [36], (
+        "three CONTIGUOUS copies must merge into ONE 36-word span — a first-occurrence-only reader "
+        f"returns a severed fragment instead: {[len(s.split()) for s in three_copies]} word(s) "
+        f"across {len(three_copies)} span(s)")
+    # ⛔ …and that extent is exact only while the copies AGREE. A DIVERGENT pair — the canonical
+    # `merge:union` artefact when both sides edited one LINE — stops at the differing token, so its
+    # span LOCATES the seam and is not a deletion unit: measured on the spliced fold `14b8322eb2`,
+    # the ratio line reads as 11-word spans against ~30-word copies, and running the message's own
+    # advice there leaves an unreadable `2.0361).` fragment beside the duplicated tail with this
+    # guard GREEN. `_splice_divergences` names the tokens the repair must reconcile.
+    divergent = _emission_block_header(
+        "# at 28 m the ratio is `2.04` (1680 / 825.1 = 2.0361). A carried ratio in a graded\n"
+        "# sentence is exactly the defect this block exists to prevent, one level below.\n"
+        "# at 28 m the ratio is `2.04` (1680 / 825.1 = 2.0362). A carried ratio in a graded\n"
+        "# sentence is exactly the defect this block exists to prevent, one level below.\n"
+        "\nfast_shards: 11\n")
+    assert len(_repeated_header_spans(divergent)) == 4, (
+        "the divergent fixture no longer states the ratio sentence twice in two fragments — the "
+        f"divergence read below is not exercising that shape: "
+        f"{[len(s.split()) for s in _repeated_header_spans(divergent)]!r} words per span")
+    assert _splice_divergences(divergent) == [("2.0361).", "2.0362).")], (
+        "a divergent pair's differing tokens were not reported, so the failure message cannot name "
+        f"the figure to reconcile: {_splice_divergences(divergent)!r}")
+    # …and two copies that merely END differently are NOT a divergence: this block legitimately
+    # states one sentence twice, so a read that reported every first difference would send a
+    # maintainer to reconcile nothing. Measured: these copies diverge at `the` / `while` and never
+    # re-agree, so a naive first-difference read reports `('the', 'while')` and this one reports
+    # none — re-agreement is what separates a carried FIGURE from a repeated claim.
+    ends_differently = _emission_block_header(
+        "# twelve words stated twice make one splice seam and no more here\n"
+        "# the prose after the FIRST copy appears exactly once in this block, and\n"
+        "# twelve words stated twice make one splice seam and no more here\n"
+        "# while the prose after the SECOND copy is a different sentence entirely.\n"
+        "\nfast_shards: 11\n")
+    assert [len(s.split()) for s in _repeated_header_spans(ends_differently)] == [12, 12], (
+        "the fixture below is not the shape it must be — it has to state the passage exactly twice")
+    assert not _splice_divergences(ends_differently), (
+        "two copies that differ only in what FOLLOWS them were reported as a DIVERGENT pair — the "
+        "re-agreement requirement is what tells a carried figure from a repeated claim, and "
+        f"without it every duplicate reads as one: {_splice_divergences(ends_differently)!r}")
+    # …and a DOUBLE-QUOTED retraction is NOT a second claim. The block at `d8fd31c268c5a` quoted
+    # the clause it retracted, twice, and that quotation is how the retraction stays checkable;
+    # masking quotes is what keeps the guard from redding on a block's own honesty. ⛔ That retraction
+    # is NOT in the block `main` now carries (`main`'s #14415 cut it: `retract` appears 0 times in the
+    # header, measured at this head) — so this fixture is where the rule is graded, and it must stay
+    # graded here rather than being read off the live block.
+    quoted = _emission_block_header(
+        """# ⛔ The live clause that stood here — "because THIS PR re-cuts that file pin, its fold
+# KEEPS the branch copy of it" — was re-spliced back, and the paragraph below records it
+# as retracted: the fix deleted the figures while leaving "because THIS PR re-cuts that
+# file pin, its fold KEEPS the branch copy of it" standing.
+
+fast_shards: 11
+""")
+    assert not _repeated_header_spans(quoted), (
+        "a quoted retraction was read as a live second claim — a block records what it deleted "
+        "by quoting it, so masking the quoted span is required for this guard not to red on the "
+        "block's own provenance")
+    # ⛔ AN ODD QUOTE COUNT RAISES, and that is the arm's most important fail-closed path: the mask
+    # pairs quotes ACROSS the block, so one duplicated line that OPENS a quoted clause re-pairs every
+    # quote after it and INVERTS the mask — live prose masked, the block's own quoted retraction
+    # exposed. Measured at `d8fd31c268c5a` (the head whose quoted retraction this is): with parity
+    # intact a duplicated ratio line is reported; with parity ODD the ratio line is NOT reported,
+    # the block's retraction is, and following the
+    # message's "delete the reported span" leaves the arm GREEN over a ratio line stated twice and
+    # severed. This fixture is the shape of that fold — a quote opened and never closed.
+    odd_parity = _emission_block_header(
+        "# ⛔ The live clause that stood here — \"because THIS PR re-cuts that file pin\n"
+        "# and a duplicated ratio line at 825.1 s and `2.04` at 825.1 s (1680 / 825.1 = 2.0361)\n"
+        "# and `2.04` at 825.1 s (1680 / 825.1 = 2.0361)\n"
+        "\nfast_shards: 11\n")
+    assert odd_parity.count('"') % 2, "the fixture is meant to carry an ODD quote count"
+    with pytest.raises(AssertionError, match="ODD number of double quotes"):
+        _repeated_header_spans(odd_parity)
+    # …and the SAME body with the quote balanced is reported as a splice, so the raise above is not
+    # a vacuous branch that swallows every header carrying a quote.
+    balanced = odd_parity.replace('\"because THIS PR re-cuts that file pin',
+                                  '\"because THIS PR re-cuts that file pin\"')
+    assert balanced.count('"') % 2 == 0
+    assert _repeated_header_spans(balanced), (
+        "a spliced block whose quotes are BALANCED must still be reported — otherwise the parity "
+        "check has become a way for a spliced header to pass")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
