@@ -1661,9 +1661,11 @@ def test_the_runbook_calls_a_failed_close_the_episode_end_release_it_is():
     """Two surfaces described ONE event two ways, and this PR rewrote both.
 
     ``release_abuse_delivery``'s docstring says a close that RAISES or is backing
-    off is part of the EPISODE-END release (it leaves ``skipped_window`` false,
-    so the ``if not skipped_window:`` gate inside ``resolve_abuse_episode`` does
-    not hold) and states explicitly that it is NOT in the kind-agnostic
+    off is part of the EPISODE-END release (it leaves ``skipped_window`` false —
+    UNLESS another episode kind answers ``SKIPPED_WINDOW`` in the same call, the
+    flag being per CALL and not per kind — so the ``if not skipped_window:`` gate
+    inside ``resolve_abuse_episode`` normally does not hold) and states explicitly
+    that it is NOT in the kind-agnostic
     per-outcome set. The runbook's ``ABUSE_FLAG_RAISED`` row classified the same
     event the other way — *"a release that is not an episode end (a failed
     close, ...)"* — so an operator got two answers for one event.
@@ -1678,6 +1680,16 @@ def test_the_runbook_calls_a_failed_close_the_episode_end_release_it_is():
         f"episode-end release the code performs: {row!r}")
     assert "EPISODE-END release" in row, (
         f"the row must name the release that actually re-arms the window: {row!r}")
+    # Round 14 (P2): the clause described the per-CALL `skipped_window` flag as a
+    # per-kind fact. A close that FAILS for ONE episode kind does not release the
+    # ledger when the SIBLING kind answers `SKIPPED_WINDOW` in the same call
+    # (`notify.py` `skipped_window` is one flag for the whole loop), so the row
+    # must carry the caveat every code site carries. Deleting it reddens — this
+    # caveat has now had to be added to four separate surfaces, which is why it is
+    # pinned here rather than trusted to prose discipline.
+    assert "per CALL, not per kind" in row, (
+        "the row states the release gate flat, but `skipped_window` is ONE flag "
+        f"for the whole call: {row!r}")
     # BOTH polarities: a fix that deleted the clause would under-report the
     # genuinely kind-agnostic releases this row exists to name.
     assert "FAILED SEND" in row, row
