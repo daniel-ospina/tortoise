@@ -24,15 +24,14 @@ only safe if it costs no precision:
   `list what we retired` — each through a NAMED shape, so the row says which
   words selected the population;
 * **`what has ended recently` deliberately still does NOT route**, and this file
-  pins that too: the `tortoise_search` HANDLER DOCSTRING
-  (`tortoise/mcp_server.py` — not the served `ToolDefinition.description`, which
-  carries no state-routing sentence) names that exact string as a RELEVANCE
-  read, so routing it here would leave that documented contract wrong about a
-  phrasing it names — #14033's own acceptance item #3. The adverb is harmless
-  to the POPULATION (the ended read is ordered by `endedAt` newest-first, so
-  nothing a caller said is narrowed away), so this is deferred rather than
-  refused: it moves together with the docstring, which is a frozen baseline cell
-  and an owner-gated surface edit (#4282);
+  pins that too: the SERVED `tortoise_search` description
+  (`tortoise/mcp_server.py`) names that exact string as a RELEVANCE read, so
+  routing it here would make the shipped contract wrong about a phrasing it
+  names — #14033's own acceptance item #3. The adverb is harmless to the
+  POPULATION (the ended read is ordered by `endedAt` newest-first, so nothing a
+  caller said is narrowed away), so this is deferred
+  rather than refused: it moves together with the description, which is a frozen
+  baseline cell and an owner-gated surface edit (#4282);
 * **the four content questions #14033 names must NOT route** — a policy question,
   an attributive participle, and a constrained question are all content lookups,
   and a detector that hijacks them answers a different question than the one
@@ -73,7 +72,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 #: must reach it through. The shape name is part of the pin: it is what the reply
 #: would cite as "which words selected the population".
 #: ⛔ Only TWO of the issue's three: `what has ended recently` is pinned as still
-#: refused, in `test_the_adverb_tail_stays_out_until_the_docstring_moves_with_it`.
+#: refused, in `test_the_adverb_tail_stays_out_until_the_description_moves_with_it`.
 NOW_ROUTING = [
     # a yes/no question about ONE record — "is X retired" is a state question
     # whose predicate IS the ending, and the population answers it WITH the
@@ -81,11 +80,22 @@ NOW_ROUTING = [
     ("is the onboarding flow retired?", "is_predicate"),
     ("is our pricing decision withdrawn", "is_predicate"),
     ("is the Q3 target abandoned?", "is_predicate"),
+    # …and the same question in another tense / number, and with an ordinary
+    # apostrophe or hyphen inside the head noun. Each of these answered `0 rows`
+    # before (the relevance read EXCLUDES terminal statuses), so refusing them is
+    # the same silent-empty defect in a different spelling.
+    ("was the onboarding flow retired?", "is_predicate"),
+    ("are our endpoints deprecated", "is_predicate"),
+    ("were the claims retracted", "is_predicate"),
+    ("is the company's policy archived", "is_predicate"),
+    ("is the all-hands meeting cancelled", "is_predicate"),
     # an imperative that asks for the SET by clause, not for one named record.
     # ⛔ `show me the retired onboarding flow` is still refused (it asks for ONE
     # record); the `what we <verb>` clause is what makes this a set request.
     ("list what we retired", "list_what"),
     ("list what we archived", "list_what"),
+    # the PAST form of `withdrawn`, which the participle family does not contain
+    ("list what we withdrew", "list_what"),
 ]
 
 
@@ -157,21 +167,19 @@ def test_the_widening_does_not_admit_the_attributive_participle():
     assert detect_state_question("which claims were withdrawn").population == ENDED
 
 
-def test_the_adverb_tail_stays_out_until_the_docstring_moves_with_it():
+def test_the_adverb_tail_stays_out_until_the_description_moves_with_it():
     """`what has ended recently` is DEFERRED, not forgotten, and this is the pin.
 
     #14033 names it as one of the three measured misses, and this change does not
     fix that one. The reason is not precision — `recently` names no boundary and
-    the read is ordered by `endedAt` newest-first (a row carrying none sorts
-    last), so the population read would honour it — it is the CONTRACT: the
-    `tortoise_search` HANDLER DOCSTRING (`tortoise/mcp_server.py` — not the served
-    `ToolDefinition.description` in `tortoise/tool_registry.py`, which carries no
-    state-routing sentence) states that `what has ended recently` is a RELEVANCE
-    read, so routing it here would leave that documented contract wrong about a
-    phrasing it names, which is #14033's acceptance item #3 rather than a way to
-    satisfy it. That docstring is a frozen baseline cell (its `co_consts` feed
-    `served_from`, so the edit moves the recorded surface identity; an
-    owner-gated re-cut, #4282), so the two move in one change or not at all.
+    the read is ordered by `endedAt` newest-first, so the population read would honour it — it is the CONTRACT: the
+    served `tortoise_search` description
+    (`tortoise/mcp_server.py`) states that `what has ended recently` is a
+    RELEVANCE read, so routing it here would make the shipped description wrong
+    about a phrasing it names, which is #14033's acceptance item #3 rather than
+    a way to satisfy it. That description is a frozen baseline cell (an
+    owner-gated surface re-cut, #4282), so the two move in one change or not at
+    all.
 
     ⛔ This test reds if the adverb tail is admitted WITHOUT the re-cut — that is
     the whole point. Whoever lands the re-cut deletes these rows and moves them
@@ -188,10 +196,10 @@ def test_the_adverb_tail_stays_out_until_the_docstring_moves_with_it():
         got = detect_state_question(adverb_tailed)
         assert got.population is None, (
             f"{adverb_tailed!r} now routes to {got.population!r} (shape "
-            f"{got.shape!r}) while the `tortoise_search` handler docstring still "
-            f"names it a relevance read — that leaves the documented contract "
-            f"wrong about a phrasing it names (#14033 acceptance #3). Admit it "
-            f"only together with the owner-gated docstring re-cut (#4282).")
+            f"{got.shape!r}) while the SERVED tortoise_search description still "
+            f"names it a relevance read — that ships a contract that is wrong "
+            f"about a phrasing it names (#14033 acceptance #3). Admit it only "
+            f"together with the owner-gated description re-cut (#4282).")
 
     # …and the unqualified forms are the advertised route, so the deferral above
     # is a boundary and not a dead end.
@@ -206,7 +214,7 @@ def test_a_constraint_is_still_not_dropped_in_silence():
     serving the whole ended set as if the narrowing had been honoured would drop
     what the caller said — the mirror defect of the fallthrough this change
     fixes. It is the same tail anchor that keeps the adverb out (see
-    `test_the_adverb_tail_stays_out_until_the_docstring_moves_with_it`), which
+    `test_the_adverb_tail_stays_out_until_the_description_moves_with_it`), which
     is why the two are pinned separately: they refuse for different reasons and
     will move at different times.
     """
@@ -277,6 +285,9 @@ def test_the_five_guards_inside_is_predicate_are_each_load_bearing():
         "is the plan anyone abandoned",
         "is the ticket both teams cancelled",
         "is the report nobody archived",
+        "is the ticket every team cancelled",
+        "is the plan another team abandoned",
+        "is the report few engineers archived",
         "the question is the report archived",
         "the question is the onboarding flow retired",
         "is the very old legacy pricing plan retired",

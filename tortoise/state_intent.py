@@ -69,7 +69,8 @@ what that claim cost: two of the most obvious ways a customer asks about state
 fell through to the relevance read and were served as a confident answer to a
 different question. They are ``is_predicate`` (`is the onboarding flow retired?`
 — a yes/no question about ONE record the caller NAMES, whose PREDICATE is the
-ending; the ended population answers it from the row's own ``status``) and
+ending; the ended population is SERVED, so the named record's row carries its
+#: ``status`` when it lands on the page) and
 ``list_what`` (`list what we retired` — an imperative whose `what we <verb>`
 CLAUSE asks for a SET). So "names a record" is no longer by itself a refusal:
 `is the X retired?` routes because the participle is the question's predicate,
@@ -176,13 +177,22 @@ _ENDING_WORDS = (
 #:   becoming the noun→route assignment #13128 refuses;
 #: * `all|some|any|no` are left in the run on purpose — each is also an ordinary
 #:   noun modifier (`is the all hands meeting cancelled`), so refusing them would
-#:   cost measured recall to close a spelling this list cannot close cleanly.
+#:   cost measured recall to close a spelling this list cannot close cleanly;
+#: * so are the NUMERALS (`is the two factor login abandoned`): a number is an
+#:   ordinary modifier, and `one|two|…` as a clause subject is the rarer reading.
+#: One word of the subject NP. ⛔ A hyphen or an apostrophe is an ordinary spelling
+#: INSIDE a head noun (`company's`, `all-hands`, `e-mail`), not a clause boundary —
+#: a `[a-z0-9]+` run refuses those spellings and answers `0 rows`, because the
+#: relevance read excludes terminal statuses.
+_NP_WORD = r"[a-z0-9][a-z0-9'-]*"
+
 _NP_STOP = (
     r"(?!(?:that|which|who|whom|whose|where|when"
     r"|the|a|an|this|these|those|our|your|their|its|my"
     r"|we|us|i|they|them|he|she|you|it"
     r"|anyone|anybody|someone|somebody|everyone|everybody|nobody"
-    r"|each|both|either|several|many|most|none)\b)"
+    r"|whoever|whatever|whichever|such"
+    r"|each|every|both|either|another|several|many|most|few|none)\b)"
 )
 
 #: …and the BASE forms of the same words, which is what do-support selects
@@ -239,7 +249,7 @@ _ENDING_BASE = (
 #:   constraint (`what is the archived pricing document`) cannot reach it, and it
 #:   refuses a WINDOW too (`what has ended in Q3`). ⛔ The vague adverbs
 #:   (`recently`/`lately`) are NOT admitted — they were withdrawn in the same
-#:   change that noticed the `tortoise_search` HANDLER DOCSTRING names
+#:   change that noticed the served `tortoise_search` description names
 #:   `what has ended recently` a RELEVANCE read (§ the adverb bullet below).
 #:   ⛔ IT IS THE HANDLER DOCSTRING, NOT THE SERVED DESCRIPTION (#14491 review).
 #:   The served tool description is `ToolDefinition.description`
@@ -255,6 +265,15 @@ _ENDING_BASE = (
 #:   verb in:
 #:   `is the report archived in S3`, `is the report that legal archived` and
 #:   `is the policy when a booking is cancelled` all keep the relevance read.
+#:   ⛔ AND THE RESIDUAL IS THE ONE-RECORD LOOKUP ITSELF, stated rather than
+#:   discovered: once the scope is derived the read DROPS the query text (it was
+#:   APPLIED as the selector, not as a filter), and the ended read is a
+#:   FAMILY-WIDE enumeration — the newest 50 by ``endedAt``. So the named
+#:   record's ``status`` is served when that row is on the page, and nothing in
+#:   the reply separates "your record has not ended" from "your record is not on
+#:   this page". The route is still the right one (#14033 asks for it): the
+#:   answer is a state population, and the alternative is ``0 rows`` from a read
+#:   that excludes terminal statuses.
 #: * ``list_what`` — "list what we retired": an imperative whose `what we <verb>`
 #:   CLAUSE asks for the SET. Tail-anchored, so `list what we retired last
 #:   quarter` is refused rather than served with the narrowing dropped.
@@ -344,18 +363,16 @@ _ENDING_BASE = (
 #:
 #: * "what has ended recently" / "what ended recently" — a trailing vague
 #:   adverb. #14033 names it as a measured miss and it still does NOT route, on
-#:   purpose: the `tortoise_search` HANDLER DOCSTRING
-#:   (`tortoise/mcp_server.py`, not the served `ToolDefinition.description`)
+#:   purpose: the SERVED `tortoise_search` description (`tortoise/mcp_server.py`)
 #:   states that this exact string is a RELEVANCE read, so admitting it here
-#:   would leave that documented handler contract WRONG about a phrasing it
-#:   names — which is #14033's own acceptance item #3, not a way to satisfy it.
-#:   Honouring it needs the docstring re-cut in the SAME change, and the docstring
-#:   is a frozen baseline cell — it is part of the handler's ``co_consts``, so
-#:   editing it moves ``served_from`` and the re-cut is owner-gated (#4282).
-#:   The adverb would in fact be harmless for the POPULATION — the ended read is
-#:   ordered by the row's own ``endedAt`` newest-first, so nothing a caller said
-#:   is narrowed away — which is why this is deferred rather than refused: it is
-#:   the DOCSTRING that binds, not the population.
+#:   would make the shipped contract WRONG about a phrasing it names — which is
+#:   #14033's own acceptance item #3, not a way to satisfy it. Honouring it needs
+#:   the description re-cut in the SAME change, and that description is a frozen
+#:   baseline cell (an owner-gated surface edit, #4282). The adverb would in fact
+#:   be harmless for the POPULATION — the ended read is ordered by the row's own
+#:   ``endedAt`` newest-first, so nothing a caller said is narrowed away — which
+#:   is why this is deferred rather than
+#:   refused: it is the DESCRIPTION that binds, not the population.
 #:   `what ended` and `what has been withdrawn` are the route until the re-cut
 #:   lands.
 #: * "what commitments do we have" / "what are the commitments" — a commitment
@@ -386,9 +403,9 @@ _ENDING_BASE = (
 #:   VAGUE ADVERB INCLUDED (`what has ended recently`, `list what we retired last
 #:   quarter`). The adverb is deferred on the CONTRACT, not on precision:
 #:   "recently" names no boundary, so it would narrow nothing away — but the
-#:   `tortoise_search` handler docstring names that exact string a RELEVANCE
-#:   read, so admitting it here needs the docstring re-cut in the SAME change
-#:   (owner-gated, #4282). See the adverb bullet above.
+#:   served `tortoise_search` description names that
+#:   exact string a RELEVANCE read, so admitting it here needs the description
+#:   re-cut in the SAME change (owner-gated, #4282). See the adverb bullet above.
 #: * "which of our withdrawn claims affected pricing" — #14033's own fourth table
 #:   row, and it KEEPS the relevance read on purpose: ``withdrawn`` there
 #:   MODIFIES ``claims``, which is the same attributive slot as the pinned
@@ -474,11 +491,22 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # that reaches it in `tests/test_14033_state_cue_gap.py`; the `what is …` row
     # of `NOT_SELECTED` cannot exercise any of them, because `^is` never reaches
     # it.
+    # ⛔ THE COPULA IS THE WHOLE be-PARADIGM, not `is` alone: `was the onboarding
+    # flow retired?`, `are our endpoints deprecated` and `were the claims
+    # retracted` are the same question in another tense/number, and refusing them
+    # costs the very fallthrough this shape exists to remove — the relevance read
+    # EXCLUDES terminal statuses, so a refused state question answers `0 rows`.
+    # The determiner set is the closed one (`these`/`those` included: a yes/no
+    # question about ONE named record can use either), and the token class
+    # survives `company's` / `all-hands` — a hyphen or an apostrophe inside a
+    # head noun is an ordinary spelling, not a clause boundary.
     ("is_predicate", re.compile(
-        rf"^is\s+(?:the|our|your|their|its|my|this|that)\s+"
-        rf"[a-z0-9]+"                        # the wh-phrase's HEAD noun
-        rf"(?:\s+{_NP_STOP}[a-z0-9]+){{0,3}}"
+        rf"^(?:is|are|was|were)\s+"
+        rf"(?:the|our|your|their|its|my|this|that|these|those)\s+"
+        rf"{_NP_WORD}"                       # the question's HEAD noun
+        rf"(?:\s+{_NP_STOP}{_NP_WORD}){{0,3}}"
         rf"\s+(?:{_ENDING_WORDS})\s*[?.!]*$")),
+
     # "list what we retired" / "list what we archived" (#14033). An IMPERATIVE,
     # which the `scoped_noun`/`show me` boundary refuses — and the discriminator
     # is the `what we <verb>` clause, not the imperative: `show me the retired
@@ -487,7 +515,11 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # asks for a SET. ⛔ The participle ends the question, so an appended window
     # (`list what we retired last quarter`) is refused rather than dropped.
     ("list_what", re.compile(
-        rf"^list\s+(?:out\s+)?what\s+(?:we|i)\s+(?:{_ENDING_WORDS})\s*[?.!]*$")),
+        # ⛔ `withdrew` joins the alternation because this slot is the PAST
+        # tense: `_ENDING_WORDS` is the PARTICIPLE family and does not contain
+        # it, so `list what we withdrew` fell through to the relevance read.
+        rf"^list\s+(?:out\s+)?what\s+(?:we|i)\s+(?:withdrew|{_ENDING_WORDS})"
+        rf"\s*[?.!]*$")),
 )
 
 #: COMMITMENT-question shapes. The issue's own wording — *a commitment is a KIND,
