@@ -1647,14 +1647,14 @@ SWEEP_NAMES = 66
 #: rows and NO digest at all (measured: `--report --base 28ca66878d… --top 5 | grep -c
 #: f0647020531c078c` → **0**), so a pair quoted as `--report`'s output sends a reader to a command
 #: that cannot reproduce it. `--repin` prints `SWEEP_RESIDUE = (n, digest)`; `--check` prints an
-#: ⚠️ AND THIS PR (#14480) MOVED IT BY ONE, FROM ITS OWN LINE — stated because the pin's own note
-#: says a count that moves without a named cause is the drift it exists to catch: the durable
-#: `claim_unavailable` record writes `recorded.update(keep)` in `capture_spool`'s self-heal
-#: (`tortoise/capture_spool.py`, the one new untyped `.update(` receiver in this diff), so
-#: `--repin` on this tree prints **(11903, "0a80b03111e58c47")**. Re-derived by RUNNING the tool on
-#: the tree being merged, never by arithmetic on the delta.
 #: observed digest ONLY on its failure path (`observed: (n, digest)` on stderr), never on a
 #: passing run — so a pair quoted from a green tree is `--repin`'s or nothing.
+#: ⚠️ THIS PR (#14480) MOVED THE PIN BY ONE FROM ITS OWN LINE — stated because the pin's own note
+#: says a count that moves without a named cause is the drift it exists to catch: the durable
+#: `claim_unavailable` record writes `recorded.update(keep)` in `capture_spool`'s self-heal
+#: (`tortoise/capture_spool.py:4037`, the one new untyped `.update(` receiver in this diff), so
+#: `--repin` on the tree being merged prints **(11911, "3e92044bab08cc3d")**. Re-derived by RUNNING
+#: the tool on that tree, never by arithmetic on the delta.
 #: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
 #: and diffed, and EXACTLY ONE row differs
 #: out of an UNCHANGED 856-row SHAPE set on both sides:
