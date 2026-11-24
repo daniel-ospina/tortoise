@@ -482,10 +482,28 @@ def test_orphan_adoption_never_wipes_the_estimate_the_ack_carried():
     assert before.estimate, "the premise: the ACK wrote a non-empty estimate"
     assert before.corpus_name == "handbook", "the premise: the ACK wrote a corpus"
 
+    # ⛔ BACKDATE THE ITEM ROWS — WITHOUT THIS THE GUARD IS VACUOUS (#14415
+    # recut-2 review, P2 — measured). Items written microseconds ago are INSIDE
+    # `BATCH_RECLAIM_AFTER_S`, and round 22's liveness rule reads that as "an
+    # acceptance is in flight" and DEFERS the adoption (`_resume_batch` returns
+    # `None`) BEFORE reaching the write this test exists to pin. Measured on the
+    # pre-fix code (re-read removed + blind `put_batch`): `1 passed` — the guard
+    # could not fail, which is exactly what the mutation-attribution pass exists
+    # to refuse. The ancient stamp is what makes this the CRASH-RESIDUE case the
+    # docstring describes, so the adoption path is genuinely reached; the
+    # `RESUMING` assertion at the end proves it was.
+    for submitted in _items:
+        stale_row = store.get_item(ORG, batch.batch_id, submitted.item_id)
+        assert stale_row is not None
+        stale_row.updated_at = _ancient_stamp()
+        store.put_item(ORG, stale_row)
+
     real_get = store.get_batch
     fired = {"done": False}
+    reads = {"n": 0}
 
     def stale_get(org_id, batch_id):
+        reads["n"] += 1
         if not fired["done"]:
             fired["done"] = True
             return None          # the read the scan took BEFORE the row was written
@@ -497,6 +515,10 @@ def test_orphan_adoption_never_wipes_the_estimate_the_ack_carried():
     assert fired["done"], "the stale read did not fire — the test proves nothing"
     after = real_get(ORG, batch.batch_id)
     assert after is not None, "the adoption DELETED the batch row"
+    # ⛔ NOT `state is RESUMING`: a freshly accepted batch with every item `queued`
+    # is deliberately NOT relabelled `resuming` (recut review round 13 — a scan
+    # that resumed nothing must not mint that word), so that would fail on
+    # correct code. The reachability proof is the LAST assertion instead.
     assert after.estimate == before.estimate, (
         "the adoption overwrote the ACK's estimate with an empty one — owner §4 "
         f"requires it on the record: {before.estimate!r} -> {after.estimate!r}")
@@ -512,6 +534,15 @@ def test_orphan_adoption_never_wipes_the_estimate_the_ack_carried():
     assert after.created_at == before.created_at, (
         "the adoption re-stamped created_at from an orphan item's updated_at, so "
         "the batch's own age is lost")
+    # ⛔ REACHABILITY, asserted LAST so it can never mask a behavioural failure
+    # above (P2 fix). More than one read means the scan went PAST the stale read
+    # it took, i.e. the orphan/adoption region was entered; ONE read means it
+    # stopped right there — the premature-deferral vacuity this test was measured
+    # to have, where the assertions above hold by construction.
+    assert reads["n"] > 1, (
+        f"the scan made {reads['n']} read of the batch row and stopped at the "
+        "stale one — the adoption path was never reached, so the assertions "
+        "above prove nothing")
 
 
 def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
