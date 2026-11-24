@@ -551,6 +551,14 @@ STOP_WORDS_KEEP_THIS_RECALL = (
     "is the go to market plan archived",
     "is the past due invoice archived",
     "is the point to point integration archived",
+    # ⛔ AND `to`/`about` HEADING A NOUN MODIFIER, which is the same recall cost
+    # as the compound-head-noun rows above and the reason those tokens may only
+    # stop inside the futurity FRAME (`… to be retired`), never flat. Both of these
+    # routed at `35c7ab5a5c0e` and were refused at `4aecc782d3ef` / `dd498dff8262`
+    # by the flat `to`/`about` stop — measured at each head, so this row reds on
+    # that head rather than being a claim about it (#14491 review P3, carried).
+    "is the guide to pricing retired",
+    "is the book about pricing archived",
     "is the board of directors report archived",
     "is the list of open tickets archived",
     # ⛔ THE APPROXIMATIVE NEGATORS ARE ADJECTIVE MODIFIERS HERE, not predicate
@@ -631,18 +639,23 @@ def test_an_affirmative_temporal_modifier_still_routes():
     AFFIRMATIVE strings below, which ask exactly the question the ended population
     answers — has this named record already ended. ⛔ THIS TEST IS A RECALL GUARD
     **AND** A NON-VACUITY PIN, and saying which head matters: every row routes at
-    every head of THIS branch (`35c7ab5a5c0e` onwards, the head before the
-    predicate-modifier guard landed), and every row answers `None` on
+    `35c7ab5a5c0e` (the head before the predicate-modifier guard landed) and at
+    every head from `80574227c5` (where `due`/`going` became a FRAME instead of a
+    flat stop) through this one — but NOT at `4aecc782d3ef` or `dd498dff8262`, where
+    the flat `due|going` stop refused the two COMPOUND-HEAD-NOUN rows below. That
+    two-head recall loss is exactly what the next paragraph is about, and it is
+    measured at each head rather than inferred. Every row also answers `None` on
     `origin/main`, which has no `is_predicate` shape at all — so it reds both when
     someone widens the modifier list and when the shape is removed.
 
     ⛔ The two COMPOUND-HEAD-NOUN rows are the same argument applied to the
     futurity tokens: `due` and `going` are ordinary modifiers of the HEAD NOUN in
     the second slot (`due diligence`, `going concern`), so stopping them refuses a
-    plain state question — while `to` alone already stops every infinitive that
+    plain state question — while the `to` frame already stops every infinitive that
     can reach the tail anchor, i.e. the extra tokens bought no closure at all.
-    They are pinned here because the round-8 cut carried them; narrowing them is
-    a later round's edit, and this is what reds if someone adds them back.
+    They are pinned here because the round-8 cut carried them as FLAT stop words,
+    which refused both; `80574227c5` narrowed them into the frame, and this is what
+    reds if someone flattens them back.
     """
     from tortoise.state_intent import ENDED, detect_state_question
 
