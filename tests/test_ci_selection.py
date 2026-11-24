@@ -9227,14 +9227,23 @@ def _emission_block_header(manifest_text: str) -> str:
 #: red no figure — and it is stated rather than left as a hole, because the case it excludes is the
 #: one this block deliberately quotes.
 #:
-#: ⛔ 10 IS MEASURED, NOT CHOSEN — and the measurement is the guard's own false negative. This block
-#: states ONE instruction verbatim twice ("never carry the last revision's minute, seconds, or
-#: split." — `grep -c` on the block returns exactly 2, in the per-registration and the
-#: `--emit-push-matrix` paragraphs), so a 9-word window reds on CLEAN prose —
-#: **2 spans, one per copy** — and 10 is the smallest window on which the guard is quiet over the
-#: tree it guards (**0**, and 0 again at 11). A span is counted PER COPY, so the 2 at window 9 are
-#: one instruction seen twice, not two defects. The cost is that a repeated span SHORTER than the
-#: window — and a header with fewer than this many words at all — is silently ungraded here, which
+#: ⛔ 10 IS MEASURED, NOT CHOSEN — and BOTH measurements are stated, because the first one describes
+#: a block #14415 has since collapsed. On the block as #14481 folded it (234 comment lines), ONE
+#: instruction was stated verbatim twice ("never carry the last revision's minute, seconds, or
+#: split." — `grep -c` returned exactly 2, in the per-registration and the `--emit-push-matrix`
+#: paragraphs), so a 9-word window red on CLEAN prose — **2 spans, one per copy** — and 10 was the
+#: smallest quiet window (**0**, and 0 again at 11). #14415 then collapsed the block to 159 lines and
+#: that instruction appears ONCE, so 10 is no longer the minimum: measured on `origin/main`'s block
+#: today the guard is quiet from **window 8** up, and windows 5-7 red on clean prose at the clause
+#: "which is how this block went stale" — two UNRELATED sentences that share it (the S-choice
+#: ARITHMETIC paragraph and the `#11298` guard-rationale paragraph). So window 8 sits one word above a
+#: measured false red, and 10 keeps that margin rather than ratcheting the window down to today's
+#: exact minimum: a splice this arm exists to catch is a LONG passage, while a legitimate short
+#: clause repeat is common in 1,950 words of prose, so the sensitivity lost between 8 and 10 buys
+#: nothing and the false reds a tighter window would add cost a maintainer a review cycle. A span is
+#: counted PER COPY, so the 2 at window 9 were one instruction seen twice, not two defects. The cost
+#: is that a repeated span SHORTER than the window — and a header with fewer than this many words at
+#: all — is silently ungraded here, which
 #: is why the arm below asserts the real block is long enough to be gradable rather than trusting
 #: this bound. A DIVERGENT pair is a DIFFERENT residual, not a shorter one: the repeats stop at the
 #: token the copies disagree on, so the span covers their COMMON PREFIX only (measured on the
@@ -9254,7 +9263,8 @@ _SPLICE_SHINGLE_WORDS = 10
 #: much may differ (a figure, a shard letter, a count), `_SPLICE_DIVERGENCE_RESYNC_WORDS` is how much
 #: must AGREE again afterwards (the discriminator — two IDENTICAL copies placed side by side also
 #: diverge once the first copy ends, but do not re-agree), and `_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS`
-#: bounds the read on a ~2,900-word block. jscpd's clone taxonomy draws the same line: divergent
+#: bounds the read on the block it guards — ~1,950 words on `origin/main` after #14415's collapse,
+#: ~2,950 before it. jscpd's clone taxonomy draws the same line: divergent
 #: copies are reported as separate EXACT clones, and merging across a gap is opt-in there
 #: (`--max-gap-lines`), reported as a `similar` clone WITH its similarity score.
 #:
@@ -9287,8 +9297,10 @@ def _splice_shingle_positions(header: str) -> tuple[str, dict[str, list[int]]]:
     ⛔ QUOTE PARITY IS A FAIL-CLOSED PRECONDITION, not a convenience. `"[^\"]*"` pairs quotes ACROSS
     the whole block, so ONE duplicated line carrying an odd number of `"` flips the parity for
     every quote after it: previously-masked quoted prose becomes LIVE and ~60% of live prose becomes
-    MASKED. Measured on this block (10 of its lines carry an odd quote count), with a fold that
-    duplicates one such line and the ratio line:
+    MASKED. Measured on the block as #14481 folded it (234 comment lines, 10 of them carrying an
+    odd quote count, 2,946 words — before #14415 collapsed that block to 159 lines / 1,947 words /
+    4 odd-quote lines / 12 quotes total, an EVEN count, so the parity precondition holds today),
+    with a fold that duplicates one such line and the ratio line:
 
         parity even -> the duplicated ratio line is reported (2 spans of 25 words)
         parity ODD  -> the ratio line is NOT reported; the 2 reported spans are the block's own
@@ -9575,7 +9587,8 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     # ⛔ NON-VACUITY ON THE REAL BLOCK, not only on the fixtures: a header with fewer words than the
     # repeated-span window makes `_repeated_header_spans` return `[]` for ANY content, so the guard
-    # below would be decoration on the one file it exists to grade. This block is ~2,900 words; the
+    # below would be decoration on the one file it exists to grade. This block is ~1,950 words on
+    # `origin/main` (~2,950 on the pre-#14415 tree); the
     # floor is an order of magnitude below that, not a tuned value.
     assert len(header.split()) > _SPLICE_SHINGLE_WORDS * 10, (
         f"the `fast_shards` header block is {len(header.split())} words — too short for a "
