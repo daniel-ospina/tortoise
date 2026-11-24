@@ -9046,3 +9046,41 @@ test("#14350: a FOREIGN reason is not stringified onto the shared operator line"
   assert.equal(line,
     "capture: OK (0 queued), NO drain exclusion, drain claim UNREADABLE", line);
 });
+
+test("#14350: an OCCUPIED path plus a refused link PRESERVES the displaced claim", () => {
+  // ⛔ THE WARNING MUST BE TRUE (review, cycle 16, P1). `disposeQuarantine`'s occupied
+  // arm warned "PRESERVED at <quarantine>" and then FELL THROUGH to the `unlinkSync`
+  // below, destroying the only copy of the displaced holder's claim — the code
+  // contradicting its own sentence, and a divergence from the Python twin, which
+  // returns inside the same arm. Narrow reachability (it needs a `link` refusal that
+  // is not EEXIST arriving before the existence check — an LSM/FUSE/odd FS), but the
+  // invariant is certified as absolute in the record and in both twins.
+  //
+  // MUTATION THAT REDS THIS: delete the `return false;` after the occupied warn (the
+  // quarantine disappears and the preservation assertion fails — measured: 271 pass
+  // before this row existed, i.e. nothing redded).
+  const spool = tmpSpool();
+  const path = join(spool, "drain.claim");
+  const occupied = `${JSON.stringify({
+    version: DRAIN_CLAIM_VERSION, token: "newer-holder", leg: "python",
+    pid: process.pid, host: "box-a", boot_id: "boot-1",
+    started_at: Date.now(), expires_at: Date.now() + 120_000,
+  })}\n`;
+  writeFileSync(path, occupied);          // the path is OCCUPIED by a newer claim
+  const quarantine = join(spool, "drain.claim.tmp-clear-9-occupied");
+  const displaced = "displaced-holder-bytes\n";
+  writeFileSync(quarantine, displaced);
+
+  const refused = () => {
+    const err = new Error("EPERM: link refused") as NodeJS.ErrnoException;
+    err.code = "EPERM";                    // NOT EEXIST, and the path IS occupied
+    throw err;
+  };
+  const disposed = disposeQuarantine(quarantine, displaced, path, "<not ours>", refused);
+  assert.equal(disposed, false, "we did not judge this claim, so it is not ours to drop");
+  assert.equal(existsSync(quarantine), true,
+    "the copy the warning calls PRESERVED was DELETED");
+  assert.equal(readFileSync(quarantine, "utf8"), displaced);
+  assert.equal(readFileSync(path, "utf8"), occupied,
+    "the newer holder's claim is undisturbed");
+});

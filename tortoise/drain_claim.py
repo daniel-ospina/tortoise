@@ -432,9 +432,10 @@ def _dispose_quarantine(quarantine: Path, data: bytes,
     ⛔ WHAT HAPPENS WHEN EVEN THE RESTORE LOST, stated accurately because the earlier
     version of this sentence was FALSE and a false sentence is worse than no
     sentence — and because the code changed under it: on a non-``EEXIST`` failure the
-    object is **left in the quarantine** (it is the only copy of that holder's claim
-    once the rename has vacated the path), so the claim at ``path`` is absent while a
-    peer may still be installing one. The displaced holder does NOT "stop": it keeps
+    object is first put BACK with ``rename`` while the path is free (it is the only
+    copy of that holder's claim once the rename has vacated that path), and only when
+    that ALSO fails — or the path is occupied — is the copy **left in the
+    quarantine**, with the claim at ``path`` absent in that case. The displaced holder does NOT "stop": it keeps
     draining until its next `renew`/`renew_if_due` tells it the claim is not ours, up
     to ``TTL/3`` (≈40 s) away. Two drainers can coexist for that window, and it is
     BOUNDED BY THE LEASE rather than unbounded, which is the only claim this code
@@ -454,7 +455,7 @@ def _dispose_quarantine(quarantine: Path, data: bytes,
                 f"until its next refresh (up to {_ttl_third_hint()})",
                 file=sys.stderr)
         except OSError as exc:
-            # ⛔ THE ONLY OTHER COPY (review, P3). The rename vacated `path`, so on a
+            # ⛔ THE ONLY OTHER COPY (review, cycle 16, P1). The rename vacated `path`, so on a
             # non-`EEXIST` failure this quarantined file is all that is left of a
             # live holder's claim. Unlinking it turned "restore failed" into "claim
             # destroyed" and freed the path for the next `link` — two holders for up
@@ -881,7 +882,7 @@ def _clear_unusable_claim_path(path: Path) -> str:
         # `filelock` advisory GHSA-fq56-3cx3-fjxp describes, and it inverts the
         # doctrine `acquire` states 40 lines above: a regular file we could not read
         # is HONOURED and never unlinked (#14480 review, F3).
-        # ⛔ AND THE ANSWER IS STILL `HELD` WHEN THE RESTORE FAILED (review, P3) —
+        # ⛔ AND THE ANSWER IS STILL `HELD` WHEN THE RESTORE FAILED (review, cycle 16, P1) —
         # the failure mode was never the answer, it was the DELETION: the restore
         # used to unlink the only copy and then report HELD anyway, emptying `path`
         # so the next `link` won it (the two-drainer window this branch exists to
