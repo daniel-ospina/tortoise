@@ -57,11 +57,26 @@ WHY A QUESTION SHAPE AND NOT A KEYWORD
 --------------------------------------
 A keyword match alone would hijack ordinary content searches: ``search('the
 meeting was cancelled')`` is a lookup for a note, not a request for the ended
-population. So an ending population is selected only by the *aggregative
-question shapes* below — a wh-word or an "anything/which" quantifier carrying an
-ending word — which is exactly the shape a customer uses when they do not know
-which record they are asking about. A query that names a record ("onboarding
-flow retired") keeps the text read it always had.
+population. So an ending population is selected by *question shapes* — most of
+them AGGREGATIVE (a wh-word or an "anything/which" quantifier carrying an ending
+word), which is exactly the shape a customer uses when they do not know which
+record they are asking about — and ⛔ NOT by a keyword, nor by "a word near a
+wh-word", nor by "an ending copula anywhere in the sentence".
+
+⛔ TWO NON-AGGREGATIVE SHAPES ARE ADMITTED, and #14033 is why. This paragraph used
+to say a state question is *only* aggregative, and the list below then measured
+what that claim cost: two of the most obvious ways a customer asks about state
+fell through to the relevance read and were served as a confident answer to a
+different question. They are ``is_predicate`` (`is the onboarding flow retired?`
+— a yes/no question about ONE record the caller NAMES, whose PREDICATE is the
+ending; the ended population is SERVED, so the named record's row carries its
+``status`` when it lands on the page) and
+``list_what`` (`list what we retired` — an imperative whose `what we <verb>`
+CLAUSE asks for a SET). So "names a record" is no longer by itself a refusal:
+`is the X retired?` routes because the participle is the question's predicate,
+while `onboarding flow retired` (no predicate to ask about) and `show me the
+retired onboarding flow` (an imperative naming ONE record) keep the text read
+they always had.
 
 ⛔ AND THE WORD MUST BE THE ENDED-STATE FORM: ``ended``, not ``end``;
 ``withdrawn``, not ``withdraw``. The first cut matched the bare verbs and the bare
@@ -87,6 +102,7 @@ OCCURRENCE_EVENT_KINDS`` (#13128) and the question keeps its own issue.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 # ── the populations a question may select ───────────────────────────────────
@@ -121,6 +137,62 @@ POPULATIONS: dict[str, str] = {
 #: compared with one — the population itself is selected by the predicate
 #: (``ended.py``). ``tests/test_13557_13558_reachable_reads.py`` holds it to
 #: ``live.TERMINAL_EXCLUDED_STATUSES`` so the two cannot drift.
+#:
+#: ⛔ THE FOLD THE SHAPES SEE RUNS THROUGH THIS, and it exists so the regexes do
+#: not have to know about typography. It is deliberately CATEGORY-based rather
+#: than a list: enumerating "the dashes" is how 19 of Unicode's 26 ``Pd`` code
+#: points were missed (the table below names only 7 of the 26), and the soft hyphen
+#: is not one of them — U+00AD is category ``Cf`` and folds to a SPACE under the
+#: format rule below, not to ``-``. Each of these silently turned a routable state
+#: question into `0 rows`. Rules, in order:
+#:
+#: * ``Pd`` (any dash or hyphen) -> ``-``. A dash is punctuation the shapes keep:
+#:   `-` is a member of the head-noun token class, and `committed_to`'s terminator depends on the
+#:   character still being there (folding it to a SPACE was a measured P0).
+#: * the quote set -> ``'`` (U+2018/2019/201A/201B, U+02BC, U+FF07);
+#: * ``Cf`` (zero-width/format characters) -> a SPACE, ⛔ not dropped: dropping
+#:   JOINS the characters either side, so `plan` + U+00AD + `not` became one token
+#:   starting with `plan`, bypassing every negation arm at once (measured across
+#:   all 170 `Cf` code points). A space keeps `all<U+00AD>hands` routable and
+#:   `plan<U+00AD>not` refusable.
+#:
+#: The ASCII fast path keeps the common case free: the table handles the usual
+#: suspects and the per-character category pass only runs when the result is
+#: still non-ASCII. NFC/lowercasing happen at the call site, after this.
+_TYPOGRAPHIC_FOLD = {
+    0x2018: "'", 0x2019: "'", 0x201A: "'", 0x201B: "'",
+    0x02BC: "'", 0xFF07: "'",
+    0x2010: "-", 0x2011: "-", 0x2012: "-", 0x2013: "-", 0x2014: "-",
+    0x2015: "-", 0x2212: "-", 0xFF0D: "-",
+}
+
+
+def _fold_typography(text: str) -> str:
+    """Fold typographic punctuation; turn zero-width characters into spaces."""
+    folded = text.translate(_TYPOGRAPHIC_FOLD)
+    if folded.isascii():
+        return folded
+    out: list[str] = []
+    for ch in folded:
+        if ch > "\x7f":
+            category = unicodedata.category(ch)
+            if category == "Pd":
+                out.append("-")
+                continue
+            if category == "Cf":
+                # ⛔ A SPACE, NOT DROPPED. Dropping joins the characters either
+                # side, so `plan` + U+00AD + `not` became the single token
+                # `plannot` — which starts with `plan`, not `not`, so EVERY
+                # negation arm was bypassed at once and the polarity-INVERTED
+                # population was served (measured across all 170 `Cf` code
+                # points, review cycle 9). A space keeps `all<U+00AD>hands`
+                # routable as two words and keeps `plan<U+00AD>not` refusable.
+                out.append(" ")
+                continue
+        out.append(ch)
+    return "".join(out)
+
+
 _ENDING_WORDS = (
     r"withdrawn"
     r"|retracted"
@@ -132,6 +204,389 @@ _ENDING_WORDS = (
     r"|cancell?ed"
     r"|ended"
 )
+
+#: One word of the subject NP.
+#: ⛔ A hyphen or an apostrophe is an ordinary spelling INSIDE a head noun
+#: (`company's`, `all-hands`, `e-mail`), not a clause boundary — a `[a-z0-9]+` run
+#: refuses those spellings and answers `0 rows`, because the relevance read
+#: excludes terminal statuses.
+#:
+#: ⛔ AND THE CLASS IS EVERY APOSTROPHE AND EVERY LETTER, not the ASCII ones: the
+#: smart apostrophe in `company’s` (U+2019 — what macOS/iOS/Word produce when prose
+#: is pasted into a search box) and an accented head noun (`naïve`, `café`) are the
+#: same ordinary spellings the paragraph above is about, and an ASCII-only
+#: `[a-z0-9'-]*` answered `0 rows` for each (measured, PR #14491 review P2) — the
+#: #14033 fallthrough, in the spelling a real caller is most likely to send.
+#: Admitting the full letter class costs nothing here because
+#: `detect_state_question` LOWERCASES and whitespace-collapses the query before any
+#: shape is tried, so no case-folding assumption is smuggled in.
+#:
+#: ⛔ THE TYPOGRAPHIC VARIANTS ARE FOLDED AT THE BOUNDARY, NOT ENUMERATED HERE. A
+#: character class that lists every spelling of an apostrophe and a hyphen is a
+#: losing game — the U+2010..U+2014 dashes and a decomposed (NFD) accent each
+#: answered `0 rows` while U+2019 and the ASCII forms routed (review cycle 3, P2).
+#: `detect_state_question` now TRANSLATES those code points and NFC-normalises
+#: before any shape is tried (⛔ NFC, not NFKC — a compatibility fold breaks
+#: fractions), so the fold is the single place that knows about typography. ⛔ EVERY
+#: dash folds to `-`, separators included (`_TYPOGRAPHIC_FOLD`:
+#: 0x2010..0x2015, 0x2212, 0xFF0D -> `-`) — not to a space, and the distinction
+#: matters: a space-fold breaks `committed_to`'s appositive terminator, and a `-`
+#: that stays a JOINER is what let a dash re-attach a stop word to the head noun
+#: (the `_NP_DASH_BOUNDARY` note below). The `’` member is a redundant safety net,
+#: kept because it costs nothing and because the guarded token class below still
+#: admits it.
+
+#: What a ``is_predicate`` subject NP's word run may NOT cross. A word run alone
+#: admits a relative clause whose own finite verb then reads as the question's
+#: predicate, and there are TWO spellings of that clause:
+#:
+#: * with an OVERT marker — `is the report that legal archived`, `is the ticket
+#:   which support cancelled`, `is the doc where we archived it`;
+#: * with NO marker at all — a zero relative, which is the same clause with the
+#:   relativiser elided: `is the plan the team abandoned`, `is the data we
+#:   retired`, `is the claim finance retracted`, `is the ticket they deprecated`.
+#:   Measured on the marker-only guard: all four routed, i.e. the guard closed one
+#:   spelling and left the other open.
+#:
+#: A clause can be neither the head noun nor a word inside it, so the run stops
+#: at a relativiser AND at the subject a zero relative puts where the head noun's
+#: own modifier would be — a determiner, a pronoun, or an indefinite/quantified
+#: subject (`is the plan anyone abandoned`, `is the ticket both teams cancelled`).
+#:
+#: ⛔ AND IT STOPS AT A PREDICATE MODIFIER, which is a DIFFERENT failure from the
+#: clause one: the words between the head noun and the ending can only modify the
+#: PREDICATE, and each of the three classes below changes what the question asks.
+#: Measured before this guard (PR #14491 review, P1/P2) — every row routed:
+#:
+#: * NEGATION (`not`, `never`, `neither`, `nor`, `longer`, the contracted
+#:   auxiliaries matched as the SUFFIX `…n't`, and the approximatives
+#:   `hardly`/`barely`/`scarcely`/`rarely`) — `is the plan not
+#:   cancelled` was answered with the population of CANCELLED records, the
+#:   polarity-INVERTED answer, which is the #14033 defect class exactly. `no`
+#:   is left in the run by the residual below (it is an ordinary noun modifier),
+#:   so the `no longer` spelling is stopped by its own token rather than by `no`.
+#:   ⛔ AND THE APPROXIMATIVE NEGATORS (`hardly`, `barely`, `scarcely`, `far from`,
+#:   `anything but`) stop ONLY WHERE THEY MODIFY THE ENDING: they leaked `is the
+#:   plan hardly cancelled` to the same polarity-INVERTED population (P1), but they
+#:   are also ordinary ADJECTIVE modifiers inside the NP, so a flat stop word
+#:   would refuse `is the barely visible notice archived` — a real state question.
+#:   The guard's POSITION is the whole point, and it costs no recall;
+#: * FUTURITY / INTENT (`to`, and the PROGRESSIVE `being`) —
+#:   `is the v2 api to be retired` asks about something that has NOT ended, and
+#:   the ended population can only answer it with records that have;
+#:   `is the report being archived` is an action in flight, which the population
+#:   cannot represent at all. ⛔ THE INFINITIVE IS STOPPED BY THE FRAME
+#:   `to|going|about|due|scheduled (to) be`, and the FRAME is the load-bearing
+#:   part: measured, dropping it (with `being` left in the list) routes all six
+#:   pinned futurity rows, while a bare `be` alternative routes nothing it alone
+#:   can reach — every infinitive that survives to this tail anchor carries the
+#:   marker in front of it. So the frame is what does the work and `be` is
+#:   deliberately NOT a separate stop word: as a slot-2 token it is
+#:   un-falsifiable (nothing reaches it that the frame does not already stop).
+#:   ⛔ An `is the be all plan archived` argument does NOT pay for it — that
+#:   spelling sits in the HEAD slot, where `_NP_STOP` never applies at all (see
+#:   the note below), so citing it confuses the two slots. The words are kept
+#:   INSIDE the frame because
+#:   `due`/`going` are ordinary head-noun modifiers in the second slot:
+#:   `is the annual due diligence report archived` and `is the current going
+#:   concern note archived` still route;
+#: * DISJUNCTION (`or`) — `is the ticket still open or cancelled` asks about two
+#:   states at once, and one population cannot answer both.
+#:
+#: ⛔ NO RECALL IS LOST IN THE AFFIRMATIVE-MODIFIER CLASS, and that is measured
+#: rather than assumed: `is the claim already archived`, `is the ticket still
+#: archived` and `is the report already withdrawn` still route, and adding
+#: `yet|still|already` as well would close the same class while refusing those
+#: three — so this is the narrower list. ⛔ AND THE COST IS STATED, because a
+#: linker word is also an ordinary NOUN: `is the do while loop deprecated` and
+#: `is the before after comparison archived` keep the relevance read now. They are
+#: rare spellings and the alternative is a polarity-inverted answer to a negation,
+#: so the trade is taken here rather than hidden; the FRAME words (`to|due|
+#: scheduled|going|about` introducing `be`) and the `of`-complement apply only in
+#: their frame, which is why `is the go to market plan archived` and
+#: `is the list of open tickets archived` still route
+#: (``STOP_WORDS_KEEP_THIS_RECALL``).
+#: ⛔ IT APPLIES FROM THE SECOND WORD ON, never to the head noun: `it` and `us`
+#: are ordinary head nouns in this product's own vocabulary (`is our IT platform
+#: retired`, `is the US footprint archived`), and the head-noun slot is not a
+#: place a zero relative's subject can stand.
+#:
+#: ⛔ THE RESIDUALS ARE STATED, NOT HIDDEN, and there are THIRTEEN — the fourteen
+#: bullets below minus the last, which declares itself CLOSED and is kept only as a
+#: record of a cost this branch removed. Count the bullets, not this sentence: it has been
+#: stale at every round, including the round that added two bullets above the old
+#: numbering and left every cross-reference behind. The numbers used by
+#: ``tests/test_14033_state_cue_gap.py`` are the BULLET ORDINALS.
+#:
+#: * a zero relative whose subject is a BARE NOUN (`is the claim finance
+#:   retracted`) is lexically identical to a two-word head noun plus a predicate
+#:   (`is the onboarding flow retired?`), so no word list separates them without
+#:   becoming the noun→route assignment #13128 refuses;
+#: * `all|some|any|no` are left in the run on purpose — each is also an ordinary
+#:   noun MODIFIER, and the cost is visible only in a non-head slot where it
+#:   really does the modifying: `is the onboarding all hands meeting cancelled`
+#:   routes at this head and refuses once `all` is a stop word. (A head-slot
+#:   example would prove nothing: the stop never applies to word one.);
+#: * so are the NUMERALS, for the same reason and in the same slot — the modifier
+#:   use is `is the onboarding two day workshop cancelled` (which refuses once a
+#:   numeral is a stop word), and the clause-subject spelling it keeps is
+#:   `is the report one team archived`;
+#: * AND THE SUBJECT NEED NOT NAME A RECORD AT ALL: a yes/no question about a
+#:   TIME SPAN — `is the quarter ended`, `is the deadline ended`, `is the sprint
+#:   ended` — routes, and the ended population answers a calendar question with
+#:   our ended records. No word list separates `quarter` from a record name
+#:   without becoming the same noun→route assignment, so this is disclosed rather
+#:   than closed; the tail anchor still refuses the windowed spellings
+#:   (`is the quarter ended in Q3`);
+#: * THE PRESENT-PERFECT YES/NO SPELLING OF THE SAME QUESTION DOES NOT ROUTE:
+#:   `has the onboarding flow been retired?` and `has our pricing decision been
+#:   withdrawn` keep the relevance read, because ``existence`` requires an
+#:   existential quantifier after the auxiliary (`has ANYTHING … been retired`).
+#:   That is #14033's own defect class in one more spelling, stated here rather
+#:   than left to be rediscovered;
+#: * SO DOES AN IMPERATIVE THAT IS NOT `list`: `show me what we retired`,
+#:   `show what we retired` and `tell me what we retired` keep the relevance read
+#:   — ``list_what`` is anchored on `^list\s+`, although the discriminator this
+#:   module states is the `what we <verb>` CLAUSE and not the imperative mood. The
+#:   anchor is the narrower claim and the prose is wider than the code: this bullet
+#:   is the record of that.
+#: * AND A HEAD NOUN JOINED BY `or` IS REFUSED — `is the sales or marketing plan
+#:   archived` keeps the relevance read. A coordinator INSIDE the NP is lexically
+#:   identical to the disjunctive PREDICATE the `or` stop exists to close
+#:   (`is the plan live or already cancelled`), and the precision contract says a
+#:   shape that could go either way does not fire. The cost is not new either:
+#:   `is_predicate` did not exist on the base module, which refused the same
+#:   string. It is disclosed here so a later round does not present it as a find.
+#: * AND THE APPROXIMATIVE NEGATORS ARE CLOSED ONLY ACROSS ONE CLOSED-CLASS
+#:   WORD. The arm below is positional (see its note): the negator stops the run
+#:   only when the ENDING follows it, optionally across an auxiliary or a
+#:   negation-flavoured adverbial (`been|ever|yet`). So `is the plan hardly
+#:   cancelled`, `… hardly been cancelled`, `… hardly ever cancelled` and
+#:   `… hardly-ever cancelled` all REFUSE — but once TWO words intervene,
+#:   `is the plan hardly at all cancelled` ROUTES TO THE ENDED POPULATION, i.e.
+#:   the question is answered with the records that ARE cancelled. ⛔ THAT IS THE
+#:   POLARITY-INVERTED ANSWER, NOT A SAFE MISS — do not read this residual as
+#:   "the caller keeps the relevance read". Widening the window is NOT the fix:
+#:   it refuses `is the old barely visible notice archived` and `is the service
+#:   hardly used archived`, real state questions whose negator modifies a noun.
+#:   The trade is therefore taken and stated — the guard needs the negator
+#:   adjacent to the predicate.
+#: * AND THE NEGATOR LIST IS NOT THE WHOLE LANGUAGE. It is the closed class this
+#:   module stops, not a complete negation grammar: MULTI-WORD negators outside
+#:   it route with inverted polarity — `is the plan by no means cancelled`, `is
+#:   the plan nowhere near cancelled`, `is the plan in no way archived`, `is the
+#:   plan nothing like cancelled` all reach the CANCELLED/ENDED population. So
+#:   does a modal (`is the plan will be cancelled`) — `will` is deliberately NOT
+#:   a stop word because it is an ordinary noun modifier in this product's
+#:   vocabulary (`estate will probate`). Chasing the rest of English's negation
+#:   is the unbounded word-list shape #13128 refuses, so this is disclosed rather
+#:   than closed;
+#: * AND `is_predicate` REQUIRES A DETERMINER after the copula, so a yes/no
+#:   question whose subject is a BARE NOUN, a bare PLURAL, or a PROPER-NOUN
+#:   possessive is refused — `is pricing retired`, `are endpoints deprecated`,
+#:   `is Acme's plan archived`, `is Dan's plan retired` all answer `None` (the
+#:   relevance read, which excludes terminal statuses: `0 rows`, this module's
+#:   own defect class). ⛔ The proper-noun case is the sharpest, because the head-noun token class
+#:   was widened FOR possessive head nouns and `is the company's policy archived`
+#:   routes — only the determiner stands in the way of `is Acme's plan archived`.
+#:   It is disclosed rather than widened because the determiner is what keeps the
+#:   shape to a NAMED record: admitting any bare word also admits `is it retired`
+#:   and `is he cancelled`, which are boolean questions about something that is
+#:   not a record at all, and that precision trade needs its own measurement
+#:   rather than being taken inside a cue-gap fix (PR #14491 review cycle 8).
+#: * THE CONTRACTED WH-COPULA IS NOT IN A SHAPE: `what's been withdrawn` and
+#:   `whats ended` answer `None` while `what has been withdrawn` and `what ended`
+#:   route. `is_predicate` handles `n't`, but no shape handles `what's`; this is
+#:   the same defect class as the present-perfect bullet above and is stated for
+#:   the same reason;
+#: * AND A THIRD-PARTY SUBJECT IS REFUSED by the `do_support` shape, which is
+#:   restricted to `we|i`: `what did legal archive`, `what has legal archived` and
+#:   `which claims did legal retract` all answer `None`. Widening it admits any
+#:   noun phrase as the actor, which is the trade the `we|i` restriction exists to
+#:   refuse, so this is disclosed rather than closed;
+#: * AND AN ATTRIBUTIVE ENDING WORD IN THE **HEAD** SLOT IS REFUSED by the
+#:   head-noun guard: `is the deprecated api migration guide archived`,
+#:   `is the retired employees list archived` and
+#:   `is the superseded-policy document archived` answer `None`. They routed to
+#:   `ended` before the guard, which was a REGRESSION against `main` — a content
+#:   lookup served the ended population. A safe miss is the deliberate trade;
+#: * A DASH-JOINED COMPOUND WHOSE SEGMENT IS A STOP WORD **ROUTES** — this was a
+#:   disclosed recall cost (#8) and it is now CLOSED, so it is recorded here rather than
+#:   left in the residual list. The first cut of the guard refused a dash on the stop
+#:   word ALONE, which gave back `is the state-of-the-art model retired`, `… the
+#:   all-or-nothing plan archived`, `… the everything-or-nothing plan archived`, `… the
+#:   do-it-yourself plan archived`, `… the once-in-a-lifetime plan archived` and `… the
+#:   take-it-or-leave-it plan archived` (all `None`, i.e. `0 rows`). The guard is now
+#:   predicate-anchored, so all six route — together with `not-for-profit` — while the
+#:   hole the old disclosure used to justify the cost stays shut: `is the
+#:   plan—not—really cancelled`, `…—not actually cancelled` and `…—never really archived`
+#:   are still refused, because the adverbs live INSIDE `_NP_DASH_AUX`. Pinned as
+#:   `DASH_JOINED_COMPOUND_FORMERLY_REFUSED` / `DASH_JOINED_NEGATION_REFUSED` in
+#:   `tests/test_14033_state_cue_gap.py`. ⛔ WHAT STILL KEEPS THE RELEVANCE READ is the
+#:   half whose tail IS predicate-shaped, where the guard cannot tell the compound from
+#:   the predicate — `is the list-of-retired-services view archived` (the `of`-complement
+#:   arm), `is the going-to-be-cancelled plan archived` and `is the
+#:   about-to-be-archived list archived` (the futurity frame) — a SAFE MISS, pinned as
+#:   `DASH_JOINED_COMPOUND_STILL_REFUSED`. ⛔ AND THE OTHER REMAINING EDGE is an adverb
+#:   OUTSIDE the closed list (`is the plan—only partly cancelled` routes): `_NP_DASH_AUX`
+#:   is a deliberate closed list — widening it to the token class would swallow
+#:   `not-for-profit` — so the rest of the adverb space is a residual, not a closed class.
+#:   ⛔ THE r9 PIN MOVED WITH THIS, not after it: the test
+#:   `test_a_stop_word_compound_is_the_stated_cost_of_the_guarded_token` asserted the
+#:   opposite of this paragraph and was left RED at `1f9dfd0452`; it is now
+#:   `test_the_dash_guard_splits_only_a_predicate_shaped_tail`.
+
+_NP_STOP_BODY = (
+    r"(?:that|which|who|whom|whose|where|when"
+    r"|the|a|an|this|these|those|our|your|their|its|my"
+    r"|we|us|i|they|them|he|she|you|it"
+    r"|anyone|anybody|someone|somebody|everyone|everybody|nobody"
+    r"|whoever|whatever|whichever|such"
+    # predicate modifiers — negation, futurity/intent, disjunction (see the note
+    # above: each one changes what the question asks, and a negated predicate is
+    # answered with the polarity-INVERTED population)
+    # ⛔ `no` IS NOT A STOP WORD, and the dash-joined `no—longer` needs no arm of its own:
+    # `longer` catches the spaced spelling at the next token, and the token guard in
+    # `_NP_WORD_GUARDED` refuses the joined one (measured: reverting a `no[\s-]+longer`
+    # alternative left the suite green, i.e. it was an INERT arm — the guard was already
+    # doing the work).
+    r"|not|never|neither|nor|longer"
+    # ⛔ AND THE APPROXIMATIVE NEGATORS, BUT ONLY IN THE PREDICATE SLOT. Measured
+    # (PR #14491 review, P1): `is the plan hardly cancelled`, `… barely
+    # cancelled`, `… scarcely archived`, `… far from cancelled` and `… anything
+    # but cancelled` all routed and were served the population of CANCELLED
+    # records — the polarity-INVERTED answer this whole list exists to stop.
+    # ⛔ THEY ARE NOT FLAT STOP WORDS, and flattening them would have been the
+    # wrong fix: each is ALSO an ordinary ADJECTIVE modifier INSIDE the NP
+    # (`is the barely visible notice archived`, `is the hardly noticeable change
+    # archived`, `is the scarcely used endpoint retired` — all route
+    # correctly and are real state questions), so a plain stop word buys the
+    # negated spellings by refusing the unnegated ones too (the in-RUN and
+    # negator-plus-adjective spellings pinned in `STOP_WORDS_KEEP_THIS_RECALL`,
+    # which is the table that reds if this guard is flattened). The lookahead stops
+    # the negator only where the ENDING follows it, optionally across an AUXILIARY
+    # (`… hardly cancelled`, `… hardly been cancelled`), and leaves it in the run
+    # everywhere else — including where the next word is an ADJECTIVE
+    # (`is the service hardly used archived`), which a generic one-word window
+    # refused and which is a real state question. That distinction is why the
+    # intervening class is CLOSED rather than open-ended (PR #14491 review P1).
+    rf"|(?:(?:hardly|barely|scarcely|rarely)(?:-ever)?|far[\s-]+from|anything[\s-]+but)"
+    rf"(?=[\s-]+(?:(?:been|ever|yet)[\s-]+)?(?:{_ENDING_WORDS}))"
+    # `being` is the PROGRESSIVE and is a separate token from the infinitive
+    # frame below, because no frame marker sits in front of it:
+    # `is the plan being cancelled`, `is the report still being archived`.
+    r"|being"
+    # ⛔ FUTURITY/INTENT is a FRAME, not a word list: `to|going|about|due|scheduled`
+    # are ordinary noun modifiers elsewhere (`is the go to market plan archived`,
+    # `is the past due invoice archived`, `is the point to point integration
+    # archived`) and refusing them cost that recall, so they stop the run only
+    # where they introduce the predicate (`… to be retired`, `… due to be
+    # cancelled`).
+    r"|(?:to|going|about|due|scheduled)[\s-]+(?:to[\s-]+)?be\b"
+    r"|or"
+    # ⛔ AND AT A CLAUSE LINKER / ADJUNCT MARKER, which is the same defect one
+    # grammar step further out: the ending there is inside an ADJUNCT, so the
+    # question's predicate is something else entirely and the run drops it —
+    # `is the data safe once archived`, `is the report still accurate once
+    # archived`, and `is the policy unless bookings were cancelled` (whose own
+    # finite verb `were` sat inside the run). Measured on the head that already
+    # carried the negation/futurity/disjunction list: all three still routed.
+    # ⛔ THE CONTRACTION IS A SUFFIX, not a token, and the SUFFIX IS NOT ASCII:
+    # `_NP_STOP` is a negative lookahead evaluated at a TOKEN START, so a bare
+    # `n't` alternative stopped only the literal word — `is the plan isn't
+    # cancelled`, `is the report wasn't archived` and `is the ticket hasn't been
+    # archived` all routed and were served the polarity-INVERTED population.
+    # ⛔ AND THE SMART-APOSTROPHE SPELLING IS THE SAME HOLE: the head-noun token class admits
+    # U+2019 (see its own note), so an ASCII-only contraction arm let the token
+    # `isn’t` through as an ordinary NP word and `is the plan isn’t cancelled`
+    # still answered with the CANCELLED records (measured, PR #14491 review). The
+    # class is therefore `…n` + EITHER apostrophe + `t`.
+    rf"|[^\W_]*n['’-]t"
+    # ⛔ THE SIXTH TAB IS THE SAME CLASS AS THE POSITIONAL ARM ABOVE — kept here
+    # only for its RECALL argument, because the flat-stop-word alternative keeps
+    # being proposed and it is measurably wrong: each negator is also an ordinary
+    # modifier INSIDE the NP, and `_NP_STOP` applies from slot 2 on, so a flat word
+    # refuses `is the old barely visible notice archived`, `is the legacy scarcely
+    # used endpoint retired`, `is the current hardly used service archived` and
+    # `is the service hardly used archived` — real state questions the relevance
+    # read answers `0 rows`. The in-slot spellings that made the flat cut look free
+    # (`is the barely visible notice archived`) only pass because the negator lands
+    # in the HEAD-noun slot, where the stop never applies. ⛔ `will` is NOT part of
+    # this class and is a residual, not a stop word (`estate will probate`) — see
+    # residual #9.
+    r"|unless|once|if|before|after|until|while|because|although|though"
+    r"|as|since|whenever|whereas|whether"
+    r"|each|every|both|either|another|several|many|most|few|none"
+    # ⛔ AND AT AN `of`-COMPLEMENT WHOSE HEAD IS THE ENDING WORD (`is the list of
+    # retired services archived`): the question is about the LIST, and the ending
+    # modifies the complement, so the head noun is not the thing that ended.
+    rf"|of[\s-]+(?:{_ENDING_WORDS}))"
+)
+
+#: The lookahead itself — the NEGATIVE assertion `_NP_STOP` is at a TOKEN START.
+_NP_STOP = rf"(?!(?:{_NP_STOP_BODY})\b)"
+
+#: ⛔ THE HYPHEN INSIDE A HEAD NOUN IS A JOINER **OR** A SEPARATOR, and the two are
+#: lexically identical — which is why the plain token class is not usable in this shape.
+#: Measured (PR #14491 review, P1): after the boundary fold turns every dash into `-`,
+#: `is the plan—not cancelled`, `…—being archived`, `…—to be retired`,
+#: `…—hardly cancelled`, `…—never/—or/—which/—once …` all answered `ended/is_predicate`
+#: — the polarity-INVERTED population, i.e. a WRONG ANSWER rather than the safe miss the
+#: old shape returned — because `-` joined the two into ONE head noun and `_NP_STOP`
+#: never saw `not`. Measured across all four separator codepoints
+#: (U+2012/U+2013/U+2014/U+2212), 12 of 13 stop arms leaked.
+#: ⛔ A BARE STOP WORD IS NOT ENOUGH, and the first cut of this guard made exactly that
+#: mistake (measured, PR #14491 review, P2): refusing the dash on the stop word alone
+#: also refused the compounds whose head noun merely CONTAINS one — `is the
+#: off-the-shelf plan archived`, `… state-of-the-art pipeline retired`, `… all-or-nothing
+#: deal cancelled`, `… either-or choice archived`, `… run-of-the-mill endpoint
+#: deprecated` all went `ended` -> **`None`**, i.e. a silent `0 rows` (the relevance
+#: read excludes terminal statuses). Those spellings are this repo's own vocabulary
+#: (`all-or-nothing` 61× across `docs/`+`tortoise/`, and the wider `or-nothing` family 69×), and the shape's own claim — a
+#: hyphen inside a head noun is an ordinary spelling — is only true if the guard is
+#: grammatical. So the dash is a BOUNDARY only where what follows it is unambiguously
+#: the PREDICATE: a stop word inside a short frame that ENDS on the ending word.
+#: `-the shelf` and `-or nothing` therefore JOIN; `-not cancelled`, `-being archived`,
+#: `-to be retired`, `-which was archived`, `-hardly cancelled`, `-of retired services`
+#: still REFUSE. ⚠️ The copulas are load-bearing in `_NP_DASH_AUX`: without `was|were|
+#: is|are|had|has` the `-which was archived` spelling leaks (measured).
+#: ⛔ AND THE TWO "OBVIOUS" FIXES ARE BOTH WRONG TOO, for the reason that matters:
+#: folding separators to a SPACE breaks the APPOSITIVE the fold exists for — the dash is
+#: `committed_to`'s terminator, so `what are we currently committed to — pricing, …`
+#: stops routing (1 failed in `test_13557_13558_reachable_reads.py`) — and dropping `-`
+#: from the token class gives up every hyphenated head noun (`all-hands`).
+_NP_DASH_AUX = (
+    r"(?:been|be|being|ever|yet|still|already|was|were|is|are|had|has|will"
+    # ⛔ THE ADVERBS ARE LOAD-BEARING, and they are why an unconditional negator
+    # boundary is NOT the fix: `is the plan—not—really cancelled` and
+    # `…—not actually cancelled` sit one adverb away from the ending, so a negator
+    # arm that insists on the immediate tail admits them back into the CANCELLED/ENDED
+    # population (measured). The list stays CLOSED and the remainder of the adverb
+    # space is a disclosed residual — widening it to `{_NP_WORD_GUARDED}` would also swallow
+    # `not-for-profit`, a real head noun (`-not` + `for` is not aux, so it joins).
+    r"|really|actually|truly|certainly|definitely|probably|possibly|currently"
+    r"|now|just|even|also|still|quite|simply|fully|completely|entirely|totally)"
+)
+_NP_DASH_FRAME = rf"(?:[\s-]+{_NP_DASH_AUX})*[\s-]+(?:{_ENDING_WORDS})"
+_NP_DASH_BOUNDARY = (
+    rf"(?!(?:"
+    # negation / disjunction / progressive / clause linkers / relative pronouns
+    rf"(?:not|never|neither|nor|or|being|once|unless|if|before|after"
+    rf"|until|while|because|although|though|as|since|whenever|whereas|whether"
+    rf"|which|who|whom|whose|that|when|where|longer)"
+    rf"{_NP_DASH_FRAME}"
+    # futurity/intent frame
+    rf"|(?:to|going|about|due|scheduled)[\s-]+(?:to[\s-]+)?be"
+    # `of`-complement whose head is the ending word
+    rf"|of[\s-]+(?:{_ENDING_WORDS})"
+    # approximative negators
+    rf"|(?:hardly|barely|scarcely|rarely)(?:-ever)?{_NP_DASH_FRAME}"
+    rf"|(?:far[\s-]+from|anything[\s-]+but){_NP_DASH_FRAME}"
+    # contracted auxiliaries — a suffix, not a token
+    rf"|[^\W_]*n['’-]t"
+    rf")\b)"
+)
+_NP_WORD_GUARDED = rf"[^\W_](?:(?:-{_NP_DASH_BOUNDARY})|[^\W_]|['’])*"
 
 #: …and the BASE forms of the same words, which is what do-support selects
 #: ("what did we retire"). A closed list with NO ``end``: "what did we end up
@@ -184,7 +639,44 @@ _ENDING_BASE = (
 #:   middle window is the relative clause and stays.
 #: * ``wh_whole_question`` — the WHOLE question is "what (has been) <participle>":
 #:   "what ended", "what has been withdrawn". Anchored at both ends, so a trailing
-#:   constraint (`what is the archived pricing document`) cannot reach it.
+#:   constraint (`what is the archived pricing document`) cannot reach it, and it
+#:   refuses a WINDOW too (`what has ended in Q3`). ⛔ The vague adverbs
+#:   (`recently`/`lately`) are NOT admitted — they were withdrawn in the same
+#:   change that noticed the `tortoise_search` HANDLER DOCSTRING names
+#:   `what has ended recently` a RELEVANCE read (§ the adverb bullet below).
+#:   ⛔ IT IS THE HANDLER DOCSTRING, NOT THE SERVED DESCRIPTION (#14491 review).
+#:   The served tool description is `ToolDefinition.description`
+#:   (`tortoise/tool_registry.py:511-522` — its `description=` at `:514-517`) and it
+#:   carries no state-routing sentence at all; the sentence that names the adverb
+#:   is the handler's docstring in `tortoise/mcp_server.py`. Both cells are
+#:   frozen, and the docstring is the one carrying the claim this shape defers to.
+#: * ``is_predicate`` — the ending is the PREDICATE of a yes/no question about a
+#:   named record: "is the onboarding flow retired?". #14033's measured miss.
+#:   ⛔ Tail-anchored (the participle must END the question), the subject NP is
+#:   bounded to a determiner plus at most FOUR words, and its word run STOPS at a
+#:   relativiser or a clause subject, so a clause cannot smuggle its own finite
+#:   verb in:
+#:   `is the report archived in S3`, `is the report that legal archived` and
+#:   `is the policy when a booking is cancelled` all keep the relevance read.
+#:   ⛔ AND THE RESIDUAL IS THE ONE-RECORD LOOKUP ITSELF, stated rather than
+#:   discovered: once the scope is derived the read DROPS the query text (it was
+#:   APPLIED as the selector, not as a filter), and the ended read is a
+#:   FAMILY-WIDE enumeration — the newest ``limit`` rows by ``endedAt``, where
+#:   ``limit`` is the CALLER's page: ``tortoise_search``'s default is **10**
+#:   (``tortoise/mcp_server.py:5634-5635``; the read's own door,
+#:   ``sdk.py:_tortoise_fts_query``, defaults the same at ``:45907``) and the SDK
+#:   always asks the enumerator for ``limit + 1`` (``tortoise/sdk.py:47017``) so a
+#:   truncated page is PROVEN rather than guessed. (50 is ``enumerate_ended``'s
+#:   own default, ``tortoise/ended.py:295-296`` — the SDK never uses it.) So the named
+#:   record's ``status`` is served only when that row is on the page, and nothing
+#:   in the reply separates "your record has not ended" from "your record is not
+#:   on this page": a truncation marker says the population is wider, never that
+#:   the named record is in it. The route is still the right one (#14033 asks for
+#:   it): the answer is a state population, and the alternative is ``0 rows`` from
+#:   a read that excludes terminal statuses.
+#: * ``list_what`` — "list what we retired": an imperative whose `what we <verb>`
+#:   CLAUSE asks for the SET. Tail-anchored, so `list what we retired last
+#:   quarter` is refused rather than served with the narrowing dropped.
 #: * ``which_predicate`` — the wh-word's OWN predicate: "which claims were
 #:   archived". Anchored at the start and requiring the auxiliary IMMEDIATELY
 #:   after the wh-phrase's HEAD NOUN, so `which archived report has the Q3
@@ -251,25 +743,78 @@ _ENDING_BASE = (
 #: where a shape could go either way it does not fire. The phrasings that
 #: therefore do NOT reach this read are stated rather than discovered:
 #:
-#: * "is the onboarding flow retired?" — a yes/no question about an id-less
-#:   record; ``read_entity`` and the ordinary currency read answer it.
-#: * "what has ended recently" / "what ended recently" — a trailing adverb;
-#:   "what ended" and "what has been withdrawn" do route.
+#: ⛔ #14033 WIDENED THIS SET, AND THE WIDENING IS THE POINT OF THE ISSUE. It
+#: measured that the gap around the shapes was itself the defect: a question
+#: that is plainly about state but is not in a shape fell through to the
+#: ordinary relevance read, so the caller got a confident answer to a DIFFERENT
+#: question and nothing said the state route had not engaged — silence that is
+#: indistinguishable from "nothing has ended". TWO of the three measured misses
+#: now have a shape below — `is the onboarding flow retired?` (``is_predicate``)
+#: and `list what we retired` (``list_what``). The third,
+#: `what has ended recently`, deliberately still does NOT, for the reason the
+#: bullet below states. The widening stays narrow for the reason the precision
+#: rounds established: each new shape fixes the GRAMMATICAL ROLE of the ending
+#: word (a predicated participle ending the question, or a `what we <verb>` set
+#: clause), never a word that happens to be PRESENT. #14033's four content
+#: questions still do not route, and they are pinned as the falsifier in
+#: ``tests/test_14033_state_cue_gap.py``:
+#: `have any customers cancelled this month`, `which features are deprecated in
+#: v3`, `do we archive customer emails`, `which claims were retracted by legal`.
+#:
+#: * "what has ended recently" / "what ended recently" — a trailing vague
+#:   adverb. #14033 names it as a measured miss and it still does NOT route, on
+#:   purpose: the `tortoise_search` HANDLER DOCSTRING
+#:   (`tortoise/mcp_server.py`, not the served `ToolDefinition.description`)
+#:   states that this exact string is a RELEVANCE read, so admitting it here
+#:   would leave that documented handler contract WRONG about a phrasing it
+#:   names — which is #14033's own acceptance item #3, not a way to satisfy it.
+#:   Honouring it needs the docstring re-cut in the SAME change, and the docstring
+#:   is a frozen baseline cell — it is part of the handler's ``co_consts``, so
+#:   editing it moves ``served_from`` and the re-cut is owner-gated (#4282).
+#:   The adverb would in fact be harmless for the POPULATION — the ended read is
+#:   ordered by the row's own ``endedAt`` newest-first, so nothing a caller said
+#:   is narrowed away — which is why this is deferred rather than refused: it is
+#:   the DOCSTRING that binds, not the population.
+#:   `what ended` and `what has been withdrawn` are the route until the re-cut
+#:   lands.
 #: * "what commitments do we have" / "what are the commitments" — a commitment
 #:   noun that does not END the question or is not preceded by a set determiner;
 #:   "current commitments", "our commitments" and "what are we committed to" do
 #:   route.
-#: * "list what we retired" / "show me the retired onboarding flow" — an
-#:   imperative, which was measured as a hijack: `show me the retired onboarding
-#:   flow` is a lookup for ONE record. ⛔ The same frame with a SET noun (`list
-#:   our commitments`, `show me all the commitments`) is the recall the start
-#:   anchor gives up, and it is named here so it is a decision and not a gap.
+#: * "show me the retired onboarding flow" / "list the retired onboarding flow"
+#:   — a bare IMPERATIVE naming one record BY NAME, which was measured as a
+#:   hijack. ⛔ `list what we retired` used to sit in this bullet and does NOT
+#:   anymore (#14033): it routes through ``list_what`` below, and the
+#:   discriminator is the `what we <verb>` CLAUSE — a request for the SET — not
+#:   the imperative mood. The bare imperative still refuses, and the same frame
+#:   with a SET noun (`list our commitments`, `show me all the commitments`) is
+#:   the recall the start anchor gives up, named here so it is a decision and
+#:   not a gap.
 #: * "do we ever archive plans" / "do we archive customer emails" — the
 #:   PRESENT-habitual frame, which `do_support` refuses on purpose (round-5
 #:   review, P1): it asks what we do, not which records ended.
 #: * "have any claims been retracted in Q3" / "has anything been withdrawn by
-#:   legal" — an appended CONSTRAINT, refused by every shape's tail anchor so the
-#:   caller keeps the relevance read instead of having the narrowing dropped.
+#:   legal" — an appended CONSTRAINT, refused by the tail anchor of every shape
+#:   that has one, so the caller keeps the relevance read instead of having the
+#:   narrowing dropped. ⛔ ``do_support`` HAS NO TAIL ANCHOR (it is prefix-anchored
+#:   on `did we <verb>`, and `what did we archive last quarter` is a pinned
+#:   SELECTED row), so a window there is not refused: the population is served
+#:   newest-first and the caller reads each row's own ``endedAt``. That is a
+#:   stated boundary, not a claim that every shape refuses a window.
+#:   ⛔ AND WHERE THE SHAPE IS TAIL-ANCHORED THE TAIL ADMITS NO TOKEN AT ALL — a
+#:   VAGUE ADVERB INCLUDED (`what has ended recently`, `list what we retired last
+#:   quarter`). The adverb is deferred on the CONTRACT, not on precision:
+#:   "recently" names no boundary, so it would narrow nothing away — but the
+#:   `tortoise_search` handler docstring names that exact string a RELEVANCE
+#:   read, so admitting it here needs the docstring re-cut in the SAME change
+#:   (owner-gated, #4282). See the adverb bullet above.
+#: * "which of our withdrawn claims affected pricing" — #14033's own fourth table
+#:   row, and it KEEPS the relevance read on purpose: ``withdrawn`` there
+#:   MODIFIES ``claims``, which is the same attributive slot as the pinned
+#:   `which archived report has the Q3 numbers`. A modifier is not the question's
+#:   predicate, and reading it as one is the round-2/4/5 hijack class. The
+#:   caller reaches the population the stated way instead (``ended_scope=True``,
+#:   or the unqualified `which claims were withdrawn`).
 _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "has anything we relied on been withdrawn?" / "have any claims been retired?"
     # An EXISTENCE question about an ending: the auxiliary + quantifier is the
@@ -284,6 +829,21 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # question, anchored at both ends, so a trailing constraint ("what is the
     # archived pricing document") and a wh-word in a subordinate clause cannot
     # reach it.
+    # ⛔ AND THE TAIL ADMITS NO TRAILING TOKEN AT ALL (#14033). A vague adverb
+    # would be harmless for the POPULATION — `recently` names no BOUNDARY, which
+    # is the whole of the argument and not the ordering: `endedAt` is coalesced
+    # over five time properties with no fallback, and FalkorDB sorts NULL FIRST
+    # under that `DESC` (`analyze.py:1049-1050` records the ASC half), so a row
+    # carrying none leads the page rather than trailing it — but the
+    # `tortoise_search` HANDLER DOCSTRING names `what has ended recently` as a
+    # RELEVANCE read, so a route here would leave that documented contract WRONG
+    # about a phrasing it names. (⛔ Not the served description: that is
+    # `ToolDefinition.description` in `tortoise/tool_registry.py` and it carries
+    # no state-routing sentence — #14491 review.) The docstring is a frozen
+    # baseline cell (its `co_consts` feed `served_from`; an owner-gated re-cut,
+    # #4282), so the two move together or not at all; this shape keeps its tail
+    # anchor until then (`what has ended in Q3` and `what was retired this
+    # quarter` are narrowings and refuse on the same anchor).
     ("wh_whole_question", re.compile(
         rf"^what\s+(?:(?:is|are|was|were|has|have|had)\s+)?(?:been\s+)?"
         rf"(?:{_ENDING_WORDS})\s*[?.!]*$")),
@@ -318,6 +878,68 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # we do, and every one of those was answered with the whole ended population.
     ("do_support", re.compile(
         rf"^(?:what\s+)?did\s+(?:we|i)\s+(?:{_ENDING_BASE})\b")),
+    # "is the onboarding flow retired?" / "is our pricing decision withdrawn"
+    # (#14033). A YES/NO question whose PREDICATE is the ending is a state
+    # QUESTION — the predicate, not the mood, is what makes it one.
+    # ⛔ The participle ENDS the question, which is the same tail anchor every
+    # tail-anchored shape uses: `is the report archived in S3` keeps the relevance
+    # read, because `in S3` is a narrowing and the ending is not the whole
+    # predicate. And the subject NP is BOUNDED (a determiner plus at most FOUR
+    # words) with a word run that STOPS at a relative-clause marker, so a clause
+    # cannot smuggle its own finite verb in — `is the report that legal archived`,
+    # `is the payment terms clause given the contract was archived` and
+    # `is the policy when a booking is cancelled` all refuse. The tail anchor, the
+    # NP bound, the NP stop and the start anchor are each pinned by a falsifier
+    # that reaches it in `tests/test_14033_state_cue_gap.py`; the `what is …` row
+    # of `NOT_SELECTED` cannot exercise any of them, because the start anchor
+    # (`^(?:is|are|was|were)`) never reaches it.
+    # ⛔ AND THE SUBJECT RUN STOPS AT A PREDICATE MODIFIER (PR #14491 review,
+    # P1/P2): a `not`/`never` in the run INVERTS the question — `is the plan not
+    # cancelled` was served the CANCELLED records — and a futurity (`to be
+    # retired`) or a disjunction (`… open or cancelled`) marker asks about a state
+    # the ended population cannot represent. All three classes are pinned in
+    # `tests/test_14033_state_cue_gap.py`, and the affirmative temporal modifiers
+    # (`already`, `still`) stay in the run so their spellings still route.
+    # ⛔ THE COPULA IS THE WHOLE be-PARADIGM, not `is` alone: `was the onboarding
+    # flow retired?`, `are our endpoints deprecated` and `were the claims
+    # retracted` are the same question in another tense/number, and refusing them
+    # costs the very fallthrough this shape exists to remove — the relevance read
+    # EXCLUDES terminal statuses, so a refused state question answers `0 rows`.
+    # The determiner set is the closed one (`these`/`those` included: a yes/no
+    # question about ONE named record can use either), and the token class
+    # survives `company's` / `all-hands` — a hyphen or an apostrophe inside a
+    # head noun is an ordinary spelling, not a clause boundary.
+    ("is_predicate", re.compile(
+        rf"^(?:is|are|was|were)\s+"
+        rf"(?:the|our|your|their|its|my|this|that|these|those)\s+"
+        # ⛔ THE HEAD SLOT IS GUARDED TOO. `_NP_STOP` starts at the SECOND
+        # word, so without this an ATTRIBUTIVE ending word in the head slot
+        # routes a content lookup to the ended population — measured on the
+        # previous cut: `is the deprecated api migration guide archived`,
+        # `is the retired employees list archived` and
+        # `is the superseded-policy document archived` all returned `ended`,
+        # where `origin/main` correctly keeps the relevance read. That is the
+        # wrong-answer class this module exists to remove, and it was a
+        # REGRESSION against main rather than a pre-existing gap. With the guard
+        # they are a safe miss (`None`, i.e. the read that says it did not
+        # understand) instead of a confident wrong population.
+        rf"(?!(?:{_ENDING_WORDS})\b){_NP_WORD_GUARDED}"   # the question's HEAD noun
+        rf"(?:\s+{_NP_STOP}{_NP_WORD_GUARDED}){{0,3}}"
+        rf"\s+(?:{_ENDING_WORDS})\s*[?.!]*$")),
+
+    # "list what we retired" / "list what we archived" (#14033). An IMPERATIVE,
+    # which the `scoped_noun`/`show me` boundary refuses — and the discriminator
+    # is the `what we <verb>` clause, not the imperative: `show me the retired
+    # onboarding flow` and `list our commitments` ask for records BY NAME and
+    # keep the relevance read (both are pinned), while "list WHAT we retired"
+    # asks for a SET. ⛔ The participle ends the question, so an appended window
+    # (`list what we retired last quarter`) is refused rather than dropped.
+    ("list_what", re.compile(
+        # ⛔ `withdrew` joins the alternation because this slot is the PAST
+        # tense: `_ENDING_WORDS` is the PARTICIPLE family and does not contain
+        # it, so `list what we withdrew` fell through to the relevance read.
+        rf"^list\s+(?:out\s+)?what\s+(?:we|i)\s+(?:withdrew|{_ENDING_WORDS})"
+        rf"\s*[?.!]*$")),
 )
 
 #: COMMITMENT-question shapes. The issue's own wording — *a commitment is a KIND,
@@ -381,7 +1003,10 @@ _COMMITMENT_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"(?:\s+(?:[a-z]+ly|still|also|now|ever)){0,2}\s+"
         r"\bcommitt(?:ed|ing)\b"
         r"\s*(?:to\b)?"
-        r"(?=\s*(?:[—–\-,.;:!?]|and\b|or\b|but\b|so\b|yet\b|nor\b|$))")),
+        # ⛔ `—`/`–` are UNREACHABLE here: the boundary fold rewrites every separator dash
+        # to `-` before any shape matches, so listing them was dead weight that read as
+        # coverage. The `-` member is the one that actually carries the fold's appositive.
+        r"(?=\s*(?:[\-,.;:!?]|and\b|or\b|but\b|so\b|yet\b|nor\b|$))")),
     # "current commitments" / "live commitments" / "what are the live commitments"
     ("scoped_noun", re.compile(
         r"^(?:what\s+(?:are|is)\s+)?(?:the\s+)?"
@@ -411,8 +1036,9 @@ class StateQuestion:
 def detect_state_question(text: str | None) -> StateQuestion:
     """Map a query to the state population it asks about (:data:`POPULATIONS`).
 
-    Deterministic and bounded — one normalisation plus a scan of six compiled
-    patterns, no model call and no IO, so the hot read path pays microseconds
+    Deterministic and bounded — one normalisation plus a scan of nine compiled
+    patterns (six ending + three commitment), no model call and no IO, so the hot
+    read path pays microseconds
     and the mapping is unit-testable offline. A ``None``/empty/whitespace query
     yields ``population=None``: full-scan mode and ``ended_scope`` are safe.
 
@@ -434,7 +1060,73 @@ def detect_state_question(text: str | None) -> StateQuestion:
     """
     if not text or not str(text).strip():
         return StateQuestion()
-    t = " ".join(str(text).lower().split())
+    # ⛔ ONE NORMALISATION POINT, BEFORE ANY SHAPE MATCHES. The shapes carry
+    # hand-written character classes (the head-noun token class admits `'`/`-`), and enumerating
+    # every typographic spelling of an apostrophe or a hyphen inside those classes
+    # is a losing game: a word processor, an autocorrect or a typesetter emits
+    # U+2019 for an apostrophe and U+2010..U+2014 for a hyphen, and a decomposed
+    # (NFD) `é` is a different string from the composed one. Measured before this
+    # fold, each of these answered `0 rows` — the silent-empty answer the whole
+    # shape exists to remove, because the relevance read excludes terminal
+    # statuses (PR #14491 review cycle 3, P2):
+    #     is the all–hands meeting cancelled     (U+2013)
+    #     is the all‑hands meeting cancelled     (U+2011)
+    #     is the all‐hands meeting cancelled     (U+2010)
+    #     is the café plan archived             (NFD `e` + U+0301)
+    # Folding here fixes them all at once, and keeps the regexes readable.
+    # ⛔ NFC, NOT NFKC, AND THE DIFFERENCE IS LOAD-BEARING. Compatibility
+    # normalisation also expands characters the word-run accepts into sequences
+    # that contain a NON-word character — `NFKC("½")` is `1` + U+2044 FRACTION
+    # SLASH + `2`, and U+2044 is not `[^\W_]`, so the run breaks and
+    # `is the ½ price plan archived` answers `None` (measured, PR #14491 review
+    # cycle 5, P1: it routed before the fold). NFC composes the NFD accent that
+    # motivated the normalisation in the first place (`cafe` + U+0301 -> `café`)
+    # and leaves fractions alone. ⛔ NFC ALSO FORGOES COMPATIBILITY FOLDING
+    # (full-width Latin, ligatures) — and that costs NOTHING here, because
+    # `[^\W_]` accepts any alphanumeric, so `is the ｐｌａｎ archived` and
+    # `is the ﬁle plan archived` route either way (measured on both this head and
+    # an NFKC mutant). An earlier cut of this note claimed full-width input
+    # "keeps the relevance read"; that was false and is not repeated.
+    # ⛔ EVERY DASH FOLDS TO `-`, AND THAT IS DELIBERATE — but it is why the
+    # MULTI-WORD stops in `_NP_STOP` accept `[\s-]+` rather than `\s+`. `-` is a
+    # member of the UNGUARDED token spelling (the guard below is what adds the boundary), so a dash with no spaces around it JOINS
+    # the words either side into ONE token and a stop lookahead anchored at a token
+    # start would never see the second word. ⛔ TWO DIFFERENT MECHANISMS COVER THAT,
+    # and naming them matters: `is_predicate` runs `_NP_WORD_GUARDED`, which turns a
+    # dash into a BOUNDARY exactly where a stop word follows it (`plan—not` refuses
+    # while `all-hands` still joins), and the multi-word arms keep `[\s-]+` because
+    # the arm itself has to cross the dash (`to—be`, `far—from`, `of—retired`;
+    # measured: reverting either widening to `\s+` flips its pinned rows to `ended`).
+    # So `no—longer` needs no `no[\s-]+longer` arm at all — `no` is not a stop word,
+    # the guard refuses `-longer`, and the flat `longer` arm stops the spaced
+    # spelling at the next token.
+    # ⛔ FOLDING A SEPARATOR DASH TO A SPACE INSTEAD IS WRONG, and it was
+    # measured: `committed_to`'s terminator admits `[—–-,.;:!?]` and depends on
+    # the dash still being THERE, so folding it away silently dropped
+    # `what are we currently committed to — pricing, …` out of the commitments
+    # population into the relevance read (a P0 in review cycle 7, which also
+    # red-ed the sibling pin). So the dash survives as punctuation and the STOPS
+    # are written to cross it.
+    # ⛔ AND THE SET IS THE `Pd` CATEGORY, NOT AN ENUMERATION. Listing
+    # U+2010..U+2014 missed 20 of Unicode's 26 `Pd` code points, and the ones real
+    # tooling emits are U+2015 (a horizontal bar) and U+FF0D (full-width) — each
+    # turned a routable state question into the same silent-empty fallthrough,
+    # including the commitments row above for U+2015 (measured, review cycle 8).
+    # ⛔ The SOFT HYPHEN U+00AD is NOT a `Pd` — it is `Cf`, and it is the `Cf` rule
+    # below that handles it (a list of dashes would have missed it too). So the
+    # fold is: every `Pd` -> `-`, the quote set -> `'`, and zero-width FORMAT
+    # characters (`Cf`) -> a SPACE (⛔ not dropped — dropping joins the words either
+    # side and lets `plan<U+00AD>not` bypass the negation arms). The
+    # ASCII fast path keeps the common case free: the explicit table handles the
+    # usual suspects, and the per-character category pass runs only when the
+    # result is still non-ASCII.
+    # ⛔ THE ORDER MATTERS AND IS TRANSFORM -> LOWER -> NORMALISE: normalising LAST
+    # means the composed form is what the shapes see, and lowering before the
+    # composition means a decomposed accent still composes afterwards. The
+    # transform is idempotent on its own output, so a caller that already sent
+    # ASCII passes through unchanged.
+    folded = _fold_typography(str(text))
+    t = " ".join(unicodedata.normalize("NFC", folded.lower()).split())
     for shape, pattern in _ENDING_SHAPES:
         m = pattern.search(t)
         if m:
