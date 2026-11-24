@@ -110,6 +110,7 @@ import {
   cheapSpoolScan,
   clearUnusableClaimPath,
   applyClaimPolicy,
+  restoreQuarantine,
 } from "./tortoise-capture.ts";
 import tortoiseCapture from "./tortoise-capture.ts";
 
@@ -8584,7 +8585,7 @@ test("#14350: a TARGETED pass cannot erase the durable claim fact (F1)", () => {
 });
 
 test("#14350: the TARGETED pass carries the fact END-TO-END (F1)", async () => {
-  // ⛔ THE POLICY IS NOT THE WIRING (review, cycle 13 P2). Every other F1 row on
+  // ⛔ THE POLICY IS NOT THE WIRING (review, cycle 15 P2). Every other F1 row on
   // this leg calls `applyClaimPolicy` directly, so re-introducing the PRE-FIX call
   // site — `if (summary.claimHeld || next === null) next = applyClaimPolicy(…)`, i.e.
   // a claim-less pass with an earned record BYPASSES the policy — left the suite
@@ -8655,7 +8656,7 @@ test("#14350: the claim policy agrees between both legs on every summary shape",
   const earned = { version: 1 as const, state: "ok" as const,
                    updated_at: "2026-01-02T00:00:00.000Z" };
   // [label, earned, summary, writes?, claim_unavailable on the result, prior?]
-  // ⛔ `prior: false` MEANS THERE IS NO FACT TO CARRY (review, cycle 13 P2). Every
+  // ⛔ `prior: false` MEANS THERE IS NO FACT TO CARRY (review, cycle 15 P2). Every
   // other row starts from an existing fact, so widening "carry it forward" to
   // "always stamp it" (`if (next)`) was green here — and a healthy box would then
   // report `NO drain exclusion` forever. It is the false-positive direction, and it
@@ -8680,7 +8681,7 @@ test("#14350: the claim policy agrees between both legs on every summary shape",
       { claimUnavailable: true, claimUnavailableReason: "" }, true, true],
   ];
   for (const [label, earnedRec, summary, writes, expected, prior] of matrix) {
-    // ⛔ A FRESH COPY OF BOTH INPUTS PER ROW (review, cycle 13 P3). One mutable
+    // ⛔ A FRESH COPY OF BOTH INPUTS PER ROW (review, cycle 15 P3). One mutable
     // `earned` object was reused across rows and `applyClaimPolicy` MUTATES its
     // `next`, so "holder, earned ok" only detected a missing `delete` because the
     // earlier "targeted, earned ok" row had already stamped the fact onto that shared
@@ -8703,4 +8704,40 @@ test("#14350: the claim policy agrees between both legs on every summary shape",
           + JSON.stringify(out));
     }
   }
+});
+
+test("#14350: a FAILED restore does not delete the only copy of a peer claim", () => {
+  // ⛔ `link(2)` FAILS WITH MORE THAN EEXIST (review, cycle 16, P3): the rename
+  // already vacated the claim path, so once the object is in the quarantine it is the
+  // ONLY copy of a live holder's claim. This branch used to warn and then
+  // `unlinkSync` unconditionally, emptying the path for the next `linkSync` — two
+  // holders for up to `ttl/3`, silently, evidence gone. `link(2)` lists
+  // EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside EEXIST, and ENOSPC on a
+  // spool directory is the ordinary case.
+  //
+  // The failure is produced deterministically at the PRIMITIVE: a restore target
+  // inside a directory that does not exist makes `linkSync` fail with ENOENT — an
+  // errno that is not EEXIST, exactly the class above — so no seam is needed.
+  //
+  // MUTATION THAT REDS THIS: restore the unconditional `unlinkSync(quarantine)` on
+  // the failure branch (then the quarantine is gone and the return value is `true`).
+  const spool = tmpSpool();
+  const quarantine = join(spool, "drain.claim.tmp-clear-1-peer");
+  writeFileSync(quarantine, "peer-claim-bytes");
+  const blockedTarget = join(spool, "no-such-dir", "drain.claim");
+
+  assert.equal(restoreQuarantine(quarantine, blockedTarget), false,
+    "a restore that could not happen must SAY so");
+  assert.equal(existsSync(quarantine), true,
+    "the only copy of the peer's claim was DELETED when the restore failed");
+
+  // …and the displacement path must obey the same rule.
+  const quarantine2 = join(spool, "drain.claim.tmp-clear-2-peer");
+  writeFileSync(quarantine2, "peer-claim-bytes-2");
+  assert.equal(
+    disposeQuarantine(quarantine2, "peer-claim-bytes-2", blockedTarget, "<not ours>"),
+    false,
+  );
+  assert.equal(existsSync(quarantine2), true,
+    "displaceQuarantine deleted the only copy when the restore failed");
 });

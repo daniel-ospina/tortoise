@@ -5423,6 +5423,12 @@ export function disposeQuarantine(
           `(${(err as NodeJS.ErrnoException)?.code ?? String(err)}); ` +
           "its holder keeps draining until its next refresh (up to ttl/3)",
       );
+      // ⛔ THE ONLY OTHER COPY (review, cycle 16, P3): the rename vacated `path`, so
+      // on a non-EEXIST failure this quarantined file is all that is left of a live
+      // holder's claim. Deleting it turns "restore failed" into "claim destroyed".
+      // Left in place — the `*.tmp-*` shape is swept by mtime, so nothing outlives
+      // the process here.
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return false;
     }
     try { unlinkSync(quarantine); } catch { /* best effort */ }
     return false;
@@ -5445,22 +5451,37 @@ export function disposeQuarantine(
  * deleted — see the call site in `clearUnusableClaimPath` (#14480 review, F3).
  * Mirrors `drain_claim._restore_quarantine`.
  */
-export function restoreQuarantine(quarantine: string, path: string): void {
+export function restoreQuarantine(
+  quarantine: string, path: string,
+): boolean {
   try {
     linkSync(quarantine, path);
   } catch (err) {
     // EEXIST is the normal case: a newer object already holds the path, and that
-    // is a holder either way. Anything else is worth naming, because the object we
-    // could not read could not be put back.
+    // is a holder either way. Anything else means the object we could not read
+    // could NOT be put back — and since the rename already vacated `path`, the
+    // quarantined file is then the ONLY copy of a live holder's claim.
+    //
+    // ⛔ SO IT IS NOT DELETED (review, cycle 16, P3). This used to warn and then
+    // `unlinkSync` unconditionally, which destroyed that only copy and answered
+    // `held` over an EMPTY path: the next `link` wins and two holders coexist for up
+    // to `ttl/3`, silently — exactly the window the quarantine rule exists to close,
+    // with the moved-aside evidence gone too. `link(2)` lists
+    // EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV besides EEXIST, and
+    // ENOSPC/EDQUOT on a spool directory is the ordinary case, not the exotic one.
+    // The `*.tmp-*` shape means the scratch sweeper collects it by mtime if this
+    // process dies here, so leaving it behind is BOUNDED.
     if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") {
       warn(
         `an unreadable drain claim could not be restored at ${path} ` +
-          `(${(err as NodeJS.ErrnoException)?.code ?? String(err)}); it is ` +
-          "honoured as a holder, so this pass must not run beside it",
+          `(${(err as NodeJS.ErrnoException)?.code ?? String(err)}); it is left in ` +
+          "the quarantine, honoured as a holder, and this pass must not run beside it",
       );
+      return false;
     }
   }
   try { unlinkSync(quarantine); } catch { /* best effort */ }
+  return true;
 }
 
 /**
@@ -5739,6 +5760,13 @@ export function acquireDrainClaim(
           // A peer's claim appeared in the window and was put back: there IS a
           // holder, so answer CONTENTION (no obstruction marker). Reporting it as
           // an obstruction ran the pass UNCLAIMED beside a live claim.
+          //
+          // ⛔ "HELD" WITH NOTHING AT THE PATH IS A FAILED RESTORE (review, cycle 16,
+          // P3): the object is the only copy and now sits in the quarantine, so the
+          // caller's `readDrainClaim` arm finds no record and would fall through to
+          // its UNCLAIMED arm. Mark the lost race instead, so the caller fails CLOSED
+          // and does not name a holder it cannot see.
+          if (!existsSync(path)) markRaced();
           return undefined;
         }
         // `gone` / `done`: the path changed, so RETRY — the next tick either installs

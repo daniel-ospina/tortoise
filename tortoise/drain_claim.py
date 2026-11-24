@@ -298,7 +298,7 @@ def _lstat_is_regular(path: Path) -> bool:
         return False
 
 
-def _restore_quarantine(quarantine: Path, path: Path) -> None:
+def _restore_quarantine(quarantine: Path, path: Path) -> bool:
     """Put a quarantined object BACK, never replacing a newer one.
 
     ``link`` is the create-if-absent arbiter, so a claim a peer installs while
@@ -400,8 +400,17 @@ def _dispose_quarantine(quarantine: Path, data: bytes,
         except OSError as exc:
             print(
                 f"tortoise.drain_claim: a displaced claim could not be restored "
-                f"({exc}); it will be re-verified at the holder's next refresh",
+                f"({exc}); it is left in the quarantine, and it will be re-verified "
+                "at the holder's next refresh",
                 file=sys.stderr)
+            # ⛔ THE ONLY OTHER COPY (review, cycle 16, P3). The rename vacated
+            # `path`, so on a non-`EEXIST` failure this quarantined file is all that
+            # is left of a live holder's claim. Unlinking it turned "restore failed"
+            # into "claim destroyed" and freed the path for the next `link` — two
+            # holders for up to `TTL/3`, silently. `link(2)` lists
+            # EACCES/EDQUOT/EIO/EMLINK/ENOSPC/EPERM/EROFS/EXDEV beside EEXIST.
+            # Leaving it is BOUNDED: the `.tmp-` infix is what the sweeper collects.
+            return False
         with contextlib.suppress(OSError):
             os.unlink(quarantine)
         return False
@@ -799,7 +808,23 @@ def _clear_unusable_claim_path(path: Path) -> str:
         # `filelock` advisory GHSA-fq56-3cx3-fjxp describes, and it inverts the
         # doctrine `acquire` states 40 lines above: a regular file we could not read
         # is HONOURED and never unlinked (#14480 review, F3).
-        _restore_quarantine(quarantine, path)
+        # ⛔ AND THE ANSWER IS STILL HELD WHEN THE RESTORE FAILED (review, cycle 16,
+        # P3) — the failure mode was never the answer, it was the DELETION: the
+        # restore used to unlink the only copy and then report HELD anyway, emptying
+        # `path` so the next `link` won it (the two-drainer window this branch
+        # exists to close). The object now stays in the quarantine, and HELD is the
+        # fail-CLOSED answer on this leg: `acquire` returns None, which `flush_spool`
+        # reads as `held_by_claim` and attempts NOTHING. ⛔ NOT `_CLEAR_REFUSED`:
+        # that raises `DrainClaimUnavailable`, whose handler stats the path, finds
+        # nothing, and runs the pass UNCLAIMED with the false reason "the spool root
+        # cannot hold a claim" — strictly worse than a contention answer naming no
+        # holder.
+        if not _restore_quarantine(quarantine, path):
+            print(
+                f"tortoise.drain_claim: the unreadable claim at {path} could not be "
+                "put back; it is left in the quarantine and this pass must not run "
+                "beside it",
+                file=sys.stderr)
         return _CLEAR_HELD
     try:
         os.unlink(quarantine)

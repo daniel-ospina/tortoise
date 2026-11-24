@@ -2113,7 +2113,7 @@ def test_the_claim_policy_agrees_on_every_summary_shape(tmp_path):
         # here carried `""`, which is why five rounds of parity work missed it.
         ("unclaimed, reason is EMPTY", 0, {"unavailable": True, "empty_reason": True},
          True, True),
-        # ⛔ THE FALSE-POSITIVE DIRECTION (review, cycle 13 P2). Every other row
+        # ⛔ THE FALSE-POSITIVE DIRECTION (review, cycle 15 P2). Every other row
         # starts from an EXISTING fact, so "carry it forward" could be widened to
         # "always stamp it" (`elif record is not None:`) with this matrix green — and
         # a healthy box would then report `NO drain exclusion` forever. This is the
@@ -2209,7 +2209,7 @@ def test_the_measurement_is_NO_VERDICT_when_a_NESTED_race_measured_nothing():
     `saturated`), so a scan of the TOP-LEVEL receipt alone never sees it.
 
     Deleting the nested scan left `_no_verdict` permanently `False` in the tool's
-    only multi-race mode — exit 0 on a barren run (#14480 review, cycle 13 P3).
+    only multi-race mode — exit 0 on a barren run (#14480 review, cycle 15 P3).
     The loop is what makes the mode's verdict exist at all.
 
     MUTATION THAT REDS THIS: delete the `for key in ("baseline", "saturated")`
@@ -2235,7 +2235,7 @@ def test_the_BARREN_counter_reads_each_processes_OWN_stdout():
     `barren += out.count("BARREN")` could be disabled with the hand-built
     receipts still green (a witness that passes `barren=4` proves nothing about
     the counter) — and the printed receipt would then say `supported: true`
-    while the exit code said 2 (#14480 review, cycle 13 P2). This drives the real
+    while the exit code said 2 (#14480 review, cycle 15 P2). This drives the real
     `_claim_race` with the arrival barrier stubbed to expire for every process.
 
     MUTATION THAT REDS THIS: delete the `barren += out.count("BARREN")` line.
@@ -2354,3 +2354,64 @@ def test_the_CLAIM_RACE_BARRIER_reports_TWO_winners_as_a_FINDING():
     assert M._no_verdict({"claim_race": receipt}) is False, (
         "a real two-drainer race is the FINDING this harness was built for, not a "
         "no-verdict — " + repr(receipt))
+
+
+def test_a_FAILED_restore_does_not_delete_the_only_copy(tmp_path, monkeypatch):
+    """⛔ A FAILED RESTORE MUST NOT DESTROY THE CLAIM IT COULD NOT PUT BACK
+    (review, cycle 16, P3).
+
+    `_takedown`/the clear already vacated the claim path, so once the object is in the
+    quarantine it is the ONLY copy of a live holder's claim. The failure branch used to
+    warn and then `unlink` it, emptying the path for the next `link` — two holders for
+    up to `TTL/3`, silently, with the moved-aside evidence gone too. `link(2)` lists
+    `EACCES`/`EDQUOT`/`EIO`/`EMLINK`/`ENOSPC`/`EPERM`/`EROFS`/`EXDEV` besides
+    `EEXIST`, and `ENOSPC`/`EDQUOT` on a spool directory is the ordinary case.
+
+    The answer stays HELD (fail CLOSED: `acquire` → `None` → `held_by_claim`, nothing
+    attempted). ⛔ Not `REFUSED`: that raises `DrainClaimUnavailable`, whose handler
+    finds an empty path and runs the pass UNCLAIMED — strictly worse.
+
+    MUTATION THAT REDS THIS: restore the unconditional `os.unlink(quarantine)` on the
+    failure branch (the object vanishes from disk, and the second assertion fails).
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    real_link = os.link
+
+    def link_fails(src, dst, *a, **kw):
+        if ".tmp-clear-" in str(src):
+            raise OSError(28, "No space left on device")  # ENOSPC, not EEXIST
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    monkeypatch.setattr(os, "link", link_fails)
+    try:
+        outcome = drain_claim._clear_unusable_claim_path(fifo)
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the removal"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "a failed restore is still CONTENTION (fail closed), got " + repr(outcome))
+    leftovers = list(root.glob("*.tmp-clear-*"))
+    assert leftovers, (
+        "the only copy of the peer's claim was DELETED when the restore failed")
+    assert json.loads(leftovers[0].read_text())["token"] == "peer-token"
