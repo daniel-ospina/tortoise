@@ -99,7 +99,11 @@ version: 1
 # matters only because it sits one main fold from rounding again. #14407 registered
 # `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
 # `test_notify`), and that registration is part of the partition stated above — the minute did not
-# move (28 m either way), which is exactly why the SECONDS are the graded claim. Re-run
+# move (28 m either way), which is exactly why the SECONDS are the graded claim. ⛔ #13722's
+# `tests/test_13722_stamp_chain_off_loop.py` (dual `api`/`core`, 0.2 s) is the registration that
+# moved THIS reading's NAME SETS off the five/six split the parent map emits: `i` and `j` joined
+# the worst bin while the minute stayed at 28 m, which is again why the graded claim is the set and
+# not the minute. Re-run
 # `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or split.
 # ⛔ AND THESE PARAGRAPHS ARE HISTORY, NOT A SECOND CLAIM. Every fold of `origin/main` re-derived
 # this emission and left its own reading behind, so the block accumulated five stacked restatements
