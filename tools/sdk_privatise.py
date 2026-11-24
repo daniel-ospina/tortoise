@@ -2040,7 +2040,30 @@ SWEEP_NAMES = 66
 #: **(11911, "3e92044bab08cc3d")**, which is `main`'s own 11910 plus exactly ONE row — the durable
 #: `claim_unavailable` self-heal's `recorded.update(keep)` (`tortoise/capture_spool.py`, the only new
 #: untyped `.update(` receiver in this diff vs `origin/main`). `--check` exits 0 on it.
-SWEEP_RESIDUE = (11911, "3e92044bab08cc3d")
+#:
+#: ⛔ THAT TREE IS THAT LANE'S, NOT THIS ONE'S.
+#:
+#: ⛔ #14445 RE-CUT IT ON `main`'s BEHALF — a deliberate re-pin, `--repin`'s own output and never
+#: arithmetic on the last one. `main` pinned (11910, "adc8229295339239") while its OWN tree derives
+#: (11911, "4ed42694957a174d"), so the required `surface-guard` leg was red ON `main` and every open
+#: PR inherited that red — the #14062 class this pin has recurred in before. The new reading is ONE
+#: ROW, `seen.update` **101 -> 102**, a COUNT and not a shape: the row sets were diffed with
+#: `--report --base 28ca66878d… --top 5000` on both trees and 860 shapes are on each. The row arrived
+#: with `#14506` on `main`: a `seen: dict[str, object] = {}` accumulator's `.update(kwargs)` inside a
+#: `subprocess.Popen` spy — the ordinary-word receiver class this pin REPORTS rather than refuses.
+#: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
+#: legitimised by this re-cut, and `--check` exits 0 on the pair below.
+#:
+#: ⛔ THIS FOLD KEPT BOTH SIDES' PROSE BLOCKS, as every fold above it did, and the PAIR itself was
+#: RE-DERIVED on the RESOLVED merge tree (`origin/main` `2cccf90f4dd` + `refs/pull/14445/head`) rather
+#: than carried from either side: `--repin` on THIS tree prints **(11912, "73827c80583e139f")** and
+#: `--check` exits 0 on it. Both parents read 11911 — they arrived at the same COUNT from different
+#: trees (`main` from its own `claim_unavailable` self-heal row, this lane from the `#14506`
+#: `seen.update` row, each naming a DIFFERENT digest), so the merged tree carries BOTH rows and the
+#: pair is neither parent's: the count is one above either, and the digest is the merged tree's own.
+#: Neither parent's pair is inherited — both parents' blocks stay because the diff between their
+#: readings is the substance of the fold, not a decoration around it.
+SWEEP_RESIDUE = (11912, "73827c80583e139f")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

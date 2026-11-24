@@ -1808,6 +1808,32 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #         i.e. the drain sequence is exercised against a throwaway graph this
     #         box serves, never the shared lane.
     # every site uses `monkeypatch.setenv`, so the parent env is reverted at teardown.
+    #
+    # ── #14429 (`test_spool_drain_rehearsal.py`) — the spool-drain rehearsal, and why
+    #    none of these three spellings can reach a server ────────────────────────────
+    # #14429 added seven mutation sites and no rows here, which redded THIS census on
+    # `main` (measured at 84f0d4440f03: `test (b)`'s only failure was
+    # `test_uri_env_mutations_declared.py::test_uri_env_mutations_declared`). The ten
+    # sibling shards were then cancelled by the NEXT push on the PR SUPERSEDING that
+    # run (`concurrency: cancel-in-progress: github.event_name == 'pull_request'`,
+    # python-ci.yml:154) — not by fail-fast: all three matrices set
+    # `fail-fast: false` (python-ci.yml:747, :2209, :3411) and no `fail-fast: true`
+    # exists in this repo. That supersede left the predicate at
+    # `VERDICT: UNMEASURED` and `python-ci-gate` at `failure`, because a cancelled
+    # shard's failure set cannot be measured. Triaged as
+    # DELIBERATE_URI, per site:
+    #   :389  the production-target REFUSAL probe — the assertion is `SystemExit` plus
+    #         "refusing a production target", so the gate READS the value and the
+    #         refusal fires before anything constructs a connection.
+    #   :395  the non-vacuity arm for that same gate ("refuse everything" would pass
+    #         :389 alone): the call proceeds PAST the gate and then dies on the stubbed
+    #         `_mode_knobs` assertion, so again nothing connects.
+    #   :568, :590, :614, :649, :676  each runs with `_stub_one_mode`, which replaces the
+    #         mode's work with a stub — the URI selects a branch of the acceptance path
+    #         and no server is contacted.
+    # Every site uses `monkeypatch`, so no lane state leaks. The literals are anchored to
+    # these exact values on purpose: a FUTURE, different URI in this file must red until
+    # it is triaged here, which is the whole point of the census.
     "test_spool_drain_rehearsal.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://api\.premiselabs\.co:6379/live-v5"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://localhost:16379/tortoise"\)$',
