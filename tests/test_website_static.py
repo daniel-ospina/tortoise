@@ -3898,6 +3898,27 @@ def _media_applies_at_desktop(condition: str) -> bool:
     REACHING a desktop viewport, because guessing "narrow" is the direction that
     hides an override.
 
+    ⛔ TWO NARROW SPELLINGS THIS READER DOES NOT MODEL, measured at this head
+    rather than assumed, and both deliberately left on the fail-closed side
+    (they are FALSE REDS, the direction a maintainer can SEE and a whole PR's
+    rounds have accepted; the other direction hides an override and ships):
+
+    * the Media Queries 4 RANGE syntax — `@media (width <= 760px) { … }` does
+      not carry `max-width`, so nothing is `constrained` and the block is read
+      as reaching desktop. Measured: `.pricing-card .btn { margin-top: 0 }`
+      inside it reds 4 rows of `TestProductTeamsPricingCardCtaBaseline`, on a
+      page a browser renders correctly. The `max-width` spelling of the SAME
+      hatch stays excluded, so this is a spelling gap and not a threshold one.
+    * a bare MEDIA TYPE — `@media print { … }` carries no threshold by design
+      and is likewise read as reaching, although print cannot affect a
+      1440x900 SCREEN measurement. `print` appears in the query-LIST rows
+      above for the same reason (an unmodelled component fails closed), so
+      excluding it here would reverse that recorded choice; this note exists so
+      the next reader finds the measurement instead of re-deriving it.
+
+    Both shapes are recorded as evidence, not fixed: modelling them is a
+    behaviour change that belongs in its own round with its own mutants.
+
     The CONDITION may be a query LIST or an `or` condition — both are a logical
     OR — so the answer is `any()` over the alternatives, never a verdict from
     one threshold picked out of the whole string. Measured (#14406 review round
