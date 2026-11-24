@@ -12189,16 +12189,92 @@ class TestProductTeamsCopy:
             "the scroll position")
 
 
-def _border_px_of(body: str, where: str) -> float:
-    """The px width in a `border:` shorthand — the compensation relation's operand."""
-    value = _effective_decl(body, "border") or ""
+#: Every property that can set a box's BLOCK-END border WIDTH.
+BORDER_END_WIDTH_PROPS = ("border", "border-width", "border-block",
+                          "border-bottom", "border-block-end",
+                          "border-bottom-width", "border-block-end-width")
+
+
+def _css_border_end_width(prop: str, value: str) -> float | None:
+    """The BLOCK-END border width `prop` sets, in px, or `None` if it sets none.
+
+    The border-width FAMILY, for the same reason `BASE_PAD_PROPS` exists: the
+    compensation relation's other operand was read from the `border` shorthand
+    alone, so `border-bottom-width`, `border-block-end` and
+    `border-width: a b c` were invisible and re-split the four CTAs with every
+    row GREEN (measured #14406 review round 19: `.pricing-card.popular
+    { border-bottom-width: 3px }` put its CTA at 6414.78 against 6415.78 —
+    1px, the exact #13645 item 6 signature — 209 passed).
+
+    `border`/`border-width` are ordered lists — 1 value sets all four sides, 2
+    are `(block, inline)`, 3 are `(block-start, inline, block-end)` and 4 are
+    `(block-start, inline-end, block-end, inline-start)` — so block-end is the
+    THIRD for 3 and 4 values and the FIRST otherwise, the positional rule
+    `_css_block_end` already applies to `padding`. `border-block` is
+    `(start, end)`; the single-side properties name their side.
+
+    Widths are picked out by the px pattern rather than by position, because a
+    `border:` shorthand interleaves style and colour tokens
+    (`2px solid var(--accent)`) and those are not lengths.
+    """
     widths = [m for m in (_BORDER_WIDTH_PX.fullmatch(t)
-                          for t in _css_tokens(value)) if m]
-    assert widths, (
-        f"`{where}` declares `border: {value}`, whose width cannot be read as "
-        "px — the popular card's compensation relation needs it, so an "
-        "unreadable border is a FAIL, not a skip")
-    return float(widths[0].group(1))
+                          for t in _css_tokens(_without_important(value)))
+              if m]
+    if not widths:
+        return None
+    if prop in ("border", "border-width"):
+        chosen = widths[2] if len(widths) >= 3 else widths[0]
+    elif prop == "border-block":
+        chosen = widths[-1] if len(widths) > 1 else widths[0]
+    else:
+        chosen = widths[0]
+    return float(chosen.group(1))
+
+
+def _border_end_width_cascade(css: str, compound: str,
+                              skip_popular: bool) -> float | None:
+    """The block-END border width a browser applies to `compound`.
+
+    Same ranking as `_css_block_end_cascade` — `!important`, then specificity,
+    then source order — and the same reach (`_css_rightmost_selects`, the
+    element a bare rule selects, and `*`), because this is the OTHER operand of
+    a relation whose `padding` half is already read that way: a reader narrower
+    than the one it is compared against turns a stale expectation into a green
+    row (#14406 review round 19).
+
+    `skip_popular` drops the parts that NAME `.popular`, so the BASE operand is
+    the border the three sibling cards get. The popular operand keeps them on
+    purpose: its own rule out-ranks the base one and the cascade decides.
+    """
+    ranked: list[tuple[tuple, float]] = []
+    element = (_element_carrying_class(css, compound[1:])
+               if compound.startswith(".") else None)
+    for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
+        for part in (p.strip() for p in prelude.split(",")):
+            if "<" in part:
+                continue
+            rightmost = _css_rightmost_compound(part)
+            if not _css_rightmost_selects(rightmost, compound) and not (
+                    rightmost.startswith("*")) and not (
+                    element is not None
+                    and _css_compound_matches_element(rightmost, element)):
+                continue
+            if skip_popular and ".popular" in part:
+                continue
+            specificity = _css_specificity(part) or (9, 9, 9)
+            for decl_index, decl in enumerate(_css_blanked(body).split(";")):
+                name, sep, value = decl.partition(":")
+                prop = name.strip().lower()
+                if not sep or prop not in BORDER_END_WIDTH_PROPS:
+                    continue
+                width = _css_border_end_width(prop, value)
+                if width is None:
+                    continue
+                important = bool(_CSS_IMPORTANT.search(value))
+                ranked.append(((important, specificity, rule_index, decl_index),
+                               width))
+    ranked.sort(key=lambda entry: entry[0])
+    return ranked[-1][1] if ranked else None
 
 
 def _popular_border_extra_px(css: str) -> float:
@@ -12211,16 +12287,18 @@ def _popular_border_extra_px(css: str) -> float:
     page whose border was untouched (measured: `.pricing-card { border-color:
     #fff }`, CTA baselines unmoved, `_border_px_of` receiving "").
     """
-    base_card = _css_last_declaring_body(css, ".pricing-card", "border")
+    base_card = _border_end_width_cascade(css, ".pricing-card",
+                                         skip_popular=True)
     assert base_card is not None, (
-        "no rule naming `.pricing-card` declares `border`, so this relation has "
-        "no base operand")
-    popular = _css_last_declaring_body(css, ".pricing-card.popular", "border")
-    assert popular is not None, (
-        "no rule naming `.pricing-card.popular` declares `border`, so its "
-        "thicker border is gone")
-    return (_border_px_of(popular, ".pricing-card.popular")
-            - _border_px_of(base_card, ".pricing-card"))
+        "no rule the three sibling cards obey gives `.pricing-card` a "
+        "block-END border width, so this relation has no base operand")
+    popular_card = _border_end_width_cascade(css, ".pricing-card.popular",
+                                             skip_popular=False)
+    assert popular_card is not None, (
+        "no rule reaching `.pricing-card.popular` gives it a block-END border "
+        "width, so its thicker border — the reason the compensation exists — "
+        "is gone")
+    return popular_card - base_card
 
 
 #: Every property that can set a box's BLOCK-END inset, in one place so the
@@ -12253,26 +12331,50 @@ def _base_block_end_pad(css: str) -> str | None:
     construction and what remains is `!important` over source order — the
     author-origin cascade in full.
 
-    Reach is `_css_last_declaring_body`'s: this selector, at a DESKTOP-applicable
-    media condition (a narrow hatch is the cards stacking by design). Nothing
-    wider is claimed — an ancestor-selector override is not read here.
+    Reach is the CASCADE's, not an exact-selector's (#14406 review round 19):
+    this reader used to accept only rules whose selector LIST contained
+    `.pricing-card` verbatim, so an ancestor- or type-qualified override of the
+    base inset moved what a browser renders while the expectation stayed at the
+    base rule's value — measured `.pricing-grid .pricing-card { padding: 2rem }`
+    and `div.pricing-card { padding: 2rem }` at 4px off the shared baseline with
+    the whole module GREEN (209 passed). It is one operand of a relation whose
+    other side (`_css_block_end_cascade`) is fully wide, so a narrow read here
+    makes a stale expectation indistinguishable from a correct one. The parts
+    that NAME `.popular` are skipped instead: those are the OTHER operand.
+
+    `!important` is a PRIORITY, not part of the value (#14406 review round 19):
+    the longhand branch of `_css_block_end` returns its value verbatim, so
+    `padding-bottom: 1.75rem !important` produced the expectation
+    `calc(1.75rem !important - 1px)` — not a CSS value at all — and reded six
+    rows on a page that renders identically (measured: CTA tops 6415.78 x4).
+    It is stripped before the side is read.
     """
-    best_plain: str | None = None
-    best_important: str | None = None
-    for prelude, body, _condition in _css_desktop_rules(css):
-        if ".pricing-card" not in {p.strip() for p in prelude.split(",")}:
-            continue
-        for decl in _css_blanked(body).split(";"):
-            name, sep, value = decl.partition(":")
-            prop = name.strip().lower()
-            if not sep or prop not in BASE_PAD_PROPS:
+    ranked: list[tuple[tuple, str]] = []
+    element = _element_carrying_class(css, "pricing-card")
+    for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
+        for part in (p.strip() for p in prelude.split(",")):
+            if "<" in part:
                 continue
-            inset = _css_block_end(prop, value.strip())
-            if _CSS_IMPORTANT.search(value.strip()):
-                best_important = inset
-            else:
-                best_plain = inset
-    return best_important if best_important is not None else best_plain
+            rightmost = _css_rightmost_compound(part)
+            if not _css_rightmost_selects(rightmost, ".pricing-card") and not (
+                    rightmost.startswith("*")) and not (
+                    element is not None
+                    and _css_compound_matches_element(rightmost, element)):
+                continue
+            if ".popular" in part:
+                continue
+            specificity = _css_specificity(part) or (9, 9, 9)
+            for decl_index, decl in enumerate(_css_blanked(body).split(";")):
+                name, sep, value = decl.partition(":")
+                prop = name.strip().lower()
+                if not sep or prop not in BASE_PAD_PROPS:
+                    continue
+                important = bool(_CSS_IMPORTANT.search(value))
+                ranked.append(((important, specificity, rule_index, decl_index),
+                               _css_block_end(
+                                   prop, _without_important(value.strip()))))
+    ranked.sort(key=lambda entry: entry[0])
+    return ranked[-1][1] if ranked else None
 
 
 def _expected_popular_block_end_pad(css: str) -> str:
@@ -12938,16 +13040,17 @@ class TestProductTeamsPricingCardCtaBaseline:
         # red this row with "declares `border: `, whose bottom width cannot be
         # read", and `.pricing-card { padding: 2rem }` with its compensation
         # derived from a padding the page no longer has.
-        base_border = _css_last_declaring_body(css, ".pricing-card", "border")
+        base_border = _border_end_width_cascade(css, ".pricing-card",
+                                               skip_popular=True)
         assert base_border is not None, (
-            "no rule naming `.pricing-card` declares `border`, so the base "
-            "card's width — the other operand of the compensation relation — "
-            "cannot be read")
-        popular_border = _css_last_declaring_body(
-            css, ".pricing-card.popular", "border")
+            "no rule the sibling cards obey gives `.pricing-card` a block-END "
+            "border width, so the compensation relation has no base operand")
+        popular_border = _border_end_width_cascade(
+            css, ".pricing-card.popular", skip_popular=False)
         assert popular_border is not None, (
-            "`.pricing-card.popular` declares no `border`, so its thicker "
-            "border — the reason the compensation exists — is gone")
+            "no rule reaching `.pricing-card.popular` gives it a block-END "
+            "border width, so its thicker border — the reason the "
+            "compensation exists — is gone")
         # ⛔ THE WHOLE `padding` FAMILY, through the ONE helper
         # (#14406 review round 16). Reading only the shorthand here red a
         # `padding-block`/`padding-inline` split whose geometry is identical —
@@ -12964,8 +13067,13 @@ class TestProductTeamsPricingCardCtaBaseline:
             "the popular card's bottom border is not WIDER than its siblings', "
             f"so the 1px compensation this row exists for is stale (measured "
             f"{extra_px:g}px, expected a positive difference)")
-        popular_border_px = _border_px_of(popular_border, ".pricing-card.popular")
-        base_border_px = _border_px_of(base_border, ".pricing-card")
+        popular_border_px = _border_end_width_cascade(
+            css, ".pricing-card.popular", skip_popular=False)
+        base_border_px = _border_end_width_cascade(
+            css, ".pricing-card", skip_popular=True)
+        assert popular_border_px is not None and base_border_px is not None, (
+            "the compensation relation's border operands cannot be read from "
+            "this page, so its message would quote a number it does not have")
         expected_pad = _expected_popular_block_end_pad(css)
 
         assert winner == expected_pad, (
