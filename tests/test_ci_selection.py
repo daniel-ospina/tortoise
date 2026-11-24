@@ -21835,11 +21835,13 @@ def test_duration_coverage_guard_fires_below_the_floor_and_not_at_it():
       * `test_null_or_non_mapping_durations_reports_instead_of_tracebacking` — the
         documented ABSENT-map PASS state (`cs.main()` must exit 0 on an empty map).
 
-    What nothing else pins is the CONSTANT ITSELF: no behavioural mutation can see a
-    changed `DURATION_COVERAGE_MIN`, because the boundary arm's 89/90/95 fixtures move
-    with it. This arm's first assertion is the literal
-    `assert DURATION_COVERAGE_MIN == 0.90`, and that is its whole remaining
-    contribution — it is kept for that pin, not for a gate nobody else grades.
+    What nothing else pins is the CONSTANT ITSELF, and the reason is the width of the
+    boundary arm's band, not any blindness to it: its fixtures are the literals 89 /
+    90 / 95, so it brackets `DURATION_COVERAGE_MIN` to `(0.89, 0.90]` — 0.80 and 0.95
+    red it, while a SUB-BAND move to 0.895 passes it (measured, with this arm redding
+    on `assert DURATION_COVERAGE_MIN == 0.90`). That literal is this arm's whole
+    remaining contribution: it is kept for the constant pin, not for a gate nobody
+    else grades.
     """
     from tools.ci_selection import DURATION_COVERAGE_MIN, duration_coverage_issues, load_manifest
 
