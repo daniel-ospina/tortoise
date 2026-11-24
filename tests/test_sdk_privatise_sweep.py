@@ -296,6 +296,10 @@ def _residue_block() -> str:
     both sides' blocks once more and took the run to 1862, which is ALSO the figure re-measured by
     this walk on the resolved file; only on that later fold did the pair move (+1, `11910`), so the
     two folds are not interchangeable and neither figure is inherited from the other:
+    — and the `#14395` read-wave lane's own re-pin paragraph arrived on `main` in the same
+    window, adding `#:` prose of its own to `tools/sdk_privatise.py`; it is NOT folded into any
+    figure above, because every one of those is the reading of ITS OWN tree and this one is the
+    resolved tree's, re-walked by this function and never adjusted to a carried figure:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
