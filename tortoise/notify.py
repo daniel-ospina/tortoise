@@ -1065,6 +1065,30 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                        else ("an open incident whose issue number could not be "
                              "read just now" if not number_known
                              else "an open incident with no issue number on record"))
+                # ⛔ The re-arm clause is RENDERED from the tuple, never restated
+                # (round 13, P2). This arm is reached for EVERY member of
+                # :data:`ABUSE_INCIDENT_KINDS`, and ``abuse_suspended`` is one of
+                # them — but it is deliberately EXCLUDED from
+                # :data:`_EPISODE_INCIDENT_KINDS` (it records an operator
+                # decision, not a rule's flag window), so NO episode end ever runs
+                # for it and no close can therefore FAIL or back off. The flat
+                # sentence told an operator holding a suspension reminder to look
+                # for a failed close that cannot exist for that kind, and at "a
+                # rule that flaps", which is not what a suspension is. This is the
+                # surface the human READS; the log line in
+                # :func:`_deliver_unattributed` already derives its clause this
+                # way, and the two must not diverge again.
+                re_arm_note = (
+                    "a close that FAILS or is backing off (a cooldown) can "
+                    "re-arm it, as can a LIFTED suppression, a deferred filing "
+                    "or a FAILED SEND, so a rule that flaps can page once per "
+                    "crossing"
+                    if kind in _episode_delivery_kinds() else
+                    "this kind has NO rule episode, so no episode end ever "
+                    "re-arms it; a LIFTED suppression, a deferred filing, a "
+                    "FAILED SEND or the ledger's own cap eviction can end the "
+                    "window early"
+                )
                 bot_token = _env("TELEGRAM_BOT_TOKEN")
                 chat_id = _env("TELEGRAM_CHAT_ID")
                 channel_ok = not (
@@ -1074,10 +1098,8 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         kind, org_id, details,
                         attribution=(f"Still open — {ref}. One reminder per "
                                      f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
-                                     "while the delivery window holds; a close "
-                                     "that FAILS or is backing off (a cooldown) "
-                                     "can re-arm it, so a rule that flaps can page "
-                                     "once per crossing. Repeats inside a held "
+                                     "while the delivery window holds; "
+                                     f"{re_arm_note}. Repeats inside a held "
                                      "window are folded"
                                      # ⛔ ONLY the arm that NAMES an issue may
                                      # point at its comment trail (round 5, P2):

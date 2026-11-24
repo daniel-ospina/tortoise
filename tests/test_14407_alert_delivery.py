@@ -1643,6 +1643,83 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
     notify.reset_abuse_delivery_for_tests()
 
 
+def test_the_sent_reminder_credits_a_close_re_arm_only_to_a_kind_that_has_one(
+        monkeypatch):
+    """The SENT reminder must scope its re-arm clause exactly as the log does
+    (#14407 round 13, P2).
+
+    The ``DEDUP`` arm of ``_notify_abuse_incident`` is reached for EVERY member of
+    :data:`ABUSE_INCIDENT_KINDS`, and ``abuse_suspended`` is one of them — but it
+    is deliberately EXCLUDED from :data:`_EPISODE_INCIDENT_KINDS`, so **no episode
+    end ever runs for it** and no close can therefore FAIL or back off. The
+    reminder's re-arm clause was still the flat rule-episode sentence, so an
+    operator holding a suspension reminder was pointed at a failed close that
+    cannot exist for that kind, and at "a rule that flaps", which is not what an
+    operator suspension is.
+
+    ⛔ This is the surface a HUMAN READS (the message that is actually sent), which
+    is why it is pinned separately from the ``logger.warning`` clause: the log was
+    scoped and tested in round 6 while the sent text kept the flat claim, so the
+    code comment above the string and the string itself disagreed.
+
+    BOTH polarities are pinned: deleting the clause from every kind would
+    under-report the rule-episode kinds' real (true) re-arm and must red too.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    sent: list[str] = []
+
+    class _HeldOpenIncident:
+        """A live incident whose delivery window has expired (DEDUP + deliver)."""
+
+        def open_incident_state(self, kind, subject="", detail=None, writer=None):
+            return OpenOutcome.DEDUP
+
+        def incident_record(self, kind, subject=""):
+            return {"issue_number": 7}
+
+        def resolve_incident_state(self, kind, subject="", **kw):
+            raise RuntimeError("close failed")
+
+    def _reminder(kind: str) -> str:
+        sent.clear()
+        monkeypatch.setattr(notify, "_abuse_alert_store",
+                            lambda: (_HeldOpenIncident(), ""))
+        monkeypatch.setattr(notify, "telegram_send",
+                            lambda bot, chat, text, **k: sent.append(text))
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+        notify._skip_logged.clear()
+        notify.reset_abuse_delivery_for_tests()
+        notify.notify_abuse(kind, {"org_id": "org-a"},
+                            {"rule": "point_create", "count": 900})
+        assert len(sent) == 1, (kind, sent)
+        return sent[0]
+
+    reminder = _reminder("abuse_suspended")
+    assert "a close that FAILS" not in reminder, (
+        "the reminder points a suspension at a failed close, but that kind has no "
+        f"rule episode so no episode end ever runs: {reminder!r}")
+    assert "NO rule episode" in reminder, (
+        f"the suspension reminder must state the limit it actually has: {reminder!r}")
+    # The retired absolute and the complete re-arm set, same discipline as the log:
+    # ``abuse_suspended`` IS re-armed early in some shapes, so neither "never" nor
+    # a truncated list may be stated.
+    assert "NEVER re-armed early" not in reminder, (
+        f"the reminder restates the absolute a generic release disproves: {reminder!r}")
+    assert "FAILED SEND" in reminder, (
+        f"the re-arm set omitted the release a chat outage produces: {reminder!r}")
+    assert "cap eviction" in reminder, (
+        f"the re-arm set omitted the ledger's own cap eviction: {reminder!r}")
+
+    reminder = _reminder("abuse_flag")
+    assert "a close that FAILS" in reminder, (
+        f"a rule-episode kind lost its (true) close re-arm clause: {reminder!r}")
+    assert "NO rule episode" not in reminder, reminder
+    notify.reset_abuse_delivery_for_tests()
+
+
 # ── 4b. the runbook's own cells agree with the code's classification ────────
 
 def _runbook_row(kind: str) -> str:
