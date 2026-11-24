@@ -210,7 +210,7 @@ def _refers_to(node: ast.AST, name: str) -> bool:
     return isinstance(node, ast.Attribute) and node.attr == name
 
 
-def _submitted_names(tree: ast.Module) -> list[ast.Name]:
+def _submitted_names(tree: ast.Module) -> list[ast.Name | ast.Attribute]:
     """The callable nodes that ARE an awaited off-loop submission's second argument.
 
     i.e. the second positional argument of every awaited
@@ -223,7 +223,7 @@ def _submitted_names(tree: ast.Module) -> list[ast.Name]:
         for node in ast.walk(tree)
         if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)
     }
-    out: list[ast.Name] = []
+    out: list[ast.Name | ast.Attribute] = []
     for node in ast.walk(tree):
         if not (
             isinstance(node, ast.Call)
@@ -449,6 +449,32 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         for owner in sorted(owners)
     }
     stray = {owner: lines for owner, lines in stray.items() if lines}
+
+    # ⛔ A CALLABLE BUILT FROM A STRING IS STILL A WAY TO RUN THE CHAIN (review
+    # finding, P2, measured on `/tmp` mutants). The reference walk above sees
+    # `ast.Name`/`ast.Attribute` NODES, so `locals().get("_stamp_chain")()` and
+    # `getattr(_holder, "_stamp_chain")()` — both valid inline runs on the loop —
+    # leave it reporting ONLY the legal submission, and the pin stayed GREEN
+    # (`1 passed`, rc=0) for both. This arm closes the shape the walk cannot
+    # follow: the owner's name must not appear as a STRING LITERAL in the module
+    # at all. Fail-closed on purpose — a diagnostic string naming the chain reds
+    # too, and a name worth spelling in a string is a name worth grading
+    # explicitly. Measured cost today: zero (`grep` finds the name at its `def`
+    # and at its submission, and nowhere else).
+    string_built = {
+        owner: [node.lineno for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and node.value == owner]
+        for owner in sorted(owners)
+    }
+    string_built = {owner: lines for owner, lines in string_built.items() if lines}
+    assert not string_built, (
+        f"{_STAMP_DOOR}'s chain name appears as a STRING LITERAL at "
+        f"{string_built} (owner: lines) — a callable built from a string "
+        "(`locals().get(…)`, `getattr(obj, …)`) is an inline run this pin's "
+        "reference walk cannot see, so it could put the per-id record writes back "
+        "on the event loop with this gate GREEN. Spell the call by name at its "
+        "single submission, or re-derive this pin to follow that indirection "
+        "(#13722)")
     assert not stray, (
         f"{_STAMP_DOOR}'s chain is referenced OUTSIDE its off-loop submission at "
         f"{stray} (owner: lines) — it runs on the caller's thread there, i.e. on "
