@@ -74,9 +74,11 @@ run-time guard in #14528:
    two branches — decide it (`` X if False else Y ``, `` X if PAYLOAD else X ``,
    and an `if`-expression IN test position such as `` if (0 if True else 1): ``),
    a `match` case's `if` guard (`case _ if False:`), a `for`/`async for`
-   iterable (`for _ in ():` never enters its body), and a comprehension's
+   iterable (`for _ in ():` never enters its body), a comprehension's
    generator iterables and `if` clauses (`[await … for _ in ()]`,
-   `[await … for _ in _xs if False]`). Ungraded: anything
+   `[await … for _ in _xs if False]`), and the ELSE branch of an always-TRUE
+   `if`/`if`-expression (`if True: … else: await …` never runs the `else`).
+   Ungraded: anything
    `_literal_truth` answers `None` for — a run-time constant (`if _FEATURE:`), an
    unpack of a run-time value, an arbitrary call, two equal non-singleton
    literals compared by `is`, and an expression-position short circuit
@@ -87,7 +89,9 @@ run-time guard in #14528:
    the submission, a `break`/`continue`, an `assert False` — is an
    unreachable-body question an expression grader cannot answer, so it is
    neither graded here nor implied by these arms; the run-time guard in #14528
-   is its home.
+   is its home. The same is true of a `while`'s `else` in BOTH polarities: it
+   runs when the loop completes WITHOUT a `break`, so deciding it needs break
+   analysis rather than an expression walk.
 
 ⛔ NESTING IS NOT THE PROPERTY, and a first cut of this file asserted it: the
 chain already lives in `_report_capture`, a nested `async def`, and nesting a
@@ -697,10 +701,15 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
             # submission never runs, and `… if False` filters every element. Each
             # generator's `iter` is evaluated at its own nesting level — the first
             # in the enclosing scope, a later one only once the earlier clauses
-            # pass — so every clause is pushed as a guard for the ELEMENT, which is
-            # the only place the submission can sit. The clause expressions
-            # themselves are walked under the guards already in force, because they
-            # run before their own condition is applied.
+            # pass — so every clause is pushed as a guard for the ELEMENT (and for
+            # every LATER clause), while each clause expression ITSELF is walked
+            # under the guards already in force, because it runs before its own
+            # condition is applied. ⛔ THE ELEMENT IS NOT THE ONLY PLACE A
+            # SUBMISSION CAN SIT, and an earlier cut of this comment said it was
+            # (review P2 at `f229af1`, measured): a call in a clause expression is
+            # graded too, and the rows below put one in each — the nested-`iter`
+            # row reds if a later clause is walked without the earlier guards, and
+            # the bare `if g()` row reds if clause calls stop being graded at all.
             element_guards = list(guards)
             for generator in node.generators:
                 walk(generator.iter, element_guards)
@@ -716,17 +725,40 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
             for part in parts:
                 walk(part, element_guards)
             return
-        if isinstance(node, (ast.If, ast.While, ast.IfExp)):
+        if isinstance(node, (ast.If, ast.IfExp)):
             # ⛔ `IfExp` is graded too: CPython folds `X if False else Y` to `Y` and
             # drops the `X` branch, so a submission in `X` is as gone as one under a
-            # dead `if`. Its `orelse` is the branch that runs, so it is walked
-            # unguarded — same rule as `If`.
+            # dead `if`.
+            #
+            # ⛔ AND THE OTHER BRANCH CAN BE THE DEAD ONE (review P2 at `f229af1`,
+            # measured): when the test is ALWAYS TRUE the `else` is what never runs
+            # — `if True: pass` / `else: await _run_off_loop(…)` is the same
+            # silent-loss state with the polarity flipped, and walking `orelse`
+            # unguarded reported NOTHING for it. The guard pushed there is the
+            # NEGATION of the test, so the one `_statically_false` predicate decides
+            # both directions instead of a second polarity rule.
             walk(node.test, guards)
             body = node.body if isinstance(node.body, list) else [node.body]
             orelse = node.orelse if isinstance(node.orelse, list) else [node.orelse]
             for child in body:
                 walk(child, [*guards, (node.test.lineno, node.test)])
+            else_guards = guards
+            if _literal_truth(node.test) is True:
+                negated = ast.UnaryOp(op=ast.Not(), operand=node.test)
+                ast.copy_location(negated, node.test)
+                else_guards = [*guards, (node.test.lineno, negated)]
             for child in orelse:
+                walk(child, else_guards)
+            return
+        if isinstance(node, ast.While):
+            # ⛔ A `while`'s `else` is NOT graded in either polarity: it runs when
+            # the loop completes WITHOUT a `break`, so deciding it needs break
+            # analysis, which an expression grader cannot do. Declared ungraded in
+            # the header rather than half-graded here.
+            walk(node.test, guards)
+            for child in node.body:
+                walk(child, [*guards, (node.test.lineno, node.test)])
+            for child in node.orelse:
                 walk(child, guards)
             return
         if node is target:
@@ -1183,7 +1215,9 @@ def test_literal_truth_decides_the_shapes_the_dead_guard_arm_relies_on(
     never run — the silent-loss state the arm exists to refuse. The `{*…}`/
     `{**…}` rows are the P2-1 fix, which read a spread from its operand instead of
     treating it as empty. The `0 if _x else 0` / `1 if _x else 1` rows pin the
-    branch-agreement arm (deleting its two lines reds them and nothing else), and
+    branch-agreement arm (deleting its two lines reds them AND
+    `test_an_if_expression_guard_is_graded_as_a_guard`, whose dead leg is built from
+    the same `0 if _x else 0` — measured: 3 failed), and
     `0 if _x else 1` is its control: disagreeing branches stay undecidable. The
     `None` rows pin the other direction: nothing may grade a run-time value, or a
     correct tree reds with a false diagnosis.
@@ -1648,6 +1682,28 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
         (["def f():", "    {k: g() for k in _xs if 1 == 2}"], ["1 == 2"]),
         (["def f():", "    [g() for _ in _xs]"], []),
         (["def f():", "    [g() for _ in _xs if _flag]"], []),
+        # ⛔ A CALL INSIDE A CLAUSE IS GRADED TOO, under the guards already in force
+        # (review P2 at `f229af1`, measured). The nested-`iter` row is the fail-open
+        # direction: with a later clause walked under the ENCLOSING guards only, the
+        # inner `g()` runs only if the outer `()` yielded, i.e. never — and that
+        # mutant reported nothing. The bare `if g()` row is the other direction: a
+        # clause call that DOES run must not be reported.
+        (["def f():", "    [x for _ in () for _y in (g(),)]"], ["()"]),
+        (["def f():", "    [g() for _ in () if _flag]"], ["()"]),
+        (["def f():", "    [x for _ in _xs if g()]"], []),
+        # …and the same for a comprehension's own `iter`: pushing its guard before
+        # walking it reports `g()` inside `(0 if g() else 0)`, which RUNS.
+        (["def f():", "    [x for _ in (0 if g() else 0)]"], []),
+        # ⛔ AND A CALL IN A `for` HEADER RUNS — the iterable is evaluated to DECIDE
+        # the loop, so an always-false iterable does not make its own calls dead
+        # (review P2 at `f229af1`, measured: pushing the header guard before walking
+        # the iterable reported `g()` here, which runs).
+        (["def f():", "    for _ in (0 if g() else 0):", "        pass"], []),
+        # ⛔ THE `else` OF AN ALWAYS-TRUE `if` IS THE DEAD BRANCH (same finding,
+        # measured): walking `orelse` unguarded reported nothing for it.
+        (["def f():", "    if True:", "        pass", "    else:", "        g()"],
+         ["not True"]),
+        (["def f():", "    if False:", "        pass", "    else:", "        g()"], []),
     ],
 )
 def test_a_loop_header_or_comprehension_clause_is_graded_as_a_guard(
