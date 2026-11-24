@@ -301,7 +301,14 @@ recovery_streak_declared() { # kind -> the DECLARED window (no env overrides)
     # #3147 split R2 into two tiers — both are bounded measurements, so both
     # carry the window (R2_DOWN is the watcher-owned reachability tier,
     # R2_UNLISTABLE the driver-owned listing tier).
-    R2_DOWN|R2_UNLISTABLE|APP_DOWN|WATCHER_DOWN|SWEEP_CONFIG_ERROR|SWEEP_OFF_STALE|SWEEP_NO_COVERAGE|POOL_STALE|PURGE_FAILED|RECONCILE_FAILED|STALE|NEVER_BACKED_UP|METADATA_LOST|BACKUP_SET_MISSING|DRIVER_DOWN)
+    # #14407: the two abuse kinds a RULE EPISODE can file. Their recovery
+    # condition is R1/R2's bounded sliding-window measurement, which hovers at
+    # its threshold exactly like the DR plane above — so the engine needs
+    # consecutive clean observations, not one. These two rows are INERT here
+    # (this sweep never resolves an abuse kind; `notify.resolve_abuse_episode`
+    # does), mirrored only so the two declarations cannot drift and the
+    # cross-language contract test keeps ONE window policy.
+    R2_DOWN|R2_UNLISTABLE|APP_DOWN|WATCHER_DOWN|SWEEP_CONFIG_ERROR|SWEEP_OFF_STALE|SWEEP_NO_COVERAGE|POOL_STALE|PURGE_FAILED|RECONCILE_FAILED|STALE|NEVER_BACKED_UP|METADATA_LOST|BACKUP_SET_MISSING|DRIVER_DOWN|ABUSE_FLAG_RAISED|abuse_review_needed)
       echo 2 ;;
     # Everything else keeps the pre-#3146 behaviour (one healthy poll clears):
     # notably the human-triggered resolves and the app-owned kinds whose trigger
