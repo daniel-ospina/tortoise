@@ -2413,7 +2413,8 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        mirrors the READER that judged a written map
        (`tests/test_ci_selection.py::_durations_row_comments`, cut by `#14439`'s re-cut
        on 2026-11-23 and restored by `#14481`, so it is live again at this head): a
-       how a cut came to orphan a parenthesis the guard was counting.
+       writer reasoning about a different span than the guard is how a cut came to
+       orphan a parenthesis the guard was counting.
 
     3. ⛔ The block must actually CONTINUE the row's sentence — its first line must
        not OPEN a note (`_starts_a_new_note`). This is the condition YAML cannot
