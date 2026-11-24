@@ -27,10 +27,16 @@ in any way. It reads, diffs, and prints.
      to do anything with;
    * its ONLY external command is the checker's own
      ``read_fly_secret_names`` — default ``flyctl secrets list --app <app>
-     --json``, a READ. There is no code path here that builds a ``secrets
-     set``/``secrets unset``/``deploy`` argument vector, and no ``--json``/env
-     seam that can add one: the command override (``FLY_SECRETS_CMD``) is the
-     checker's, and the workflow pins it to the read.
+     --json``, a READ. There is no code path here that builds a
+     ``secrets set``/``secrets unset``/``deploy`` argument vector. ⛔ The command
+     override (``FLY_SECRETS_CMD``) IS an env seam — it is the CHECKER's, and a
+     caller cannot un-invent it — so this file's read-only property does NOT rest
+     on a default: the WORKFLOW pins ``FLY_SECRETS_CMD`` to the read explicitly
+     (spelled out in that step, not inherited), and
+     ``tests/…::test_the_workflow_pins_the_only_command_it_runs`` asserts the argv
+     the shipped file actually hands this tool — a stub on ``PATH`` records it — so
+     a later edit that re-points the command reds a test instead of quietly
+     widening the job's only credential.
    * ``tests/test_fly_secret_declaration_report.py`` pins both halves (no ``gh``,
      no mutating subcommand) so a later edit cannot quietly widen it.
 
@@ -52,11 +58,22 @@ WHAT IT COMPARES (two lists, two directions — the same two the gate uses)
             An UNDECLARED staged name is the same violation one step earlier:
             the run that first creates it passes (the gate runs BEFORE the
             propagation step) and every run after would hard-fail on it.
-            ⛔ The ``staged`` sample is the ALL-GITHUB-SECRETS-PRESENT one, which
-            is exactly the sample the gate's own UNDECLARED check uses — so this
-            tool cannot form a second opinion about a name's declaration status.
-            `test_the_reporter_and_the_gate_agree_on_an_undeclared_name` pins
-            that: the same fixture makes both name the same variable.
+            The sample is the ALL-GITHUB-SECRETS-PRESENT one plus the
+            NO-GITHUB-SECRET one, and — when ``GH_SECRETS_PRESENT`` is set — the
+            run's own, which is the third population the gate's UNDECLARED check
+            unions in.
+            ⛔ THE RESIDUAL, STATED RATHER THAN PAPERED OVER: only the DEPLOY can
+            state ``GH_SECRETS_PRESENT`` (#4259), so on a SCHEDULED tick the run
+            sample collapses onto the all-present one — and a name the payload
+            assigns only under a guard NEITHER synthetic sample reproduces
+            (``A present AND B absent``) is therefore deploy-time discovery, not an
+            hourly finding. Everything both synthetic samples can see — the
+            ``-z``-guarded direction included, which is the #4126 shape — is the
+            same set the gate's UNDECLARED check builds, so the two agree rather
+            than argue about a name's declaration status.
+            `test_the_reporter_and_the_gate_agree_on_an_undeclared_name` pins that
+            agreement; `test_the_run_sample_widens_the_staged_set_when_it_is_provided`
+            pins the seam AND the residual, so neither can be assumed away.
 
 ⛔ THE REUSE IS DELIBERATE: the manifest grammar (``read_manifest``, including
 ``fly-only:<issue-ref>`` validation), the Fly payload shape
@@ -182,7 +199,17 @@ def staged_names(gate: ModuleType, workflow_text: str) -> set[str]:
         referenced |= gate.workflow_secret_refs(script)
         for value in (step_env or {}).values():
             referenced |= gate.workflow_secret_refs(str(value))
-    assigned, unconditional, live, _sources = gate.payload_partition(blocks, referenced)
+    # The RUN sample — the gate's own seam, and the ONLY population that can see a
+    # guard neither synthetic sample reproduces. `GH_SECRETS_PRESENT` is written by
+    # the DEPLOY, so the scheduled reader normally has no value and the run sample
+    # then collapses onto `referenced` (the docstring above states that residual
+    # instead of claiming the two populations are identical).
+    present = (
+        gate.read_gh_secret_presence()
+        if os.environ.get("GH_SECRETS_PRESENT") is not None
+        else referenced
+    )
+    assigned, unconditional, live, _sources = gate.payload_partition(blocks, present)
     if not assigned and not unconditional:
         # The gate refuses this too (it cannot certify an empty payload). Here it
         # would render as "nothing is stageable", i.e. a clean-looking answer to a

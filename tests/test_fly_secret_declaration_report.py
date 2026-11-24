@@ -28,6 +28,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -410,9 +411,12 @@ def test_the_help_block_names_every_declaration_shape_and_the_variable():
     finally:
         sys.path.pop(0)
     help_text = tool.declaration_help("SOME_UNDECLARED_KEY")
+    # Asserted once, outside the loop: inside it this line had no placeholder and so
+    # could not vary — four identical assertions grading nothing about the shape the
+    # iteration is about (#14585 review P3).
+    assert "SOME_UNDECLARED_KEY" in help_text
     for source, _why in tool.SOURCES:
         assert source in help_text, source
-        assert "SOME_UNDECLARED_KEY" in help_text
     # Every shape the gate's `read_manifest` accepts, and no invented fifth one.
     assert {s for s, _ in tool.SOURCES} == {
         "gh-secret:<GH_NAME>",
@@ -724,11 +728,20 @@ def _report_step() -> str:
     raise AssertionError("the report step is gone")
 
 
+def _read_step() -> dict:
+    for job in _workflow()["jobs"].values():
+        for step in job.get("steps") or []:
+            if step.get("id") == "read":
+                return step
+    raise AssertionError("the read step is gone")
+
+
 class _Harness:
     """A run of the SHIPPED report step, offline, against the stub `gh`."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, broken_jq: bool = False) -> None:
         self.root = root
+        self.last_rc: int | None = None
         self.state = root / "state"
         self.state.mkdir(parents=True, exist_ok=True)
         self.bin = root / "bin"
@@ -736,7 +749,15 @@ class _Harness:
         stub = self.bin / "gh"
         stub.write_text(_GH_STUB)
         stub.chmod(0o755)
-        (self.bin / "jq").symlink_to(shutil.which("jq") or "/usr/bin/jq")
+        if broken_jq:
+            # The fallback-runner shape the runner-tools step exists for: `jq` is
+            # present but unusable. A step that swallowed this used to exit 0 with
+            # an empty finding (the "reported" and "not reported" same-colour bug).
+            jq = self.bin / "jq"
+            jq.write_text("#!/bin/sh\nexit 5\n")
+            jq.chmod(0o755)
+        else:
+            (self.bin / "jq").symlink_to(shutil.which("jq") or "/usr/bin/jq")
 
     def calls(self) -> str:
         log = self.state / "calls.log"
@@ -751,9 +772,19 @@ class _Harness:
             return []
         return [line.split("\t", 1)[1] for line in path.read_text().splitlines() if "\t" in line]
 
-    def run(self, *, rc: str, reading: dict, file_issues: str = "true") -> str:
-        report = self.root / "reading.json"
-        report.write_text(json.dumps(reading))
+    def run(
+        self,
+        *,
+        rc: str,
+        reading: dict | None,
+        file_issues: str = "true",
+        report: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
+        """Run the SHIPPED report step. `report` mimics `steps.read.outputs.report`."""
+        report = report if report is not None else self.root / "reading.json"
+        if reading is not None:
+            report.write_text(json.dumps(reading))
         script = self.root / "report-step.sh"
         script.write_text(_report_step())
         env = {
@@ -769,16 +800,19 @@ class _Harness:
             GITHUB_REPOSITORY="daniel-ospina/tortoise",
             GITHUB_SERVER_URL="https://github.com",
             GITHUB_RUN_ID="0",
-            # The step reads the reading from /tmp by absolute path; give it the
-            # harness's own copy rather than racing a shared /tmp file.
             RC=rc,
+            # ⛔ The reading's identity now comes from the read step's own OUTPUT, so
+            # there is no fixed path to substitute: the harness stands in for that
+            # output the same way Actions would.
+            REPORT=str(report),
             FILE_ISSUES=file_issues,
         )
-        body = _report_step().replace("/tmp/fly-secret-declaration.json", str(report))
-        script.write_text(body)
+        if extra_env:
+            env.update(extra_env)
         proc = subprocess.run(
             ["bash", "-e", str(script)], capture_output=True, text=True, env=env, timeout=300
         )
+        self.last_rc = proc.returncode
         return proc.stdout + proc.stderr
 
     def assert_ok(self, proc_out: str) -> None:
@@ -881,6 +915,268 @@ def test_a_dispatched_dry_run_files_nothing(tmp_path):
     assert "issues --method POST" not in h.calls()
     assert "DRY RUN" in out
     assert "ALPHA_SECRET" in out, "a dry run must still show the finding"
+
+
+# ── (h) THE COLOUR CONTRACT, THE READING'S IDENTITY, AND THE PINNED COMMAND ──
+#
+# Every test below reds on the PRE-FIX shape, and each names the pre-fix behaviour
+# it forbids — a colour contract that was only asserted in a comment, a reading that
+# could be a previous tick's bytes, a "pinned" command that was only a default, and
+# an issue body that dropped the blocking consequence for a name that is BOTH live
+# and stageable (#14585 review).
+
+
+def test_the_read_step_cannot_red_its_own_run():
+    """DRIFT exits 1 — so without `continue-on-error` every DRIFT tick is a RED run.
+
+    The header's whole argument is that a red tick must mean ONE thing (the
+    instrument could not read); 24 reds a day for a state already filed is the
+    "monitor nobody reads" defect. A failing step reddens its job, so the colour
+    contract needs this key — a comment asserting it was the only thing holding it,
+    and a comment cannot red a test.
+    """
+    step = _read_step()
+    assert step.get("continue-on-error") is True, (
+        "without `continue-on-error: true` this step's rc=1 verdict reddens the job, "
+        "so DRIFT is a red run and red no longer means 'the instrument could not "
+        "read' — the exact defect the workflow header refuses"
+    )
+    # …and the colour is then decided by the Report step, which is the only place
+    # that knows whether the finding was DELIVERED.
+    assert "steps.read.outputs.rc" in _report_step_env()
+
+
+def _report_step_env() -> str:
+    for job in _workflow()["jobs"].values():
+        for step in job.get("steps") or []:
+            if str(step.get("name", "")).startswith("Report —"):
+                return json.dumps(step.get("env") or {})
+    raise AssertionError("the report step is gone")
+
+
+def test_the_read_step_publishes_a_fresh_reading_identity_every_tick():
+    """A fixed `/tmp` path outlives a tick that died before writing.
+
+    Pre-fix the read step wrote to a predictable path and the report step judged
+    whatever was THERE — so a tick that died at rc=127 on a runner whose /tmp
+    survives between jobs would judge the previous tick's CLEAN bytes and exit 0
+    with no reading at all.
+    """
+    run = _read_step()["run"]
+    assert "mktemp" in run, (
+        "the reading must get a per-run identity; a predictable path lets a previous "
+        "tick's bytes be consumed as this tick's verdict"
+    )
+    assert "report=" in run and "$GITHUB_OUTPUT" in run, (
+        "the path must be published as a step OUTPUT, or the report step has to guess"
+    )
+    assert "/tmp/fly-secret-declaration.json" not in run, (
+        "the fixed path is back — that is the stale-reading hole"
+    )
+    # And the report step must CONSUME that output rather than a literal.
+    assert "steps.read.outputs.report" in _report_step_env(), _report_step_env()
+    assert "/tmp/fly-secret-declaration.json" not in _report_step(), (
+        "the report step still falls back to the fixed path"
+    )
+
+
+def test_the_workflow_pins_the_only_command_it_runs(tmp_path):
+    """`FLY_SECRETS_CMD` is an env seam — a default is not a pin.
+
+    Pre-fix the workflow set only FLY_API_TOKEN/FLY_APP, so "read-only by shape"
+    rested on the TOOL's default command while the header claimed the workflow
+    pinned it. Spelled out in the step, the only command this job can run is
+    reviewable in the diff that grants the credential.
+    """
+    env = _read_step()["env"]
+    assert "FLY_SECRETS_CMD" in env, (
+        "the read must be PINNED in the workflow, not inherited from the tool's "
+        "default — an ambient FLY_SECRETS_CMD would re-point the job's only command"
+    )
+    argv = shlex.split(env["FLY_SECRETS_CMD"])
+    assert argv == ["flyctl", "secrets", "list", "--app", env["FLY_APP"], "--json"], argv
+    for mutating in ("set", "unset", "import", "destroy", "deploy"):
+        assert mutating not in argv, f"the pinned command may not contain {mutating!r}"
+
+    # Behavioural half: the TOOL must actually run exactly that argv. A static read
+    # of the YAML cannot prove the tool honours the variable at all.
+    binder = tmp_path / "bin"
+    binder.mkdir()
+    recorded = tmp_path / "argv.txt"
+    fly = binder / "flyctl"
+    fly.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{recorded}"\n'
+        "printf '[{\"name\":\"FASTAPI_INTERNAL_KEY\"},{\"name\":\"STRIPE_PRICE_IDS\"},'"
+        "'{\"name\":\"GIT_SHA\"},{\"name\":\"GITHUB_CLIENT_ID\"}]'\n"
+    )
+    fly.chmod(0o755)
+    e = {k: v for k, v in os.environ.items() if k not in _AMBIENT}
+    e.update(
+        PATH=f"{binder}:{os.environ['PATH']}",
+        FLY_SECRETS_CMD=env["FLY_SECRETS_CMD"],
+        FLY_MANAGED_SECRETS_FILE=str(MANIFEST),
+        DEPLOY_WORKFLOW=str(WORKFLOW),
+        FLY_TOML=str(FLY_TOML),
+        FLY_MITIGATION_LEDGER=str(EMPTY_LEDGER),
+    )
+    proc = subprocess.run(
+        [sys.executable, str(TOOL)], capture_output=True, text=True, env=e, timeout=120
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert recorded.read_text().strip() == " ".join(argv[1:]), (
+        f"the tool ran a different command than the workflow pins: {recorded.read_text()!r}"
+    )
+
+
+# ── (i) THE VERDICT SET IS CLOSED, AND THE ROWS ARE MATERIALISED FIRST ────────
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_an_unknown_verdict_never_reads_as_no_drift(tmp_path):
+    """rc=127 (no python3) used to fall through into the DRIFT branch.
+
+    With a stale CLEAN reading still at the path, pre-fix the step printed
+    `DRIFT — 0`, filed nothing and exited 0: a false green with no reading at all.
+    """
+    h = _Harness(tmp_path)
+    out = h.run(rc="127", reading={"verdict": "CLEAN", "remainder": []})
+    assert h.last_rc == 1, out
+    assert "UNEXPECTED" in out, out
+    assert "issues --method POST" not in h.calls()
+    assert "--method PATCH" not in h.calls()
+
+
+def test_an_empty_reading_identity_is_an_error(tmp_path):
+    """No path from the read step ⇒ nothing to judge ⇒ red, never a default path."""
+    h = _Harness(tmp_path)
+    out = h.run(
+        rc="1", reading=None, report=tmp_path / "never.json", extra_env={"REPORT": ""}
+    )
+    assert h.last_rc == 1, out
+    assert "no reading path" in out, out
+    assert "issues --method POST" not in h.calls()
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_a_broken_jq_never_exits_green_on_an_unenumerated_finding(tmp_path):
+    """A failing `jq` must not yield an empty loop and a green tick.
+
+    Pre-fix the rows came from `done < <(jq …)`: on a failing jq the process
+    substitution was empty, the loop body never ran, `failed` stayed 0 and the step
+    exited 0 — "not reported" in the same colour as "reported".
+    """
+    h = _Harness(tmp_path, broken_jq=True)
+    out = h.run(rc="1", reading=_drift_reading("ALPHA_SECRET"))
+    assert h.last_rc != 0, out
+    assert "::error::" in out, out
+    assert "issues --method POST" not in h.calls()
+
+
+# ── (j) THE ISSUE BODY MUST NEVER LOSE THE BLOCKING CONSEQUENCE ───────────────
+
+
+def _reading_with(classes: list[str], name: str = "ALPHA_SECRET") -> dict:
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    try:
+        import fly_secret_declaration_report as tool  # noqa: PLC0415 — path-based
+    finally:
+        sys.path.pop(0)
+    return {
+        "verdict": "DRIFT",
+        "app": "fixture-app",
+        "remainder": [
+            {"name": name, "classes": classes, "fix": tool.declaration_help(name)}
+        ],
+    }
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_a_both_classes_issue_still_names_the_blocking_consequence(tmp_path):
+    """`classes` is `join("+")`, so `live+staged` failed an `= "live"` test.
+
+    Pre-fix an issue for a name that is BOTH live and stageable told the operator the
+    deploy "can stage it" and omitted that it is already on the app refusing every
+    deploy — the weaker of the two consequences, on the artifact a human acts on.
+    """
+    h = _Harness(tmp_path)
+    h.run(rc="1", reading=_reading_with(["live", "staged"]))
+    calls = h.calls()
+    # `Production is frozen` is the LIVE arm's sentence. (`refuses every` is not
+    # discriminating — it is also in the issue TITLE, which every tick carries.)
+    assert "Production is frozen" in calls, (
+        "a live+staged name's issue dropped the blocking consequence — it must say "
+        f"the deploy is refused NOW. calls were:\n{calls[:2000]}"
+    )
+    assert "also" in calls and "stageable" in calls, (
+        "the staged half of the finding was dropped for a live+staged name"
+    )
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_a_staged_only_issue_states_the_staged_consequence(tmp_path):
+    """The staged-only arm must not claim the deploy is already refused."""
+    h = _Harness(tmp_path)
+    h.run(rc="1", reading=_reading_with(["staged"]))
+    calls = h.calls()
+    assert "can STAGE it" in calls, calls[:2000]
+    assert "Production is frozen" not in calls, (
+        "a staged-only name claimed a live refusal"
+    )
+
+
+# ── (k) THE RUN SAMPLE — the seam the gate has and the schedule does not ──────
+
+_RUN_SAMPLE_WORKFLOW = """\
+name: Deploy Hosted API
+jobs:
+  deploy:
+    steps:
+      - name: Set all app secrets on Fly.io
+        run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          if [ -n "${{ secrets.GATE_A }}" ] && [ -z "${{ secrets.GATE_B }}" ]; then
+            ARGS="$ARGS RUN_SAMPLE_ONLY=x"
+          fi
+          flyctl secrets set --stage $ARGS
+"""
+
+_RUN_SAMPLE_MANIFEST = """\
+# fixture: declares the unconditional name only, so a run-only name is undeclared
+FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY
+"""
+
+
+def test_the_run_sample_widens_the_staged_set_when_it_is_provided():
+    """A guard NEITHER synthetic sample reproduces is visible only in the run sample.
+
+    With no ``GH_SECRETS_PRESENT`` (the SCHEDULED case) the run sample collapses onto
+    the all-present one, so ``RUN_SAMPLE_ONLY`` is deploy-time discovery — that is the
+    residual the module docstring now states. With the gate's own seam set, the same
+    name MUST be reported, because that is the population the gate's UNDECLARED check
+    unions in.
+    """
+    workflow = _fixture("run-sample.yml", _RUN_SAMPLE_WORKFLOW)
+    manifest = _fixture("run-sample-manifest.txt", _RUN_SAMPLE_MANIFEST)
+    secrets = _secrets_file(["FASTAPI_INTERNAL_KEY"], "run-sample.json")
+    loud_json = _TMP / "run-sample-reading.json"
+
+    quiet, _ = _run(secrets, manifest=manifest, workflow=workflow)
+    assert quiet.returncode == 0, quiet.stdout + quiet.stderr
+    assert "RUN_SAMPLE_ONLY" not in quiet.stdout, (
+        "the reporter claimed a run-sample-only name with no run sample to see it in"
+    )
+
+    loud, reading = _run(
+        secrets,
+        manifest=manifest,
+        workflow=workflow,
+        extra_env={"GH_SECRETS_PRESENT": "GATE_A FASTAPI_INTERNAL_KEY"},
+        json_to=loud_json,
+    )
+    assert loud.returncode == 1, loud.stdout + loud.stderr
+    assert reading is not None
+    assert [entry["name"] for entry in reading["remainder"]] == ["RUN_SAMPLE_ONLY"], reading
 
 
 def test_a_report_tool_only_change_selects_core_so_this_guard_actually_runs():
