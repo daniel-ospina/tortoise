@@ -515,8 +515,53 @@ def _identical_literals(left: object, right: object) -> bool | None:
     return None if left == right else False
 
 
-def _literal_truth(node: ast.expr) -> bool | None:
+def _bound_names(tree: ast.Module) -> frozenset[str]:
+    """Every name this module BINDS — so a shadowed builtin is never a builtin.
+
+    ⛔ A NAME IS NOT A BUILTIN (review P2, measured): `_literal_truth` answered
+    "always false" for a zero-arg call of `list`/`set`/`dict`/… by NAME, so
+    `def f(list): if list(): g()` — where the CALLER's `list` decides the guard —
+    reported the body dead (measured: `[(3, 'list()')]`), the false-diagnosis
+    class this arm exists to remove. The graded module binds none of the eleven
+    names today (AST scan: zero), which is precisely why the hole would survive a
+    refactor; the bound set is threaded into `_literal_truth` instead of relying on
+    that census staying true.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            args = node.args
+            for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+                names.add(arg.arg)
+            if args.vararg is not None:
+                names.add(args.vararg.arg)
+            if args.kwarg is not None:
+                names.add(args.kwarg.arg)
+            if not isinstance(node, ast.Lambda):
+                names.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.alias):
+            names.add((node.asname or node.name).split(".")[0])
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+    return frozenset(names)
+
+
+def _literal_truth(
+    node: ast.expr, bound: frozenset[str] = frozenset(),
+) -> bool | None:
     """The statically decidable truth of a literal-ish expression, or None.
+
+    ⛔ `bound` IS THE MODULE'S BOUND-NAME SET (`_bound_names`), and it exists so a
+    NAME is never mistaken for a builtin (review P2, measured): `_literal_truth`
+    answered False for a zero-arg call of `list`/`set`/`dict`/… by NAME, so
+    `def f(list): if list(): g()` — where the CALLER's `list` decides the guard —
+    reported the body dead (measured: `[(3, 'list()')]`), the false-diagnosis class
+    this arm exists to remove. The default keeps every direct call (and the unit
+    rows) unchanged.
 
     ⛔ `None` means "not statically decidable" and the caller must NOT read it as a
     polarity. ⛔ AN UNPACK IS NOT "NO ITEM": `{*()}` is empty because the OPERAND is
@@ -535,13 +580,13 @@ def _literal_truth(node: ast.expr) -> bool | None:
         # `{*PAYLOAD}` is not decidable at all. Decide from the operand: any
         # plain element makes it non-empty; otherwise every unpack must be
         # statically EMPTY for the whole collection to be.
-        members = [(_literal_truth(e.value) if isinstance(e, ast.Starred) else True)
+        members = [(_literal_truth(e.value, bound) if isinstance(e, ast.Starred) else True)
                    for e in node.elts]
         if any(m is True for m in members):
             return True
         return False if all(m is False for m in members) else None
     if isinstance(node, ast.Dict):
-        spreads = [_literal_truth(value)
+        spreads = [_literal_truth(value, bound)
                    for key, value in zip(node.keys, node.values, strict=True)
                    if key is None]
         if any(key is not None for key in node.keys):
@@ -550,7 +595,7 @@ def _literal_truth(node: ast.expr) -> bool | None:
             return True
         return False if all(s is False for s in spreads) else None
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        operand = _literal_truth(node.operand)
+        operand = _literal_truth(node.operand, bound)
         return None if operand is None else not operand
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
         try:
@@ -570,6 +615,7 @@ def _literal_truth(node: ast.expr) -> bool | None:
             not node.args and not node.keywords
             and isinstance(node.func, ast.Name)
             and node.func.id in _EMPTY_CONSTRUCTORS
+            and node.func.id not in bound
         ):
             return False
         return None
@@ -611,15 +657,15 @@ def _literal_truth(node: ast.expr) -> bool | None:
             left = right
         return answer
     if isinstance(node, ast.IfExp):
-        behaviour = _literal_truth(node.test)
+        behaviour = _literal_truth(node.test, bound)
         if behaviour is not None:
-            return _literal_truth(node.body if behaviour else node.orelse)
+            return _literal_truth(node.body if behaviour else node.orelse, bound)
         # Both branches deciding the SAME polarity decide the expression, whatever
         # the test is: `X if PAYLOAD else Y` with X and Y both false is always false.
-        body, orelse = _literal_truth(node.body), _literal_truth(node.orelse)
+        body, orelse = _literal_truth(node.body, bound), _literal_truth(node.orelse, bound)
         return body if body is not None and body == orelse else None
     if isinstance(node, ast.BoolOp):
-        values = [_literal_truth(v) for v in node.values]
+        values = [_literal_truth(v, bound) for v in node.values]
         if isinstance(node.op, ast.And):
             if any(v is False for v in values):
                 return False
@@ -630,7 +676,9 @@ def _literal_truth(node: ast.expr) -> bool | None:
     return None
 
 
-def _statically_false(test: ast.expr) -> bool:
+def _statically_false(
+    test: ast.expr, bound: frozenset[str] = frozenset(),
+) -> bool:
     """True when ``test`` is ALWAYS false — the body can never run.
 
     ⛔ THE CRITERION IS "always false", NOT "CPython constant-folds it". A fixer
@@ -640,7 +688,7 @@ def _statically_false(test: ast.expr) -> bool:
     catch the disable a fixer actually writes. `_literal_truth` is the one place
     that decides, so `not X` and `X` cannot disagree.
     """
-    return _literal_truth(test) is False
+    return _literal_truth(test, bound) is False
 
 
 def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
@@ -669,6 +717,7 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
     without `break`), so a submission in either is live and must not be reported.
     """
     dead: list[tuple[int, str]] = []
+    bound = _bound_names(tree)
 
     def walk(node: ast.AST, guards: list[tuple[int, ast.expr]]) -> None:
         if isinstance(node, ast.Match):
@@ -747,7 +796,7 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
             for child in body:
                 walk(child, [*guards, (node.test.lineno, node.test)])
             else_guards = guards
-            if _literal_truth(node.test) is True:
+            if _literal_truth(node.test, bound) is True:
                 negated = ast.UnaryOp(op=ast.Not(), operand=node.test)
                 ast.copy_location(negated, node.test)
                 else_guards = [*guards, (node.test.lineno, negated)]
@@ -769,7 +818,7 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
             dead.extend(
                 (line, ast.unparse(test))
                 for line, test in guards
-                if _statically_false(test)
+                if _statically_false(test, bound)
             )
             return
         for child in ast.iter_child_nodes(node):
@@ -1708,6 +1757,25 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
         (["def f():", "    if True:", "        pass", "    else:", "        g()"],
          ["not True"]),
         (["def f():", "    if False:", "        pass", "    else:", "        g()"], []),
+        # ⛔ AND A `while`'s `else` RUNS WHEN THE TEST IS FALSE — it is NOT graded in
+        # either polarity (its `else` needs break analysis), so this row pins the
+        # DECLARED gap: pushing the test there reported `['False']` for a body that
+        # runs (review P2, measured).
+        (["def f():", "    while False:", "        pass", "    else:", "        g()"], []),
+        # ⛔ A `match` CASE'S GUARD APPLIES TO THAT CASE'S BODY ONLY, and the
+        # one-case fixtures cannot measure the scoping (review P2, measured: leaking
+        # the guard onto a later case stayed GREEN).
+        (["def f(x):",
+          "    match x:",
+          "        case _ if False:",
+          "            pass",
+          "        case _:",
+          "            g()"], []),
+        # ⛔ A NAME IS NOT A BUILTIN: `list` bound as a parameter decides `list()`,
+        # so the guard is undecidable rather than always-false (review P2,
+        # measured: `[(3, 'list()')]` before `_bound_names`).
+        (["def f(list):", "    if list():", "        g()"], []),
+        (["def f():", "    if list():", "        g()"], ["list()"]),
     ],
 )
 def test_a_loop_header_or_comprehension_clause_is_graded_as_a_guard(
