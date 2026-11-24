@@ -31,8 +31,10 @@ different decisions and had drifted apart:
   window HOLDS it re-alarms at most once per
   :data:`_INCIDENT_DELIVERY_WINDOW_S`, naming the same issue when the incident
   carries one (a placeholder or a post-close tombstone has no number, and the
-  message says so instead); a release that is not an episode end (a failed close,
-  a cooldown back-off, a failed send) re-arms it. So a window is what a message
+  message says so instead); the episode-end release re-arms it — including a
+  close that RAISES or is backing off, unless the sibling episode kind answers
+  ``SKIPPED_WINDOW`` in the same call (the flag is per CALL and not per kind) —
+  and so does a failed send, kind-agnostically. So a window is what a message
   SPENDS, and where releases fire often enough the effective bound is per
   EPISODE, not per window. The engine closes the incident and re-arms delivery
   at episode end.
@@ -103,9 +105,11 @@ _BILLING_SEND_FAILED_KIND = KIND_BILLING_SEND_FAILED
 #: INCIDENT, not of the detection. Each one files (or reuses) a durable,
 #: assignable incident, and its messages come from the store's create-once path:
 #: ONE opening push for the episode, at most ONE re-alarm per
-#: ``_INCIDENT_DELIVERY_WINDOW_S`` **while the delivery window holds** — a release
-#: that is not an episode end (a failed close, a cooldown back-off, a failed send)
-#: re-arms it, so a flapping rule can page once per crossing — and the reminder
+#: ``_INCIDENT_DELIVERY_WINDOW_S`` **while the delivery window holds** — re-armed
+#: by the episode-end release (including a close that RAISES or is backing off,
+#: unless the sibling episode kind answers ``SKIPPED_WINDOW`` in the same call,
+#: the flag being per CALL and not per kind) and kind-agnostically by a failed
+#: send, so a flapping rule can page once per crossing — and the reminder
 #: names the
 #: issue when the sentinel carries one, says `an open incident with no issue
 #: number on record` when it does not, and says the number `could not be read
@@ -916,9 +920,11 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
     live: repeats inside the delivery window are folded (the store records them
     on the ISSUE, agent-visible, bounded to one a day by #12243), and at most one
     RE-ALARM per window is sent while those folds hold so a persistent
-    breach cannot go silent. The window is the LEDGER's, not the episode's: a
-    release that is not an episode end (a failed close, a cooldown back-off, a
-    failed send) re-arms it, so a rule that flaps can page once per crossing.
+    breach cannot go silent. The window is the LEDGER's, not the episode's: the
+    episode-end release re-arms it — including a close that RAISES or is backing
+    off, unless the sibling episode kind answers ``SKIPPED_WINDOW`` in the same
+    call (the flag is per CALL and not per kind) — and so does a failed send,
+    kind-agnostically, so a rule that flaps can page once per crossing.
     ``SUPPRESSED`` means an operator paused the kind in
     ``ops/suppression.json`` — an explicit decision, which is honoured.
 
@@ -1039,9 +1045,11 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                 # and the message NAMES the incident so the human can see it is
                 # the same one — the pre-fix code pushed every window with no
                 # reference at all. The window is the LEDGER's, not the episode's:
-                # a release that is not an episode end (a failed close, a cooldown
-                # back-off, a failed send) re-arms it, so a flapping rule can page
-                # once per crossing.
+                # the episode-end release re-arms it — including a close that
+                # RAISES or is backing off, unless the sibling episode kind
+                # answers `SKIPPED_WINDOW` in the same call (the flag is per CALL
+                # and not per kind) — and so does a failed send, kind-agnostically,
+                # so a flapping rule can page once per crossing.
                 ref = (f"issue #{number}" if number
                        else ("an open incident whose issue number could not be "
                              "read just now" if not number_known
