@@ -85,18 +85,20 @@ version: 1
 # 2026-11-16 sweep and the two rows that followed it.)
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
-# `main` at `af40c97ca312`, and the pool it emits is the union of BOTH parents' registrations —
+# `main` at `b665cbd619860` (the two landings after `af40c97ca312` — `14b8322eb271f` and
+# `b665cbd619860` — move NO `durations` row: the map is equal on both trees, row for row), and the
+# pool it emits is the union of BOTH parents' registrations —
 # ⛔ `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
 # `tests/test_14033_state_cue_gap.py` are BOTH `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, and
 # this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
-# (measured: the only `durations` lines this PR touches are comment rewrites of two existing rows,
-# `test_7949_capstone_measure.py` and `test_e2e_wrangler_prewarm.py`, whose values are unchanged), so
+# (measured: `git diff origin/main HEAD -- config/ci-surfaces.yml` touches NO `durations` line at
+# all, and `yaml.safe_load(...)['durations']` is EQUAL on both trees, row for row), so
 # the ONE split stated below is `main`'s reading too. ⛔ THIS BRANCH'S OWN READING WAS HERE and is
 # DELETED, not merged: it said one shard at 838.1 s and ten at 838.2 s, which was true of the previous
 # fold and is not true of this one — the `merge=union` driver (#5373) kept both parents' clauses, so
 # the block briefly claimed two partitions. Re-derived below with the verb.
 # On THIS merged tree (`main` at
-# `af40c97ca312` folded in) the verb packs six shards at 825.1 s
+# `b665cbd619860` folded in) the verb packs six shards at 825.1 s
 # (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so
 # `ceil(825.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.04`, so the two
@@ -141,7 +143,7 @@ version: 1
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
-# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `af40c97ca312`
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `b665cbd619860`
 # and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
 # is why `main` alone emits this same split. ⛔ THE WHY IS NOT RECITED HERE: the "why the minute
 # cannot be the operand, and why a restatement would be graded as a second claim" reasoning is in

@@ -9209,9 +9209,11 @@ def _emission_block_header(manifest_text: str) -> str:
 #: nothing grades this block's prose. Measured 2026-11-24 on the `45dd35ba9a` fold: THREE passages
 #: arrived twice (the `8c373f59a1` provenance paragraph, the "stated at the sha" sentence, and the
 #: ratio line — the last carrying TWO figures, `2.0361` beside `2.0362`, which is the tell). The
-#: fold's block states `_emission_block_header` length 19,059 chars and **10 repeated spans** (5
-#: passages x 2 copies) against **0 duplicate non-trivial lines**, which is why a line-level recipe
-#: saw nothing and every existing arm stayed green: none of the three is a shard-figure sentence.
+#: fold's block states `_emission_block_header` length 19,059 chars and **10 repeated spans** — the
+#: 5 maximal fragments each copy splits into, x 2 copies, from 3 passages (two of them diverge
+#: inside the repeated region, so each copy splits there) — against **0 duplicate non-trivial
+#: lines**, which is why a line-level recipe saw nothing and every existing arm stayed green: none
+#: of the three is a shard-figure sentence.
 #:
 #: A splice is a REPEATED LONG SPAN, so the detector is one: a `_SPLICE_SHINGLE_WORDS`-word window
 #: that occurs twice in the block. LINE matching cannot see it — the two copies re-wrap, which is why
@@ -9553,9 +9555,9 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     # ⛔ The re-wrap is GRADED below, never asserted in this comment. Measured on this arm's own
     # pre-fix fixture: both copies were line-for-line IDENTICAL (three duplicate `#` lines), so the
     # very check the comment claimed to defeat caught it — while the real spliced base `14b8322eb2`
-    # carries ZERO duplicate lines and ten repeated spans (five passages x two copies). The fixture
-    # proved the opposite of its own comment, in a PR whose thesis is that a claim graded by nothing
-    # rots.
+    # carries ZERO duplicate lines and ten repeated spans (five maximal fragments per copy). The
+    # fixture proved the opposite of its own comment, in a PR whose thesis is that a claim graded by
+    # nothing rots.
     spliced_raw = (
         "# the verb packs six shards at 825.1 s (a, b, g, i, j, k) and\n"
         "# five at 825.0 s (c, d, e, f, h), so `ceil(825.1/60 x 2)` = 28 m\n"
