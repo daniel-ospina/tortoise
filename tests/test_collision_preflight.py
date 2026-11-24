@@ -748,10 +748,18 @@ def _stop_fake_lane(proc: subprocess.Popen) -> None:
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
+        # ⛔ BOUNDED, BOTH BRANCHES (#14506 review, P2). The unbounded `proc.wait()` this
+        # replaced hangs the whole file's teardown — which on a 3-minute gating run reads
+        # as a WEDGED CI JOB rather than as a failure — and the `pgid is None` branch sent
+        # no second signal at all after a `kill()` that the `suppress(OSError)` could have
+        # swallowed. A survivor is now signalled again and then given a deadline.
         if pgid is not None:
             with suppress(OSError):
                 os.killpg(pgid, signal.SIGKILL)
-        proc.wait()
+        else:
+            with suppress(OSError):
+                proc.kill()
+        proc.wait(timeout=10)
 
 
 def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
@@ -10112,23 +10120,36 @@ class CollisionPreflightTest(unittest.TestCase):
 
         Three arms, each on a dead child the registry explains, each asserting the note is
         on the continuation line and the identity line is untouched.
+
+        ⛔ INJECT INTO `_FAKE_LANE_STDERR` — THE REGISTRY THE CODE ACTUALLY READS (#14506
+        review, P0). This test first wrote into a per-instance `_fake_pi_stderr_paths()`
+        map that a concurrent version of this commit had, and the landed capture keys on
+        the module's `{pid: file handle}` instead: the injection raised `AttributeError`,
+        the suite went red (`1 failed, 455 passed`) and every arm here was unexecuted
+        while the commit message claimed a green run. The entries are `TemporaryFile`
+        SPOOLS, so this test hands over a real file object and closes it in `finally`.
         """
         mod = _tool_module()
         identity = ("the process census never saw the fake pi lane — the test cannot "
                     "discriminate process-cwd liveness")
 
-        def run(census: str, stderr_text: str) -> str:
+        def run(census: str, stderr_text: str, reader_err: str = "") -> str:
             dead = subprocess.Popen(["/bin/true"])
             dead.wait(timeout=10)
-            log = self.tmp / f"note-{dead.pid}.stderr"
-            log.write_text(stderr_text, encoding="utf-8")
-            self._fake_pi_stderr_paths()[dead.pid] = log
+            spool = tempfile.TemporaryFile()  # noqa: SIM115 — closed in `finally`
+            spool.write(stderr_text.encode("utf-8"))
+            spool.flush()
+            _FAKE_LANE_STDERR[dead.pid] = spool
             try:
                 with mock.patch.object(mod.fleet_state, "pi_processes",
                                        return_value=([], census)), \
+                     mock.patch.object(mod.fleet_state, "process_cwds",
+                                       return_value=({}, reader_err)), \
                      self.assertRaises(AssertionError) as caught:
                     self._wait_for_pi_cwd(self.tmp, timeout=0.2, proc=dead)
             finally:
+                _FAKE_LANE_STDERR.pop(dead.pid, None)
+                spool.close()
                 if dead.poll() is None:  # pragma: no cover — /bin/true is already reaped
                     dead.kill()
             first, _, rest = str(caught.exception).partition("\n")
@@ -10147,6 +10168,49 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("census NEVER ANSWERED", rest)
         self.assertIn("cannot import name x", rest,
                       "a dead child's words survive even when the census never answered")
+
+        # ⛔ THE THIRD ARM (#14506 review, P2). `fatal` has THREE arms and the CWD-READER
+        # one was driven by no test that says anything about line 1 or the note, so `fatal
+        # += self._fake_lane_stderr_note(pid)` could silently exclude it and the file
+        # stayed green while "in EVERY arm" became false.
+        rest = run("", "KeyError: 'Point'\n", reader_err="lsof: cannot read cwd")
+        self.assertIn("CWD READER failed", rest)
+        self.assertIn("cannot read cwd", rest)
+        self.assertIn("KeyError: 'Point'", rest,
+                      "a dead child's words survive when the ATTRIBUTION read failed too")
+
+    def test_a_spawn_registers_its_stderr_so_a_dead_lane_can_be_asked(self):
+        """#14506 review F1 — reverting the capture to `DEVNULL` must RED, not go unseen.
+
+        ⛔ THE INJECTION ARMS ABOVE CANNOT COVER THIS: they write into the registry
+        themselves, so they stay green over a spawn that registers nothing — the exact
+        "repair nothing can see failing" shape #14388 left behind. This asserts the SEAM:
+        that `_fake_lane` hands the child a REAL stream and registers it under the child's
+        pid. A live lane writes nothing to stderr, which is why a behavioural test here
+        would be green over a discarded stream.
+        """
+        real_popen = subprocess.Popen
+        seen: dict[str, object] = {}
+
+        def spy(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            seen["stderr"] = kwargs.get("stderr")
+            return proc
+
+        with mock.patch.object(subprocess, "Popen", side_effect=spy):
+            proc = _fake_lane(self.tmp)
+        try:
+            self.assertIsNot(seen["stderr"], subprocess.DEVNULL,
+                             "an `rc` with no text is not a cause — capture the child's "
+                             "stderr, never discard it (#14388)")
+            self.assertIs(_FAKE_LANE_STDERR.get(proc.pid), seen["stderr"],
+                          "the spawn must register the stream it gave the child, or the "
+                          "failure path cannot read it back")
+            self.assertTrue(hasattr(seen["stderr"], "fileno"),
+                            "the child needs a real fd, not a path")
+        finally:
+            _stop_fake_lane(proc)
+            _FAKE_LANE_STDERR.pop(proc.pid, None)
 
     def test_the_fake_lane_kit_survives_an_environment_that_cannot_start_python(self):
         """⛔ THE FIXTURE MUST NOT DEPEND ON THE INTERPRETER'S OWN PATH CONFIG (#14506).
@@ -10219,9 +10283,18 @@ class CollisionPreflightTest(unittest.TestCase):
             if not cerr and pid in cwds and os.path.realpath(str(cwds[pid])) == want:
                 return
             time.sleep(0.05)
-        self.fail(f"the tool's own cwd reader could not attribute pid {pid} to {want!r} "
-                  f"within {timeout:.0f}s (last read: {last}) — the tool would report "
-                  f"process-cwd-unreadable and the assertion below could not fire")
+        # ⛔ LINE 1 IS THIS FAILURE'S GATE IDENTITY TOO (#14506 review, P2 — the same rule
+        # as `_wait_for_pi_cwd`): `ci_exemption.py::_signature_from` reads pytest's FIRST
+        # `E   ` line, and `pid`, `want` (a per-run temp path), `timeout` and `last` are all
+        # per-run, so a one-line message here is a different identity on every run and the
+        # `pr <= main` subset test can never be satisfied — the `signature differs from
+        # main's` block this change exists to remove, for a different set of ids. Its
+        # callers are census/cwd arms that fail on the same pooled hosts.
+        self.fail(
+            "the tool's own cwd reader could not attribute the fake lane to the worktree\n"
+            f"pid {pid} was not attributed to {want!r} within {timeout:.0f}s (last read: "
+            f"{last}) — the tool would report process-cwd-unreadable and the assertion "
+            "below could not fire")
 
 
 # ══ the four bunded tool defects (agent-infra #1233 + tortoise #9976 #10684
