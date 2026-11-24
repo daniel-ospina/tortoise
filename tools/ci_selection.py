@@ -1788,6 +1788,40 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_measure_4211_session_hierarchy.py::
              # test_a_receipt_only_diff_selects_this_pin.
              "docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json",
+             # #14062 / PR #14445: the privatisation RESIDUE instrument. Same silent-drop
+             # class as the rows above, and MEASURED before this entry: `--changed-files
+             # tools/sdk_privatise.py` -> `surfaces: []`, `full: false`, 106 test files with
+             # `test_sdk_privatise_sweep.py` ABSENT. `tools/` is a flat `NON_PYTHON_PREFIXES`
+             # entry and this file has no `SOURCE_PATTERNS` bridge, so a diff that edits ONLY
+             # the residue pin runs none of the arms that grade this file's pins — the pinned
+             # pair itself (`test_the_residue_pin_is_a_reading_of_the_whole_set`) and the
+             # addresses the block publishes (`test_every_addressed_rev_names_a_fetchable_refspec`,
+             # which grades `_ARM_REFSPECS` rather than the pin).
+             # ⛔ WHAT THE GAP IS — the loose version of this comment is FALSE: the
+             # required `surface-guard` step runs `--check`, which DOES compare the
+             # `(rows, digest)` pair against the tree, so a stale PAIR reds there and does not
+             # need this row. What a `tools/sdk_privatise.py`-only diff leaves ungraded — the
+             # whole suite, since `surfaces: []` selects ZERO of its files — includes, but is
+             # not limited to: the pin's SHAPE (rows > 0, and a digest that separates SHAPES
+             # and COUNTS, not only counts), the
+             # vacuous-map REFUSAL (an empty map must exit 2 with its own
+             # diagnosis — without it a map that silently derived nothing still exits 1, but
+             # reported as `the residue SET moved off its pin`, which sends the reader to the
+             # pin instead of to the map), the
+             # `SWEEP_NAMES == 66` non-vacuity FLOOR, the map/private-spelling assertions of
+             # `test_the_pinned_base_still_derives_the_whole_batch`, the import-shape arm
+             # `test_reading_the_approved_set_does_not_shadow_the_package_star_import`, the
+             # scope-local typing arms and the refspec arms.
+             # ⛔ THIS INCLUDES THE GRADED PROSE, and that is the point: the block's own
+             # published extent is asserted against `_residue_block()`'s walk, so a re-cut that
+             # grows or shrinks the `#:` run reds THAT arm — but only on a diff that selects the
+             # suite. Without this row a stale figure can only be caught by the NEXT
+             # `core`-selecting PR, on rows its author never wrote. (`#14439` briefly deleted
+             # those arms; `#14474` restored them, so the rule is written against the suite as
+             # it is rather than against that episode.) With the entry: `surfaces=['core']`
+             # and the suite is selected. Pinned by
+             # tests/test_sdk_privatise_sweep.py::test_a_tool_only_diff_selects_this_suite.
+             "tools/sdk_privatise.py",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
              # /docs formula guard lives there), and a SOURCE_PATTERNS match
              # REPLACES the `core` fallback (#2938) — so without this entry the
