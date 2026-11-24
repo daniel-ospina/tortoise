@@ -88,7 +88,7 @@ import re
 import subprocess
 import warnings
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -113,7 +113,24 @@ SWEEP_NAMES = 66
 #: The residue the sweep REFUSED to guess at, pinned as `(rows, digest)` over the sorted rows so
 #: that a NEW untyped shape — the ordinary-word receivers (`x.query`, `x.update`, `x.delete`) that
 #: cannot be typed from evidence — reds `--check` instead of being silently absorbed into a fresh
-#: count each review (#13899 F6). Re-pin deliberately with `--repin`, in a commit that says why.
+#: count each review (#13899 F6).
+#:
+#: ⛔ THE PIN IS A **HISTORICAL READING**, NOT THE GATE (#14548). `--check` no longer compares this
+#: `(rows, digest)` pair to the tree; it is a RATCHET: the observed untyped-receiver count must not
+#: EXCEED a baseline reconstructed at check time from the tree's base point with `origin/main` (the
+#: merge base, or `--baseline REV`; a named baseline that does not resolve is a REFUSAL, exit 2).
+#: Growth reds naming the row, the file and the line; a REMOVAL passes; the digest is kept only as a
+#: non-blocking SHAPE signal (rows appeared / vanished / moved), because a count alone cannot see a
+#: rename and gating on the digest would rebuild the re-pin treadmill this replaces. So `--repin` is
+#: wanted only when a re-cut is worth RECORDING, never to make the gate pass — the values below are
+#: left untouched and still read, as the record's own measurement.
+#: ⛔ EVERY `--check` EXIT READING BELOW IS A **PRE-RATCHET** READING. The records that follow were
+#: written against the equality gate, and each is true of the tree and commit it NAMES; the verb in
+#: them (`--check` exits 0, `--check` exited 1) reports what THAT gate said there. Re-running TODAY's
+#: `--check` on those trees does not reproduce those exits — it returns a ratchet verdict about that
+#: tree against its own base point — so the reproducible command for a pair recorded below is
+#: `--repin` on the named tree, which prints the pair the record states. Nothing below is
+#: re-litigated by the mechanism change, and no recorded value moves.
 #:
 #: RE-PINNED (11776, bfbf6195136edc2c) → (11782, 0f00153d4691e3de) → (11769, 3dc892001700a031)
 #: by #13899's fix rounds, and both moves are the intended direction:
@@ -127,9 +144,12 @@ SWEEP_NAMES = 66
 #:     `integrations/cli-extraction/extract_turns.py`, …), and every one of those was an
 #:     untyped-receiver row of this residue. The pinned row set holds exactly the ordinary
 #:     words that remain, `reg.query` still at 409.
-#: A re-pin here is a DECLARATION of a known shape, not a new allowance: adding an
-#: SDK-holding receiver to the residue still requires the same deliberate re-pin with its
-#: own reason.
+#: A re-pin here WAS a DECLARATION of a known shape, not a new allowance — and under the ratchet
+#: (#14548, stated at the top of this record) there is no declaration left to make. A re-pin was
+#: never an allowance; today it is not even a repair. An SDK-holding receiver ADDED to the residue
+#: is a RED naming the row and the `file:line` — type the receiver, or convert the call — and
+#: pasting a fresh pair into this file does not clear it, nor does any `--repin`: the gate compares
+#: this tree against its own base point, not against the number recorded here.
 #:
 #: RE-PINNED (11769, 3dc892001700a031) → (11758, d2311d5af77fe5d5) by the same round, and again the
 #: intended direction: eleven side effects in `tests/test_tortoise_client.py` sat on the RETIRED
@@ -137,8 +157,10 @@ SWEEP_NAMES = 66
 #: the client calls `_query` / `_create_point` / `_summarize_structure`, so eleven untyped-receiver
 #: rows that pinned nothing are gone. The ordinary-word rows are unchanged (`reg.query` 409,
 #: `graph.query` 267, `cp.query` 263, `sdk._get_registry().query` 263, `self.g.query` 202) and typed
-#: references to a public name are still 0. An SDK-holding receiver is still residue: adding one
-#: still requires this same deliberate step, with its own reason.
+#: references to a public name are still 0. An SDK-holding receiver is still residue — but the
+#: deliberate step an addition required was a re-pin only while the pin was the gate: under the
+#: ratchet an addition is a RED naming the row and the `file:line`, to type or convert, and a
+#: re-pin clears nothing (see the record's opening).
 #: RE-PINNED → (11757, 7a53ce4f33a41246) by the commit that re-keyed
 #: `tools/window_quality_m2.py`'s `cur["sdk"].tortoise_fts_query(` to the private
 #: `._tortoise_fts_query(`: that receiver is a SUBSCRIPT, so the sweep could not type it and had
@@ -280,10 +302,10 @@ SWEEP_NAMES = 66
 #: The proof is the ATTRIBUTION, not the sign of the delta: reverting ONLY that one call site (the
 #: file's only `stub._get_point` hit) back to the retired public spelling reproduces exactly 11822,
 #: so the -1 is that one removed call site and nothing else. ⛔ A shrink is NOT evidence on its own —
-#: `--check` compares the `(count, digest)` PAIR and `--repin` prints a fresh pair that is pasted in
-#: deliberately, so a re-pin absorbs whatever shape the tree holds in EITHER direction (remove two
-#: untyped receivers, add one different shape -> net -1, absorbed). Read the rows `--repin` prints,
-#: not the direction of the delta (#14003 review, round 3, P3 / #14030).
+#: `--check` RATCHETS the COUNT against the base point and reports the digest without gating on it,
+#: so a NET SHRINK passes on its own (remove two untyped receivers, add one different shape -> net
+#: -1, passes) while any NET GROWTH reds. Read the rows `--report`'s dump names, not the direction of
+#: the delta (#14003 review, round 3, P3 / #14030; ratcheted by #14548).
 #: ⚠️ NO LINE NUMBERS ARE TYPED HERE ON PURPOSE: a reproducer that says `:803` is not reproducible
 #: once the file moves, and this block carried exactly such a stale address — nothing in the tree
 #: reads it (`grep -rln 'tools/sdk_privatise.py:' tests/` is empty), so a lane following it edits the
@@ -754,11 +776,11 @@ SWEEP_NAMES = 66
 #: The proof is the ATTRIBUTION, not the sign of the delta: reverting ONLY that one call site (the
 #: file's only `stub._get_point` hit) back to the retired public spelling reproduces exactly 11822,
 #: so the -1 is that one removed call site and nothing else. ⛔ A shrink is NOT evidence on its own —
-#: `--check` compares the `(count, digest)` PAIR and `--repin` prints a fresh pair that is pasted in
-#: deliberately, so a re-pin absorbs whatever shape the tree holds in EITHER direction (remove two
-#: untyped receivers, add one different shape -> net -1, absorbed). Read the ROWS from `--report`'s
-#: dump against `SWEEP_BASE` (`--repin` prints only the tuple), not the direction of the delta
-#: (#14003 review, round 3, P3 / #14030).
+#: `--check` RATCHETS the COUNT against the base point and reports the digest without gating on it,
+#: so a NET SHRINK passes on its own (remove two untyped receivers, add one different shape -> net
+#: -1, passes) while any NET GROWTH reds. Read the ROWS from `--report`'s dump against `SWEEP_BASE`
+#: (`--repin` prints only the tuple), not the direction of the delta (#14003 review, round 3, P3 /
+#: #14030; ratcheted by #14548).
 #: ⚠️ NO LINE NUMBERS ARE TYPED HERE ON PURPOSE: a reproducer that says `:803` is not reproducible
 #: once the file moves, and this block carried exactly such a stale address — nothing in the tree
 #: reads it (`grep -rln 'tools/sdk_privatise.py:' tests/` is empty), so a lane following it edits the
@@ -1473,8 +1495,10 @@ SWEEP_NAMES = 66
 #: merged in, and `--repin` printed the same pair before and after that merge, so the merge
 #: contributes no row here either — nor do the sibling commits merged after it (all on this
 #: branch's census file, and named by log rather than counted here, because a count restated in this
-#: block goes stale at the next sibling push, the class `2465cda150` was written to stop). The
-#: pin is RE-DERIVED after every integration rather than carried forward. ⛔ EVERY PAIR HERE IS
+#: block goes stale at the next sibling push, the class `2465cda150` was written to stop). At that
+#: time the pin was RE-DERIVED after every integration rather than carried forward; since #14548 no
+#: integration re-pins anything, because `--check` ratchets against the tree's own base point
+#: instead of against this pair. ⛔ EVERY PAIR HERE IS
 #: SCOPED TO THE TREE IT WAS MEASURED ON, and an earlier cut of this paragraph attributed one to
 #: another (review of #14287, round 4, P1): `(11861, "f0647020531c078c")` is what `main` COMMITS
 #: at `0467ba329d` and again at `47e28b549e76` (measured: `git show <rev>:tools/sdk_privatise.py`),
@@ -1494,9 +1518,10 @@ SWEEP_NAMES = 66
 #: ROW" IS FALSE AS A GENERAL CLAIM: an integration CAN add untyped receivers, and re-cutting the
 #: pin is exactly how that gets recorded — the block BELOW is one, where merging `10e51693` moved
 #: the pair to `(11864, …)`, "FOUR MORE than this branch's parent". ⛔ AND THE EVIDENCE IS
-#: `--repin`'s OUTPUT, NOT THE CHECK'S EXIT: `--check` exiting 0 says the observed pair equals the
-#: pin, which it reports just as readily on a tree whose pin was re-cut after the integration
-#: added rows.
+#: `--repin`'s OUTPUT, NOT THE CHECK'S EXIT: under the equality gate this record was written
+#: against, `--check` exiting 0 meant the observed pair equalled the pin — and it said so just as
+#: readily on a tree whose pin was re-cut after the integration added rows. Since #14548 it says
+#: less still: the COUNT did not EXCEED a base point, and the pin is not consulted at all.
 #: ⛔ NAMED BY ITS COMMITS, NOT BY "this branch's base": the base moves under every integration
 #: and a parenthetical reading `this branch's base` went stale at the very next merge (measured:
 #: written naming `0467ba329d`, false the moment `47e28b549e76` was merged).
@@ -1646,9 +1671,9 @@ SWEEP_NAMES = 66
 #: ⛔ THE PAIRS COME FROM `--repin`, NOT `--report`. `--report` prints the untyped COUNT and the
 #: rows and NO digest at all (measured: `--report --base 28ca66878d… --top 5 | grep -c
 #: f0647020531c078c` → **0**), so a pair quoted as `--report`'s output sends a reader to a command
-#: that cannot reproduce it. `--repin` prints `SWEEP_RESIDUE = (n, digest)`; `--check` prints an
-#: observed digest ONLY on its failure path (`observed: (n, digest)` on stderr), never on a
-#: passing run — so a pair quoted from a green tree is `--repin`'s or nothing.
+#: that cannot reproduce it. `--repin` prints `SWEEP_RESIDUE = (n, digest)`. `--check` no longer
+#: prints the TREE's own pair: a green run prints the RECORDED pin's, and its failure path prints
+#: rows and sites with no OBSERVED digest — so a pair quoting a tree is `--repin`'s or nothing.
 #: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
 #: and diffed, and EXACTLY ONE row differs
 #: out of an UNCHANGED 856-row SHAPE set on both sides:
@@ -2268,19 +2293,21 @@ SWEEP_NAMES = 66
 #: accepted as a flake: `main`'s rewrite of `tests/test_collision_preflight.py` adds exactly one
 #: untyped `.update` receiver, `seen.update(kwargs)` in its new `spy()` fixture, and that merge
 #: deleted no `.update` line anywhere (`#4625`'s own -2 is still in that tree: `_JSONB_CACHE.update`
-#: is 2 rows on `origin/main` and 0 there). A rising pin is the direction the guard exists to CATCH,
+#: is 2 rows on `2cccf90f4dd4` and 0 here). A rising pin is the direction the guard exists to CATCH,
 #: and there the row is main's, so the pin followed `main` — measured `--repin` on that merged tree,
 #: never arithmetic on the old number.
 #: ⛔ AND THE NEXT FOLD OF `origin/main` RE-DERIVED IT AGAIN RATHER THAN INHERITING EITHER SIDE,
 #: because the fold's own tree is a THIRD tree: that merge brought main's durable
 #: `claim_unavailable` self-heal, whose `recorded.update(keep)` in `tortoise/capture_spool.py` is one
 #: new untyped `.update(` receiver, and `--repin` on THAT resolved tree printed
-#: **(11910, "3216395d35345904")**. The -3 between that and that `main`'s committed 11911 is
-#: attributed ROW BY ROW, not waved through:
+#: **(11910, "3216395d35345904")**. The TWO rows between that and the **11912** `main`'s own
+#: tree derives are attributed ROW BY ROW, not waved through:
 #:   * that `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1
 #:     is `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which
-#:     arrived with `#14491`'s rewrite and which that re-pin did not count. So `--check` exited 1 on
-#:     that `main` ITSELF (the `#14062` recurrence the blocks above record a sixth time); this
+#:     arrived with `#14506`'s rewrite and which that re-pin did not count. So `--check` exited 1 on
+#:     that `main` AT THAT COMMIT (the `#14062` recurrence the blocks above record a sixth time);
+#:     `#14459` then re-derived the pin at 11910 on its own tree, so `main` reads exit 0 today
+#:     (measured); this
 #:     branch inherits main's row set, not main's number.
 #:     took with it — 2 rows on that `origin/main`, 0 there, and the report row sets are otherwise
 #:     IDENTICAL (`--report --top 5000` on both trees, 862 shape-carrying lines either side, one
@@ -2433,14 +2460,49 @@ def rename_map(rev: str | None = None) -> list[Entry]:
     return out
 
 
+#: ⛔ GIT DOES NOT HAND BACK PATHS VERBATIM BY DEFAULT, AND A PATH THAT IS NOT VERBATIM IS NOT THE
+#: PATH — every reader in this file then disagrees, SILENTLY, about which files exist (#14548
+#: review, P3 latent). TWO default behaviours do it, and only `-z` answers BOTH: `core.quotePath`
+#: (on by default) octal-escapes any byte above 0x7F, so `añ.py` arrives as `"a\303\261.py"`; and a
+#: name holding a quote, tab or newline is C-quoted REGARDLESS of that flag. MEASURED on a tree
+#: carrying `tortoise/añ.py` (the review named the third state; the FIRST is the one this file was
+#: actually in):
+#:   * BOTH reads quoted, `py_files()` as shipped: it is handed `"tortoise/a\303\261.py"`,
+#:     `ROOT / name` is not a file on disk, so the WHOLE FILE LEAVES THE CENSUS. Every receiver in
+#:     it leaves `now` — and a ratchet passes any shrink — so **growth written into that file is
+#:     absorbed, silently.** `ls-tree` is quoted too, so it is missing from `tree_paths` as well:
+#:     consistently invisible on BOTH sides is what makes it a clean PASS rather than a red.
+#:   * BOTH reads quoted, with the census fixed: the path is still absent from `tree_paths` and its
+#:     `diff` row still fails `dest.endswith(".py")` (the row ends in `"`), so its rows are neither
+#:     seeded nor replaced and read as `baseline 0` — a false attribution and a false RED.
+#:   * `ls-tree` unquoted but `diff` quoted (a MIXED state): the path is seeded at its MEASURED
+#:     count AND its `diff` row is skipped, so it keeps the working tree's own count as its baseline
+#:     and **growth inside it is absorbed** — the mechanism the review named, and it needs the two
+#:     reads to disagree.
+#: ONE mechanism on EVERY path-naming read is what keeps the three populations the SAME population,
+#: so no mixed state is reachable — and it has to be `-z`, not `-c core.quotePath=false`, because
+#: the flag leaves the SEPARATOR problem: `py_files()` split its rows on WHITESPACE, so `a b.py` —
+#: which git emits UNQUOTED, flag or no flag — became the two tokens `a` and `b.py`, neither of them
+#: a file, and the whole file left the census (MEASURED on exactly that fixture). SOURCES, so the
+#: next lane can check rather than re-derive: git-config(1) says `core.quotePath` defaults to `true`
+#: and "quotes unusual characters in path names"; git-diff-options(1) and git-ls-files(1) name `-z`
+#: as the machine-parsing form (paths VERBATIM and NUL-terminated). `core.quotePath=false` is the
+#: narrower fix — it changes no parsing shape — and it is exactly why it cannot close this half.
+#: `-z` is one path per NUL-terminated field, a separator that cannot occur inside a name, so a
+#: space, a tab and a newline all survive. Same rule and same reason as `tools/lane_wip.py`'s note.
+#: Measured in this clone: `git ls-files | grep -cP '[^\x00-\x7F]'` → **0** and no tracked path
+#: holds a space, tab or newline, so every hole here is LATENT; they are closed anyway because one
+#: of the states is a silent PASS.
+
+
 def py_files() -> list[Path]:
-    tracked = subprocess.run(
-        ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True
-    ).stdout.split()
-    untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "*.py"],
-        cwd=ROOT, capture_output=True, text=True,
-    ).stdout.split()
+    # ⛔ `check=True`: a FAILED `git ls-files` (dubious-ownership refusal, a `GIT_INDEX_FILE`
+    # temp index, a corrupt index) used to return `""` and this walk would then measure NO files.
+    # With a total-count ratchet that reads as `0 now vs 0` — a PASS — so a lost measurement must
+    # be an ERROR, never an empty population. (The equality pin this change replaced could not be
+    # fooled that way; a ratchet has to refuse it explicitly.)
+    tracked = _git_paths("ls-files", "-z", "*.py")
+    untracked = _git_paths("ls-files", "-z", "--others", "--exclude-standard", "*.py")
     out = []
     for f in tracked + untracked:
         if f.startswith(("archive/", ".venv/", ".worktrees/")):
@@ -2455,6 +2517,355 @@ def residue_digest(rows: Counter) -> str:
     """A stable digest of the residue SET (row -> count), for the `SWEEP_RESIDUE` pin."""
     text = "\n".join(f"{row}\t{rows[row]}" for row in sorted(rows))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+# ── THE RESIDUE RATCHET: growth REDS, removal PASSES, nothing is re-pinned ──────
+#
+# `SWEEP_RESIDUE` was an EQUALITY pin: `--check` required the observed `(rows, digest)` to match
+# the pair written into this file. The count is a WHOLE-TREE reading, so it moved whenever anyone
+# touched an audited call, and the only repair was a new PR that pasted a fresh pair — the
+# re-pin treadmill (#4625's block above counts its own re-cuts). The pin is kept ABOVE as a
+# historical reading, and `--check` no longer requires it: the assertion is a RATCHET against a
+# baseline MEASURED at check time, so
+#   * a NET increase in untyped receivers still REDS (the signal the pin existed to carry);
+#     one added and one removed is a net-zero PASS, and the SHAPE note names the swap — that is
+#     why the digest is REPORTED rather than graded,
+#   * removing one PASSES (a ratchet that reds on improvement is useless),
+#   * nobody re-pins, because there is no number to keep in step with the tree.
+
+#: The paths `py_files()` never measures. Repeated here so the baseline reconstruction skips
+#: exactly what the measured walk skips: a path in one population and not the other is a
+#: difference the ratchet would report as growth.
+_SKIP_PREFIXES = ("archive/", ".venv/", ".worktrees/")
+
+
+def _git(*args: str) -> str:
+    """Run `git` in ROOT and return its stdout. Raises `CalledProcessError` on failure.
+
+    ⛔ For a read that NAMES PATHS, use `_git_paths()` instead: this one returns the raw stream, and
+    a path read out of it is quoted or whitespace-split unless the caller asked for `-z` — see the
+    block above `py_files()`. The readers here that stay on text are `rev-parse`/`merge-base`/
+    `show`, none of which hands a path BACK.
+    """
+    return subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout
+
+
+def _git_paths(*args: str) -> list[str]:
+    """The NUL-separated fields of a `git` read — paths VERBATIM, never quoted, never split.
+
+    The caller passes `-z`, because its position is subcommand-specific (`ls-files -z <pathspec>`,
+    `diff … -z <rev>`) and a helper that appended it would hand `ls-files` a pathspec named `-z`.
+    """
+    out = subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout
+    fields = out.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()  # the stream is NUL-TERMINATED, so the last field is empty by construction
+    return fields
+
+
+def baseline_rev(explicit: str | None = None) -> tuple[str | None, str]:
+    """The rev the ratchet measures its baseline on, plus a sentence naming which one it is.
+
+    The MERGE BASE with `origin/main` is the tree this working change is a diff against, so it is
+    the tree the question "did this change ADD an untyped receiver?" is asked against. A
+    detached `origin/main` resolves no merge base, so `origin/main` itself is the fallback; a
+    clone with no such ref at all returns `None`, and the caller degrades to the recorded pin.
+    ⛔ THAT FALLBACK IS NOT SIMPLY "LOOSER" (#14548 review, P3): the pin is FROZEN, so it is looser
+    BELOW itself — growth up to the pin's count passes, and nobody writes the pin any more — and
+    STRICTER ABOVE it, where a tree that added nothing still reds because its total is already over
+    the pin (a stale clone is exactly that case, and it is the treadmill's signature). Both facts
+    are the caller's to print, beside the way out: `--baseline REV`, or fetch `origin/main`.
+    """
+    if explicit is not None:
+        # ⛔ `is not None`, not truthiness: `--baseline "$BASE_REV"` with the variable UNSET yields
+        # an EMPTY string, which must be the documented refusal rather than "the flag was absent".
+        # Otherwise the run silently answers about the merge base, at exit 0, which is the exact
+        # substitution the refusal exists to prevent.
+        try:
+            _git("rev-parse", "--verify", f"{explicit}^{{commit}}")
+        except subprocess.CalledProcessError:
+            return None, f"`--baseline {explicit}` does not name a commit in this clone"
+        return explicit, "named by --baseline"
+    try:
+        rev = _git("merge-base", "HEAD", "origin/main").strip()
+        if rev:
+            return rev, "the merge base with origin/main"
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    try:
+        rev = _git("rev-parse", "--verify", "origin/main").strip()
+        if rev:
+            return rev, "origin/main (no merge base resolved)"
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    return None, "no origin/main in this clone"
+
+
+def _is_own_base(rev: str) -> bool:
+    """True when `rev` IS this commit — the post-merge case, where a ratchet cannot red.
+
+    ⛔ STATED RATHER THAN LEFT INERT (#14548 review, P3/F4). `baseline_rev()` prefers the merge
+    base with `origin/main`, and on a `push: main` run `HEAD == origin/main`, so the merge base
+    IS `HEAD`, `git diff --name-status -M HEAD` is empty, `baseline_rows` seeds the whole
+    measured tree and `then == now` — `--check` passes on `main` whatever the tree holds, and
+    `shape_notes` is silent as well (identical digest). The pin this change demotes is what
+    caught the merges that moved the census, so the loss is named at the point where it happens
+    and the recorded pin is still printed as a NON-BLOCKING delta beside it.
+    """
+    try:
+        # ⛔ RESOLVE BOTH SIDES. `rev-parse HEAD` yields a full sha, so comparing it against the
+        # caller's SPELLING (`--baseline origin/main`, `HEAD`, an abbreviated sha) answers False
+        # for the very invocations the flag invites — and the disclosure this function gates would
+        # then be skipped exactly when it matters, on a self-comparison that still prints "equal
+        # to the baseline, nothing was added".
+        return _git("rev-parse", "--verify", f"{rev}^{{commit}}").strip() == (
+            _git("rev-parse", "HEAD").strip()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def _diff_name_status(rev: str) -> list[tuple[str, list[str]]]:
+    """`git diff --name-status -M <rev>` as `(status, [path, …])` records, paths VERBATIM.
+
+    ⛔ THE LINE-AND-TAB PARSE BROKE ON A NAME THE SEPARATORS COULD OCCUR IN. A non-ASCII path
+    arrives C-quoted (`dest.endswith(".py")` is then False, so the row was `continue`d and the
+    file kept its MEASURED rows as its baseline: growth inside it absorbed), and a name holding a
+    TAB splits into fields that are not paths at all. `-z` is git's documented machine format:
+    the status and each path are separate NUL-terminated fields, so a rename still yields its two
+    paths in order and the separator cannot occur inside a name.
+    """
+    fields = _git_paths("diff", "--name-status", "-M", "-z", rev)
+    records: list[tuple[str, list[str]]] = []
+    i = 0
+    while i < len(fields):
+        kind = fields[i]
+        i += 1
+        width = 2 if kind.startswith(("R", "C")) else 1
+        paths = fields[i:i + width]
+        i += width
+        if not kind or len(paths) != width:
+            # A TRUNCATED record is not a moveless diff, so it must not be completed by guess:
+            # stop rather than invent a path from the next record's status field.
+            break
+        records.append((kind, paths))
+    return records
+
+
+def baseline_rows(
+    rev: str,
+    rmap: dict[str, str],
+    measured: dict[str, Counter],
+    measured_sites: dict[str, dict[str, list[int]]] | None = None,
+) -> tuple[Counter, dict[str, Counter], dict[str, dict[str, list[int]]]]:
+    """The residue rows on `rev`, walking ONLY the paths that moved since `rev`.
+
+    A file whose blob is identical has an identical residue set by construction — same bytes,
+    same AST — so re-walking the whole package to obtain the baseline would double `--check`'s
+    wall clock to learn nothing. `git diff --name-status -M` names what moved, including renames
+    (whose BASELINE rows come from the OLD path: a file that only moved its own untyped calls
+    must not read as growth), and only those blobs are measured, from the object store.
+
+    Returns `(whole-tree baseline rows, per-path baseline rows, per-path sites)`. ⛔ The maps are
+    PER PATH for every path the baseline tree has, not only the ones that moved: the failure
+    names a file by comparing its count now against its count on the baseline, so a missing entry
+    would read as "baseline 0" and blame an untouched file for receivers it always had.
+    """
+    try:
+        tree_paths = {
+            p for p in _git_paths("ls-tree", "-r", "--name-only", "-z", rev)
+            if p.endswith(".py") and not p.startswith(_SKIP_PREFIXES)
+        }
+    except subprocess.CalledProcessError:
+        tree_paths = set()
+    out: Counter = Counter()
+    # ⛔ ONLY paths that exist in the baseline tree start the count. `git diff` does not list
+    # UNTRACKED files, so seeding from the measured totals alone let a brand-new uncommitted
+    # `.py` file carry its untyped receivers into BOTH sides and hide them (measured: the probe
+    # file at this lane's own growth proof read as "equal to the baseline"). A file the baseline
+    # does not have cannot have baseline rows.
+    measured_sites = measured_sites or {}
+    per_file: dict[str, Counter] = {
+        path: rows for path, rows in measured.items() if path in tree_paths
+    }
+    per_file_sites: dict[str, dict[str, list[int]]] = {
+        path: measured_sites.get(path, {}) for path in per_file
+    }
+    # An UNMOVED file's baseline rows ARE its measured rows (same bytes, same AST), so every path
+    # is seeded here and the diff loop below REPLACES the ones that moved.
+    for rows in per_file.values():
+        out += rows
+    for kind, paths in _diff_name_status(rev):
+        dest = paths[-1]
+        if not dest.endswith(".py") or dest.startswith(_SKIP_PREFIXES):
+            continue
+        if dest in tree_paths:  # counted above; the baseline blob below REPLACES it
+            for row, count in measured.get(dest, Counter()).items():
+                out[row] -= count
+                if out[row] <= 0:
+                    del out[row]
+        # `A` (added) and `C` (copied) have no baseline blob of their OWN: a copy that clones an
+        # untyped call site IS growth, so it must contribute nothing to the baseline. Kept as a
+        # guard rather than as live logic, and said out loud: an `A` row's `paths[0] == dest`, so
+        # the `git show <rev>:<dest>` below already fails for it, and `-M` without `-C` never
+        # emits a `C` row at all. A future `-C` must not silently seed a copy from its source.
+        if kind.startswith(("A", "C")):
+            continue
+        src_path = paths[0]
+        # ⛔ The SOURCE needs the same skip guard as the destination, and for the mirror reason:
+        # `py_files()` never counts an `archive/` file, so a rename OUT of it must not donate that
+        # blob's receivers to the baseline either — that would grant a restoring PR exactly that
+        # much headroom. (Measured: this repo carries 111 `.py` files under `archive/`.)
+        if src_path.startswith(_SKIP_PREFIXES):
+            continue
+        try:
+            src = _git("show", f"{rev}:{src_path}")
+        except subprocess.CalledProcessError:
+            continue
+        measured_at_src = edits_for(ROOT / src_path, rmap, src=src)
+        if measured_at_src.residue:
+            per_file[dest] = measured_at_src.residue
+            per_file_sites[dest] = measured_at_src.sites
+            out += measured_at_src.residue
+        else:  # the baseline blob carries no residue: it must stop being counted for `dest`
+            per_file.pop(dest, None)
+            per_file_sites.pop(dest, None)
+    return out, per_file, per_file_sites
+
+
+def _new_sites(
+    row: str,
+    files: dict[str, Counter],
+    baseline_files: dict[str, Counter],
+    sites: dict[str, dict[str, list[int]]],
+    baseline_sites: dict[str, dict[str, list[int]]] | None = None,
+    limit: int = 12,
+    files_limit: int = 8,
+) -> list[str]:
+    """`file:line` for the files whose count of `row` ROSE against the baseline.
+
+    ⛔ WHICH lines, not just how many. Two things a bare `sites[:n]` got wrong: `ast.walk` is
+    BREADTH-first, so source order is not list order and truncating prints pre-existing lines and
+    drops the new one; and the baseline's own lines are subtracted as a MULTISET, because a plain
+    set difference is only sound while no line moved — inserting a receiver above existing ones
+    shifts every later one, which would name survivors as new and hide the addition. When the
+    difference does not account for the growth, every site is shown with that said, rather than a
+    confident wrong line.
+    """
+    cands = []
+    for path in sorted(files):
+        now = files[path].get(row, 0)
+        before = baseline_files.get(path, Counter()).get(row, 0)
+        if now > before:
+            cands.append((now - before, path, now, before))
+    cands.sort(reverse=True)
+    out = []
+    for _delta, path, now, before in cands[:files_limit]:
+        have = sites.get(path, {}).get(row, [])
+        had = (baseline_sites or {}).get(path, {}).get(row, [])
+        note = ""
+        if not had:
+            # No baseline lines to subtract (a new file, or a baseline measured without sites):
+            # show them all rather than claim a line is not locatable.
+            fresh = sorted(have)
+        else:
+            fresh = sorted(Counter(have) - Counter(had))
+            if len(fresh) != now - before:
+                fresh = sorted(have)
+                note = "  (baseline lines shifted, so the new site is among these, not singled out)"
+        if fresh:
+            where = ", ".join(f"line {n}" for n in fresh[:limit])
+            if len(fresh) > limit:
+                where += f", … +{len(fresh) - limit} more of {len(fresh)}"
+        else:
+            where = "site not located"
+        out.append(f"{path}  (baseline {before} -> now {now}): {where}{note}")
+    if len(cands) > files_limit:
+        out.append(f"… +{len(cands) - files_limit} more file(s) rising in this row")
+    return out
+
+
+def ratchet_verdict(
+    measured: Counter,
+    baseline: Counter,
+    files: dict[str, Counter],
+    baseline_files: dict[str, Counter],
+    sites: dict[str, dict[str, list[int]]],
+    label: str,
+    baseline_sites: dict[str, dict[str, list[int]]] | None = None,
+    rows_limit: int = 8,
+) -> tuple[bool, list[str]]:
+    """The residue comparison as a RATCHET: `measured <= baseline`, never equality.
+
+    A ratchet that cannot point at the offending line is not actionable, so a rise names the
+    rows that grew, by how much, and the `file:line` in the files whose count rose. A fall is a
+    PASS — the whole point of a ratchet — and equal is the ordinary case.
+    """
+    now, then = sum(measured.values()), sum(baseline.values())
+    if now <= then:
+        if now < then:
+            direction = f"{then - now} FEWER than the baseline, which the ratchet allows"
+        else:
+            direction = "equal to the baseline, so nothing was added"
+        return True, [
+            f"untyped receivers: {now} now vs {then} on the baseline ({label}) — {direction}"
+        ]
+    lines = [
+        f"the untyped-receiver count ROSE by {now - then}: {then} on the baseline ({label}) -> "
+        f"{now} now. Do not add untyped `.update(`/`.query(`/`.delete(` receivers — type the "
+        "receiver, or convert the call. This is a RATCHET: it passes when the count falls and "
+        "reds when it rises, so there is no pin to re-cut."
+    ]
+    rising = sorted(
+        (row for row in measured if measured[row] > baseline.get(row, 0)),
+        key=lambda r: (measured[r] - baseline.get(r, 0), baseline.get(r, 0), r), reverse=True,
+    )
+    for row in rising[:rows_limit]:
+        lines.append(
+            f"  +{measured[row] - baseline.get(row, 0)}  {row}  "
+            f"(baseline {baseline.get(row, 0)} -> now {measured[row]})"
+        )
+        for where in _new_sites(row, files, baseline_files, sites, baseline_sites):
+            lines.append(f"        {where}")
+    if len(rising) > rows_limit:
+        lines.append(f"  … and {len(rising) - rows_limit} more rising row(s)")
+    return False, lines
+
+
+def shape_notes(measured: Counter, baseline: Counter) -> list[str]:
+    """Rows that APPEARED or VANISHED between the baseline and the tree — never a gate.
+
+    The digest half of `SWEEP_RESIDUE` was what caught a NEW untyped shape whose total a removed
+    one masked. That is a real signal and it is kept, but it cannot be a gate: renaming an
+    innocent receiver (`db.update` -> `store.update`) moves the digest without adding a call, and
+    gating on it would rebuild the very treadmill this ratchet removes. So it is REPORTED.
+    """
+    if residue_digest(measured) == residue_digest(baseline):
+        return []
+    appeared = sorted(set(measured) - set(baseline))
+    vanished = sorted(set(baseline) - set(measured))
+    out = [
+        "residue SHAPE changed against the baseline (not a failure — the digest is a signal, "
+        "the count is the gate)"
+    ]
+    for row in appeared[:8]:
+        out.append(f"  appeared: {row}  (now {measured[row]})")
+    for row in vanished[:8]:
+        out.append(f"  vanished: {row}  (was {baseline[row]})")
+    if not appeared and not vanished:
+        moved = sorted(
+            (row for row in measured if measured[row] != baseline[row]),
+            key=lambda r: abs(measured[r] - baseline[r]), reverse=True,
+        )
+        for row in moved[:8]:
+            out.append(f"  count moved: {row}  {baseline[row]} -> {measured[row]}")
+    if len(appeared) > 8 or len(vanished) > 8:
+        out.append(f"  … {len(appeared)} appeared / {len(vanished)} vanished in total")
+    return out
 
 
 def _call_name(node: ast.expr) -> str:
@@ -2705,14 +3116,24 @@ def _in_sdk_class(line: int, ranges: list[tuple[int, int, str]]) -> bool:
     return any(lo <= line <= hi and nm == "TortoiseSDK" for lo, hi, nm in ranges)
 
 
-def _def_name_span(path: Path, node: ast.AST, name: str) -> tuple[int, int] | None:
+def _def_name_span(
+    path: Path, node: ast.AST, name: str, lines: list[str] | None = None
+) -> tuple[int, int] | None:
     """The (start, end) columns of the NAME in `def <name>(`, read from the source line.
 
     ⛔ NOT `col_offset + 4`: for an `AsyncFunctionDef`, `col_offset` points at `async`, so
     offset arithmetic writes `asyn_deletedelete`, a syntax error the sweep then cannot see
     because the file no longer parses.
+
+    ⛔ `lines` is the caller's OWN source when it measured a BLOB (`edits_for(..., src=...)`). A
+    node's `lineno` belongs to the source it was parsed from, so re-reading `path` here would
+    either raise (the baseline file was deleted or renamed away) or index the WORKING TREE's line
+    — locating nothing, charging a phantom `def <name> (span not located)` row to the BASELINE,
+    and handing the ratchet one row of headroom per shifted stand-in `def`.
     """
-    line = path.read_text(encoding="utf-8").splitlines()[node.lineno - 1]
+    if lines is None:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    line = lines[node.lineno - 1]
     m = re.search(rf"\bdef\s+({re.escape(name)})\b", line[node.col_offset:])
     if not m:
         return None
@@ -2726,6 +3147,11 @@ class FileEdits:
     defs: list[tuple[int, int, int, str]]
     strings: list[tuple[int, int, int, str]]
     residue: Counter
+    #: row -> the line numbers this file contributes to it. `residue` is a whole-tree COUNT, and
+    #: a count cannot point at the receiver that was added; `--check`'s ratchet failure needs the
+    #: `file:line`, so the sites are carried beside the counts. Empty for the rows that have no
+    #: node to point at (`<<syntax-error>>`).
+    sites: dict[str, list[int]] = field(default_factory=dict)
 
 
 #: A string literal naming one of the methods: `"query"`, `"sdk.query"`,
@@ -2736,8 +3162,16 @@ _STRING_CLASS_REF = re.compile(r"(?:^|\.)TortoiseSDK\.([A-Za-z_][A-Za-z0-9_]*)$"
 _STRING_PLAIN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)$")
 
 
-def edits_for(path: Path, rmap: dict[str, str]) -> FileEdits:
-    src = path.read_text(encoding="utf-8")
+def edits_for(path: Path, rmap: dict[str, str], src: str | None = None) -> FileEdits:
+    """The edits and the residue for ONE file.
+
+    `src` overrides the file's CONTENT while keeping `path` as its identity — that is how the
+    ratchet measures a baseline row set from the merge base's blob without checking the tree out
+    (a file that no longer exists in the working tree still needs its old identity for the SDK
+    self-measurement, and `Path.resolve()` is non-strict, so the path need not exist).
+    """
+    if src is None:
+        src = path.read_text(encoding="utf-8")
     # SOUND, not a heuristic: an attribute, `def` or string reference to a name cannot exist
     # without that name's literal text in the file, so a file containing none of them has no
     # edit and no residue. It is what keeps `--check` a gate people will actually run.
@@ -2760,21 +3194,27 @@ def edits_for(path: Path, rmap: dict[str, str]) -> FileEdits:
     defs: list[tuple[int, int, int, str]] = []
     strings: list[tuple[int, int, int, str]] = []
     residue: Counter = Counter()
+    sites: dict[str, list[int]] = {}
+
+    def _residue(row: str, lineno: int = 0) -> None:
+        residue[row] += 1
+        if lineno:
+            sites.setdefault(row, []).append(lineno)
 
     for node in ast.walk(tree):
         # ── attribute accesses ────────────────────────────────────────────────
         if isinstance(node, ast.Attribute) and node.attr in rmap:
             in_class = in_sdk and _in_sdk_class(node.lineno, ranges)
             if not receiver_is_sdk(node.value, typing, standins, in_class, node.lineno):
-                residue[f"{ast.unparse(node.value)[:40]}.{node.attr}"] += 1
+                _residue(f"{ast.unparse(node.value)[:40]}.{node.attr}", node.lineno)
                 continue
             if node.value.end_lineno != node.end_lineno:
-                residue[f"{node.attr} (multiline receiver)"] += 1
+                _residue(f"{node.attr} (multiline receiver)", node.lineno)
                 continue
             start = node.value.end_col_offset  # EXCLUSIVE: this is the '.'
             end = node.end_col_offset
             if lines[node.lineno - 1][start:end] != "." + node.attr:
-                residue[f"{node.attr} (unexpected span)"] += 1
+                _residue(f"{node.attr} (unexpected span)", node.lineno)
                 continue
             attrs.append((node.lineno, start, end, "." + rmap[node.attr]))
             continue
@@ -2817,7 +3257,7 @@ def edits_for(path: Path, rmap: dict[str, str]) -> FileEdits:
                         )
                         continue
                     if m and m.group(1) in rmap:
-                        residue[f"string {literal.value!r} on untyped receiver"] += 1
+                        _residue(f"string {literal.value!r} on untyped receiver", literal.lineno)
 
         # ── stand-in `def`s ───────────────────────────────────────────────────
         if isinstance(node, ast.ClassDef) and node.name in standins:
@@ -2833,23 +3273,23 @@ def edits_for(path: Path, rmap: dict[str, str]) -> FileEdits:
                     isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and m.name in rmap
                 ):
-                    span = _def_name_span(path, m, m.name)
+                    span = _def_name_span(path, m, m.name, lines)
                     if span is None:
-                        residue[f"def {m.name} (span not located)"] += 1
+                        _residue(f"def {m.name} (span not located)", m.lineno)
                         continue
                     defs.append((m.lineno, span[0], span[1], rmap[m.name]))
 
     if in_sdk:
-        for m in class_body().body:
+        for m in class_body(src).body:
             if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name in rmap:
-                span = _def_name_span(SDK_SRC, m, m.name)
+                span = _def_name_span(SDK_SRC, m, m.name, lines)
                 if span is None:
                     raise SystemExit(
                         f"cannot locate the name span for `def {m.name}` at "
                         f"tortoise/sdk.py:{m.lineno}"
                     )
                 defs.append((m.lineno, span[0], span[1], rmap[m.name]))
-    return FileEdits(attrs, defs, strings, residue)
+    return FileEdits(attrs, defs, strings, residue, sites)
 
 
 def apply_edits(path: Path, edits: list[tuple[int, int, int, str]]) -> int:
@@ -2876,9 +3316,11 @@ def main() -> int:
                     help="classification, collisions, stand-ins and every untyped residue shape")
     ap.add_argument("--apply", action="store_true", help="rewrite the tree")
     ap.add_argument("--check", action="store_true",
-                    help="exit 1 while any TYPED reference to a now-private name survives, or "
-                         "the residue set moved off its pin, or the map derived from the "
-                         "pinned base is empty/wrong-sized (a vacuous verifier is a failure)")
+                    help="exit 1 while any TYPED reference to a now-private name survives, or the "
+                         "untyped-receiver count EXCEEDS the baseline measured on the merge "
+                         "base (a ratchet: an increase reds and names the new sites, a "
+                         "decrease passes), or the map derived from the pinned base is "
+                         "empty/wrong-sized (a vacuous verifier is a failure)")
     ap.add_argument(
         "--base", default=None,
         help=f"rev to derive the rename map from (default for --check: the PINNED sweep base "
@@ -2886,8 +3328,14 @@ def main() -> int:
              "⛔ `--check` MUST NOT default to `merge-base origin/main`: after this branch "
              "merges the live class no longer holds the names, the map is empty, and the "
              "check would answer 0 references over an unswept tree — a vacuous PASS.")
+    ap.add_argument(
+        "--baseline", default=None,
+        help="rev the residue RATCHET measures its baseline on (default: the merge base with "
+             "origin/main, else origin/main, else the recorded pin). Growth over that baseline "
+             "is the failure; nothing is re-pinned to fix it.")
     ap.add_argument("--repin", action="store_true",
-                    help="print the SWEEP_RESIDUE pin for the current tree (deliberate re-pin)")
+                    help="print the residue pair for the current tree (a reading; `--check` no "
+                         "longer requires it — the ratchet measures its own baseline)")
     ap.add_argument("--top", type=int, default=25, help="residue rows to print")
     args = ap.parse_args()
     if not (args.plan or args.apply or args.check or args.report or args.repin):
@@ -2955,30 +3403,102 @@ def main() -> int:
     if args.check or args.repin:
         after = 0
         after_residue: Counter = Counter()
+        per_file: dict[str, Counter] = {}
+        per_file_sites: dict[str, dict[str, list[int]]] = {}
+        walked = 0
         for p in py_files():
+            walked += 1
             e2 = edits_for(p, rmap)
             after += len(e2.attrs) + len(e2.defs) + len(e2.strings)
             after_residue.update(e2.residue)
+            if e2.residue:
+                rel = p.relative_to(ROOT).as_posix()
+                per_file[rel] = e2.residue
+                per_file_sites[rel] = e2.sites
         digest = residue_digest(after_residue)
+        now = sum(after_residue.values())
         if args.repin:
-            print(f"SWEEP_RESIDUE = ({sum(after_residue.values())}, {digest!r})")
+            print(f"SWEEP_RESIDUE = ({now}, {digest!r})")
             return 0
         print(f"typed references still pointing at a public name: {after}")
-        print(f"untyped receivers left alone (deliberate, reported): {sum(after_residue.values())}")
-        pinned = SWEEP_RESIDUE
-        if (sum(after_residue.values()), digest) != pinned:
+        print(f"untyped receivers left alone (deliberate, reported): {now}")
+        # ⛔ A FILE THAT DOES NOT PARSE IS NOT A FILE WITH FEWER UNTYPED RECEIVERS. `edits_for`
+        # folds an unparseable file down to ONE `<<syntax-error>>` row, so a file that carried
+        # many residue rows and then broke would LOWER the count and mask any growth elsewhere —
+        # a fail-open introduced by comparing totals rather than requiring equality. Refuse.
+        broken = sorted(p for p, rows in per_file.items() if rows.get("<<syntax-error>>"))
+        if broken:
             print(
-                "the residue SET moved off its pin: a reference shape that was not there when "
-                "this sweep was verified is now on the tree, and the ordinary-word receivers "
-                "(`x.query`, `x.update`, `x.delete`) are exactly the shape a typed-reference "
-                "count cannot see. Read the rows below, fix or declare the new shape, then "
-                f"re-pin with --repin.\n  observed: ({sum(after_residue.values())}, "
-                f"{digest!r})\n  pinned:   {pinned}",
+                "CANNOT ANSWER: the sweep cannot parse " + ", ".join(broken) + " — an unparseable "
+                "file is not a file with fewer untyped receivers, so the count cannot be "
+                "compared with a baseline until it parses again.",
                 file=sys.stderr,
             )
-            for r, c in after_residue.most_common(10):
-                print(f"  {c:5d}  {r}", file=sys.stderr)
             return 1
+        base_rev, why = baseline_rev(args.baseline)
+        if base_rev is None and args.baseline is not None:
+            # A baseline the caller NAMED (even as an EMPTY string) and we cannot resolve is a
+            # refusal, not a fallback: the run would answer a different question than it was asked.
+            print(f"CANNOT ANSWER: {why}. Nothing was graded.", file=sys.stderr)
+            return 2
+        if walked == 0:
+            # ⛔ A ZERO-FILE WALK IS NOT A CLEAN TREE. A `git ls-files` that failed (or a working
+            # tree that is not the one this gate is about) leaves the count at 0, and a ratchet
+            # PASSES any shrink by construction — so the measurement itself has to be refused.
+            print(
+                "CANNOT ANSWER: the walk measured no Python files at all, so a 0-row count is "
+                "not a clean tree — `git ls-files` failed, or this is not the tree the gate is "
+                "about. Nothing was graded.",
+                file=sys.stderr,
+            )
+            return 1
+        if base_rev is None:
+            # DEGRADED: with no `origin/main` there is no tree to measure, so the recorded pin is
+            # the only ceiling available. ⛔ IT IS NOT SIMPLY "LOOSER" (#14548 review, P3): the pin is
+            # FROZEN, so it reds at `now > SWEEP_RESIDUE[0]` — looser BELOW itself (growth up to the
+            # pin passes, and the pin is now written by nobody) and STRICTER ABOVE it (a tree
+            # already over the pin reds having added nothing; a stale clone is that case). Both are
+            # stated rather than implied: run with `--baseline <rev>` (or fetch `origin/main`) for
+            # the real merge-base ratchet.
+            pinned_rows = SWEEP_RESIDUE[0]
+            ok = now <= pinned_rows
+            lines = [
+                f"the untyped-receiver count ROSE by {now - pinned_rows}: {pinned_rows} on the "
+                f"recorded pin -> {now} now ({why}; the PIN is the only ceiling here, and it is "
+                "frozen — fetch `origin/main` or pass `--baseline REV` to grade against a tree)."
+            ] if not ok else [
+                f"untyped receivers: {now} now vs {pinned_rows} on the recorded pin — not an "
+                f"increase ({why}; the PIN is the ceiling, not a merge base)"
+            ]
+        else:
+            base_rows, base_files, base_sites = baseline_rows(
+                base_rev, rmap, per_file, per_file_sites)
+            print(f"ratchet baseline: {base_rev[:12]} ({why})")
+            ok, lines = ratchet_verdict(
+                after_residue, base_rows, per_file, base_files, per_file_sites,
+                f"{base_rev[:12]}, {why}", baseline_sites=base_sites,
+            )
+            for note in shape_notes(after_residue, base_rows):
+                print(note)
+            if _is_own_base(base_rev):
+                print(
+                    f"⛔ the baseline IS this commit (HEAD == {base_rev[:12]}), so there is no "
+                    "other tree to ratchet against and this check cannot go red: on a "
+                    "`push: main` run it grades nothing, and a census move that lands there "
+                    "unseen is NOT detectable here. Comparison only, never a gate: "
+                    f"{sum(after_residue.values())} now vs {SWEEP_RESIDUE[0]} on the recorded "
+                    f"pin (Δ {sum(after_residue.values()) - SWEEP_RESIDUE[0]:+d})."
+                )
+        print(
+            f"recorded pin (historical, no longer required): {SWEEP_RESIDUE[0]}, "
+            f"{SWEEP_RESIDUE[1]!r}"
+        )
+        if not ok:
+            for line in lines:
+                print(line, file=sys.stderr)
+            return 1
+        for line in lines:
+            print(line)
         return 1 if after else 0
 
     return 0

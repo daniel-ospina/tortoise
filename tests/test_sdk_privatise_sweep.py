@@ -147,10 +147,13 @@ def test_check_refuses_a_base_whose_map_is_empty(monkeypatch, capsys):
 
 
 def test_the_residue_pin_is_a_reading_of_the_whole_set():
-    """F6: the residue is pinned as (rows, digest), so a NEW untyped shape reds the check.
+    """F6: the residue is still pinned as `(rows, digest)`, a READING of the whole SET.
 
-    The digest has to be a function of the SET, not of a count: two different shapes with
-    the same number of rows are the case a count cannot see.
+    ⛔ The COUNT is the gate (the ratchet) and a shape change is REPORTED, not graded — gating on
+    the digest would rebuild the re-pin treadmill, since renaming an innocent receiver moves it
+    without adding a call. What this arm still grades is that the reading exists and that the
+    digest is a function of the SET, so `shape_notes` can name what appeared or vanished: two
+    different shapes with the same number of rows are the case a count cannot see.
     """
     rows, digest = privatise.SWEEP_RESIDUE
     assert rows > 0, "an unpinned (0, …) residue means the drift arm is a no-op"
@@ -253,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2209 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2236 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
@@ -263,7 +266,17 @@ def _residue_block() -> str:
     FOLD of `origin/main` `af40c97c`, which re-cut the pin 11920 → **11913** (the −7 is `#14544`'s
     DoD-probe cut deleting the receivers that test carried) and RESTORED the 146 distinct `#:` lines
     of `main`'s own records from `e66997b8` that the branch's resolution did not already carry — so
-    the run reads **2209** here, measured by THIS function on the RESOLVED file. The 2047 named
+    the run reads **2209** on that tree, measured by THIS function on the RESOLVED file. ⛔ AND
+    RE-WALKED ONCE MORE ON THIS RE-CUT (`#14548`'s ratchet re-applied onto `origin/main` `10f0107`):
+    what this re-cut ADDS inside the run is `#:` prose from `#14548`'s own side of the two conflicted
+    hunks — the pin's mechanism paragraphs (`tools/sdk_privatise.py:118-133`) and the `--check`-output
+    correction (`tools/sdk_privatise.py:1674-1676`) — while the ratchet CODE block below the assignment is plain `#` and
+    is NOT part of the walk at all (measured: `"THE RESIDUE RATCHET" in _residue_block()` is
+    `False`). `main`'s own 2209 is a reading of a tree that does not have those `#:` lines, so the
+    figure above is this walk's own count on the RESOLVED file (**2236**) rather than `main`'s
+    numeral plus a delta counted by hand. ⛔ THE FILE THIS RATCHET IS RE-APPLIED ONTO WAS MOVED ON
+    `main` BY `#14415` (`e975a7e045c4c`: +237/−60 on `tools/sdk_privatise.py`) — not by `#14527`,
+    which touches that file zero times. The 2047 named
     above is the PREVIOUS fold's reading (`60db4d7`), and the 2059 this head read before `main`'s
     block was restored; both are kept because every fold's record stays — neither is this head's
     figure. ⛔ THOSE NUMBERS ARE A
@@ -273,7 +286,7 @@ def _residue_block() -> str:
     the pre-merge branch's. Both are real readings of real trees, one fold or one head behind the
     ones above — 1989 is this branch's own walk at `c6e06d4b`, 2006 at `7ce74ac` — so that cut's
     defect was STALENESS PLUS MIS-ATTRIBUTION, never a fabricated number: it published the
-    penultimate branch reading as the resolved one. Only 2209 is graded
+    penultimate branch reading as the resolved one. Only 2236 is graded
     (`test_the_extent_figure_is_the_walks_own_count` reads the `ITS EXTENT IS THE ENTIRE RUN (N
     lines` phrase), which is exactly why the three UNGRADED numerals around it were free to rot —
     the class this PR records in `MEMORY.md`. ⛔ Earlier readings, kept because every fold's record stays (1921 at
@@ -2508,3 +2521,900 @@ def _assert_not_tier1(manifest):
         "is now selected unconditionally and the suite-selection assert above no longer tests "
         "the `CORE_ALSO` row: it would pass with the row deleted. The row is no longer what "
         "selects it, so this pin must be RE-DERIVED rather than assumed still load-bearing")
+
+
+# ── THE RESIDUE RATCHET: growth REDS naming the line, removal PASSES ─────────────
+#
+# `SWEEP_RESIDUE` was an EQUALITY pin over a WHOLE-TREE count, so every merge that touched an
+# audited call invalidated it and the only repair was a PR that pasted a fresh pair. The arms
+# below are the two directions the ratchet has to get right, plus the baseline reconstruction
+# it rests on: no arm here runs the tree-wide walk (the `surface-guard` job's `--check` step
+# does, at depth 0).
+
+
+def _verdict(measured, baseline, files=None, base_files=None, sites=None):
+    return privatise.ratchet_verdict(
+        Counter(measured), Counter(baseline), files or {}, base_files or {}, sites or {},
+        "a fixture baseline",
+    )
+
+
+def test_the_ratchet_reds_an_added_untyped_receiver_and_names_its_line():
+    """The ONE signal the equality pin carried, kept: a NEW untyped receiver is a RED.
+
+    ⛔ And it has to be ACTIONABLE — by how much, and at which `file:line` — because a failure
+    that only says "the set moved" leaves re-pinning as the only repair a lane can find, which
+    is the treadmill this change deletes.
+    """
+    ok, lines = _verdict(
+        {"client.update": 46},
+        {"client.update": 45},
+        files={"tortoise/hosted_api.py": Counter({"client.update": 46})},
+        base_files={"tortoise/hosted_api.py": Counter({"client.update": 45})},
+        sites={"tortoise/hosted_api.py": {"client.update": [123]}},
+    )
+    assert ok is False, "an added untyped receiver must still red — that is the pin's signal"
+    text = "\n".join(lines)
+    assert "+1" in text, f"the failure must say BY HOW MUCH: {text}"
+    assert "client.update" in text, text
+    assert "tortoise/hosted_api.py" in text and "line 123" in text, (
+        f"the failure must name the offending file:line, or it is not actionable: {text}")
+
+
+def test_the_ratchet_passes_a_removed_untyped_receiver():
+    """⛔ THE INVERSE ARM: a ratchet that reds on improvement is worse than the pin it replaced."""
+    ok, lines = _verdict(
+        {"client.update": 44},
+        {"client.update": 45},
+        files={"tortoise/hosted_api.py": Counter({"client.update": 44})},
+        base_files={"tortoise/hosted_api.py": Counter({"client.update": 45})},
+    )
+    assert ok is True, "removing an untyped receiver must PASS — that is the whole point"
+    assert "FEWER than the baseline" in "\n".join(lines)
+
+
+def test_the_ratchet_passes_an_unchanged_count():
+    """The ordinary case: a PR that adds no untyped receiver is not asked to re-pin anything."""
+    ok, lines = _verdict({"client.update": 45}, {"client.update": 45})
+    assert ok is True, "an unchanged count must not red"
+    assert "equal to the baseline" in "\n".join(lines), lines
+
+
+def test_the_ratchet_passes_an_EQUAL_count_even_when_the_SHAPE_moved():
+    """⛔ THE DECISION THIS CHANGE IS MADE OF: shape is REPORTED, never graded.
+
+    `shape_notes()` keeps the one signal the equality pin carried, and `ratchet_verdict()`'s
+    whole design says it must not gate. Renaming an innocent receiver
+    (`db.update` -> `store.update`) leaves the COUNT equal and moves the DIGEST — the ordinary
+    rename a digest gate would red, and redding it rebuilds precisely the re-pin treadmill this
+    change removes. So the equal-count path must pass a MOVED shape.
+
+    Mutation: add `if now == then and residue_digest(measured) != residue_digest(baseline):\n    return False, ["shape moved"]` to `ratchet_verdict`'s equal branch — this arm REDs, and no
+    other arm reaches that branch with a moved shape, which is why it exists.
+    """
+    ok, lines = _verdict({"store.update": 1}, {"db.update": 1})
+    assert ok is True, (
+        "an equal COUNT with a moved SHAPE must PASS: gating the digest here would red every "
+        "innocent receiver rename, which is the treadmill `shape_notes` exists to avoid")
+    assert "equal to the baseline" in "\n".join(lines), lines
+
+
+def test_the_shape_signal_is_REPORTED_when_rows_appear_vanish_or_move():
+    """`shape_notes` is the ONLY report of an appeared / vanished row, and it must stay one.
+
+    A count ratchet passes a NET-ZERO change (one receiver added, one removed), so this report
+    is the whole of what a reviewer sees about the shape — and a mutant returning `[]` deletes
+    it silently, leaving every other arm green. Each of the three branches is graded here, plus
+    the ordinary quiet case: an unchanged shape must print NOTHING, or the note becomes noise a
+    reader learns to skip.
+    """
+    text = "\n".join(privatise.shape_notes(
+        Counter({"a.update": 2, "b.update": 1}), Counter({"a.update": 1, "c.update": 2})))
+    assert text, "a moved SHAPE must produce a report — the digest is a signal, not a gate"
+    assert "SHAPE changed" in text, text
+    assert "appeared: b.update" in text, text
+    assert "vanished: c.update" in text, text
+    assert "not a failure" in text, (
+        f"the report must say it is NOT a gate, or a lane reads it as a red it cannot clear: {text}")
+
+    moved = "\n".join(privatise.shape_notes(
+        Counter({"a.update": 3}), Counter({"a.update": 1})))
+    assert "count moved: a.update  1 -> 3" in moved, (
+        f"the same rows with a different count is the third branch, and it must be named: {moved}")
+
+    assert privatise.shape_notes(
+        Counter({"a.update": 1}), Counter({"a.update": 1})) == [], (
+        "an unchanged shape must print nothing: a note on every green run is noise")
+
+
+def _main_fixture(monkeypatch, tmp_path: Path, src: str) -> Path:
+    """Let `main()` answer over ONE fixture file: the tree walk and the pinned map are stubbed.
+
+    Stubbing them is not a shortcut around the graded behaviour — `--baseline` resolution and the
+    degraded ceiling are decided BEFORE any of this, and the real walk would spend its 1m13 to
+    reach the same decision.
+    """
+    path = tmp_path / "subject.py"
+    path.write_text(src, encoding="utf-8")
+    monkeypatch.setattr(privatise, "py_files", lambda: [path])
+    # `main()` reports residue paths RELATIVE TO `ROOT`, so the fixture tree has to BE the root
+    # or the report raises `ValueError` out of `relative_to` instead of reaching a verdict.
+    monkeypatch.setattr(privatise, "ROOT", tmp_path)
+    monkeypatch.setattr(privatise, "SWEEP_NAMES", 1)
+    monkeypatch.setattr(
+        privatise, "rename_map",
+        lambda rev=None: [privatise.Entry(name="update", private="_update", collided=False)])
+    return path
+
+
+def test_a_named_baseline_that_does_not_resolve_is_a_REFUSAL(monkeypatch, tmp_path, capsys):
+    """A `--baseline` the caller NAMED and this clone cannot resolve must NOT fall back.
+
+    Falling through to the degraded pin would answer a DIFFERENT question from the one asked —
+    a frozen ceiling instead of a tree — and print an ordinary verdict for it. That is the
+    fail-open shape `--check` exists to refuse, so it is exit 2 and the refusal names why.
+
+    Mutation: delete the `return 2` in `main()`'s `base_rev is None and args.baseline` branch —
+    the run falls through to the pin and this arm's `== 2` REDs.
+    """
+    dead = "0" * 40
+    rev, why = privatise.baseline_rev(dead)
+    assert rev is None, f"`{dead}` must not resolve as a baseline: {rev!r}"
+    assert dead in why and "does not name a commit" in why, why
+
+    _main_fixture(monkeypatch, tmp_path, "def probe(reg):\n    reg.update({'a': 1})\n")
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check", "--baseline", dead])
+    assert privatise.main() == 2, (
+        "an unresolvable `--baseline` is a REFUSAL (exit 2), never a degraded pass")
+    err = capsys.readouterr().err
+    assert "CANNOT ANSWER" in err, f"the refusal must say it could not answer: {err!r}"
+
+
+def test_without_origin_main_the_RECORDED_PIN_is_the_ceiling(monkeypatch, tmp_path, capsys):
+    """The degraded path: no `origin/main`, so the FROZEN pin is the only ceiling available.
+
+    ⛔ NOT SIMPLY "LOOSER" (#14548 review, P3): a frozen pin is looser BELOW itself — growth
+    between this tree's count and the pin passes — and STRICTER ABOVE it, where a tree that added
+    nothing still reds because its total is already over the pin (a stale clone is that case).
+    Both directions are graded, plus the sentence that tells a lane the ceiling is frozen, because
+    a lane reading "not an increase" off a frozen pin without knowing it is frozen has been told
+    the wrong thing by a true number.
+
+    Mutation: flip the degraded `ok` to `True` — the above-the-pin arm REDs; delete the
+    "frozen" clause from the message — the message assert REDs.
+    """
+    _main_fixture(monkeypatch, tmp_path, "def probe(reg):\n    reg.update({'a': 1})\n")
+
+    def _no_origin(*args, **_kwargs):
+        raise subprocess.CalledProcessError(1, args[0] if args else "git")
+
+    monkeypatch.setattr(privatise, "_git", _no_origin)
+    rev, why = privatise.baseline_rev()
+    assert rev is None and "no origin/main" in why, (rev, why)
+
+    # AT the pin: passes, and says the PIN is the ceiling rather than a merge base.
+    monkeypatch.setattr(privatise, "SWEEP_RESIDUE", (1, "0" * 16))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 0, "a tree AT the recorded pin is not an increase"
+    out = capsys.readouterr().out
+    assert "the PIN is the ceiling, not a merge base" in out, out
+
+    # ABOVE the pin: reds, and names the ceiling as frozen rather than a tree.
+    monkeypatch.setattr(privatise, "SWEEP_RESIDUE", (0, "0" * 16))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 1, (
+        "with no `origin/main` the pin is the ceiling, and a tree ABOVE it must still red")
+    err = capsys.readouterr().err
+    assert "the PIN is the only ceiling here, and it is frozen" in err, err
+    assert "--baseline REV" in err, f"the red must name the way out of the degraded path: {err!r}"
+
+
+def test_baseline_rev_prefers_the_MERGE_BASE_then_falls_back_to_origin_main(monkeypatch):
+    """The TWO resolution branches `baseline_rev()` is made of, neither of which had an arm.
+
+    ⛔ THE CHOICE OF BASELINE IS THE WHOLE MECHANISM (#14548 review, P2/F3). `--check`'s verdict
+    is a comparison against whatever this returns, so a resolver that stopped preferring the
+    merge base would silently grade a PR against the branch it is about to merge INTO — a
+    baseline that already contains the change — and every added receiver would be absorbed. A
+    resolver that lost the `origin/main` fallback would degrade to the frozen pin on a detached
+    clone. Both are one-line deletions that leave every other arm green, so each is graded by
+    its own stub.
+
+    Mutation: delete the `_git("merge-base", …)` attempt -> the first call's rev is the
+    `origin/main` sha and the RED is immediate; delete the `rev-parse --verify origin/main`
+    fallback -> the second call returns `(None, "no origin/main in this clone")`.
+    """
+    merge_sha, main_sha = "a" * 40, "b" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def _no_merge_base(*args):
+        calls.append(args)
+        raise subprocess.CalledProcessError(1, args[0] if args else "git")
+
+    def _merge_base(*args):
+        calls.append(args)
+        assert args[0] == "merge-base", f"the merge base must be asked for FIRST: {args}"
+        return f"{merge_sha}\n"
+
+    monkeypatch.setattr(privatise, "_git", _merge_base)
+    rev, why = privatise.baseline_rev()
+    assert rev == merge_sha, (
+        f"the merge base with `origin/main` is the tree the question is asked against; got {rev!r}")
+    assert "merge base" in why, why
+
+    def _detached(*args):
+        calls.append(args)
+        if args[0] == "merge-base":
+            raise subprocess.CalledProcessError(1, "git")
+        assert args[:2] == ("rev-parse", "--verify"), args
+        assert args[2] == "origin/main", args
+        return f"{main_sha}\n"
+
+    monkeypatch.setattr(privatise, "_git", _detached)
+    rev, why = privatise.baseline_rev()
+    assert rev == main_sha, (
+        "a detached `origin/main` resolves no merge base, and the fallback is `origin/main` "
+        f"itself — not the frozen pin; got {rev!r}")
+    assert "no merge base" in why, why
+
+    assert calls, "the stub was never called — the arm is vacuous"
+
+
+def test_the_check_WIRES_the_resolved_baseline_into_the_ratchet(monkeypatch, tmp_path, capsys):
+    """⛔ THE WIRING ITSELF, which is the mutant that survived every other arm (#14548 review, F3).
+
+    Replacing `base_rev, why = baseline_rev(args.baseline)` with `base_rev, why = None, "x"` left
+    all fifteen ratchet arms green: they grade `ratchet_verdict` / `baseline_rows` directly, and
+    the only other `main()` arm returns at the VACUOUS CHECK 67 lines earlier. That mutant puts
+    `--check` back on the frozen-pin ceiling — the headline behaviour of this PR, gone, with a
+    green suite. So this arm drives `main()` through the RESOLVED-baseline path and grades both
+    the wiring (`ratchet baseline: <sha>`) and the verdict (a growth REDS, exit 1).
+
+    Mutation: `main(): base_rev, why = None, "x"` -> the run takes the degraded pin path, prints
+    no `ratchet baseline:`, and exits 0 (1 <= the pin) — both asserts RED.
+    """
+    _main_fixture(monkeypatch, tmp_path, "def probe(reg):\n    reg.update({'a': 1})\n")
+    base = "e" * 40
+    monkeypatch.setattr(
+        privatise, "baseline_rev", lambda explicit=None: (base, "the merge base with origin/main"))
+    monkeypatch.setattr(privatise, "baseline_rows", lambda *a, **k: (Counter(), {}, {}))
+    monkeypatch.setattr(privatise, "_git", lambda *a: "0" * 40)  # HEAD is NOT the baseline
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+
+    assert privatise.main() == 1, (
+        "one receiver above the RESOLVED baseline must red — taking the degraded pin instead "
+        "would pass it, which is the mutant this arm exists to kill")
+    captured = capsys.readouterr()
+    assert f"ratchet baseline: {base[:12]}" in captured.out, (
+        f"`--check` must grade against the baseline it resolved: {captured.out!r}")
+    assert "ROSE by 1" in captured.err, (
+        f"the growth must be reported as a ratchet failure: {captured.err!r}")
+    assert "the PIN is the only ceiling here" not in captured.err, (
+        f"the resolved baseline was a real tree, so the degraded pin path must not run: "
+        f"{captured.err!r}")
+
+
+def test_on_a_post_merge_tree_the_dead_ratchet_is_STATED(monkeypatch, tmp_path, capsys):
+    """When the baseline IS this commit, `--check` cannot red — and it must SAY so.
+
+    ⛔ THE INERT CASE (#14548 review, P3/F4). `baseline_rev()` prefers the merge base, and on the
+    `push: main` trigger `HEAD == origin/main`, so the baseline tree is this tree: the diff is
+    empty, `then == now`, and `--check` passes whatever the census did. That is a real loss — the
+    pin this change demotes is what caught a census move landing on `main` — so the loss is
+    printed at the point it happens, with the recorded pin as a NON-BLOCKING delta beside it.
+
+    Both directions are graded: the notice APPEARS for the own-base case, and does NOT appear
+    when the baseline is a distinct tree (where the ratchet is doing real work and the notice
+    would be noise).
+
+    Mutation: delete the `_is_own_base(...)` print -> the first assert REDs; print it
+    unconditionally -> the inverse assert REDs.
+    """
+    _main_fixture(monkeypatch, tmp_path, "x = 1\n")
+    monkeypatch.setattr(privatise, "baseline_rows", lambda *a, **k: (Counter(), {}, {}))
+    monkeypatch.setattr(privatise, "SWEEP_RESIDUE", (0, "0" * 16))
+    # The REAL `_is_own_base()` is graded: only `git` is stubbed, so the comparison it makes is
+    # the one that runs on `main` — `HEAD == <the resolved baseline>`. ⛔ The stub RESOLVES, because
+    # that is what `git rev-parse --verify <rev>^{commit}` does: a stub that answers "" for every
+    # rev would make the notice unreachable for spellings like `origin/main` (the defect this
+    # compares against was fixed by resolving, and a stub that cannot resolve hides it).
+    def fake_git(*a):
+        if tuple(a) == ("rev-parse", "HEAD"):
+            return "c" * 40
+        if tuple(a[:2]) == ("rev-parse", "--verify"):
+            return a[2].removesuffix("^{commit}")
+        return ""
+
+    monkeypatch.setattr(privatise, "_git", fake_git)
+    monkeypatch.setattr(
+        privatise, "baseline_rev",
+        lambda explicit=None: ("c" * 40, "the merge base with origin/main"))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 0, "an own-base run still exits 0 — the notice is not a verdict"
+    out = capsys.readouterr().out
+    assert "the baseline IS this commit" in out, (
+        "a `push: main` run that grades nothing must say so, or the check reads as a green it "
+        f"never earned: {out!r}")
+    assert "NOT detectable here" in out, out
+    assert "never a gate" in out, f"the delta must not read as a red: {out!r}"
+
+    monkeypatch.setattr(
+        privatise, "baseline_rev", lambda explicit=None: ("d" * 40, "named by --baseline"))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check", "--baseline", "d" * 40])
+    assert privatise.main() == 0
+    out = capsys.readouterr().out
+    assert "the baseline IS this commit" not in out, (
+        f"a DISTINCT baseline means the ratchet is live, and the notice would be noise: {out!r}")
+
+
+def _git_repo(path: Path) -> Path:
+    """A throwaway repo the baseline reconstruction can be measured against."""
+    path.mkdir(parents=True, exist_ok=True)
+    # ⛔ `init` only: an empty `commit` exits non-zero (`nothing to commit`), so the fixture
+    # leaves the first commit to the caller that has actually written the base tree.
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, capture_output=True)
+    return path
+
+
+def _commit_all(path: Path, message: str) -> None:
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+         "commit", "-q", "-m", message],
+        cwd=path, check=True, capture_output=True, text=True)
+
+
+#: One untyped receiver: `reg` is not an SDK, so `reg.update(` is residue, not an edit.
+_UNTYPED = "def probe(reg):\n    reg.update({'a': 1})\n"
+
+
+def test_the_baseline_is_reconstructed_from_only_the_moved_paths(tmp_path, monkeypatch):
+    """The ratchet's baseline is the MERGE BASE's row set, measured without checking it out.
+
+    A file whose blob did not move cannot have a different residue, so only the paths
+    `git diff --name-status` names are measured from the object store. This arm is that claim:
+    an ADDED file contributes nothing, a MODIFIED one contributes its baseline rows and not the
+    working tree's — and ⛔ an UNMOVED file is still in the per-path map at its real count, so the
+    failure does not blame it for receivers it always had (a map holding only the moved paths
+    read every untouched carrier as "baseline 0 -> now 40").
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
+    (repo / "b.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+
+    (repo / "a.py").write_text(_UNTYPED + "    reg.update({'b': 2})\n", encoding="utf-8")
+    (repo / "c.py").write_text(_UNTYPED, encoding="utf-8")
+    measured = {
+        "a.py": privatise.edits_for(repo / "a.py", rmap).residue,
+        "b.py": privatise.edits_for(repo / "b.py", rmap).residue,
+        "c.py": privatise.edits_for(repo / "c.py", rmap).residue,
+    }
+    assert [sum(measured[p].values()) for p in ("a.py", "b.py", "c.py")] == [2, 1, 1], (
+        "premise: four untyped receivers, two of them in the modified `a.py`")
+
+    sites = {p: privatise.edits_for(repo / p, rmap).sites for p in measured}
+    base, base_files, base_sites = privatise.baseline_rows(
+        "HEAD", rmap, measured, sites)
+    assert sum(base.values()) == 2, (
+        f"the baseline is the committed tree's TWO receivers — an added file contributes "
+        f"nothing: {base}")
+    assert sum(base_files["a.py"].values()) == 1, base_files
+    assert sum(base_files.get("b.py", Counter()).values()) == 1, (
+        f"an UNMOVED file must be in the per-path map at its real count: {base_files}")
+    assert "c.py" not in base_files, "a file absent from the baseline has no baseline rows"
+
+    total = Counter()
+    for rows in measured.values():
+        total += rows
+    ok, lines = privatise.ratchet_verdict(
+        total, base, measured, base_files, sites, "HEAD", baseline_sites=base_sites)
+    assert ok is False, "four against a baseline of two is growth"
+    text = "\n".join(lines)
+    assert "a.py" in text and "line 3" in text, (
+        f"the NEW line in `a.py` is 3 — the baseline already had line 2: {text}")
+    assert "c.py" in text, f"the added file's site must be named too: {text}"
+    assert "b.py" not in text, (
+        f"`b.py` was never touched, so it must not be blamed for growth: {text}")
+
+
+def test_the_reported_line_is_singled_out_only_when_the_baseline_can_explain_it():
+    """Two arms, because a line list is only as good as its worst case.
+
+    ⛔ UNSHIFTED: the site list grew by one and the baseline's own lines are a subset, so the ONE
+    new line is named. SHIFTED: inserting a receiver above existing ones moves every later line,
+    so a set difference would name two shifted survivors and hide the addition — in that case the
+    arm must print every site and SAY the list is not a diff, never a confident wrong line.
+    """
+    flat = privatise._new_sites(
+        "reg.update",
+        {"f.py": Counter({"reg.update": 2})},
+        {"f.py": Counter({"reg.update": 1})},
+        {"f.py": {"reg.update": [10, 11]}},
+        baseline_sites={"f.py": {"reg.update": [10]}},
+    )
+    assert flat == ["f.py  (baseline 1 -> now 2): line 11"], flat
+
+    shifted = privatise._new_sites(
+        "reg.update",
+        {"f.py": Counter({"reg.update": 3})},
+        {"f.py": Counter({"reg.update": 2})},
+        {"f.py": {"reg.update": [10, 11, 21]}},
+        baseline_sites={"f.py": {"reg.update": [10, 20]}},
+    )
+    text = "\n".join(shifted)
+    assert "shifted" in text, f"the report must admit it cannot single the line out: {text}"
+    assert "line 10" in text and "line 21" in text, (
+        f"every site is printed, so the added one IS among them: {text}")
+
+
+def test_the_site_subtraction_is_a_MULTISET_not_a_set():
+    """⛔ THE OTHER half of the shift rationale: TWO receivers on ONE line are TWO rows.
+
+    The review of #14548 (P3) noted that the docstring's multiset claim was graded by nothing: a
+    plain `set(have) - set(had)` gives the SAME answer on every other fixture, because they all
+    carry one receiver per line. It differs exactly here — `have=[10, 10]`, `had=[10]` is a real
+    +1 whose set difference is EMPTY, so the one line an added receiver sits on would be reported
+    as `site not located`.
+
+    Mutation: `fresh = sorted(Counter(have) - Counter(had))` -> `sorted(set(have) - set(had))` —
+    this arm REDs (the line vanishes and a `shifted` caveat appears); no other arm distinguishes
+    them.
+    """
+    flat = privatise._new_sites(
+        "reg.update",
+        {"f.py": Counter({"reg.update": 2})},
+        {"f.py": Counter({"reg.update": 1})},
+        {"f.py": {"reg.update": [10, 10]}},
+        baseline_sites={"f.py": {"reg.update": [10]}},
+    )
+    assert flat == ["f.py  (baseline 1 -> now 2): line 10"], (
+        f"two receivers on one line is a +1, and the line IS locatable: {flat}")
+
+
+def test_an_untouched_carrier_file_is_not_blamed_for_growth():
+    """A row that lives in hundreds of files must blame only the file that gained one."""
+    blame = privatise._new_sites(
+        "proj.g.query",
+        {"edited.py": Counter({"proj.g.query": 3}),
+         "hosted_api.py": Counter({"proj.g.query": 40})},
+        {"edited.py": Counter({"proj.g.query": 2}),
+         "hosted_api.py": Counter({"proj.g.query": 40})},
+        {"edited.py": {"proj.g.query": [9]}, "hosted_api.py": {"proj.g.query": [11, 12]}},
+    )
+    assert len(blame) == 1, blame
+    assert blame[0].startswith("edited.py"), blame
+
+
+def test_a_rename_is_not_growth(tmp_path, monkeypatch):
+    """A file that only MOVED keeps its baseline rows: renaming is not adding a receiver.
+
+    Without the `R<score>` arm reading the OLD path's blob, every rename would read as its new
+    rows added, and the ratchet would red an innocent refactor — the false block that gets a
+    gate disabled.
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+    subprocess.run(["git", "mv", "a.py", "d.py"], cwd=repo, check=True, capture_output=True)
+
+    measured = {"d.py": privatise.edits_for(repo / "d.py", rmap).residue}
+    base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base.values()) == 1, f"the moved file's baseline row must survive: {base}"
+    ok, lines = privatise.ratchet_verdict(
+        Counter({"reg.update": 1}), base, measured, base_files,
+        {"d.py": {"reg.update": [2]}}, "HEAD")
+    assert ok is True, f"a rename must not read as growth: {lines}"
+
+
+def test_an_added_file_is_not_baseline_rows(tmp_path, monkeypatch):
+    """A file the baseline tree does not have contributes NOTHING to it.
+
+    ⛔ What this grades, precisely: the `git ls-tree` seeding and the object-store read both skip
+    a path the baseline tree lacks. It does NOT grade the `A`/`C` guard — an `A` row's
+    `paths[0] == dest`, so `git show <rev>:<dest>` already fails for it (measured: deleting that
+    guard leaves this arm green), and `-M` without `-C` never emits a `C` row. The premise
+    assertion below keeps the STAGED case distinct from the untracked one.
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+    (repo / "b.py").write_text(_UNTYPED, encoding="utf-8")
+    subprocess.run(["git", "add", "b.py"], cwd=repo, check=True, capture_output=True)
+    status = privatise._git("diff", "--name-status", "-M", "HEAD").splitlines()
+    assert "A\tb.py" in status, f"premise: the staged file IS the `A` arm, not the untracked one: {status}"
+
+    measured = {
+        "a.py": privatise.edits_for(repo / "a.py", rmap).residue,
+        "b.py": privatise.edits_for(repo / "b.py", rmap).residue,
+    }
+    base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base.values()) == 1, f"`b.py` is added, so the baseline holds only `a.py`: {base}"
+    assert "b.py" not in base_files, base_files
+
+
+def test_a_rename_out_of_archive_does_not_donate_baseline_rows(tmp_path, monkeypatch):
+    """⛔ The mirror of the untracked-file hole, on the SOURCE arm.
+
+    `py_files()` never counts `archive/`, so a file RESTORED out of it must not carry its
+    receivers into the baseline — otherwise the ratchet reports them as pre-existing and grants
+    a restoring PR exactly that much headroom (this repo holds 111 `.py` files under `archive/`).
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "archive").mkdir()
+    (repo / "archive" / "old.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+    subprocess.run(
+        ["git", "mv", "archive/old.py", "restored.py"], cwd=repo, check=True,
+        capture_output=True)
+    status = privatise._git("diff", "--name-status", "-M", "HEAD").splitlines()
+    assert status and status[0].startswith("R"), f"premise: this is a RENAME row: {status}"
+
+    measured = {"restored.py": privatise.edits_for(repo / "restored.py", rmap).residue}
+    assert sum(measured["restored.py"].values()) == 1, "premise: the restored file carries one"
+    base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base.values()) == 0, (
+        f"an archived file was never counted, so its receivers are NOT baseline rows: {base}")
+    assert not base_files, base_files
+
+
+def test_a_non_ascii_path_is_MEASURED_not_silently_dropped(tmp_path, monkeypatch):
+    """⛔ git QUOTES a non-ASCII path by default, and a quoted path is a silent PASS (#14548
+    review, P3 latent).
+
+    With `core.quotePath` on (git's default) `git ls-files`, `ls-tree` and `diff --name-status`
+    print `"tortoise/a\303\261.py"`. ⛔ MEASURED, not assumed: the review named the baseline
+    absorbing the growth, and that IS reachable — but only while the reads DISAGREE. In the state
+    this file shipped in, BOTH are quoted, and the load-bearing consequence is the CENSUS:
+    `ROOT / '"tortoise/a\303\261.py"'` is not a file, so `py_files()` drops a whole FILE, `now`
+    loses every receiver in it, and a ratchet passes any shrink — growth written into that file is
+    absorbed for free. Second site, same root: with the census fixed but the reads still quoted, the
+    path is missing from `tree_paths` and its `diff` row fails `dest.endswith(".py")`, so its
+    rows read as `baseline 0` (a false attribution). Both are graded below; `-z` on every read that
+    names a path closes them together — a FLAG cannot, because `core.quotePath=false` only stops the
+    >0x7F escaping and leaves `py_files()` splitting rows on WHITESPACE (see
+    `test_a_path_with_a_SPACE_is_MEASURED_not_split_away`).
+
+    Mutation: drop `-z` from the `ls-files`/`ls-tree` reads (back to `.split()`/`.splitlines()`) →
+    `py_files()` stops listing the file at all (the first assert REDs); drop it from the `diff` read
+    → the baseline and the attribution RED. Restoring either one alone leaves a MIXED state, which
+    is the third state described above.
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "tortoise").mkdir()
+    carrier = repo / "tortoise" / "añ.py"
+    carrier.write_text(_UNTYPED, encoding="utf-8")
+    (repo / "plain.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+
+    carrier.write_text(_UNTYPED + "    reg.update({'b': 2})\n", encoding="utf-8")
+    # PREMISE, measured at this git version rather than assumed: the DEFAULT does quote it.
+    default_quoting = subprocess.run(
+        ["git", "diff", "--name-status", "-M", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True).stdout
+    assert '"' in default_quoting and "\\303\\261" in default_quoting, (
+        "premise: git's default `core.quotePath` quotes this path — if a future git stops doing "
+        f"that, this arm's reason has changed: {default_quoting!r}")
+
+    # ⛔ THE LOAD-BEARING HALF: a file the census cannot see is a file whose growth cannot red.
+    walked = {p.relative_to(repo).as_posix() for p in privatise.py_files()}
+    assert "tortoise/añ.py" in walked, (
+        "a quoted `ls-files` row is not a file on disk, so the whole file leaves the census and "
+        f"every receiver in it leaves `now`, which a ratchet passes: {sorted(walked)}")
+
+    measured = {
+        "plain.py": privatise.edits_for(repo / "plain.py", rmap).residue,
+        "tortoise/añ.py": privatise.edits_for(carrier, rmap).residue,
+    }
+    sites = {p: privatise.edits_for(repo / p, rmap).sites for p in measured}
+    assert sum(measured["tortoise/añ.py"].values()) == 2, (
+        "premise: the working tree carries the committed receiver plus one added one")
+    base, base_files, base_sites = privatise.baseline_rows("HEAD", rmap, measured, sites)
+    assert sum(base_files["tortoise/añ.py"].values()) == 1, (
+        "the COMMITTED blob carries ONE receiver, so the baseline must read 1 — a quoted `tree_paths` "
+        f"entry is not the path, so it is never seeded and reads as `baseline 0`: {base_files}")
+
+    total = Counter()
+    for rows in measured.values():
+        total += rows
+    ok, lines = privatise.ratchet_verdict(
+        total, base, measured, base_files, sites, "HEAD", baseline_sites=base_sites)
+    assert ok is False, f"growth inside a non-ASCII-named file is still growth: {lines}"
+    text = "\n".join(lines)
+    assert "tortoise/añ.py" in text and "baseline 1 -> now 2" in text, (
+        f"and the growth is ATTRIBUTED to that file at its real baseline, not `baseline 0`: {text}")
+
+
+def test_a_path_with_a_SPACE_is_MEASURED_not_split_away(tmp_path, monkeypatch):
+    """⛔ THE SEPARATOR, not the quoting: a name git emits UNQUOTED can still leave the census.
+
+    `py_files()` read its rows with `.stdout.split()`, which splits on ANY whitespace. A file named
+    `a b.py` is emitted by `git ls-files` as the single line `a b.py` — UNQUOTED, so
+    `-c core.quotePath=false` has nothing to normalise — and `.split()` turned it into the two
+    tokens `a` and `b.py`, neither of which is a file: the whole file left the census, every
+    untyped receiver in it left `now`, and a ratchet passes any shrink, so growth written there was
+    absorbed. MEASURED pre-fix on exactly this fixture: `py_files()` listed `['plain.py']`.
+
+    This is the half a quoting flag cannot close, and the reason the mechanism is `-z`: one path
+    per NUL-terminated field, a separator that cannot occur inside a name, so a space, a tab and a
+    newline all survive.
+
+    Mutation: `_git_paths(...)` back to `.split()` on the `ls-files` rows → the census assert REDs
+    and the baseline assert REDs with it (the file is in neither population, which is a PASS).
+    """
+    repo = _git_repo(tmp_path / "r")
+    spaced = repo / "a b.py"
+    spaced.write_text(_UNTYPED, encoding="utf-8")
+    (repo / "plain.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+
+    # PREMISE, measured rather than assumed: git emits the name UNQUOTED, so this is NOT the
+    # `core.quotePath` hole — a flag cannot reach it.
+    rows = subprocess.run(
+        ["git", "ls-files", "*.py"], cwd=repo, capture_output=True, text=True, check=True).stdout
+    assert "a b.py" in rows and '"' not in rows, (
+        f"premise: a spaced name is emitted raw, not quoted: {rows!r}")
+
+    walked = sorted(p.name for p in privatise.py_files())
+    assert "a b.py" in walked, (
+        "whitespace-splitting a path row drops the file from the census entirely, and a ratchet "
+        f"passes the shrink that follows: {walked}")
+
+    measured = {
+        "a b.py": privatise.edits_for(spaced, rmap).residue,
+        "plain.py": privatise.edits_for(repo / "plain.py", rmap).residue,
+    }
+    base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base_files["a b.py"].values()) == 1, (
+        f"the committed blob's receiver must be seeded against its real path: {base_files}")
+    assert sum(base.values()) == 2, f"both files carry one receiver on the baseline: {base}"
+
+
+def _standin_src(shift: int = 0) -> tuple[str, str]:
+    """A module carrying a STAND-IN class whose `def query` is one of the swept names.
+
+    A stand-in is a class implementing >= 2 of the APPROVED surface plus an off-surface `def`;
+    that shape is what routes a `def` through `_def_name_span`, which is where a blob measurement
+    used to read the WORKING TREE's lines instead of its own.
+    """
+    approved = sorted(privatise.approved_methods())
+    assert len(approved) >= 2, "premise: the approved surface has at least two names"
+    body = (
+        "class FakeSDK:\n"
+        f"    def {approved[0]}(self):\n"
+        "        return 1\n"
+        f"    def {approved[1]}(self):\n"
+        "        return 2\n"
+        "    def query(self, q):\n"
+        "        return q\n"
+    )
+    return body, "# pad\n" * shift
+
+
+def test_a_blob_measure_reads_the_blobs_own_lines_never_the_disk(tmp_path):
+    """⛔ THE CYCLE-3 DEFECT: `edits_for(..., src=...)` gave the AST a blob's source but let
+    `_def_name_span` re-read the PATH from disk.
+
+    Two symptoms, one root: a baseline file that was deleted or renamed away raised
+    `FileNotFoundError` (so `--check` could not answer at all), and one whose `def` merely SHIFTED
+    located nothing — charging a phantom `def query (span not located)` row to the BASELINE, which
+    hands the ratchet exactly that much headroom.
+    """
+    body, _pad = _standin_src()
+    rmap = {"query": "_query"}
+    gone = tmp_path / "gone.py"  # deliberately NEVER written: the deleted-file case
+    edits = privatise.edits_for(gone, rmap, src=body)
+    assert not edits.residue, (
+        f"a blob measure must not charge a phantom row for a file it cannot read: {edits.residue}")
+    assert [repl for *_span, repl in edits.defs] == ["_query"], edits.defs
+
+    # …and the SHIFTED case: the path EXISTS on disk, with the def at a different line.
+    shifted = tmp_path / "shifted.py"
+    shifted.write_text("# pad\n" * 5 + body, encoding="utf-8")
+    edits = privatise.edits_for(shifted, rmap, src=body)
+    assert not edits.residue, (
+        f"the def is at line 6 on disk and line 1 in the blob; the BLOB's lines must be used: "
+        f"{edits.residue}")
+    assert [repl for *_span, repl in edits.defs] == ["_query"], edits.defs
+
+
+def test_a_deleted_standin_file_is_measured_from_its_blob(tmp_path, monkeypatch):
+    """End to end of the same defect: deleting a stand-in file must GRADE, not crash.
+
+    `--check` on a branch that deletes a file carrying an un-swept `def` used to raise
+    `FileNotFoundError` from the baseline walk — a gate that cannot answer is not a gate.
+    """
+    repo = _git_repo(tmp_path / "r")
+    body, _pad = _standin_src()
+    (repo / "standin.py").write_text(body, encoding="utf-8")
+    (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"query": "_query", "update": "_update"}
+    subprocess.run(["git", "rm", "-q", "standin.py"], cwd=repo, check=True, capture_output=True)
+    assert (repo / "standin.py").exists() is False, "premise: the file is gone from the worktree"
+
+    measured = {"a.py": privatise.edits_for(repo / "a.py", rmap).residue}
+    base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base.values()) == 1, (
+        f"the deleted file carried a `def` (an EDIT, not residue), so the baseline is `a.py`'s "
+        f"one untyped receiver: {base}")
+    assert "standin.py" not in base_files, (
+        f"a def is not a residue row; charging one would grant the ratchet headroom: {base_files}")
+
+
+def _stub_walk(monkeypatch, root, files, names=()):
+    """Point `--check` at a fixture tree: a ROOT, the files to walk, and a rename map.
+
+    ⛔ THIS IS THE WIRING THE RATCHET LIVES IN, and for three cycles nothing graded it: the arms
+    above grade `ratchet_verdict` and `baseline_rows` as functions, so `main()` could always take
+    the degraded pin path (or never refuse a named baseline) with every arm green.
+    """
+    monkeypatch.setattr(privatise, "ROOT", root)
+    monkeypatch.setattr(privatise, "py_files", lambda: list(files))
+    entries = [privatise.Entry(name, private, False) for name, private in names]
+    monkeypatch.setattr(privatise, "rename_map", lambda rev=None: list(entries))
+    monkeypatch.setattr(privatise, "SWEEP_NAMES", len(entries))
+
+
+def test_check_refuses_a_named_baseline_that_does_not_resolve(tmp_path, monkeypatch, capsys):
+    """A baseline the caller NAMED and the tool cannot resolve is a REFUSAL, not the pin."""
+    _stub_walk(monkeypatch, tmp_path, [], names=(("update", "_update"),))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check", "--baseline", "no-such-rev"])
+    assert privatise.main() == 2, "an unresolvable NAMED baseline must refuse (exit 2)"
+    assert "CANNOT ANSWER" in capsys.readouterr().err
+
+
+def test_check_reds_growth_through_main_and_names_the_line(tmp_path, monkeypatch, capsys):
+    """End to end through `main()`: growth is exit 1 and the report carries the `file:line`."""
+    (tmp_path / "growth.py").write_text(
+        "def probe(reg):\n    reg.update({'a': 1})\n", encoding="utf-8")
+    _stub_walk(monkeypatch, tmp_path, [tmp_path / "growth.py"], names=(("update", "_update"),))
+    monkeypatch.setattr(privatise, "baseline_rev", lambda explicit=None: ("deadbeefcafe", "fixture"))
+    monkeypatch.setattr(
+        privatise, "baseline_rows", lambda rev, rmap, measured, sites=None: (Counter(), {}, {}))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 1, "an added untyped receiver must red through `main()`"
+    err = capsys.readouterr().err
+    assert "growth.py" in err and "line 2" in err, f"the report must name the site: {err}"
+
+
+def test_check_refuses_a_file_it_cannot_parse(tmp_path, monkeypatch, capsys):
+    """⛔ A file that stops parsing is ONE `<<syntax-error>>` row instead of its real many, so it
+    LOWERS the count and would mask growth elsewhere. That is a refusal, never a pass."""
+    # ⛔ It must MENTION a swept name: `edits_for` short-circuits (soundly) on a file holding none
+    # of them, so a broken file that never mentions one is not even parsed.
+    (tmp_path / "broken.py").write_text(
+        "def broken(:\n    reg.update(1)\n", encoding="utf-8")
+    _stub_walk(monkeypatch, tmp_path, [tmp_path / "broken.py"], names=(("update", "_update"),))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 1, "an unparseable file must red, not silently reduce the count"
+    err = capsys.readouterr().err
+    assert "CANNOT ANSWER" in err and "broken.py" in err, err
+
+
+def test_the_sdk_class_body_is_read_from_the_same_bytes_as_the_blob(tmp_path, monkeypatch):
+    """`class_body(src)`, not `class_body()`: the body is enumerated from the BLOB too.
+
+    The no-argument form re-reads `SDK_SRC` from DISK, so for the SDK file's own baseline blob the
+    bodies came from the working tree while the spans came from the blob — the same two-sources
+    defect `_def_name_span(..., lines)` closes for the stand-in arm, on the branch that enumerates
+    the SDK's own class. Residue-neutral today (every `def` this file carries is already private),
+    wrong by construction, and it is exactly the read that makes `edits_for`'s `src=` contract
+    unkeepable the moment a public `def` returns.
+
+    ⛔ The arm `e4c5c62` wrote for its own fix; the fix is carried in `e68f4487163`, so its arm is
+    carried too rather than re-invented.
+    """
+    repo = _git_repo(tmp_path / "r")
+    sdk = repo / "sdk.py"
+    blob = "class TortoiseSDK:\n    def update(self, x):\n        return x\n"
+    sdk.write_text(blob, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    monkeypatch.setattr(privatise, "SDK_SRC", sdk)
+    rmap = {"update": "_update"}
+    # the WORKING TREE no longer holds that `def` at all; the blob does.
+    sdk.write_text(
+        "class TortoiseSDK:\n    def renamed(self, x):\n        return x\n", encoding="utf-8")
+
+    e = privatise.edits_for(sdk, rmap, src=blob)
+    assert [d[3] for d in e.defs] == ["_update"], (
+        "the blob's `def update` must be an EDIT, enumerated from the bytes it was parsed from — "
+        f"reading the body off disk found the working tree's `renamed` instead: {e.defs}")
+
+
+def test_a_zero_file_walk_is_refused_not_passed(tmp_path, monkeypatch, capsys):
+    """⛔ A FAILED `git ls-files` MEASURES NOTHING, and a ratchet passes any shrink.
+
+    Under the equality pin an empty walk was RED by construction (`(0, digest) != pin`). A ratchet
+    passes `0 now vs 0 on the baseline`, so the measurement itself has to be refused — and
+    `py_files()` must fail loudly on a git error rather than returning `[]`.
+    """
+    _stub_walk(monkeypatch, tmp_path, [], names=(("update", "_update"),))
+    monkeypatch.setattr(privatise, "baseline_rev", lambda explicit=None: ("deadbeefcafe", "fixture"))
+    monkeypatch.setattr(
+        privatise, "baseline_rows", lambda rev, rmap, measured, sites=None: (Counter(), {}, {}))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 1, "a zero-file walk must red, never grade `0 vs 0` as a pass"
+    assert "measured no Python files" in capsys.readouterr().err
+
+
+def test_an_empty_baseline_string_is_a_refusal_not_an_absent_flag(tmp_path, monkeypatch, capsys):
+    """`--baseline "$REV"` with `REV` unset expands to an EMPTY string, which must still refuse.
+
+    Truthiness (`if explicit:`) cannot tell that from "the flag was not given", so the run would
+    answer about the merge base instead — at exit 0.
+    """
+    rev, why = privatise.baseline_rev("")
+    assert rev is None, f"an empty --baseline must not resolve to a tree: {(rev, why)}"
+    assert "does not name a commit" in why, why
+
+    (tmp_path / "growth.py").write_text(
+        "def probe(reg):\n    reg.update({'a': 1})\n", encoding="utf-8")
+    _stub_walk(monkeypatch, tmp_path, [tmp_path / "growth.py"], names=(("update", "_update"),))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check", "--baseline", ""])
+    assert privatise.main() == 2, "an EMPTY named baseline must refuse with exit 2"
+    assert "CANNOT ANSWER" in capsys.readouterr().err
+
+
+def test_py_files_refuses_a_failed_ls_files(tmp_path, monkeypatch):
+    """The OTHER half of cycle 5's fix: a FAILED `git ls-files` must raise, not return `[]`.
+
+    ⛔ `walked == 0` cannot see a PARTIAL failure: if the tracked walk succeeds and the untracked
+    one alone fails, `walked > 0`, the refusal never fires, and every un-added `.py` file silently
+    leaves `now` — exactly the state a lane is in when it runs `--check` before committing. The
+    `check=True` on both reads is what turns that into an error; this arm executes the REAL
+    `py_files()` (the zero-walk arm next door stubs it out) against a directory that is not a repo.
+    """
+    monkeypatch.setattr(privatise, "ROOT", tmp_path)  # not a git repo: `ls-files` exits 128
+    with pytest.raises(subprocess.CalledProcessError):
+        privatise.py_files()
+
+
+def test_py_files_asks_both_git_reads_to_fail_loudly(monkeypatch):
+    """Graded on the CALL, because the partial-failure shape is one boolean away from silent.
+
+    A stub that raises proves nothing about `check=True` (it would propagate either way), so the
+    kwargs are asserted directly: BOTH `git ls-files` invocations must carry `check=True`.
+    """
+    seen = []
+
+    def fake(args, **kwargs):
+        seen.append((list(args), kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert privatise.py_files() == [], "the fixture lists nothing, so nothing is measured"
+    assert len(seen) == 2, f"py_files must run exactly two git reads: {seen}"
+    assert all(kwargs.get("check") is True for _args, kwargs in seen), (
+        f"every git read must be check=True, or a failed one measures nothing: {seen}")
+
+
+def test_the_dead_ratchet_notice_survives_every_spelling_of_its_own_base():
+    """⛔ `_is_own_base` must RESOLVE the rev, or the disclosure it gates is skipped by spelling.
+
+    `git rev-parse HEAD` returns a 40-hex sha, so comparing it against the caller's text answers
+    False for `--baseline origin/main`, `--baseline HEAD` and an abbreviated sha — the invocations
+    the flag itself invites — and `--check` then reports "equal to the baseline, so nothing was
+    added" from a tree compared with ITSELF, with the `⛔ the baseline IS this commit …` notice and
+    the recorded-pin delta both skipped.
+    """
+    head = privatise._git("rev-parse", "HEAD").strip()
+    for spelling in ("HEAD", head, head[:12]):
+        assert privatise._is_own_base(spelling) is True, (
+            f"`{spelling}` names this commit; the notice must fire")
+    assert privatise._is_own_base("HEAD~5") is False, "an older rev is NOT this commit"
+    assert privatise._is_own_base("no-such-rev") is False, "an unresolvable rev is not a crash"
