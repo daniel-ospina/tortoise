@@ -9203,6 +9203,47 @@ def _emission_block_header(manifest_text: str) -> str:
     return re.sub(r"\n\s*#\s?", " ", header)
 
 
+#: `merge=union` (#5373) applies BOTH parents' hunks with NO conflict marker, so a fold of two
+#: re-derivations splices this block into a second copy of itself and every gate stays green —
+#: nothing grades this block's prose. Measured 2026-11-24 on the `45dd35ba9a` fold: THREE passages
+#: arrived twice (the `8c373f59a1` provenance paragraph, the "stated at the sha" sentence, and the
+#: ratio line — the last carrying TWO figures, `2.0361` beside `2.0362`, which is the tell), the
+#: header grew 18,453 -> 19,261 characters, and every existing arm stayed green because none of the
+#: three is a shard-figure sentence.
+#:
+#: A splice is a REPEATED LONG SPAN, so the detector is one: a `_SPLICE_SHINGLE_WORDS`-word window
+#: that occurs twice in the block. LINE matching cannot see it — the two copies re-wrap, which is why
+#: five earlier de-splices were found by reviewers reading the block rather than by a check. SENTENCE
+#: matching cannot either — the splice lands mid-sentence, which is what leaves a severed fragment
+#: like "…flat 2.0 s at 28 m." behind. A DOUBLE-QUOTED span is masked first, because this block
+#: legitimately quotes a clause it RETRACTED (the record of a dead claim is not a live second claim).
+_SPLICE_SHINGLE_WORDS = 10
+_QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
+
+
+def _repeated_header_spans(header: str) -> list[str]:
+    """Long spans this block states twice — a `merge=union` splice, or a claim stated twice."""
+    masked = _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
+    flat = re.sub(r"\s+", " ", masked).strip()
+    words = flat.split()
+    window = _SPLICE_SHINGLE_WORDS
+    counts: dict[str, int] = {}
+    for i in range(len(words) - window + 1):
+        shingle = " ".join(words[i:i + window])
+        counts[shingle] = counts.get(shingle, 0) + 1
+    spans = sorted({(flat.find(s), flat.find(s) + len(s))
+                    for s, n in counts.items() if n > 1})
+    if not spans:
+        return []
+    merged: list[list[int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [flat[s:e] for s, e in merged]
+
+
 def _emission_block_claims(
         manifest_text: str) -> tuple[dict[float, set[str]], float, int] | None:
     """Read the `fast_shards` header block's stated emission.
@@ -9370,6 +9411,55 @@ def test_the_fast_shards_header_block_states_the_measured_emission():
         "neighbours are graded by this test — re-spell it as `N shards at S.S s "
         "(names)`, or delete it. A rebase that splices two re-derivations is how it "
         "gets there.")
+
+
+def test_the_fast_shards_header_block_states_no_span_twice():
+    """#14481: a fold must not splice this block into a second copy of itself.
+
+    The residual the block names ("nothing grades prose") is what let THREE passages arrive
+    twice on the `45dd35ba9a` fold while every arm stayed green: a `merge=union` fold applies
+    both parents' hunks, raises no conflict marker, and the duplicated claim is prose rather
+    than a shard figure, so `test_the_fast_shards_header_block_states_the_measured_emission`
+    reads the one graded clause and passes. The mechanical recipe the block's own residuals
+    section prescribes ("no duplicated non-trivial line in the header block") was applied by
+    hand each round and MISSED two of them, because both copies re-wrap onto different lines.
+    """
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    repeated = _repeated_header_spans(header)
+    assert not repeated, (
+        "the `fast_shards` header states the same span twice, which is what a `merge=union` "
+        f"fold (#5373) leaves behind when both parents rewrote it: {repeated!r}. Keep ONE copy — "
+        "the newer spelling usually wins, and where the copies disagree on a FIGURE the figure "
+        "is the tell — then re-derive the emission with the verb rather than around the splice.")
+    # NON-VACUITY: the shape measured on `45dd35ba9a`, RE-WRAPPED — so a line-level check calls
+    # this clean and the guard above would be decoration. Both fixtures are the same claim; only
+    # the second copy's line breaks differ, which is exactly how the real splice hid.
+    spliced = _emission_block_header(
+        "# the verb packs six shards at 825.1 s\n"
+        "# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so\n"
+        "# `ceil(825.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST\n"
+        "# the verb packs six shards at 825.1 s\n"
+        "# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so\n"
+        "# `ceil(825.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST\n"
+        "\nfast_shards: 11\n")
+    assert _repeated_header_spans(spliced), (
+        "a re-wrapped duplicate of the same sentence was not read — the pattern has been "
+        "narrowed into silence, so the sibling arm is decoration")
+    # …and a DOUBLE-QUOTED retraction is NOT a second claim. This block quotes the clause it
+    # retracted, twice, and that quotation is how the retraction stays checkable; masking quotes
+    # is what keeps the guard from redding on the block's own honesty.
+    quoted = _emission_block_header(
+        """# ⛔ The live clause that stood here — "because THIS PR re-cuts that file pin, its fold
+# KEEPS the branch copy of it" — was re-spliced back, and the paragraph below records it
+# as retracted: the fix deleted the figures while leaving "because THIS PR re-cuts that
+# file pin, its fold KEEPS the branch copy of it" standing.
+
+fast_shards: 11
+""")
+    assert not _repeated_header_spans(quoted), (
+        "a quoted retraction was read as a live second claim — the block records what it deleted "
+        "by quoting it, so masking the quoted span is required for this guard not to red on the "
+        "block's own provenance")
 
 
 def test_the_emission_block_guard_is_not_vacuous():
