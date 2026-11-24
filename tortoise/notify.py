@@ -1126,7 +1126,9 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
     # ⛔ The bound sentence is RENDERED from the code, never restated (round 6,
     # P2). This helper is reached for EVERY member of
     # :data:`ABUSE_INCIDENT_KINDS`, but only a kind in
-    # :func:`_episode_delivery_kinds` can be re-armed: ``abuse_suspended`` is
+    # :func:`_episode_delivery_kinds` can be re-armed BY AN EPISODE END (the
+    # kind-agnostic per-outcome releases — a lifted suppression, a deferred filing
+    # — re-arm any kind): ``abuse_suspended`` is
     # deliberately excluded from :data:`_EPISODE_INCIDENT_KINDS` (it records an
     # operator decision, not a rule's flag window), and even for the rule-episode
     # kinds the re-arm is CONDITIONAL ON THE SHAPE — with a store the release is
@@ -1147,9 +1149,12 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
         " attribution and the continuous-breach rate, not flapping volume),"
         " while a continuously breaching org stays at that ceiling"
         if kind in _episode_delivery_kinds() else
-        ", NEVER re-armed early — this kind has NO episode (it records an"
-        " operator decision, not a rule's flag window), so the window is the"
-        " hard limit and a repeat about the same subject inside it is folded")
+        ", NOT re-armed by an episode end — this kind has NO rule episode (it"
+        " records an operator decision), so no episode end ever re-arms it; it"
+        " is bounded by that window like every other outcome, and is re-armed"
+        " only by the generic per-outcome releases (a LIFTED suppression, a"
+        " deferred filing), so a repeat about the same subject inside the"
+        " window is normally folded")
     logger.warning(
         "abuse notify: delivered %s (%s) with NO attributable incident — %s. "
         "The message says so; the class is bounded to one such message per %dh "

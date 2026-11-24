@@ -1516,15 +1516,27 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
     assert "RE-ARMED by a confirmed episode end" not in log, (
         "the log credits an episode re-arm to a kind that has no episode; its own "
         f"runbook row says the window is never re-armed early: {log!r}")
-    assert "NEVER re-armed early" in log, (
+    assert "NOT re-armed by an episode end" in log, (
         f"the suspension shape must state the limit it actually has: {log!r}")
-    assert "NO episode" in log, log
+    assert "NO rule episode" in log, log
+    # ⛔ "NEVER re-armed early" was the previous pin and it was FALSE (round 7 of the
+    # #14487 review): the episode-end release is not the only re-arm site — the
+    # kind-agnostic per-outcome releases (a lifted suppression, a deferred filing)
+    # re-arm this kind too. Measured: a suspension whose incident read raises,
+    # followed by a second inside the same window, delivers TWO messages. The pin
+    # is on the truthful clause, and the false absolute is absent.
+    assert "NEVER re-armed early" not in log, (
+        "the log restates the retired absolute a generic release disproves: "
+        f"{log!r}")
+    assert "per-outcome releases" in log, (
+        f"the suspension shape must name what CAN re-arm it: {log!r}")
 
     _emit("abuse_flag")
     log = captured["abuse_flag"]
     assert "RE-ARMED by a confirmed episode end" in log, (
         f"a rule-episode kind lost its (true) re-arm clause: {log!r}")
-    assert "NEVER re-armed early" not in log and "NO episode" not in log, log
+    assert ("NEVER re-armed early" not in log and "NO rule episode" not in log
+            and "per-outcome releases" not in log), log
     notify.reset_abuse_delivery_for_tests()
 
 
