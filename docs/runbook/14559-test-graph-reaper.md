@@ -51,11 +51,18 @@ false negative). Hourly would let a burst bank ~70 graphs ≈ 100 MB against a
 The reaper refuses, deliberately, and the schedule passes **no** `--test-org`,
 `--force`, or any other widener. In particular:
 
-- `refused-unresolved` — no `organizations` row owns the graph name. An orphan is
-  an **adjudication**, not a cleaning job. Do not "fix" it by widening the name
-  markers; find out which org it belonged to. **The one exception is when ALL of
-  them are unresolved AND at least one is orphan-shaped** (`reserved: false`): that
+- `refused-unresolved` — the tool could not adjudicate the graph, and the row's
+  own `reason` says which of THREE states it is: no `organizations` row owns the
+  graph name (**orphan-shaped**, `org_id: null`), the org row owns it but its ACL
+  user cannot be attributed (**a credential/tombstone refusal**, `org_id` set), or
+  it is a **reserved** control-plane graph. Only the first is an orphan, and that
+  one is an **adjudication**, not a cleaning job. Do not "fix" it by widening the
+  name markers; find out which org it belonged to. **The one exception is when ALL
+  of them are unresolved AND at least one is orphan-shaped** (`reserved: false`): that
   is the control plane faulting, not a cluster of orphans, and the run reds for it.
+  The note splits the count three ways for the same reason: labelling a refusal that
+  names its own owner "no owning org" is a false claim about the row, not a
+  shorthand.
   ⛔ A reserved-only estate (`tortoise`, `registry_*`) is the **converged, benign**
   state, not a fault: the tool refuses reserved control-plane graphs before any
   owner lookup, so they bucket `refused-unresolved` by design. That estate stays

@@ -302,11 +302,19 @@ class TestCredentialGuard:
 RESERVED_GRAPH_FIXTURES = ("tortoise", "registry_control_plane", "registry_ops")
 
 def _plan(reapable: int = 1, total: int | None = None, unresolved: int = 0,
-          unreadable: int = 0, reserved: int = 0) -> dict:
+          unreadable: int = 0, reserved: int = 0, refused_owned: int = 0) -> dict:
     """The tool's own `build_report` shape, including the `reserved` flag the row
     carries (`build_report` stamps it from the SAME predicate `classify_graph`
     refuses on). A reserved graph buckets `refused-unresolved` like an orphan, so
-    the flag — not the bucket — is what a consumer can discriminate on."""
+    the flag — not the bucket — is what a consumer can discriminate on.
+
+    `refused_owned` is the THIRD state the same bucket carries: a credential or
+    tombstone refusal, where the org row DOES own the graph and `build_report`
+    stamps `reserved: false` beside a populated `org_id` (`classify_graph`'s
+    `entry["refused"]` arm). It is neither reserved nor an orphan, and without a
+    fixture for it the labels the verdict publishes about these rows were graded
+    by nothing.
+    """
     graphs = []
     for i in range(reapable):
         graphs.append({"graph": f"org_a{i}", "bucket": "reapable", "org_id": f"a{i}",
@@ -316,6 +324,11 @@ def _plan(reapable: int = 1, total: int | None = None, unresolved: int = 0,
         graphs.append({"graph": f"orphan{i}", "bucket": "refused-unresolved",
                        "org_id": None, "org_name": None, "gid": None,
                        "node_count": None, "reserved": False})
+    for i in range(refused_owned):
+        graphs.append({"graph": f"org_c{i}_g{i}", "bucket": "refused-unresolved",
+                       "org_id": f"c{i}", "org_name": f"agent-c{i}", "gid": None,
+                       "node_count": None, "reserved": False,
+                       "reason": "REFUSED rather than deleted: graph row is a TOMBSTONE"})
     for name in RESERVED_GRAPH_FIXTURES[:reserved]:
         graphs.append({"graph": name, "bucket": "refused-unresolved",
                        "org_id": None, "org_name": None, "gid": None,
@@ -541,6 +554,34 @@ class TestReviewFindings:
         # Still VISIBLE (a note, never silence) — and labelled for what it is.
         assert any("REFUSED as unresolved" in n and "reserved control-plane" in n
                    for n in record["notes"]), record["notes"]
+
+    def test_a_REFUSED_WITH_OWNER_row_is_not_labelled_no_owning_org(self, tmp_path):
+        """⛔ The third state, and the false label it used to get (review P3).
+
+        `classify_graph` puts a CREDENTIAL/tombstone refusal in the SAME
+        `refused-unresolved` bucket as an orphan — the org row owns the graph and
+        only its ACL user is unattributable — and `build_report` stamps
+        `reserved: false` with a populated `org_id`. Counting those rows as
+        orphan-shaped published "no owning org" over a graph whose own artifact
+        names its owner, and the old `unresolved - len(orphan_unresolved)`
+        subtraction then called it "reserved control-plane" as well: two false
+        claims on one row. Pinned here so the wording cannot regress to it.
+        """
+        done, record, _ = _verdict(
+            tmp_path, plan=_plan(reapable=0, refused_owned=2, reserved=1),
+            verify=_plan(reapable=0, refused_owned=2, reserved=1),
+            execute=_execute(deleted=0))
+        notes = " ".join(record["notes"])
+        assert "no owning org" not in notes, (
+            "a refusal that NAMES its owner was labelled 'no owning org'", notes)
+        assert "2 refused with an owner (credential/tombstone)" in notes, notes
+        assert "1 reserved control-plane" in notes, notes
+        # The GATE is unchanged and deliberately so: nothing resolved, so the
+        # estate still needs adjudication and the run still reds for it.
+        assert done.returncode != 0, record["reasons"]
+        assert any("resolved none" in r for r in record["reasons"]), record["reasons"]
+        assert any("name no owning org" in r and "2 were refused with an owner" in r
+                   for r in record["reasons"]), record["reasons"]
 
     def test_ONE_orphan_among_reserved_rows_reds_the_run(self, tmp_path):
         """The other half of the discriminator: the flag must not swallow the case
