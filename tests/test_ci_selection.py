@@ -1569,6 +1569,16 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
     # returned `surfaces: []` with `test_website_static.py` absent. That is the
     # exact silent drop the row's own comment cites as its reason for existing
     # ("a diff that … changed a price selected NOTHING").
+    #
+    # ⛔ `tortoise-pricing.js` ONLY — this loop does not need the page. The pages
+    # loop in THIS test above already pins `website/tortoise-for-product-teams.
+    # html` with the same three assertions, through a `website/*.html` glob that
+    # cannot miss a page, so a second row for it has no marginal coverage.
+    #
+    # The forward ratchet (`test_every_source_pattern_is_selectable`) iterates
+    # the entries, so it cannot notice an entry being DELETED — that is the gap
+    # this row closes, and `tortoise-pricing.js` is the only file it must close
+    # it for (a `.html` page is covered by the glob above).
     for asset in ("website/assets/tortoise-pricing.js",):
         r = _sel([asset])
         assert r["surfaces"] == ["onboarding"], (
