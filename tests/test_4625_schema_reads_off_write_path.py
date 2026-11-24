@@ -162,8 +162,11 @@ def test_a_warm_record_write_performs_no_migration_filesystem_operation(
     WHY THE COLD BUILD IS ASSERTED FIRST: a probe that never records anything is
     indistinguishable from a fix, and this suite would then pass over a process
     whose schema resolution had moved somewhere the probe cannot see. So the
-    cold plan must be SEEN to read (it is the one resolution a process pays), and
-    every plan after it must be silent.
+    cold plan must be SEEN to read the FILES — a bare `fs_ops` is not enough,
+    because the first resolution always probes the directory (`_migrations_dir`
+    → `_complete` is one `exists` per registered migration), so `assert fs_ops`
+    alone is satisfied by the directory probe and cannot tell a parse from a
+    stat pass. Every plan after it must be silent.
 
     FALSIFIER (executed — see the PR body): restoring
     `key = (str(migrations_dir or _migrations_dir()), _migrations_fingerprint(…))`
@@ -180,6 +183,11 @@ def test_a_warm_record_write_performs_no_migration_filesystem_operation(
         "the FIRST plan build of a fresh process touched no migration file — "
         "the probe is not observing the schema resolution at all, so the "
         "assertion below would pass over any implementation")
+    assert any(op.startswith("read_text:") for op in fs_ops), (
+        "the FIRST plan build probed the migration directory without READING a "
+        f"single file ({sorted(set(fs_ops))}) — then `fs_ops` cannot tell a "
+        "parse from the resolver's own `exists` pass, and the silence below "
+        "would be asserted over a probe that never sees a read")
     del fs_ops[:]
     clock = _Clock()
     monkeypatch.setattr(time, "monotonic", clock)
@@ -350,7 +358,7 @@ def test_the_jsonb_reader_reads_nothing_on_a_warm_process(fs_ops, monkeypatch):
 
 
 def test_an_absent_schema_heals_without_the_refresh_verb(monkeypatch, tmp_path):
-    """Absence→appear on the RESIDENT path heals by itself (#4625 review).
+    """Absence→appear on the RESIDENT path heals by itself, through ALL THREE readers.
 
     The fix made the resident entry permanent, so a process that served a write
     BEFORE its migrations were readable would otherwise raise
@@ -360,9 +368,18 @@ def test_an_absent_schema_heals_without_the_refresh_verb(monkeypatch, tmp_path):
     filesystem operations on the HEALTHY path, never a permanent hard failure
     while the schema is merely not there yet.
 
+    ⛔ EVERY READER THAT ANSWERS FROM THE RESIDENT ENTRY IS DRIVEN HERE (#4625
+    review), because they do NOT share one failure shape: `table_columns()` and
+    `jsonb_columns()` fail closed while the schema is absent, so neither can
+    memoise it — but `refused_props_names()` answers an EMPTY map, which is the
+    SILENT shape, and a `{}`-is-not-None cache probe freezes it for the
+    process's life. A pin that drives only `table_columns()` leaves that half
+    uncovered.
+
     FALSIFIER (executed): memoise the empty read again (`entry["sql"] = sql`
     unconditionally in `_entry_sql`) and the second `table_columns()` below keeps
-    raising.
+    raising; memoise the refusal parse unconditionally
+    (`entry["parsed"]["refused_props_names"] = out`) and `healed` stays `{}`.
     """
     source = _real_migrations()          # the real tree, captured BEFORE the patch
     tree = tmp_path / "migrations"
@@ -372,6 +389,12 @@ def test_an_absent_schema_heals_without_the_refresh_verb(monkeypatch, tmp_path):
     try:
         with pytest.raises(rp.RecordProjectionError, match="not on disk"):
             rp.table_columns()
+        with pytest.raises(rp.RecordProjectionError, match="not on disk"):
+            rp.jsonb_columns()
+        assert rp.refused_props_names() == {}, (
+            "the refusal map is expected to answer EMPTY (not raise) while the "
+            "schema is absent — if that changed, this pin's premise changed "
+            "with it")
         # …the schema becomes readable under the SAME process, no refresh verb.
         for name in rp.RECORD_MIGRATIONS:
             shutil.copy(source / name, tree / name)
@@ -380,6 +403,19 @@ def test_an_absent_schema_heals_without_the_refresh_verb(monkeypatch, tmp_path):
             "the empty read is memoised, so every record write raises for the "
             "life of the process and the only cure (`_release_schema_cache()`) "
             "has no production caller. Do not memoise an ABSENT read.")
+        healed = rp.refused_props_names()
+        assert healed.get("point"), (
+            "the refusal map did not heal: the `{}` parsed from the ABSENT read "
+            "was memoised, so this reader answers 'no name is refused' for the "
+            "life of the process. The projection then stops dropping the "
+            "derived/EP-scalar names BY NAME and `chk_*_props_no_derived` "
+            f"rejects the row instead (healed={healed}). An empty read must not "
+            "satisfy the cache probe — mirror `_entry_sql`.")
+        assert rp.jsonb_columns(), (
+            "the jsonb name map did not heal. It fails closed on an absent "
+            "schema today, so this can only red on a 'make it cheap' tidy-up "
+            "that memoises the empty answer instead — which would silently "
+            "stop the #9548 encoding and drop the row with no signal.")
         # …and the healthy path still resolves ONCE: the memo is taken now.
         assert "point" in rp.table_columns()
     finally:

@@ -262,14 +262,21 @@ had copied the retired figure (⛔ #11388's own body still quotes the retired
 so it is corrected on the issue itself rather than here).
 
 **(b) The column-map half is real but smaller than the issue's "~4 ms" note
-suggests.** At this head `table_columns()` costs ~1.7 ms uncached and ~0.47 ms
-cached. ⚠️ The CALL COUNT is unchanged (1 per record): what changed is that the
-call no longer reads and regex-parses fifteen migration files, it stats them.
-That is the substance of the indicator (`a fresh migration read per record`), and
-it is why the target's wording — *"called once per process/refresh, not once per
-record"* — is satisfied at the level of WORK rather than of call sites. Forcing
-the call count itself to 1 would require a caller-held map, which is the
-batching/lifecycle change this issue explicitly defers.
+suggests.** At the #9558 head `table_columns()` cost ~1.7 ms uncached and ~0.47 ms
+cached. ⚠️ The CALL COUNT did not change there (1 per record): what changed is
+that the call stopped reading and regex-parsing the migration files (twenty at
+this head) and **stat-ed** them instead. ⛔ **#4625 then removed that stat pass
+too**, so at the CURRENT head a warm `table_columns()` performs **zero**
+filesystem operations on the migrations — it answers from the process's resident
+schema, read and parsed once per process, with `_release_schema_cache()` as the
+refresh verb. The call is still made once per record; what is once per process
+is the WORK behind it, which is the substance of the indicator (`a fresh
+migration read per record`) and why the target's wording — *"called once per
+process/refresh, not once per record"* — is satisfied at the level of WORK
+rather than of call sites. (The `~1.7 ms` / `~0.47 ms` pair above is a
+measurement at the #9558 head and is kept as the record of what that change
+bought; it is not a statement about the current head, which does no filesystem
+work here at all.)
 
 ⚠️ **`column_types()` is NOT cached** (a contract read a pin performs, not a
 per-record read). **`jsonb_columns()` no longer has a TTL** (#4625): it runs once

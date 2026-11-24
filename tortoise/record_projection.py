@@ -2455,7 +2455,13 @@ _ALTER_COLUMN_TYPE_RE = re.compile(
 #: process. What is guaranteed is narrower and is the reason that is acceptable:
 #: (a) the migrations are baked into the deployed image (`migrations_source:
 #: "checkout"`), so an edit is a redeploy there; (b) an ABSENT schema is not
-#: memoised, so absence→appear heals on the next consult (:func:`_entry_sql`);
+#: memoised, so absence→appear heals on the next consult (:func:`_entry_sql`,
+#: and the same rule now holds for :func:`refused_props_names`'s own parse —
+#: **TOTAL** absence, stated no wider than the code: a PARTIAL tree, where some
+#: registered migrations are readable and others are not, yields a non-empty read
+#: and IS memoised, so partial→complete heals only through the refresh verb. That
+#: is disclosed at :func:`_resident_entry` rather than closed, and no production
+#: shape reaches it — both `_complete()` candidates require all twenty files);
 #: and (c) a caller that must SEE an edit has a verb — `_release_schema_cache()`
 #: or `_jsonb_cache_clear()` — instead of paying a per-call `stat` on the write
 #: path. The earlier wording in this block ("The map cannot go stale
@@ -2965,6 +2971,17 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
     uncached parse here is the other half of the per-batch migration read, and a
     per-call `stat` to revalidate it is the cost #4625 measured on the serving
     thread. The copy-on-return rule is the same too.
+
+    ⛔ AN EMPTY READ IS NOT MEMOISED — the same rule, and the same reason, as
+    :func:`_entry_sql` (#4625 review): `{}` is not `None`, so a parse of an
+    ABSENT schema stored here would satisfy the probe below for the life of the
+    process. The reader would then never see an absence→appear transition and
+    would answer "no name is refused" forever, which is not a slow path: the
+    derived/EP-scalar names stop being dropped BY NAME and the row is instead
+    rejected by `chk_*_props_no_derived` — the row-loss class the carve-out at
+    :func:`table_columns` exists to prevent. `jsonb_columns()` fails closed on
+    the same read (:func:`_jsonb_columns_for_dir`), so only this reader and the
+    SQL half can memoise an absence.
     """
     entry = _schema_entry(migrations_dir)
     cached = entry["parsed"].get("refused_props_names")
@@ -2993,7 +3010,8 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
             continue
         extra = frozenset(n.strip().strip("'") for n in arr.split(",") if n.strip())
         out[table] = out[table] | extra
-    entry["parsed"]["refused_props_names"] = out
+    if sql:  # ⛔ never memoise the `{}` an ABSENT read produces — see the docstring
+        entry["parsed"]["refused_props_names"] = out
     return dict(out)
 
 
