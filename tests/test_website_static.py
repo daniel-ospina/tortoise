@@ -12222,8 +12222,71 @@ BORDER_END_WIDTH_PROPS = ("border", "border-width", "border-block",
                           "border-block-end", "border-bottom-width",
                           "border-block-end-width")
 
+#: Every property that can set the block-END border STYLE — the axis that
+#: decides whether a stated WIDTH is used at all. The style axis is separate
+#: from the width axis because CSS resolves them separately: a `none` style in
+#: one declaration zeroes a width declared in ANOTHER one.
+BORDER_END_STYLE_PROPS = ("border-style", "border-block-style",
+                          "border-bottom-style", "border-block-end-style")
+
 #: Border-style keywords that mean "no border" and therefore a WIDTH of zero.
 _BORDER_NONE_STYLES = ("none", "hidden")
+
+#: Every border-style keyword (CSS Backgrounds and Borders 3 §4.1). A style
+#: token found in a declaration is what the style axis ranks; anything outside
+#: this tuple is not a style (e.g. a colour name or `var(--accent)`).
+_BORDER_STYLES = ("none", "hidden", "solid", "dashed", "dotted", "double",
+                  "groove", "ridge", "inset", "outset")
+
+
+def _css_border_end_style(prop: str, value: str) -> str | None:
+    """The block-END border STYLE `prop` states, lowercased, or `None`.
+
+    Same positional rule as `_css_border_end_length`: `border`/`border-style`
+    are ordered lists whose THIRD value is block-end for 3 and 4 values, and
+    `border-block`/`border-block-style` are `(start, end)`; the single-side
+    longhands name their side. A shorthand (`border: 2px solid #f00`,
+    `border-bottom: 4px none`) states a style for every side it sets, so it is
+    an entry on this axis too — otherwise a LATER `border-bottom-style: solid`
+    could not restore a border a shorthand removed.
+    """
+    styles = [t.lower() for t in _css_tokens(_without_important(value))
+              if t.lower() in _BORDER_STYLES]
+    if not styles:
+        return None
+    if prop in ("border", "border-style"):
+        return styles[2] if len(styles) >= 3 else styles[0]
+    if prop in ("border-block", "border-block-style"):
+        return styles[-1] if len(styles) > 1 else styles[0]
+    return styles[0]
+
+
+def _css_border_end_length(prop: str, value: str) -> float | None:
+    """The BLOCK-END border WIDTH `prop` states, in px, ignoring its STYLE.
+
+    Style-blind on purpose: whether a stated width is USED is the style axis's
+    decision, and the two axes resolve independently (see
+    `_border_end_width_cascade`). Folding the style into this read is what made
+    `border-bottom: 2px none` followed by `border-bottom-style: solid` read 0
+    on a page a browser draws with 2px.
+    """
+    tokens = _css_tokens(_without_important(value))
+    lengths: list[float] = []
+    for token in tokens:
+        match = _BORDER_WIDTH_PX.fullmatch(token)
+        if match:
+            lengths.append(float(match.group(1)))
+        elif _BARE_ZERO_LENGTH.fullmatch(token) and float(token) == 0.0:
+            lengths.append(0.0)
+    if not lengths:
+        return None
+    if prop in ("border", "border-width"):
+        chosen = lengths[2] if len(lengths) >= 3 else lengths[0]
+    elif prop in ("border-block", "border-block-width"):
+        chosen = lengths[-1] if len(lengths) > 1 else lengths[0]
+    else:
+        chosen = lengths[0]
+    return chosen
 
 
 def _css_border_end_width(prop: str, value: str) -> float | None:
@@ -12269,29 +12332,24 @@ def _css_border_end_width(prop: str, value: str) -> float | None:
     STATED (CSS Backgrounds and Borders 3 — a side's USED border width is 0
     when its style is `none` or `hidden`, whatever the width property says), so
     `border-bottom: 4px none #f00` is a 0px border, not a 4px one.
+
+    ⛔ AND THE STYLE IS ITS OWN AXIS, so this single-declaration read is only
+    half the rule (#14406 review round 22, measured). A declaration that sets
+    the STYLE LONGHAND zeroes the width just as the shorthand does — but it is
+    a different declaration, and reading only width properties made the removal
+    invisible: `.pricing-card.popular { border-bottom-style: none }` (and
+    `hidden`, `border-style`, `border-block-end-style`) left the reader at the
+    shipped 1px while a browser applies -1, the exact fail-open round 20 found
+    for `border-bottom: 0`. `_border_end_width_cascade` now resolves this axis
+    against the whole cascade; this function keeps the one-declaration form
+    for callers and assertions that hand it a single value.
     """
-    tokens = _css_tokens(_without_important(value))
-    if any(t.lower() in _BORDER_NONE_STYLES for t in tokens):
+    if _css_border_end_style(prop, value) in _BORDER_NONE_STYLES:
         # `none`/`hidden` state a width of zero and OVERRIDE a stated length.
         # Unlike `thin`, whose px width this file cannot convert, so it stays
         # None below and the caller fails rather than guesses.
         return 0.0
-    lengths: list[float] = []
-    for token in tokens:
-        match = _BORDER_WIDTH_PX.fullmatch(token)
-        if match:
-            lengths.append(float(match.group(1)))
-        elif _BARE_ZERO_LENGTH.fullmatch(token) and float(token) == 0.0:
-            lengths.append(0.0)
-    if not lengths:
-        return None
-    if prop in ("border", "border-width"):
-        chosen = lengths[2] if len(lengths) >= 3 else lengths[0]
-    elif prop in ("border-block", "border-block-width"):
-        chosen = lengths[-1] if len(lengths) > 1 else lengths[0]
-    else:
-        chosen = lengths[0]
-    return chosen
+    return _css_border_end_length(prop, value)
 
 
 def _border_end_width_cascade(css: str, compound: str,
@@ -12308,8 +12366,20 @@ def _border_end_width_cascade(css: str, compound: str,
     `skip_popular` drops the parts that NAME `.popular`, so the BASE operand is
     the border the three sibling cards get. The popular operand keeps them on
     purpose: its own rule out-ranks the base one and the cascade decides.
+
+    ⛔ TWO AXES, RESOLVED SEPARATELY (#14406 review round 22). CSS computes a
+    side's border STYLE and WIDTH independently, so a `none`/`hidden` style
+    zeroes a width stated in ANOTHER declaration — `.pricing-card.popular
+    { border-bottom-style: none }` is a 0px border with the shipped 2px width
+    untouched — and a later `border-bottom-style: solid` restores a border a
+    shorthand had removed. Both reads therefore rank in their own list and only
+    the RESOLVED pair decides. Folding the style into the width read (the
+    round-21 shape) got both directions wrong: it kept the removal invisible
+    when the style was a longhand, and read 0 where a browser draws 2px when a
+    shorthand's dead style was later restored.
     """
     ranked: list[tuple[tuple, float]] = []
+    styles: list[tuple[tuple, str]] = []
     element = (_element_carrying_class(css, compound[1:])
                if compound.startswith(".") else None)
     for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
@@ -12328,15 +12398,27 @@ def _border_end_width_cascade(css: str, compound: str,
             for decl_index, decl in enumerate(_css_blanked(body).split(";")):
                 name, sep, value = decl.partition(":")
                 prop = name.strip().lower()
-                if not sep or prop not in BORDER_END_WIDTH_PROPS:
-                    continue
-                width = _css_border_end_width(prop, value)
-                if width is None:
+                if not sep or prop not in (BORDER_END_WIDTH_PROPS
+                                           + BORDER_END_STYLE_PROPS):
                     continue
                 important = bool(_CSS_IMPORTANT.search(value))
-                ranked.append(((important, specificity, rule_index, decl_index),
-                               width))
+                rank = (important, specificity, rule_index, decl_index)
+                # The two axes are RESOLVED SEPARATELY and only then combined:
+                # CSS computes a side's style and width independently, so a
+                # `none` style zeroes a width stated in another declaration —
+                # and a later `solid` restores one a shorthand had removed.
+                if prop in BORDER_END_WIDTH_PROPS:
+                    width = _css_border_end_length(prop, value)
+                    if width is not None:
+                        ranked.append((rank, width))
+                style = _css_border_end_style(prop, value)
+                if style is not None:
+                    styles.append((rank, style))
     ranked.sort(key=lambda entry: entry[0])
+    styles.sort(key=lambda entry: entry[0])
+    style = styles[-1][1] if styles else None
+    if style in _BORDER_NONE_STYLES:
+        return 0.0
     return ranked[-1][1] if ranked else None
 
 
@@ -13719,6 +13801,23 @@ class TestCssDesktopReachAndSpecificity:
         so the whole longhand was invisible; the zero shapes were read as "this
         rule says nothing about the border". Both re-split the four CTAs by
         1–2px — the compensation's own signature — with every row GREEN.
+
+        ⛔ ROUND 22: THE STYLE IS A SECOND AXIS, and the width family could not
+        see it (#14406 review round 22, measured at `674f4a8366`). A `none`
+        style stated as a LONGHAND zeroes the width exactly as the shorthand
+        does, but it arrives in a declaration that names no width at all:
+
+            .pricing-card.popular { border-bottom-style: none }      browser -1, read 1
+            .pricing-card.popular { border-bottom-style: hidden }    browser -1, read 1
+            .pricing-card.popular { border-style: none }             browser -1, read 1
+            .pricing-card.popular { border-block-end-style: none }   browser -1, read 1
+            .pricing-card         { border-bottom-style: none }      browser  2, read 1
+
+        So the style and width reads are ranked in their OWN cascade lists and
+        only the resolved PAIR decides. Resolving the style inside the width
+        read (the round-21 shape) got the mirror case wrong in the other
+        direction: `border-bottom: 2px none` with a LATER
+        `border-bottom-style: solid` is a 2px border in a browser, and read 0.
         """
         shipped = _product_teams_html()
         assert _popular_border_extra_px(shipped) == 1.0, (
@@ -13746,6 +13845,30 @@ class TestCssDesktopReachAndSpecificity:
             assert _css_border_end_width(prop, value) == expected, (
                 f"`{prop}: {value}` gives block-end {expected:g}px in a "
                 f"browser; the reader says {_css_border_end_width(prop, value)!r}")
+
+        # The STYLE is its own axis (#14406 review round 22): a `none`/`hidden`
+        # style is what makes a stated width unused, and it can arrive in a
+        # longhand the width family cannot see at all.
+        assert "border-bottom-style" in BORDER_END_STYLE_PROPS, (
+            "`border-bottom-style` is how a maintainer REMOVES the popular "
+            "card's 2px border, so leaving it out of the style family makes "
+            "the removal invisible to the relation")
+        for prop, value, expected in (
+                ("border-bottom-style", "none", "none"),
+                ("border-bottom-style", "hidden", "hidden"),
+                ("border-bottom-style", "solid", "solid"),
+                ("border-block-end-style", "NONE", "none"),
+                ("border-style", "solid dashed dotted double", "dotted"),
+                ("border-style", "dashed solid", "dashed"),
+                ("border", "2px solid var(--accent)", "solid"),
+                ("border", "4px none #f00", "none"),
+                ("border-bottom-width", "3px", None),
+                ("border-width", "1px 2px 0", None),
+        ):
+            assert _css_border_end_style(prop, value) == expected, (
+                f"`{prop}: {value}` states block-end style {expected!r}; the "
+                f"style axis reads {_css_border_end_style(prop, value)!r}, so "
+                "the `none`/`hidden` zeroing fires on the wrong declarations")
         # …and a width this file CANNOT read still fails rather than being read
         # as zero: `thin` is a keyword, not a length.
         assert _css_border_end_width("border", "thin") is None, (
@@ -13767,6 +13890,23 @@ class TestCssDesktopReachAndSpecificity:
                 (".pricing-card.popular { border-block-width: 2px 3px }", 2.0),
                 (".pricing-card.popular { border-bottom: 1px solid #f00 }", 0.0),
                 (".pricing-card.popular { border-bottom: 4px none #f00 }", -1.0),
+                # A `none`/`hidden` STYLE LONGHAND is the same removal via a
+                # declaration the width family cannot see (#14406 round 22).
+                (".pricing-card.popular { border-bottom-style: none }", -1.0),
+                (".pricing-card.popular { border-bottom-style: hidden }", -1.0),
+                (".pricing-card.popular { border-block-end-style: none }", -1.0),
+                (".pricing-card.popular { border-style: none }", -1.0),
+                (".pricing-card { border-bottom-style: none }", 2.0),
+                # …and the style axis is RESOLVED, not per-declaration: a later
+                # `solid` restores the border, an `!important` removal holds
+                # against it, and the mirror case (a shorthand whose dead style
+                # is later restored) keeps the width it states.
+                (".pricing-card.popular { border-bottom-style: none }\n"
+                 ".pricing-card.popular { border-bottom-style: solid }", 1.0),
+                (".pricing-card.popular { border-bottom-style: none !important }\n"
+                 ".pricing-card.popular { border-bottom-style: solid }", -1.0),
+                (".pricing-card.popular { border-bottom: 2px none }\n"
+                 ".pricing-card.popular { border-bottom-style: solid }", 1.0),
         ):
             got = _popular_border_extra_px(self._page_with(mutant))
             assert got == expected, (
@@ -13783,6 +13923,7 @@ class TestCssDesktopReachAndSpecificity:
                 (".pricing-card.popular { border-color: #fff }", 1.0),
                 (".pricing-card { border-color: #fff }", 1.0),
                 (".pricing-card.popular { border-bottom-style: solid }", 1.0),
+                (".pricing-card.popular { border-bottom-style: dashed }", 1.0),
         ):
             got = _popular_border_extra_px(self._page_with(quiet))
             assert got == expected, (
