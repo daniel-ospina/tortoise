@@ -2039,9 +2039,12 @@ SWEEP_NAMES = 66
 #: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
 #: so no typed call site is legitimised by the re-cut.
 #:
-#: ⛔ #14445's FIRST fold — this lane's own, `a2f165b0ba47`: ⛔ THIS PIN WAS RE-DERIVED ON THE **MERGE
-#: TREE**, not carried from either side of the `origin/main` integration: `--repin` HERE prints
-#: **(11911, "3e92044bab08cc3d")**, which is `main`'s own 11910 plus exactly ONE row — the durable
+#: ⛔ KEPT VERBATIM, AND IT IS **NOT** THIS LANE'S: it is the `#14480` lane's own re-derivation on
+#: ITS merge of `origin/main`, and the only tree that reproduces it is `05c46e24a2782` (measured —
+#: `--repin` there prints the pair below and `--check` exits 0). It reached this branch through the
+#: `a2f165b0ba47` fold, whose own tree derives 11912 and NOT this pair. ⛔ THIS PIN WAS RE-DERIVED ON
+#: THE **MERGE TREE**, not carried from either side of the `origin/main` integration: `--repin` HERE
+#: prints **(11911, "3e92044bab08cc3d")**, which is `main`'s own 11910 plus exactly ONE row — the durable
 #: `claim_unavailable` self-heal's `recorded.update(keep)` (`tortoise/capture_spool.py`, the only new
 #: untyped `.update(` receiver in this diff vs `origin/main`). `--check` exits 0 on it.
 #:

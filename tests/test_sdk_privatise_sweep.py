@@ -253,7 +253,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2016 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2019 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -315,14 +315,18 @@ def _residue_block() -> str:
     lane's copy read 1930, the peer re-cut's copy 1931) and brought that peer's own `#14445`
     `SWEEP_RESIDUE` re-cut — the `#:` lines that attribute it are prose in the same run. ⛔ THAT
     FOLD'S FIRST RESOLUTION DID NOT keep either: it replaced BOTH sides' records with one new
-    paragraph. That deleted the branch's own `(11911, "3e92044bab08cc3d")` merge-tree reading AND
-    the peer's `(11911, "4ed42694957a174d")` one, and left the surviving sentence pointing at a note
+    paragraph. That deleted the `#14480` record the branch's side of that fold carried — pair
+    (11911, "3e92044bab08cc3d") — AND the peer's `(11911, "4ed42694957a174d")` one, and left the
+    surviving sentence pointing at a note
     no longer in the file — against this block's own rule a few hundred lines above (`BOTH SIDES'
-    RECORDS ARE KEPT VERBATIM ABOVE`, and there is ONE assignment after them). Two fresh review
-    rounds caught it; BOTH records are restored — each marked with the tree it names — above the
-    later paragraph, so the claim in this sentence is now true of the resolved file rather than
+    RECORDS ARE KEPT VERBATIM ABOVE`, and there is ONE assignment after them). Review rounds
+    caught it; BOTH records are restored verbatim above the later paragraph, each with a marker
+    naming the ONE tree that reproduces its pair — `59a08fdb8b40` for the peer's,
+    `05c46e24a2782` for `#14480`'s (neither is a tree this branch ever built, and an earlier marker
+    naming `a2f165b0ba47` was wrong: that tree derives 11912 and `--check` exits 1 there) — so the
+    claim in this sentence is now true of the resolved file rather than
     only of the peer's half. So the figure above is RE-MEASURED by this walk ON THE RESOLVED FILE
-    at 1959 rather than inherited from either side, and that fold's pair was re-derived by RUNNING
+    at 2019 rather than inherited from either side, and that fold's pair was re-derived by RUNNING
     `--repin` on BOTH trees
     (`main`'s pristine worktree and this one, identical) rather than differenced from a parent's pin,
     — and the `2cccf90f4dd4` fold's own re-cut record (`SWEEP_RESIDUE` re-derived on ITS merge tree,
