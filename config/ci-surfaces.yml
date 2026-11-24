@@ -65,7 +65,8 @@ version: 1
 # ⛔ `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
 # `tests/test_14033_state_cue_gap.py` are BOTH `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, and
 # this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
-# (measured: the only `durations` line this PR touches is a comment rewrite of an existing row), so
+# (measured: the only `durations` lines this PR touches are comment rewrites of two existing rows,
+# `test_7949_capstone_measure.py` and `test_e2e_wrangler_prewarm.py`, whose values are unchanged), so
 # the split below is `main`'s reading too. On that merged tree the verb packs
 # one shard at 838.1 s (g) and ten at
 # 838.2 s (a, b, c, d, e, f, h, i, j, k), so
@@ -79,6 +80,7 @@ version: 1
 # the last revision's minute, seconds, or split.
 #
 # `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
+# `8c373f59a1` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
 # durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
 # 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
 # `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
@@ -91,6 +93,16 @@ version: 1
 # describing a run that had already moved — nothing in this file grades an extent, so a figure here
 # can only be history and is spelled as history) — rather than accepting the
 # cut or carrying either side's figure — folded over the #14371, #14186, #14434,
+# 0 removed, against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue
+# counts — at THAT head B8 dropped `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
+# ⛔ THIS PR neither carries nor re-cuts that file: `git diff origin/main HEAD --
+# tests/test_sdk_privatise_sweep.py` is EMPTY at this head (the file is byte-identical to `main`'s,
+# and every commit `--full-history` lists for it in `origin/main..HEAD` is a MERGE of `main`), so
+# the arm at this head is `main`'s (restored there after the cut) and the extent it publishes is
+# graded by the arm itself — re-derive it there, never carry it here. An earlier revision of this
+# paragraph credited `da4b76a5851c` (a #13526 quota-report commit, not this fold) and claimed "this
+# PR re-cuts that file's pin … 1915 → 1921"; both halves were false at this head, so the figures
+# are dropped rather than re-pointed — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
@@ -116,10 +128,12 @@ version: 1
 # `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
 # `test_notify`), and that registration is part of the partition stated above — the minute did not
 # move (28 m either way), which is exactly why the SECONDS are the graded claim. ⛔ #13722's
-# `tests/test_13722_stamp_chain_off_loop.py` (dual `api`/`core`) is the registration that moved
-# THIS reading's NAME SETS off the five/six split the parent map emits — `d` AND `e` left the worst
-# bin and the eight below absorbed both — while the minute stayed at 28 m, which is again why the graded
-# claim is the set and not the minute. Its `durations` row states the flat 2.0 s
+# `tests/test_13722_stamp_chain_off_loop.py` (dual `api`/`core`) is a registration that MOVED the
+# NAME SETS on the head it landed at: at `f4eb91fd7a7a` (#14504) it took the split off the five/six
+# its own parent emitted to three/eight — `d` AND `e` leaving the worst bin — while the minute stayed
+# at 28 m, which is again why the graded claim is the set and not the minute. ⛔ Stated at the sha it
+# was MEASURED at and not as a claim about this head: later folds moved it again (this head emits the
+# one/ten graded above), which is why the rule is to re-derive it here rather than remember it. Its `durations` row states the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: a file a PR ADDS cannot carry a junit reading yet),
 # NOT the hand-picked sub-default weight the row first carried — an unmeasured figure re-packs the
 # bins and so moves THIS graded claim on a number no run measured, which is the deviation the
@@ -151,12 +165,7 @@ version: 1
 # carried.
 #
 # The registrations this reading counts are enumerated ONCE, below — ⛔ NOT re-listed here, and with
-# NO per-file shard letter (the paragraph after it says why a letter rots). A file a PR ADDS carries
-# the flat 2.0 s `DEFAULT_FAST_WEIGHT` (the #3400/#4348 trap: it cannot have a junit reading yet),
-# NOT a hand-picked sub-default weight — an unmeasured figure re-packs the bins and so moves a graded
-# claim on a number no run measured. EVERY one of them re-partitions every bin, because the packer is
-# greedy: ONE new 2.0 s file re-packs the whole map, which is why the NAMES are quoted and graded,
-# not only the seconds.
+# NO per-file shard letter (the paragraph after it says why a letter rots).
 #
 # ⛔ NO PER-FILE SHARD LETTER IS RECORDED HERE ANY MORE — and unlike every earlier statement of that
 # rule, this one is GRADED: `test_the_fast_shards_header_block_records_no_per_file_shard_letter`
@@ -177,10 +186,16 @@ version: 1
 # ⛔ HISTORICAL-LETTERS-END
 # A claim that must be re-derived on every fold
 # and is graded by nothing is a claim that rots, so what survives is the RULE rather than the
-# values: read the letter off `--emit-push-matrix` at the head you are citing and never infer it
-# from a neighbouring row — `tests/test_14407_alert_delivery.py` is registered on TWO surfaces (`api`
-# beside `test_abuse`, `core` beside `test_notify`) and its `core` row sits in a DIFFERENT bin than
-# `test_notify`'s precisely because a `core` neighbour packs elsewhere.
+# values: read the letter off `--emit-push-matrix` at the head you are citing, and never infer it
+# from a neighbouring row. ⛔ The worked example this paragraph used to carry was ITSELF false: it
+# claimed `tests/test_14407_alert_delivery.py`'s `core` row "sits in a DIFFERENT bin than
+# `test_notify`'s precisely because a `core` neighbour packs elsewhere". It cannot — `fast_pool()`
+# folds every surface into one `classified` set and returns `sorted(...)` of it
+# (`tools/ci_selection.py`, `fast_pool`), so a file registered on TWO surfaces (`api` beside
+# `test_abuse`, `core` beside `test_notify`) contributes ONE pool entry and therefore ONE bin.
+# Measured at this head both of those files land in the same one. A dual registration is exactly the
+# case where a neighbour's bin tells you nothing, which is why the rule is to read the letter off the
+# verb rather than to remember a pairing.
 #
 # The registrations the reading above counts are `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows:
 # #14409's `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`,
