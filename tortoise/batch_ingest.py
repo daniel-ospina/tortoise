@@ -1967,10 +1967,21 @@ class BatchCoordinator:
                                      corpus_name=corpus_name, estimate=estimate)
         except _BatchIdConflict:
             # The id was minted or taken by a CONCURRENT writer between the check
-            # above and the insert. Nothing written here is ours to remove: the
-            # batch row belongs to the winner, and the item rows share `bid` with
-            # it. Discarding would delete the winner's batch, so this path does
-            # the only safe thing — it refuses and leaves the winner alone.
+            # above and the insert. Do NOT roll back: `discard(org_id, bid)` removes
+            # the batch row AND every item row, and `bid` belongs to the writer that
+            # WON, so tidying up after the loser would delete the winner's batch.
+            #
+            # ⛔ THIS PATH IS NOT CLEAN, AND THE EARLIER WORDING HERE SAID IT WAS.
+            # Rounds 18-19 measured that the loser has ALREADY run `put_items` (a
+            # blind `MERGE … SET` keyed on `bid`-derived `item_id`s) and `stage_text`
+            # (the SAME `<base>/_batches/<bid>/` filenames) before it learns it lost,
+            # so it resets the winner's accepted item — `indexed` -> `queued`,
+            # `attempts`/`tokens_*` zeroed, `ref` replaced, staged bytes overwritten
+            # — which re-drains and re-charges that work. Exempting the rollback is
+            # still right (a deletion is worse and unrecoverable; a reset is visible
+            # and resumable), but this path is a KNOWN HAZARD, not a safe one: the
+            # real fix is an insert-if-absent item write plus per-attempt staging,
+            # tracked as #14499 rather than smuggled into this PR.
             raise
         except Exception:
             # ⛔ COMPENSATE, or the 503 is a lie (#14219 review round 2,

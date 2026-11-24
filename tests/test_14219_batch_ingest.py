@@ -3023,12 +3023,20 @@ def test_a_taken_id_is_refused_and_destroys_nothing_it_did_not_create(tmp_path):
 
 
 def test_losing_the_create_to_a_concurrent_writer_does_not_discard_the_winner(tmp_path):
-    """The same destruction, one race window later (#14415 round 18, P1).
+    """The loser must not DISCARD the winner's batch (#14415 round 18, P1).
 
     When `put_batch_if_absent` loses to a concurrent writer, `bid` belongs to the
     WRITER THAT WON. Tidy-up must not `discard(org_id, bid)` — that removes the
-    winner's batch row and its item rows. The loser refuses and leaves the winner
-    alone, which is pinned here by asserting no discard was ever issued.
+    winner's batch row AND its item rows, and a deletion is unrecoverable.
+
+    ⛔ THE SCOPE OF THIS PIN IS EXACTLY "NO DISCARD", AND NOTHING WIDER. Round 19
+    measured that the loser has already run `put_items` (blind `MERGE … SET`) and
+    `stage_text` (same `<base>/_batches/<bid>/` names) before it learns it lost, so
+    the winner's accepted item is still reset to `queued` with `attempts`/`tokens_*`
+    zeroed and its staged bytes replaced — re-drained and re-charged. That hazard is
+    real, is NOT undone here, and is tracked as #14499; this pin asserts only that
+    the strictly-worse deletion does not also happen. Do not read it as evidence the
+    concurrent path is safe.
     """
     class _LoserStore(InMemoryBatchStore):
         def __init__(self) -> None:
