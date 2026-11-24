@@ -21961,9 +21961,17 @@ _CUT_CLAIM_NAME_RE = re.compile(r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z]
 #: produced a non-name, and silently dropped six real claims).
 _CUT_CLAIM_WRAPPED_RE = re.compile(
     r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z][A-Za-z0-9_]*)\n\s*#?\s*([A-Za-z][A-Za-z0-9_]*)`")
-#: AND ONLY A SHAPE THAT CAN CONTRADICT IS A CLAIM. `live` is this file's own `def`s, so a
-#: captured token that is neither `test_…` nor a private helper is not an arm — it was a sha,
-#: `main`, `ValueError` — and counting it inflated the plan-ledger figure below.
+#: A SHAPE FILTER TRIMS NON-NAMES — IT IS NEVER THE AUTHORITY ON WHAT CAN CONTRADICT.
+#: A captured token that is neither `test_…` nor a private helper is *usually* not an arm — the
+#: three an unfiltered scan counted were the sha `e6b3cf2908`, `main` and `ValueError` — and
+#: counting those inflated the figure below. But `live` is every `^def ` in this file, and four
+#: of its module-level helpers match NEITHER shape (iter_shell_commands,
+#: changed_set_git_diff_commands, changed_set_git_diff_offenders,
+#: unparsed_changed_set_diff_lines — deliberately unbackticked, because this comment is inside the
+#: file the scan reads and a backticked live name beside the word CUT would become a claim about
+#: itself): measured, a shape-only filter rejected all four, so a record
+#: that called one CUT would be silently dropped — the false PASS this pin exists to forbid,
+#: rebuilt inside its own filter. `_cut_claim_is_claim` therefore keeps any name `live` defines.
 _CUT_CLAIM_ARM_RE = re.compile(r"^(?:test_\w+|_[A-Za-z]\w*)$")
 _CUT_CLAIM_FILES = (
     "tools/ci_timing.py",
@@ -21975,6 +21983,18 @@ _CUT_CLAIM_FILES = (
     # `test_split_*` verdicts are still the record of what `#14419` cut)
     "docs/plans/2026-08-18-1473-tier2-duration.md",
 )
+
+
+def _cut_claim_is_claim(name: str, live: set[str]) -> bool:
+    """True when a captured backticked token is a claim the scan must judge.
+
+    `name in live` is decisive on purpose: `live` is the set the contradiction check
+    keys on, so a filter that could reject one of its members is a blind spot, not a
+    count tidy-up. The shape test only trims tokens that cannot be an arm here (a sha,
+    `main`, `ValueError`) — and it must never be the only test, because four live
+    module-level helpers in this file match neither arm shape.
+    """
+    return name in live or bool(_CUT_CLAIM_ARM_RE.match(name))
 
 
 def _cut_claims() -> list[tuple[str, int, str, bool]]:
@@ -22002,7 +22022,7 @@ def _cut_claims() -> list[tuple[str, int, str, bool]]:
         found += [(m, m.group(1) + m.group(2))
                   for m in _CUT_CLAIM_WRAPPED_RE.finditer(text)]
         for m, name in sorted(found, key=lambda pair: pair[0].start()):
-            if not _CUT_CLAIM_ARM_RE.match(name):
+            if not _cut_claim_is_claim(name, live):
                 continue
             window = text[m.end():m.end() + _CUT_CLAIM_WINDOW]
             if not re.search(r"\bCUT\b", window):
@@ -22047,6 +22067,22 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
     assert _CUT_CLAIM_ARM_RE.match(joined[0]), (
         "the joined name must survive the arm-shape filter, or the wrap is read and "
         "then discarded")
+    # ⛔ AND NO NAME THIS FILE DEFINES MAY BE FILTERED AT ALL. `live` is what the
+    # contradiction check keys on, so a filter that rejects a member turns a real
+    # contradiction into a green run — measured on the shape-only form: it rejected four
+    # live module-level helpers (iter_shell_commands, changed_set_git_diff_commands,
+    # changed_set_git_diff_offenders, unparsed_changed_set_diff_lines; unbackticked so this
+    # comment is not itself a claim in the scan that reads this file).
+    live = set(re.findall(r"^def (\w+)", (REPO / "tests" / "test_ci_selection.py")
+                          .read_text(encoding="utf-8"), re.M))
+    assert {"iter_shell_commands", "changed_set_git_diff_commands"} <= live, (
+        "this assertion exists because those helpers are live and match neither arm "
+        f"shape; if they are gone the filter test is vacuous: live={sorted(live)[:8]}…")
+    dropped = sorted(n for n in live if not _cut_claim_is_claim(n, live))
+    assert not dropped, (
+        "the claim filter rejects names this file DEFINES, so a record calling one CUT "
+        "would pass unseen — a false PASS at the filter, which is the class this pin "
+        f"forbids: {dropped!r}")
     contradictions = [c for c in claims if c[3]]
     assert not contradictions, (
         "these records call an arm CUT while `tests/test_ci_selection.py` defines "
