@@ -22153,7 +22153,22 @@ def _arm_names_in(text: str) -> set[str]:
 #: trailing space before the wrap, or on joining the wrap. A whitespace edit must never
 #: change a grade. Attribution is still enforced by `_CUT_CLAIM_RESTORED_RE` (an
 #: UNATTRIBUTED "restored" does not defuse), so this is a clause bound, not a grant.
-_CLAUSE_SEP_RE = re.compile(r"\.[ \t]*(?:\n[ \t]*#*[ \t]*|[ \t]+)")
+#: ⛔ `?` AND `!` END A SENTENCE TOO, and `e.g.`/`i.e.` DO NOT. Both were measured reds on a
+#: CORRECT record: "…CUT by #14439 (e.g. the B7 sweep) and RESTORED by `#14481`" split at
+#: the `e.g.`, so the restoration fell into a clause with no arm name and the record was
+#: charged with a contradiction it does not state; "Was `X` CUT by #14439? RESTORED by
+#: `#14481`." split nowhere, so the question mark did not end the first clause either. The
+#: no-break list is the standard remedy for exactly this (UAX #29 / SRX sentence-break
+#: rules are "a break rule PLUS a no-break rule for abbreviations"; Moses-style segmenters
+#: suppress the split with an abbreviation list), applied rather than reinvented. A
+#: sentence that genuinely ENDS on one of these abbreviations is folded into the next
+#: clause, which can only weaken a defuse — never create one — because attribution is
+#: still required by `_CUT_CLAIM_RESTORED_RE`.
+_CLAUSE_SEP_RE = re.compile(r"[.?!][ \t]*(?:\n[ \t]*#*[ \t]*|[ \t]+)")
+#: The NO-BREAK half of the rule above: a candidate stop that CLOSES one of these is not a
+#: sentence end. `$`-anchored and matched against the text immediately before the stop, so
+#: it reads the ABBREVIATION and not the sentence.
+_NO_BREAK_ABBREV_RE = re.compile(r"(?:\be\.g|\bi\.e|\betc|\bcf|\bvs|\bal)\.$", re.I)
 
 
 def _claim_clause_bounds(text: str, pos: int) -> tuple[int, int]:
@@ -22168,6 +22183,8 @@ def _claim_clause_bounds(text: str, pos: int) -> tuple[int, int]:
     clause = text[lo:hi]   # computed against the block start, never the advanced `lo`:
     rel = pos - lo         # mixing them inflated the clause past its own full stop whenever
     for m in _CLAUSE_SEP_RE.finditer(clause):
+        if _NO_BREAK_ABBREV_RE.search(clause[max(0, m.start() - 7):m.start() + 1]):
+            continue       # an abbreviation's stop, not a sentence end
         if m.end() <= rel:     # the sentence had a preamble, which let an unrelated later
             lo = max(lo, block_lo + m.end())   # "RESTORED by …" defuse the verdict.
         elif m.start() >= rel:
@@ -22176,8 +22193,50 @@ def _claim_clause_bounds(text: str, pos: int) -> tuple[int, int]:
     return lo, hi
 
 
+#: ⛔ A BACK-REFERENCE OPENS THE CLAUSE, A COLLECTIVE SUBJECT DOES NOT. This is what lets a
+#: restoration written in the NEXT sentence still be attributed to this arm — the shape an
+#: ordinary two-sentence record uses (`"`X` was CUT by #14419. It was RESTORED by `#14481`."`)
+#: — WITHOUT reopening the false PASS a following-sentence allowance is normally bought with
+#: (the pinned `"`X` was CUT by #14419. Forty-two arms were RESTORED by `#14481`."`, a fixed
+#: fixture in `_CLAUSE_SEP_RE`'s rationale). Both records have a marker in the following
+#: clause and NO arm name in it, so "names no arm" cannot separate them; their SUBJECT can.
+#: An ELIDED subject (`"… ? RESTORED by `#14481`."` / `"And restored by …"`) is a back-reference
+#: too — it inherits the clause before it — where a plural subject (`arms`, `they`, `these`)
+#: may be a set the arm is not in. ⛔ SINGULAR PRONOUNS ONLY, DELIBERATELY: a plural pronoun
+#: is not mechanically distinguishable from a collective subject, so it stays on the
+#: over-blocking side (a red on a record that writes it) rather than reopening the false
+#: PASS. No corpus record uses one.
+_CUT_CLAIM_BACKREF_RE = re.compile(r"^(?:(?:and|but|then|also)\s+)?(?:it|this|that|which)\b", re.I)
+#: A clause that is only a CONNECTOR is the elided-subject spelling (`"… and RESTORED by …"`).
+_CUT_CLAIM_CONNECTOR_RE = re.compile(r"^(?:and|but|then|also)$", re.I)
+
+
+def _restoration_marker_defuses(text: str, marker_start: int, name: str, *,
+                                following: bool) -> bool:
+    """Does ONE attributed restoration marker restore `name`?
+
+    `following` says the marker sits in a LATER clause of the same block than the verdict,
+    which is a weaker position: there the marker must EITHER name `name` explicitly OR
+    carry a back-reference subject (see `_CUT_CLAIM_BACKREF_RE`). In the verdict's OWN
+    clause the existing rule stands — the marker's clause names `name`, or names no arm at
+    all (one marker over a list of names restores every name in the list).
+    """
+    marker_lo, marker_hi = _claim_clause_bounds(text, marker_start)
+    subjects = _arm_names_in(text[marker_lo:marker_hi])
+    if name in subjects:
+        return True
+    if subjects:
+        return False
+    if not following:
+        return True
+    prefix = text[marker_lo:marker_start].strip()
+    return (not prefix
+            or bool(_CUT_CLAIM_BACKREF_RE.match(prefix))
+            or bool(_CUT_CLAIM_CONNECTOR_RE.match(prefix)))
+
+
 def _cut_claim_restoration_defuses(text: str, start: int, name: str) -> bool:
-    """Does a restoration in THIS NAME'S OWN CLAUSE defuse its verdict?
+    """Does an ATTRIBUTED restoration of `name` defuse its verdict?
 
     ⛔ BOUND TO THE NAME, NOT MERELY NEAR IT — and not to a distance at all. Two measured
     false passes came from weaker rules: a fixed ±N-character window let ONE
@@ -22194,30 +22253,42 @@ def _cut_claim_restoration_defuses(text: str, start: int, name: str) -> bool:
     of names restores every name in the list, and charging the furthest one would red a
     correct record.
 
-    ⛔ ONE KNOWN FAIL-OPEN IS RECORDED AND DELIBERATELY NOT FIXED HERE (#12140, which
-    carries the two verbatim shapes — they are NOT repeated in this docstring, because
-    this text lives inside the file the scan reads and a verdict word beside this
-    function's own `def` line becomes a claim about itself). In short: two records differ
-    only by their SUBJECT — one restates the same arm with a pronoun, one restates a
-    DIFFERENT, collective subject — and a marker in the FOLLOWING sentence is outside the
-    arm's own clause, so the first is graded as if nothing restored it.
+    ⛔ THE RESTORATION MAY BE IN THE NEXT SENTENCE, BUT ONLY BEHIND A BACK-REFERENCE. This
+    used to be refused outright, and the refusal graded prose STYLE: measured, the same
+    truth in two ordinary sentences (`"X was CUT by #14419. It was RESTORED by #14481."`),
+    after a `?` (`"Was X CUT by #14419? RESTORED by #14481."`) or after an `e.g.` all redded
+    a record that is correct — see `_CLAUSE_SEP_RE`'s rationale for the boundary half. The
+    separation between that shape and the collective one it must not defuse is the
+    marker's SUBJECT (`_CUT_CLAIM_BACKREF_RE`), not its distance — which is why this is an
+    attribution rule and not a fourth span tweak. An EXPLICIT attribution further down the
+    same block (`"… `test_x` was restored by #14481"` sentences later) still counts: naming
+    the arm is the strongest form this prose has.
 
-    Accepting a following-sentence marker to fix that shape is exactly what reopens a
-    false PASS for the second, because "names no arm in its own clause" cannot tell a
-    pronoun that refers back from a collective subject that does not. Three consecutive
-    rounds bound this marker by distance, then by joint clause, then by clause origin,
-    each closing one direction and opening the other; a fourth blind span tweak is the
-    wrong bet, so the pair is recorded on #12140 and tracked. The bounds that ARE settled
-    are pinned by the fixtures in `test_no_record_calls_an_arm_CUT_while_that_arm_is_live`.
+    ⛔ ONE KNOWN FAIL-OPEN IS RECORDED AND DELIBERATELY NOT FIXED HERE: a sentence naming
+    TWO arms and ONE shared restoration ("`A` was CUT by #14419, unlike `B`, which was
+    RESTORED by #14481") defuses `A`. It is an ATTRIBUTION problem — which arm is the
+    contrast? — that a mechanical reader cannot settle without a linguistic rule with
+    fixtures on both sides, and the three prior span-based rounds oscillate on it. It is
+    latent (0 contradictions across the corpus) and bounded (it only hides a verdict in a
+    sentence that ALSO states a restoration; a stale record has no marker at all). It is
+    tracked on #12140, which carries the verbatim shapes — NOT repeated here, because this
+    text lives inside the file the scan reads and a verdict word beside this function's own
+    `def` line becomes a claim about itself.
     """
     clause_lo, clause_hi = _claim_clause_bounds(text, start)
-    clause = text[clause_lo:clause_hi]
-    for marker in _CUT_CLAIM_RESTORED_RE.finditer(clause):
-        marker_clause_lo, marker_clause_hi = _claim_clause_bounds(
-            text, clause_lo + marker.start())
-        marker_clause = text[marker_clause_lo:marker_clause_hi]
-        subjects = _arm_names_in(marker_clause)
-        if not subjects or name in subjects:
+    for marker in _CUT_CLAIM_RESTORED_RE.finditer(text, clause_lo, clause_hi):
+        if _restoration_marker_defuses(text, marker.start(), name, following=False):
+            return True
+    _block_lo, block_hi = _claim_block_bounds(text, start)
+    if clause_hi >= block_hi:
+        return False
+    next_lo, next_hi = _claim_clause_bounds(text, clause_hi)
+    for marker in _CUT_CLAIM_RESTORED_RE.finditer(text, next_lo, min(next_hi, block_hi)):
+        if _restoration_marker_defuses(text, marker.start(), name, following=True):
+            return True
+    for marker in _CUT_CLAIM_RESTORED_RE.finditer(text, min(next_hi, block_hi), block_hi):
+        marker_lo, marker_hi = _claim_clause_bounds(text, marker.start())
+        if name in _arm_names_in(text[marker_lo:marker_hi]):
             return True
     return False
 
@@ -22286,22 +22357,18 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         "(the durations arithmetic this PR restored, and the arms B7 really did "
         "take), so this is the scan going blind — a renamed verdict word or file — "
         f"not a tree with nothing to check. claims={claims!r}")
-    # ⛔ AND THE FLOOR MUST NOT BE SATISFIED BY THIS TEST'S OWN FIXTURES. At this head 28
-    # of the 47 claims the scan reads come from THIS file — the guard's prose and the
-    # synthetic passages below — so `len(claims) >= 2` passes green even when a real record
-    # source is dropped from `_CUT_CLAIM_FILES`, which is exactly the recurrence
-    # `fb21c37aa298` had to fix for the plan ledger. Count the sources the pin exists to
-    # read. Per-file equality was deliberately NOT used: it would red a later PR that
-    # legitimately removes a file's last verdict, which is not a lost source.
     # ⛔ AND THE FLOOR MUST NOT BE SATISFIED BY THIS TEST'S OWN FIXTURES, and it must FAIL
-    # when a SINGLE source is dropped. Both halves matter: 58 of the 82 claims the scan
-    # reads at this head come from THIS file — the guard's prose and its synthetic
-    # fixtures — so a bare count is met by the fixtures alone. A foreign-count floor was
-    # ALSO wrong: measured, dropping any ONE of the five record sources still left >= 2
-    # foreign claims and passed green, i.e. the guard its own comment says exists to catch
-    # a dropped source could not catch one. The assertion is the SET, so a file that
-    # legitimately loses its last verdict must delete its `_CUT_CLAIM_FILES` entry in the
-    # same commit — which is the honest record of that change.
+    # when a SINGLE source is dropped. Both halves matter: most of the claims the scan
+    # reads come from THIS file — the guard's prose and its synthetic fixtures — so a bare
+    # count is met by the fixtures alone. A foreign-count floor was ALSO wrong: measured,
+    # dropping any ONE of the record sources still left enough foreign claims and passed
+    # green, i.e. the guard its own comment says exists to catch a dropped source could not
+    # catch one — with `len(claims) >= 2` that was the recurrence `fb21c37aa298` had to fix
+    # for the plan ledger. The assertion is the SET, so a file that legitimately loses its
+    # last verdict must delete its `_CUT_CLAIM_FILES` entry in the same commit — which is
+    # the honest record of that change. ⛔ NO COUNT IS STATED HERE: this file's own census
+    # note (see `_CUT_CLAIM_FILES`) forbids one, and two earlier cuts of THIS comment
+    # carried figures that were wrong at the head they shipped on.
     foreign_sources = {c[0] for c in claims if c[0] != _SELF_SCAN_REL}
     assert foreign_sources == set(_CUT_CLAIM_FILES) - {_SELF_SCAN_REL}, (
         "the CUT-verdict scan lost a record source (or the scope moved without its "
@@ -22540,3 +22607,69 @@ def test_the_cut_verdict_scan_requires_an_attributed_restoration():
     assert [c[2] for c in _cut_claims_in(attributed, live)] == [False], (
         "an attributed restoration must still be read as history, or every "
         "correctly-recorded cut reds the tree")
+
+
+def test_the_cut_verdict_scan_separates_a_backreference_from_a_collective_subject():
+    """#14481 round-11 P1: the NEXT sentence is read, and a collective is still caught.
+
+    The guard used to accept a restoration only in the verdict's OWN clause, which graded
+    prose STYLE rather than truth: the same restoration written in two ordinary sentences,
+    after a `?`, or after an `e.g.` redded a record that is correct. Every GREEN row below
+    was a FALSE RED before this round (measured), and each is paired so a fix cannot pass by
+    simply widening.
+
+    ⛔ THE RED ROWS ARE THE POINT, NOT A FOOTNOTE. The obvious fix — accept a marker from
+    the following clause, as the review suggested — turns the first RED row green, because
+    "Forty-two arms were RESTORED by `#14481`" names no arm and so satisfies "names no arm
+    at all". That is the false PASS `_CLAUSE_SEP_RE`'s rationale exists to forbid, in the
+    OTHER order (verdict first, collective after). The separation is the marker's SUBJECT,
+    which is why the fix is an attribution rule and not a fourth span tweak.
+
+    Non-vacuity: the GREEN rows fail on the pre-fix code (they were measured red there) and
+    the RED rows fail on the naive widening, so neither direction can be satisfied by an
+    empty or permissive scan.
+    """
+    live = {"test_live"}
+    def contradicts(record: str) -> bool:
+        found = _cut_claims_in(record, live)
+        assert len(found) == 1, (
+            f"the scan must read exactly one claim here, got {found!r} for {record!r}")
+        return found[0][2]
+
+    # ── GREEN: the restoration is the arm's, in whatever sentence/abbreviation ──
+    for record in (
+        "`test_live` was CUT by #14439 and RESTORED by `#14481`.",
+        "`test_live` was CUT by #14439. It was RESTORED by `#14481`.",
+        "`test_live` was CUT by #14439.\n# It was RESTORED by `#14481`.",
+        "Was `test_live` CUT by #14439? RESTORED by `#14481`.",
+        "`test_live` was CUT by #14439 (e.g. the B7 sweep) and RESTORED by `#14481`.",
+        "`test_live` was CUT by #14439 (i.e. the sweep) and RESTORED by `#14481`.",
+        "`test_live` was CUT by #14439. This arm was RESTORED by `#14481`.",
+    ):
+        assert contradicts(record) is False, (
+            "a restoration this arm OWNS must not red the tree — a two-sentence or "
+            f"abbreviation-broken spelling is not a different claim: {record!r}")
+
+    # ── RED: a COLLECTIVE subject restores a set this verdict does not join ──
+    for record in (
+        "`test_live` was CUT by #14439. Forty-two arms were RESTORED by `#14481`.",
+        "`test_live` was CUT by #14439.\n# Forty-two arms were RESTORED by `#14481`.",
+        "`test_live` was CUT by #14439.\n# The remaining arms were RESTORED by `#14481`.",
+        # a plural pronoun cannot be told from a collective subject mechanically, so it
+        # stays on the over-blocking side rather than reopening the false PASS above
+        "`test_live` was CUT by #14439. They were RESTORED by `#14481`.",
+        # ⛔ and `?` IS a boundary: without it this row's collective marker sits in the
+        # verdict's OWN clause and defuses it, which is the false PASS pre-fix (measured)
+        "Was `test_live` CUT by #14439? Forty-two arms were RESTORED by `#14481`.",
+        # the PREVIOUS bullet still cannot reach forward
+        "Forty-two arms were RESTORED by `#14481`. `test_live` was CUT by #14439.",
+    ):
+        assert contradicts(record) is True, (
+            "a collective restoration does not restore THIS arm: the scan must still "
+            f"report the contradiction: {record!r}")
+
+    # ── and the abbreviation list is the no-break half, not a blanket grant ──
+    assert _claim_clause_bounds(
+        "a (e.g. b) tail", 0)[1] == len("a (e.g. b) tail"), (
+        "`e.g.` must not end a clause — a sentence genuinely ending on it merely folds "
+        "into the next clause, which can only weaken a defuse")
