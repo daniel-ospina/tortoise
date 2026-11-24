@@ -685,6 +685,30 @@ def _fake_lane_argv(seconds: int = 120) -> list[str]:
 _FAKE_LANE_STDERR: dict[int, io.BufferedRandom] = {}
 
 
+def _dead_lane_note(pid: int) -> str:
+    """What a fixture child said before it died — an `rc` with no text is not a cause.
+
+    Returns `""` for a pid this suite did not spawn, so the note never claims to explain a
+    child it never saw. Callers append it AFTER their identity line, so nothing here can
+    reach a failure signature (`ci_exemption.py` reads the FIRST `E` line).
+
+    ⛔ MODULE-LEVEL, so a helper that is not a method can reach it: `_wait_for_deleted_cwd`
+    has no `self`, and with `stderr=DEVNULL` on its spawn a `cd`/`rmdir` failure there
+    reached the reader only as an after-the-fact "proves nothing" (#14506 review).
+    """
+    fh = _FAKE_LANE_STDERR.get(pid)
+    if fh is None:
+        return ""
+    try:
+        fh.seek(0)
+        text = " ".join(fh.read().decode("utf-8", "replace").split())
+    except (OSError, ValueError) as exc:  # pragma: no cover — the spool was closed
+        return f"; its stderr could not be read back ({exc})"
+    if not text:
+        return "; its stderr was captured and was EMPTY — the child died without a word"
+    return f"; its stderr: {text[:400]!r}"
+
+
 def _fake_lane(cwd, *, env: dict[str, str] | None = None,
                stderr=None, seconds: int = 120) -> subprocess.Popen:
     """A live `pi`-named process standing in `cwd` — the census fixtures' ONE spawn.
@@ -775,7 +799,8 @@ def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
         time.sleep(0.02)
     raise AssertionError(
         f"`/proc/{pid}/cwd` never read back as deleted — the fixture cannot model "
-        "a live `pi` whose cwd is unreadable, so this run proves nothing")
+        f"a live `pi` whose cwd is unreadable, so this run proves nothing"
+        f"{_dead_lane_note(pid)}")
 
 
 #: A `ps` that hides the BOX's UNATTRIBUTABLE `pi` rows from this suite.
@@ -9395,9 +9420,16 @@ class CollisionPreflightTest(unittest.TestCase):
         # A real process standing in a directory that is then REMOVED: the kernel
         # appends ` (deleted)` to its `/proc/<pid>/cwd`, which is exactly the
         # unreadable-cwd shape the census must not read as "no lane there".
+        # ⛔ ITS STDERR IS CAPTURED TOO (#14506 review). This argv cannot be a `pi` name —
+        # its census row is SERVED as a stub, so only its cwd matters — and it must
+        # `rmdir` then `exec`, so it cannot use `_fake_lane`. But its `cd`/`rmdir` can fail
+        # BEFORE the `exec`, and under `stderr=DEVNULL` that failure reached the reader only
+        # as `_wait_for_deleted_cwd`'s "proves nothing", with the cause discarded.
+        spool = tempfile.TemporaryFile()  # noqa: SIM115 — read back by `_dead_lane_note`
         proc = subprocess.Popen(
             ["/bin/sh", "-c", 'cd "$0" && rmdir "$0" && exec sleep 120', str(gone)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=spool)
+        _FAKE_LANE_STDERR[proc.pid] = spool
         try:
             _wait_for_deleted_cwd(proc.pid)
             self.add_process_row(f"{proc.pid} 1 {os.getuid()} pi")
@@ -9787,28 +9819,13 @@ class CollisionPreflightTest(unittest.TestCase):
         return proc
 
     def _fake_lane_stderr_note(self, pid: int) -> str:
-        """What the dead lane itself said — an `rc` with no text is not a cause (#14506).
+        """What the dead lane itself said — delegates to the module's `_dead_lane_note`.
 
-        Returns `""` for a pid this suite did not spawn (a caller may hand
-        `_wait_for_pi_cwd` its own `proc`, as the DEAD-FIXTURE arm's own test does), so the
-        note never claims to explain a child it never saw. The text is appended AFTER the
-        identity line by the caller, so nothing here can reach the failure signature.
-
-        ⛔ THE LOOKUP IS THE MODULE'S, NOT THIS TEST'S (#14506 review). Registering the
-        spool inside `_start_fake_pi` left the five arms that call `_fake_lane` directly
-        with `DEVNULL`: their DEAD FIXTURE read `EXITED with rc=0` and no words at all.
+        Kept as a method because `_wait_for_pi_cwd` is one; the lookup itself is shared
+        with `_wait_for_deleted_cwd`, which has no `self` and was the ONE arm that could
+        not report a dead child's words (#14506 review).
         """
-        fh = _FAKE_LANE_STDERR.get(pid)
-        if fh is None:
-            return ""
-        try:
-            fh.seek(0)
-            text = " ".join(fh.read().decode("utf-8", "replace").split())
-        except (OSError, ValueError) as exc:  # pragma: no cover — the spool was closed
-            return f"; its stderr could not be read back ({exc})"
-        if not text:
-            return "; its stderr was captured and was EMPTY — the child died without a word"
-        return f"; its stderr: {text[:400]!r}"
+        return _dead_lane_note(pid)
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
