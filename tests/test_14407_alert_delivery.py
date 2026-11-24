@@ -1603,12 +1603,14 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
         f"{log!r}")
     assert "per-outcome releases" in log, (
         f"the suspension shape must name what CAN re-arm it: {log!r}")
-    # F2 (#14487): the list was an "only" that omitted a site 19 lines below it —
-    # a send that does not land releases the window for EVERY kind (`:1031`, the
-    # DEDUP arm, and `:1187`, the unattributed tail). Named here so deleting it
-    # reddens: an operator reading "only a lifted suppression or a deferred
-    # filing" would not look at a failed send, which is the shape a chat outage
-    # produces.
+    # F2 (#14487): the list was an "only" that omitted a release site in the SAME
+    # function — a send that does not land releases the window for EVERY kind (the
+    # DEDUP arm's `release_abuse_delivery`, and the `_deliver_unattributed` tail's).
+    # Named by LABEL, not by line number: this head's own insertions shift the line
+    # numbers and a citation that moves with neither head misleads its reader.
+    # Deleting the phrase reddens: an operator reading "only a lifted suppression or
+    # a deferred filing" would not look at a failed send, which is the shape a chat
+    # outage produces.
     assert "FAILED SEND" in log, (
         f"the 'only' list must name the failed-send release it omitted: {log!r}")
 
