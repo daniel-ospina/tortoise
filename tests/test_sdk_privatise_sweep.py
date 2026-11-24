@@ -1053,7 +1053,7 @@ def test_a_tool_only_diff_selects_this_suite():
     reds on the prose": `#14439` (B8, `8c373f59a15b`) cut this suite from 36 arms to 11 and
     deleted `_residue_block()` together with the published-extent and prose grading, so no
     prose arm remains to catch that. That cut is `main`'s decision and is NOT restored here;
-    this arm pins the SELECTION of the 11 arms that survive.
+    this arm pins the SELECTION of the arms `#14439` left — a count is deliberately not restated.
 
     The `CORE_ALSO` row is what fixes it, and both of its failure directions are graded here:
     the row is removed (surfaces collapse), and the row is made DECORATIVE by adding this file

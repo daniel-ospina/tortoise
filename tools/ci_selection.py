@@ -1793,9 +1793,10 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tools/sdk_privatise.py` -> `surfaces: []`, `full: false`, 106 test files with
              # `test_sdk_privatise_sweep.py` ABSENT. `tools/` is a flat `NON_PYTHON_PREFIXES`
              # entry and this file has no `SOURCE_PATTERNS` bridge, so a diff that edits ONLY
-             # the residue pin runs none of the arms that grade it
-             # (`test_the_residue_pin_is_a_reading_of_the_whole_set`,
-             # `test_every_addressed_rev_names_a_fetchable_refspec`).
+             # the residue pin runs none of the arms that grade this file's pins — the pinned
+             # pair itself (`test_the_residue_pin_is_a_reading_of_the_whole_set`) and the
+             # addresses the block publishes (`test_every_addressed_rev_names_a_fetchable_refspec`,
+             # which grades `_ARM_REFSPECS` rather than the pin).
              # ⛔ WHAT THE GAP IS, EXACTLY — the loose version of this comment is FALSE: the
              # required `surface-guard` step runs `--check`, which DOES compare the
              # `(rows, digest)` pair against the tree, so a stale PAIR reds there and does not
