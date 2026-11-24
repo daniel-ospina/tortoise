@@ -33,6 +33,11 @@ version: 1
 # SUM paragraph below).
 # The other live pin, the lane-parity superset test below, does NOT read the map —
 # it pins the
+# The ONE live pin left is the emission guard
+# (`test_the_fast_shards_header_block_states_the_measured_emission`), which grades
+# the per-shard `--emit-push-matrix` sentence further down in this block against
+# the LIVE emission, so the figures in it are a graded claim and not merely prose.
+# The lane-parity superset test below does NOT read the map either — it pins the
 # label POLARITY (`shard_labels(2)` ⊂ `shard_labels(9)`), which is what the merge rail
 # subtracts main's published job names against.
 #
