@@ -219,13 +219,22 @@ def _enclosing_functions(tree: ast.Module, target: ast.AST) -> list[str]:
 
 
 def _stamp_calls(tree: ast.Module) -> list[ast.Call]:
-    """Every `_stamp_capture_provenance(...)` call in the WHOLE module."""
+    """Every `_stamp_capture_provenance(...)` call in the WHOLE module.
+
+    ⛔ THE CALL SHAPE IS RESOLVED THE SAME WAY EVERY OTHER ARM RESOLVES IT. This
+    walk matched `ast.Name` only, while `_off_loop_submissions` accepts an
+    ATTRIBUTE (through `_callable_name`) — so a second run of the stamp door spelled
+    `hosted_api._stamp_capture_provenance(…)`, or `module._stamp_capture_provenance`
+    after a rename-the-import, fell out of the graded population and this pin stayed
+    GREEN with that call's record writes back on the event loop (measured on a
+    `/tmp` copy of `hosted_api.py`: GREEN before this change, RED after). A
+    `getattr`-built callee stays outside a static walk, as the header declares.
+    """
     return [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == _STAMP_DOOR
+        and _callable_name(node.func) == _STAMP_DOOR
     ]
 
 
