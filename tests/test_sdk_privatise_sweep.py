@@ -2768,3 +2768,76 @@ def test_a_rename_out_of_archive_does_not_donate_baseline_rows(tmp_path, monkeyp
     assert sum(base.values()) == 0, (
         f"an archived file was never counted, so its receivers are NOT baseline rows: {base}")
     assert not base_files, base_files
+
+
+def _standin_src(shift: int = 0) -> tuple[str, str]:
+    """A module carrying a STAND-IN class whose `def query` is one of the swept names.
+
+    A stand-in is a class implementing >= 2 of the APPROVED surface plus an off-surface `def`;
+    that shape is what routes a `def` through `_def_name_span`, which is where a blob measurement
+    used to read the WORKING TREE's lines instead of its own.
+    """
+    approved = sorted(privatise.approved_methods())
+    assert len(approved) >= 2, "premise: the approved surface has at least two names"
+    body = (
+        "class FakeSDK:\n"
+        f"    def {approved[0]}(self):\n"
+        "        return 1\n"
+        f"    def {approved[1]}(self):\n"
+        "        return 2\n"
+        "    def query(self, q):\n"
+        "        return q\n"
+    )
+    return body, "# pad\n" * shift
+
+
+def test_a_blob_measure_reads_the_blobs_own_lines_never_the_disk(tmp_path):
+    """⛔ THE CYCLE-3 DEFECT: `edits_for(..., src=...)` gave the AST a blob's source but let
+    `_def_name_span` re-read the PATH from disk.
+
+    Two symptoms, one root: a baseline file that was deleted or renamed away raised
+    `FileNotFoundError` (so `--check` could not answer at all), and one whose `def` merely SHIFTED
+    located nothing — charging a phantom `def query (span not located)` row to the BASELINE, which
+    hands the ratchet exactly that much headroom.
+    """
+    body, _pad = _standin_src()
+    rmap = {"query": "_query"}
+    gone = tmp_path / "gone.py"  # deliberately NEVER written: the deleted-file case
+    edits = privatise.edits_for(gone, rmap, src=body)
+    assert not edits.residue, (
+        f"a blob measure must not charge a phantom row for a file it cannot read: {edits.residue}")
+    assert [repl for *_span, repl in edits.defs] == ["_query"], edits.defs
+
+    # …and the SHIFTED case: the path EXISTS on disk, with the def at a different line.
+    shifted = tmp_path / "shifted.py"
+    shifted.write_text("# pad\n" * 5 + body, encoding="utf-8")
+    edits = privatise.edits_for(shifted, rmap, src=body)
+    assert not edits.residue, (
+        f"the def is at line 6 on disk and line 1 in the blob; the BLOB's lines must be used: "
+        f"{edits.residue}")
+    assert [repl for *_span, repl in edits.defs] == ["_query"], edits.defs
+
+
+def test_a_deleted_standin_file_is_measured_from_its_blob(tmp_path, monkeypatch):
+    """End to end of the same defect: deleting a stand-in file must GRADE, not crash.
+
+    `--check` on a branch that deletes a file carrying an un-swept `def` used to raise
+    `FileNotFoundError` from the baseline walk — a gate that cannot answer is not a gate.
+    """
+    repo = _git_repo(tmp_path / "r")
+    body, _pad = _standin_src()
+    (repo / "standin.py").write_text(body, encoding="utf-8")
+    (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"query": "_query", "update": "_update"}
+    subprocess.run(["git", "rm", "-q", "standin.py"], cwd=repo, check=True, capture_output=True)
+    assert (repo / "standin.py").exists() is False, "premise: the file is gone from the worktree"
+
+    measured = {"a.py": privatise.edits_for(repo / "a.py", rmap).residue}
+    base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base.values()) == 1, (
+        f"the deleted file carried a `def` (an EDIT, not residue), so the baseline is `a.py`'s "
+        f"one untyped receiver: {base}")
+    assert "standin.py" not in base_files, (
+        f"a def is not a residue row; charging one would grant the ratchet headroom: {base_files}")
