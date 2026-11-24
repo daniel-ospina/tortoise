@@ -32,7 +32,7 @@ from __future__ import annotations
 #: mirrors pyproject.toml (single source of truth); programmatic access for SDK clients.
 #: #2208: moved OUT of the module docstring — 5a2b4eb4 added it inside the docstring
 #: (lines 1-24), so `tortoise.__version__` was doc text, never an executable attr.
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 import os
 
