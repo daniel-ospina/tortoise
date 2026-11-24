@@ -224,8 +224,12 @@ SLOW_LEG_CAPPED_WALL_TARGET_MIN = 20.0
 # sweep the committed map's largest was 355.0 s (`test_lane_stash.py`) — 2.54×,
 # i.e. the pin was passing on 0.04 of margin. That sweep then MEASURED
 # `test_calibration.py` at 390.0 s (it had carried the flat 2.0 s default, so no
-# sweep had ever weighed it), which puts 15m at 2.31× and reds
-# `test_watchdog_is_per_shard_and_scales_with_the_shard`. 19m = ceil(390.0 ×
+# sweep had ever weighed it), which puts 15m at 2.31× and red the shard-scaling
+# pin — CUT in the B7 test-bureaucracy cut (2026-11-23), which removed the
+# durations-map arithmetic from `tests/test_ci_selection.py`. ⛔ THE FLOOR IS NOW
+# UNPINNED: no test references `WATCHDOG_FLOOR_MIN` (the derivation arm went with
+# the cut), so a re-tune here is reviewed by reading this comment, not by a
+# failing test. 19m = ceil(390.0 ×
 # 2.9 / 60) restores the stated derivation (1140 s / 390.0 s = 2.92×).
 # ⚠️ The alternative — moving that file to `slow_files` — is a SELECTIVITY
 # decision (a change to it would stop running the fast shards), so it is left to
@@ -2044,13 +2048,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # digest, the two token refusals or the unmatched-node count would merge
              # with every falsifier that catches those asleep — and the failure it would
              # ship is a RECORD VECTOR OVERWRITTEN, which no later run can undo. Pinned by
-             # tests/test_13685_entity_vector_backfill.py::test_a_tools_only_diff_selects_this_pin
-             # and by
-             # tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row,
-             # which iterates `ROWED_BY_THIS_FOLD` — this file's test is a member, so DROPPING
-             # its `durations:` row reds that pin. The REQUIRED `manifest-integrity` leg covers
-             # the classification and slow-file halves; it does NOT cover the row: its coverage
-             # check is a 0.90 RATIO with headroom and is silent over one missing row.
+             # tests/test_13685_entity_vector_backfill.py::test_a_tools_only_diff_selects_this_pin.
+             # (The second `test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`
+             # citation was cut with the B7 durations-map arithmetic, 2026-11-23.)
              "tools/entity_vector_backfill.py",
              # #13906: the dense-leg QUERY-parity harness
              # (`tools/vector_parity_13906.py`) owns
@@ -5803,10 +5803,16 @@ def slow_wall_projection(manifest: dict,
                          max_parallel: int | None = None) -> dict:
     """#9539: the projected slow-leg wall, from the committed `durations` map.
 
-    `projected_wall_min = max(leg est) + SLOW_LEG_SETUP_ALLOWANCE_MIN`. This is
-    the number the wall guard holds to `SLOW_LEG_WALL_TARGET_MIN`; it is a
-    PROJECTION from the map (never a measurement), which is why the setup
-    allowance is a measured constant rather than an assumption inside it.
+    `projected_wall_min = max(leg est) + SLOW_LEG_SETUP_ALLOWANCE_MIN`. This WAS
+    the number the wall guard held to `SLOW_LEG_WALL_TARGET_MIN`; ⛔ ITS CALLERS
+    WERE THE B7-CUT ARMS (`test_slow_shards_are_duration_packed_and_meet_the_
+    wall_target` and the wall-clock/cap arithmetic around it, CUT 2026-11-23), so
+    this function now has NO caller and NO grader in the tree — the projection is
+    a reading a human takes, not a gate. It is kept because it is the documented
+    re-derivation for the two targets below; retire it deliberately if that is
+    the decision. It is a PROJECTION from the map (never a measurement), which is
+    why the setup allowance is a measured constant rather than an assumption
+    inside it.
 
     #6744: it is the PER-LEG wall, and with the matrix capped it is not the
     job's. Pass the job's `max_parallel` and the projection also reports
@@ -5961,9 +5967,9 @@ def watchdog_headroom_issues(manifest: dict) -> list[str]:
     is killed, and it is reachable today: at a 30.62-minute estimate
     `ceil(30.62 * 2) = 62` is clamped to the 55-minute ceiling — an EFFECTIVE
     1.80x — which the ceiling's own comment treated as "the validated budget"
-    rather than as a breach, and which
-    `tests/test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`
-    asserts without ever computing the margin.
+    rather than as a breach, and which the shard-scaling pin asserted without
+    ever computing the margin (that pin was CUT in the B7 test-bureaucracy cut,
+    2026-11-23; this function is the check that computes the margin now).
 
     ⛔ SCOPE — ONE direction, and it is not the direction the observed kills came
     from. The two axes are independent and only ONE is visible here:
@@ -6381,8 +6387,10 @@ def resolve_fold_runner(
 
     ⛔ `matrix_runner` is returned UNCHANGED rather than re-serialised: the
     non-fold path must stay byte-identical to main's, so a lane diffing the
-    emitted matrix sees no change at all (pinned by
-    `tests/test_ci_selection.py::test_the_fold_runner_seam_is_inert_by_default`).
+    emitted matrix sees no change at all (its pin, `test_the_fold_runner_seam_is_
+    inert_by_default`, was CUT in the B7 cut, 2026-11-23 — the FOLD-SEAM cluster,
+    not the durations arithmetic — so the identity return below is UNGRADED and
+    this comment is the whole record of it).
 
     ⛔ `warn=False` exists because this runs PER ROW: the caller resolves the
     same declaration for every shard, and `::warning::` annotations are capped at
