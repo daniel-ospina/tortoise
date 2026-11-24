@@ -7110,7 +7110,12 @@ _DENSE_LEG_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 
 
 def _fly_state_naming(name: str) -> Path:
-    """A Fly secret list holding `name` plus every other `fly-only:` member.
+    """The Fly secret list `flyctl secrets list` prints: EVERY `fly-only:` member.
+
+    `name` is one OF those members (`assert name in fly_only` below), so the list is the
+    `fly-only:` set itself. It was `[name, *fly_only]` until review round 2's observation 1
+    — that listed the name TWICE, which is a state `flyctl secrets list` cannot produce,
+    and the docstring above it already claimed "`name` plus every OTHER member".
 
     The other members have to be present too: the gate refuses a `fly-only:`
     declaration whose name is not on Fly, so a fixture that carried only the name
@@ -7122,7 +7127,7 @@ def _fly_state_naming(name: str) -> Path:
     assert name in fly_only, f"{name} is not declared fly-only in the shipped manifest"
     return _fixture(
         "dense-leg-fly-state.json",
-        json.dumps([{"name": n} for n in [name, *fly_only]]),
+        json.dumps([{"name": n} for n in fly_only]),
     )
 
 
