@@ -2324,7 +2324,11 @@ def rename_map(rev: str | None = None) -> list[Entry]:
 #: is reachable. Measured in this clone: `git ls-files | grep -cP '[^\x00-\x7F]'` → **0**, so the
 #: hole is LATENT; it is closed anyway because one of its states is a silent PASS.
 #: Residual, stated rather than hidden: a path holding a TAB or a NEWLINE still breaks the line/`\t`
-#: parsing below (`-z` would be needed for that). This clone has none.
+#: parsing below. The documented form for that is `-z` — git-config(1) says `core.quotePath`
+#: defaults to `true` and "quotes unusual characters in path names", while git-diff-options(1) and
+#: git-ls-files(1) name `-z` as the machine-parsing form (`--name-status -z` emits paths verbatim and
+#: NUL-terminated); `core.quotePath=false` is the narrower fix this file takes because it changes no
+#: parsing shape. This clone has neither a TAB nor a NEWLINE in a tracked path.
 _QUOTE_PATH_OFF = ("-c", "core.quotePath=false")
 
 
