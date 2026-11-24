@@ -16910,10 +16910,8 @@ def _batch_staging_writable(org_id: str) -> str | None:
         return None
     finally:
         if probe is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(probe)
-            except OSError:
-                pass
     return root
 
 
