@@ -70,13 +70,79 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `2cccf90f4dd4` plus this PR's own `core` registration — `tests/test_4625_schema_reads_off_write_path.py`
-# at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (g) and ten at
-# 838.2 s (a, b, c, d, e, f, h, i, j, k), so
-# `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
-# agree by construction rather than by a hand re-read.
+# MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
+# `2cccf90f4dd4` (this head's own fold, on top of the `#14472` merge base after the `#14419` B7 cut
+# took the durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool)
+# plus this PR's own `core` registrations, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — the verb
+# packs six shards at 838.6 s (a, b, c, i, j, k) and five shards at 838.5 s (d, e, f, g, h), so
+# `ceil(838.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two agree
+# by construction rather than by a hand re-read.
+# ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, in ONE form.
+# Three lanes have now re-derived it on the same tree and reached the SAME reading, and each fold
+# spliced a second spelling in; the guard then reads it as a `<est stated twice>` /
+# `<ceil stated 3 times>` marker — a red that no reader of the prose could see. The repair is the one
+# stated here: re-derive at the merged tree, then keep ONE sentence. ⛔ This branch's own `core` rows
+# are what moved the partition, which is why the shard NAMES are stated and graded, not only the
+# seconds.
+# ⛔ The MINUTE has stood at 28 m across every reading of this pool while the SECONDS moved under it,
+# so NO arithmetic on the minute can catch a carried figure — only the `est_seconds` partition can,
+# which is why the sentence is GRADED below instead of trusted. The registration map behind those rows
+# is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py` (`main`'s
+# #14038) and this PR's own rows. Re-run `--emit-push-matrix` on the MERGED tree; never carry the
+# last revision's minute, seconds, or split.
+# Re-run `--emit-push-matrix`; never carry the last revision's minute.
+# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
+# `88cd00a068`, whose #14428 cut B2 down to `tests/test_12184_shifted_cites.py`, whose #14446
+# repaired #7879's record-chain arm, and whose #14429 registered
+# `tests/test_spool_drain_rehearsal.py` `core` with its own flat row, on top of #14350's
+# `tests/test_14350_drain_convergence.py`, #14220's `tests/test_14186_embedder_seam_batching.py`
+# and #14371's `tests/test_14371_offline_embed_json.py` — the last three at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) the partition is the one stated above — re-emitted at THIS tree rather
+# than restated here, because two spellings of one emission is exactly the `<est stated twice>`
+# shape the guard reds on and a reader of the prose cannot see.
+#
+# ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
+# figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
+# reading of this pool while the seconds moved under it (835.5 → 837.3 s). So NO arithmetic on the
+# minute can catch a carried figure — only the `est_seconds` partition can, which is why the
+# sentence is GRADED below instead of trusted.
+#
+# ⛔ The partition moves on EVERY landed registration, which is why a rebase that interleaves two
+# sides of this paragraph REDS rather than picking one: it was re-emitted for the #14371 row at a
+# six/five split, then for #7879 at a four/seven one within the hour (reddening `main` in
+# between), #14220 moved it to a two/nine split, merging `main`'s #14350 row collapsed it to a
+# single eleven-shard one, #14429's `core` registration re-split it to nine/two at 837.3 s, and
+# merging `main`'s own copy left this block stating the emission TWICE — each parent had rewritten
+# this paragraph and git kept BOTH spellings, so the guard read `<est 837.3 stated twice>` and
+# `<ceil stated 2 times>` rather than a clean claim. It is RE-EMITTED once more here, from the
+# merged tree. Re-run `--emit-push-matrix` on the merged tree; never carry the last revision's
+# minute, seconds, or split.
+#
+# That pool is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`,
+# landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
+# shard `k`) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
+# one main fold from rounding again.
+# MERGES INTO, never carried from the branch that first wrote it. ⛔ THE EMISSION IS STATED ONCE, in
+# the paragraph above, and this one deliberately restates no partition. An earlier cut of this block
+# carried a SECOND statement right here — nine at 837.3 s / two at 837.2 s, with its own derivation
+# and minute,
+# attributed to `main` `e6b3cf2908b` — spliced in by a rebase that interleaved two re-derivations of
+# this same paragraph, which is why the guard read `<ceil stated 2 times>` over a paragraph whose
+# readable half was graded. DELETED rather than corrected: two spellings of one emission is the
+# failure, and re-pointing the duplicate would leave the shape. The registrations this block's reading
+# counts are the ones `main` has landed at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's
+# `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`, #14220's
+# `tests/test_14186_embedder_seam_batching.py`, #14423's `tests/test_14350_drain_convergence.py`,
+# #14038's `tests/test_13998_capacity_notice.py` and #14429's `tests/test_spool_drain_rehearsal.py`
+# (listed in shard `k`) — FIVE of them on top of #14038's row, which the 836.4 s baseline below
+# MERGES INTO, never carried from the branch that first wrote it. ⛔ THE EMISSION IS STATED ONCE, in
+# the paragraph above, and this one deliberately restates NO partition and no minute: a second
+# `N shards at S.S s (names)` clause here is the `<est stated twice>` shape the guard reds on, and
+# a carried figure is exactly what the graded sentence further up exists to catch. (An earlier cut
+# of this spot stated its own partition attributed to `main` `2cccf90f4dd4`; it is DELETED rather
+# than re-pointed, because two spellings of one emission is the failure and re-pointing a duplicate
+# leaves the shape.)
 # ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
 # SETS move on every landed registration while the minute has stood at 28 m across every reading of
 # this pool from 835.5 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
@@ -95,9 +161,39 @@ version: 1
 # (post-merge review of #14459, P3: this sentence read as a measurement of "the resolved tree" while
 # describing a run that had already moved — nothing in this file grades an extent, so a figure here
 # can only be history and is spelled as history) — rather than accepting the
+# and re-measures the graded extent on the resolved tree, 1915 → 1921 at that fold and **1977** at
+# this one (the resolved run is the UNION of the two sides' `#:` blocks, never one side's figure),
+# rather than accepting the
 # cut or carrying either side's figure — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) the verb's emission is the ONE stated at the top of this block — re-emitted
+# there on THIS tree rather than restated here. ⛔ A partition WAS carried at this spot by an earlier
+# fold of the same paragraph (five at 837.7 s / six at 837.6 s) and it is DELETED rather than
+# re-pointed, on the rule the paragraph above states: two spellings of one emission is exactly the
+# `<est stated twice>` / `<ceil stated N times>` shape the guard reds on, and a reader of the prose
+# cannot see it. ⛔ The split is 0.1 s WIDE and the NAME SETS differ, which is the point of quoting
+# them: a carried figure and a re-derived one differ in the
+# `DEFAULT_FAST_WEIGHT`) the verb packed three shards (`a`, `c`, `k`) at 837.9 s and eight (`b`, `d`,
+# `e`, `f`, `g`, `h`, `i`, `j`) at 837.8 s — ⛔ MEASURED ON AN EARLIER HEAD, which folded `main` at
+# `2f38053601` and adds this PR's own registration; that parent alone emits five/six at
+# 837.7/837.6 and `da4b76a5851c` a seven/four at 837.5/837.4, so the split quoted here belongs
+# to no `main` sha and the attribution is not allowed to imply one. ⛔ THAT SPLIT IS HISTORY, NOT
+# THIS HEAD'S EMISSION, and it is spelled with the names BEFORE the seconds on purpose: the graded
+# clause lives at the TOP of this block, and a second `N shards at S.S s (names)` here would be a
+# second statement of one fact — the duplicate the guard reds on, which is what a merge of two
+# re-derivations produces (measured, this fold). Its derivation and minute are deleted with it, so
+# the block carries exactly ONE `ceil` operand.
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
+# `DEFAULT_FAST_WEIGHT`) the verb split the pool into a slowest shard reading 838.1 seconds (shard `a`)
+# and 838.0 seconds for the other ten — ⛔ MEASURED ON AN EARLIER HEAD, which sat on
+# `main` at `59a08fdb8b40` and adds this PR's own registration only
+# (`tests/test_14033_state_cue_gap.py`, which the same emission puts in shard `f`), so that head's
+# operand (838.1/60 x 2) rounded up to 28 m too — ⛔ spelled WITHOUT the `ceil(...)` form, so the
+# block carries exactly ONE graded operand: the one at the top of this block, re-derived on this
+# fold's tree, and this sentence is a HISTORICAL record that grades nothing —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
+# agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
 # which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `2cccf90f4dd4`
@@ -109,6 +205,10 @@ version: 1
 # differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
 # SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
 # 835.5 s to 838.2 s while the seconds moved under it. So NO arithmetic on the minute can catch a
+# 835.5 s to 838.1 s while the seconds moved under it. So NO arithmetic on the minute can catch a
+# carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED at the
+# top of this block instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
+# 835.5 s to 837.9 s while the seconds moved under it. So NO arithmetic on the minute can catch a
 # carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
 # instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
@@ -2752,6 +2852,19 @@ surfaces:
   # ⛔ An unregistered file is not merely an `--integrity` red — NO job selects it,
   # so the guard silently stops existing on the very change it pins.
   - test_14232_ingest_ack_split.py
+  # #14219 F4 (PR #14415) — the batch-ingest WIRE suite. DUAL-REGISTERED with
+  # `core` (below) for exactly the #2969/#14232 reason: it drives the `/v1/batches`
+  # handlers in tortoise/hosted_api.py, which is an EXACT `api` SOURCE_PATTERNS
+  # match — and a named-surface match REPLACES the `core` fallback, so a
+  # `hosted_api.py`-only diff would select NEITHER file and a regression in the
+  # route layer would ship behind a green required check. Measured before this
+  # row existed: `tools/ci_selection.py --changed-files tortoise/hosted_api.py`
+  # selects 486 test files and NONE named `14219` (`--surface-audit` reported
+  # the mismatch). The layer suite is registered beside it because both files
+  # also exercise `hosted_api` symbols (`_batch_store_for`, `_drain_batch`,
+  # `_recover_org_batches`), so an api-only diff must run the state machine too.
+  - test_14219_batch_ingest.py
+  - test_14219_batches_api.py
   # #3540 ruling B: the consolidated source-management tool's handlers live in
   # `tortoise/mcp_server.py` + `tortoise/hosted_api.py`; the guard must run on
   # the surface change it guards.
@@ -9463,6 +9576,12 @@ surfaces:
   # tortoise/session_projection.py, which matches no SOURCE_PATTERNS entry and so
   # selects `core` via the `tortoise/` fallback.
   - test_14232_ingest_ack_split.py
+  # #14219 F4 (PR #14415) — the `core` half of the dual registration documented at
+  # the `api` entry above. `tortoise/batch_ingest.py` is a new product module that
+  # matches NO `SOURCE_PATTERNS` entry, so a layer-only diff selects `core` via the
+  # `tortoise/` fallback and would otherwise run neither suite that pins it.
+  - test_14219_batch_ingest.py
+  - test_14219_batches_api.py
   # #6151: the weight mechanisms live in `tortoise/weights.py`, which matches no
   # SOURCE_PATTERNS entry — so a weights.py change selects `core` via the
   # `tortoise/` fallback and, until now, ran NONE of the three tests that guard
@@ -13614,6 +13733,8 @@ durations:
   # post-merge run that includes the file; do NOT drop it without re-deriving the
   # floor at that head.
   test_14232_ingest_ack_split.py: 2.0  # new in #14232. The #3400/#4348 trap applies: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this is the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `api` + `core` registrations above put the file in `fast_pool()`, and `--integrity` is a 0.90 RATIO check that stays green over an absent row, so only this row records the weight. The file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because that ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local timing and no case count are quoted beside it on purpose — a seconds figure next to a shard-layout input re-stales against the run it came from, and the count moves with every review round (`tools/ci_selection.py --integrity` is the authority). What the weight covers is assertion-bound and wall-clock-bound in a way the weight does not show: the offline mock capture plus the two window rows a loaded host makes INCONCLUSIVE (#5049), which is exactly why it is the flat default rather than a local figure. Hermetic: the in-process handler over the embedded graph and a mock extractor — no DB, no docker, no network, no model call.
+  test_14219_batch_ingest.py: 2.0  # new in #14415. Same #3400/#4348 trap as the row above: a file a PR ADDS cannot carry a CI junit reading yet, so this is the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading. The row must EXIST, not merely default: the `api` + `core` registrations put the file in `fast_pool()`, and `--integrity` is a 0.90 RATIO check that stays green over an absent row, so only this row records the weight. The file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`. Hermetic and cheap by construction: no DB, no docker, no network — the layer is exercised through `InMemoryBatchStore` and a stubbed runner, with the graph store reached only through a fake `query` callable.
+  test_14219_batches_api.py: 2.0  # new in #14415. The wire half of the same registration (see the row above for why the row must exist). FastAPI `TestClient` over the real handlers with the tenant store replaced by the in-memory one and the batch worker's `submit` stubbed, so acceptance is measured without touching a graph: no DB, no docker, no network, no model call.
   test_7927_epistemic_read_surfaces.py: 11.8  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 8.3
   test_session_capture_status.py: 7.3  # #3520: same #3400 flat default; Required for the durations half as well as the surface half (#4348 trap): an unregistered new test file reds `integrity_problems`. Refresh from the first post-merge main run that includes it — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 3.5
   test_served_skills_parity.py: 12.9  # new in #4643; A local timing is deliberately NOT substituted: the weight is a SHARD-LAYOUT input, so only a measured CI junit value for the leg that carries the file models it. Refresh from the first post-merge main run that includes it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 12.1

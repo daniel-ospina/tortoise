@@ -2129,7 +2129,7 @@ SWEEP_NAMES = 66
 #: rows `#4625` retires (measured `git grep -c '_JSONB_CACHE.update'` → **2** on that tree, **0** on
 #: `origin/main`), which is exactly the pair the block above already accounts for. Adopting main's
 #: deletion is what makes this tree read main's count; nothing fell unaccounted in either direction.
-SWEEP_RESIDUE = (11910, "3216395d35345904")
+SWEEP_RESIDUE = (11920, "932d96bdb7151f75")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
