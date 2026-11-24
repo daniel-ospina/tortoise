@@ -8310,8 +8310,17 @@ test("#14350: a PEER's removal during the clear answers `gone`, not `refused`", 
   // `unlink` is by NAME and could delete a claim a peer installed in the window.
   //
   // MUTATION THAT REDS THIS: return `"refused"` from the `ENOENT` arms.
+  // ⛔ THE FIFO IS BUILT THE SAME GUARDED WAY THE PRE-EXISTING TEST ABOVE BUILDS IT
+  // (#14480 review, F4): unguarded, a win32 box (or one without the `mkfifo` binary)
+  // THROWS here, so the suite reds for an environment reason and names none of the
+  // behaviour under test. The Python twin skips instead (`not hasattr(os, "mkfifo")`).
+  if (process.platform === "win32") return; // no mkfifo on win32
   const fifo = join(tmpSpool(), "drain.claim");
-  execFileSync("mkfifo", [fifo]);
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
   const peerWins = (): void => {
     const err = new Error("ENOENT") as NodeJS.ErrnoException;
     err.code = "ENOENT";
@@ -8343,9 +8352,16 @@ test("#14350: the clear NEVER deletes an object it did not judge", () => {
   //
   // MUTATION THAT REDS THIS: unlink/quarantine-delete without judging what landed
   // (drop the `landedRaw` arm).
+  // ⛔ GUARDED LIKE THE PRE-EXISTING FIFO TEST (#14480 review, F4) — see the note in
+  // the `gone` test above for why an unguarded `mkfifo` is an environment red.
+  if (process.platform === "win32") return; // no mkfifo on win32
   const dir = tmpSpool();
   const fifo = join(dir, "drain.claim");
-  execFileSync("mkfifo", [fifo]);
+  try {
+    execFileSync("mkfifo", [fifo], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
   const peerRaw = JSON.stringify({
     version: 1, token: "peer-token", leg: "pi", pid: process.pid,
     host: "h", started_at: 0, expires_at: Date.now() + 600_000,
@@ -8377,8 +8393,13 @@ test("#14350: a HEALTHY pass clears the recorded claim fact (no one-way latch)",
   // (measured — `pass 1 / fail 0` with the stale field kept on the `ok` write,
   // while the Python twin redded). It now drives a REAL pass.
   //
-  // MUTATION THAT REDS THIS: keep `previous?.claim_unavailable` on the `ok` write
-  // (`recordOutcome`, the `summary.attempted > 0` arm).
+  // MUTATION THAT REDS THIS: delete the `summary.claimHeld && !summary.claimUnavailable`
+  // clearing block in `recordOutcome`.
+  // ⛔ NOT "keep `previous?.claim_unavailable` on the `ok` write": this spool is EMPTY
+  // ON PURPOSE (see below), so `summary.attempted === 0`, so the `attempted > 0` `ok`
+  // write NEVER EXECUTES and that mutant cannot reach the assertion below. Naming it
+  // was the same unattributable-catch defect cycle 9 fixed on this very test (#14480
+  // review, F3).
   //
   // ⛔ THE PASS IS DRIVEN THROUGH THE EXTENSION, not `flushSpool(cfg, {dir})`: the
   // durable write lives in the extension's own `recordOutcome`, which records to

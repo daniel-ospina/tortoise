@@ -95,9 +95,9 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```text
-# 59 cases — the claim protocol, the capacity rule, the falsifier, 5 CROSS-LEG
+# 61 cases — the claim protocol, the capacity rule, the falsifier, 5 CROSS-LEG
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-59 passed
+61 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
@@ -105,7 +105,7 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-748 passed
+760 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
@@ -114,6 +114,13 @@ node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortois
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
+
+All three counts are **measured on the merge tree at this head**, not carried forward: `origin/main`
+(`6a72cfd661`) is integrated in this branch, and its capture-family suites grow on their own, so the
+family count moves with `main` and is re-run rather than arithmetic'd from the last head. `61` is the
+collection count for `tests/test_14350_drain_convergence.py` (54 `def test_` plus the 8-way
+parametrize); the previous record said `59`/`748` because cycle 10's two new cases were never folded
+in.
 
 Two existing cases needed a stated reason, and neither is weakened:
 
@@ -274,11 +281,22 @@ Each finding is a hole in the *answers this PR gives*, not in its mechanism:
 | **P2** `claimHeld` was declared on `CaptureStatus` (the on-disk record) instead of `FlushSummary` (the pass), so `summary.claimHeld` was a type error no gate can see (no `tsc` project covers `pi-hooks/`) and the `claim_unavailable` doc block had come loose onto the wrong field | **fixed**: the field and its own doc block live on `FlushSummary`, next to `claimUnavailable`; `CaptureStatus` carries only what is written to disk. |
 | **P2-minor** `tools/measure_drain_convergence.py` stacked three contradictory definitions of `overlapped`, and `bounded` was consumed by nothing — so "an early release makes the run no verdict" was prose, not behaviour | **fixed**: `overlapped` is REMOVED (each process writes exactly one `done` marker, so it was always `processes` — the barrier that makes it true is the very thing it was supposed to verify), and `bounded: false` now GATES: `main()` prints "NO VERDICT" and exits non-zero instead of returning 0 with a `winners` count that no longer measures the protocol. |
 
+**Cycle 11** (a fresh-context reviewer at `01064dc1` — the head after the cycle-10 fixes) — 4 **P2**,
+all record- and attribution-accuracy rather than mechanism. That is this PR's own declared subject
+matter, which is why each is fixed at the source and not restated:
+
+| finding | disposition |
+|---|---|
+| **P2** the committed record quoted a generation-33 seam digest this PR does not ship (`3eef418b…`, the blob at the branch's FIRST commit), while the pinned and shipped value is `932d74a2…` | **fixed**: the record now states `932d74a2…`, re-derived here rather than copied — `sha256sum tortoise/pi-hooks/tortoise-capture.ts` = `932d74a2…`, byte-identical to `_PINNED_PI_SEAM_INSTALL_CONTRACT` and `_GENERATION_DIGESTS[33]`. ⚠️ The GitHub *description* still quotes `4cbd1f02…`; left alone deliberately — it is not the committed record the merge path reads, and it is the artifact that will carry the harness's review attestation at the final head. |
+| **P2** the recorded test counts were short by two — `59`/`748` were regenerated at cycle 9 and cycle 10's two new cases were never folded in | **fixed by re-running, not arithmetic**: `61 passed` for `tests/test_14350_drain_convergence.py` (54 `def test_` + the 8-way parametrize = the reviewer's own collection model), and `760 passed` for the family run measured on the MERGE tree with `origin/main` (`6a72cfd661`) integrated — `main` grows that family itself, so the number is re-measured here, not carried. `node --test …` stays `314 pass / 0 fail` (no Pi test is added). |
+| **P2** the Pi leg's "a HEALTHY pass clears the recorded claim fact" test still named the mutation it cannot reach (`keep previous?.claim_unavailable` on the `attempted > 0` `ok` write — the spool is EMPTY, so `attempted === 0` and that arm never executes) | **fixed and PROVEN**: the comment now names the mutant that does red it — deleting the `summary.claimHeld && !summary.claimUnavailable` clearing block in `recordOutcome`. Applied that mutant and ran the row: RED (`actual: true, expected: undefined`); restored, green. Same unattributable-catch class cycle 9 corrected on this very test. |
+| **P2** the two new Pi-leg tests called `mkfifo` unguarded, so a win32 box (or one without the binary) THROWS instead of grading — one-leg regression against the pre-existing FIFO test beside them and against both Python twins | **fixed**: both now use the file's own guard (`if (process.platform === "win32") return;` then `try { execFileSync("mkfifo", …, { stdio: "ignore" }) } catch { return; }`), matching the pre-existing test verbatim. Behaviour unchanged on Linux — the 31 `#14350`-tagged Pi cases pass. |
+
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `3eef418b…`, re-cut at every byte change: for the export-only test seam, for
+  (capture half `932d74a2…`, re-cut at every byte change: for the export-only test seam, for
   the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
   changes, and for the MERGE of the two — a merge is a byte set neither side
   hashed, so the digest is always derived from the merged tree; the read half moved
