@@ -1208,6 +1208,28 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             stores=NO_LIVE_VECTOR,  # renders the clause; the CALLER's `MERGE` names the label
         ),
     ),
+    # ── A writer the name-level census walk found, classed by READING its seam (#14483) ────────
+    #: `#14220` added `tortoise/embed_seam.py::_external_rows` and declared nothing, so the census
+    #: credited `24 of 25` outside-gate writers and held row 1 at PARTIAL over this one. Discovered
+    #: by the NAME-LEVEL enumeration (it returns a variable list of vectors, which no name-level
+    #: walk can tell from a producer) — not by a widened shape filter.
+    (
+        "tortoise.embed_seam::_external_rows",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/embed_seam.py::_external_rows` — a PARSER of a provider's HTTP answer: it "
+            "picks the vector table out of the decoded payload (`vectors` / `embeddings`) and "
+            "normalises every row through `_external_vector`, so what it RETURNS is a "
+            "`list[list[float]]`. Its own body issues no store clause and names no graph label: "
+            "the rows go back to `ExternalBacking.encode`, which hands them to its CALLER, and "
+            "no function in this seam stores one. It enrols because the census enumeration is "
+            "deliberately name-level — a bypass that reads as exempt is the shape that "
+            "population exists to catch — so the match is READ and classified here rather than "
+            "silenced by narrowing the scan",
+            "#14186",
+            stores=NO_LIVE_VECTOR,  # parses a provider answer into floats; no store clause at all
+        ),
+    ),
 )
 
 #: The register, frozen. `module::symbol` → :class:`WriterClass`; the same key the instrument uses.

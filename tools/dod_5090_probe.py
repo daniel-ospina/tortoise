@@ -1669,6 +1669,22 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`tortoise/vector_write.py::set_embedding_clause` — the clause BUILDER "
         "itself; it renders the `<alias>.embedding = …` clause and stores no "
         "vector"),
+    # ⛔ Found by the NAME-LEVEL enumeration, not a widened shape filter (#14483): `#14220`
+    # landed this seam and declared nothing, so row 1 was held at PARTIAL over the ONE writer of
+    # the twenty-five outside the gate with no class at all. EXEMPT by READING the body, not by
+    # narrowing the scan — the instrument cannot tell a parser from a producer, and a narrowing
+    # that silenced this match would silence real writes the same regex finds.
+    "tortoise.embed_seam::_external_rows": (
+        CENSUS_EXEMPT,
+        "`tortoise/embed_seam.py::_external_rows` — a PARSER of a provider's HTTP "
+        "answer. It picks the vector table out of the decoded payload and "
+        "normalises every row through `_external_vector`, so it RETURNS a "
+        "`list[list[float]]`; its own body issues no store clause and names no "
+        "graph label, and the rows go back to `ExternalBacking.encode`, which "
+        "returns them to its caller. It enrols because the enumeration is "
+        "deliberately name-level — a bypass that reads as exempt is the failure "
+        "its population exists to prevent — so the match is READ and classified "
+        "here"),
 }
 
 
@@ -1793,6 +1809,13 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.vector_write::set_embedding_clause": (
         ("tortoise/vector_write.py", "set_embedding_clause",
          "vecf32({vector_expr})"),),
+    # The needle is the NORMALISATION CHAIN, not the docstring: it sits inside the symbol and
+    # travels with the half that makes this an EXEMPT parser (a row read out of a provider's
+    # answer, never a clause). Move the call out of `_external_rows` and this entry reds — the
+    # direction that matters, since a stale exemption must not outlive what it exempts.
+    "tortoise.embed_seam::_external_rows": (
+        ("tortoise/embed_seam.py", "_external_rows",
+         "_external_vector(row, index, key)"),),
     # The label OVERRIDE carries evidence too — it is a claim about where the
     # `:Point` write happens, and it drifted the same way (it cited
     # `api.py:318`, which is `vec = encode_for_row(` in a DIFFERENT function).
