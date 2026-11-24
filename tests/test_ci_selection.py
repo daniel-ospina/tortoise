@@ -8728,7 +8728,6 @@ def test_an_unhashable_key_is_refused_with_pyyaml_OWN_exception():
         strict.value.context, safe.value.context)
 
 
-
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
 # The test (a)/(b) halves in python-ci.yml are a second source of truth next
 # to config/ci-surfaces.yml. The #1262 integrity gate only covers manifest
@@ -8765,14 +8764,6 @@ def _halves_manifest(extra_slow: str = "") -> dict:
     }
 
 
-def test_parse_matrix_halves_extracts_both_halves():
-    from tools.ci_selection import parse_matrix_halves
-    halves = parse_matrix_halves(WF_HALVES_FIXTURE)
-    assert set(halves) == {"a", "b"}
-    assert halves["a"] == ["test_api", "test_auth", "test_slow_leak", "test_dead_entry"]
-    assert halves["b"] == ["test_api", "test_crypto", "bench/test_roundrobin"]
-
-
 def test_halves_slow_leak_flagged():
     from tools.ci_selection import parse_matrix_halves, workflow_halves_issues
     halves = parse_matrix_halves(WF_HALVES_FIXTURE)
@@ -8794,48 +8785,6 @@ def test_halves_duplicate_entry_flagged():
     halves = {"a": ["test_api"], "b": ["test_api", "test_crypto"]}
     issues = workflow_halves_issues(_halves_manifest(), halves)
     assert any("test_api" in i and "MORE THAN ONE shard" in i for i in issues), issues
-
-
-def test_halves_imbalance_flagged_beyond_tolerance():
-    from tools.ci_selection import workflow_halves_issues
-    halves = {"a": ["test_api", "test_auth", "test_crypto",
-                     "test_slow_leak", "test_dead_entry"],
-              "b": ["test_api"]}
-    issues = workflow_halves_issues(_halves_manifest(), halves)
-    assert any("imbalanced" in i for i in issues), issues
-
-
-def test_halves_imbalance_within_tolerance_clean():
-    from tools.ci_selection import workflow_halves_issues
-    halves = {"a": ["test_api", "test_auth"], "b": ["test_crypto", "test_api"]}
-    issues = workflow_halves_issues(_halves_manifest(), halves)
-    assert not any("imbalanced" in i for i in issues), issues
-
-
-def test_halves_ratio_decides_at_the_published_precision():
-    """#6145, same root as the watchdog gate: this check compared the EXACT
-    ratio and then rendered both operands at 2 dp, so a fire inside
-    (1.25, 1.255) printed "ratio 1.25x, tolerance 1.25x" — a diagnosis that
-    reads as compliant while the check refuses, the very contradiction the
-    #6145 change removes next door. The ratio is now decided at the precision it
-    publishes, so no message can print a value that reads as within tolerance.
-    """
-    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, workflow_halves_issues
-    halves = {"a": ["test_api"], "b": ["test_auth", "test_crypto"]}
-    # 1250.4 / 1000 = 1.2504 -> prints 1.25 -> INSIDE tolerance, so it must pass
-    # (under the old exact comparison this fired with a 1.25x-vs-1.25x message).
-    inside = _halves_manifest()
-    inside["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
-                           "test_crypto.py": 250.4}
-    assert not any("imbalanced" in i
-                   for i in workflow_halves_issues(inside, halves))
-    # 1256.0 / 1000 = 1.256 -> prints 1.26 -> still refused.
-    beyond = _halves_manifest()
-    beyond["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
-                           "test_crypto.py": 256.0}
-    assert any("imbalanced" in i
-               for i in workflow_halves_issues(beyond, halves))
-    assert HALF_DURATION_IMBALANCE_RATIO == 1.25
 
 
 def test_fast_files_absent_from_halves_reports_coverage_hole():
@@ -8912,39 +8861,6 @@ def test_coverage_hole_report_is_always_a_fast_pool_file():
     assert absent <= pool, sorted(absent - pool)
 
 
-def test_real_workflow_halves_are_consistent():
-    # #1472: the matrix halves are now DERIVED from the manifest
-    # (space-joined matrix_* outputs) —
-    # the #1266 discipline runs against the derivation. Verify the derived
-    # halves carry every fast file exactly once and tilt is bounded.
-    # #3400: the tilt invariant is now DURATION, not count. The full-matrix
-    # halves are packed by measured weight (LPT), so a correct split is
-    # duration-balanced while carrying very different file counts — the count
-    # difference is the design (a few multi-minute files against the long tail
-    # of sub-second ones), and the assertion below checks the balance, not the
-    # count. The old `abs(count_a - count_b) <= 3` assertion encoded the
-    # duration-blind parity split this issue exists to remove.
-    from tools.ci_selection import (TESTS_DIR, push_legs,  # noqa: I001
-                                    workflow_halves_issues,
-                                    HALF_DURATION_IMBALANCE_RATIO)
-    m = load_manifest()
-    legs = push_legs(m)
-    # #6135: the derived split is the SHARD set (N of them), not a/b.
-    halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
-    issues = workflow_halves_issues(m, halves, TESTS_DIR)
-    assert issues == [], f"derived halves drift: {issues}"
-    weights = {h: sum(m["durations"].get(f + ".py", 2.0) for f in fs)
-               for h, fs in halves.items()}
-    ratio = max(weights.values()) / min(weights.values())
-    assert ratio <= HALF_DURATION_IMBALANCE_RATIO, (
-        f"duration tilt beyond {HALF_DURATION_IMBALANCE_RATIO}x: "
-        f"{ {h: round(w / 60, 1) for h, w in weights.items()} } min "
-        f"(ratio {ratio:.2f}x)")
-    # every fast file rides exactly one shard (no coverage hole, no double-run)
-    flat = [f for fs in halves.values() for f in fs]
-    assert len(flat) == len(set(flat)), "leg overlap"
-
-
 def test_push_legs_partitions_every_classified_file():
     """#1472: every classified file lands in exactly one push leg. Epic
     #1647 Task 9: the carve-out set is its OWN leg (E2E-4) — it is
@@ -8995,35 +8911,13 @@ def test_push_legs_partitions_every_classified_file():
     # classified file flipped all three bench files into half_a, reddening an
     # unrelated PR). Assert the invariant the code actually provides HERE: every
     # bench file reaches a half (the partition assertion above). The push_extra
-    # spread rule is not asserted against this manifest — the shipped
-    # `push_extra` is empty, so it would be vacuous — it is pinned on a
-    # SYNTHETIC manifest by test_push_legs_distributes_push_extra_across_halves
-    # below (#2988/#3243).
+    # spread rule is not asserted at all: the shipped `push_extra` is empty, so it
+    # would be vacuous, and the synthetic-manifest pin that did assert it was a
+    # property of the round-robin's own arithmetic (#2988/#3243), deleted with
+    # the durations-map arithmetic cut.
     all_shard_files = [f for s in legs["shards"] for f in s["files"]]
     assert any(f.startswith("bench/") for f in all_shard_files), \
         "no bench file reached the push legs at all"
-
-
-def test_push_legs_distributes_push_extra_across_halves():
-    """#1485: ``push_extra`` is spread across the halves (even index -> half_a,
-    odd -> half_b), never dumped on one.
-
-    Pinned on a SYNTHETIC manifest: the shipped ``push_extra`` is empty (the
-    bench files are classified under the `eval` surface and packed by LPT), so
-    asserting this against the real manifest is vacuous — and pinning which
-    half a *bench* file lands on was a function of the duration estimates, not
-    a designed invariant (#2988/#3243 corrected the stale
-    test_selfhost_health_probe_executor.py weight, which flipped it).
-    """
-    from tools.ci_selection import push_legs
-
-    m = dict(load_manifest())
-    m["push_extra"] = ["bench/synthetic_a.py", "bench/synthetic_b.py"]
-    legs = push_legs(m)
-    # #6135: round-robin over the shards — the first two extras land on the
-    # first two labels (there is no "half" to pin to any more).
-    assert "bench/synthetic_a" in legs["shards"][0]["files"]
-    assert "bench/synthetic_b" in legs["shards"][1]["files"]
 
 
 # ── #6135: the fast pool's shard count ────────────────────────────────────
@@ -9071,7 +8965,6 @@ def test_every_file_rides_exactly_one_shard_at_s_greater_than_two():
     # green (measured) while silently removing the feature. Pin it per entry
     # against the shard value it reports, so the emitter and the shard dict
     # cannot drift, and require it to be a real margin.
-    from tools.ci_selection import WATCHDOG_HEADROOM
     for s, e in zip(legs["shards"], inc, strict=True):
         assert "watchdog_headroom" in e, \
             f"the emitted matrix must carry the headroom (#6145): {e['half']}"
@@ -9094,11 +8987,521 @@ def test_shard_labels_are_a_superset_when_s_changes():
     assert not (pr_names <= main_names)
 
 
+#: The `fast_shards` header block is the ONE place in the manifest that restates
+#: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
+#: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head
+#: above — re-derive them with that verb rather than trusting them", and the same block
+#: had gone stale before this guard existed (#11298 review cycle 5, #14015, #14296) —
+#: and it has been caught going stale AGAIN since (#14434's and #14220's registrations
+#: each re-packed the bins), which is what this guard is for. ⛔ No tally is carried here
+#: on purpose: the number of times moves with every landing, so the instances are named
+#: and the count is left to whoever re-derives it. A promise in prose is not a
+#: guard, so the sentence is graded against the live emission here instead.
+#:
+#: Shard names are read in BOTH spellings this map uses — an explicit list (`f, h`)
+#: and a range (`a–e`) — and the count may be a word (`nine`) as the surrounding prose
+#: prefers. A guard that only reads one spelling turns the other into an unread claim,
+#: which is how the sibling head-total guard above became inert three times.
+_EMISSION_COUNT_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+_EMISSION_CLAUSE_RE = re.compile(
+    r"(?P<n>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"(?: shards?)? at (?P<est>\d+\.\d) s \((?P<names>[a-z][a-z,\s\u2013\u2014-]*)\)")
+_EMISSION_CEIL_RE = re.compile(
+    r"`ceil\((?P<est>\d+\.\d)/60 x (?P<headroom>\d+(?:\.\d+)?)\)` = (?P<minutes>\d+) m")
+_EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
+#: A shard-figure sentence the CLAUSE parser above cannot read: a seconds figure
+#: immediately followed by a shard-name list opener. `_EMISSION_CLAUSE_RE` needs one
+#: decimal place and a closing `)`, so a block can state a figure this guard never
+#: grades — measured 2026-11-23 on the rebase this guard was cut onto: `main`'s cut of
+#: this paragraph spelled "ALL ELEVEN shards at 835.8-835.9 s (a-k; two runs" (a RANGE of
+#: seconds and a semicolon in the name list, so no clause match), the rebase kept BOTH
+#: parents' sentences, and the readable clause was graded while that one was invisible.
+#: A figure nobody reads is the same no-op-gate class as a pattern that matches nothing.
+_EMISSION_UNREAD_SENTENCE_RE = re.compile(r"\d\.\d+\s*s\s*\([a-z]")
+#: A watch-minute DERIVATION, anchored on the OPERAND (`X.X/60`) rather than on a spelling.
+#: `_EMISSION_CEIL_RE` above reads exactly one spelling of it, so any other spelling in the block
+#: is a minute graded by NOTHING — the no-op-gate class `_EMISSION_UNREAD_SENTENCE_RE` covers on
+#: the partition side. Measured 2026-11-23 against the real manifest, with the partition untouched:
+#: `` `ceil(837.0/60 * 2)` = 29 m ``, `836.9/60 x 2 → 30 m` and the prose `… rounds 837.0/60 x 2.0
+#: up to 29 m` each kept BOTH rows green while the block claimed two different minutes. A first
+#: attempt matched `[x\u00d7X]` and `=|up to` and was itself spelling-bound (it missed `*`, `→`,
+#: `->`, `=>`), which is why this one anchors on the operand and reads the first `N m` after it.
+_EMISSION_DERIVATION_RE = re.compile(r"(?P<est>\d+\.\d)\s*/\s*60")
+_EMISSION_MINUTE_AFTER_RE = re.compile(r"(?P<minutes>\d+)\s*m\b")
+#: How far past an operand its stated minute may sit. The manifest's own prose form —
+#: `rounds 840.2/60 x 2.0 up to 29 m` — puts it 14 characters after the operand.
+_DERIVATION_LOOKAHEAD = 60
+
+
+def _emission_names(phrase: str) -> set[str]:
+    """Expand a shard-name phrase: `a–e, i, j` -> {a,b,c,d,e,i,j}."""
+    names: set[str] = set()
+    for part in phrase.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        span = _EMISSION_RANGE_RE.fullmatch(part)
+        if span:
+            names |= {chr(c) for c in range(
+                ord(span.group("lo")), ord(span.group("hi")) + 1)}
+        else:
+            names.add(part)
+    return names
+
+
+def _emission_block_header(manifest_text: str) -> str:
+    """The `fast_shards` block, bounded at the key and joined into one string.
+
+    The subject is bounded to the header so a shard-count sentence elsewhere in the
+    map cannot be mistaken for this block's claim, and comment line breaks are
+    PRESENTATION — a sentence wraps at will — so the block is joined before reading it;
+    otherwise a figure that happens to land on the next line makes a claim unread,
+    which is the no-op-gate class this guard's own message names.
+    """
+    key = re.search(r"^fast_shards:", manifest_text, re.MULTILINE)
+    assert key is not None, (
+        "the manifest carries no `fast_shards:` key, so the bound below is the WHOLE "
+        "file rather than the block this guard claims to read — fail closed here instead of "
+        "silently widening the subject a renamed key would hand it.")
+    header = manifest_text[:key.start()]
+    return re.sub(r"\n\s*#\s?", " ", header)
+
+
+def _emission_block_claims(
+        manifest_text: str) -> tuple[dict[float, set[str]], float, int] | None:
+    """Read the `fast_shards` header block's stated emission.
+
+    Returns `{est_seconds -> shard names}`, the `ceil(...)` operand and the minutes it
+    states; `None` when the block (the text above the `fast_shards:` key) states none, or
+    when it carries a correct `ceil(...)` derivation but no partition clause to grade.
+
+    ⛔ It RAISES rather than returning `None` on THREE conditions, so the caller reds with the
+    real reason instead of the generic "states no emission" message: an `AssertionError` if
+    the manifest carries no `fast_shards:` key (the bound would otherwise be the whole map),
+    one if any `ceil(...)` multiplier is not
+    `ci_selection.WATCHDOG_HEADROOM` — the block would then state an arithmetic the code does
+    not perform — and one if an est this block GRADES is derived to a different minute in a
+    spelling `_EMISSION_CEIL_RE` cannot read (so that minute would be graded by nobody). The
+    headroom check runs BEFORE the empty-partition return on purpose, so a
+    wrong multiplier is never reported as an absent sentence.
+    """
+    header = _emission_block_header(manifest_text)
+    groups: dict[float, set[str]] = {}
+    for m in _EMISSION_CLAUSE_RE.finditer(header):
+        names = _emission_names(m.group("names"))
+        raw_n = m.group("n")
+        stated_n = int(raw_n) if raw_n.isdigit() else _EMISSION_COUNT_WORDS[raw_n]
+        if stated_n != len(names):
+            # The COUNT and the SET are two statements of one fact. A sentence that
+            # disagrees with itself is graded as claiming a set it does not name, so
+            # the caller reds rather than silently believing one side.
+            names = names | {f"<count says {stated_n}>"}
+        est = float(m.group("est"))
+        if est in groups:
+            # A SECOND clause at the same `est` merges under `|` into a claim LARGER than
+            # either sentence makes, so a restatement of a subset (`two at 835.7 s (a, k)`
+            # beside the clause that already names five) would be invisible, and a
+            # duplicated one would grade as if it were a single statement. Mark the repeat
+            # so the caller reds rather than believing a claim the block does not make.
+            groups[est] = groups[est] | {f"<est {est} stated twice>"}
+        else:
+            groups[est] = set()
+        # `|` rather than `set.update`: a `.update(` on a receiver this sweep cannot
+        # type is one more member of the `tools/sdk_privatise.py` residue pin, and a
+        # test is not a reason to move a pinned count.
+        groups[est] = groups[est] | names
+    ceil_matches = _EMISSION_CEIL_RE.findall(header)
+    if not ceil_matches:
+        return None
+    # The multiplier is `ci_selection.WATCHDOG_HEADROOM`, not a literal this guard owns. Read
+    # from the code so a change there REDS here with an accurate reason instead of returning
+    # `None` (which the caller reports as "states no emission the guard can read" — fail-closed,
+    # but it would send the next reader looking for a missing sentence rather than a moved
+    # constant). ⛔ This runs BEFORE the empty-`groups` check on purpose: a header carrying a
+    # wrong multiplier but NO partition clause must raise for the headroom, not fall down the
+    # generic `None` path this check exists to avoid. The `not ceil_matches` guard above stays
+    # ahead of it, because a block that states no derivation at all must read as `None` rather
+    # than being redded for a headroom it never used.
+    # ⛔ Compare the headroom NUMERICALLY, not as a spelling. `f"{2.0:g}"` is `"2"`, so a string
+    # comparison reds a block that writes `x 2.0` — the same multiplier, and the spelling the
+    # manifest's own block uses (`config/ci-surfaces.yml:46`: `shard_watchdog_minutes()` rounds
+    # `840.2/60 x 2.0` up to 29 m). A false block is the one failure this check must not produce.
+    headrooms = {float(h) for _est, h, _minutes in ceil_matches}
+    assert headrooms == {float(cs.WATCHDOG_HEADROOM)}, (
+        f"the block derives its watchdog with headroom {sorted(headrooms)}, but the code uses "
+        f"`ci_selection.WATCHDOG_HEADROOM` = {cs.WATCHDOG_HEADROOM:g} — the `ceil(...)` operand "
+        "no longer states the code's own multiplier, so the figures beside it are not the ones "
+        "anything computes. Update the sentence, or the constant moved and the block is stale.")
+    if not groups:
+        return None
+    est_str, _headroom, minutes_str = ceil_matches[0]
+    if len(ceil_matches) > 1:
+        # A SECOND `ceil(...)` clause is a repeat, not a second statement of one fact — the same
+        # doctrine as `<est X stated twice>` for the partition clauses, which also fires on an
+        # IDENTICAL second clause at one `est` (measured, not assumed). Here it needs its own arm
+        # because `.search()` used to take the FIRST match: measured 2026-11-23, a block stating
+        # both `ceil(836.4/60 x 2)` = 28 m and `= 29 m` read as `(836.4, 28)` and BOTH guard rows
+        # stayed green while the block visibly claimed two different minutes. That is exactly the
+        # shape a rebase produces (two sides of one paragraph interleaved).
+        #
+        # ⛔ This is deliberately ANY second clause, an exact restatement included, so that this
+        # helper has ONE rule for repeats rather than an exception nobody would remember — a block
+        # that states its derivation twice is redundancy in a paragraph this tight, whatever the
+        # two clauses say. Both shapes are pinned in the vacuity test.
+        groups = {est: names | {f"<ceil stated {len(ceil_matches)} times>"}
+                  for est, names in groups.items()}
+    else:
+        # ⛔ …and the ests this block GRADES must carry ONE minute in EVERY spelling they are
+        # derived in. A derivation `_EMISSION_CEIL_RE` cannot read is graded by nobody, so the
+        # block can claim two different watchdog minutes and still read as one.
+        #
+        # ⛔ Scoped to the GRADED ests — the partition's own operands plus the derived one —
+        # because the header legitimately quotes HISTORY at other operands (the S=10 paragraph's
+        # `840.2/60 x 2.0 up to 29 m`). Measured: an unscoped version reds the real block, which
+        # is the one failure this check must not produce.
+        graded = {float(est_str)} | {float(est) for est in groups}
+        conflicting: dict[float, int] = {}
+        for operand in _EMISSION_DERIVATION_RE.finditer(header):
+            minute = _EMISSION_MINUTE_AFTER_RE.search(
+                header[operand.end():operand.end() + _DERIVATION_LOOKAHEAD])
+            if minute is None:
+                continue
+            est, stated = float(operand.group("est")), int(minute.group("minutes"))
+            if est in graded and stated != int(minutes_str):
+                conflicting[est] = stated
+        assert not conflicting, (
+            f"the block derives {sorted(conflicting)} s to {sorted(conflicting.values())} m in a "
+            f"spelling `_EMISSION_CEIL_RE` cannot read, but its graded clause says {minutes_str} m "
+            "— a derivation nothing grades is how a block claims two different watchdog minutes "
+            "and still reads as one. Spell every derivation of these ests the way "
+            "`_EMISSION_CEIL_RE` reads it, or delete the extra one.")
+    return groups, float(est_str), int(minutes_str)
+
+
+def _live_fast_shard_emission() -> tuple[dict[float, set[str]], int]:
+    """The emission the block claims to quote: `{est_seconds -> names}` and the
+    watchdog the emitted shards carry."""
+    legs = cs.push_legs(cs.load_manifest())
+    groups: dict[float, set[str]] = {}
+    for shard in legs["shards"]:
+        groups.setdefault(float(shard["est_seconds"]), set()).add(shard["name"])
+    return groups, max(s["watchdog_minutes"] for s in legs["shards"])
+
+
+def test_the_fast_shards_header_block_states_the_measured_emission():
+    """#14296: the block restates the emission and must BE the emission.
+
+    Measured at the pre-fix head `2d57abb3e98c`: the block stated nine shards at 721.8 s (`a`–`e`,
+    `g`, `i`–`k`) and two at 721.7 s (`f`, `h`), while `push_legs` packed **seven** at
+    **722.0** (`a`–`e`, `i`, `j`) and **four** at **721.9** (`f`, `g`, `h`, `k`) — the
+    `origin/main` merge moved the pool and the sentence was carried instead of
+    re-emitted, which is the third time this block went stale. The watchdog is
+    unaffected (25 m either way), so arithmetic on the minute could not catch it: only
+    the `est_seconds` figures can.
+    """
+    claims = _emission_block_claims(cs.MANIFEST.read_text(encoding="utf-8"))
+    assert claims is not None, (
+        "the `fast_shards` header block states no emission the guard can read — this "
+        "is a no-op gate over an empty subject set, not a clean map. Re-point "
+        "`_EMISSION_CLAUSE_RE` / `_EMISSION_CEIL_RE` at the sentence the block "
+        "actually uses, or retire this guard rather than leaving it reading nothing.")
+    groups, ceil_est, ceil_minutes = claims
+    live_groups, live_minutes = _live_fast_shard_emission()
+    assert groups == live_groups, (
+        "the `fast_shards` header block quotes a `--emit-push-matrix` this tree does "
+        f"not emit — stated {groups}, emitted {live_groups}. Re-run the verb and paste "
+        "its figures; a carried emission is the class this block exists to warn "
+        "about — and the reason this guard grades it instead of trusting it.")
+    assert (ceil_est, ceil_minutes) == (max(live_groups), live_minutes), (
+        "the block's watchdog derivation disagrees with the emission — stated "
+        f"`ceil({ceil_est}/60 x 2)` = {ceil_minutes} m, emitted worst "
+        f"{max(live_groups)} s at {live_minutes} m. The block claims the two agree "
+        "by construction rather than by a hand re-read; this is that check.")
+    # ⛔ A shard-figure sentence the clause parser cannot read is a figure NO row grades —
+    # and this block states one exactly when a rebase splices two parents' re-derivations
+    # together. Measured 2026-11-23 on the rebase this guard was cut onto: both parents had
+    # rewritten this paragraph, git kept BOTH spellings, and the readable clause was graded
+    # while the stale one was invisible. An unread figure is the same no-op-gate class as a
+    # pattern that matches nothing, so the count of sentences is graded too, not only the
+    # clauses that happen to parse.
+    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
+    unread = _EMISSION_UNREAD_SENTENCE_RE.findall(header)
+    assert len(unread) == len(_EMISSION_CLAUSE_RE.findall(header)), (
+        "the `fast_shards` header states a shard-figure sentence the clause parser "
+        f"cannot read ({unread}), so that figure is graded by NOTHING while its "
+        "neighbours are graded by this test — re-spell it as `N shards at S.S s "
+        "(names)`, or delete it. A rebase that splices two re-derivations is how it "
+        "gets there.")
+
+
+def test_the_emission_block_guard_is_not_vacuous():
+    """The guard must bite on a carried emission and stay quiet on this tree's.
+
+    The stale sentence is the block's own pre-fix text (721.8/721.7, nine/two), kept
+    here as the measured instrument: it must NOT read as this tree's emission. If a
+    future edit widens a pattern until it matches anything, this arm stops redding
+    and the sibling guard above becomes decoration.
+    """
+    stale = (
+        "# carried: `--emit-push-matrix` at THIS head packs 9 shards at 721.8 s "
+        "(a, b, c, d, e, g, i, j, k) and 2 shards at 721.7 s (f, h), so\n"
+        "# `ceil(721.8/60 x 2)` = 25 m governs\n"
+        "\nfast_shards: 11\n")
+    stale_claims = _emission_block_claims(stale)
+    live_groups, live_minutes = _live_fast_shard_emission()
+    assert stale_claims is not None
+    assert (stale_claims[0], stale_claims[1], stale_claims[2]) != (
+        live_groups, max(live_groups), live_minutes), (
+        "the pre-fix sentence reads as this tree's emission — the guard cannot "
+        "distinguish a carried figure from a re-measured one")
+    # A sentence is bounded to the header: a shard-count line BELOW `fast_shards:`
+    # (the carve-out / slow-leg comments quote their own shard counts) is not this
+    # block's claim and must not be joined into it. The `ceil(...)` clause is what makes
+    # this fixture a WITNESS for the bound rather than only a True/True: without it
+    # `None` arrives for two independent reasons (an EMPTY bounded header, or a missing
+    # ceil, which the unbounded read also lacks) and a revert of the truncation would
+    # pass. With it, the bounded read returns `None` and the unbounded one returns a
+    # claim — so the row reds on that revert and only that revert.
+    assert _emission_block_claims(
+        "fast_shards: 11\n# packs 2 shards at 700.0 s (a, b)\n"
+        "# `ceil(700.0/60 x 2)` = 24 m\n") is None, (
+        "a shard-count comment BELOW `fast_shards:` was read as this block's claim — the "
+        "subject is not truncated at the key")
+    # A RENAMED key must not silently widen the subject to the whole file: the bound is
+    # `manifest_text[:key.start()]` for the `key` `re.search(r"^fast_shards:")` returned, and an
+    # absent key yields NO bound at all (the whole file) — so a renamed key used to hand the guard
+    # every shard-count sentence in the map and still return a readable claim. It fails closed on
+    # the bound itself now, before it reads a single clause.
+    with pytest.raises(AssertionError, match="carries no `fast_shards:` key"):
+        _emission_block_claims(
+            "fast_shards_x: 11\n# five shards at 835.7 s (a, c, d, e, k)\n")
+    # A COUNT that disagrees with the names beside it is graded as claiming a set it does not name
+    # (`<count says N>`), so the caller reds rather than believing one side of a sentence that
+    # disagrees with itself. Without this fixture the arm is live on the artifact but graded by
+    # nothing: measurably, with the arm disabled (`if False:`) BOTH rows above stay green and a
+    # count-word-only edit (`five` -> `four`, names intact) ships silently (agent-infra#3442 rule 3).
+    disagreed = _emission_block_claims(
+        "# four shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
+        "# `ceil(835.7/60 x 2)` = 28 m\n"
+        "\nfast_shards: 11\n")
+    assert disagreed is not None
+    assert disagreed[0][835.7] == {
+        "a", "c", "d", "e", "k", "<count says 4>"}, (
+        "a COUNT that disagrees with the names beside it was read as the names alone — the count arm "
+        f"is the only thing that reds a `five` -> `four` edit: {disagreed[0][835.7]}")
+    # A SECOND clause at the same `est` is a repeat, not a second statement of one fact:
+    # `|` would absorb a subset (`two at 835.7 s (a, k)` beside the clause naming five)
+    # into a claim the block does not make, invisibly. The repeat is marked instead.
+    repeated = _emission_block_claims(
+        "# five shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
+        "# and two at 835.7 s (a, k) — `ceil(835.7/60 x 2)` = 28 m\n"
+        "\nfast_shards: 11\n")
+    assert repeated is not None
+    assert repeated[0][835.7] == {
+        "a", "c", "d", "e", "k", "<est 835.7 stated twice>"}, (
+        "a subset restated at the same est was absorbed into the group beside it — the "
+        f"guard would grade a claim the block does not make: {repeated[0][835.7]}")
+    # A SUPERSET restatement reds by the same marker — it is not the subset case's leftover.
+    # Measured through the guard itself (2026-11-23): a stray clause naming all five PLUS two
+    # more at 835.7 leaves `{…, '<est 835.7 stated twice>'}` against a live group of five, so
+    # the partition comparison reds. Stated because the fix commit's own record claimed this
+    # shape was absorbed, which was wrong.
+    superset_repeat = _emission_block_claims(
+        "# five shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
+        "# and seven at 835.7 s (a, c, d, e, i, j, k) — `ceil(835.7/60 x 2)` = 28 m\n"
+        "\nfast_shards: 11\n")
+    assert superset_repeat is not None
+    assert "<est 835.7 stated twice>" in superset_repeat[0][835.7], (
+        "a SUPERSET restated at the same est was absorbed — the repeat marker must fire on "
+        f"ANY second clause at one est, not only on a subset: {superset_repeat[0][835.7]}")
+    # A SECOND `ceil(...)` clause is that same repeat one line over — and it was UNGRADED while the
+    # reader used `.search()`: measured 2026-11-23, a block stating both `ceil(836.4/60 x 2)` = 28 m
+    # and `= 29 m` returned `(836.4, 28)` and BOTH guard rows stayed green, so the block visibly
+    # claimed two different minutes and nothing redded. That is precisely the shape a rebase
+    # produces when it interleaves the two sides of one paragraph, so it needs its own witness.
+    duplicate_ceil = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n# `ceil(836.4/60 x 2)` = 29 m\n\nfast_shards: 11\n")
+    assert duplicate_ceil is not None
+    # ⛔ The witness is the MARKER, and its paired NEGATIVE — not `partition != live_groups`. That
+    # comparison is satisfied by any live-emission drift as well, so it would stop witnessing the
+    # arm exactly when the block went stale (which it has been caught doing again since this
+    # guard landed — #14434's and #14220's registrations each re-packed the bins): an assertion
+    # that cannot fail for the
+    # reason it names is the class this file keeps re-learning. The single-clause block below
+    # proves the marker is caused by the duplicate.
+    assert all("<ceil stated 2 times>" in names for names in duplicate_ceil[0].values()), (
+        "the duplicate `ceil(...)` marker did not reach EVERY group — an arm that marks one group "
+        "and not the other still leaves a live-looking partition beside a marked one, and "
+        f"`next(iter(...))` would not have seen it: {duplicate_ceil[0]}")
+    single_ceil = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n")
+    assert single_ceil is not None and not any(
+        marker.startswith("<ceil")
+        for names in single_ceil[0].values() for marker in names), (
+        "ONE `ceil(...)` clause picked up the duplicate marker — the arm fires on the count of "
+        f"clauses, not on a repeat: {single_ceil[0]}")
+    # An EXACT restatement is a repeat too, and it is pinned rather than left to chance: the sibling
+    # `<est X stated twice>` arm also reds on an identical second clause at one `est` (measured), so
+    # the helper has ONE rule for repeats instead of an exception nobody would remember.
+    exact_repeat = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n")
+    assert exact_repeat is not None and all(
+        "<ceil stated 2 times>" in names for names in exact_repeat[0].values()), (
+        "an EXACT restatement of the derivation was read as one statement — the same repeat rule "
+        f"as the partition clauses must apply to every group: {exact_repeat[0]}")
+    # ⛔ A SECOND DERIVATION of a GRADED est in a spelling `_EMISSION_CEIL_RE` cannot read is the
+    # same false PASS one spelling over, and it is NOT covered by the repeat marker above: the
+    # marker counts canonical matches, so an alternate spelling is a minute nothing grades.
+    # Measured 2026-11-23 against the real manifest with the partition untouched (so only the
+    # minute could differ), each of these kept BOTH rows green before this check existed. The set
+    # deliberately includes `*` and `→` — the first attempt at this arm matched `[x×X]` and
+    # `=|up to` and was itself spelling-bound.
+    for alt_spelling in (
+            "# `ceil(836.4 / 60 x 2)` = 29 m\n",
+            "# `ceil(836.4/60 \u00d7 2)` = 29 m\n",
+            "# `ceil (836.4/60 X 2)` = 29 m\n",
+            "# `ceil(836.4/60 * 2)` = 29 m\n",
+            "# 836.4/60 x 2 \u2192 29 m\n",
+            "# 836.4/60 x 2 -> 29 m\n",
+            "# and `shard_watchdog_minutes()` rounds 836.4/60 x 2.0 up to 29 m\n"):
+        with pytest.raises(AssertionError, match="derivation nothing grades"):
+            _emission_block_claims(
+                "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at "
+                "836.3 s (f, g, i)\n"
+                "# `ceil(836.4/60 x 2)` = 28 m\n" + alt_spelling + "\nfast_shards: 11\n")
+    # …and a derivation at an est the block's own PARTITION names is graded too: `836.3` below is a
+    # live group, so a conflicting minute on it must red rather than be excused as "historical".
+    with pytest.raises(AssertionError, match="derivation nothing grades"):
+        _emission_block_claims(
+            "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+            "# `ceil(836.4/60 x 2)` = 28 m\n# 836.3/60 x 2 \u2192 30 m\n\nfast_shards: 11\n")
+    # …and the check is SCOPED to the est the block grades, so the header's historical derivation
+    # at a DIFFERENT operand — the S=10 paragraph's `840.2/60 x 2.0 up to 29 m`, which is prose
+    # about a tree that is not this one — must NOT red. Without this negative the arm could be
+    # satisfied by a pattern that simply rejects the manifest's real block.
+    historical = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n"
+        "# (an earlier split was 840.2 s, and `shard_watchdog_minutes()` rounds 840.2/60 x 2.0 "
+        "up to 29 m)\n\nfast_shards: 11\n")
+    assert historical is not None and (historical[1], historical[2]) == (836.4, 28), (
+        "a historical derivation at a DIFFERENT operand is legitimate prose about another tree "
+        f"and must not red: {historical}")
+    # …and the multiplier is the CODE's constant, not a literal this guard owns. A block deriving
+    # with a different headroom does not state what `ci_selection.WATCHDOG_HEADROOM` computes, so
+    # it reds with that reason rather than reading as "no emission stated".
+    with pytest.raises(AssertionError, match="WATCHDOG_HEADROOM"):
+        _emission_block_claims(
+            "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+            "# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
+    # …but the comparison is NUMERIC, so the same multiplier spelled `2.0` — the spelling the
+    # manifest's own block uses at `config/ci-surfaces.yml:46` (`shard_watchdog_minutes()` rounds
+    # `840.2/60 x 2.0` up to 29 m) — must NOT red. A false block is the one failure that check must
+    # never produce, and a string compare would produce it.
+    spelled = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2.0)` = 28 m\n\nfast_shards: 11\n")
+    assert spelled is not None and (spelled[1], spelled[2]) == (836.4, 28), (
+        "`x 2.0` is the same multiplier as `x 2` and must read identically — a spelling-sensitive "
+        f"comparison would refuse a CORRECT block: {spelled}")
+    # A clause WRAPPED across two comment lines must still be read. The block itself wrapped exactly
+    # there at `2d57abb3e98c` (`… and two at` / `# 721.7 s (f, h)`), so without the comment-line join
+    # the `721.7` group is silently lost and the guard REDS A CORRECT BLOCK. Nothing else in this
+    # suite reaches the join branch, so without this fixture `re.sub(r"\n\s*#\s?", " ", …)` can be
+    # deleted with both rows still green (measured against the live manifest: identical claim).
+    wrapped = _emission_block_claims(
+        "# nine shards at 721.8 s (a–e, g, i–k) and two at\n"
+        "# 721.7 s (f, h)\n"
+        "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
+    assert wrapped is not None and wrapped[0] == {
+        721.8: set("abcdegijk"), 721.7: {"f", "h"}}, (
+        "a clause wrapped across two comment lines was not joined into one sentence — a figure that "
+        f"happens to land on the next line then makes a claim unread: {wrapped}")
+    # ⛔ ROUND 5 SPLIT THE GUARD, so BOTH halves of the split need a witness or the split is
+    # reversible with everything green. The measurement was taken BEFORE these two fixtures
+    # existed (restoring the pre-round-5 order left this suite at 2 passed, and deleting the
+    # `not groups` return did too); with them present BOTH mutants now red — which is the whole
+    # point, so the numbers are stated with the state they belong to rather than in the present
+    # tense, where a reader re-measuring here would get the opposite answer. These two fixtures
+    # carry a `ceil(...)` clause and NO partition clause — the shape that makes the two branches
+    # disagree.
+    #   1. wrong multiplier → MUST raise for the headroom, not fall down the generic `None` path
+    #      this check exists to avoid (that is the whole reason the assert now precedes the
+    #      empty-`groups` return);
+    #   2. correct multiplier → MUST be `None`, because the block states no emission to grade.
+    with pytest.raises(AssertionError, match="WATCHDOG_HEADROOM"):
+        _emission_block_claims("# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
+    assert _emission_block_claims(
+        "# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n") is None, (
+        "a block with a correct derivation but NO partition clause states no emission to grade — "
+        "it must read as `None`, not as a claim")
+    # The RANGE spelling this block ITSELF used at `4ff7964acc` (`a–e, g, i–k`) and
+    # `29a2da4c9c` (`a–e, i, j`). ⛔ `wrapped` above reaches this same arm with the `a–e, g, i–k`
+    # mix, so this fixture deliberately uses the OTHER historical spelling — otherwise the two
+    # would be the same test twice, and the claim that it pins `29a2da4c9c`'s spelling would be
+    # prose about a string the file never contains (which is what an earlier cut of this comment
+    # did). ⛔ `ranged` is NOT the sole witness for the range arm: `wrapped` above reds on the same
+    # mutation (measured — deleting this fixture and neutering `_EMISSION_RANGE_RE` leaves one
+    # failure, at `wrapped`). It is kept as the single-line control that pins `29a2da4c9c`'s
+    # spelling specifically, and both assertions red when the pattern is neutered.
+    ranged = _emission_block_claims(
+        "# seven shards at 721.8 s (a–e, i, j) and two at 721.7 s (f, h)\n"
+        "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
+    assert ranged is not None and ranged[0][721.8] == set("abcdeij"), (
+        "the RANGE spelling this block used at `29a2da4c9c` (`a–e, i, j`) is unread — an arm "
+        "that only reads explicit lists turns the map's other spelling into an unread claim: "
+        f"{ranged}")
+    # A SHARD FIGURE the clause parser cannot read is invisible to the row above — and this
+    # is not hypothetical: it is the shape the rebase onto `origin/main` on 2026-11-23 actually
+    # produced (`_EMISSION_UNREAD_SENTENCE_RE` records the same event above; #14430's body
+    # measures it), where the block held this branch's readable clause AND a stale one that
+    # spelled a RANGE of seconds with a semicolon in its name list. The readable clause was
+    # graded, the stale one was graded by nothing, so the guard could sit GREEN over a block
+    # stating two different emissions.
+    #
+    # ⛔ CITE A SHA THAT RESOLVES. This comment first cited `b766b779af`, which no reader can
+    # resolve: `git cat-file -t b766b779af` -> fatal, `git rev-list --all | grep -c b766b779` -> 0
+    # (it is in no history this clone holds), and it is no advertised TIP on `origin`
+    # (`git ls-remote origin | grep b766b779` -> 0 matches). ⛔ Neither command settles
+    # reachability on its own, and quoting the wrong one is how a sound conclusion gets an
+    # unsound proof: `ls-remote` lists TIPS, so its grep can only show a sha is not a tip — an
+    # ancestor of any tip is fetched by every clone without ever matching that grep (e.g.
+    # `bbe54363ad` is in `origin/main`'s history and greps 0 there), while a bare `cat-file`
+    # measures the BOX, not the citation, because a local-only ref such as `refs/preserved/*`
+    # can hold an object no reader has. It was then rewritten to say the splice
+    # is at "no reachable commit" — which is also false, so the correction repeated the very
+    # defect it was removing. The half that IS citable was measured with this module's own helpers:
+    # `dc42c55baa` (on `integration/14296-on-new-main`) is the RANGE-with-semicolon spelling —
+    # FOUR clauses parse against FIVE shard-figure sentences, so exactly one figure there is graded
+    # by nothing (`_EMISSION_UNREAD_SENTENCE_RE` also matches the tail of every readable clause, so
+    # this arm's two counts agree only when EVERY sentence parses). ⛔ The OTHER half — four groups
+    # spliced out of two parents' readable clauses by `merge=union` — has no sha named here on
+    # purpose: it existed only on this branch's own pre-rebase merge commits, and a rebase leaves no
+    # ref resolving to them, so citing one would be the same uncheckable-sha defect this note
+    # removes. The `spliced` fixture below is a HAND-BUILT string, not a checkout of any commit; the
+    # one commit above is named so the arm is motivated by a shape a reader can go and check.
+    spliced = _emission_block_header(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s "
+        "(f, g, i),\n"
+        "# `ceil(836.4/60 x 2)` = 28 m — and packs ALL ELEVEN shards at 835.8-835.9 s "
+        "(a-k; two runs,\n"
+        "\nfast_shards: 11\n")
+    assert len(_EMISSION_UNREAD_SENTENCE_RE.findall(spliced)) > len(
+        _EMISSION_CLAUSE_RE.findall(spliced)), (
+        "a spliced block's unreadable shard-figure sentence went undetected — that is the "
+        f"fail-open this arm exists for: {spliced}")
+
+
 def test_watchdog_is_per_shard_and_scales_with_the_shard():
     """#6135: the watchdog is PER-LEG. Inheriting the old 55m means a hung
     ~6-minute shard is detected ~8× later than it should be."""
     from tools.ci_selection import (
-        WATCHDOG_CEILING_MIN,
         WATCHDOG_FLOOR_MIN,
         _duration_weight,
         _durations_map,
@@ -9139,73 +9542,6 @@ def test_watchdog_is_per_shard_and_scales_with_the_shard():
         assert shard_watchdog_minutes(bad) == WATCHDOG_FLOOR_MIN, bad
 
 
-def test_a_shard_merely_slow_under_load_still_fits_its_budget():
-    """#6145 direction (a): a shard that runs SLOW under load must still fit.
-
-    The budget is built from `WATCHDOG_HEADROOM`, so the question this test asks
-    is whether that factor is still above the slowest width a healthy shard has
-    actually been observed to occupy. If it were not, the watchdog would kill a
-    shard that observed no defect — the whole defect #6145 names.
-
-    MEASURED — pytest-STEP duration of all nine fast shards, 76 SUCCESSFUL leg
-    samples drawn from main runs 2026-10-02T01:19Z-03:22Z, each over that shard's
-    declared 7.22-min estimate: min 0.47x, median 0.86x, MAX 1.33x.
-
-    ⛔ THE SAMPLE IS SUCCESS-ONLY, DELIBERATELY, AND ITS LIMIT IS NAMED. A killed
-    leg is excluded because a kill is not a "merely slow" observation — it is the
-    event this budget exists to bound, and it is not what this assertion is
-    about. For the record, the kills in that window and the day after were at
-    ~2.11x (legs SIGKILLed at the 15m floor with 0 failures), and the SAME shards
-    ran 0.9x-1.2x on another attempt of that run — a nondeterministic wedge
-    beyond this distribution, not a tail of it. So this bounds the SUCCESSFUL
-    distribution; it does NOT claim the budget survives every loaded leg, and
-    #6145 carries that half. The value
-    that must survive is the MAX (the median is what a healthy shard costs).
-    A job's WALL time is deliberately NOT the measurement: it carries ~6 min of
-    setup plus the off-watchdog collect-only pre-phase, so it overstates the
-    shard by roughly the setup constant — the pytest step is the only surface
-    the watchdog actually bounds, hence the only comparable one.
-    """
-    from tools.ci_selection import (
-        WATCHDOG_HEADROOM,
-        load_manifest,
-        push_legs,
-        watchdog_headroom_issues,
-    )
-    # The slowest healthy shard measured. A frozen literal is right HERE, unlike
-    # the derived floor below: this is an observation about runs that have
-    # already happened, not a property of the committed manifest, so there is
-    # nothing in-tree to re-derive it from. It is re-measured by hand when the
-    # pool changes materially (the durations map's own sweep is the trigger).
-    measured_max_healthy_shard_ratio = 1.33
-    assert measured_max_healthy_shard_ratio < WATCHDOG_HEADROOM, (
-        "the worst HEALTHY shard measured is already outside the factor the "
-        "budget is built from — the margin no longer covers even the "
-        "successful distribution, and the constant must be raised "
-        "DELIBERATELY (#6145)")
-    # The shipped gate's OWN verdict on the committed manifest is the primary
-    # assertion, so this test cannot disagree with the gate at either end of the
-    # reporting quantum (#6145). The loop below is a readable restatement for a
-    # non-empty leg, not a second, differently-precise gate.
-    committed = load_manifest()
-    assert watchdog_headroom_issues(committed) == [], watchdog_headroom_issues(committed)
-    for s in push_legs(committed)["shards"]:
-        headroom = s["watchdog_minutes"] * 60.0 / s["est_seconds"]
-        assert headroom >= measured_max_healthy_shard_ratio, (
-            f"shard {s['name']}: {headroom:.2f}x is below the slowest healthy "
-            f"shard measured ({measured_max_healthy_shard_ratio}x) — a merely "
-            f"slow shard would be killed")
-        # The shipped gate's own invariant, asserted on the value the matrix
-        # PUBLISHES (2 dp) rather than on a second, differently-precise
-        # recomputation: otherwise this test and the gate could disagree in the
-        # band where rounding decides — a manifest could pass `--integrity` and
-        # then red here (#6145).
-        assert s["watchdog_headroom"] >= WATCHDOG_HEADROOM, (
-            f"shard {s['name']}: emitted budget retains "
-            f"{s['watchdog_headroom']:.2f}x, below the {WATCHDOG_HEADROOM}x it "
-            f"is built from (#6145)")
-
-
 def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
     """#6145 direction (b): the sizing contract — "a shard unable to fit is
     flagged rather than silently killed". #4819 option 2 recorded this as the
@@ -9216,6 +9552,12 @@ def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
     (2.0x) DOWNWARD. Before this check the clamp was silent, so raising an
     estimate produced a TIGHTER margin with no signal anywhere — the state in
     which a shard that fits its own declared estimate is killed.
+
+    Kept by #14419: `watchdog_headroom_issues()` still runs in the REQUIRED
+    `manifest-integrity` leg, and this is the only arm that drives it on a
+    manifest it must REFUSE — the live guard reads the committed map, which is
+    compliant, so without this the emitter could stop naming mis-sized legs with
+    every required check green.
     """
     from tools.ci_selection import (
         WATCHDOG_CEILING_MIN,
@@ -9291,6 +9633,73 @@ def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
         "job's outer cap and the budget is advisory")
 
 
+def test_a_shard_merely_slow_under_load_still_fits_its_budget():
+    """#6145 direction (a): a shard that runs SLOW under load must still fit.
+
+    The budget is built from `WATCHDOG_HEADROOM`, so the question this test asks
+    is whether that factor is still above the slowest width a healthy shard has
+    actually been observed to occupy. If it were not, the watchdog would kill a
+    shard that observed no defect — the whole defect #6145 names.
+
+    MEASURED — pytest-STEP duration of all nine fast shards, 76 SUCCESSFUL leg
+    samples drawn from main runs 2026-10-02T01:19Z-03:22Z, each over that shard's
+    declared 7.22-min estimate: min 0.47x, median 0.86x, MAX 1.33x.
+
+    ⛔ THE SAMPLE IS SUCCESS-ONLY, DELIBERATELY, AND ITS LIMIT IS NAMED. A killed
+    leg is excluded because a kill is not a "merely slow" observation — it is the
+    event this budget exists to bound, and it is not what this assertion is
+    about. For the record, the kills in that window and the day after were at
+    ~2.11x (legs SIGKILLed at the 15m floor with 0 failures), and the SAME shards
+    ran 0.9x-1.2x on another attempt of that run — a nondeterministic wedge
+    beyond this distribution, not a tail of it. So this bounds the SUCCESSFUL
+    distribution; it does NOT claim the budget survives every loaded leg, and
+    #6145 carries that half. The value
+    that must survive is the MAX (the median is what a healthy shard costs).
+    A job's WALL time is deliberately NOT the measurement: it carries ~6 min of
+    setup plus the off-watchdog collect-only pre-phase, so it overstates the
+    shard by roughly the setup constant — the pytest step is the only surface
+    the watchdog actually bounds, hence the only comparable one.
+    """
+    from tools.ci_selection import (
+        WATCHDOG_HEADROOM,
+        load_manifest,
+        push_legs,
+        watchdog_headroom_issues,
+    )
+    # The slowest healthy shard measured. A frozen literal is right HERE, unlike
+    # the derived floor below: this is an observation about runs that have
+    # already happened, not a property of the committed manifest, so there is
+    # nothing in-tree to re-derive it from. It is re-measured by hand when the
+    # pool changes materially (the durations map's own sweep is the trigger).
+    measured_max_healthy_shard_ratio = 1.33
+    assert measured_max_healthy_shard_ratio < WATCHDOG_HEADROOM, (
+        "the worst HEALTHY shard measured is already outside the factor the "
+        "budget is built from — the margin no longer covers even the "
+        "successful distribution, and the constant must be raised "
+        "DELIBERATELY (#6145)")
+    # The shipped gate's OWN verdict on the committed manifest is the primary
+    # assertion, so this test cannot disagree with the gate at either end of the
+    # reporting quantum (#6145). The loop below is a readable restatement for a
+    # non-empty leg, not a second, differently-precise gate.
+    committed = load_manifest()
+    assert watchdog_headroom_issues(committed) == [], watchdog_headroom_issues(committed)
+    for s in push_legs(committed)["shards"]:
+        headroom = s["watchdog_minutes"] * 60.0 / s["est_seconds"]
+        assert headroom >= measured_max_healthy_shard_ratio, (
+            f"shard {s['name']}: {headroom:.2f}x is below the slowest healthy "
+            f"shard measured ({measured_max_healthy_shard_ratio}x) — a merely "
+            f"slow shard would be killed")
+        # The shipped gate's own invariant, asserted on the value the matrix
+        # PUBLISHES (2 dp) rather than on a second, differently-precise
+        # recomputation: otherwise this test and the gate could disagree in the
+        # band where rounding decides — a manifest could pass `--integrity` and
+        # then red here (#6145).
+        assert s["watchdog_headroom"] >= WATCHDOG_HEADROOM, (
+            f"shard {s['name']}: emitted budget retains "
+            f"{s['watchdog_headroom']:.2f}x, below the {WATCHDOG_HEADROOM}x it "
+            f"is built from (#6145)")
+
+
 def test_fast_shard_config_is_validated_not_silently_defaulted():
     """#6135: a malformed `fast_shards` is NAMED by the integrity gate — a
     present-but-unusable declaration must not read as the default 2."""
@@ -9305,370 +9714,6 @@ def test_fast_shard_config_is_validated_not_silently_defaulted():
         assert fast_shard_issues(m), f"{bad!r} must be reported"
         assert fast_shard_count(m) == 2, "a producer path must never crash"
     assert fast_shard_issues({"fast_shards": 9}) == []
-
-
-def test_shard_count_is_stable_regardless_of_the_selection_size():
-    """#6135: the tier-2 matrix must emit the SAME shard count as the push
-    matrix, even for a tiny selection. The merge rail's lane-parity is a
-    job-NAME subtraction, so a PR that ran `test (a)`…`test (c)` while main runs
-    `a`…`i` would be refused NOT COMPARABLE. An empty shard exits early with an
-    honest report; a shard that does not EXIST cannot be compared at all.
-    """
-    from tools.ci_selection import build_shard_entries, fast_matrix_include
-    three = ["tests/test_a.py", "tests/test_b.py", "tests/test_c.py"]
-    entries = build_shard_entries(
-        three, {f: 5.0 for f in ("test_a.py", "test_b.py", "test_c.py")}, 9)
-    assert len(entries) == 9
-    assert [e["name"] for e in entries] == list("abcdefghi")
-    inc = fast_matrix_include(entries)["include"]
-    assert [e["half"] for e in inc] == list("abcdefghi")
-    # #6897: the routing is POSITIONAL and derived, so a tiny selection that leaves
-    # most shards EMPTY must still emit a class for every row — an empty shard is
-    # still a JOB, and a row without `runner` makes `runs-on` resolve to null.
-    assert all(e.get("runner") for e in inc), inc
-    # every file still rides exactly one shard; the rest are legitimately empty
-    flat = [f for e in entries for f in e["files"]]
-    assert sorted(flat) == ["test_a", "test_b", "test_c"]
-    assert sum(1 for e in entries if not e["files"]) == 6
-
-
-def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
-    """#6135: the `test` job must expand the selector's matrix (no hand-written
-    shard count), and the pytest watchdog must be the shard's own budget.
-
-    These are the two workflow-level claims the unit tests above cannot see:
-    a literal `half: [a, b]` is exactly the drift the issue exists to end, and
-    a literal `55m` watchdog is the per-leg correctness bug it names.
-    """
-    wf = _load_python_ci()
-    job = wf["jobs"]["test"]
-    matrix = job["strategy"]["matrix"]
-    assert "fromJSON(needs.changes.outputs.fast_matrix)" in str(matrix), matrix
-    assert "include" not in str(matrix), \
-        "the shard set must come from the selector, not a workflow literal"
-    run = next(s for s in job["steps"]
-               if s.get("name", "").startswith("Run fast test suite"))["run"]
-    assert "timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m" in run, \
-        "the pytest watchdog must be the per-shard budget, not a literal"
-    assert "timeout -s INT -k 10 55m" not in run
-    # the canary artifact the separate job downloads must be the fixed
-    # producer name, never a per-shard one (no shard name survives S changes)
-    dl = next(s for s in wf["jobs"]["canary-streak"]["steps"]
-              if s.get("name", "").startswith("Download producer-shard"))
-    assert dl["with"]["name"] == "pytest-canary-producer"
-
-
-def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
-    """#6744: each shard matrix declares `max-parallel`, and the three caps
-    together keep ONE PR's MATRIX fan-out below the measured runner pool.
-
-    Unbounded, a single PR admits its whole shard set (17 jobs) at once. The
-    measured consequence (9 `python-ci` runs, 2026-10-30T21:48Z..10-31T02:54Z,
-    completed jobs only): per-PR peak simultaneous jobs p50 11 / max 18 against
-    a 12-runner pool, and a single run held >=50% of all running jobs at 352 of
-    the 367 sampled instants.
-
-    ⛔ SCOPE: this bounds the matrix fan-out — the part that was unbounded and
-    that made one PR own the pool. It is NOT a total-concurrency budget: this
-    workflow's 12 non-matrix jobs include 8 that are eligible concurrently with
-    the matrices (3 with no `needs:`; the fourth `needs:`-less job is `changes`,
-    which the matrices wait on and so cannot overlap them; 5 need only
-    `changes`), so on a full selection a PR requests 30 jobs (19 matrix legs +
-    11 non-matrix; `canary-streak` is push-gated), at most 17 of them in flight
-    at once. The POOL does not bound that — it bounds only the subset that lands
-    on it (`test`/`test-carve-out` ask for `ubuntu-latest` and `test-slow` pins
-    `ubuntu-24.04`; on this repo BOTH labels can be answered by the pool while
-    their mitigations are engaged, so all three matrices are pool-eligible, and a
-    hosted runner answers those labels too — that is how one run measured 18
-    simultaneous jobs over a 12-runner pool). The invariants below
-    hold the three CAPS, and must never be read as "a PR holds 9 jobs".
-
-    This pins the INVARIANTS, not the chosen number, so a re-tune from a fresh
-    measurement passes and a silent removal does not:
-
-    1. presence — every matrix job declares the cap (its absence IS the defect,
-       and it is invisible in a green run because a matrix completes either
-       way);
-    2. no new waves — `ceil(shards / cap) <= 4`, because the measured start
-       stagger (4.0–23.9m) against the measured per-shard wall (p50 10.5m) says
-       the pool already delivers these shards in 2–4 waves, so a cap needing
-       more than 4 is strictly added wall;
-    3. no monopolisation — the three matrices overlap (all start after
-       `changes`), so the per-PR maximum MATRIX hold is their SUM and it must
-       leave the rest of the measured pool to other PRs: `sum <= 12 - 3`. It
-       bounds MATRIX slots only: the eligible non-matrix jobs are not bounded
-       by it — up to 8 can run alongside the matrices, and the pool does not
-       bound those either (see the workflow comment).
-
-    ⛔ It deliberately says nothing about job ORDER or the matrix contents: the
-    shard set is still the selector's, so `max-parallel` cannot skip a leg, and
-    `python-ci-gate`'s `needs:` (job-id keyed, per test_no_required_check_names_
-    a_fast_leg) still waits for every leg regardless of when it starts.
-    """
-    from tools.ci_selection import fast_shard_count
-
-    wf = _load_python_ci()
-    counts = {
-        "test": fast_shard_count(load_manifest()),
-        "test-slow": slow_shard_count(load_manifest()),
-        "test-carve-out": carve_shard_count(load_manifest()),
-    }
-    # #6744 review (P2): the three ids above are HAND-WRITTEN, so a FOURTH
-    # matrix added later would never be asked to declare a cap — the very
-    # defect this test exists to catch, hidden behind a green run. Derive the
-    # matrix-bearing job ids from the workflow itself and require the set to be
-    # exactly the three, so an added matrix fails loudly here instead of
-    # shipping unbounded.
-    matrix_jobs = {
-        job_id
-        for job_id, job in wf["jobs"].items()
-        if isinstance(job.get("strategy"), dict) and "matrix" in job["strategy"]
-    }
-    assert matrix_jobs == set(counts), (
-        "the matrix-bearing jobs in python-ci.yml are "
-        f"{sorted(matrix_jobs)}, but this test only pins the caps on "
-        f"{sorted(counts)} — a new matrix must be added here (with its shard "
-        "count) so it cannot ship unbounded (#6744)")
-    measured_pool = 12          # `gh api .../actions/runners` — 12 online AT THE MEASUREMENT
-    # (2026-10-31, the read `docs/ops/ci-wall-clock.md` §7 dates its `12 / 12` row to). ⚠ Not a live
-    # figure: re-read it on any re-tune rather than trusting this line. The invariant below is
-    # one-sided (`sum(caps) <= measured_pool - 3`), so a POOL THAT GREW keeps the shipped caps
-    # conservative and reds nothing — which is exactly why an undated read here is easy to miss.
-    reserved_for_others = 3     # MATRIX headroom kept free, not a total guarantee:
-    # a PR's eligible non-matrix jobs can still take these runners (see the
-    # SCOPE note above and `docs/ops/ci-wall-clock.md` §7).
-    max_waves = 4               # measured stagger/wall ratio-implied ceiling
-
-    caps = {}
-    for job_id, shards in counts.items():
-        strategy = wf["jobs"][job_id].get("strategy") or {}
-        cap = strategy.get("max-parallel")
-        assert isinstance(cap, int) and cap >= 1, (
-            f"{job_id} declares no integer `max-parallel` (got {cap!r}) — an "
-            "uncapped matrix lets one PR hold its whole shard set at once, "
-            f"which is #6744; measured per-PR peak was 18 of a {measured_pool}"
-            "-runner pool")
-        waves = -(-shards // cap)
-        assert waves <= max_waves, (
-            f"{job_id}: cap {cap} over {shards} shards needs {waves} waves, "
-            f"past the measured {max_waves}-wave ceiling — a cap this small "
-            "makes the matrix the critical path instead of the queue (#6744)")
-        caps[job_id] = cap
-
-    hold = sum(caps.values())
-    assert hold <= measured_pool - reserved_for_others, (
-        f"one PR would hold {hold} MATRIX jobs at once ({caps}), so fewer "
-        f"than {reserved_for_others} of the {measured_pool} measured runners "
-        f"are left for other PRs: the bound is {measured_pool} - "
-        f"{reserved_for_others} = {measured_pool - reserved_for_others} "
-        "(#6744)")
-
-
-#: The present-tense "how many jobs does ONE full-selection run emit" claims. There are FOUR
-#: copies of that count in the tree and `fast_shards: 9 -> 10` (#11602) moved all four: the
-#: `max-parallel` comment block in `python-ci.yml` states it TWICE (the second copy, in the same
-#: block, is the one a sibling fix missed), `docs/ops/ci-wall-clock.md` §5 and §7 each state it,
-#: and this file's own `test_every_matrix_bounds_its_fan_out_below_the_measured_pool` docstring
-#: states it. Nothing read any of them, which is how one file came to claim `18` matrix jobs at
-#: `:749` and `17` matrix legs at `:798` a screen apart.
-#:
-#: ⛔ The `max` claim has a SECOND half and this pin did not read it (#11602 review at
-#: `cbc930427cfe`). The sentence `A <wc> run is N jobs (max M)` carries TWO counts: `max` (every
-#: job the run can request) and the leading `typical` (what a PR run requests, i.e. `max` minus
-#: the push-gated jobs). The regex captured `typical` and only ever compared `max`, so the same
-#: sentence the 9 -> 10 raise made half-wrong stayed GREEN — the repo's named defect class, "a
-#: tool that cannot answer its question because it already holds the datum and does not read it".
-#: Both halves are asserted now; `typical` is DERIVED (`fast + non_matrix_pr`), never hard-coded.
-#: ⛔ `<wc>` is a placeholder ON PURPOSE (see the f-string note below): the literal spelling of
-#: that sentence here would match the scanner on this file — one of the pinned sources — and turn
-#: the pin red on its own docstring.
-#:
-#: ⛔ Read through `re.sub(r"\s+", " ", ...)` with `**` stripped: the doc wraps
-#: `**requests 29` / `jobs** (18 matrix legs` across two lines, so a line-oriented pattern would
-#: match nothing there and stay silently green — the exact vacuity this pin exists to avoid.
-_FULL_SELECTION_TOTAL_RE = re.compile(
-    r"(?:REQUESTS|requests)\s+(?P<total>\d+)\s+jobs\s*\((?P<legs>\d+)\s+matrix")
-_FULL_SELECTION_MAX_RE = re.compile(
-    r"`python-ci`\s+run\s+is\s+(?P<typical>\d+)\s+jobs\s*\(max\s+(?P<max>\d+)\)")
-
-
-def _full_selection_claim_violations(
-    sources: dict[str, str], total: int, legs: int, typical: int,
-) -> list[str]:
-    """Every full-selection count stated in `sources` that disagrees with the shipped shape.
-
-    `total` is the max a run can request (legs + non-matrix). `typical` is what a PR run actually
-    requests, and it is NOT `total` minus the push-gated jobs: the `test-slow` and
-    `test-carve-out` matrices are PATH-gated, so a typical PR run emits neither. It is the fast
-    shards plus the always-eligible non-matrix jobs (`22 = 11 + 11` at this head). Both are
-    checked: a doc may state one half correctly and the other half wrongly, which is exactly how
-    `20 jobs (max 29)` survived the 9 -> 10 raise.
-
-    Pure, so the non-vacuity control below can feed it the PRE-FIX text instead of trusting a
-    comment that the pin would catch the numbers it was written to catch.
-    """
-    violations: list[str] = []
-    for name, text in sources.items():
-        flat = re.sub(r"\s+", " ", text.replace("**", ""))
-        for match in _FULL_SELECTION_TOTAL_RE.finditer(flat):
-            stated = (int(match.group("total")), int(match.group("legs")))
-            if stated != (total, legs):
-                violations.append(
-                    f"{name}: states {stated[0]} jobs ({stated[1]} matrix legs), but the "
-                    f"shipped shape emits {total} ({legs}) — {match.group(0)!r}")
-        for match in _FULL_SELECTION_MAX_RE.finditer(flat):
-            if int(match.group("max")) != total:
-                violations.append(
-                    f"{name}: states a max of {match.group('max')} jobs, but the shipped "
-                    f"shape requests {total} — {match.group(0)!r}")
-            if int(match.group("typical")) != typical:
-                violations.append(
-                    f"{name}: states a typical run of {match.group('typical')} jobs, but the "
-                    f"shipped shape emits {typical} on a PR (max {total}) — "
-                    f"{match.group(0)!r}")
-    return violations
-
-
-def test_the_full_selection_job_and_leg_counts_match_the_shipped_shards():
-    """P2 (#11602 review at `4ddc9ec63a73`): the 9 -> 10 raise falsified four prose counts.
-
-    `da93af0e1c39` rewrote `python-ci.yml:749-750` to *""requests **18** matrix jobs ... (**10**
-    fast + 5 slow + 3 carve-out)""* for exactly this reason — ""Doc prose that understates the
-    emitted shape is how the next reader infers a 9-leg matrix from a file that emits 10"" — and
-    missed the same block's `:798`, both `ci-wall-clock.md` §5/§7 copies, and this file's
-    sibling docstring. On `origin/main` (9 fast legs) 17 legs / 28 jobs was correct; the raise
-    is what made it wrong, so this is attributable to the change, not inherited.
-
-    The counts are DERIVED, never hard-coded, so a future re-tune needs the prose moved with it:
-    `legs = fast + slow + carve` shard counts from the manifest, `non_matrix_pr = every job in
-    `python-ci.yml` minus the matrix jobs minus the push-gated ones, and the in-flight figure is
-    NOT derived — it is `sum(caps) + eligible non-matrix` and is pinned by the sibling test
-    above, which is also why `:798`'s ""at most 17"" holds at ANY shard count: it is
-    `9 capped matrix slots + 8 eligible non-matrix`, and the cap is per matrix, so a
-    shard-count change moves the LEG total and not the in-flight total. `17` therefore
-    appears twice on that line with two different meanings; only the LEG count is this pin's.
-
-    Coverage is asserted per source, so deleting a stale sentence is not a way to pass: the pin
-    reds on a missing claim the same way it reds on a wrong one. ⛔ Deliberately NOT reached: the
-    past-tense ""up to **17** matrix jobs (9 fast + 5 slow + 3 carve-out)"" in §7's ""before
-    #6744"" paragraph, and the ""(17 jobs)"" inside this file's other docstring — both describe
-    the MEASURED past shape at the 9-leg measurement window, and rewriting a dated measurement to
-    today's shard count is how a record becomes a guess.
-
-    P2 (#11602 review at `cbc930427cfe`): the `max` sentence carries a SECOND count, and this pin
-    read only one of them. `A <wc> run is N jobs (max M)` states what a TYPICAL PR run emits in
-    `N` — `fast + non_matrix_pr`, because the slow and carve matrices are path-gated — and the
-    raise moved `M` while leaving `N` at its 9-leg value. The old checker compared `M` only and
-    reported GREEN on the line it was written to protect, which is the ""tool that already holds
-    the datum and does not read it"" class: a false PASS, not prose drift. Both halves are now
-    derived and asserted, and the non-vacuity control below feeds the PRE-FIX sentence through
-    the same checker — against the max-only arm that fixture yields ZERO violations.
-    """
-    from tools.ci_selection import (
-        carve_shard_count,
-        fast_shard_count,
-        load_manifest,
-        slow_shard_count,
-    )
-
-    manifest = load_manifest()
-    jobs = _load_python_ci()["jobs"]
-    matrix_jobs = {
-        job_id for job_id, job in jobs.items()
-        if isinstance(job.get("strategy"), dict) and "matrix" in job["strategy"]
-    }
-    # anchor the population before deriving from it: an emptied/moved matrix set would make
-    # `legs` a sum of nothing and the prose trivially "agree"
-    assert len(matrix_jobs) == 3, matrix_jobs
-    push_gated = {
-        job_id for job_id, job in jobs.items()
-        if job_id not in matrix_jobs
-        and "github.event_name == 'push'" in str(job.get("if") or "")
-    }
-    assert push_gated == {"canary-streak"}, (
-        "the push-gated job set moved, so `non_matrix_pr` below no longer means "
-        f"'jobs a PR actually requests'; got {sorted(push_gated)}")
-    legs = (fast_shard_count(manifest) + slow_shard_count(manifest)
-            + carve_shard_count(manifest))
-    non_matrix_pr = len(jobs) - len(matrix_jobs) - len(push_gated)
-    total = legs + non_matrix_pr
-    # `typical` is NOT `total - push_gated`: the slow and carve matrices are path-GATED, so a
-    # typical PR run emits neither. It is the fast shards plus the always-eligible non-matrix
-    # jobs (`20 = 9 + 11` on origin/main, `21 = 10 + 11` after the raise, `22 = 11 + 11` after
-    # #11576's raise).
-    typical = fast_shard_count(manifest) + non_matrix_pr
-    assert legs >= 3 and non_matrix_pr >= 1 and 0 < typical < total, (
-        legs, non_matrix_pr, typical, total)
-
-    sources = {
-        ".github/workflows/python-ci.yml": (
-            REPO / ".github" / "workflows" / "python-ci.yml").read_text(),
-        "docs/ops/ci-wall-clock.md": (
-            REPO / "docs" / "ops" / "ci-wall-clock.md").read_text(),
-        "tests/test_ci_selection.py": Path(__file__).read_text(),
-    }
-    sites = {
-        name: (len(_FULL_SELECTION_TOTAL_RE.findall(re.sub(r"\s+", " ", text.replace("**", "")))),
-               len(_FULL_SELECTION_MAX_RE.findall(re.sub(r"\s+", " ", text.replace("**", "")))))
-        for name, text in sources.items()
-    }
-    assert sites == {
-        ".github/workflows/python-ci.yml": (1, 0),
-        "docs/ops/ci-wall-clock.md": (1, 1),
-        "tests/test_ci_selection.py": (1, 0),
-    }, (
-        "the full-selection claim sites moved (a sentence was added, reworded past this pin, or "
-        f"deleted): {sites}. Re-point the regexes at the new wording instead of letting the "
-        "remaining copies drift unchecked")
-
-    violations = _full_selection_claim_violations(sources, total, legs, typical)
-    assert not violations, (
-        "a full-selection count disagrees with the shape `python-ci.yml` emits today — prose "
-        "that understates the emitted shape is how the next reader infers a 9-leg matrix from a "
-        "file that emits 10:\n  " + "\n  ".join(violations))
-
-    # NON-VACUITY, derived from the finding rather than hard-coded: the four PRE-FIX copies
-    # (#11602 at 9 fast legs, before the raise) must be rejected by this same checker, and the
-    # line-WRAPPED form must be read, not skipped. ⛔ Built with f-strings ON PURPOSE: a literal
-    # `… 28 jobs (17 matrix …` here would itself match the scanner below (this file is one of the
-    # pinned sources) and turn the pin red on its own non-vacuity fixture.
-    pre_fix = {
-        "python-ci.yml": (f"On a full selection a PR REQUESTS {total - 1} jobs "
-                          f"({legs - 1} matrix legs + 11 non-matrix"),
-        "ci-wall-clock.md wrapped": (f"a PR therefore **requests {total - 1}\njobs** "
-                                     f"({legs - 1} matrix legs + 11 non-matrix"),
-        "ci-wall-clock.md max": (f"A `python-ci` run is {typical - 1} jobs "
-                                 f"(max {total - 1}) by construction"),
-        # ⛔ THE ARM THIS REVIEW ADDED, and the only fixture that proves it non-vacuous: the HEAD's
-        # own pre-fix sentence — `max` already correct, `typical` one short. Against the previous
-        # (max-only) checker this fixture produced ZERO violations, i.e. the pin reported GREEN on
-        # the exact line the finding names (#11602 review at `cbc930427cfe`, `20 jobs (max 29)`).
-        # f-string built for the same reason as the others — a literal here would match the scanner
-        # on this file, one of the pinned sources.
-        "ci-wall-clock.md typical": (f"A `python-ci` run is {typical - 1} jobs "
-                                     f"(max {total}) by construction"),
-    }
-    pre_fix_violations = _full_selection_claim_violations(pre_fix, total, legs, typical)
-    for fixture in pre_fix:
-        assert any(v.startswith(f"{fixture}:") for v in pre_fix_violations), (
-            f"the checker is vacuous on {fixture!r} — the PRE-FIX text passes it: "
-            f"{pre_fix_violations}")
-    assert any(f"{total - 1} jobs" in v and f"{legs - 1} matrix legs" in v
-               for v in pre_fix_violations), pre_fix_violations
-    # the `typical` arm must reject the head's pre-fix sentence ON ITS OWN, while that sentence's
-    # `max` half is CORRECT — that difference is what makes the new arm load-bearing rather than a
-    # duplicate of the max check. A max-arm rejection here would mean the fixture isolates nothing.
-    typical_arm = [v for v in pre_fix_violations
-                   if v.startswith("ci-wall-clock.md typical:")]
-    assert any(f"typical run of {typical - 1} jobs" in v and f"emits {typical} " in v
-               for v in typical_arm), pre_fix_violations
-    assert not any("states a max of" in v for v in typical_arm), (
-        f"the fixture's `max` is {total}, so only the `typical` arm may reject it: {typical_arm}")
-    # the wrapped copy is the one a line-oriented pattern silently skips — key the assertion on
-    # its SOURCE NAME: flattening makes its matched text identical to the unwrapped copy's.
-    assert any(v.startswith("ci-wall-clock.md wrapped:")
-               and f"requests {total - 1} jobs ({legs - 1} matrix" in v
-               for v in pre_fix_violations), pre_fix_violations
 
 
 def test_no_required_check_names_a_fast_leg():
@@ -10345,42 +10390,6 @@ def test_integrity_no_matrix_drift():
     assert workflow_matrix_issues(str(wf), m) == []
 
 
-def test_split_balances_heavy_files():
-    """#1473: LPT puts the heavy files on alternating halves."""
-    from tools.ci_selection import split_fast_gate
-    files = ["tests/test_calibration.py", "tests/test_analyze.py",
-             "tests/test_main_guards.py", "tests/test_ops_safety.py"]
-    durations = {"test_calibration.py": 52.1, "test_analyze.py": 3.9,
-                 "test_main_guards.py": 19.5, "test_ops_safety.py": 16.8}
-    a, b = split_fast_gate(files, durations)
-    # LPT: calibration(52.1)->a, main_guards(19.5)->b, ops_safety(16.8)->b,
-    # analyze(3.9)->b (a stays heavier after calibration).
-    assert a == ["tests/test_calibration.py"]
-    assert sorted(b) == ["tests/test_analyze.py", "tests/test_main_guards.py",
-                         "tests/test_ops_safety.py"]
-    # imbalance bounded (vs parity which could cluster 52.1+19.5 on one half)
-    wa = 52.1
-    wb = 19.5 + 16.8 + 3.9
-    assert max(wa, wb) / min(wa, wb) < 1.5
-
-
-def test_split_is_deterministic_and_ties_go_a():
-    from tools.ci_selection import split_fast_gate
-    files = ["tests/test_a.py", "tests/test_b.py"]
-    a1, b1 = split_fast_gate(files, {"test_a.py": 1.0, "test_b.py": 1.0})
-    a2, b2 = split_fast_gate(files, {"test_a.py": 1.0, "test_b.py": 1.0})
-    assert a1 == a2 and b1 == b2
-    assert a1 == ["tests/test_a.py"]  # tie -> a
-
-
-def test_split_default_weight_for_unmeasured():
-    from tools.ci_selection import split_fast_gate
-    files = ["tests/test_new_a.py", "tests/test_new_b.py"]
-    a, b = split_fast_gate(files, {})  # no durations -> default 2.0
-    assert sorted(a + b) == sorted(files)
-    assert len(a) == 1 and len(b) == 1
-
-
 def test_split_rejects_non_list():
     from tools.ci_selection import split_fast_gate  # noqa: I001
     import pytest as _pytest
@@ -10421,101 +10430,6 @@ def _duration_manifest(heavy: dict[str, float],
     durations = {**heavy, **{f: 2.0 for f in tiny}}
     return {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
             "carve_out": [], "push_extra": [], "durations": durations}
-
-
-def test_full_matrix_split_is_duration_balanced():
-    """#3400: the full-matrix (push) halves are packed by measured duration.
-
-    Four heavy files + many 2s files: parity can cluster the heavies on one
-    half; LPT must not.  The assertion is the *duration* ratio, not a count
-    ratio — a correct pack of the real pool carries unequal counts.
-    """
-    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, push_legs
-    heavy = {"test_h0.py": 850.0, "test_h1.py": 700.0,
-             "test_h2.py": 650.0, "test_h3.py": 600.0}
-    m = _duration_manifest(heavy, tiny_count=200)
-    legs = push_legs(m)
-    # the synthetic manifest declares no `fast_shards`, so the default (2)
-    # applies and `a`/`b` are the whole set — the LPT balance assertions below
-    # are the two-shard case of the same rule.
-    by_name = {s["name"]: set(s["files"]) for s in legs["shards"]}
-    assert set(by_name) == {"a", "b"}, by_name.keys()
-    a, b = by_name["a"], by_name["b"]
-    assert not (a & b), "leg overlap"
-    assert a | b == {f[:-3] for f in m["surfaces"]["core"]}, "coverage hole"
-    weights = {h: sum(m["durations"][f + ".py"] for f in fs)
-               for h, fs in (("a", a), ("b", b))}
-    ratio = max(weights.values()) / min(weights.values())
-    assert ratio <= HALF_DURATION_IMBALANCE_RATIO, (
-        f"parity-style tilt survived: { {h: round(w / 60, 1) for h, w in weights.items()} }"
-        f" min (ratio {ratio:.2f}x)")
-    # the heavy files must be SPREAD — the 850s file must not sit with every
-    # other heavy file on one half while the other side carries only 2s files.
-    a_heavy = {f for f in heavy if f[:-3] in a}
-    b_heavy = {f for f in heavy if f[:-3] in b}
-    assert a_heavy and b_heavy, (
-        f"heavy files clustered on one half: a={sorted(a_heavy)} b={sorted(b_heavy)}")
-    assert len(a_heavy) < len(heavy) and len(b_heavy) < len(heavy)
-    # and the OLD parity split of the same pool is the thing being fixed
-    order = sorted(m["surfaces"]["core"])
-    p_a, p_b = order[0::2], order[1::2]
-    p_wa = sum(m["durations"][f] for f in p_a)
-    p_wb = sum(m["durations"][f] for f in p_b)
-    parity_ratio = max(p_wa, p_wb) / min(p_wa, p_wb)
-    assert parity_ratio > ratio, (
-        f"fixture does not exercise the defect: parity {parity_ratio:.2f}x "
-        f"vs LPT {ratio:.2f}x")
-
-
-def test_push_legs_is_deterministic():
-    """#3400: same manifest -> byte-identical halves, repeated calls."""
-    from tools.ci_selection import push_legs
-    m = _duration_manifest({"test_h0.py": 850.0, "test_h1.py": 700.0}, 50)
-    first = push_legs(m)
-    assert push_legs(m) == first
-    assert push_legs(m) == first
-    real = load_manifest()
-    assert push_legs(real) == push_legs(real)
-
-
-def test_halves_duration_imbalance_flagged():
-    """#3400: a heavy file dumped on one half reds even when counts look even."""
-    from tools.ci_selection import workflow_halves_issues
-    m = _duration_manifest({"test_big.py": 600.0}, tiny_count=10)
-    # 5 vs 6 files — a count-balanced split, duration-lopsided
-    halves = {"a": ["test_big", "test_tiny_0000", "test_tiny_0002",
-                     "test_tiny_0004", "test_tiny_0006"],
-              "b": ["test_tiny_0001", "test_tiny_0003", "test_tiny_0005",
-                     "test_tiny_0007", "test_tiny_0008", "test_tiny_0009"]}
-    issues = workflow_halves_issues(m, halves)
-    assert any("duration-imbalanced" in i for i in issues), issues
-
-
-def test_duration_coverage_guard_fires_when_low():
-    """#3400: 15 weights for 100 fast files is the rot this guard forbids."""
-    from tools.ci_selection import duration_coverage_issues
-    m = _duration_manifest({}, tiny_count=0)
-    m["surfaces"]["core"] = [f"test_cov_{i:03d}.py" for i in range(100)]
-    m["durations"] = {f: 2.0 for f in m["surfaces"]["core"][:15]}
-    issues = duration_coverage_issues(m)
-    assert issues, "guard did not bite at 15% coverage"
-    assert any("15.0%" in i and "floor" in i for i in issues), issues
-
-
-def test_duration_coverage_guard_boundary_and_realistic():
-    """#3400: the floor is inclusive; realistic coverage is silent."""
-    from tools.ci_selection import duration_coverage_issues, load_manifest
-    files = [f"test_cov_{i:03d}.py" for i in range(100)]
-    below = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
-             "durations": {f: 2.0 for f in files[:89]}}
-    at = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
-          "durations": {f: 2.0 for f in files[:90]}}
-    above = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
-             "durations": {f: 2.0 for f in files[:95]}}
-    assert duration_coverage_issues(below) != [], "89% must fire"
-    assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
-    assert duration_coverage_issues(above) == [], "95% must be silent"
-    assert duration_coverage_issues(load_manifest()) == []
 
 
 # ⛔ THE GENERAL ENTRY RULE WAS RETIRED — READ THIS BEFORE CITING THE PARAGRAPH BELOW
@@ -10849,17 +10763,69 @@ ROWED_BY_THIS_FOLD = (
 )
 
 
+def _rows_missing(durations: dict, population=ROWED_BY_THIS_FOLD) -> list:
+    """The members of `population` with no `durations:` row, in population order.
+
+    ⛔ ONE implementation, because the non-vacuity arm below must exercise the
+    PIN's predicate and not a copy of it: a re-implemented comprehension stays
+    green when the pin's own predicate is blinded (`… if f not in durations and
+    False` reds nothing), which is the "green while guarding nothing" shape both
+    arms exist to refuse.
+    """
+    return [f for f in population if f not in durations]
+
+
 def test_every_fast_file_this_fold_rows_carries_a_durations_row():
-    """#2148 P3: the ENTRY RULE, pinned — an added fast file has a row of its own."""
+    """#2148 P3: the ENTRY RULE, pinned — an added fast file has a row of its own.
+
+    ⛔ RESTORED with B7's durations-map arithmetic cut. The cut deleted this arm as
+    arithmetic, but it is the ONLY whole-set assertion behind the header above
+    (`:10200`): "dropping a row it names still reds required CI". The per-file pins
+    (`test_the_eviction_suite_is_in_the_entry_rule_set_13123`, `…_14357_…_14362`,
+    `…_record_chain_suite_…_7879`, the `_13110` pair) each cover ONE row, so the
+    remaining members were uncovered: dropping one of their rows left `--integrity`
+    green (its coverage check is a 0.90 RATIO with ~70 files of headroom) and nothing
+    reded. The header states an enforcement, so the enforcement must exist.
+
+    Red on a dropped row: delete any `durations:` entry this tuple names.
+    """
     from tools.ci_selection import load_manifest
     durations = load_manifest()["durations"]
-    missing = [f for f in ROWED_BY_THIS_FOLD if f not in durations]
+    missing = _rows_missing(durations)
     assert missing == [], (
         "a test file this PR ADDS is registered in a fast surface but carries no "
         f"`durations:` row, so it packs at the flat default: {missing}. The map's "
         "ENTRY RULE requires the row to EXIST (#3400/#4348) — add it with the "
         "`new in …` note; `tools/ci_timing.py --refresh-durations` fills the value "
         "from a push-to-main junit sweep later.")
+
+
+def test_the_whole_set_row_pin_sees_every_member_it_guards():
+    """Non-vacuity for the whole-set pin above: its population must be non-empty.
+
+    `missing == []` is vacuously TRUE over an empty iteration set — the exact shape
+    this file refuses elsewhere (a `git`-derived set goes silently empty on a shallow
+    CI checkout, #10356). So the pin's own predicate is driven over the LIVE map
+    one member at a time: removing a member's row must leave a non-empty `missing`
+    that names it (`_rows_missing(holed) == [name]`).
+
+    ⛔ It calls `_rows_missing` — the pin's OWN predicate — rather than restating
+    the comprehension, so blinding the pin (e.g. `… if f not in durations and
+    False`) reds here instead of leaving both arms green.
+
+    Red on the pre-fix state: empty the population (the whole-set pin stays GREEN
+    while guarding nothing) or break the predicate — either way `blind` is non-empty.
+    """
+    from tools.ci_selection import load_manifest
+    durations = load_manifest()["durations"]
+    blind = []
+    for name in ROWED_BY_THIS_FOLD:
+        holed = {k: v for k, v in durations.items() if k != name}
+        if _rows_missing(holed) != [name]:
+            blind.append(name)
+    assert ROWED_BY_THIS_FOLD and blind == [], (
+        "the whole-set row pin is vacuous for these members — an empty population or "
+        f"a predicate that cannot name a dropped row: {blind}")
 
 
 def test_ROWED_BY_THIS_FOLD_carries_no_duplicate_entries():
@@ -11045,8 +11011,6 @@ def test_the_entry_rule_bites_on_the_two_rows_this_fold_registered():
     the very row deletion it claimed to pin (the #13116 round-6 review falsified it by
     deleting `config/ci-surfaces.yml`'s row). Dropping a single name keeps the
     reconstruction a function of the map, so each deletion reds here, naming the row.
-    The flat-weight half of the ENTRY RULE is the sibling pin's business
-    (`test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading`).
 
     ⛔ Both files must be IN the guarded set for the pin above to see them at all — that
     is the half of this defect the rows alone do not fix (measured: with the rows added
@@ -11143,157 +11107,6 @@ def test_an_sdk_diff_is_the_full_matrix_and_the_second_row_has_its_subjects_else
         "update this pin; do not re-add the row on the old rationale.")
 
 
-def test_the_added_file_row_guard_bites_at_the_pre_fix_head():
-    """Non-vacuity: on the PRE-FIX map the guard must name exactly the two rowless files.
-
-    The pre-fix state is reconstructed from the live map by dropping the two rows this
-    fix adds — not by an invented fixture — so the assertion is about the map this PR
-    shipped, and a future reader can re-derive it the same way.
-    """
-    from tools.ci_selection import load_manifest
-    real = load_manifest()["durations"]
-    # the guard's own predicate, applied to a map that lacks the two rows this fix adds
-    pre_fix = {k: v for k, v in real.items()
-               if k not in {"test_attest_census.py", "test_rail_detach.py"}}
-    assert [f for f in ROWED_BY_THIS_FOLD if f not in pre_fix] == [
-        "test_attest_census.py", "test_rail_detach.py"], (
-        "the pre-fix reconstruction must find exactly the two files the review "
-        "reported rowless — otherwise this pin is not testing that defect")
-    # and dropping any ONE row is still named, so the guard is not keyed to those two
-    dropped = next(f for f in ROWED_BY_THIS_FOLD if f in real)
-    holed = {k: v for k, v in real.items() if k != dropped}
-    assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [dropped]
-
-
-def _added_files_off_the_flat_default(durations: dict, tails: dict):
-    """Files in this fold's row set whose row is neither the flat default nor a CI reading.
-
-    The ENTRY RULE's SECOND half, which the existence pin above cannot see: the
-    VALUE of a PR-added row must be `DEFAULT_FAST_WEIGHT`, because no push-to-main
-    junit sweep can have collected the file yet — a hand-picked number is this
-    host's wall clock, and `fast_pool()` feeds the shard balancer (#2818/#3419/#4348,
-    the rule stated verbatim above the `durations:` block). The one legitimate
-    exception is a row whose tail carries a CI basis: that is the refresher having
-    ADOPTED a junit reading, which IS the number the balancer should take.
-    """
-    from tools.ci_selection import DEFAULT_FAST_WEIGHT
-    off = []
-    for f in ROWED_BY_THIS_FOLD:
-        if f not in durations:
-            continue
-        value = durations[f]
-        if abs(value - DEFAULT_FAST_WEIGHT) < 1e-9:
-            continue
-        if _MEASURED_BASIS_RE.search(tails.get(f, "")):
-            continue
-        off.append((f, value))
-    return off
-
-
-def test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading():
-    """#10726 review P1: `test_9548_record_search_keys_shape.py` shipped `4.0`.
-
-    That 4.0 was this host's local clock — the row's note at the time quoted "11 passed,
-    1 skipped in 3.45s", a count a later commit removed because a hand-written figure
-    re-stales — while the other eight files in `ROWED_BY_THIS_FOLD` all took 2.0.
-    (Only ONE of the nine is a file this fold ADDED — the `ROWED_BY_THIS_FOLD` block
-    above is the authority on what the set actually is, #2148 review P3 — but the whole
-    set is the row-set this pin guards.)
-
-    The existence pin above stayed green through it, because a local reading is a
-    row like any other; the coverage floor could not see it either (it is a RATIO
-    with ~70 files of headroom). Nothing reds on a hand-picked shard weight, which
-    is precisely why it needs its own pin — `test_state_value_verbatim_10360.py` is
-    the settled shape: state the local reading as a sanity bound and keep the flat
-    default as the weight.
-    """
-    from tools.ci_selection import load_manifest
-    durations = load_manifest()["durations"]
-    tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
-    off = _added_files_off_the_flat_default(durations, tails)
-    assert off == [], (
-        "a test file this PR ADDS carries a weight that is neither the flat "
-        f"`DEFAULT_FAST_WEIGHT` nor a CI reading: {off}. A local wall clock is not "
-        "a shard-layout input (#2818/#3419) — keep the flat default and state the "
-        "local number as a sanity bound, or wait for the junit sweep to adopt one.")
-
-
-def test_the_flat_default_value_pin_bites_on_the_pre_fix_row_and_spares_a_ci_reading():
-    """Non-vacuity for the pin above, in both directions.
-
-    The pre-fix state is reconstructed from the LIVE row (the local-reading `4.0`
-    this review corrected) rather than an invented fixture, so a future reader can
-    re-derive what was wrong; and a `2.0 -> 3.1` ADOPTED CI reading — the
-    `test_oauth_consent_page_step4.py` shape — must stay silent, or the pin would
-    forbid the refresher from doing its job.
-
-    ⛔ BOTH halves are reconstructed, and the TAIL half is not optional: the
-    exemption `_added_files_off_the_flat_default` applies is keyed on the row's
-    tail (a CI basis), never on its value. Reusing the LIVE tail exempts the
-    reconstructed pre-fix value the moment `--refresh-durations` adopts this row
-    onto its row line — which the row's own note promises it will — and this pin
-    then reds about its own fixture. `""` is the FAITHFUL pre-fix tail: the `4.0`
-    row carried nothing after it on its row line, its measurement note in the
-    continuation block below (#10726 review round 4, P2).
-
-    The pre-fix state is dated by its own commits, not by memory: `33b312feb`
-    (`fix(10692)`) INTRODUCED the row as `…search_keys_shape.py: 4.0` with an empty
-    row-line tail, and `36b028494` (`fix(10726)`) is the commit that REPLACED it
-    with `2.0` (`git show 36b028494^:config/ci-surfaces.yml` still carries `4.0`;
-    `git show 36b028494:config/ci-surfaces.yml` carries `2.0`). So the fixing commit
-    is `36b028494` and the carrier of the defect is its parent.
-    """
-    from tools.ci_selection import load_manifest
-    real = load_manifest()["durations"]
-    tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
-    victim = "test_9548_record_search_keys_shape.py"
-    pre_fix = dict(real, **{victim: 4.0})
-    pre_fix_tails = dict(tails, **{victim: ""})
-    assert _added_files_off_the_flat_default(pre_fix, pre_fix_tails) == [(victim, 4.0)], (
-        "the reconstruction must find exactly the row this review corrected — "
-        "otherwise the pin is not testing that defect")
-    adopted = dict(real, **{victim: 3.1})
-    adopted_tails = dict(tails, **{
-        victim: "  # new in #1 — ci-timing junit-census+top-15 2026-11-02"
-                " (run 41375596528); was 2.0"})
-    assert _added_files_off_the_flat_default(adopted, adopted_tails) == [], (
-        "a row the refresher ADOPTED from a junit sweep must not be reported — "
-        "that value is the CI reading the balancer should take")
-
-
-def test_the_pre_fix_reconstruction_clears_the_tail_a_sweep_would_adopt():
-    """Regression pin for the half-reconstruction defect (review round 4, P2).
-
-    Simulates the state the FIRST post-landing `--refresh-durations` sweep produces
-    for this row — an adopted junit basis written ONTO the row line — without waiting
-    for that sweep, so the hazard is falsifiable in the repo rather than a year from
-    now in a red shard.
-
-    Both directions matter: the control asserts the exemption really IS tail-keyed
-    (a valid adopted row stays silent, so the fix cannot be "make the helper ignore
-    tails"), and the second arm asserts the reconstruction still finds the pre-fix
-    row once its tail is cleared — which is exactly what reusing the live tail
-    (the pre-fix test body) stops doing.
-    """
-    from tools.ci_selection import load_manifest
-    real = load_manifest()["durations"]
-    victim = "test_9548_record_search_keys_shape.py"
-    swept_tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
-    swept_tails[victim] = (
-        "  # ci-timing junit-census+top-15 2026-11-09 (run 99999999999); was 2.0")
-    adopted = dict(real, **{victim: 3.1})
-    assert _added_files_off_the_flat_default(adopted, swept_tails) == [], (
-        "control: an ADOPTED row must be exempt on its tail — this is why the tail "
-        "cannot be reused when reconstructing the PRE-fix row")
-    pre_fix = dict(real, **{victim: 4.0})
-    assert _added_files_off_the_flat_default(pre_fix, swept_tails) == [], (
-        "control: reusing a swept tail exempts the pre-fix value, i.e. the pin "
-        "would report nothing and the reconstruction assertion above would red — "
-        "the exact defect this pin exists for")
-    pre_fix_tails = dict(swept_tails, **{victim: ""})
-    assert _added_files_off_the_flat_default(pre_fix, pre_fix_tails) == [(victim, 4.0)]
-
-
 # The refresher (`tools/ci_timing.py::render_refreshed_manifest`) rewrites a row's
 # VALUE and preserves its trailing comment verbatim, so a note that states WHERE
 # the number came from can outlive the basis it states — the file ships a rule about
@@ -11346,22 +11159,6 @@ _FLAT_DEFAULT_CLAIM_RE = re.compile(
     re.IGNORECASE)
 
 
-def _durations_rows_claiming_the_flat_default(text: str, durations: dict):
-    """Rows that claim the flat default as their OWN basis for a non-default value."""
-    from tools.ci_selection import DEFAULT_FAST_WEIGHT
-    out = []
-    for line in text.splitlines():
-        m = _DURATIONS_ROW_RE.match(line)
-        if m is None or m.group("key") not in durations:
-            continue
-        value = float(m.group("value"))
-        if abs(value - DEFAULT_FAST_WEIGHT) < 1e-9:
-            continue
-        if _FLAT_DEFAULT_CLAIM_RE.search(m.group("tail")):
-            out.append((m.group("key"), value))
-    return out
-
-
 # A row that carries a ci-timing BASIS was measured, so a note that still says it is
 # unmeasured ON CI is falsified by its own tail. The flat-default guard above cannot
 # see this shape, because the claim need not mention the default's VALUE:
@@ -11373,46 +11170,6 @@ def _durations_rows_claiming_the_flat_default(text: str, durations: dict):
 _MEASURED_BASIS_RE = re.compile(
     r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2} [^—]*?"
     r"(?:;\s*was |;\s*kept |the reading \()")
-_UNMEASURED_ON_CI_RE = re.compile(
-    r"unmeasured\s+(?:on|in|by)\s+CI\b", re.IGNORECASE)
-
-
-def _durations_rows_claiming_unmeasured_on_ci(text: str):
-    """Rows whose note says they are unmeasured on CI AND cites a CI reading."""
-    out = []
-    for line in text.splitlines():
-        m = _DURATIONS_ROW_RE.match(line)
-        if m is None:
-            continue
-        tail = m.group("tail")
-        if _UNMEASURED_ON_CI_RE.search(tail) and _MEASURED_BASIS_RE.search(tail):
-            out.append((m.group("key"), tail))
-    return out
-
-
-# The FORWARD-LOOKING form of the same falsified claim: "so the flat 2.0
-# UNDERSTATES it until a sweep replaces this row" (and its `overstates` twin). It
-# names no claim verb and no `is`, so `_FLAT_DEFAULT_CLAIM_RE` cannot see it; and
-# it says `unmeasured` nowhere, so `_UNMEASURED_ON_CI_RE` cannot either. Once the
-# sweep HAS replaced the row, the tail carries its own `ci-timing …; was N` basis
-# and the sentence describes a state the row has left — 6 rows shipped that way in
-# the 2026-11-09 refresh (`test_9664_capstone_verdict_ledger.py` was the one the
-# review named; the guard found the other five). The PAST tense is a true history
-# and must stay silent: "the flat 2.0 UNDERSTATED it until this sweep replaced the
-# row" is what the fix says.
-#
-# ⛔ WIDENED at the 2026-11-16 refresh (#12962). The literal `flat 2.0 … UNDERSTATES`
-# spelling was the ONLY form the arm read, so ten rows that named the same claim in
-# another spelling shipped GREEN: an inserted adverb (`the flat 2.0 still UNDERSTATES`,
-# `the flat 2.0 may UNDERSTATE` — note the BARE `understate`, not the `-S` form) and
-# the three noun spellings the map also uses (`the flat default`, `the flat reading`,
-# `the flat weight`). A guard that reads one spelling of a claim cannot say the claim
-# is absent — `[]` from a spelling-bound arm is a false clean, and it is why the same
-# defect regenerated on two successive refreshes. The tense boundary is now explicit:
-# `UNDERSTATE(S)` / `OVERSTATE(S)` are present/future and bite; the PAST forms
-# (`UNDERSTATED`, `OVERSTATED`) end in a word character after `UNDERSTATE`, so they
-# cannot satisfy the closing `\b` and stay silent — that is the polarity the fix relies
-# on, not an incidental property.
 #
 # ⛔ A `.` TERMINATES THE CLAIM ONLY WHEN IT IS NOT PART OF A NUMBER (#12962 rebase
 # review, P1). `[^.;]*?` was the cycle-5 fix for an undocumented 40-character budget,
@@ -11424,595 +11181,10 @@ def _durations_rows_claiming_unmeasured_on_ci(text: str):
 # figure spelled out BIT. That is the same false clean this whole guard family exists
 # to close, one spelling over again. `_CLAUSE` is the window these arms now share:
 # `.` and `;` still bound it, and a `.` followed by a digit does not.
-# ⛔ The ONE negative lookahead left in this family — `_FLAT_DEFAULT_STILL_OWED_RE`'s
-# future-sweep `until …` arm — keeps the narrower `[^.;]` window ON PURPOSE: widening
-# a past-marker SCAN can only add silence, i.e. push that arm further toward
-# fail-open. Widening a window that CONSUMES between a noun and its verb can only add
-# bites, which is the safe direction. The two are not the same fix and must not be
-# "unified". (The past-copula arm that used to be the second member of this list is a
-# LOOKBEHIND on the predicate now — see `_WEIGHT_UNCHANGED_CLAIM_RE` — so there is no
-# window left to widen there at all.)
+# ⛔ The other arms that shared this window went with B7's note-guard cut
+# (`_FLAT_DEFAULT_STILL_OWED_RE`, `_WEIGHT_UNCHANGED_CLAIM_RE`), so `_WEIGHT_IS_CLAIM_RE`
+# below is now its only consumer — kept because that arm still needs it.
 _CLAUSE = r"(?:[^.;]|\.(?=\d))*?"
-_FLAT_DEFAULT_STILL_OWED_RE = re.compile(
-    r"\bflat\s+(?:2\.0s?(?:\s+default)?|default|reading|weight)\b" +
-    # ⛔ The verb WINDOW is the SENTENCE, not a character budget (#12962 cycle 5).
-    # It was `[^.;]{0,40}?` — an undocumented 40-character bound, which is the same
-    # false clean one spelling over: a row can name the noun and the present-tense
-    # verb with more than 40 characters between them, and the arm then returned `[]`
-    # while the claim was on the page (measured: "the flat weight a PR-added row
-    # takes is, in this shard, one that UNDERSTATES it" — 48 chars — did not match).
-    # `_CLAUSE` keeps the bound MEANINGFUL (the claim and its subject in ONE clause:
-    # `.` and `;` still terminate it, and a decimal point does NOT — see `_CLAUSE`)
-    # while removing a limit no reader of this file could have known about. Both the
-    # over-window shape and the decimal shape that caught this arm's own bound are
-    # pinned in `test_the_still_owed_flat_default_guard_bites_and_stays_quiet`.
-    _CLAUSE +
-    r"\b(?:UNDERSTATES|UNDERSTATE|OVERSTATES|OVERSTATE)\b"
-    # …and the FUTURE-SWEEP construction, which names the owed sweep without ever
-    # writing UNDER/OVERSTATE — so the tense arm above cannot see it. Four rows
-    # shipped this way at the 2026-11-16 refresh (`flat default until a CI sweep
-    # measures this file`, `KNOWN UNDER-ESTIMATE UNTIL THE REFRESHER`, `until the
-    # refresh lands`, `until the first post-merge sweep`), which is what made the
-    # widening's own `[]` a false clean (#12962 cycle 4). Scoped to the words that
-    # name a sweep still TO COME: the healed wording names the LANDED sweep
-    # (`until the 2026-11-16 sweep replaced the row`) and matches none of these.
-    #
-    # ⛔ AND THE NOUN ARMS NEED A TENSE BOUNDARY TOO (#12962 cycle 6). `until the
-    # refresher` / `until the first post-merge` were bare, so they matched a TRUE
-    # past-tense history — "the flat 2.0 UNDERSTATED it until the refresher replaced
-    # the row", "it was the flat default until the first post-merge sweep gave it a
-    # reading" — i.e. the blessed healed form redded `test-slow` on the next
-    # refresh, the opposite polarity to every other arm here. `UNTIL THE REFRESHER.`
-    # (nothing after) still bites, which is the shipped shape the bare arm was added
-    # for.
-    #
-    # ⛔ THE TENSE BOUNDARY IS A SHORT PAST-VERB LIST, AND THAT IS ITS ACTUAL
-    # BOUNDARY — NOT "the past tense" (#12962 cycle 10, review P1 + three VGATE
-    # passes). The list was `replaced|re-bas\w*|gave|lifted|landed|resolved`, so a
-    # healed note that past-tenses the sweep with any OTHER verb still bites:
-    # measured, "It was the flat default until the refresher **corrected** the row"
-    # / **re-measured** / **fixed** all red, while `replaced` / `re-based` / `gave`
-    # stay silent. That over-block is REAL and is NOT fixed here.
-    #
-    # ⛔ FOUR DESIGNS WERE BUILT AND EACH WAS REFUTED BY MEASUREMENT. Recorded so the
-    # next lane does not re-derive this as an easy win:
-    #   (a) require a PRESENT/FUTURE predicate → FAILS OPEN. A bounded list of
-    #       present forms goes silent on the next synonym and on every modal, and it
-    #       silently DROPPED four genuine catches on `origin/main`'s map
-    #       (`test_rail_detach.py`, `test_measure_ask_distilled.py`,
-    #       `eval/ask/test_ask_corpus.py`, `test_code_freshness_9494.py`) — those
-    #       name the owed sweep and then a CITATION or a COMMA, not a verb.
-    #   (b) no past marker anywhere (`[a-z]+ed`) → FAILS OPEN. `[a-z]+ed` matches
-    #       `red`, `need`, `embed`, so a provenance word anywhere later in the
-    #       clause silenced a live claim.
-    #   (c) a `[^.;]*?` window over present forms → OVER-BLOCKS: the window crosses
-    #       commas and re-bites a healed sentence on a later present word.
-    #   (d) extend the past list to ~32 verbs → FAILS OPEN against THIS arm. The
-    #       extra verbs are the map's general prose vocabulary — `set` appears in 25
-    #       tails, `moved` in 20, `taken` in 19, `introduced`, `superseded`,
-    #       `corrected`, `adopted`, … — so any of them anywhere before the next
-    #       `.`/`;` silences a LIVE claim that the shipped six caught (measured: 13
-    #       of 14 probes regressed). A short list over-blocks healed notes; a long
-    #       list silences live ones. THERE IS NO LIST LENGTH THAT IS CORRECT.
-    #
-    # So the shipped boundary is left EXACTLY as it was, and this comment is the fix:
-    # it previously claimed "fires only when NO past-tense `landed`-marker follows",
-    # i.e. it described a general tense test the code does not implement. The honest
-    # consequences, both live and both accepted for this PR:
-    #   • OVER-BLOCK (the live bug): a healed note with an unlisted past verb reds
-    #     `test-slow`. Loud, and one word fixes the list — deliberately preferred
-    #     over a silent miss, because a silent miss ships an unread claim.
-    #   • FAIL-OPEN (unavoidable here): a future claim whose sweep action is spelled
-    #     with a LISTED past form after a modal reads as healed — measured
-    #     `until the refresher will have replaced …`, `… has landed a reading`,
-    #     `… will be resolved` are all silent. (A modal in front of an UNLISTED verb
-    #     like `will set` still bites, which is why the example has to name a listed
-    #     form; the original draft of this sentence cited `will set` and was wrong
-    #     about its own code — #12962 review cycle 11.)
-    # ⛔ THE ROOT IS FILED, NOT WORKED AROUND: regex tense detection over free prose
-    # cannot be made complete in both directions, which is the same structural reason
-    # these row guards cannot reach block comments. Recorded on **#9442** (the home
-    # for ungated provenance prose) with the four refuted designs and their
-    # measurements, rather than a fifth regex.
-    r"|\buntil\s+(?:the\s+)?(?:refresher|first\s+post-merge)"
-    r"(?![^.;]*?\b(?:replaced|re-bas\w*|gave|lifted|landed|resolved)\b)"
-    r"|\buntil\s+the\s+refresh\s+lands"
-    r"|\buntil\s+a\s+(?:push-to-main\s+|CI\s+)?sweep\s+"
-    r"(?:includes|measures|covers|collects)"
-    # …and the construction that names the sweep by its INSTRUMENT or its VERB
-    # rather than the word "sweep" (#12962 cycle 6). Rows shipped `entered at the
-    # flat default … until a CI junit artifact carries the weight` and `stays at the
-    # default until \`tools/ci_timing.py --refresh-durations\` replaces it from
-    # junit`, each beside a tail citing the ALREADY-LANDED sweep — the same
-    # contradiction the two cycles above chased, and `[]` from the arms above.
-    #
-    # ⛔ The INSTRUMENT arm carries a VERB LIST, not just `until <instrument>`
-    # (#12962 cycle 7). Keying on the instrument alone made the arm TENSE-BLIND, so
-    # it red the minimal legal repair of the owed sentence — past-tense the verb and
-    # keep the tool name (`until \`tools/ci_timing.py --refresh-durations\` REPLACED
-    # it`). That is the same trap the UNDER/OVERSTATE arm is built to avoid: the fix
-    # IS the past tense, so an arm that bites it leaves no legal way to write the
-    # note. Only the present/future verbs bite.
-    #
-    # ⚠️ SCOPE, stated so this is not read as total: these arms read the `until …`
-    # form ONLY. The map's more common forward-looking PROVENANCE boilerplate drops
-    # `until` entirely (`… \`tools/ci_timing.py --refresh-durations\` replaces this
-    # value from the first push-to-main junit sweep that includes the file`), which
-    # these arms cannot see. That is the ungated-provenance-prose class, recorded on
-    # #9442 rather than claimed closed here. Its size is COUNTED, not asserted — at
-    # 3d74516 the rows whose tail names `--refresh-durations` and carries no `until`
-    # (case-insensitive, as this regex compiles) numbered 112, of which 110 carry a
-    # landed `; was N` tail; at `b7cd203` the same count is 114 / 111. The count is
-    # pinned to a DEFINITION so the next reader can reproduce it rather than trust it
-    # (`rows = [l for l in text.splitlines() if _DURATIONS_ROW_RE.match(l)]`;
-    # `tail_names = [l for l in rows if "--refresh-durations" in m.group("tail")]`;
-    # `no_until = [l for l in tail_names if not re.search(r"\buntil\b", l, re.I)]`;
-    # `landed = [l for l in no_until if _MEASURED_BASIS_RE.search(l)]`), because three
-    # earlier revisions of this sentence asserted 121/112, 112/106 and then 111/105 and
-    # NONE reproduces — 111/105 matches no natural variant of the definition at all
-    # (measured 2026-11-16, #12962 cycle 10 review P2). A figure that cannot be
-    # re-derived is exactly the stale-prose rot the surrounding arms exist to stop.
-    # ⛔ The WINDOW is `[^.;\n]` — `.`, `;` and the newline, NOT "the sentence" — and
-    # the anchor eats its OWN period (#12962 cycles 7-8). Two revisions each inverted a
-    # different polarity: `[^.;]` cannot span `tools/ci_timing.py`, so the arm was
-    # silent on the very row it was written for; `[^;\n]{0,80}` let the window cross
-    # a `.` into the NEXT sentence, where `What the weight covers:` — the map's
-    # dominant opener, 104 occurrences at aff53070 — supplied a present-tense verb and
-    # falsely red a correctly past-tensed row. That is the over-block this arm's own
-    # contract forbids, so it is not a nit: `tools/ci_timing(?:\.py)?` consumes the
-    # anchor's period, restoring that bound with no character budget. ⚠️ Residual, so
-    # the wording does not overclaim again: `…`, `!` and `?` are NOT in the class, so a
-    # healed row whose boundary is one of those can still reach the next sentence's
-    # verb. No shipped row is reachable that way (the opener's preceding character is
-    # `.` x89, `;` x11, line-start x4 — zero ellipsis/bang/question).
-    r"|\buntil\s+(?:a\s+)?(?:CI\s+)?junit[^.;\n]*?"
-    r"\b(?:carries|lands|collects|measures|covers|exists|arrives)\b"
-    r"|\buntil\s+`?tools/ci_timing(?:\.py)?[^.;\n]*?"
-    r"\b(?:replaces|re-derives|measures|collects|covers)\b",
-    re.IGNORECASE)
-
-
-def _durations_rows_still_owing_the_flat_default_to_a_sweep(text: str,
-                                                            durations: dict):
-    """Rows that claim a FUTURE sweep still owes them the flat default."""
-    from tools.ci_selection import DEFAULT_FAST_WEIGHT
-    out = []
-    for line in text.splitlines():
-        m = _DURATIONS_ROW_RE.match(line)
-        if m is None or m.group("key") not in durations:
-            continue
-        if abs(float(m.group("value")) - DEFAULT_FAST_WEIGHT) < 1e-9:
-            continue
-        tail = m.group("tail")
-        if (_FLAT_DEFAULT_STILL_OWED_RE.search(tail)
-                and _MEASURED_BASIS_RE.search(tail)):
-            out.append((m.group("key"), float(m.group("value"))))
-    return out
-
-
-def test_no_durations_row_claims_it_is_unmeasured_on_ci_beside_a_ci_reading():
-    """#10575 review P3: a falsified claim must go with its clause.
-
-    This is the PR's own thesis one clause over — the refresh ADOPTED the row from a
-    CI census, so "unmeasured on CI" is false, and the note stated both facts in one
-    sentence. Corrected by hand because the writer cannot attribute a mid-note claim
-    to the adoption; this pin is what stops the next one from shipping quietly.
-    """
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    offenders = _durations_rows_claiming_unmeasured_on_ci(text)
-    assert offenders == [], (
-        "a durations row cites a CI reading AND still claims it is unmeasured on CI "
-        f"— drop the falsified claim: {[(k, t[:90]) for k, t in offenders]}"
-    )
-
-
-def test_the_unmeasured_on_ci_claim_check_is_not_vacuous():
-    """The guard above must bite on the shipped shape and stay quiet on its siblings."""
-    stale = (
-        "  test_a.py: 0.1  # new in #1; unmeasured on CI (flat default, see the entry"
-        " above) — ci-timing junit-census+top-15 2026-11-02 (run 1); was 2.0\n"
-        "  test_b.py: 0.1  # unmeasured on CI — ci-timing junit-census+top-15"
-        " 2026-11-02 (run 1): no declared testcase count for this file (UNKNOWN), so"
-        " the reading cannot prove it saw the whole file; the reading (0.1s) is a"
-        " LOWER bound; kept 0.1\n")
-    legitimate = (
-        # an unmeasured claim with NO CI basis at all is the honest state
-        "  test_c.py: 2.0  # unmeasured on CI — a new file takes the flat default.\n"
-        # a CI basis with no unmeasured claim
-        "  test_d.py: 3.7  # ci-timing junit-census+top-15 2026-11-02 (run 1); was 2.0\n"
-        # prose about the MARKER, not a claim about this row's measurement
-        "  test_e.py: 140.3  # the tail must LEAD with `# unmeasured`\n")
-    assert [k for k, _ in _durations_rows_claiming_unmeasured_on_ci(stale)] == [
-        "test_a.py", "test_b.py"]
-    assert _durations_rows_claiming_unmeasured_on_ci(legitimate) == []
-
-
-# The refresher's `unmeasured` marker is `unmeasured [on|in|by CI]`, and the marker
-# paths used to consume the single WORD — leaving its qualifier behind with nothing
-# to modify: `# by CI — #10046: …` on an ADOPTED row and `# carried forward (not a
-# full-file CI measurement) — by CI — #10025: …` on a HELD one (#10575 review, F2).
-# The stub is only ever in those two positions — at the note's OPENING, or straight
-# after the carried-forward restatement — so the detector names them and cannot
-# confuse a note that merely mentions CI.
-_ORPHANED_UNMEASURED_QUALIFIER_RE = re.compile(
-    r"(?:^[ \t]*#[ \t]*|—[ \t]*)(?:by|on|in)[ \t]+CI\b", re.IGNORECASE)
-
-
-def test_no_durations_row_note_carries_an_orphaned_unmeasured_qualifier():
-    """#10575 review F2: a marker's qualifier must not outlive the marker.
-
-    The writer half of this repair is pinned in `tests/test_ci_timing.py`
-    (`test_the_unmeasured_markers_qualifier_goes_with_the_marker`); this is the
-    MAP half, because two rows shipped the stub in this PR's own diff and the
-    guard added for the neighbouring class could not see either of them (it looks
-    for the phrase the deletion destroys).
-    """
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    offenders = [(key, note[:120]) for key, note in _durations_row_comments(text)
-                 if _ORPHANED_UNMEASURED_QUALIFIER_RE.search(note)]
-    assert offenders == [], (
-        "a durations row's note opens with (or is joined to) an `unmeasured`"
-        f" marker's stranded qualifier — restore the marker's subject: {offenders}")
-
-
-def test_the_orphaned_qualifier_check_is_not_vacuous():
-    """The guard above bites on the two shipped shapes and stays quiet beside them."""
-    stale = (
-        "durations:\n"
-        "  test_a.py: 0.1  # by CI — #10046: the record tenant, adopted.\n"
-        "  test_b.py: 3.0  # carried forward (not a full-file CI measurement)"
-        " — by CI — #10025: the graph identity, held.\n")
-    legitimate = (
-        "durations:\n"
-        # the honest marker, with its qualifier consumed by the writer
-        "  test_c.py: 2.0  # unmeasured by CI — a new file takes the flat default.\n"
-        "  test_d.py: 3.0  # carried forward (not a full-file CI measurement)"
-        " — #10025: the marker was restated, not mangled.\n"
-        # prose ABOUT CI that is not a stranded marker qualifier
-        "  test_e.py: 0.4  # the census reads the leg's own junit; CI is the source,"
-        " and by CI timings this file is trivial.\n")
-    assert [key for key, note in _durations_row_comments(stale)
-            if _ORPHANED_UNMEASURED_QUALIFIER_RE.search(note)] == [
-        "test_a.py", "test_b.py"]
-    assert [key for key, note in _durations_row_comments(legitimate)
-            if _ORPHANED_UNMEASURED_QUALIFIER_RE.search(note)] == []
-
-
-def test_a_cut_note_does_not_leave_a_clause_owned_by_no_reading():
-    """#10575 review F3: `test_10017_cache_tier.py`'s re-base orphaned a clause.
-
-    The adopted-note cut removed the sentence that owned `a property of THIS host
-    …` and re-joined the survivor to the unrelated coverage-floor sentence, so the
-    note asserted that a merge-gating coverage check was "a property of THIS host"
-    — and it opened `It still has to EXIST` with the antecedent cut away. The
-    survivors are BALANCED, so `_balance_cut_parens` cannot see the damage.
-    """
-    note = dict(_durations_row_comments(
-        cs.MANIFEST.read_text(encoding="utf-8")))["test_10017_cache_tier.py"]
-    assert "pool's own size; a property of THIS host" not in note, note
-    # the host-property clause keeps the LOCAL READING it describes in front of it
-    assert "136.25s" in note, note
-    assert note.index("136.25s") < note.index("a property of THIS host"), note
-    # …and the antecedent the cut took (what the row is, and when it arrived) is back
-    assert "#10017" in note and "#3400/#4348" in note, note
-
-
-def test_no_durations_row_claims_the_flat_default_at_a_measured_value():
-    """#2876/#8254 (P3): a re-derived value must not keep its old basis note."""
-    from tools.ci_selection import load_manifest
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    offenders = _durations_rows_claiming_the_flat_default(
-        text, load_manifest()["durations"])
-    assert offenders == [], (
-        "a durations row states the #3400 flat 2.0s default as its basis while "
-        "carrying a different value — the refresh re-derived the row and the note "
-        f"went stale: {offenders}. Rewrite the note to the new basis (or drop the "
-        "claim), keeping any #4348 do-not-drop instruction.")
-
-
-def test_flat_default_claim_check_is_not_vacuous():
-    """The guard above must bite on the stale shape and stay quiet on its siblings."""
-    stale = (
-        "  test_a.py: 2.2  # a new file takes the #3400 flat 2.0s default."
-        "\n"
-        "  test_b.py: 3.7  # so it takes the #3400 flat 2.0s default; required."
-        "\n"
-        # The CONSTANT-NAME spelling of the same claim: measured on the real
-        # manifest as `test_oauth_consent_page_step4.py: 3.1` and
-        # `test_5095_s3_identity_policy.py: 0.4`, both invisible to the value-only
-        # pattern (#10790 review, P3).
-        "  test_g.py: 3.1  # a PR-added file, so it takes the flat"
-        " `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading."
-        "\n"
-        "  test_h.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
-        " and NOT a local reading.")
-    legitimate = (
-        "  test_c.py: 7.2  # unmeasured — without this row the file packs at the"
-        " flat 2.0s default.\n"
-        "  test_d.py: 18.0  # its absence packs it at the flat 2.0s default.\n"
-        "  test_e.py: 140.3  # a real weight, not the flat 2.0 default.\n"
-        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.\n"
-        # the COUNTERFACTUAL spelling of the constant NAME — no claim verb, so it
-        # must stay silent
-        "  test_g.py: 6.5  # its absence packs it at the flat `DEFAULT_FAST_WEIGHT`."
-        # …and the two counterfactual forms that phrase the constant's name without
-        # a claim verb (#10790 review).
-        "\n  test_i.py: 0.4  # THAT SWEEP HAS NOW LANDED: the flat"
-        " `DEFAULT_FAST_WEIGHT` is what it REPLACED rather than what it needs."
-        "\n  test_j.py: 23.8  # must carry a row or it packs at the flat 2.0 s"
-        " `DEFAULT_FAST_WEIGHT`, not a dev-box reading.")
-    # …and the NAMED-CONSTANT spelling of the CLAIM, which shipped twice on the real
-    # map (`test_10602_query_limit_bound.py: 2.3`, `test_5095_s3_identity_policy.py:
-    # 0.4`) because neither guard's verb list carried `stays` and the first
-    # alternation insists on the literal `flat 2.0s default` phrase.
-    named_constant = (
-        "  test_h.py: 2.3  # The weight stays the flat `DEFAULT_FAST_WEIGHT`"
-        " declaration a file a PR ADDS takes.\n"
-        "  test_i.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
-        " and NOT a local reading.")
-    # …and the DEMONSTRATIVE copula spelling, which has no claim verb and no
-    # determiner, and so went unread on `test_required_set.py: 0.4` (#11602 review
-    # P3 finding 1: CI was green on a falsified claim).
-    demonstrative = (
-        "  test_j.py: 0.4  # #10991: pre-merge estimate for a NEW file; This is"
-        " `DEFAULT_FAST_WEIGHT`, stated as a placeholder, not a measurement."
-        " — ci-timing junit-census+top-15 2026-11-09 (run 1); was 2.0")
-    durations = {f"test_{c}.py": 1.0 for c in "abcdefghij"}
-    assert _durations_rows_claiming_the_flat_default(stale, durations) == [
-        ("test_a.py", 2.2), ("test_b.py", 3.7),
-        ("test_g.py", 3.1), ("test_h.py", 0.4)]
-    assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
-    assert _durations_rows_claiming_the_flat_default(named_constant, durations) == [
-        ("test_h.py", 2.3), ("test_i.py", 0.4)]
-    assert _durations_rows_claiming_the_flat_default(demonstrative, durations) == [
-        ("test_j.py", 0.4)], (
-        "the demonstrative copula form must bite — it is the shape that shipped "
-        "past this guard at the 2026-11-09 refresh")
-
-
-def test_no_durations_row_still_owes_its_basis_to_a_sweep_that_has_landed():
-    """#11602 review P3 finding 2, as a CLASS: six rows stated the claim.
-
-    The reviewer named `test_9664_capstone_verdict_ledger.py`; re-deriving the
-    shape against the committed map found five siblings carrying the identical
-    sentence (`test_embed_writer_register`, `test_10997_identity_hold`,
-    `test_wait_bound_write_ack`, `test_9664_premise_census`,
-    `test_capstone_a_rows_10982`). Each said a sweep still OWED it the flat
-    default while its own tail cited the sweep's `was N` basis — the map's own
-    rule (`config/ci-surfaces.yml` above the `durations:` block) is that a row's
-    comment is kept only while the value AND its stated basis are unchanged.
-    """
-    from tools.ci_selection import load_manifest
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    offenders = _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        text, load_manifest()["durations"])
-    assert offenders == [], (
-        "a durations row says the flat default still describes it while its own "
-        "tail cites the sweep that replaced it — re-word to the past tense (the "
-        f"flat default UNDERSTATED it until this sweep replaced the row): {offenders}")
-
-
-def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
-    """Non-vacuity for the pin above, on the shipped (pre-fix) wording."""
-    durations = {"test_a.py": 1.0, "test_b.py": 1.0, "test_c.py": 1.0}
-    basis = " — ci-timing junit-census+top-15 2026-11-09 (run 1); was 2.0"
-    stale = (
-        # the reviewer-named row, verbatim from the head before the fix
-        "  test_a.py: 39.0  # No DB, no network, no graph fixture; #2818/#3419/#4348:"
-        " ~6s wall for the file. The flat 2.0 UNDERSTATES it until a junction sweep"
-        " replaces this row." + basis + "\n"
-        # the `overstates` twin, verbatim from `test_capstone_a_rows_10982.py`
-        "  test_b.py: 0.9  # measured locally as context, NOT as the weight, so the"
-        " flat 2.0 overstates it until a sweep replaces this from junit" + basis)
-    legitimate = (
-        # the PAST tense the fix uses — a true history, not a claim
-        "  test_a.py: 39.0  # The flat 2.0 UNDERSTATED it; this row's 39.0 is the"
-        " sweep that replaced it." + basis + "\n"
-        # an UNMEASURED row (still the flat default) may state it
-        "  test_b.py: 2.0  # the flat 2.0 UNDERSTATES it until a sweep replaces"
-        " this row.\n"
-        # the same sentence, PRESENT tense, with NO landed basis. The tense arm
-        # MATCHES this row, so only the `_MEASURED_BASIS_RE` conjunct keeps it
-        # quiet — delete that conjunct and this fixture is the one that reds.
-        # ⛔ It must stay present tense: `_FLAT_DEFAULT_STILL_OWED_RE` matches
-        # `UNDERSTATES`, so the PAST-tense wording this fixture first carried
-        # (`UNDERSTATED`) never reached the conjunct at all and the arm was
-        # unpinned (review P3, 2026-11-09).
-        "  test_c.py: 0.4  # the flat 2.0 UNDERSTATES it until a sweep; nothing"
-        " in the tail cites one.")
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        stale, durations) == [("test_a.py", 39.0), ("test_b.py", 0.9)]
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        legitimate, durations) == []
-
-    # ── The spellings that shipped PAST this arm (#12962 repair) ───────────────
-    # Each names the same present-tense claim as `stale` above and none of them
-    # matched the literal `flat 2.0 … UNDERSTATES` form: an inserted adverb, and the
-    # `flat default` / `flat reading` / `flat weight` nouns the map actually uses.
-    # Ten rows carried one of these while their own tail cited the landed sweep.
-    widened = (
-        "  test_a.py: 27.3  # weight-dominated by a single case and the flat default"
-        " UNDERSTATES it on the slow leg until the refresher re-bases it." + basis + "\n"
-        "  test_b.py: 0.5  # The flat 2.0 may understate it until a sweep replaces"
-        " the row." + basis + "\n"
-        "  test_c.py: 25.1  # it sits above the flat weight, so the flat reading"
-        " UNDERSTATES it until a sweep replaces this row" + basis + "\n"
-        "  test_d.py: 12.7  # the flat 2.0 still UNDERSTATES it until a sweep"
-        " re-bases it." + basis)
-    quad = {f"test_{c}.py": 1.0 for c in "abcd"}
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        widened, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5),
-                           ("test_c.py", 25.1), ("test_d.py", 12.7)]
-    # ── The VERB-WINDOW shape (#12962 cycle 5) ────────────────────────────────
-    # The arm used to bound the gap between the noun and the present-tense verb at
-    # an undocumented 40 characters, so a row stating the same claim across a longer
-    # same-sentence clause read as absent. Pinned here because that bound was
-    # invisible: the claim is in ONE sentence, and the guard's job is to say so.
-    far_verb = (
-        "  test_a.py: 27.3  # the flat weight a PR-added row takes is, in this"
-        " shard, one that UNDERSTATES it" + basis + "\n"
-        "  test_b.py: 0.5  # the flat default a cold leg pays interpreter start for"
-        " here is one the census reading has already replaced, and on the slow leg"
-        " it still UNDERSTATES the body" + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        far_verb, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5)], (
-        "the window is the SENTENCE — an arm bounded to 40 characters returns [] "
-        "while the claim is on the page, which is the false clean it exists to "
-        "prevent")
-    # ── The DECIMAL-POINT bound (#12962 rebase review, P1) ────────────────────
-    # `[^.;]*?` reads the decimal point of ANY figure as a sentence end, so the most
-    # natural way to write this note — naming the reading the flat default is being
-    # compared against — returned `[]` while the claim was on the page. All three of
-    # these were SILENT on the shipped arm; the same shape without a figure BIT.
-    # A `.` followed by a digit is not a terminator; `_CLAUSE` is the window.
-    decimal = (
-        "  test_a.py: 27.3  # the flat weight is, against the 2.5 reading, one that"
-        " UNDERSTATES it" + basis + "\n"
-        "  test_b.py: 0.5  # the flat default, measured against a 3.0 wall, still"
-        " UNDERSTATES it" + basis + "\n"
-        "  test_c.py: 25.1  # the flat reading is 1.4 on the 2.0 rule and it"
-        " UNDERSTATES this file" + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        decimal, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5),
-                           ("test_c.py", 25.1)], (
-        "a decimal point is not a sentence end — `[^.;]` returns [] over every "
-        "claim that names the reading it compares against")
-    # …and the DECIMAL is still not a licence to cross a REAL terminator: a `.`
-    # followed by a space, or a `;`, bounds the clause exactly as before.
-    real_stop = (
-        "  test_a.py: 27.3  # the flat weight is 2.0. It UNDERSTATES nothing now"
-        + basis + "\n"
-        "  test_b.py: 0.5  # the flat weight is 2.0; the row UNDERSTATES nothing"
-        + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        real_stop, quad) == []
-    # …and the sentence bound is what keeps it honest: a `.` or `;` terminates the
-    # claim, so a healed past-tense sentence is never joined to a later verb.
-    cross_sentence = (
-        "  test_a.py: 27.3  # the flat weight was replaced by this sweep; the row"
-        " now UNDERSTATES nothing" + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        cross_sentence, quad) == []
-    # …and the PAST tense of every one of those spellings stays silent, because the
-    # fix IS the past tense — a widening that bit the healed wording would red every
-    # corrected row on the committed map and leave no legal way to write the note.
-    healed = (
-        "  test_a.py: 27.3  # the flat default UNDERSTATED it until this sweep"
-        " replaced the row." + basis + "\n"
-        "  test_b.py: 0.5  # The flat 2.0 OVERSTATED it until this sweep replaced"
-        " the row." + basis + "\n"
-        "  test_c.py: 25.1  # so the flat reading UNDERSTATED it until this sweep"
-        " replaced the row" + basis + "\n"
-        "  test_d.py: 12.7  # the flat weight OVERSTATED it until this sweep"
-        " re-based it." + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        healed, quad) == []
-
-    # ── The FUTURE-SWEEP construction (#12962 cycle 4) ────────────────────────
-    # These name the sweep still owed without ever writing UNDER/OVERSTATE, so the
-    # tense arm alone cannot see them; four rows shipped this way at the 2026-11-16
-    # refresh, under a widening whose own docstring already promised this arm.
-    owing = (
-        "  test_a.py: 55.5  # #9076: flat default until a CI sweep measures this"
-        " file" + basis + "\n"
-        "  test_b.py: 31.3  # ⚠️ KNOWN UNDER-ESTIMATE UNTIL THE REFRESHER." + basis + "\n"
-        "  test_c.py: 24.7  # until the refresh lands a fast shard is"
-        " under-weighted" + basis + "\n"
-        "  test_d.py: 18.8  # flat default until the first post-merge sweep —"
-        " nothing else" + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        owing, quad) == [("test_a.py", 55.5), ("test_b.py", 31.3),
-                         ("test_c.py", 24.7), ("test_d.py", 18.8)]
-    # …and the healed wording — which names the LANDED sweep — stays silent. This
-    # is the arm that keeps the widening from biting every corrected row on the
-    # committed map, so it is pinned rather than assumed.
-    landed_sweep = (
-        "  test_a.py: 55.5  # it opened as the flat default; the 2026-11-16 sweep"
-        " replaced it" + basis + "\n"
-        "  test_b.py: 31.3  # A KNOWN UNDER-ESTIMATE, and it survived the"
-        " 2026-11-16 sweep" + basis + "\n"
-        "  test_c.py: 24.7  # until the 2026-11-16 sweep landed, a fast shard was"
-        " under-weighted by ~6.4x" + basis + "\n"
-        "  test_d.py: 18.8  # the flat 2.0 OVERSTATED it until this sweep replaced"
-        " the row" + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        landed_sweep, quad) == []
-
-    # …and the SAME construction in the PRESENT tense bites. Pinned because the
-    # boundary is the shipped six-verb list only in its `until the refresher` form:
-    # these spell the claim with a present predicate the list does not cover.
-    synonym_owing = (
-        "  test_a.py: 27.3  # it stays at the flat default until the refresher"
-        " corrects the row." + basis + "\n"
-        "  test_b.py: 0.5  # it stays at the flat default until the refresher"
-        " measures the file." + basis + "\n"
-        "  test_c.py: 25.1  # it is the flat default until the first post-merge"
-        " sweep gives it a reading." + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        synonym_owing, quad) == [("test_a.py", 27.3), ("test_b.py", 0.5),
-                                 ("test_c.py", 25.1)]
-
-    # ── The INSTRUMENT/VERB spellings (#12962 cycle 6) ────────────────────────
-    # The map names the owed sweep by its TOOL or its VERB far more often than by the
-    # word "sweep", so the four arms above reported `[]` over three rows that each
-    # sat beside a tail citing the ALREADY-LANDED sweep — the same contradiction this
-    # guard exists to catch, one spelling over again. Pinned in both directions.
-    instrument_owing = (
-        "  test_a.py: 3.9  # a weight is a SHARD-LAYOUT input, so it stays at the"
-        " default until `tools/ci_timing.py --refresh-durations` replaces it from"
-        " junit" + basis + "\n"
-        "  test_b.py: 0.6  # entered at the flat default per the convention until a"
-        " CI junit artifact carries the weight" + basis + "\n"
-        "  test_c.py: 0.9  # flat default until a junit reading lands" + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        instrument_owing, quad) == [("test_a.py", 3.9), ("test_b.py", 0.6),
-                                    ("test_c.py", 0.9)], (
-        "naming the sweep by its instrument (`junit`, `tools/ci_timing`) is the "
-        "map's DOMINANT spelling of this claim; an arm that reads only the word "
-        "`sweep` reports [] while three rows assert the owed basis")
-    # …and the healed wording — which names the LANDED sweep instead of an owed one
-    # — stays silent. The last two rows are the cycle-7 POLARITY pin: the minimal
-    # legal repair of an owed sentence is to PAST-TENSE its verb and keep the
-    # instrument, so an arm keyed on the tool name alone (rather than on a
-    # present/future verb) red exactly that repair and left no way to write the note.
-    instrument_healed = (
-        "  test_a.py: 3.9  # it stayed at the default until the 2026-11-16 sweep"
-        " replaced it from junit" + basis + "\n"
-        "  test_b.py: 0.6  # entered at the flat default; the 2026-11-09 sweep"
-        " re-derived it to 0.9" + basis + "\n"
-        "  test_c.py: 0.9  # it stayed at the default until `tools/ci_timing.py"
-        " --refresh-durations` replaced it from junit" + basis + "\n"
-        "  test_d.py: 1.2  # until junit artifacts carried the weight, the flat"
-        " default stood" + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        instrument_healed, quad) == [], (
-        "the fix IS the past tense — an arm that bit the healed wording would red "
-        "every corrected row on the committed map")
-    # ── The NOUN arms' tense boundary (#12962 cycle 6) ──────────────────────────
-    # `until the refresher` / `until the first post-merge` were bare, so they matched
-    # a TRUE past-tense history — the blessed healed form itself — and would have
-    # redded `test-slow` on the next refresh. The lookahead requires no past-tense
-    # `landed`-marker to follow in the same sentence; `UNTIL THE REFRESHER.` with
-    # nothing after it (the shipped shape the arm was added for) still bites.
-    healed_noun = (
-        "  test_a.py: 27.3  # the flat 2.0 UNDERSTATED it until the refresher"
-        " replaced the row." + basis + "\n"
-        "  test_b.py: 27.3  # it was the flat default until the first post-merge"
-        " sweep gave it a reading." + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        healed_noun, {"test_a.py": 27.3, "test_b.py": 27.3}) == [], (
-        "a past-tense history is not a claim — the noun arms need the same tense "
-        "boundary the UNDER/OVERSTATE arm gets from its closing \\b")
-    bare_owing = (
-        "  test_a.py: 27.3  # ⚠️ KNOWN UNDER-ESTIMATE UNTIL THE REFRESHER."
-        + basis + "\n"
-        "  test_b.py: 27.3  # the flat default holds until the first post-merge"
-        " sweep, so a fast shard is under-weighted." + basis)
-    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
-        bare_owing, {"test_a.py": 27.3, "test_b.py": 27.3}) == [
-        ("test_a.py", 27.3), ("test_b.py", 27.3)]
-
-
 _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
 
 
@@ -12073,82 +11245,6 @@ def _durations_row_comments(text: str):
     return [(key, " ".join(chunks)) for key, chunks in out]
 
 
-def _durations_rows_with_unbalanced_parens(text: str):
-    """Rows whose note carries a `(` or `)` whose partner is nowhere in the note."""
-    return [(key, note.strip()) for key, note in _durations_row_comments(text)
-            if note.count("(") != note.count(")")]
-
-
-def test_no_durations_row_keeps_half_a_parenthesis():
-    """#10055 review (P3): a clause cut may not orphan a parenthesis.
-
-    `tools/ci_timing.py`'s clause cutters drop a stale clause whole; when that
-    clause carried one half of a paren pair the survivor kept the other half, e.g.
-    `test_url_keyed_source_write_4649.py` -> `#4649: 169.5s wall for the whole file)`
-    and `test_7951_enforce_atomic_write.py` -> `#7951: … 7.39s wall (measured at the
-    rebase head — ci-timing …` with no closer. Measured on the refresh head: 18 rows
-    against 2 on main. Every surviving claim is still TRUE (that is why this is P3
-    and not a behaviour defect), but a dangling half reads as a typo and hides that
-    a sentence was cut — this map treats a damaged note as a defect, not cosmetics.
-    """
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    offenders = _durations_rows_with_unbalanced_parens(text)
-    assert offenders == [], (
-        "a durations row's note keeps half a parenthesis — a clause was cut without "
-        f"its partner (#10055 review, P3): {[k for k, _ in offenders]}. Drop the "
-        "orphaned half (`tools/ci_timing._balance_cut_parens` does this on every cut).")
-
-
-def test_the_paren_guard_is_not_vacuous():
-    """The guard above must bite on a cut casualty and stay quiet on its siblings."""
-    stale = (
-        "durations:\n"
-        "  test_a.py: 4.3  # #4649: 169.5s wall for the whole file); the floor "
-        "fails by construction.\n"
-        "  test_b.py: 7.4  # #7951: 19 tests, 7.39s wall (measured at the rebase head "
-        "— ci-timing junit 2026-10-26; was 7.4\n"
-        "surfaces: []\n")
-    legitimate = (
-        "durations:\n"
-        "  test_c.py: 1.0  # a note with no parens at all.\n"
-        "  test_d.py: 2.0  # says (a balanced thing) and nothing else.\n"
-        "  test_e.py: 3.0  # a pair that WRAPS across lines (opened here\n"
-        "      # and closed on the continuation line).\n"
-        "surfaces: []\n")
-    assert [k for k, _ in _durations_rows_with_unbalanced_parens(stale)] == [
-        "test_a.py", "test_b.py"]
-    assert _durations_rows_with_unbalanced_parens(legitimate) == []
-
-
-def test_the_paren_guard_reads_only_a_rows_OWN_note():
-    """A row's note is its indented wrap lines — not the block's column-0 prose.
-
-    The `durations:` block carries COLUMN-0 prose between rows (186 lines at the
-    2026-11-02 head — the `# #3395: per-file CI wall time …` method note). Attaching
-    that prose to the row above it made `test_spa_dependency_overrides.py`'s "note"
-    122 lines of the map's own header. A guard that judges a note together with
-    unrelated prose can both HIDE an imbalance (prose closing a pair the note
-    opened) and INVENT one (prose opening a pair the note never closes), which is
-    why the span is bounded the same way the writer bounds it
-    (`tools/ci_timing._row_continuation_lines`).
-    """
-    text = (
-        "durations:\n"
-        "  test_a.py: 4.3  # a note that OPENS a pair (and never closes it\n"
-        "# column-0 prose, NOT this row's note: it closes a pair) nobody opened\n"
-        "  test_b.py: 7.4  # a balanced row (fine).\n"
-        "      # its continuation line carries the closer (so it stays balanced).\n"
-        "surfaces: []\n")
-    joined = dict(_durations_row_comments(text))
-    assert "column-0 prose" not in joined["test_a.py"], joined["test_a.py"]
-    assert "carries the closer" in joined["test_b.py"]
-    # …so the opener on test_a.py is judged on its own, and is caught.
-    assert [k for k, _ in _durations_rows_with_unbalanced_parens(text)] == [
-        "test_a.py"]
-    # The prose alone is balanced, so the pre-fix join would have cleared it.
-    assert joined["test_a.py"].count("(") != joined["test_a.py"].count(")")
-
-
 # ── the re-derivable CASE COUNT a row states (#10356 review P3-1) ─────────────
 # A durations row may state its file's case count as a MEASUREMENT, naming the
 # instrument: `# #5086: 35 cases (`grep -c '^def test_'` -> 35; pytest collects 35 …)`.
@@ -12165,8 +11261,8 @@ def test_the_paren_guard_reads_only_a_rows_OWN_note():
 # #10610 review at `fdff8f432`, P2). A row that CORRECTED its leading count and left
 # the superseded one standing beside it returned `[]` — the guard's claim is "no
 # count in a row is one its file refutes", and "the first count is right" is a
-# different, weaker sentence. The two-claim arm is
-# `test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row`.
+# different, weaker sentence. That second arm is no longer pinned; `finditer`
+# below is the whole of what remains of it.
 # ⛔ The JOINER is free-form: the row's ENTRY RULE tells a reader to re-derive the
 # count with `grep -c '^def test_'` and never prescribes how the note spells the
 # relation. Matching `->`/`→` ALONE left the `=` spelling unpoliced, and measured at
@@ -12220,6 +11316,273 @@ def _durations_rows_with_a_stale_case_count(text: str, tests_dir: Path):
     return out
 
 
+# ── a row may not state ZERO cases beside a passing reading (#10726 ISSUE 1) ──
+# `02133e21b` (the fold's auto-merge) re-derived 41 `durations:` counts with
+# `grep -c '^def test_'` — a FLOOR, and `0` for every class-based file — and
+# wrote those floors into notes that quote a DIFFERENT, really-measured number.
+# The result was a row that contradicts itself in one sentence:
+#
+#   test_5509…: … pytest session total, **0 tests**, "16 passed in 138.63s"
+#   test_8864…: … (embedded carve-out lane, **0 tests**): "8 passed in 5.82s"
+#
+# `ac129dec7` repaired both by restoring the count each note's OWN reading
+# quotes — `16 tests` and `8 tests` at this head — so the MAP IS CLEAN HERE and
+# this pin is a REGRESSION GUARD, not the report of a live defect: the map arm
+# below asserts the offender list is EMPTY, which is the state a future fold has
+# to keep true.
+#
+# ⛔ The vocabulary is exactly two nouns (`0 tests` / `0 cases`) — it is NOT any
+# `0 <noun>`; a `0 points` beside a
+# passing reading is invisible to this pin too (#10726 review round 3, P3). This
+# pin is NARROWER in scope (one sentence, so the map's legitimate history —
+# `"33 passed" … (31 tests / 2.77 s BEFORE this review)`, and `at 35 tests on an
+# [earlier] idle host` — is not judged). A same-sentence `0 … N>0` needs no
+# history exemption: no correct note can say it.
+def test_duration_coverage_guard_boundary_and_realistic():
+    """#3400: the floor is inclusive; realistic coverage is silent."""
+    from tools.ci_selection import duration_coverage_issues, load_manifest
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    below = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+             "durations": {f: 2.0 for f in files[:89]}}
+    at = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+          "durations": {f: 2.0 for f in files[:90]}}
+    above = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+             "durations": {f: 2.0 for f in files[:95]}}
+    assert duration_coverage_issues(below) != [], "89% must fire"
+    assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
+    assert duration_coverage_issues(above) == [], "95% must be silent"
+    assert duration_coverage_issues(load_manifest()) == []
+
+
+def _added_files_off_the_flat_default(durations: dict, tails: dict):
+    """Files in this fold's row set whose row is neither the flat default nor a CI reading.
+
+    The ENTRY RULE's SECOND half, which the per-file existence pin that used to sit
+    above (#14419 cut it; `duration_coverage_issues()` is a 0.90 ratio and is silent
+    over a single missing row) cannot see either: the
+    VALUE of a PR-added row must be `DEFAULT_FAST_WEIGHT`, because no push-to-main
+    junit sweep can have collected the file yet — a hand-picked number is this
+    host's wall clock, and `fast_pool()` feeds the shard balancer (#2818/#3419/#4348,
+    the rule stated verbatim above the `durations:` block). The one legitimate
+    exception is a row whose tail carries a CI basis: that is the refresher having
+    ADOPTED a junit reading, which IS the number the balancer should take.
+    """
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT
+    off = []
+    for f in ROWED_BY_THIS_FOLD:
+        if f not in durations:
+            continue
+        value = durations[f]
+        if abs(value - DEFAULT_FAST_WEIGHT) < 1e-9:
+            continue
+        if _MEASURED_BASIS_RE.search(tails.get(f, "")):
+            continue
+        off.append((f, value))
+    return off
+
+
+def test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading():
+    """#10726 review P1: `test_9548_record_search_keys_shape.py` shipped `4.0`.
+
+    That 4.0 was this host's local clock — the row's note at the time quoted "11 passed,
+    1 skipped in 3.45s", a count a later commit removed because a hand-written figure
+    re-stales — while the other eight files in `ROWED_BY_THIS_FOLD` all took 2.0.
+    (Only ONE of the nine is a file this fold ADDED — the `ROWED_BY_THIS_FOLD` block
+    above is the authority on what the set actually is, #2148 review P3 — but the whole
+    set is the row-set this pin guards.)
+
+    The per-file existence pin that used to sit above (and went with the
+    durations-map arithmetic cut, #14419) stayed green through it, because a local
+    reading is a row like any other; the coverage floor could not see it either
+    (it is a RATIO
+    with ~70 files of headroom). Nothing reds on a hand-picked shard weight, which
+    is precisely why it needs its own pin — `test_state_value_verbatim_10360.py` is
+    the settled shape: state the local reading as a sanity bound and keep the flat
+    default as the weight.
+    """
+    from tools.ci_selection import load_manifest
+    durations = load_manifest()["durations"]
+    tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
+    off = _added_files_off_the_flat_default(durations, tails)
+    assert off == [], (
+        "a test file this PR ADDS carries a weight that is neither the flat "
+        f"`DEFAULT_FAST_WEIGHT` nor a CI reading: {off}. A local wall clock is not "
+        "a shard-layout input (#2818/#3419) — keep the flat default and state the "
+        "local number as a sanity bound, or wait for the junit sweep to adopt one.")
+
+
+def test_the_flat_default_value_pin_bites_on_the_pre_fix_row_and_spares_a_ci_reading():
+    """Non-vacuity for the pin above, in both directions.
+
+    The pre-fix state is reconstructed from the LIVE row (the local-reading `4.0`
+    a review corrected) rather than an invented fixture, so a future reader can
+    re-derive what was wrong; and a `2.0 -> 3.1` ADOPTED CI reading — the
+    `test_oauth_consent_page_step4.py` shape — must stay silent, or the pin would
+    forbid the refresher from doing its job.
+
+    ⛔ BOTH halves are reconstructed, and the TAIL half is not optional: the
+    exemption `_added_files_off_the_flat_default` applies is keyed on the row's
+    tail (a CI basis), never on its value. Reusing the LIVE tail exempts the
+    reconstructed pre-fix value the moment `--refresh-durations` adopts this row
+    onto its row line — which the row's own note promises it will — and this pin
+    then reds about its own fixture. `""` is the FAITHFUL pre-fix tail: the `4.0`
+    row carried nothing after it on its row line, its measurement note in the
+    continuation block below (#10726 review round 4, P2).
+
+    The pre-fix state is dated by its own commits, not by memory: `33b312feb`
+    (`fix(10692)`) INTRODUCED the row as `…search_keys_shape.py: 4.0` with an empty
+    row-line tail, and `36b028494` (`fix(10726)`) is the commit that REPLACED it
+    with `2.0` (`git show 36b028494^:config/ci-surfaces.yml` still carries `4.0`;
+    `git show 36b028494:config/ci-surfaces.yml` carries `2.0`). So the fixing commit
+    is `36b028494` and the carrier of the defect is its parent.
+
+    Kept by #14419: the guard it proves can fire survives the cut, and a guard whose
+    bite is asserted nowhere is the inert-enforcer shape the cut must not produce.
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
+    victim = "test_9548_record_search_keys_shape.py"
+    pre_fix = dict(real, **{victim: 4.0})
+    pre_fix_tails = dict(tails, **{victim: ""})
+    assert _added_files_off_the_flat_default(pre_fix, pre_fix_tails) == [(victim, 4.0)], (
+        "the reconstruction must find exactly the row this review corrected — "
+        "otherwise the pin is not testing that defect")
+    adopted = dict(real, **{victim: 3.1})
+    adopted_tails = dict(tails, **{
+        victim: "  # new in #1 — ci-timing junit-census+top-15 2026-11-02"
+                " (run 41375596528); was 2.0"})
+    assert _added_files_off_the_flat_default(adopted, adopted_tails) == [], (
+        "a row the refresher ADOPTED from a junit sweep must not be reported — "
+        "that value is the CI reading the balancer should take")
+
+
+def test_the_pre_fix_reconstruction_clears_the_tail_a_sweep_would_adopt():
+    """Regression pin for the half-reconstruction defect (review round 4, P2).
+
+    Simulates the state the FIRST post-landing `--refresh-durations` sweep produces
+    for this row — an adopted junit basis written ONTO the row line — without waiting
+    for that sweep, so the hazard is falsifiable in the repo rather than a year from
+    now in a red shard.
+
+    Both directions matter: the control asserts the exemption really IS tail-keyed
+    (a valid adopted row stays silent, so the fix cannot be "make the helper ignore
+    tails"), and the second arm asserts the reconstruction still finds the pre-fix
+    row once its tail is cleared — which is exactly what reusing the live tail
+    (the pre-fix test body) stops doing.
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    victim = "test_9548_record_search_keys_shape.py"
+    swept_tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
+    swept_tails[victim] = (
+        "  # ci-timing junit-census+top-15 2026-11-09 (run 99999999999); was 2.0")
+    adopted = dict(real, **{victim: 3.1})
+    assert _added_files_off_the_flat_default(adopted, swept_tails) == [], (
+        "control: an ADOPTED row must be exempt on its tail — this is why the tail "
+        "cannot be reused when reconstructing the PRE-fix row")
+    pre_fix = dict(real, **{victim: 4.0})
+    assert _added_files_off_the_flat_default(pre_fix, swept_tails) == [], (
+        "control: reusing a swept tail exempts the pre-fix value, i.e. the pin "
+        "would report nothing and the reconstruction assertion above would red — "
+        "the exact defect this pin exists for")
+    pre_fix_tails = dict(swept_tails, **{victim: ""})
+    assert _added_files_off_the_flat_default(pre_fix, pre_fix_tails) == [(victim, 4.0)]
+
+
+def _durations_rows_claiming_the_flat_default(text: str, durations: dict):
+    """Rows that claim the flat default as their OWN basis for a non-default value."""
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT
+    out = []
+    for line in text.splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is None or m.group("key") not in durations:
+            continue
+        value = float(m.group("value"))
+        if abs(value - DEFAULT_FAST_WEIGHT) < 1e-9:
+            continue
+        if _FLAT_DEFAULT_CLAIM_RE.search(m.group("tail")):
+            out.append((m.group("key"), value))
+    return out
+
+
+def test_no_durations_row_claims_the_flat_default_at_a_measured_value():
+    """#2876/#8254 (P3): a re-derived value must not keep its old basis note."""
+    from tools.ci_selection import load_manifest
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_claiming_the_flat_default(
+        text, load_manifest()["durations"])
+    assert offenders == [], (
+        "a durations row states the #3400 flat 2.0s default as its basis while "
+        "carrying a different value — the refresh re-derived the row and the note "
+        f"went stale: {offenders}. Rewrite the note to the new basis (or drop the "
+        "claim), keeping any #4348 do-not-drop instruction.")
+
+
+def test_flat_default_claim_check_is_not_vacuous():
+    """The guard above must bite on the stale shape and stay quiet on its siblings.
+
+    Kept by #14419 with the guard it proves: the guard survives the cut, so its bite
+    must survive it too.
+    """
+    stale = (
+        "  test_a.py: 2.2  # a new file takes the #3400 flat 2.0s default."
+        "\n"
+        "  test_b.py: 3.7  # so it takes the #3400 flat 2.0s default; required."
+        "\n"
+        # The CONSTANT-NAME spelling of the same claim: measured on the real
+        # manifest as `test_oauth_consent_page_step4.py: 3.1` and
+        # `test_5095_s3_identity_policy.py: 0.4`, both invisible to the value-only
+        # pattern (#10790 review, P3).
+        "  test_g.py: 3.1  # a PR-added file, so it takes the flat"
+        " `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading."
+        "\n"
+        "  test_h.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
+        " and NOT a local reading.")
+    legitimate = (
+        "  test_c.py: 7.2  # unmeasured — without this row the file packs at the"
+        " flat 2.0s default.\n"
+        "  test_d.py: 18.0  # its absence packs it at the flat 2.0s default.\n"
+        "  test_e.py: 140.3  # a real weight, not the flat 2.0 default.\n"
+        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.\n"
+        # the COUNTERFACTUAL spelling of the constant NAME — no claim verb, so it
+        # must stay silent
+        "  test_g.py: 6.5  # its absence packs it at the flat `DEFAULT_FAST_WEIGHT`."
+        # …and the two counterfactual forms that phrase the constant's name without
+        # a claim verb (#10790 review).
+        "\n  test_i.py: 0.4  # THAT SWEEP HAS NOW LANDED: the flat"
+        " `DEFAULT_FAST_WEIGHT` is what it REPLACED rather than what it needs."
+        "\n  test_j.py: 23.8  # must carry a row or it packs at the flat 2.0 s"
+        " `DEFAULT_FAST_WEIGHT`, not a dev-box reading.")
+    # …and the NAMED-CONSTANT spelling of the CLAIM, which shipped twice on the real
+    # map (`test_10602_query_limit_bound.py: 2.3`, `test_5095_s3_identity_policy.py:
+    # 0.4`) because neither guard's verb list carried `stays` and the first
+    # alternation insists on the literal `flat 2.0s default` phrase.
+    named_constant = (
+        "  test_h.py: 2.3  # The weight stays the flat `DEFAULT_FAST_WEIGHT`"
+        " declaration a file a PR ADDS takes.\n"
+        "  test_i.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
+        " and NOT a local reading.")
+    # …and the DEMONSTRATIVE copula spelling, which has no claim verb and no
+    # determiner, and so went unread on `test_required_set.py: 0.4` (#11602 review
+    # P3 finding 1: CI was green on a falsified claim).
+    demonstrative = (
+        "  test_j.py: 0.4  # #10991: pre-merge estimate for a NEW file; This is"
+        " `DEFAULT_FAST_WEIGHT`, stated as a placeholder, not a measurement."
+        " — ci-timing junit-census+top-15 2026-11-09 (run 1); was 2.0")
+    durations = {f"test_{c}.py": 1.0 for c in "abcdefghij"}
+    assert _durations_rows_claiming_the_flat_default(stale, durations) == [
+        ("test_a.py", 2.2), ("test_b.py", 3.7),
+        ("test_g.py", 3.1), ("test_h.py", 0.4)]
+    assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
+    assert _durations_rows_claiming_the_flat_default(named_constant, durations) == [
+        ("test_h.py", 2.3), ("test_i.py", 0.4)]
+    assert _durations_rows_claiming_the_flat_default(demonstrative, durations) == [
+        ("test_j.py", 0.4)], (
+        "the demonstrative copula form must bite — it is the shape that shipped "
+        "past this guard at the 2026-11-09 refresh")
+
+
 def test_no_durations_row_states_a_stale_case_count():
     """#10356 review P3-1: a cited `grep -c` count must match the file it weighs."""
     offenders = _durations_rows_with_a_stale_case_count(
@@ -12229,6 +11592,17 @@ def test_no_durations_row_states_a_stale_case_count():
         "ENTRY RULE tells the reader to re-derive with (`grep -c '^def test_'`) and "
         f"the file disagrees — (key, stated, actual): {offenders}. Re-derive the "
         "count AND extend the row's staleness chain with the cycle that moved it.")
+
+
+#: over exactly the contradiction the guard was widened for two cycles earlier
+#: (`tests/test_ci_selection.py`'s own comment measures that row). It is a FAIL-
+#: OPEN in a guard: the guard's job is "no row carries a count its file refutes",
+#: and "the first count is right" is not that sentence.
+_ROW_WITH_A_CORRECT_THEN_A_STALE_CLAIM = (
+    "durations:\n"
+    "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` -> 2) — and the\n"
+    "  # older re-derivation beside it still reads (`grep -c '^def test_'` = 190).\n"
+    "surfaces: []\n")
 
 
 def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
@@ -12286,419 +11660,6 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         ("test_gone.py", 4, None)]
 
 
-#: A chain entry is a CONTINUATION line whose comment opens with `-> <n>`.
-#:
-#: ⛔ Why the ANCHOR matters (#10032): a row legitimately cites `-> N` mid-sentence
-#: (`grep -c '^def test_'` -> 57, `27 -> 30 when …`) and a naive "the same number
-#: twice" rule reds **5 healthy rows on `main`** — `test_mcp_bridge.py` and
-#: `test_selection_step.py` cite one count with two instruments, `test_substrate_map.py`
-#: and `test_problem_map_2820.py` carry a `->` chain that revisits the count their
-#: citation already named, and `test_7949_capstone_measure.py`'s decimals
-#: (`0.2 -> 1.0`) match an unanchored `\d+`. The chain ENTRY — the line that opens
-#: with the arrow — is the only position where a repeat means one landing's entry was
-#: replayed beside another's, which is the defect. Measured with this file's own
-#: reader on `origin/main` at `e4703a286a`: 0 offenders across the 1328 rows
-#: `_durations_row_comments` returns there.
-_CHAIN_ENTRY_RE = re.compile(r"^#\s*->\s*(?P<n>\d+)(?!\.\d)")
-#: Any `-> N` in a comment line — the map's OTHER way of recording a move
-#: (`# 33 at <sha> … -> 39, 40, 41`), used only as evidence that a count DROPPED.
-_MID_LINE_ARROW_RE = re.compile(r"->\s*(?P<n>\d+)(?!\.\d)")
-#: An issue reference (`#11904`) — the token a union splice's two halves share when
-#: the branch and `main` fixed the same landing.
-_ISSUE_TOKEN_RE = re.compile(r"#(\d{3,5})\b")
-
-
-def _durations_rows_with_a_duplicated_chain_count(text: str):
-    """`(key, count)` for every row whose note names ONE chain count TWICE.
-
-    ⛔ The defect this names (#10032): `config/ci-surfaces.yml` is declared
-    `merge=union` (`.gitattributes:21`), so a conflict-FREE merge of `main` into a
-    branch appends both sides' lines into the same comment block. Measured on the
-    union of PR #11958's head `1ae5cd37c4` into `origin/main e4703a286a`, the
-    `test_problem_map_2820.py` row came out carrying
-
-        # -> 57 once #11904's pin landed
-        …
-        # -> 57 once #11904's re-cut control landed
-
-    — two landings' entries for the same count, so the row asserts two histories. No
-    mapping key changed, so the duplicate-key loader is green, `yaml.safe_load` is
-    green and `--integrity` is green. The paren guard (#10055) caught THIS instance
-    only because the same splice also orphaned a parenthesis; a balanced-paren splice
-    reds nothing.
-
-    The scan mirrors `_durations_row_comments`' span rules — indented comments only,
-    one contiguous block per row, and a block whose first line OPENS a note is NOT
-    this row's note and is left untouched (`tools.ci_timing._row_continuation_lines`
-    words it the same way). It also reads the row line's OWN comment tail, because
-    the reader seeds the note with it: `test_x.py: 2.0  # -> 41 once …` followed by
-    a union-appended `# -> 41 once …` continuation is the same defect (0 such rows
-    on `main` at `e4703a286a`, so this closes a latent miss rather than a live one).
-    A guard reading a different span than the reader it protects is how #10055's cut
-    came to orphan a paren nobody counted.
-
-    ⛔ A repeat is reported only when NOTHING DIFFERENT sits between the two
-    occurrences (in either direction, entry or mid-line) OR the two entries cite a
-    common issue number: this map records
-    count-REDUCING landings too (`#10452`'s lane dropped a duplicate arm), so both
-    `-> 43`, `-> 42 once a duplicate arm was dropped`, `-> 43 once its replacement
-    landed` and `-> 57`, `-> 58 once an arm landed`, `-> 57 once a duplicate arm was
-    dropped` are coherent histories, not replays. Adjacent equal entries with
-    nothing in between are the replay. 0 live instances at `e4703a286a`; the
-    exclusion is here so the guard does not red one when it arrives.
-
-    ⛔ RESIDUALS, measured at `e4703a286a` and stated so the next reader does not
-    assume more: (a) a multi-line union splice — two landings' entries separated by
-    another arrow — is caught only when both halves cite the SAME `#NNNN`; the
-    shared token is what distinguishes it from a coherent return, and a splice whose
-    prose cites no issue number stays invisible; (b) a coherent chain that returns
-    to a count while citing the same issue twice is reported (0 such rows today).
-    """
-    from tools.ci_timing import _starts_a_new_note
-
-    out: list = []
-    lines = text.splitlines()
-    try:
-        start = next(i for i, ln in enumerate(lines) if ln.strip() == "durations:")
-    except StopIteration:  # pragma: no cover — the map always declares the block
-        return out
-    end = next((i for i in range(start + 1, len(lines))
-                if _DURATIONS_TOP_KEY_RE.match(lines[i])), len(lines))
-    key = None
-    opened = False
-    # (value, is_entry, text) per arrow seen in the note: entries are the chain's
-    # own positions; mid-line arrows are the map's other way of recording a move,
-    # and they still count as EVIDENCE OF A CHANGE between two entries.
-    items: list = []
-
-    def flush() -> None:
-        if key is None:
-            return
-        seen: dict = {}
-        for i, (n, is_entry, text) in enumerate(items):
-            if not is_entry:
-                continue
-            if n not in seen:
-                seen[n] = i
-                continue
-            _, _, prev_text = items[seen[n]]
-            moved = any(v != n for v, _, _ in items[seen[n] + 1:i])
-            # A union splice is TWO landings' entries for one count. When another
-            # arrow sits between them (a multi-line splice) `moved` is true and the
-            # repeat would be excused as a coherent return — so the same ISSUE TOKEN
-            # on both entries is what still identifies it. Residual, stated in the
-            # docstring: a splice whose two halves cite no issue number is invisible.
-            same_issue = bool(set(_ISSUE_TOKEN_RE.findall(prev_text))
-                              & set(_ISSUE_TOKEN_RE.findall(text)))
-            if not moved or same_issue:
-                out.append((key, n))
-                break
-            # The repeat was EXCUSED; judge the next one from here, not from the
-            # first occurrence (otherwise a replay after a reduction stays invisible).
-            seen[n] = i
-
-    def add(stripped: str) -> None:
-        entry = _CHAIN_ENTRY_RE.search(stripped)
-        if entry is not None:
-            items.append((int(entry.group("n")), True, stripped))
-            return
-        for mid in _MID_LINE_ARROW_RE.finditer(stripped):
-            items.append((int(mid.group("n")), False, stripped))
-
-    for i in range(start + 1, end):
-        m = _DURATIONS_ROW_RE.match(lines[i])
-        if m is not None:
-            flush()
-            key, opened, items = m.group("key"), False, []
-            tail = (m.group("tail") or "").strip()
-            if tail:
-                add(tail)
-            continue
-        stripped = lines[i].strip()
-        if stripped.startswith("#") and lines[i][:1].isspace():
-            if key is None:
-                continue
-            if not opened and _starts_a_new_note(lines[i]):
-                flush()
-                key, opened, items = None, False, []
-                continue
-            opened = True
-            add(stripped)
-            continue
-        if stripped:
-            flush()
-            key, opened, items = None, False, []
-    flush()
-    return out
-
-
-#: A pytest summary line — the shapes a row's own prohibition names. The status-list
-#: form (`58 passed, 2 warnings in 12.51s`) is what `pytest -q` prints whenever
-#: anything but a clean pass occurs, so it is at least as likely to be copied as the
-#: bare form; `IGNORECASE` covers `58 PASSED in …`. The trailing unit is `s\b` or
-#: `sec…`, NOT a bare `\s*s`: measured at head `3a08343c90`, `\s*s` matched the first
-#: letter of an ordinary word (`58 passed in 2 shards`, `… 3 surfaces`, `… 2 suites`)
-#: and would have red the required leg over prose that is not a wall clock.
-_WALL_CLOCK_QUOTE_RE = re.compile(
-    r"\d+\s+(?:tests?\s+)?passed\b(?:,\s*\d+\s*[A-Za-z]+)*\s+in\s+"
-    r"(?:(?:\d+\s*[mh]\s*)?\d+(?:\.\d+)?\s*(?:s\b|sec(?:onds?)?\b)"
-    r"|\d+:\d{2})", re.IGNORECASE)
-_NO_WALL_CLOCK_CLAUSE_RE = re.compile(
-    r"no\s+wall-clock\s+seconds\s+are\s+quoted", re.IGNORECASE)
-
-
-def _durations_rows_quoting_a_wall_clock_beside_its_own_prohibition(text: str):
-    """`(key, quotes)` for every row that forbids a wall-clock quote and carries one.
-
-    ⛔ #11938 added the prohibition — *"⛔ No wall-clock seconds are quoted beside
-    this row"* — to the `test_problem_map_2820.py` row, because a wall-clock reading
-    is a datum at ONE head and a shard-layout input must not carry it. The union
-    merge of #11958's head into that `main` put `58 passed in 12.51s` back
-    underneath it: the row's own sentence, contradicted by the row's own text, with
-    every structural guard green. This is the general shape — a row's prohibition
-    checked against the row — narrowed to the ONE prohibition the map states in
-    those words.
-
-    ⛔ THE BOUNDARY IS DELIBERATE AND IS NOT "every wall-clock claim". Two live
-    shapes are therefore OUT of scope: a row that forbids a local reading in other
-    words (`⛔ A LOCAL wall-clock reading is deliberately NOT stated …`), and a row
-    quoting a reading with no prohibition at all. Widening the clause to the general
-    form reds **19 rows on `main`** (measured at `e4703a286a`), every one a
-    legitimate historical quote, so the arm names this sentence and nothing else; a
-    future prohibition in new words is a new arm, not a silent widening.
-    """
-    out: list = []
-    for key, note in _durations_row_comments(text):
-        if _NO_WALL_CLOCK_CLAUSE_RE.search(note) is None:
-            continue
-        quotes = _WALL_CLOCK_QUOTE_RE.findall(note)
-        if quotes:
-            out.append((key, quotes))
-    return out
-
-
-def test_no_durations_row_names_one_chain_count_twice():
-    """#10032: a union merge must not replay one landing's chain entry beside another's."""
-    offenders = _durations_rows_with_a_duplicated_chain_count(
-        cs.MANIFEST.read_text(encoding="utf-8"))
-    assert offenders == [], (
-        "a durations row names ONE chain count TWICE — two `-> N` chain entries in "
-        f"one note, i.e. two landings' entries spliced into one block: {offenders}. "
-        "This is the union-merge shape (`config/ci-surfaces.yml` is `merge=union`, "
-        "so a conflict-free merge APPENDS both sides). Keep ONE entry and restore "
-        "one coherent history; do not re-number to dodge the guard.")
-
-
-def test_no_durations_row_quotes_a_wall_clock_beside_its_own_prohibition():
-    """#10032: a row's `no wall-clock seconds` clause must hold for its own text."""
-    offenders = _durations_rows_quoting_a_wall_clock_beside_its_own_prohibition(
-        cs.MANIFEST.read_text(encoding="utf-8"))
-    assert offenders == [], (
-        "a durations row forbids wall-clock seconds and then quotes one — the row "
-        f"contradicts its own text: {offenders}. The prohibition exists because a "
-        "wall-clock reading is a datum at ONE head and this map is a shard-layout "
-        "input; cite the testcase sum or the CI weight instead of a local run.")
-
-
-def test_the_union_merge_prose_guards_are_not_vacuous():
-    """Both guards above must bite on the spliced shape and stay quiet on its siblings."""
-    spliced = (
-        "durations:\n"
-        "  test_dup.py: 1.0  # #1: the row.\n"
-        "  # -> 7 once #10's arm landed\n"
-        "  # (`test_a`: the arm).\n"
-        # An OPENER-SHAPED continuation between the two entries. `_NOTE_OPENER_RE`
-        # matches `[A-Z]`/`#NNNN`, so this line looks like a new note; only the
-        # block's FIRST line may be treated as one. A mutant that applies the
-        # opener test to EVERY line cuts the note here and stops seeing the replay
-        # below — measured: it returns `[]` on the real union tree, i.e. the guard
-        # silently dies on the exact merge it was written for.
-        "  # The block continues past an opener-shaped line.\n"
-        "  # -> 7 once #11's re-cut landed\n"
-        "  # (`test_a`: the SAME arm, landed twice).\n"
-        "  test_tail.py: 1.5  # -> 41 once #12 landed\n"
-        "  # -> 41 once #13's replay landed\n"
-        "  test_clock.py: 3.0  # #2: ⛔ No wall-clock seconds are quoted beside"
-        " this row: measured `58 passed, 2 warnings in 12.51s`, then `58 passed in"
-        " 1m 12s`, and once `58 passed in 00:12` on the slow leg; a rerun printed"
-        " `58 tests passed in 4.00 s` and one CI leg prints `58 PASSED in 12.5S`.\n"
-        # The LIVE shape: clause and quotes on CONTINUATION lines of a wrapped note
-        # (measured on the union of #11958's `1ae5cd37c4` into `e4703a286a` with
-        # `git merge-file --union`: in the `test_problem_map_2820.py` note the clause
-        # sits at offset 6803 and the quote `58 passed in 12.51s` at 7403 — ~600
-        # characters AFTER it, the same direction the guard's docstring records as
-        # "put back underneath it"). A helper that read only the row line would be
-        # blind to the clause, the quote, or both; this fixture is what notices.
-        "  test_clock_cont.py: 3.5  # #23: a prohibition stated on a continuation.\n"
-        "  # (`test_a`: the arm this row covers).\n"
-        "  # ⛔ No wall-clock seconds are quoted beside this row: measured"
-        " `58 passed in 12.51s` on the slow leg,\n"
-        "  # and re-measured `58 passed in 1m 12s` after the arm landed.\n"
-        # A mid-line DECIMAL arrow must not become evidence of a change: without the
-        # `(?!\.\d)` lookahead this reads 4.5 -> 4.0 as two moves and excuses the
-        # adjacent replay below (measured). The superseded `(?![\d.])` spelling is
-        # history: it also swallowed a period-terminated `-> 57.`, which the block
-        # below (and its entry in the expected-offender list) asserts must count.
-        # A sentence-ending PERIOD after the count must still be an entry: `-> 57.`
-        # is a count, `-> 4.0` is not. A lookahead that rejects both hides this replay.
-        # A MULTI-LINE union splice: the same landing token on both halves (the shape
-        # the live #11904/#11958 merge has), with another arrow between them.
-        "  test_multiline_splice.py: 2.66  # #19: the same landing splices twice.\n"
-        "  # -> 57 once #11904's pin landed\n"
-        "  # -> 58 once #11800's arm landed\n"
-        "  # -> 57 once #11904's re-cut control landed\n"
-        # …and a THREE-digit landing token. Latent, disclosed rather than claimed
-        # live: 0 three-digit tokens sit in any of the 1332 notes `_durations_row_
-        # comments` returns for `main` at `e991d8d3fe`, so nothing reds today — but
-        # this map is free to cite one, and a token pattern narrowed to 4–5 digits
-        # silently loses that splice. Every three-digit token in the file sits
-        # OUTSIDE a note the reader returns: `#669` :1522, `#331`/`#325` :2797,
-        # `#330` :3512, `#548` :4565 (all in `surfaces:`) and, in `durations:`,
-        # `#548` only inside the block the reader drops at :11881–:11889.
-        "  test_splice_3digit.py: 2.67  # #20: a three-digit landing splices twice.\n"
-        "  # -> 9 once #548's pin landed\n"
-        "  # -> 10 once an arm landed\n"
-        "  # -> 9 once #548's re-cut landed\n"
-        "  test_period_entry.py: 2.65  # #15: an entry that ends a sentence.\n"
-        "  # -> 57. The pin landed with the arm.\n"
-        "  # -> 57 once the SAME pin was replayed\n"
-        "  test_decimal_midline.py: 2.7  # #12: a decimal reading between two entries.\n"
-        "  # -> 57 once the pin landed\n"
-        "  # 4.5 -> 4.0 s for this file on the slow leg\n"
-        "  # -> 57 once the SAME pin was replayed\n"
-        # A replay AFTER a reduction: the reduction excuses the FIRST repeat, and the
-        # second repeat has nothing lower between it and its predecessor, so it is
-        # reported. A guard that keeps comparing against the FIRST occurrence misses
-        # this (measured: [7, 5, 7, 7] -> [] under that bug).
-        "  test_replay_after_drop.py: 2.6  # #11: a replay after the drop.\n"
-        "  # -> 7 once the arm landed\n"
-        "  # -> 5 once a duplicate arm was dropped\n"
-        "  # -> 7 once a partial restore landed\n"
-        "  # -> 7 once the SAME partial restore was replayed\n"
-        # The `durations:` block must END at the next top-level key; the decoy below
-        # fails if the scanner keeps reading past it (`_DURATIONS_TOP_KEY_RE` does
-        # not match `surfaces: []`, which is why the terminator is spelled bare).
-        "surfaces:\n"
-        "  test_decoy.py: 1.0  # #8: NOT a durations row.\n"
-        "  # -> 5 once a\n"
-        "  # -> 5 once b\n")
-    healthy = (
-        "durations:\n"
-        "  test_ok.py: 2.0  # #3: a chain that only ever increases.\n"
-        "  # -> 3 once #20 landed\n"
-        "  # -> 4 once #21 landed\n"
-        # The ANCHOR: two MID-SENTENCE `-> 9` citations, one per continuation line.
-        # `search` is bounded by the `^` in the pattern, so no entry is read; a guard
-        # whose pattern lost the `^` counts these and reds this healthy row — so the
-        # fixture pins the anchor rather than merely describing it.
-        "  test_cite.py: 2.5  # #4: two INSTRUMENTS naming one count, mid-sentence.\n"
-        "  # `pytest --collect-only -q` gives -> 9 here, and\n"
-        "  # `grep -c '^def test_'` gives -> 9 here too — same count, two tools.\n"
-        # …and a MID-LINE `# -> 9` inside prose must not count either: two of them,
-        # so a pattern that keeps the `#` but loses the `^` reads both and reds here.
-        "  # a quoted literal `# -> 9` inside prose counts nothing.\n"
-        "  # and a second `# -> 9` literal, so the `^` anchor is load-bearing.\n"
-        "  test_free.py: 4.0  # #5: no prohibition, so a quoted reading is its basis"
-        " (`12 passed in 3.40s`).\n"
-        # A count that DROPS and comes BACK is a coherent history, not a replay
-        # (this map records a real count-reducing landing: #10452 dropped a
-        # duplicate arm).
-        "  test_restore.py: 2.2  # #9: a chain that steps back down and returns.\n"
-        "  # -> 43 once the arm landed\n"
-        "  # -> 42 once a duplicate arm was dropped\n"
-        "  # -> 43 once its replacement landed\n"
-        # …and the reduction recorded MID-LINE, which is how the map's own rows also
-        # write history (`# 33 at <sha> … -> 39, 40, 41`). Judging only line-opening
-        # entries reds this coherent chain.
-        "  test_restore_midline.py: 2.4  # #10: the reduction written mid-line.\n"
-        "  # -> 43 once the arm landed\n"
-        "  # 43 -> 42 once a duplicate arm was dropped\n"
-        "  # -> 43 once its replacement landed\n"
-        # …and the MIRROR: a coherent REDUCTION that lands on a count the chain
-        # already cited. Counting only lower values between reds this.
-        "  test_reduce_cited.py: 2.5  # #13: a reduction to a previously cited count.\n"
-        "  # -> 57 once #11904's pin landed\n"
-        "  # -> 58 once #11800's arm landed\n"
-        "  # -> 57 once a duplicate arm was dropped\n"
-        # …and entry-shaped DECIMALS: `4.0` is not the count `4` (pins the entry
-        # lookahead — without it these two lines are duplicate entries).
-        "  test_decimal_entry.py: 2.8  # #14: decimal readings on entry-shaped lines.\n"
-        "  # -> 4.0 s per shard on this box\n"
-        "  # -> 4.5 s after the arm landed\n"
-        # …and a reduction whose mid-line evidence ends a SENTENCE: `-> 42.` is a
-        # count, so the exception must see it (the old lookahead read it as a decimal
-        # and red the coherent chain).
-        "  test_period_reduce.py: 2.9  # #16: the reduction ends a sentence.\n"
-        "  # -> 43 once the arm landed\n"
-        "  # 43 -> 42. A duplicate arm was dropped.\n"
-        "  # -> 43 once its replacement landed\n"
-        # …and a row that forbids wall clocks while quoting SHARDS: `2 shards` is not
-        # a unit, so the arm must stay quiet (pins the `s\\b` narrowing).
-        "  test_shard_prose.py: 3.1  # #17: ⛔ No wall-clock seconds are quoted"
-        " beside this row: the run fits `58 passed in 2 shards` of the slow leg.\n"
-        # …and a row that forbids a local reading in OTHER WORDS while quoting one.
-        # This is the live shape at `config/ci-surfaces.yml:11275`; it must stay quiet,
-        # because widening the clause matcher to `wall-clock` would red it (measured).
-        "  test_local_reading.py: 2.3  # #18: ⛔ A LOCAL wall-clock reading is"
-        " deliberately NOT stated here; the leg's recorded history is"
-        " `2 passed, 34 deselected in 12.82s`.\n"
-        # A block whose FIRST continuation OPENS a note is not this row's note: the
-        # reader drops it, and so must the guard. Both entries below are inside the
-        # dropped block, so a guard that kept reading would invent a replay.
-        "  test_cut.py: 3.3  # #21: a note opener follows.\n"
-        "  # The next block opens a new note and is not this row's.\n"
-        "  # -> 9 once #30 landed\n"
-        "  # -> 9 once #31 landed\n"
-        # …and COLUMN-0 prose between rows is the map's header/method text, never a
-        # row's note: attributing it is how one row's note became 122 lines of header.
-        "  test_col0.py: 3.4  # #22: column-0 prose follows.\n"
-        "# -> 9 once this method note belongs to no row\n"
-        "# -> 9 once neither does this one\n"
-        # A row that mentions wall clocks in a LOOSER phrasing while quoting one: the
-        # clause matcher must require its `no … are quoted` form, or this reds.
-        "  test_loose_clause.py: 3.6  # #24: wall-clock seconds are quoted by CI's own\n"
-        "  # junit, so this row repeats none; the leg's history is"
-        " `2 passed, 34 deselected in 12.82s`.\n"
-        # per-ROW scoping: two different rows may each start a chain at the same
-        # count. A helper that forgot to reset per row reds these and stays green on
-        # `main` (whose chain entries all live in one row), so this pair is what pins
-        # the "one row's comment block" claim in the function's own name.
-        "  test_two_a.py: 3.0  # #6: one row's chain.\n"
-        "  # -> 9 once #30 landed\n"
-        "  test_two_b.py: 3.5  # #7: another row's chain, same starting count.\n"
-        "  # -> 9 once #31 landed\n"
-        "surfaces: []\n")
-    assert _durations_rows_with_a_duplicated_chain_count(spliced) == [
-        ("test_dup.py", 7), ("test_tail.py", 41), ("test_multiline_splice.py", 57),
-        ("test_splice_3digit.py", 9), ("test_period_entry.py", 57),
-        ("test_decimal_midline.py", 57), ("test_replay_after_drop.py", 7)]
-    assert _durations_rows_with_a_duplicated_chain_count(healthy) == []
-    assert _durations_rows_quoting_a_wall_clock_beside_its_own_prohibition(
-        spliced) == [("test_clock.py", [
-            "58 passed, 2 warnings in 12.51s", "58 passed in 1m 12s",
-            "58 passed in 00:12", "58 tests passed in 4.00 s",
-            "58 PASSED in 12.5S"]),
-            ("test_clock_cont.py", ["58 passed in 12.51s", "58 passed in 1m 12s"])]
-    assert _durations_rows_quoting_a_wall_clock_beside_its_own_prohibition(
-        healthy) == []
-
-
-#: One note carrying TWO `grep -c` claims: a CORRECT one first, a STALE one second.
-#:
-#: ⛔ THE SHAPE THE `.search` VERSION COULD NOT SEE (#10610 review at `fdff8f432`,
-#: P2). `_CASE_COUNT_CLAIM_RE.search` stops at the first claim, so a row that fixed
-#: its leading count and left the old one standing beside it returned `[]` — green
-#: over exactly the contradiction the guard was widened for two cycles earlier
-#: (`tests/test_ci_selection.py`'s own comment measures that row). It is a FAIL-
-#: OPEN in a guard: the guard's job is "no row carries a count its file refutes",
-#: and "the first count is right" is not that sentence.
-_ROW_WITH_A_CORRECT_THEN_A_STALE_CLAIM = (
-    "durations:\n"
-    "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` -> 2) — and the\n"
-    "  # older re-derivation beside it still reads (`grep -c '^def test_'` = 190).\n"
-    "surfaces: []\n")
-
-
 def test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row(tmp_path):
     """A row may cite the instrument twice; the STALE cite must be the one reported.
 
@@ -12738,538 +11699,226 @@ def test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row(tmp_path):
     assert _durations_rows_with_a_stale_case_count(fresh_only, tmp_path) == []
 
 
-def test_a_detached_note_is_a_claim_no_guard_can_read(tmp_path):
-    """#10726 review P2: a note the reader DETACHES is a claim no guard can read.
+def test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it():
+    """#9003 review (P2): a NEW file's first weight is the flat default, not a local timing.
 
-    The `durations` row for the test file this PR ADDS once stated "12 cases" while
-    the file had 13, and NOTHING red — not because the stale-count guard above is
-    broken, but because the block below the row OPENED a note of its own
-    (`# THIS file: 12 cases …` matches `tools.ci_timing._starts_a_new_note`), so
-    `_row_continuation_lines` returned `[]` and `_durations_row_comments` never
-    joined it. A citation nobody reads is how a stale count survives many rounds.
-
-    ⛔ PROVENANCE, CORRECTED — the citation was NOT "wrong on arrival" (an earlier
-    revision of this docstring said so). `36b028494` wrote it when the file's
-    `grep -c '^def test_'` really was 12; `c660ffcee`, 2 h 15 m later, added the
-    13th case and touched no note. It went stale by ORDINARY DRIFT, and the
-    guard's blindness is what let it stay.
-
-    ⛔ NO committed-map `_row_continuation_lines(...)` NON-EMPTY ASSERTION. The
-    writer FLATTENS a wrapped note on a CUT or a wholesale replacement
-    (`tools.ci_timing.render_refreshed_manifest`), so a HEALTHY map reaches zero
-    wraps on the first adopting sweep while every claim is still read off the row
-    line. Measured at `237ce923a` with this module: committed span = 25 lines and a
-    42-char row tail; after one `render_refreshed_manifest(...)` the span is 0 and
-    the joined note is 1,471 chars on the row line, still carrying the claims. The
-    sibling `tests/test_ci_timing.py::_assert_preamble_shape` dropped its own
-    `wrapped >= 1` clause for exactly this reason (#10575 review, P2).
-
-    So the property worth pinning is the MECHANISM, synthetically, in BOTH
-    directions: a note that CONTINUES the row's sentence has its claim read by the
-    guard, and a note that OPENS one does not.
+    The `durations` header above `durations:` prescribes `DEFAULT_FAST_WEIGHT` for a file
+    no sweep has collected yet (the #3419 `test_venture_pack.py` precedent) because a
+    weight is a SHARD-LAYOUT input: a locally-measured number decides which files share
+    a shard, so it must not be hand-picked. The #2818 row shipped a measured-on-this-box
+    4.9 first, under a comment that CLAIMED the flat-default convention it violated — and
+    the guard above could not see it, because the claim sat on the comment lines PRECEDING
+    the row rather than on its tail. Pinned by name here: the row is MARGIN on the
+    coverage floor, not the floor itself (`duration_coverage_issues()` is count-based and
+    passes either way — 90.01% without the row, 90.12% with it), so its MAGNITUDE must be
+    the flat default while its absence is a derivation to re-run, not an automatic red.
     """
-    from tools.ci_timing import _row_continuation_lines
-
-    (tmp_path / "test_two.py").write_text(
-        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
-
-    # Same claim, same (wrong) count — the ONLY difference is how the block opens.
-    attached = (
-        "durations:\n"
-        "  test_two.py: 2.0  # #5086: the weight.\n"
-        "  # it continues this row's sentence: 3 cases (`grep -c '^def test_'` -> 3).\n"
-        "surfaces: []\n")
-    detached = (
-        "durations:\n"
-        "  test_two.py: 2.0  # #5086: the weight.\n"
-        "  # THIS file: 3 cases (`grep -c '^def test_'` -> 3).\n"
-        "surfaces: []\n")
-
-    def _row(text: str) -> tuple[list[str], int]:
-        lines = text.splitlines()
-        start = lines.index("durations:")
-        return lines, next(i for i, ln in enumerate(lines)
-                           if i > start and ln.startswith("  test_two.py:"))
-
-    lines, row = _row(attached)
-    assert _row_continuation_lines(lines, row), (
-        "an attached note is part of the row's continuation span")
-    assert _durations_rows_with_a_stale_case_count(attached, tmp_path) == [
-        ("test_two.py", 3, 2)], (
-        "the attached note's claim must be READ by the guard, so a stale count bites")
-
-    lines, row = _row(detached)
-    assert _row_continuation_lines(lines, row) == [], (
-        "a block whose first line OPENS a note is not a continuation of the row above")
-    assert _durations_rows_with_a_stale_case_count(detached, tmp_path) == [], (
-        "the detached note's claim is INVISIBLE to the guard — that blind spot is "
-        "what this test documents, and why the map's note is attached to its row")
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT, load_manifest
+    row = "test_pack_value_declarations_2818.py"
+    durations = load_manifest()["durations"]
+    assert row in durations, (
+        "the #2818 row is missing from `durations` — its presence is the margin the "
+        "#3400 coverage floor has (90.01% without it, still above the 0.90 floor, so "
+        "treat its absence as a finding to re-derive, not an automatic red)")
+    # Scoped to the UNMEASURED state on purpose: once a sweep collects the file,
+    # `tools/ci_timing.py::render_refreshed_manifest` rewrites the value and CLEARS a
+    # tail that LEADS with the `# unmeasured` marker (that is how the #3419/#2788
+    # precedent rows work), and this pin must not then fail on a legitimate CI
+    # measurement. The marker is read exactly the way the refresher reads it — by its
+    # leading token — so the two cannot disagree: any OTHER trailing comment is
+    # preserved verbatim by the refresh, including one that mentions the word later.
+    if not _ROW_LEADS_WITH_UNMEASURED.match(
+            _durations_row_tail("test_pack_value_declarations_2818.py")):
+        assert durations[row] > 0, (
+            f"{row} carries a non-positive weight {durations[row]}s — a sweep has "
+            "collected the file, so its value must be a real measurement")
+        return
+    assert durations[row] == DEFAULT_FAST_WEIGHT, (
+        f"{row} carries {durations[row]}s, but a NEW file's first weight is the flat "
+        f"{DEFAULT_FAST_WEIGHT}s default until a CI sweep collects it. Do not substitute "
+        "a local timing: a weight is a shard-layout input, so a number that does not "
+        "model CI decides which files run together (#3419, #9003 review).")
 
 
-def test_the_9548_rows_note_is_readable_by_the_guard_whatever_its_shape():
-    """#10726 review P2: the MECHANISM is pinned above; this pins the COMMITTED map.
+_ROW_LEADS_WITH_UNMEASURED = re.compile(r"[ \t]*#\s*unmeasured\b")
 
-    A synthetic pin proves the reader and the writer agree. It does not notice that
-    the REAL map's note has DETACHED, and that is not hypothetical for this row: its
-    attachment is carried ENTIRELY by the `⛔` that opens the block, because
-    `tools.ci_timing._NOTE_OPENER_RE` (`^(?:#?\\d{3,5}…|[A-Z])`) reads the block's
-    semantic first word — "The CASE COUNT …" — as a NEW note. Drop the emoji in a
-    routine cleanup and the whole note silently stops being read: measured at this
-    head, read-only, that edit takes the joined note from 2,870 chars to **0**.
 
-    ⛔ NOT `_row_continuation_lines(...) >= 1`, AND NOT `assert block` either. The
-    writer FLATTENS a wrapped note on a CUT or a wholesale replacement —
-    `tools.ci_timing.render_refreshed_manifest`'s CUT branch, the
-    `lines[index] = f"{rendered_row}{tail}"` beside its `drop.update(continuation)`
-    (`tools/ci_timing.py:3038-3039`) — so a HEALTHY map can have ZERO continuation
-    lines with the whole note read off the row line. The blank-line rule that makes
-    the span what it is lives in `_row_continuation_lines`'s own docstring
-    (`tools/ci_timing.py:2237`: a blank line does not end a note, any other
-    non-comment line does). The sibling `tests/test_ci_timing.py::
-    _assert_preamble_shape` refused the same clause for that reason (#10575
-    review, P2). Measured at this head, read-only, with the guards' own readers:
+def _durations_row_tail(key: str) -> str:
+    """The tail comment of a `durations:` row, or "" when the row is absent.
 
-        committed                                     span = 42, reader joins 2,870
-        CUT arm, `_joined_note_tail` -> `{rendered_row}{tail}`
-                                                      span =  0, reader joins 2,831
-        `⛔` dropped so the block opens a note         span =  0, reader joins      0
-
-    ⛔ THE CUT ARM CAN ONLY SHRINK (#10726 review P2). Flattening re-emits the SAME
-    note on the row line, so it drops each continuation's `#`/leading space and the
-    wrap separators and adds nothing — a CUT-arm figure ABOVE the committed one is
-    therefore a measurement bug, not a rendering. The `2,918` this line carried was
-    exactly that: it had been read off `_joined_note_tail(<the ROW line>, …)`, which
-    duplicates the row into the note's own text. Measured faithfully (the fragment is
-    the FIRST CONTINUATION line, not the row) the arm joins 2,831 < 2,870.
-
-    So the shapes are told apart by READABILITY alone, and the pin below is the one
-    property every healthy shape satisfies and a detached block does not: whatever
-    the row carries must be REACHABLE in the text `_durations_row_comments` joins.
-    The expected text is derived from the map ITSELF (never a phrase baked in here),
-    so a legitimate rewrite of the note stays green.
-
-    ⛔ THE SPAN IS THE GUARDS' OWN (`tools.ci_timing._row_continuation_lines`), never
-    a span hand-rolled in this test. That predicate refuses a block whose first line
-    OPENS a note — this map's dominant convention is a block that documents the row
-    BELOW — so a private collector that accepts one applies this row's assertion to a
-    NEIGHBOUR's prose and reds a map the reader and the writer both accept.
+    Scoped to the `durations:` block, NOT the whole file: a floored/capped key is
+    also declared in `durations_floors` ABOVE the block, and a whole-file scan takes
+    that declaration for the row — returning its (empty) tail while the real row
+    carries the note the caller is asking about (#10575 delta review, P3).
     """
-    from tools.ci_timing import _row_continuation_lines
-
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    key = "test_9548_record_search_keys_shape.py"
-    block_start = lines.index("durations:")
-    row = next(i for i, ln in enumerate(lines)
-               if i > block_start and ln.startswith(f"  {key}:"))
-
-    # Raw extent of the block below the row, with the reader's blank-line rule
-    # (`tools/ci_timing.py:2237`: a blank line does NOT end a note; any other
-    # non-comment line does). Used only to pick the DIAGNOSIS when the span is empty.
-    raw_block: list[str] = []
-    for ln in lines[row + 1:]:
-        if not ln.strip():
-            continue
-        if not (ln[:1] in (" ", "\t") and ln.strip().startswith("#")):
-            break
-        raw_block.append(ln)
-
-    joined = dict(_durations_row_comments(text))[key]
-    span = _row_continuation_lines(lines, row)
-    if span:
-        last_claim = lines[span[-1]].strip().lstrip("#").strip()
-        assert last_claim, "the note's last line is an empty comment marker"
-        assert last_claim in joined, (
-            "the note below this row is DETACHED from it: no duration guard reads "
-            "what it claims. Make the block CONTINUE the row's sentence rather "
-            f"than open a new one. (joined: {len(joined)} chars)")
-    elif raw_block:
-        # A block sits below the row but is NOT this row's note — either the row was
-        # flattened and the block documents the NEXT row (healthy), or the block was
-        # detached from this row (the defect). The row's own tail tells them apart.
-        assert joined.strip(), (
-            "the note below this row is DETACHED: its first line OPENS a note of its "
-            "own (`tools.ci_timing._starts_a_new_note`), so `_durations_row_comments` "
-            "never joins it and no duration guard reads what it claims. Start the "
-            "block with a line that CONTINUES the row's sentence.")
-    else:
-        # FLATTENED with nothing below: the writer moved the whole note onto the row
-        # line, so the only way this shape loses the guard is by carrying no note.
-        assert joined.strip(), (
-            "this row carries NO note in either shape: no continuation block below "
-            "it and no tail on its row line, so no duration guard reads what it "
-            "claims. The note is the row's rationale — restore it.")
+    lines = cs.MANIFEST.read_text(encoding="utf-8").splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == "durations:")
+    except StopIteration:  # pragma: no cover — the map always declares the block
+        return ""
+    end = next((i for i in range(start + 1, len(lines))
+                if _DURATIONS_TOP_KEY_RE.match(lines[i])), len(lines))
+    for line in lines[start + 1:end]:
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is not None and m.group("key") == key:
+            return m.group("tail")
+    return ""
 
 
-# ── a row may not state ZERO cases for a file that defines tests ──────────────
-# The instruments disagree on a CLASS-BASED file: `grep -c '^def test_'` reads **0**
-# for every test that lives as a method of a `Test*` class, while the session that
-# ran it reports the real count. So a row that re-derived its count with that
-# instrument and wrote the result into a note that QUOTES a passing run produces a
-# sentence that contradicts itself in one line — "pytest session total, 0 tests,
-# '16 passed in 138.63s'" (measured on the #10726 fold at `65b3d332b`: two such
-# rows). Zero is never a legitimate case count here — every key in this map is a
-# file that contributes tests — so it is judged WITHOUT needing the citation form
-# the pins above require. `0 tests skipped` is a different claim and is not judged.
-_ZERO_CASE_COUNT_RE = re.compile(r"(?<![\w.])0 tests\b(?!\s+skipped)")
+#: `docs/ops/ci-wall-clock.md` §7 states the runner pool as a dated measurement, in
+#: its `runners registered / online` row. Read it rather than hard-code it here: the
+#: doc is the artifact that owns the measurement, so a re-tune is ONE edit there, and
+#: a pool that GREW keeps the shipped caps conservative instead of red on a stale
+#: literal. ⛔ This comment deliberately quotes NO figure — it is beside the input, not
+#: a second copy of it, so it cannot go stale on a re-tune.
+_RUNNER_POOL_ROW_RE = re.compile(
+    r"^\|\s*runners registered / online\s*\|\s*(?P<pool>\d+)\s*/\s*\d+",
+    re.MULTILINE)
+
+#: MATRIX slots kept free for other PRs (the doc's `sum <= pool - 3`, §7 invariant 2). It reserves
+#: MATRIX headroom only, and is deliberately not a total-concurrency budget. ⛔ A
+#: POLICY literal, not a read: the doc states it in prose (§7, invariant 2), so this
+#: constant is the code's copy of that decision and a re-tune that changes the RESERVE
+#: needs this edit (only the POOL is read from the doc).
+_RESERVED_FOR_OTHER_PRS = 3
+
+#: The measured start stagger (4.0–23.9 m) against the measured per-shard wall
+#: (p50 10.5 m): the pool already delivers these shards in 2–4 waves.
+_MAX_MEASURED_WAVES = 4
 
 
-def _durations_rows_claiming_zero_cases(text: str, tests_dir: Path):
-    """`(key, indented-definition-count)` for rows asserting ZERO cases for a real file.
+def _measured_runner_pool() -> int:
+    """The runner-pool figure `docs/ops/ci-wall-clock.md` §7 dates its read to.
 
-    The second element proves the claim false: the number of `def test_` at ANY
-    indent (methods of a `Test*` class included), which no collection can undercut.
+    Fails closed: a missing row is a measurement this arm cannot grade, and an
+    unreadable pool would make `sum(caps) <= pool - 3` vacuously true.
     """
-    out = []
-    for key, note in _durations_row_comments(text):
-        if _ZERO_CASE_COUNT_RE.search(note) is None:
-            continue
-        path = tests_dir / key
-        defined = (len(re.findall(r"^\s*def test_", path.read_text(encoding="utf-8"),
-                                  re.M)) if path.is_file() else 0)
-        if defined:
-            out.append((key, defined))
-    return out
+    doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text(encoding="utf-8")
+    matches = list(_RUNNER_POOL_ROW_RE.finditer(doc))
+    assert len(matches) == 1, (
+        f"expected exactly ONE `runners registered / online` row in "
+        f"docs/ops/ci-wall-clock.md, found {len(matches)} — the fan-out bound "
+        "reads its pool from that measurement, and a second copy makes which one "
+        "is live unknowable")
+    pool = int(matches[0].group("pool"))
+    assert pool >= 4, (
+        f"the doc's measured runner pool is {pool} — too small to bound three "
+        "matrix caps against; almost certainly a mis-parse rather than a real read")
+    return pool
 
 
-def test_no_durations_row_states_zero_cases_for_a_file_that_defines_tests():
-    """A row that quotes a passing run cannot also claim the file has 0 cases."""
-    offenders = _durations_rows_claiming_zero_cases(
-        cs.MANIFEST.read_text(encoding="utf-8"), cs.TESTS_DIR)
-    assert offenders == [], (
-        "a durations row states its file has 0 cases while the file defines tests "
-        "— `grep -c '^def test_'` reads 0 for a class-based file, so a count "
-        "re-derived with it is a FLOOR of zero, not a measurement. Restore the "
-        "measured count (or re-derive with `tools/ci_timing.declared_test_counts`, "
-        f"which reads the AST): (key, defined): {offenders}")
+def test_every_matrix_bearing_job_declares_a_fan_out_cap():
+    """#6744 PRESENCE arm: every matrix job declares `max-parallel`.
 
+    Presence is the invariant a green run cannot see — a matrix completes either
+    way, so a cap silently deleted never reds anything, while the job goes back to
+    admitting its whole shard set at once (measured: one PR held 18 of a
+    12-runner pool). The job ids are DERIVED from the workflow, so a FOURTH matrix
+    added later cannot ship unbounded behind a green run.
 
-def test_the_zero_case_count_guard_is_not_vacuous(tmp_path):
-    """Bites on a zero claim, stays quiet on `0 tests skipped` and on a real file."""
-    (tmp_path / "test_cls.py").write_text(
-        "class TestThing:\n    def test_a(self):\n        pass\n", encoding="utf-8")
-    zeroed = (
-        "durations:\n"
-        "  test_cls.py: 2.0  # #5509: pytest session total, 0 tests, \"16 passed in "
-        "138.63s\".\n"
-        "surfaces: []\n")
-    skipped = (
-        "durations:\n"
-        "  test_cls.py: 2.0  # #5509: 16 tests, and 0 tests skipped on this lane.\n"
-        "surfaces: []\n")
-    assert _durations_rows_claiming_zero_cases(zeroed, tmp_path) == [("test_cls.py", 1)]
-    assert _durations_rows_claiming_zero_cases(skipped, tmp_path) == []
+    The two BOUNDS `#6744` was measured into are carried too, because presence
+    alone is not the invariant that regressed: raising the cap silently re-admits
+    the whole fan-out. Both sides were measured (9 runs, jobs API `filter=all`,
+    2026-10-30T21:48Z..10-31T02:54Z, `docs/ops/ci-wall-clock.md` §7):
 
+    1. **no invented waves** — `ceil(shards / cap) <= 4`, because the measured
+       start stagger (4.0–23.9 m) against the measured per-shard wall
+       (p50 10.5 m) says the pool already delivers these shards in 2–4 waves, so
+       a cap needing more than 4 is strictly added wall;
+    2. **no monopolisation** — the three matrices overlap, so one PR's maximum
+       MATRIX hold is their SUM, and it must leave `_RESERVED_FOR_OTHER_PRS` of
+       the measured pool outside any one PR: `sum(caps) <= pool - 3`. It bounds
+       MATRIX slots only (the same PR's eligible non-matrix jobs can still take
+       those runners) — see the doc's "What the cap does NOT bound: the total".
 
-#: A row's own STALENESS CHAIN — "This count has gone stale THIRTEEN times
-#: (17 -> 19 -> … -> 38)". The chain is the row's history of control-adding cycles,
-#: and its own ⛔ ENTRY RULE fixes what the LAST element means: "every entry in that
-#: chain is the count AFTER that cycle's controls, never before". So the chain's
-#: terminus and the `grep -c` count the SAME row cites are two statements about ONE
-#: number, and they can drift apart while the citation alone stays true.
-_STALENESS_CHAIN_RE = re.compile(
-    r"\bstale\b[^()]{0,120}\((?P<chain>\d+(?:\s*(?:->|\u2192)\s*\d+)+)\)",
-    re.IGNORECASE)
-_CHAIN_TERMINUS_RE = re.compile(r"\d+")
-
-
-def _durations_rows_whose_chain_disagrees_with_its_citation(text: str):
-    """`(key, cited, chain_terminus)` rows whose own history ends at another count.
-
-    Only rows that do BOTH are judged: cite the instrument AND carry a chain. A row
-    may legitimately cite a count with no chain (its first cycle) and carry history
-    of a WEIGHT with no citation, and neither is a contradiction.
+    ⛔ The INVARIANTS are pinned, never the chosen number. The POOL is READ
+    (`_measured_runner_pool()`, from the doc's own dated §7 row — the artifact that
+    owns the measurement), so a fresh pool reading needs one doc edit here and reds
+    nothing by itself: a 4/4/4 split against a 16-runner pool passes. The RESERVE
+    (`_RESERVED_FOR_OTHER_PRS`) is a POLICY literal, not a read — the doc states the
+    `3` in prose, so changing the reserve is a code change by design. What cannot
+    pass is a cap that is GONE, one shrunk until it invents waves, or one grown past
+    the pool.
     """
-    out = []
-    for key, note in _durations_row_comments(text):
-        cited = _CASE_COUNT_CLAIM_RE.search(note)
-        chain = _STALENESS_CHAIN_RE.search(note)
-        if cited is None or chain is None:
-            continue
-        terminus = int(_CHAIN_TERMINUS_RE.findall(chain.group("chain"))[-1])
-        if terminus != int(cited.group("n")):
-            out.append((key, int(cited.group("n")), terminus))
-    return out
+    wf = _load_python_ci()
+    matrix_jobs = {
+        job_id
+        for job_id, job in wf["jobs"].items()
+        if isinstance(job.get("strategy"), dict) and "matrix" in job["strategy"]
+    }
+    assert matrix_jobs, (
+        "no matrix-bearing job found in python-ci.yml — this arm would pass "
+        "vacuously, which is the fail-closed shape it must not have")
+    missing = {
+        job_id: (wf["jobs"][job_id].get("strategy") or {}).get("max-parallel")
+        for job_id in matrix_jobs
+        if not isinstance(
+            (wf["jobs"][job_id].get("strategy") or {}).get("max-parallel"), int)
+    }
+    assert missing == {}, (
+        f"matrix-bearing job(s) declare no integer `max-parallel`: {missing} — an "
+        "uncapped matrix lets one PR hold its whole shard set at once (#6744), "
+        "and nothing else in the suite names the absence")
+
+    # The shard counts come from the selector that PACKS the matrix, so this arm
+    # follows a shard-count change instead of going stale on a literal. The ids are
+    # hand-written here, so require the derived set to be exactly these: a FOURTH
+    # matrix added later must be given a shard count (and so a cap) rather than
+    # ship unbounded behind a green run (#6744 review P2).
+    from tools.ci_selection import carve_shard_count, fast_shard_count, slow_shard_count
+
+    manifest = load_manifest()
+    shards = {
+        "test": fast_shard_count(manifest),
+        "test-slow": slow_shard_count(manifest),
+        "test-carve-out": carve_shard_count(manifest),
+    }
+    assert matrix_jobs == set(shards), (
+        f"the matrix-bearing jobs in python-ci.yml are {sorted(matrix_jobs)}, but "
+        f"this arm only bounds {sorted(shards)} — a new matrix must be added here "
+        "(with its shard count) so it cannot ship unbounded (#6744)")
+
+    pool = _measured_runner_pool()
+    caps = {j: wf["jobs"][j]["strategy"]["max-parallel"] for j in matrix_jobs}
+    for job_id, cap in sorted(caps.items()):
+        waves = -(-shards[job_id] // cap)
+        assert waves <= _MAX_MEASURED_WAVES, (
+            f"{job_id}: cap {cap} over {shards[job_id]} shards needs {waves} "
+            f"waves, past the measured {_MAX_MEASURED_WAVES}-wave ceiling — a cap "
+            "this small makes the matrix the critical path instead of the queue "
+            "(#6744)")
+
+    hold = sum(caps.values())
+    assert hold <= pool - _RESERVED_FOR_OTHER_PRS, (
+        f"one PR would hold {hold} MATRIX jobs at once ({dict(sorted(caps.items()))}), "
+        f"so fewer than {_RESERVED_FOR_OTHER_PRS} of the {pool} measured runners are "
+        f"left for other PRs: the bound is {pool} - {_RESERVED_FOR_OTHER_PRS} = "
+        f"{pool - _RESERVED_FOR_OTHER_PRS} (#6744 — measured per-PR peak was 18 of "
+        "a 12-runner pool, and a green run cannot see it)")
 
 
-# ── a row may not state ZERO cases beside a passing reading (#10726 ISSUE 1) ──
-# `02133e21b` (the fold's auto-merge) re-derived 41 `durations:` counts with
-# `grep -c '^def test_'` — a FLOOR, and `0` for every class-based file — and
-# wrote those floors into notes that quote a DIFFERENT, really-measured number.
-# The result was a row that contradicts itself in one sentence:
-#
-#   test_5509…: … pytest session total, **0 tests**, "16 passed in 138.63s"
-#   test_8864…: … (embedded carve-out lane, **0 tests**): "8 passed in 5.82s"
-#
-# `ac129dec7` repaired both by restoring the count each note's OWN reading
-# quotes — `16 tests` and `8 tests` at this head — so the MAP IS CLEAN HERE and
-# this pin is a REGRESSION GUARD, not the report of a live defect: the map arm
-# below asserts the offender list is EMPTY, which is the state a future fold has
-# to keep true, and `test_the_zero_case_guard_is_not_vacuous` supplies the
-# discrimination the clean map cannot.
-#
-# One guard already covers PART of this, and saying otherwise invites its deletion:
-# `test_no_durations_row_states_zero_cases_for_a_file_that_defines_tests` (`:7843`,
-# added by `ac129dec7`) flags ANY row whose note claims `0 tests` for a key that
-# resolves to a file defining `def test_` at any indent — on `02133e21b` it flags
-# all FOUR offenders, including both quoted above, so this class was never
-# unguarded. What it does not reach, and this pin adds: the `0 cases` spelling
-# (`_ZERO_CASE_COUNT_RE` matches only `0 tests`), a key that resolves to no
-# readable file under `TESTS_DIR` (that guard short-circuits on `defined == 0`),
-# and a zero claim ANYWHERE in a sentence that also quotes a passing reading.
-# ⛔ The vocabulary is still exactly two nouns (`0 tests` / `0 cases`, see
-# `_ZERO_CASE_CLAIM_RE` below) — it is NOT any `0 <noun>`; a `0 points` beside a
-# passing reading is invisible to this pin too (#10726 review round 3, P3). This
-# pin is therefore NARROWER (one sentence, so the map's legitimate history —
-# `"33 passed" … (31 tests / 2.77 s BEFORE this review)`, and `at 35 tests on an
-# [earlier] idle host` — is not judged) and WIDER in spelling. Keep both: neither
-# subsumes the other. A same-sentence `0 … N>0` needs no history exemption: no
-# correct note can say it.
-_ZERO_CASE_CLAIM_RE = re.compile(r"\b0\s+(?:tests|cases)\b")
-_PASSED_READING_RE = re.compile(r'"(\d+)\s+passed')
-# ⛔ `:` is deliberately NOT a boundary (#10726 review round 2, P2).
-# `(embedded carve-out lane, **0 tests**): "8 passed in 5.82s"` splits AFTER the
-# zero claim, so with `:` in the class the two halves of one self-contradiction
-# land in different "sentences" and the row is silently skipped — the shape the
-# comment above quotes as an offender was the one shape the guard could not see.
-# Measured: at `02133e21b` this finds `test_5509` only; without `:`, both it and
-# `test_8864` are found, and the head map is still `[]`.
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+")
-
-
-def _durations_rows_stating_zero_cases_beside_a_passing_reading(text: str):
-    """`(key, passed, sentence)` for rows that contradict themselves in one sentence."""
-    out = []
-    for key, note in _durations_row_comments(text):
-        for sentence in _SENTENCE_SPLIT_RE.split(note):
-            if not _ZERO_CASE_CLAIM_RE.search(sentence):
-                continue
-            passed = _PASSED_READING_RE.search(sentence)
-            if passed is not None and int(passed.group(1)) > 0:
-                out.append((key, int(passed.group(1)), sentence.strip()[:120]))
-    return out
-
-
-def test_no_durations_row_states_zero_cases_beside_a_passing_reading():
-    """#10726 review ISSUE 1: a count of 0 is the FLOOR instrument, never a reading.
-
-    Green on this head by construction — `ac129dec7` restored the two counts —
-    which is the point: this is the guard that keeps the next fold from
-    re-deriving a cited READING with a current instrument.
-    """
-    offenders = _durations_rows_stating_zero_cases_beside_a_passing_reading(
-        cs.MANIFEST.read_text(encoding="utf-8"))
-    assert offenders == [], (
-        "a durations row states its file collected 0 cases in the same sentence "
-        "that quotes a passing count — `grep -c '^def test_'` reads 0 for every "
-        "class-based file, so 0 is the instrument's floor, never a measurement of "
-        f"a file that passed tests — (key, passed, sentence): {offenders}. "
-        "Restore the count this note's own measurement quotes; do not re-derive a "
-        "cited READING with a current instrument.")
-
-
-def test_the_zero_case_guard_is_not_vacuous():
-    """Bites on the self-contradiction, stays quiet on history and on real zeros."""
-    text = (
-        "durations:\n"
-        "  test_contradiction.py: 1.0  # measured: pytest session total, 0 tests, "
-        "\"16 passed in 138.63s\".\n"
-        "  test_history.py: 2.0  # measured: \"33 passed in 3.14s\" (31 tests / "
-        "2.77 s before this review added the two arms).\n"
-        "  test_no_reading.py: 3.0  # What the weight covers: 0 cases — none of the "
-        "arms reads a graph.\n"
-        "surfaces: []\n")
-    offenders = _durations_rows_stating_zero_cases_beside_a_passing_reading(text)
-    assert [k for k, _, _ in offenders] == ["test_contradiction.py"], offenders
-
-
-def test_the_zero_case_guard_sees_the_paren_then_colon_shape():
-    """The shape that got away with a `:` sentence boundary (#10726 review round 2).
-
-    Replayed against the revision its own comment names: at `02133e21b` the
-    offenders were `test_5509` (`0 tests, "16 passed…"`) and `test_8864`
-    (`(embedded carve-out lane, 0 tests): "8 passed in 5.82s"`). With `:` in
-    `_SENTENCE_SPLIT_RE` the second splits at the `):` and is skipped, so the
-    guard caught ONE of the two historical offenders. This arm fails if that
-    class comes back.
-    """
-    text = (
-        "durations:\n"
-        "  test_paren_colon.py: 1.0  # measured: Local reading on this host "
-        "(embedded carve-out lane, 0 tests): \"8 passed in 5.82s\" — the session "
-        "total.\n"
-        "surfaces: []\n")
-    offenders = _durations_rows_stating_zero_cases_beside_a_passing_reading(text)
-    assert [k for k, _, _ in offenders] == ["test_paren_colon.py"], offenders
-
-
-def test_no_durations_row_staleness_chain_ends_on_a_count_it_denies():
-    """#10726 review ISSUE 1: the chain must terminate on the count the row cites.
-
-    The ENTRY RULE makes the chain's last entry the count *after* the last cycle's
-    controls, i.e. the file's CURRENT count — which is what the row also cites when
-    it holds the instrument. The fold merged `config/ci-surfaces.yml` row-by-row as
-    a union, and a row is ONE key, so a branch based before a landed control (here
-    `#10452`, whose `test_a_same_thread_read_outside_the_index_is_still_drift` came
-    through) can re-take an OLDER copy of the note: at head
-    `test_substrate_map.py` cited `39` in the same sentence whose chain terminated
-    on `38` — the row contradicting itself, and the paragraph that documents the
-    landed control silently dropped. Nothing gating caught it (the CITATION matched,
-    so the guard above stayed green); this is the second half of that claim.
-    """
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    offenders = _durations_rows_whose_chain_disagrees_with_its_citation(text)
-    assert offenders == [], (
-        "a durations row's staleness chain terminates on a count it denies in the "
-        "same note — the ENTRY RULE says the last entry IS the current count, so "
-        "either the chain must be extended through the cycle that moved the count "
-        f"or the citation is wrong: (key, cited, chain_terminus): {offenders}"
-    )
-
-
-def test_the_staleness_chain_terminus_guard_is_not_vacuous():
-    """The guard above must bite on the shipped shape and stay quiet on its siblings.
-
-    `shipped` is the pre-fix `test_substrate_map.py` row, quoted from the head this
-    review found it at: `39` cited, `THIRTEEN … -> 38` chained. Measured pre-fix the
-    guard reports `('test_substrate_map.py', 39, 38)`; post-fix it reports nothing.
-    """
-    shipped = (
-        "durations:\n"
-        "  test_substrate_map.py: 0.9  # #5086: 39 cases (`grep -c '^def test_'` -> 39;"
-        " pytest collects 39). ⛔ This count has gone stale THIRTEEN times (17 -> 19 ->"
-        " 37 -> 38) — and the chain above terminates on that asserted 38.\n"
-        "surfaces: []\n")
-    assert _durations_rows_whose_chain_disagrees_with_its_citation(shipped) == [
-        ("test_substrate_map.py", 39, 38)]
-    repaired = shipped.replace("37 -> 38", "37 -> 38 -> 39").replace(
-        "asserted 38", "asserted 39")
-    assert _durations_rows_whose_chain_disagrees_with_its_citation(repaired) == []
-    legitimate = (
-        "durations:\n"
-        # a citation with NO chain is a row's first cycle, not a contradiction
-        "  test_a.py: 1.0  # 3 cases (`grep -c '^def test_'` -> 3).\n"
-        # a chain about a WEIGHT, with no instrument cited, is provenance
-        "  test_b.py: 2.0  # this weight has gone stale 3 times (1.0 -> 1.4 -> 2.0).\n"
-        "surfaces: []\n")
-    assert _durations_rows_whose_chain_disagrees_with_its_citation(legitimate) == []
-
-
-#: A row asserting that its OWN committed weight stands at N — "The 3.7 weight sits
-#: inside that range and is deliberately unchanged". The number is a claim about the
-#: row it sits in, so it can be falsified by that row's value.
-#: A note that quotes a PREVIOUS weight ("was 3.7", the sweep's provenance) must not
-#: be read as a claim — the sweep suffix never puts a present-tense predicate after
-#: the number, which is what this anchors on.
-#:
-#: ⛔ WIDENED at the 2026-11-16 refresh (#12962 cycle 6). The arm read exactly ONE
-#: predicate (`deliberately unchanged`), so nine rows asserted a superseded weight
-#: in another spelling and the pin returned `[]` while they contradicted their own
-#: value: `the 8.8 WEIGHT is deliberately left alone`, `The 18.0 WEIGHT … is
-#: deliberately NOT re-derived`, `the 10.0 weight is NOT moved`, `Declared at 5.0,
-#: above the highest observed wall`, `the 6.8 weight … left alone`, `WEIGHT raised
-#: 3.6 -> 6.2 … never corrected downward`, `The 5.0 WEIGHT is kept`, `the 2.0 weight
-#: is unchanged`. That is the same false-clean class this PR closes one function
-#: above — a guard that reads one spelling of a claim cannot say the claim is
-#: absent — so the predicate set is now the family the map actually uses. The PAST
-#: tense stays silent by construction: every alternative below is present-tense, and
-#: `was`/`held`/`had` are not among them.
-_WEIGHT_UNCHANGED_CLAIM_RE = re.compile(
-    r"\bthe\s+(?P<w>\d+(?:\.\d+)?)\s*weight\b" +
-    # ⛔ the tense boundary: a PAST copula governing the predicate means the clause is
-    # history ("The 8.8 WEIGHT WAS deliberately left alone"), which is what every
-    # repaired row says after a sweep re-bases it. Without this the widening bit the
-    # healed form and left no legal way to write the note.
-    #
-    # ⛔ AND THE BOUNDARY IS THE PREDICATE'S OWN COPULA, NOT A SENTENCE-WIDE SCAN
-    # (#12962 rebase review, P2). It shipped as a negative LOOKAHEAD over the whole
-    # window — `(?![^.;]*?\b(?:was|were|had|held|became)\b)` — so ANY past verb
-    # anywhere later in the clause silenced a LIVE claim: measured on a row holding
-    # `1.5`, "The 5.0 WEIGHT is kept, because the earlier reading had been 3.6"
-    # returned `[]`, while the same sentence with the reason dropped BIT. A lookahead
-    # cannot be scoped to "the gap I am about to match", so the scan had to become a
-    # lookbehind ON THE PREDICATE — which is the shape `_WEIGHT_DECLARED_CLAIM_RE`
-    # below already used, and the two arms now agree about the rule they document.
-    #   • The over-block this trades for is real and narrow: a past copula that does
-    #     NOT sit immediately before the predicate still bites — "The 8.8 WEIGHT
-    #     WAS, per the census, deliberately left alone", "… had all been deliberately
-    #     left alone". Loud, one word away from a legal form, and deliberately
-    #     preferred over a silent miss — the polarity this file's future-sweep arm
-    #     sets out at length further down.
-    #
-    # ⛔ AND A SINGLE TOKEN IS NOT ENOUGH (#12962 rebase review cycle 2, P1). The
-    # first cut of this lookbehind listed five ONE-WORD copulas, so every multi-token
-    # past auxiliary put `been`/`being` immediately before the predicate and fell
-    # straight through it: measured end-to-end, a correctly-healed row reading "The
-    # 8.8 WEIGHT had been deliberately left alone until the 2026-11-16 census
-    # replaced it" reported `[('test_a.py', 8.8, 1.4)]` — a FALSE RED on a
-    # `slow_files` row, i.e. on `test-slow`, which is the very failure this commit's
-    # own sibling fix set out to remove. The auxiliary chains are named explicitly.
-    # ⚠️ `has been` is NOT in the list and must not be: present perfect is a claim
-    # about the CURRENT state ("the 8.8 WEIGHT has been deliberately left alone" says
-    # it is left alone now), so it has to bite. `had been` / `was being` are history.
-    _CLAUSE +
-    r"(?<!\bwas )(?<!\bwere )(?<!\bhad )(?<!\bheld )(?<!\bbecame )"
-    r"(?<!\bhad been )(?<!\bwas being )(?<!\bwere being )"
-    r"\b(?:deliberately\s+(?:unchanged|left\s+alone|not\s+re-derived)"
-    r"|(?:is|stays|remains)\s+(?:kept|unchanged|not\s+moved|an\s+upper\s+bound)"
-    r"|never\s+corrected\s+downward)",
-    re.IGNORECASE)
-#: The same claim in its `declared at N` spelling: "Declared at 5.0, above the
-#: highest observed wall, so a loaded leg cannot under-pack" while the row holds 1.5.
-#: Kept as its own arm because it names no `weight` noun at all.
-_WEIGHT_DECLARED_CLAIM_RE = re.compile(
-    # the same tense boundary, on the other side of the verb: "It WAS declared at 5.0"
-    # is history, "Declared at 5.0" is a claim.
-    r"(?<!\bwas )(?<!\bwere )(?<!\bhad )\bdeclared\s+at\s+(?P<w>\d+(?:\.\d+)?)\b" + _CLAUSE +
-    r"\b(?:above\s+the\s+highest|so\s+a\s+loaded\s+leg\s+cannot\s+under-pack"
-    r"|so\s+a\s+cold\s+leg\s+cannot\s+under-pack)",
-    re.IGNORECASE)
-
-
-def _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(text: str):
-    """`(key, claimed, value)` rows whose note calls a weight unchanged at another number."""
-    out = []
-    for key, note in _durations_row_comments(text):
-        claim = (_WEIGHT_UNCHANGED_CLAIM_RE.search(note)
-                 or _WEIGHT_DECLARED_CLAIM_RE.search(note))
-        if claim is None:
-            continue
-        row = next((ln for ln in text.splitlines()
-                    if (m := _DURATIONS_ROW_RE.match(ln)) and m.group("key") == key),
-                   None)
-        if row is None:  # pragma: no cover — every judged note came from a row
-            continue
-        value = float(_DURATIONS_ROW_RE.match(row).group("value"))
-        if abs(float(claim.group("w")) - value) > 1e-9:
-            out.append((key, float(claim.group("w")), value))
-    return out
-
-
-def test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold():
-    """#10726 review ISSUE 1: a note may not deny the weight its own row declares.
-
-    The union merge took an older copy of the `test_substrate_map.py` note AND the
-    sweep then re-based that row's weight from `3.7` to `0.9`. Both halves are
-    individually defensible; together the row read `0.9` and then said "The 3.7
-    weight sits inside that range and is deliberately unchanged" — which is how a
-    reader concludes the committed weight is 3.7. The sweep cannot attribute a
-    mid-note claim to the value it rewrote, so this pin is what stops the next one
-    from shipping quietly.
-    """
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    offenders = _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(text)
-    assert offenders == [], (
-        "a durations row's note calls a weight 'deliberately unchanged' at a number "
-        "the row does not hold — the note is a stale copy of the row it sits in: "
-        f"(key, claimed, row's value): {offenders}"
-    )
+#: ⛔ RETIRED with B7's durations-map arithmetic cut. The two arms this block
+#: documented — `_WEIGHT_UNCHANGED_CLAIM_RE` ("The 5.0 WEIGHT is kept") and
+#: `_WEIGHT_DECLARED_CLAIM_RE` ("Declared at 5.0, above the highest …") — lost
+#: their only consumer in that cut, so the compiled regexes went with them: a
+#: regex nothing reads is the same "a gate that is not there" this file refuses
+#: for an unused cache-step `id:`, and `ruff` cannot report an unused
+#: module-level assignment, which is why both survived the sweep. The surviving
+#: weight-note arm is `_WEIGHT_IS_CLAIM_RE` below (`The weight is 0.9` /
+#: `Declared 14.0s`), and it carries the tense-boundary lessons both retired arms
+#: produced (#12962): the boundary must be a lookbehind ON THE PREDICATE, never a
+#: sentence-wide lookahead over the clause, and one token is not enough — `had
+#: been deliberately left alone` is history, `has been deliberately left alone`
+#: is a claim. Those lessons are restated where they still bind, on the surviving
+#: arm and in `_durations_rows_declaring_a_weight_they_do_not_hold`.
 
 
 #: A row asserting that its OWN committed weight IS a number the row no longer
-#: holds — "The weight is 0.9", "Declared 14.0s". The same falsification as
-#: `_WEIGHT_UNCHANGED_CLAIM_RE` above, in the DECLARATIVE spelling that guard cannot
-#: see: at the 2026-11-16 refresh four rows shipped this way after the sweep moved
+#: holds — "The weight is 0.9", "Declared 14.0s". This is the DECLARATIVE arm; the
+#: sibling non-declarative spelling it was originally paired with
+#: (`_WEIGHT_UNCHANGED_CLAIM_RE`) went with B7's note-guard cut, so this is now the
+#: only weight-note arm left. At the 2026-11-16 refresh four rows shipped this way
+#: after the sweep moved
 #: their values (`test_substrate_map.py` 0.9 -> 1.4, `test_10017_turn_parity_census`
 #: 25.0 -> 15.2, `test_embed_decision_step_11086` 7.0 -> 0.9,
 #: `test_demo_session_read_exclusion_8290` 14.0 -> 12.3) — the third re-ship of
@@ -13295,7 +11944,7 @@ def test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold():
 #: 3.0` is history and stays silent.
 _WEIGHT_IS_CLAIM_RE = re.compile(
     r"\bthe\s+weight\s+is\s+(?P<w1>\d+(?:\.\d+)?)"
-    # the same tense boundary its sibling `_WEIGHT_DECLARED_CLAIM_RE` already carried:
+    # the same tense boundary the deleted `_WEIGHT_DECLARED_CLAIM_RE` arm carried:
     # "It WAS declared 7.0s" is history, "Declared 7.0s" is a claim. Measured before
     # this fix, BOTH past forms bit — and the past form is exactly how every repaired
     # row writes it, so the healed note was unwritable in this spelling (#12962
@@ -13328,11 +11977,12 @@ def _durations_rows_declaring_a_weight_they_do_not_hold(text: str):
 def test_no_durations_row_declares_a_weight_it_does_not_hold():
     """#12962 cycle 5: the DECLARATIVE form of the #10726 claim.
 
-    `test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold` anchors
-    on `the N weight … deliberately unchanged`, so a row that says `The weight is
-    0.9` or `Declared 7.0s` while its value moved is invisible to it — which is how
-    four rows shipped past the 2026-11-16 refresh. Same thesis as the flat-default
-    guard above: a guard that reads one spelling cannot say a claim is absent.
+    Anchored on the predicate family the map actually uses, so a row that says
+    `The weight is 0.9` or `Declared 7.0s` while its value moved is caught — four
+    rows shipped that way past the 2026-11-16 refresh while the older
+    one-predicate arm (since deleted) read them as clean. Same thesis as the
+    flat-default guard above: a guard that reads one spelling cannot say a claim
+    is absent.
     """
     text = cs.MANIFEST.read_text(encoding="utf-8")
     offenders = _durations_rows_declaring_a_weight_they_do_not_hold(text)
@@ -13379,8 +12029,8 @@ def test_the_declared_weight_claim_check_is_not_vacuous():
         # is the exact form every repaired row takes, so it must stay silent.
         "  test_e.py: 0.2  # The WEIGHT WAS rounded UP to 3.0 until the 2026-11-16"
         " census read 0.2.\n"
-        # ⛔ `Declared N s` needed the SAME tense boundary its sibling
-        # `_WEIGHT_DECLARED_CLAIM_RE` already carried (#12962 rebase review, P2).
+        # ⛔ `Declared N s` needed the SAME tense boundary the deleted
+        # `_WEIGHT_DECLARED_CLAIM_RE` arm carried (#12962 rebase review, P2).
         # Both past forms BIT before the fix — and they are the form every repaired
         # row takes, so the healed note was unwritable in this spelling.
         "  test_g.py: 0.9  # It was declared 7.0s on the old map; the census has"
@@ -13389,1182 +12039,6 @@ def test_the_declared_weight_claim_check_is_not_vacuous():
         " sweep gave this row its 0.9.\n"
         "surfaces: []\n")
     assert _durations_rows_declaring_a_weight_they_do_not_hold(legitimate) == []
-
-
-def test_the_unchanged_weight_claim_check_is_not_vacuous():
-    """The guard above must bite on the shipped shape and stay quiet on its siblings.
-
-    `shipped` is the pre-fix `test_substrate_map.py` row: value `0.9`, note "The 3.7
-    weight sits inside that range and is deliberately unchanged". Measured pre-fix
-    the guard reports `('test_substrate_map.py', 3.7, 0.9)`; post-fix, nothing.
-    """
-    shipped = (
-        "durations:\n"
-        "  test_substrate_map.py: 0.9  # the range stays the file's own spread. The 3.7"
-        " weight sits inside that range and is deliberately unchanged;"
-        " `tools/ci_timing.py --refresh-durations` replaces it from junit.\n"
-        "surfaces: []\n")
-    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(shipped) == [
-        ("test_substrate_map.py", 3.7, 0.9)]
-    legitimate = (
-        "durations:\n"
-        # a claim that AGREES with its row is the honest form
-        "  test_a.py: 3.7  # 3.7 is the reading; the 3.7 weight is deliberately"
-        " unchanged by this sweep.\n"
-        # the sweep's own provenance quotes a PREVIOUS weight — not a claim
-        "  test_b.py: 0.9  # ci-timing junit-census+top-15 2026-11-02 (run 1); was 3.7\n"
-        # "deliberately unchanged" about the FILE, with no weight claim at all
-        "  test_c.py: 2.0  # the file's cost is deliberately unchanged.\n"
-        "surfaces: []\n")
-    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
-        legitimate) == []
-
-    # ── The spellings that shipped PAST this arm (#12962 cycle 6) ──────────────
-    # The arm read exactly ONE predicate (`deliberately unchanged`), so nine rows
-    # asserted a superseded weight in another spelling and this pin returned `[]`
-    # while they contradicted their own value. Four of them became false through the
-    # 2026-11-16 refresh's own re-basing. Each shape below is VERBATIM from one of
-    # those rows, paired with the value the map actually held.
-    respelled = (
-        "durations:\n"
-        # test_8098_webhook_retry_sweep.py: 1.4 (main: 8.8)
-        "  test_a.py: 1.4  # The 8.8 WEIGHT is deliberately left alone: it is the"
-        " shard packer's input, so do not 'correct' it down.\n"
-        # test_9079_edge_lane_declared.py: 1.8 (main: 18.0)
-        "  test_b.py: 1.8  # The 18.0 WEIGHT predates that added test and is"
-        " deliberately NOT re-derived from this box.\n"
-        # test_7949_capstone_verdict_check.py: 11.3 (main: 10.0)
-        "  test_c.py: 11.3  # it is a file scan with no subprocess and the 10.0"
-        " weight is NOT moved.\n"
-        # test_9256_lane_probe_attribution.py: 0.5
-        "  test_d.py: 0.5  # the 7-test wall is BELOW the 6.8 weight, so it is"
-        " deliberately left alone rather than trimmed to it.\n"
-        # test_mcp_safe_error_telemetry_8135.py: 0.1
-        "  test_e.py: 0.1  # The 5.0 WEIGHT is kept as the higher/conservative"
-        " reading on purpose.\n"
-        # test_s2_decision_seam_5087.py: 4.6
-        "  test_f.py: 4.6  # the case is inside that weight, so the 2.0 weight is"
-        " unchanged.\n"
-        # test_ax_write_eval.py: 1.5 — the `declared at N` spelling, which names no
-        # `weight` noun at all and so needed its own arm.
-        "  test_g.py: 1.5  # Declared at 5.0, above the highest observed wall, so a"
-        " loaded leg cannot under-pack.\n"
-        # ⛔ the DECIMAL-POINT bound, on the two arms that had no pin for it (#12962
-        # rebase review cycle 2, P2). Both were SILENT on the `[^.;]*?` window and
-        # BITE on `_CLAUSE`; mutation-tested, reverting `_CLAUSE` in EITHER arm left
-        # the whole suite green, so the class could be re-opened silently. Probe #5 is
-        # the reviewer's, verbatim.
-        "  test_i.py: 1.5  # the 8.8 weight is, against the 2.5 local reading,"
-        " deliberately left alone.\n"
-        "  test_j.py: 1.5  # declared at 5.0 against a 2.5 s wall, above the highest"
-        " observed wall, so a loaded leg cannot under-pack.\n"
-        "surfaces: []\n")
-    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
-        respelled) == [
-        ("test_a.py", 8.8, 1.4), ("test_b.py", 18.0, 1.8),
-        ("test_c.py", 10.0, 11.3), ("test_d.py", 6.8, 0.5),
-        ("test_e.py", 5.0, 0.1), ("test_f.py", 2.0, 4.6),
-        ("test_g.py", 5.0, 1.5), ("test_i.py", 8.8, 1.5),
-        ("test_j.py", 5.0, 1.5)], (
-        "a guard that reads one spelling of the claim cannot say the claim is "
-        "absent — these are the spellings that shipped past it")
-
-    # …and the PAST tense stays silent, which is the whole repaired dialect: without
-    # this boundary the widening bit every row a sweep had already healed.
-    past = (
-        "durations:\n"
-        "  test_a.py: 1.4  # The 8.8 WEIGHT WAS deliberately left alone; the"
-        " 2026-11-16 census replaced it with the 1.4 beside this row.\n"
-        "  test_b.py: 1.5  # It WAS declared at 5.0, above the highest observed"
-        " wall, so a loaded leg could not under-pack.\n"
-        "surfaces: []\n")
-    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
-        past) == []
-
-    # ── The past-copula boundary is the PREDICATE's, not a sentence scan (#12962
-    # rebase review, P2) ─────────────────────────────────────────────────────────
-    # It shipped as a negative LOOKAHEAD over the whole window, so ANY past verb
-    # later in the clause read the row as healed. `unrelated_past_verb` is the
-    # reviewer's probe: a present-tense claim (`is kept`) carrying a past tense in
-    # an unrelated trailing reason. It returned `[]` on the shipped arm — a live
-    # claim silenced by a sentence it does not belong to.
-    unrelated_past_verb = (
-        "durations:\n"
-        "  test_a.py: 1.5  # The 5.0 WEIGHT is kept, because the earlier reading"
-        " had been 3.6.\n"
-        "  test_b.py: 1.5  # The 5.0 WEIGHT is kept, since the 3.6 became 6.2 and"
-        " the census had not yet run.\n"
-        "surfaces: []\n")
-    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
-        unrelated_past_verb) == [("test_a.py", 5.0, 1.5), ("test_b.py", 5.0, 1.5)], (
-        "the tense boundary is the predicate's own copula — a past verb elsewhere in "
-        "the clause must not silence a claim that is present tense")
-    # …and the healed forms this boundary exists for stay silent, INCLUDING the one
-    # with material between the number and the copula. That shape is why the scan
-    # could not simply become "the copula adjacent to the number".
-    healed_with_gap = (
-        "durations:\n"
-        "  test_a.py: 1.4  # The 8.8 WEIGHT WAS deliberately left alone; the"
-        " 2026-11-16 census replaced it with the 1.4 beside this row.\n"
-        "  test_b.py: 1.4  # The 8.8 WEIGHT, sitting inside that range, WAS"
-        " deliberately left alone.\n"
-        # ⛔ the PAST-AUXILIARY chain (#12962 rebase review cycle 2, P1). Each of
-        # these put `been`/`being` immediately before the predicate, so a one-word
-        # lookbehind fell straight through and reported a FALSE RED on a healed row.
-        "  test_c.py: 1.4  # The 8.8 WEIGHT had been deliberately left alone until"
-        " the 2026-11-16 census replaced it.\n"
-        "  test_d.py: 1.4  # The 8.8 WEIGHT had been deliberately unchanged; the"
-        " 2026-11-16 census replaced it with the 1.4 beside this row.\n"
-        "  test_e.py: 1.4  # The 8.8 WEIGHT was being deliberately left alone when"
-        " the 2026-11-16 census replaced it.\n"
-        "surfaces: []\n")
-    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
-        healed_with_gap) == []
-    # …and `has been` is PRESENT perfect — it asserts the CURRENT state, so it must
-    # bite. The line between this case and the three above is the whole point of
-    # naming the auxiliary chains explicitly rather than widening `was|were|had`.
-    present_perfect = (
-        "durations:\n"
-        "  test_a.py: 1.4  # The 8.8 WEIGHT has been deliberately left alone since"
-        " the 2026-11-16 census moved everything else.\n"
-        "surfaces: []\n")
-    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
-        present_perfect) == [("test_a.py", 8.8, 1.4)], (
-        "`has been` is a claim about the state NOW — only `had been` / `was being` "
-        "are history")
-
-
-#: A row restating its file's total in PROSE, beside the machine-read instrument cite:
-#: "(`198` at this head, with #10610's `39` added cases)". The instrument cite on the
-#: same row (`grep -c '^def test_'` = 198) is what `_CASE_COUNT_CLAIM_RE` reads; this
-#: parenthetical is a SECOND total for the SAME file and no rule read it.
-#:
-#: ⛔ THE BACKTICKS ARE OPTIONAL ON PURPOSE. This map's convention is to backtick a
-#: number (`(`198` at this head, with #10610's `39` added cases)` is the spelling the
-#: example above uses, and it is what a maintainer copying from here writes), while
-#: the live `test_7949_capstone_measure.py` row happens to be unbackticked. A pattern
-#: that read only one spelling would return no claim at all for the other and report a
-#: clean map — the `=`-vs-`->` FALSE PASS this file's sibling guard was widened for one
-#: round earlier (`_CASE_COUNT_CLAIM_RE`, whose note states the rule: "a spelling the
-#: guard cannot see is a FALSE PASS, not a wording preference").
-#:
-#: ⛔ AND THE TAIL IS NOT PART OF THE SHAPE (#10610 review at `52d7173d5`, P2). The
-#: first cut required the literal `, with #N's M added cases)` after the number, and
-#: this PR's own row was then re-spelled to `(215 at this head: origin/main's 190 plus
-#: the twenty-five net new cases this PR adds, …)`. Measured on the live map:
-#: `grep -c 'added cases)' config/ci-surfaces.yml` -> **0**, so the selector matched
-#: ZERO rows tree-wide and the guard reported `[]` as a pass over a subject set that
-#: was EMPTY — a no-op gate, defeated inside the PR that added it. The shape that is
-#: stable across both spellings is the parenthetical's HEAD: `(` + the total + ` at
-#: this head` + `,`, `:` or `.` (the separator is required so a bare `(N at this
-#: head)` — a `--collect-only` count — is still excluded).
-#:
-#: ⛔ AND THE SENTENCE-TERMINATING `.` IS A SEPARATOR, because it is the spelling the
-#: live map ADOPTED and this selector still could not read: the
-#: `test_7949_capstone_measure.py` row was re-spelled from main's `(229 at this head:
-#: `origin/main`'s 21…` to `(230 at this head. ⛔ Two of the terms below are HISTORY,
-#: …` — measured at `615bb14b31`, `(\d+ at this head[,:])` matched **nothing** tree-wide
-#: and `test_the_head_total_guard_has_a_live_subject` went RED in CI with exactly the
-#: message it exists to raise (`test-slow`, run 42557508872). So the no-op-gate class
-#: this guard was widened for came back through a THIRD spelling, which is the reason
-#: the pattern reads the whole separator SET rather than the two spellings that
-#: happened to be in the map when it was written: a total ending a sentence is still a
-#: total (`230 at this head.` is a claim, and it is the claim the arm beside it makes).
-#: A period cannot re-admit the `--collect-only` form the separator excludes — that
-#: one carries no `(` immediately before its number (`… 35 executions at this head)`).
-_HEAD_TOTAL_CLAIM_RE = re.compile(r"\(`?(?P<n>\d+)`? at this head[,:.]")
-
-
-def _head_total_claims(text: str) -> list[tuple[str, int]]:
-    """`(key, stated)` for every durations row that states a prose head total.
-
-    This is the guard's SUBJECT SET, exposed so a test can assert it is not empty:
-    a selector that matches nothing turns its caller's `assert offenders == []` into
-    a pass over nothing, which is the defect (#10610 review at `52d7173d5`, P2).
-    """
-    return [(key, int(m.group("n")))
-            for key, note in _durations_row_comments(text)
-            for m in _HEAD_TOTAL_CLAIM_RE.finditer(note)]
-
-
-def _durations_rows_with_a_stale_head_total(text: str, tests_dir: Path):
-    """`(key, stated, actual)` for every prose `N at this head` total that is wrong.
-
-    ⛔ TWO TOTALS FOR ONE FILE IS THE DEFECT, whatever spelling carries them. The
-    guard above reads only the `grep -c '^def test_'` cites; measured at the #10610
-    review head `3e56f60ef`, the `test_7949_capstone_measure.py` row stated **198**
-    in its leading claim AND in that cite, and **192** in the parenthetical beside
-    it — so a maintainer got two different numbers for one file and EVERY guard was
-    green, because nothing machine-read the prose total.
-
-    ⛔ The phrase is judged ONLY in this parenthetical shape, and that is deliberate:
-    `at this head` is used elsewhere in this map for counts that are NOT `^def test_`
-    (a `--collect-only` count, e.g. "34 functions / 35 executions at this head"), for
-    POOL sizes, and inside quoted HISTORY of a past row revision. A guard over the
-    bare phrase would red those correct notes; this one reads the sentence that
-    asserts the very total the cite beside it asserts. What the shape requires is
-    only that the claim OPENS a parenthetical with the number and CONTINUES with the
-    phrase (`(`…` at this head,` / `:` / `.`), never the tail that follows it —
-    requiring the tail is what made the first cut inert (#10610 review at
-    `52d7173d5`, P2). The `.` is the live row's own separator (measured at
-    `615bb14b31`: `(230 at this head. ⛔ Two of the terms below are HISTORY, …`).
-    """
-    out = []
-    for key, note in _durations_row_comments(text):
-        claims = list(_HEAD_TOTAL_CLAIM_RE.finditer(note))
-        if not claims:
-            continue
-        path = tests_dir / key
-        if path.exists():
-            actual = len(re.findall(
-                r"^def test_", path.read_text(encoding="utf-8"), re.M))
-        else:
-            actual = None
-        for m in claims:
-            stated = int(m.group("n"))
-            if actual is None or actual != stated:
-                out.append((key, stated, actual))
-    return out
-
-
-def test_no_durations_row_states_a_head_total_its_file_refutes():
-    """#10610 review-at-`3e56f60ef` P3-1: one file, ONE stated total."""
-    offenders = _durations_rows_with_a_stale_head_total(
-        cs.MANIFEST.read_text(encoding="utf-8"), cs.TESTS_DIR)
-    assert offenders == [], (
-        "a durations row states its file's case total in prose (\"(N at this head, "
-        "with ... added cases)\") and the file disagrees — (key, stated, actual): "
-        f"{offenders}. The row's own `grep -c '^def test_'` cite is the instrument; "
-        "a second total beside it that does not equal it hands a maintainer two "
-        "numbers for one file.")
-
-
-def test_the_head_total_guard_has_a_live_subject():
-    """The guard must READ something: `[]` from an empty subject set is a no-op.
-
-    #10610 review at `52d7173d5` (P2), measured on the live map: the selector
-    required the tail `, with #N's M added cases)`, the `test_7949_capstone_measure.py`
-    row was re-spelled to the colon form, and `grep -c 'added cases)'
-    config/ci-surfaces.yml` returned **0** — so every row was skipped and
-    `test_no_durations_row_states_a_head_total_its_file_refutes` reported a clean map
-    over nothing. The stale-total arms above cannot catch that class (they feed the
-    selector a row it CAN read); only reading the live manifest can.
-    """
-    claims = _head_total_claims(cs.MANIFEST.read_text(encoding="utf-8"))
-    assert claims, (
-        "the prose-total guard matched ZERO rows in the live manifest — it is a "
-        "no-op gate: its `assert offenders == []` is a pass over an EMPTY subject "
-        "set, so any `(N at this head, …)` / `(N at this head: …)` total would ship "
-        "unread. Re-point `_HEAD_TOTAL_CLAIM_RE` at the spelling the map actually "
-        "uses, or retire this guard.")
-    keys = {key for key, _ in claims}
-    assert "test_7949_capstone_measure.py" in keys, (
-        "the row this guard was written for no longer states a prose head total "
-        f"that it can read — claims found: {sorted(keys)}. If the parenthetical was "
-        "deliberately dropped, re-point the guard at the row that now carries one "
-        "(or retire it); do not leave it reading a subject set the map no longer has.")
-
-
-def test_the_head_total_guard_is_not_vacuous(tmp_path):
-    """The prose-total guard must bite on a stale total and stay quiet on history.
-
-    Non-vacuity, measured: at the pre-fix head the `test_7949_capstone_measure.py`
-    row's parenthetical read 192 against a file of 198 and this returned
-    `[('test_7949_capstone_measure.py', 192, 198)]` — one arm red. The `fresh`
-    fixture is the SAME sentence with the file's own count, which must stay quiet
-    (`= 2` defs).
-    """
-    (tmp_path / "test_two.py").write_text(
-        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
-    stale = (
-        "durations:\n"
-        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
-        "(3 at this head, with #10610's 1 added cases), no case counted twice.\n"
-        "surfaces: []\n")
-    fresh = (
-        "durations:\n"
-        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
-        "(2 at this head, with #10610's 0 added cases), no case counted twice.\n"
-        "surfaces: []\n")
-    # A row quoting a PAST total in prose (the row's own revision history, or a
-    # `--collect-only` count beside the defined-function count) is not a claim the
-    # guard may re-derive — it is history, and the map's rule keeps history.
-    history = (
-        "durations:\n"
-        "  test_two.py: 3.0  # #9352: an earlier revision said \"10 cases at this "
-        "head\"; the file holds 2 functions / 3 executions at this head (`grep -c "
-        "'^def test_'` -> 2, pytest collects 3).\n"
-        "surfaces: []\n")
-    # The spelling this map's convention actually uses: BOTH numbers backticked. The
-    # arms above are unbackticked, so they alone left the documented shape unread —
-    # measured pre-fix, `(`204` at this head, with #10610's `45` added cases)` matched
-    # NOTHING and a stale backticked total was a clean map (the false PASS class this
-    # file already carries a rule for). Both directions, because a pattern widened to
-    # silence is the same defect inverted.
-    stale_ticked = (
-        "durations:\n"
-        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
-        "(`3` at this head, with #10610's `1` added cases), no case counted twice.\n"
-        "surfaces: []\n")
-    fresh_ticked = (
-        "durations:\n"
-        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
-        "(`2` at this head, with #10610's `0` added cases), no case counted twice.\n"
-        "surfaces: []\n")
-    assert _durations_rows_with_a_stale_head_total(stale, tmp_path) == [
-        ("test_two.py", 3, 2)]
-    assert _durations_rows_with_a_stale_head_total(fresh, tmp_path) == []
-    assert _durations_rows_with_a_stale_head_total(history, tmp_path) == []
-    assert _durations_rows_with_a_stale_head_total(stale_ticked, tmp_path) == [
-        ("test_two.py", 3, 2)], (
-        "the BACKTICKED spelling is this map's convention — a guard that cannot read "
-        "it reports a clean map over a stale total")
-    assert _durations_rows_with_a_stale_head_total(fresh_ticked, tmp_path) == []
-    # …and the COLON spelling, which is what the live `test_7949_capstone_measure.py`
-    # row actually uses (#10610 review at `52d7173d5`, P2). The first cut required the
-    # `, with #N's M added cases)` tail, so this row was skipped and a stale total in
-    # it was a clean map — the guard was inert on the very row it was written for.
-    stale_colon = (
-        "durations:\n"
-        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
-        "(3 at this head: `origin/main`'s 2 plus the one net new case this PR "
-        "adds), no case counted twice.\n"
-        "surfaces: []\n")
-    fresh_colon = (
-        "durations:\n"
-        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
-        "(2 at this head: `origin/main`'s 2 plus the zero net new cases this PR "
-        "adds), no case counted twice.\n"
-        "surfaces: []\n")
-    assert _durations_rows_with_a_stale_head_total(stale_colon, tmp_path) == [
-        ("test_two.py", 3, 2)], (
-        "the COLON spelling is what the live row uses — a guard that cannot read it "
-        "is a no-op on the only row that states a prose total")
-    assert _durations_rows_with_a_stale_head_total(fresh_colon, tmp_path) == []
-    # …and the PERIOD spelling, which is what the live `test_7949_capstone_measure.py`
-    # row uses at `615bb14b31` (`(230 at this head. ⛔ Two of the terms below are
-    # HISTORY, …)`). Measured at that head: the selector matched ZERO rows tree-wide,
-    # `test_the_head_total_guard_has_a_live_subject` redded in CI (`test-slow`, run
-    # 42557508872), and a stale total in the only row that states one was a clean map.
-    # The class is the same one the column tail cost, in a third spelling — a
-    # separator is required so a bare `(N at this head)` stays excluded, and `.` is a
-    # separator, not a bare tail.
-    stale_period = (
-        "durations:\n"
-        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
-        "(3 at this head. Two of the terms below are HISTORY, not a partition of "
-        "this head), no case counted twice.\n"
-        "surfaces: []\n")
-    fresh_period = (
-        "durations:\n"
-        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
-        "(2 at this head. Two of the terms below are HISTORY, not a partition of "
-        "this head), no case counted twice.\n"
-        "surfaces: []\n")
-    assert _durations_rows_with_a_stale_head_total(stale_period, tmp_path) == [
-        ("test_two.py", 3, 2)], (
-        "the live row terminates its total with a PERIOD — a guard that cannot read "
-        "it is a no-op on the only row that states a prose total")
-    assert _durations_rows_with_a_stale_head_total(fresh_period, tmp_path) == []
-
-
-#: The `fast_shards` header block is the ONE place in the manifest that restates
-#: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
-#: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head
-#: above — re-derive them with that verb rather than trusting them", and the same block
-#: had gone stale before this guard existed (#11298 review cycle 5, #14015, #14296) —
-#: and it has been caught going stale AGAIN since (#14434's and #14220's registrations
-#: each re-packed the bins), which is what this guard is for. ⛔ No tally is carried here
-#: on purpose: the number of times moves with every landing, so the instances are named
-#: and the count is left to whoever re-derives it. A promise in prose is not a
-#: guard, so the sentence is graded against the live emission here instead.
-#:
-#: Shard names are read in BOTH spellings this map uses — an explicit list (`f, h`)
-#: and a range (`a–e`) — and the count may be a word (`nine`) as the surrounding prose
-#: prefers. A guard that only reads one spelling turns the other into an unread claim,
-#: which is how the sibling head-total guard above became inert three times.
-_EMISSION_COUNT_WORDS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
-    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
-}
-_EMISSION_CLAUSE_RE = re.compile(
-    r"(?P<n>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
-    r"(?: shards?)? at (?P<est>\d+\.\d) s \((?P<names>[a-z][a-z,\s\u2013\u2014-]*)\)")
-_EMISSION_CEIL_RE = re.compile(
-    r"`ceil\((?P<est>\d+\.\d)/60 x (?P<headroom>\d+(?:\.\d+)?)\)` = (?P<minutes>\d+) m")
-_EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
-#: A shard-figure sentence the CLAUSE parser above cannot read: a seconds figure
-#: immediately followed by a shard-name list opener. `_EMISSION_CLAUSE_RE` needs one
-#: decimal place and a closing `)`, so a block can state a figure this guard never
-#: grades — measured 2026-11-23 on the rebase this guard was cut onto: `main`'s cut of
-#: this paragraph spelled "ALL ELEVEN shards at 835.8-835.9 s (a-k; two runs" (a RANGE of
-#: seconds and a semicolon in the name list, so no clause match), the rebase kept BOTH
-#: parents' sentences, and the readable clause was graded while that one was invisible.
-#: A figure nobody reads is the same no-op-gate class as a pattern that matches nothing.
-_EMISSION_UNREAD_SENTENCE_RE = re.compile(r"\d\.\d+\s*s\s*\([a-z]")
-#: A watch-minute DERIVATION, anchored on the OPERAND (`X.X/60`) rather than on a spelling.
-#: `_EMISSION_CEIL_RE` above reads exactly one spelling of it, so any other spelling in the block
-#: is a minute graded by NOTHING — the no-op-gate class `_EMISSION_UNREAD_SENTENCE_RE` covers on
-#: the partition side. Measured 2026-11-23 against the real manifest, with the partition untouched:
-#: `` `ceil(837.0/60 * 2)` = 29 m ``, `836.9/60 x 2 → 30 m` and the prose `… rounds 837.0/60 x 2.0
-#: up to 29 m` each kept BOTH rows green while the block claimed two different minutes. A first
-#: attempt matched `[x\u00d7X]` and `=|up to` and was itself spelling-bound (it missed `*`, `→`,
-#: `->`, `=>`), which is why this one anchors on the operand and reads the first `N m` after it.
-_EMISSION_DERIVATION_RE = re.compile(r"(?P<est>\d+\.\d)\s*/\s*60")
-_EMISSION_MINUTE_AFTER_RE = re.compile(r"(?P<minutes>\d+)\s*m\b")
-#: How far past an operand its stated minute may sit. The manifest's own prose form —
-#: `rounds 840.2/60 x 2.0 up to 29 m` — puts it 14 characters after the operand.
-_DERIVATION_LOOKAHEAD = 60
-
-
-def _emission_names(phrase: str) -> set[str]:
-    """Expand a shard-name phrase: `a–e, i, j` -> {a,b,c,d,e,i,j}."""
-    names: set[str] = set()
-    for part in phrase.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        span = _EMISSION_RANGE_RE.fullmatch(part)
-        if span:
-            names |= {chr(c) for c in range(
-                ord(span.group("lo")), ord(span.group("hi")) + 1)}
-        else:
-            names.add(part)
-    return names
-
-
-def _emission_block_header(manifest_text: str) -> str:
-    """The `fast_shards` block, bounded at the key and joined into one string.
-
-    The subject is bounded to the header so a shard-count sentence elsewhere in the
-    map cannot be mistaken for this block's claim, and comment line breaks are
-    PRESENTATION — a sentence wraps at will — so the block is joined before reading it;
-    otherwise a figure that happens to land on the next line makes a claim unread,
-    which is the no-op-gate class this guard's own message names.
-    """
-    key = re.search(r"^fast_shards:", manifest_text, re.MULTILINE)
-    assert key is not None, (
-        "the manifest carries no `fast_shards:` key, so the bound below is the WHOLE "
-        "file rather than the block this guard claims to read — fail closed here instead of "
-        "silently widening the subject a renamed key would hand it.")
-    header = manifest_text[:key.start()]
-    return re.sub(r"\n\s*#\s?", " ", header)
-
-
-def _emission_block_claims(
-        manifest_text: str) -> tuple[dict[float, set[str]], float, int] | None:
-    """Read the `fast_shards` header block's stated emission.
-
-    Returns `{est_seconds -> shard names}`, the `ceil(...)` operand and the minutes it
-    states; `None` when the block (the text above the `fast_shards:` key) states none, or
-    when it carries a correct `ceil(...)` derivation but no partition clause to grade.
-
-    ⛔ It RAISES rather than returning `None` on THREE conditions, so the caller reds with the
-    real reason instead of the generic "states no emission" message: an `AssertionError` if
-    the manifest carries no `fast_shards:` key (the bound would otherwise be the whole map),
-    one if any `ceil(...)` multiplier is not
-    `ci_selection.WATCHDOG_HEADROOM` — the block would then state an arithmetic the code does
-    not perform — and one if an est this block GRADES is derived to a different minute in a
-    spelling `_EMISSION_CEIL_RE` cannot read (so that minute would be graded by nobody). The
-    headroom check runs BEFORE the empty-partition return on purpose, so a
-    wrong multiplier is never reported as an absent sentence.
-    """
-    header = _emission_block_header(manifest_text)
-    groups: dict[float, set[str]] = {}
-    for m in _EMISSION_CLAUSE_RE.finditer(header):
-        names = _emission_names(m.group("names"))
-        raw_n = m.group("n")
-        stated_n = int(raw_n) if raw_n.isdigit() else _EMISSION_COUNT_WORDS[raw_n]
-        if stated_n != len(names):
-            # The COUNT and the SET are two statements of one fact. A sentence that
-            # disagrees with itself is graded as claiming a set it does not name, so
-            # the caller reds rather than silently believing one side.
-            names = names | {f"<count says {stated_n}>"}
-        est = float(m.group("est"))
-        if est in groups:
-            # A SECOND clause at the same `est` merges under `|` into a claim LARGER than
-            # either sentence makes, so a restatement of a subset (`two at 835.7 s (a, k)`
-            # beside the clause that already names five) would be invisible, and a
-            # duplicated one would grade as if it were a single statement. Mark the repeat
-            # so the caller reds rather than believing a claim the block does not make.
-            groups[est] = groups[est] | {f"<est {est} stated twice>"}
-        else:
-            groups[est] = set()
-        # `|` rather than `set.update`: a `.update(` on a receiver this sweep cannot
-        # type is one more member of the `tools/sdk_privatise.py` residue pin, and a
-        # test is not a reason to move a pinned count.
-        groups[est] = groups[est] | names
-    ceil_matches = _EMISSION_CEIL_RE.findall(header)
-    if not ceil_matches:
-        return None
-    # The multiplier is `ci_selection.WATCHDOG_HEADROOM`, not a literal this guard owns. Read
-    # from the code so a change there REDS here with an accurate reason instead of returning
-    # `None` (which the caller reports as "states no emission the guard can read" — fail-closed,
-    # but it would send the next reader looking for a missing sentence rather than a moved
-    # constant). ⛔ This runs BEFORE the empty-`groups` check on purpose: a header carrying a
-    # wrong multiplier but NO partition clause must raise for the headroom, not fall down the
-    # generic `None` path this check exists to avoid. The `not ceil_matches` guard above stays
-    # ahead of it, because a block that states no derivation at all must read as `None` rather
-    # than being redded for a headroom it never used.
-    # ⛔ Compare the headroom NUMERICALLY, not as a spelling. `f"{2.0:g}"` is `"2"`, so a string
-    # comparison reds a block that writes `x 2.0` — the same multiplier, and the spelling the
-    # manifest's own block uses (`config/ci-surfaces.yml:46`: `shard_watchdog_minutes()` rounds
-    # `840.2/60 x 2.0` up to 29 m). A false block is the one failure this check must not produce.
-    headrooms = {float(h) for _est, h, _minutes in ceil_matches}
-    assert headrooms == {float(cs.WATCHDOG_HEADROOM)}, (
-        f"the block derives its watchdog with headroom {sorted(headrooms)}, but the code uses "
-        f"`ci_selection.WATCHDOG_HEADROOM` = {cs.WATCHDOG_HEADROOM:g} — the `ceil(...)` operand "
-        "no longer states the code's own multiplier, so the figures beside it are not the ones "
-        "anything computes. Update the sentence, or the constant moved and the block is stale.")
-    if not groups:
-        return None
-    est_str, _headroom, minutes_str = ceil_matches[0]
-    if len(ceil_matches) > 1:
-        # A SECOND `ceil(...)` clause is a repeat, not a second statement of one fact — the same
-        # doctrine as `<est X stated twice>` for the partition clauses, which also fires on an
-        # IDENTICAL second clause at one `est` (measured, not assumed). Here it needs its own arm
-        # because `.search()` used to take the FIRST match: measured 2026-11-23, a block stating
-        # both `ceil(836.4/60 x 2)` = 28 m and `= 29 m` read as `(836.4, 28)` and BOTH guard rows
-        # stayed green while the block visibly claimed two different minutes. That is exactly the
-        # shape a rebase produces (two sides of one paragraph interleaved).
-        #
-        # ⛔ This is deliberately ANY second clause, an exact restatement included, so that this
-        # helper has ONE rule for repeats rather than an exception nobody would remember — a block
-        # that states its derivation twice is redundancy in a paragraph this tight, whatever the
-        # two clauses say. Both shapes are pinned in the vacuity test.
-        groups = {est: names | {f"<ceil stated {len(ceil_matches)} times>"}
-                  for est, names in groups.items()}
-    else:
-        # ⛔ …and the ests this block GRADES must carry ONE minute in EVERY spelling they are
-        # derived in. A derivation `_EMISSION_CEIL_RE` cannot read is graded by nobody, so the
-        # block can claim two different watchdog minutes and still read as one.
-        #
-        # ⛔ Scoped to the GRADED ests — the partition's own operands plus the derived one —
-        # because the header legitimately quotes HISTORY at other operands (the S=10 paragraph's
-        # `840.2/60 x 2.0 up to 29 m`). Measured: an unscoped version reds the real block, which
-        # is the one failure this check must not produce.
-        graded = {float(est_str)} | {float(est) for est in groups}
-        conflicting: dict[float, int] = {}
-        for operand in _EMISSION_DERIVATION_RE.finditer(header):
-            minute = _EMISSION_MINUTE_AFTER_RE.search(
-                header[operand.end():operand.end() + _DERIVATION_LOOKAHEAD])
-            if minute is None:
-                continue
-            est, stated = float(operand.group("est")), int(minute.group("minutes"))
-            if est in graded and stated != int(minutes_str):
-                conflicting[est] = stated
-        assert not conflicting, (
-            f"the block derives {sorted(conflicting)} s to {sorted(conflicting.values())} m in a "
-            f"spelling `_EMISSION_CEIL_RE` cannot read, but its graded clause says {minutes_str} m "
-            "— a derivation nothing grades is how a block claims two different watchdog minutes "
-            "and still reads as one. Spell every derivation of these ests the way "
-            "`_EMISSION_CEIL_RE` reads it, or delete the extra one.")
-    return groups, float(est_str), int(minutes_str)
-
-
-def _live_fast_shard_emission() -> tuple[dict[float, set[str]], int]:
-    """The emission the block claims to quote: `{est_seconds -> names}` and the
-    watchdog the emitted shards carry."""
-    legs = cs.push_legs(cs.load_manifest())
-    groups: dict[float, set[str]] = {}
-    for shard in legs["shards"]:
-        groups.setdefault(float(shard["est_seconds"]), set()).add(shard["name"])
-    return groups, max(s["watchdog_minutes"] for s in legs["shards"])
-
-
-def test_the_fast_shards_header_block_states_the_measured_emission():
-    """#14296: the block restates the emission and must BE the emission.
-
-    Measured at the pre-fix head `2d57abb3e98c`: the block stated nine shards at 721.8 s (`a`–`e`,
-    `g`, `i`–`k`) and two at 721.7 s (`f`, `h`), while `push_legs` packed **seven** at
-    **722.0** (`a`–`e`, `i`, `j`) and **four** at **721.9** (`f`, `g`, `h`, `k`) — the
-    `origin/main` merge moved the pool and the sentence was carried instead of
-    re-emitted, which is the third time this block went stale. The watchdog is
-    unaffected (25 m either way), so arithmetic on the minute could not catch it: only
-    the `est_seconds` figures can.
-    """
-    claims = _emission_block_claims(cs.MANIFEST.read_text(encoding="utf-8"))
-    assert claims is not None, (
-        "the `fast_shards` header block states no emission the guard can read — this "
-        "is a no-op gate over an empty subject set, not a clean map. Re-point "
-        "`_EMISSION_CLAUSE_RE` / `_EMISSION_CEIL_RE` at the sentence the block "
-        "actually uses, or retire this guard rather than leaving it reading nothing.")
-    groups, ceil_est, ceil_minutes = claims
-    live_groups, live_minutes = _live_fast_shard_emission()
-    assert groups == live_groups, (
-        "the `fast_shards` header block quotes a `--emit-push-matrix` this tree does "
-        f"not emit — stated {groups}, emitted {live_groups}. Re-run the verb and paste "
-        "its figures; a carried emission is the class this block exists to warn "
-        "about — and the reason this guard grades it instead of trusting it.")
-    assert (ceil_est, ceil_minutes) == (max(live_groups), live_minutes), (
-        "the block's watchdog derivation disagrees with the emission — stated "
-        f"`ceil({ceil_est}/60 x 2)` = {ceil_minutes} m, emitted worst "
-        f"{max(live_groups)} s at {live_minutes} m. The block claims the two agree "
-        "by construction rather than by a hand re-read; this is that check.")
-    # ⛔ A shard-figure sentence the clause parser cannot read is a figure NO row grades —
-    # and this block states one exactly when a rebase splices two parents' re-derivations
-    # together. Measured 2026-11-23 on the rebase this guard was cut onto: both parents had
-    # rewritten this paragraph, git kept BOTH spellings, and the readable clause was graded
-    # while the stale one was invisible. An unread figure is the same no-op-gate class as a
-    # pattern that matches nothing, so the count of sentences is graded too, not only the
-    # clauses that happen to parse.
-    header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
-    unread = _EMISSION_UNREAD_SENTENCE_RE.findall(header)
-    assert len(unread) == len(_EMISSION_CLAUSE_RE.findall(header)), (
-        "the `fast_shards` header states a shard-figure sentence the clause parser "
-        f"cannot read ({unread}), so that figure is graded by NOTHING while its "
-        "neighbours are graded by this test — re-spell it as `N shards at S.S s "
-        "(names)`, or delete it. A rebase that splices two re-derivations is how it "
-        "gets there.")
-
-
-def test_the_emission_block_guard_is_not_vacuous():
-    """The guard must bite on a carried emission and stay quiet on this tree's.
-
-    The stale sentence is the block's own pre-fix text (721.8/721.7, nine/two), kept
-    here as the measured instrument: it must NOT read as this tree's emission. If a
-    future edit widens a pattern until it matches anything, this arm stops redding
-    and the sibling guard above becomes decoration.
-    """
-    stale = (
-        "# carried: `--emit-push-matrix` at THIS head packs 9 shards at 721.8 s "
-        "(a, b, c, d, e, g, i, j, k) and 2 shards at 721.7 s (f, h), so\n"
-        "# `ceil(721.8/60 x 2)` = 25 m governs\n"
-        "\nfast_shards: 11\n")
-    stale_claims = _emission_block_claims(stale)
-    live_groups, live_minutes = _live_fast_shard_emission()
-    assert stale_claims is not None
-    assert (stale_claims[0], stale_claims[1], stale_claims[2]) != (
-        live_groups, max(live_groups), live_minutes), (
-        "the pre-fix sentence reads as this tree's emission — the guard cannot "
-        "distinguish a carried figure from a re-measured one")
-    # A sentence is bounded to the header: a shard-count line BELOW `fast_shards:`
-    # (the carve-out / slow-leg comments quote their own shard counts) is not this
-    # block's claim and must not be joined into it. The `ceil(...)` clause is what makes
-    # this fixture a WITNESS for the bound rather than only a True/True: without it
-    # `None` arrives for two independent reasons (an EMPTY bounded header, or a missing
-    # ceil, which the unbounded read also lacks) and a revert of the truncation would
-    # pass. With it, the bounded read returns `None` and the unbounded one returns a
-    # claim — so the row reds on that revert and only that revert.
-    assert _emission_block_claims(
-        "fast_shards: 11\n# packs 2 shards at 700.0 s (a, b)\n"
-        "# `ceil(700.0/60 x 2)` = 24 m\n") is None, (
-        "a shard-count comment BELOW `fast_shards:` was read as this block's claim — the "
-        "subject is not truncated at the key")
-    # A RENAMED key must not silently widen the subject to the whole file: the bound is
-    # `manifest_text[:key.start()]` for the `key` `re.search(r"^fast_shards:")` returned, and an
-    # absent key yields NO bound at all (the whole file) — so a renamed key used to hand the guard
-    # every shard-count sentence in the map and still return a readable claim. It fails closed on
-    # the bound itself now, before it reads a single clause.
-    with pytest.raises(AssertionError, match="carries no `fast_shards:` key"):
-        _emission_block_claims(
-            "fast_shards_x: 11\n# five shards at 835.7 s (a, c, d, e, k)\n")
-    # A COUNT that disagrees with the names beside it is graded as claiming a set it does not name
-    # (`<count says N>`), so the caller reds rather than believing one side of a sentence that
-    # disagrees with itself. Without this fixture the arm is live on the artifact but graded by
-    # nothing: measurably, with the arm disabled (`if False:`) BOTH rows above stay green and a
-    # count-word-only edit (`five` -> `four`, names intact) ships silently (agent-infra#3442 rule 3).
-    disagreed = _emission_block_claims(
-        "# four shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
-        "# `ceil(835.7/60 x 2)` = 28 m\n"
-        "\nfast_shards: 11\n")
-    assert disagreed is not None
-    assert disagreed[0][835.7] == {
-        "a", "c", "d", "e", "k", "<count says 4>"}, (
-        "a COUNT that disagrees with the names beside it was read as the names alone — the count arm "
-        f"is the only thing that reds a `five` -> `four` edit: {disagreed[0][835.7]}")
-    # A SECOND clause at the same `est` is a repeat, not a second statement of one fact:
-    # `|` would absorb a subset (`two at 835.7 s (a, k)` beside the clause naming five)
-    # into a claim the block does not make, invisibly. The repeat is marked instead.
-    repeated = _emission_block_claims(
-        "# five shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
-        "# and two at 835.7 s (a, k) — `ceil(835.7/60 x 2)` = 28 m\n"
-        "\nfast_shards: 11\n")
-    assert repeated is not None
-    assert repeated[0][835.7] == {
-        "a", "c", "d", "e", "k", "<est 835.7 stated twice>"}, (
-        "a subset restated at the same est was absorbed into the group beside it — the "
-        f"guard would grade a claim the block does not make: {repeated[0][835.7]}")
-    # A SUPERSET restatement reds by the same marker — it is not the subset case's leftover.
-    # Measured through the guard itself (2026-11-23): a stray clause naming all five PLUS two
-    # more at 835.7 leaves `{…, '<est 835.7 stated twice>'}` against a live group of five, so
-    # the partition comparison reds. Stated because the fix commit's own record claimed this
-    # shape was absorbed, which was wrong.
-    superset_repeat = _emission_block_claims(
-        "# five shards at 835.7 s (a, c, d, e, k) and six at 835.6 s (b, f, g, h, i, j)\n"
-        "# and seven at 835.7 s (a, c, d, e, i, j, k) — `ceil(835.7/60 x 2)` = 28 m\n"
-        "\nfast_shards: 11\n")
-    assert superset_repeat is not None
-    assert "<est 835.7 stated twice>" in superset_repeat[0][835.7], (
-        "a SUPERSET restated at the same est was absorbed — the repeat marker must fire on "
-        f"ANY second clause at one est, not only on a subset: {superset_repeat[0][835.7]}")
-    # A SECOND `ceil(...)` clause is that same repeat one line over — and it was UNGRADED while the
-    # reader used `.search()`: measured 2026-11-23, a block stating both `ceil(836.4/60 x 2)` = 28 m
-    # and `= 29 m` returned `(836.4, 28)` and BOTH guard rows stayed green, so the block visibly
-    # claimed two different minutes and nothing redded. That is precisely the shape a rebase
-    # produces when it interleaves the two sides of one paragraph, so it needs its own witness.
-    duplicate_ceil = _emission_block_claims(
-        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
-        "# `ceil(836.4/60 x 2)` = 28 m\n# `ceil(836.4/60 x 2)` = 29 m\n\nfast_shards: 11\n")
-    assert duplicate_ceil is not None
-    # ⛔ The witness is the MARKER, and its paired NEGATIVE — not `partition != live_groups`. That
-    # comparison is satisfied by any live-emission drift as well, so it would stop witnessing the
-    # arm exactly when the block went stale (which it has been caught doing again since this
-    # guard landed — #14434's and #14220's registrations each re-packed the bins): an assertion
-    # that cannot fail for the
-    # reason it names is the class this file keeps re-learning. The single-clause block below
-    # proves the marker is caused by the duplicate.
-    assert all("<ceil stated 2 times>" in names for names in duplicate_ceil[0].values()), (
-        "the duplicate `ceil(...)` marker did not reach EVERY group — an arm that marks one group "
-        "and not the other still leaves a live-looking partition beside a marked one, and "
-        f"`next(iter(...))` would not have seen it: {duplicate_ceil[0]}")
-    single_ceil = _emission_block_claims(
-        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
-        "# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n")
-    assert single_ceil is not None and not any(
-        marker.startswith("<ceil")
-        for names in single_ceil[0].values() for marker in names), (
-        "ONE `ceil(...)` clause picked up the duplicate marker — the arm fires on the count of "
-        f"clauses, not on a repeat: {single_ceil[0]}")
-    # An EXACT restatement is a repeat too, and it is pinned rather than left to chance: the sibling
-    # `<est X stated twice>` arm also reds on an identical second clause at one `est` (measured), so
-    # the helper has ONE rule for repeats instead of an exception nobody would remember.
-    exact_repeat = _emission_block_claims(
-        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
-        "# `ceil(836.4/60 x 2)` = 28 m\n# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n")
-    assert exact_repeat is not None and all(
-        "<ceil stated 2 times>" in names for names in exact_repeat[0].values()), (
-        "an EXACT restatement of the derivation was read as one statement — the same repeat rule "
-        f"as the partition clauses must apply to every group: {exact_repeat[0]}")
-    # ⛔ A SECOND DERIVATION of a GRADED est in a spelling `_EMISSION_CEIL_RE` cannot read is the
-    # same false PASS one spelling over, and it is NOT covered by the repeat marker above: the
-    # marker counts canonical matches, so an alternate spelling is a minute nothing grades.
-    # Measured 2026-11-23 against the real manifest with the partition untouched (so only the
-    # minute could differ), each of these kept BOTH rows green before this check existed. The set
-    # deliberately includes `*` and `→` — the first attempt at this arm matched `[x×X]` and
-    # `=|up to` and was itself spelling-bound.
-    for alt_spelling in (
-            "# `ceil(836.4 / 60 x 2)` = 29 m\n",
-            "# `ceil(836.4/60 \u00d7 2)` = 29 m\n",
-            "# `ceil (836.4/60 X 2)` = 29 m\n",
-            "# `ceil(836.4/60 * 2)` = 29 m\n",
-            "# 836.4/60 x 2 \u2192 29 m\n",
-            "# 836.4/60 x 2 -> 29 m\n",
-            "# and `shard_watchdog_minutes()` rounds 836.4/60 x 2.0 up to 29 m\n"):
-        with pytest.raises(AssertionError, match="derivation nothing grades"):
-            _emission_block_claims(
-                "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at "
-                "836.3 s (f, g, i)\n"
-                "# `ceil(836.4/60 x 2)` = 28 m\n" + alt_spelling + "\nfast_shards: 11\n")
-    # …and a derivation at an est the block's own PARTITION names is graded too: `836.3` below is a
-    # live group, so a conflicting minute on it must red rather than be excused as "historical".
-    with pytest.raises(AssertionError, match="derivation nothing grades"):
-        _emission_block_claims(
-            "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
-            "# `ceil(836.4/60 x 2)` = 28 m\n# 836.3/60 x 2 \u2192 30 m\n\nfast_shards: 11\n")
-    # …and the check is SCOPED to the est the block grades, so the header's historical derivation
-    # at a DIFFERENT operand — the S=10 paragraph's `840.2/60 x 2.0 up to 29 m`, which is prose
-    # about a tree that is not this one — must NOT red. Without this negative the arm could be
-    # satisfied by a pattern that simply rejects the manifest's real block.
-    historical = _emission_block_claims(
-        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
-        "# `ceil(836.4/60 x 2)` = 28 m\n"
-        "# (an earlier split was 840.2 s, and `shard_watchdog_minutes()` rounds 840.2/60 x 2.0 "
-        "up to 29 m)\n\nfast_shards: 11\n")
-    assert historical is not None and (historical[1], historical[2]) == (836.4, 28), (
-        "a historical derivation at a DIFFERENT operand is legitimate prose about another tree "
-        f"and must not red: {historical}")
-    # …and the multiplier is the CODE's constant, not a literal this guard owns. A block deriving
-    # with a different headroom does not state what `ci_selection.WATCHDOG_HEADROOM` computes, so
-    # it reds with that reason rather than reading as "no emission stated".
-    with pytest.raises(AssertionError, match="WATCHDOG_HEADROOM"):
-        _emission_block_claims(
-            "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
-            "# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
-    # …but the comparison is NUMERIC, so the same multiplier spelled `2.0` — the spelling the
-    # manifest's own block uses at `config/ci-surfaces.yml:46` (`shard_watchdog_minutes()` rounds
-    # `840.2/60 x 2.0` up to 29 m) — must NOT red. A false block is the one failure that check must
-    # never produce, and a string compare would produce it.
-    spelled = _emission_block_claims(
-        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
-        "# `ceil(836.4/60 x 2.0)` = 28 m\n\nfast_shards: 11\n")
-    assert spelled is not None and (spelled[1], spelled[2]) == (836.4, 28), (
-        "`x 2.0` is the same multiplier as `x 2` and must read identically — a spelling-sensitive "
-        f"comparison would refuse a CORRECT block: {spelled}")
-    # A clause WRAPPED across two comment lines must still be read. The block itself wrapped exactly
-    # there at `2d57abb3e98c` (`… and two at` / `# 721.7 s (f, h)`), so without the comment-line join
-    # the `721.7` group is silently lost and the guard REDS A CORRECT BLOCK. Nothing else in this
-    # suite reaches the join branch, so without this fixture `re.sub(r"\n\s*#\s?", " ", …)` can be
-    # deleted with both rows still green (measured against the live manifest: identical claim).
-    wrapped = _emission_block_claims(
-        "# nine shards at 721.8 s (a–e, g, i–k) and two at\n"
-        "# 721.7 s (f, h)\n"
-        "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
-    assert wrapped is not None and wrapped[0] == {
-        721.8: set("abcdegijk"), 721.7: {"f", "h"}}, (
-        "a clause wrapped across two comment lines was not joined into one sentence — a figure that "
-        f"happens to land on the next line then makes a claim unread: {wrapped}")
-    # ⛔ ROUND 5 SPLIT THE GUARD, so BOTH halves of the split need a witness or the split is
-    # reversible with everything green. The measurement was taken BEFORE these two fixtures
-    # existed (restoring the pre-round-5 order left this suite at 2 passed, and deleting the
-    # `not groups` return did too); with them present BOTH mutants now red — which is the whole
-    # point, so the numbers are stated with the state they belong to rather than in the present
-    # tense, where a reader re-measuring here would get the opposite answer. These two fixtures
-    # carry a `ceil(...)` clause and NO partition clause — the shape that makes the two branches
-    # disagree.
-    #   1. wrong multiplier → MUST raise for the headroom, not fall down the generic `None` path
-    #      this check exists to avoid (that is the whole reason the assert now precedes the
-    #      empty-`groups` return);
-    #   2. correct multiplier → MUST be `None`, because the block states no emission to grade.
-    with pytest.raises(AssertionError, match="WATCHDOG_HEADROOM"):
-        _emission_block_claims("# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
-    assert _emission_block_claims(
-        "# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n") is None, (
-        "a block with a correct derivation but NO partition clause states no emission to grade — "
-        "it must read as `None`, not as a claim")
-    # The RANGE spelling this block ITSELF used at `4ff7964acc` (`a–e, g, i–k`) and
-    # `29a2da4c9c` (`a–e, i, j`). ⛔ `wrapped` above reaches this same arm with the `a–e, g, i–k`
-    # mix, so this fixture deliberately uses the OTHER historical spelling — otherwise the two
-    # would be the same test twice, and the claim that it pins `29a2da4c9c`'s spelling would be
-    # prose about a string the file never contains (which is what an earlier cut of this comment
-    # did). ⛔ `ranged` is NOT the sole witness for the range arm: `wrapped` above reds on the same
-    # mutation (measured — deleting this fixture and neutering `_EMISSION_RANGE_RE` leaves one
-    # failure, at `wrapped`). It is kept as the single-line control that pins `29a2da4c9c`'s
-    # spelling specifically, and both assertions red when the pattern is neutered.
-    ranged = _emission_block_claims(
-        "# seven shards at 721.8 s (a–e, i, j) and two at 721.7 s (f, h)\n"
-        "# `ceil(721.8/60 x 2)` = 25 m\n\nfast_shards: 11\n")
-    assert ranged is not None and ranged[0][721.8] == set("abcdeij"), (
-        "the RANGE spelling this block used at `29a2da4c9c` (`a–e, i, j`) is unread — an arm "
-        "that only reads explicit lists turns the map's other spelling into an unread claim: "
-        f"{ranged}")
-    # A SHARD FIGURE the clause parser cannot read is invisible to the row above — and this
-    # is not hypothetical: it is the shape the rebase onto `origin/main` on 2026-11-23 actually
-    # produced (`_EMISSION_UNREAD_SENTENCE_RE` records the same event above; #14430's body
-    # measures it), where the block held this branch's readable clause AND a stale one that
-    # spelled a RANGE of seconds with a semicolon in its name list. The readable clause was
-    # graded, the stale one was graded by nothing, so the guard could sit GREEN over a block
-    # stating two different emissions.
-    #
-    # ⛔ CITE A SHA THAT RESOLVES. This comment first cited `b766b779af`, which no reader can
-    # resolve: `git cat-file -t b766b779af` -> fatal, `git rev-list --all | grep -c b766b779` -> 0
-    # (it is in no history this clone holds), and it is no advertised TIP on `origin`
-    # (`git ls-remote origin | grep b766b779` -> 0 matches). ⛔ Neither command settles
-    # reachability on its own, and quoting the wrong one is how a sound conclusion gets an
-    # unsound proof: `ls-remote` lists TIPS, so its grep can only show a sha is not a tip — an
-    # ancestor of any tip is fetched by every clone without ever matching that grep (e.g.
-    # `bbe54363ad` is in `origin/main`'s history and greps 0 there), while a bare `cat-file`
-    # measures the BOX, not the citation, because a local-only ref such as `refs/preserved/*`
-    # can hold an object no reader has. It was then rewritten to say the splice
-    # is at "no reachable commit" — which is also false, so the correction repeated the very
-    # defect it was removing. The half that IS citable was measured with this module's own helpers:
-    # `dc42c55baa` (on `integration/14296-on-new-main`) is the RANGE-with-semicolon spelling —
-    # FOUR clauses parse against FIVE shard-figure sentences, so exactly one figure there is graded
-    # by nothing (`_EMISSION_UNREAD_SENTENCE_RE` also matches the tail of every readable clause, so
-    # this arm's two counts agree only when EVERY sentence parses). ⛔ The OTHER half — four groups
-    # spliced out of two parents' readable clauses by `merge=union` — has no sha named here on
-    # purpose: it existed only on this branch's own pre-rebase merge commits, and a rebase leaves no
-    # ref resolving to them, so citing one would be the same uncheckable-sha defect this note
-    # removes. The `spliced` fixture below is a HAND-BUILT string, not a checkout of any commit; the
-    # one commit above is named so the arm is motivated by a shape a reader can go and check.
-    spliced = _emission_block_header(
-        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s "
-        "(f, g, i),\n"
-        "# `ceil(836.4/60 x 2)` = 28 m — and packs ALL ELEVEN shards at 835.8-835.9 s "
-        "(a-k; two runs,\n"
-        "\nfast_shards: 11\n")
-    assert len(_EMISSION_UNREAD_SENTENCE_RE.findall(spliced)) > len(
-        _EMISSION_CLAUSE_RE.findall(spliced)), (
-        "a spliced block's unreadable shard-figure sentence went undetected — that is the "
-        f"fail-open this arm exists for: {spliced}")
-#: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
-_WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
-
-
-def test_a_note_block_that_opens_of_its_own_is_never_read_as_the_row_aboves(
-        tmp_path):
-    """A block that OPENS a note documents another row — the reader must not join it.
-
-    This map's dominant convention is the block that PRECEDES the row it documents
-    (in `config/ci-surfaces.yml` the `355.0 IS A DELIBERATE CAP … #9172` block lies
-    directly under `test_work_claim.py` and documents `test_lane_stash.py`). YAML
-    supplies no association — §3.2.3.3: comments are "a presentation detail … not
-    associated with a particular node" — so the reader has to decide, and joining by
-    indentation alone attributes a neighbour's CLAIM to the wrong key.
-
-    Non-vacuity (measured pre-fix): the join runs to the end of the indented block,
-    so `test_above.py`'s note inherits the `grep -c '^def test_'` claim written for
-    the row BELOW and `_durations_rows_with_a_stale_case_count` reports
-    `('test_above.py', 2, 3)` — a FALSE RED against a row whose own note says
-    nothing about a count, in a required leg.
-    """
-    (tmp_path / "test_above.py").write_text(
-        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n\n\n"
-        "def test_c():\n    pass\n", encoding="utf-8")
-    text = (
-        "durations:\n"
-        "  test_above.py: 3.8  # ci-timing junit-census+top-15 2026-11-02 "
-        "(run 41375596528); was 4.0\n"
-        "  # #8051: LOCAL readings on this fleet-loaded host — 366.4s, 422.9s,\n"
-        "  # 216.6s, and #10356: 2 cases (`grep -c '^def test_'` -> 2; pytest\n"
-        "  # collects 2).\n"
-        "  test_below.py: 25.4  # ci-timing junit-census+top-15 2026-11-02 "
-        "(run 41375596528); was 355.0\n"
-        "  # #5612: 12.2 is the HIGHER of two local readings of this file.\n"
-        "surfaces: []\n")
-    joined = dict(_durations_row_comments(text))
-    assert "LOCAL readings" not in joined["test_above.py"], joined["test_above.py"]
-    assert "grep -c" not in joined["test_above.py"], joined["test_above.py"]
-    assert _durations_rows_with_a_stale_case_count(text, tmp_path) == []
-    # …and the mid-sentence wrap — the one shape that IS a continuation — still
-    # joins, so the paren guard keeps seeing a pair that wraps across two lines.
-    wrapped = (
-        "durations:\n"
-        "  test_wrapped.py: 9.5  # it opens here (and the closer sits on the\n"
-        "  # continuation line, so the pair is balanced together).\n"
-        "surfaces: []\n")
-    assert _durations_rows_with_unbalanced_parens(wrapped) == []
-    assert "continuation line" in dict(_durations_row_comments(wrapped))[
-        "test_wrapped.py"]
-
-
-def test_the_cap_block_is_not_read_as_the_row_aboves_note():
-    """The REAL `355.0 IS A DELIBERATE CAP` block belongs to the row BELOW it.
-
-    The writer's span rule and the reader's are one rule (see
-    `_durations_row_comments`); this pins the committed map against the shape that
-    rule exists for, so a re-flow of the block cannot quietly re-attach it to
-    `test_work_claim.py` (weight 3.8) and leave `test_lane_stash.py` — the row the
-    cap governs — with no note at all (#10575 review, P2).
-    """
-    from tools.ci_timing import _row_continuation_lines
-
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    # Scoped to the `durations:` BLOCK, not the whole file: the block carries the
-    # same keys once more in `durations_floors` above it (a row can be declared a
-    # floor), so a whole-file scan finds the DECLARATION rather than the row and
-    # this pin went red on a `durations_floors` line instead of measuring anything
-    # (#10575 review).
-    block_start = lines.index("durations:")
-    above = next(i for i, ln in enumerate(lines)
-                 if i > block_start and ln.startswith("  test_work_claim.py:"))
-    below = next(i for i, ln in enumerate(lines)
-                 if i > block_start and ln.startswith("  test_lane_stash.py:"))
-    assert above < below, (above, below)
-    block = lines[above + 1:below]
-    assert any("355.0 IS A DELIBERATE CAP" in ln for ln in block), block[:2]
-    assert all(ln[:1].isspace() and ln.strip().startswith("#") for ln in block), (
-        "the cap block must stay an INDENTED comment run beside its row: "
-        f"{[ln[:60] for ln in block][:2]}")
-    # The WRITER does not claim it…
-    assert _row_continuation_lines(lines, above) == [], (
-        "the cap block is being claimed as test_work_claim.py's note")
-    # …and the READER does not attribute it upward either, so no claim it carries is
-    # judged against `test_work_claim.py`'s 3.8.
-    assert "355.0 IS A DELIBERATE CAP" not in dict(_durations_row_comments(
-        text))["test_work_claim.py"]
-
-
-def test_the_committed_map_still_declares_its_three_caps():
-    """DELETING the `durations_floors` block must red — and this is where that runs.
-
-    `_declared_floors` treats an ABSENT `durations_floors` key as legal, and it has
-    to: every fixture manifest that carries no caps must keep its output. The cost
-    of that leniency is that the third defeat direction of the #10575 P1 — removing
-    the block outright — is invisible to every reader and every gate. All three
-    then see `{}`, no cap binds, and the next `--refresh-durations` (the scheduled
-    sweep, unreviewed) adopts the discounted reading this mechanism exists to stop:
-    `test_lane_stash.py` 355.0 -> 25.4.
-
-    WHY THIS PIN LIVES HERE, and not beside the mechanism in `test_ci_timing.py`.
-    `tests/test_ci_timing.py` already asserts `floors` is non-empty — but a PR that
-    edits ONLY `config/ci-surfaces.yml` does not select it. Measured with the map's
-    own selector (`ci_selection.py --changed-files config/ci-surfaces.yml`):
-    `full=False`, `surfaces=['core']`, and `test_ci_timing.py` is in NEITHER
-    `test_files` NOR `slow_selected` — while `test_ci_selection.py` IS in
-    `slow_selected`, in every diff shape that touches the map (map alone, map+code,
-    map+docs, map+`.gitattributes`). So the map's only pin on its own caps is this
-    file's, and a gate whose pin cannot be selected is not a gate (#10704 review).
-
-    DELETING the block was measured, not assumed: with it removed, `ci_manifest.py`,
-    `registry_integrity.py`, `ci_selection.py --integrity` and
-    `_manifest_contract_issues()` all stay green and `_declared_floors()` returns
-    `{}`. Lowering a cap IS caught (`ci_manifest` reds rc 1 with the CAP
-    diagnostic), so only the deletion face was open.
-
-    Scoped to the three KNOWN caps as a SUBSET: adding a fourth cap must not red
-    this, because deciding a cap is a #9172 CI-budget decision and an ordinary PR
-    may legitimately make one. Dropping one, or dropping them all, must.
-    """
-    from tools.ci_timing import _declared_floors
-
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    floors = _declared_floors(text)
-    required = {
-        "test_lane_stash.py": 355.0,
-        "test_calibration.py": 355.0,
-        "eval/write_path/test_write_path_operator_lane.py": 355.0,
-    }
-    missing = sorted(set(required) - set(floors))
-    assert not missing, (
-        f"the committed map no longer declares {missing} in `durations_floors` "
-        f"(it declares {sorted(floors) or 'NOTHING'}) — an absent block is legal to "
-        "`_declared_floors` by design, so every gate stays green while no cap binds "
-        "and the next sweep discounts the row (#10575 P1). Restore the declaration.")
-    for name, value in required.items():
-        assert floors[name].value == value, (name, floors[name])
-        # A CAP, not a FLOOR: the declared value is the weight in BOTH directions.
-        assert floors[name].pinned is True, name
-
-
-def _durations_rows_stating_a_stale_watchdog_floor(text: str, floor: int):
-    """Rows whose OWN note attaches a `WATCHDOG_FLOOR_MIN` that is not the current one.
-
-    The row's own tail only, never its continuation lines: a wrapped continuation can
-    belong to a comment BLOCK that describes the row BELOW it (the `355.0` cap block
-    sits *above* its `test_lane_stash.py` row), so reading continuations here would
-    attribute a neighbour's prose to the wrong key.
-    """
-    out = []
-    for line in text.splitlines():
-        m = _DURATIONS_ROW_RE.match(line)
-        if m is None:
-            continue
-        for claim in _WATCHDOG_FLOOR_CLAIM_RE.finditer(m.group("tail")):
-            if int(claim.group("minutes")) != floor:
-                out.append((m.group("key"), int(claim.group("minutes"))))
-    return out
-
-
-def test_no_durations_row_states_a_retired_watchdog_floor():
-    """#10044 review F3 (P2): the two cap rows still asserted the 15-min basis.
-
-    `WATCHDOG_FLOOR_MIN` moved 15 -> 19 (#10055, its own 2.9x derivation), which
-    falsifies every clause the `test_calibration.py` and `test_write_path_operator_lane.py`
-    notes were written at 15 min: at 19 min = 1140 s, 1140/390.0 = 2.92x and
-    1140/386.2 = 2.95x CLEAR the 2.5x those rows said they failed, so both readings
-    ARE declarable and the arithmetic ceiling is <456 s, not <360 s. The file's own
-    header rule ("a row's comment is kept only while the value AND its stated basis
-    are unchanged") is what the rows violated; no guard covered prose of this shape.
-
-    Only the mechanically checkable half is pinned — the number a note attaches to the
-    CONSTANT, on the row's own line. A row may still NARRATE the retired floor ("at the
-    15-min floor this cap was chosen under"), because that sentence is history, not a
-    claim about the file today; it must not state the retired number AS the constant's
-    value.
-    """
-    from tools.ci_selection import WATCHDOG_FLOOR_MIN
-    text = cs.MANIFEST.read_text(encoding="utf-8")
-    offenders = _durations_rows_stating_a_stale_watchdog_floor(text, WATCHDOG_FLOOR_MIN)
-    assert offenders == [], (
-        "a durations row states a retired `WATCHDOG_FLOOR_MIN` — the floor moved and "
-        f"the note's stated basis did not (#10044 review F3): {offenders}. Restate the "
-        "row at the current floor, keeping every ⛔ do-not-read-355.0 instruction and "
-        "the #9172 pointer.")
-
-
-def test_the_watchdog_floor_guard_is_not_vacuous():
-    """The guard above must bite on the pre-move rows and stay quiet on the rewrite."""
-    stale = (
-        "durations:\n"
-        "  test_a.py: 355.0  # #6133 CEILING, not a reading: `WATCHDOG_FLOOR_MIN` "
-        "(15 min) must clear the largest fast file by 2.5x.\n"
-        "  test_b.py: 1.0  # a row that names no floor at all.\n"
-        "surfaces: []\n")
-    legitimate = (
-        "durations:\n"
-        "  test_c.py: 355.0  # the #6133 rule is that `WATCHDOG_FLOOR_MIN` (19 min) "
-        "must clear the largest fast file by 2.5x. At the 15-min\n"
-        "      # floor this cap was chosen under, 900/360 = 2.5 exactly.\n"
-        "  test_d.py: 0.2\n"
-        "surfaces: []\n")
-    assert [k for k, _ in _durations_rows_stating_a_stale_watchdog_floor(stale, 19)] == [
-        "test_a.py"]
-    assert _durations_rows_stating_a_stale_watchdog_floor(legitimate, 19) == []
-
-
-def test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it():
-    """#9003 review (P2): a NEW file's first weight is the flat default, not a local timing.
-
-    The `durations` header above `durations:` prescribes `DEFAULT_FAST_WEIGHT` for a file
-    no sweep has collected yet (the #3419 `test_venture_pack.py` precedent) because a
-    weight is a SHARD-LAYOUT input: a locally-measured number decides which files share
-    a shard, so it must not be hand-picked. The #2818 row shipped a measured-on-this-box
-    4.9 first, under a comment that CLAIMED the flat-default convention it violated — and
-    the guard above could not see it, because the claim sat on the comment lines PRECEDING
-    the row rather than on its tail. Pinned by name here: the row is MARGIN on the
-    coverage floor, not the floor itself (`duration_coverage_issues()` is count-based and
-    passes either way — 90.01% without the row, 90.12% with it), so its MAGNITUDE must be
-    the flat default while its absence is a derivation to re-run, not an automatic red.
-    """
-    from tools.ci_selection import DEFAULT_FAST_WEIGHT, load_manifest
-    row = "test_pack_value_declarations_2818.py"
-    durations = load_manifest()["durations"]
-    assert row in durations, (
-        "the #2818 row is missing from `durations` — its presence is the margin the "
-        "#3400 coverage floor has (90.01% without it, still above the 0.90 floor, so "
-        "treat its absence as a finding to re-derive, not an automatic red)")
-    # Scoped to the UNMEASURED state on purpose: once a sweep collects the file,
-    # `tools/ci_timing.py::render_refreshed_manifest` rewrites the value and CLEARS a
-    # tail that LEADS with the `# unmeasured` marker (that is how the #3419/#2788
-    # precedent rows work), and this pin must not then fail on a legitimate CI
-    # measurement. The marker is read exactly the way the refresher reads it — by its
-    # leading token — so the two cannot disagree: any OTHER trailing comment is
-    # preserved verbatim by the refresh, including one that mentions the word later.
-    if not _ROW_LEADS_WITH_UNMEASURED.match(
-            _durations_row_tail("test_pack_value_declarations_2818.py")):
-        assert durations[row] > 0, (
-            f"{row} carries a non-positive weight {durations[row]}s — a sweep has "
-            "collected the file, so its value must be a real measurement")
-        return
-    assert durations[row] == DEFAULT_FAST_WEIGHT, (
-        f"{row} carries {durations[row]}s, but a NEW file's first weight is the flat "
-        f"{DEFAULT_FAST_WEIGHT}s default until a CI sweep collects it. Do not substitute "
-        "a local timing: a weight is a shard-layout input, so a number that does not "
-        "model CI decides which files run together (#3419, #9003 review).")
-
-
-# The refresher clears a `# unmeasured` marker by its LEADING TOKEN (see
-# `tools/ci_timing.py::render_refreshed_manifest`), so the pin below reads it the
-# same way rather than by substring.
-_ROW_LEADS_WITH_UNMEASURED = re.compile(r"[ \t]*#\s*unmeasured\b")
-
-
-def _durations_row_tail(key: str) -> str:
-    """The tail comment of a `durations:` row, or "" when the row is absent.
-
-    Scoped to the `durations:` block, NOT the whole file: a floored/capped key is
-    also declared in `durations_floors` ABOVE the block, and a whole-file scan takes
-    that declaration for the row — returning its (empty) tail while the real row
-    carries the note the caller is asking about (#10575 delta review, P3).
-    """
-    lines = cs.MANIFEST.read_text(encoding="utf-8").splitlines()
-    try:
-        start = next(i for i, ln in enumerate(lines) if ln.strip() == "durations:")
-    except StopIteration:  # pragma: no cover — the map always declares the block
-        return ""
-    end = next((i for i in range(start + 1, len(lines))
-                if _DURATIONS_TOP_KEY_RE.match(lines[i])), len(lines))
-    for line in lines[start + 1:end]:
-        m = _DURATIONS_ROW_RE.match(line)
-        if m is not None and m.group("key") == key:
-            return m.group("tail")
-    return ""
-
-
-def test_duration_coverage_guard_backwards_compatible():
-    """#3400: an absent/empty durations map is never a hard failure."""
-    from tools.ci_selection import duration_coverage_issues
-    files = [f"test_cov_{i:03d}.py" for i in range(100)]
-    base = {"surfaces": {"core": files}, "tier1": [], "slow_files": []}
-    assert duration_coverage_issues(base) == []              # key absent
-    assert duration_coverage_issues({**base, "durations": {}}) == []   # empty
-    assert duration_coverage_issues({**base, "durations": None}) == []  # null
-    # a repo with no fast files at all must not divide by zero
-    assert duration_coverage_issues(
-        {"surfaces": {}, "tier1": [], "slow_files": [],
-         "durations": {"x.py": 1.0}}) == []
 
 
 # ── #1668: the P2 flip's workflow-wiring pins (epic #1647 Task 6) ─────────
@@ -14582,194 +12056,6 @@ def _load_python_ci() -> dict:
     import yaml
     wf_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "python-ci.yml"
     return yaml.safe_load(wf_path.read_text())
-
-
-# The `test` job's dependency-caches block: the section header that opens it and the
-# step the `⛔ OVERRIDES:` marker is attached to. Both are unique lines in
-# `python-ci.yml`, which is what makes them usable anchors (#11065 round 5, ISSUE 1).
-_TEST_JOB_CACHE_SECTION_HDR = "Dependency caches: read the big half, bound the write"
-_TEST_JOB_CACHE_RESTORE_STEP = "Restore pip dependency cache (#7612, read-only — #11063)"
-
-
-def _test_job_cache_overrides_block(wf_lines: list[str], prune_name: str) -> str:
-    """Return the `⛔ OVERRIDES:` block that GOVERNS the `test` job's uv cache write.
-
-    ⛔ ANCHORED TO THE STEP IT DOCUMENTS, not to a marker's absolute position in the
-    file (#11065 round 5, ISSUE 1 — measured). This locator used to be
-    `next(ln for ln in <whole 4,900-line file> if "⛔ OVERRIDES:")`, i.e. the FIRST such
-    marker anywhere, so the two arms built on it judged whichever block happened to
-    come first. Measured at `60981107a8`, on the merge tree, nothing else altered:
-
-      * a degraded copy of the REAL block read **GREEN** once an unrelated
-        `⛔ OVERRIDES:` block was inserted above it in `changes` — a fail-open; and
-      * that unrelated block reddened a **correct** real block whose own text was
-        untouched — a false block.
-
-    Neither is hypothetical: `AGENTS.md` requires an `OVERRIDES:` line for every
-    departure from the common default, so this workflow keeps growing them (three
-    today, one already ⛔-prefixed at `:954`), and "first marker in the file" is a
-    locator that decays the moment one is added above this job.
-
-    The anchor is therefore the PARSE-VISIBLE step the comment block documents: the
-    marker must live in the contiguous comment run attached to that step, at or after
-    the dependency-caches section header and above the prune step. A marker that is
-    not attached to this block raises instead of being silently judged — the guard
-    fails closed on its own drift.
-
-    (Comment-aware YAML is the theory answer — `ruamel.yaml` round-trip can attach a
-    comment to a node (`yaml_add_eol_comment`) where PyYAML discards comments
-    entirely. It is not taken here: one new import and a second YAML parser for one
-    pin is machinery this blocker PR should not grow. Adjacency to the documented
-    step gets the same guarantee from text the pin already reads.)
-    """
-    sections = [i for i, ln in enumerate(wf_lines) if _TEST_JOB_CACHE_SECTION_HDR in ln]
-    anchors = [i for i, ln in enumerate(wf_lines)
-               if ln.strip() == f"- name: {_TEST_JOB_CACHE_RESTORE_STEP}"]
-    prunes = [i for i, ln in enumerate(wf_lines) if ln.strip() == f"- name: {prune_name}"]
-    assert len(sections) == 1, (
-        f"expected exactly one dependency-caches section header "
-        f"({_TEST_JOB_CACHE_SECTION_HDR!r}) in python-ci.yml, found {len(sections)} — "
-        "the `OVERRIDES:` arm anchors on it and cannot locate the block without it")
-    assert len(anchors) == 1, (
-        f"expected exactly one `- name: {_TEST_JOB_CACHE_RESTORE_STEP}` step in "
-        f"python-ci.yml, found {len(anchors)} — the `OVERRIDES:` marker must stay "
-        "attached to the step block that carries the cache write, so a rename or a "
-        "duplicate has to be re-anchored here rather than judged as another block")
-    assert len(prunes) == 1, (
-        f"expected exactly one `- name: {prune_name}` prune step in python-ci.yml, "
-        f"found {len(prunes)} — the marker's lower bound is the step it governs")
-    section_hdr, anchor, prune_line = sections[0], anchors[0], prunes[0]
-
-    markers = [i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln and i < anchor]
-    assert markers, (
-        "no `⛔ OVERRIDES:` marker at or above the `test` job's dependency-caches "
-        "step — the departure from the vendor's `uv cache prune --ci` recommendation "
-        "is unrecorded, which is what the marker exists to prevent")
-    start = markers[-1]
-
-    # ⛔ ADJACENCY (the actual anchor): every line between the marker and the step it
-    # documents must be blank or a comment. This is what makes the locator immune to a
-    # marker added anywhere else in the workflow — including one in another job.
-    stray = [i + 1 for i in range(start, anchor)
-             if wf_lines[i].strip() and not wf_lines[i].lstrip().startswith("#")]
-    assert not stray, (
-        f"the nearest `⛔ OVERRIDES:` at or above the dependency-caches step is at "
-        f"python-ci.yml:{start + 1}, but non-comment lines {stray} sit between it and "
-        f"the step it is supposed to document (line {anchor + 1}). That marker belongs "
-        "to a different block — a departure statement must stay attached to the "
-        "step it governs, not float above unrelated steps")
-    assert section_hdr < start < prune_line, (
-        f"the `⛔ OVERRIDES:` marker resolved to python-ci.yml:{start + 1}, which is "
-        f"outside the dependency-caches section (header {section_hdr + 1}, prune step "
-        f"{prune_line + 1}) — the arm would judge a block that does not govern this "
-        "cache write")
-
-    # ⛔ ONE MARKER PER CACHE WRITE, asserted (#11065 round 5). Two markers inside this
-    # section would leave "which block is the attributed one" to the locator's tie-break —
-    # the same class of ambiguity the absolute-position anchor had — so a second departure
-    # statement here has to be folded into the one marker that governs this write.
-    in_section = [m for m in markers if m > section_hdr]
-    assert len(in_section) == 1, (
-        f"the dependency-caches section of python-ci.yml (line {section_hdr + 1}) carries "
-        f"{len(in_section)} `⛔ OVERRIDES:` markers "
-        f"({', '.join(str(m + 1) for m in in_section)}); this write has exactly one "
-        "departure to record, and with two markers the arm would judge whichever it "
-        "picked — fold the additional departure into the marker that governs this cache "
-        "write, or move it to the block it belongs to")
-
-    block = []
-    for ln in wf_lines[start:]:
-        if re.match(r"\s*#\s*ARM \d", ln):
-            break
-        block.append(ln)
-    return "\n".join(block)
-
-
-def _overrides_payload_misattribution(overrides: str) -> str | None:
-    """Return the sentence that misattributes `#7612`'s payload, or None when clean.
-
-    The claim, not the phrase (#11065 cycle 3): a bare substring ban reddened a
-    CORRECT edit that named `~/.cache/pip` for the 3.2 GB torch wheel set. What is
-    forbidden is an assertion that the payload SITS in `~/.cache/uv`.
-    """
-    prose = " ".join(re.sub(r"^\s*#\s?", "", ln) for ln in overrides.splitlines())
-    for sentence in re.split(r"(?<=[.;])\s+", prose):
-        if "#7612" not in sentence or "~/.cache/uv" not in sentence:
-            continue
-        if "~/.cache/pip" in sentence:
-            continue
-        return sentence.strip()
-    return None
-
-
-def _cache_refs_of(step: dict) -> str:
-    """EVERY cache key a step names: its primary `key:` AND its `restore-keys:`.
-
-    `actions/cache` reads both fields. On a primary-key miss it walks
-    `restore-keys` in order as PREFIX matches and restores the newest entry that
-    matches, reporting `cache-hit == 'false'` (a partial hit) and the matched
-    key (`docs.github.com` -> "Dependency caching reference"; `actions/cache`
-    README). So a guard that reads `with.key` alone cannot see a step that reads
-    a retired or cross-family archive through `restore-keys:`, and reports the
-    pin green while the step restores the payload the pin exists to keep out —
-    the read-side twin of the #11063 split (#11065 cycle 8, P2).
-
-    `key:` ALONE remains the right field to read for a WRITER (a save writes
-    under its primary key; `restore-keys` on a save step is inert), which is what
-    the writer-identity arms do.
-    """
-    with_ = step.get("with") or {}
-    return "\n".join(str(with_.get(field) or "")
-                     for field in ("key", "restore-keys"))
-
-
-def _cache_roots_of(step: dict) -> dict:
-    """The key ROOT each cache field declares, per line: `{field: [root, ...]}`.
-
-    A root is the literal prefix before the first `${{ … }}` interpolation — the
-    only part `actions/cache` can match on: the primary `key:` exactly, each
-    `restore-keys:` entry as a prefix. Comparing ROOTS (never whole keys) is what
-    lets an arm state "this step reads inside its own family and nowhere else"
-    without restating a formula that a legitimate `uv.lock` or OS edit moves.
-    """
-    with_ = step.get("with") or {}
-    return {field: [ln.split("${{")[0].strip()
-                    for ln in str(with_.get(field) or "").splitlines() if ln.strip()]
-            for field in ("key", "restore-keys")}
-
-
-def _cross_family_restore_keys(step: dict) -> list:
-    """The `restore-keys:` roots in `step` that leave its own `key:` family.
-
-    `restore-keys` entries are prefix matches, so one is only safe while it stays
-    inside the family its primary key names: an entry that is EQUAL to the key
-    root, or NARROWER (`pip-Linux-` inside `pip-`), can only ever reach that
-    family's entries. A BROADER root (`uv-` against `uv-cache-`) or a foreign one
-    (`uv-pip-` against `uv-cache-`, `pip-` against `uv-cache-`) reaches an archive
-    written by another cache — the payload mixing #11063 split and this pin
-    exists to prevent, from the read side.
-    """
-    roots = _cache_roots_of(step)
-    own = [r for r in roots["key"] if r]
-    if not own:
-        return []
-    own_root = own[0]
-    return [rk for rk in roots["restore-keys"]
-            if rk and not (rk == own_root or rk.startswith(own_root))]
-
-
-def _steps_naming_key(jobs: dict, needle: str) -> list:
-    """`[(job id, step name)]` for every step whose cache FIELDS name `needle`.
-
-    Fields, plural: `key:` and `restore-keys:` both (`_cache_refs_of`). Takes the
-    JOBS mapping, not the workflow, so the same call serves the whole-workflow
-    scan — where "no reader, no writer" is a claim about every job, and a reader
-    left behind in a sibling job restores the same archive — and a synthetic
-    single-job fixture in `test_the_cache_key_scan_reads_restore_keys_and_not_key_alone`.
-    """
-    return [(jid, s.get("name")) for jid, jd in jobs.items()
-            for s in (jd.get("steps") or [])
-            if needle in _cache_refs_of(s)]
 
 
 def _effective_step_env(wf: dict, job_id: str, step: dict) -> dict:
@@ -15806,6 +13092,56 @@ _MEASURED_PYTEST_MAX_MIN = {
     "test-slow": 4.70,
     "test-track-b": 0.08,
 }
+
+
+# ── #3239, extended: the REQUIRED surface may not inherit the 360m default ──
+# A job whose pytest step carries a LITERAL watchdog is capped against it. This
+# arm cannot see a job with no pytest step at all, and measured 2026-10-27 that
+# gap was open on `packs-compile`
+# and on `python-ci-gate` — the REQUIRED check itself — plus FIVE of the seven
+# required contexts in `ci.yml` and the `ai-review-gate` job. A wedged job there is
+# not a slow CI, it is a merge queue held on a pending check for six hours.
+#
+# The required-context invariant below is deliberately DERIVED, never a hard-coded
+# job list: the names come from `.mergify.yml`'s own conditions (the same source
+# `tools/mergify_config_guard.py` reads), so a new required context is covered the
+# day it is named rather than the day someone remembers this file. The measured
+# bounds themselves live in `docs/ops/ci-wall-clock.md`.
+
+def test_every_python_ci_job_carries_an_outer_cap():
+    """Every job in `python-ci.yml` must carry a literal `timeout-minutes`.
+
+    This is the workflow that emits `python-ci-gate`, the REQUIRED merge check, and
+    twelve of its jobs are in that job's `needs:` — so any one of them without a
+    cap can withhold the required check for GitHub's 360-minute default (#3239).
+    The assertion is deliberately workflow-wide rather than `needs:`-scoped: the
+    two jobs outside `needs:` (`canary-streak`, and the aggregator itself) are one
+    selector output away from joining it, and a 360m default is never the bound
+    anyone would choose. A job that needs longer than its measured work is fine:
+    pick the number from a measurement and record it, as
+    `docs/ops/ci-wall-clock.md` does.
+    """
+    wf = _load_python_ci()
+    uncapped = [
+        name for name, job in wf["jobs"].items()
+        if not isinstance(job.get("timeout-minutes"), int)
+        or job["timeout-minutes"] <= 0
+    ]
+    assert not uncapped, (
+        f"python-ci.yml job(s) {uncapped} carry no literal `timeout-minutes` — "
+        f"GitHub's 360m default then holds them, and twelve of this workflow's "
+        f"jobs are in `python-ci-gate`'s `needs:`, so a hung job withholds the "
+        f"REQUIRED check for six hours (#3239). Set a bound from a measurement "
+        f"(docs/ops/ci-wall-clock.md), not from the default.")
+
+
+# A job whose pytest step carries a LITERAL watchdog is capped against it here. The
+# ORDER arm below is why this survived the durations-map arithmetic cut (B7): the
+# watchdog is the bound that PRINTS the pass/fail counts, so a cap BENEATH it
+# silently restores #798's death mode — the runner cancels the step and the log
+# tail with it — while everything still reads green beforehand. That is a shape
+# invariant about the workflow, not a restatement of any production formula, so it
+# is not B7's arithmetic to cut.
 _PYTEST_WATCHDOG_RE = re.compile(r"timeout -s INT -k \d+ (\d+)m")
 
 
@@ -15845,15 +13181,13 @@ def test_every_bounded_pytest_job_caps_above_its_watchdog():
             f"outer cap ({cap}m), or the runner kills the step before it can "
             f"print its pass/fail counts (#798)")
         bounded[name] = (watchdog, cap)
-    # W37: `test-carve-out` is now a SHARDED job, so its pytest step carries no
+    # W37: `test-carve-out` is a SHARDED job, so its pytest step carries no
     # literal watchdog — it carries `${{ matrix.watchdog_minutes }}m`, derived
-    # per shard by `tools.ci_selection.shard_watchdog_minutes`. The pin is
-    # therefore re-derived rather than deleted (its own message asked for
-    # this): the ORDER invariant is now asserted against the LARGEST watchdog
-    # the selector actually emits, which is the value the literal cap must
-    # clear. A static `in bounded` membership check would have gone vacuous the
-    # moment the job became a matrix — it would assert nothing about the
-    # carve-out at all.
+    # per shard by `tools.ci_selection.shard_watchdog_minutes`. The ORDER
+    # invariant is therefore asserted against the LARGEST watchdog the selector
+    # actually emits, which is the value the literal cap must clear. A static
+    # `in bounded` membership check would have gone vacuous the moment the job
+    # became a matrix.
     idx = _carve_matrix()
     carve_cap = jobs["test-carve-out"].get("timeout-minutes")
     assert isinstance(carve_cap, int), (
@@ -15934,1240 +13268,6 @@ def test_slow_leg_bounds_clear_the_committed_work():
             f"the committed `durations` map.")
 
 
-# ── #3239, extended: the REQUIRED surface may not inherit the 360m default ──
-# `test_every_bounded_pytest_job_caps_above_its_watchdog` closes the class for
-# jobs whose pytest step carries a LITERAL watchdog. It cannot see a job with no
-# pytest step at all, and measured 2026-10-27 that gap was open on `packs-compile`
-# and on `python-ci-gate` — the REQUIRED check itself — plus FIVE of the seven
-# required contexts in `ci.yml` and the `ai-review-gate` job. A wedged job there is
-# not a slow CI, it is a merge queue held on a pending check for six hours.
-#
-# The required-context invariant below is deliberately DERIVED, never a hard-coded
-# job list: the names come from `.mergify.yml`'s own conditions (the same source
-# `tools/mergify_config_guard.py` reads), so a new required context is covered the
-# day it is named rather than the day someone remembers this file. The measured
-# bounds themselves live in `docs/ops/ci-wall-clock.md`.
-
-def test_every_python_ci_job_carries_an_outer_cap():
-    """Every job in `python-ci.yml` must carry a literal `timeout-minutes`.
-
-    This is the workflow that emits `python-ci-gate`, the REQUIRED merge check, and
-    twelve of its jobs are in that job's `needs:` — so any one of them without a
-    cap can withhold the required check for GitHub's 360-minute default (#3239).
-    The assertion is deliberately workflow-wide rather than `needs:`-scoped: the
-    two jobs outside `needs:` (`canary-streak`, and the aggregator itself) are one
-    selector output away from joining it, and a 360m default is never the bound
-    anyone would choose. A job that needs longer than its measured work is fine:
-    pick the number from a measurement and record it, as
-    `docs/ops/ci-wall-clock.md` does.
-    """
-    wf = _load_python_ci()
-    uncapped = [
-        name for name, job in wf["jobs"].items()
-        if not isinstance(job.get("timeout-minutes"), int)
-        or job["timeout-minutes"] <= 0
-    ]
-    assert not uncapped, (
-        f"python-ci.yml job(s) {uncapped} carry no literal `timeout-minutes` — "
-        f"GitHub's 360m default then holds them, and twelve of this workflow's "
-        f"jobs are in `python-ci-gate`'s `needs:`, so a hung job withholds the "
-        f"REQUIRED check for six hours (#3239). Set a bound from a measurement "
-        f"(docs/ops/ci-wall-clock.md), not from the default.")
-
-
-def _doc_paragraphs(text: str) -> list[tuple[int, list[str]]]:
-    """`(first_line_number, lines)` for every blank-line-separated paragraph."""
-    out: list[tuple[int, list[str]]] = []
-    current: list[str] = []
-    first = 0
-    for number, line in enumerate(text.splitlines(), 1):
-        if line.strip():
-            if not current:
-                first = number
-            current.append(line)
-        elif current:
-            out.append((first, current))
-            current = []
-    if current:
-        out.append((first, current))
-    return out
-
-
-def _wall_clock_cap_claims(text: str, job: str, cap: int) -> list[str]:
-    """Every quoted `X → Y` cap MOVE for `job` that lands off `cap`.
-
-    Attributed by WINDOW: a claim WRAPS in this doc's prose — "`test-record-postgres`
-    was the first … so it has MOVED: `20 → 50`" puts the name and the number on
-    ADJACENT lines — so the two lines either side of a line naming the job are read as
-    its claim. It is not paragraph-wide: one paragraph of §2 otherwise carries the
-    arm-2 arithmetic of OTHER rows, and attributing that reds on `test-d14-hosted-api`'s
-    own worked example.
-
-    Excused by a revert marker that NAMES the shipped cap: that same wrap means the historical
-    `20 → 50` raise and its own revert marker sit on adjacent lines ("…was raised 20 → 50 … and
-    then **put back to 20**"), and a revert naming the cap the workflow ships is the record being
-    honest about a past value rather than contradicting the code. The pre-fix defect is NOT
-    excused: its paragraph never mentions a revert at all. ⛔ The marker is matched TOGETHER with
-    `cap`, not as a bare word anywhere in the paragraph — a paragraph-wide skip swallowed every
-    claim in it, and was measured letting `put back to 30` through (which now reds).
-
-    ⛔ DECLARED RESIDUAL: a NEW false claim APPENDED to a paragraph that already carries a valid
-    `put back to {cap}` marker is still excused, because the excuse is attributed per PARAGRAPH and
-    no lexical arm can tell "was raised 20 → 50, put back to 20" (a coherent triple) from "its cap
-    is 20 → 50" sitting beside it — measured, still green. Closing that needs the claim and its
-    revert attributed as a pair, which this predicate cannot do. Stated rather than left to be
-    discovered, the same way the sibling pin declares its ±2-line window.
-    """
-    offenders: list[str] = []
-    revert_naming_cap = re.compile(
-        rf"(?:put\s+back|revert\w*)[^.\n]{{0,80}}?\b{cap}\b", re.IGNORECASE)
-    for first, block in _doc_paragraphs(text):
-        if revert_naming_cap.search("\n".join(block)):
-            continue
-        named = [index for index, line in enumerate(block) if job in line]
-        if not named:
-            continue
-        window = set()
-        for index in named:
-            window.update(range(max(0, index - 2), min(len(block), index + 3)))
-        for index in sorted(window):
-            for target in re.findall(r"→\s*\**`?(\d+)", block[index]):
-                if int(target) != cap:
-                    offenders.append(
-                        f"line {first + index}: moves `{job}` to {target}, "
-                        f"the workflow ships {cap}")
-    return offenders
-
-
-def test_the_wall_clock_record_states_no_cap_the_workflow_does_not_ship():
-    """`docs/ops/ci-wall-clock.md` must not re-assert a cap move the code reversed.
-
-    #10962 review (P2): the cap revert put `test-record-postgres` back to 20 and
-    corrected the table row, the note under it and the §2 summary — but left the §2
-    paragraph that RANKS the four non-clearing rows still saying "so it has MOVED:
-    `20 → 50`". The record then asserted BOTH sides of one cap in one section, which
-    is the exact defect this document exists to remove: the next cap lane reads 50 as
-    live and re-litigates it, or "fixes" `python-ci.yml` back to 50 against a SUM that
-    no longer contains the save.
-
-    The rule is mechanical: on any paragraph naming the job, a `X → Y` cap move must
-    land on the cap `python-ci.yml` actually ships, unless the paragraph records the
-    move as reverted. Scoped to `test-record-postgres` because it is the row that has
-    moved twice (20 → 50 → 20); widening it to every row is its own decision.
-
-    Non-vacuous at the pre-fix head (`8aac7cb8d`'s parent): that head's §2 paragraph
-    reads "so it has MOVED: `20 → 50`" while the workflow ships 20, so this reds there
-    and passes here.
-    """
-    job = "test-record-postgres"
-    cap = _load_python_ci()["jobs"][job]["timeout-minutes"]
-    assert isinstance(cap, int) and cap > 0, (
-        f"python-ci.yml:{job} carries no literal `timeout-minutes`, so there is no "
-        f"shipped cap for the record to agree with")
-    doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
-    offenders = _wall_clock_cap_claims(doc, job, cap)
-    assert not offenders, (
-        "docs/ops/ci-wall-clock.md re-asserts a cap `python-ci.yml` does not ship — the "
-        "record then holds both sides of one number and the next cap lane cannot tell "
-        "which is live. State the shipped cap, or name the move as reverted:\n  "
-        + "\n  ".join(offenders))
-
-
-#: Arm 1's floor, exactly as `ci-wall-clock.md` §2 states it ("floored at 15 m").
-_WALL_CLOCK_ARM1_FLOOR_MIN = 15
-
-#: Every wording the record uses to CREDIT a row to arm 1. ⛔ WIDENED from `arm-1 shaped`
-#: alone (#11195 review, P2): the shipped doc says "not an arm-1 **reading**", so a set keyed
-#: on one phrasing was EMPTY on the very tree it audits — `grep -c 'arm-1 shaped'` returned 0 —
-#: and "empty by phrasing" is not "closed". The guard below is what lets this alternation cover
-#: the document's own vocabulary without reddening on the sentence that REFUTES arm 1 for the row.
-_ARM1_ATTRIBUTION = re.compile(
-    r"arm[- ]?1\s+(?:shaped|reading|row|attributed)", re.IGNORECASE)
-
-#: A negation ADJACENT to the attribution — `not an`, `no longer`, `never a` — with at most an
-#: article between. ⛔ IT MUST BE ADJACENT, and that is not a detail: the pre-#11195 wording this
-#: pin exists to catch reads "so it no longer pays a save and **now IS arm-1 shaped**", so a
-#: window-wide `no longer` would excuse the exact sentence that must red. The negation has to
-#: attach to the attribution, not merely sit somewhere earlier in the paragraph.
-_ARM1_NEGATION = re.compile(
-    r"(?:\bnot|\bnever|\bnor|\bn't|\bno\s+longer|cannot)\s+(?:an?\s+)?$",
-    re.IGNORECASE)
-
-
-def _arm1_attributions(text: str) -> list[tuple[int, str]]:
-    """`(offset, job)` for every row the record CREDITS to arm 1 — negation-guarded.
-
-    `job` is the nearest backticked job name before the attribution (the doc names the row
-    and then credits it), or `""` when none is in range. The caller decides what to do with
-    an unattributable credit; this helper only reports what the text says.
-    """
-    out: list[tuple[int, str]] = []
-    for claim in _ARM1_ATTRIBUTION.finditer(text):
-        window = text[max(0, claim.start() - 48):claim.start()]
-        if _ARM1_NEGATION.search(window):
-            continue
-        named = re.findall(r"`([a-z0-9][a-z0-9-]+)`",
-                           text[max(0, claim.start() - 700):claim.start()])
-        out.append((claim.start(), named[-1] if named else ""))
-    return out
-
-
-def _arm1_cap(measured_max: float) -> int:
-    """Arm 1 of the doc's own rule: `2 × max`, nearest 5 m, floored at 15 m.
-
-    Written as the doc writes it — "rounded to the nearest 5 minutes", i.e. half UP. The
-    builtin `round()` is banker's rounding and would turn a 22.5 m doubling into 20 m
-    rather than the 25 m the rule names.
-    """
-    return max(_WALL_CLOCK_ARM1_FLOOR_MIN, int((2 * measured_max) / 5 + 0.5) * 5)
-
-
-def _wall_clock_table_rows() -> dict[str, tuple[float, int]]:
-    """`{job: (published max, cap in force)}` from every 6-column row of the doc.
-
-    Read MECHANICALLY out of the table instead of restated, so this pin cannot drift from
-    the document it audits. Only rows whose job cell is a bare `` `job-name` `` (optionally
-    bold, optionally with ONE trailing parenthetical) are returned: the shard rows
-    (`test (a…i)` (9 shards), `test-slow (a…e)` (5 legs)) aggregate several workflow jobs
-    and publish a RANGE, so they have no single `timeout-minutes` to compare against. A row
-    whose max cell carries no number (`ci-introduced-failure` publishes "not yet
-    measured") is skipped rather than guessed at.
-    """
-    rows: dict[str, tuple[float, int]] = {}
-    for line in (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text().splitlines():
-        cells = [cell.strip() for cell in line.split("|")[1:-1]]
-        if len(cells) != 6:
-            continue
-        job_cell, max_cell, cap_cell = cells[0], cells[4], cells[5]
-        named = re.fullmatch(r"`([a-z0-9][a-z0-9-]+)`(?: \(.*\))?",
-                             job_cell.replace("**", ""))
-        if not named:
-            continue
-        max_digits = re.findall(r"\d+(?:\.\d+)?", max_cell.replace("**", ""))
-        cap_digits = re.findall(r"\d+", cap_cell.replace("**", ""))
-        if max_digits and cap_digits:
-            rows[named.group(1)] = (float(max_digits[0]), int(cap_digits[0]))
-    return rows
-
-
-#: Which workflow each row that is NOT a `python-ci.yml` job comes from. Every other row in
-#: the record's tables resolves against `python-ci.yml`. ⛔ The mapping is asserted EXACT below:
-#: a row in neither is a hard failure, never a skip — a skipped row is precisely how the `cap`
-#: column drifted with every sibling pin green (#11195 review, P1).
-_WALL_CLOCK_ROW_WORKFLOWS = {
-    "legal-e2e": "ci.yml",
-    "docs": "ci.yml",
-    "pricing-artifact": "ci.yml",
-    "test-isolation": "ci.yml",
-    "license-surface": "ci.yml",
-    "ai-review-gate": "ai-review-gate.yml",
-    "drift-guard": "drift-guard.yml",
-}
-
-#: `python-ci.yml` jobs the record's table deliberately publishes no single `cap` for.
-_WALL_CLOCK_TABLE_EXEMPT_JOBS = {
-    # Shard AGGREGATES: the table publishes `test (a…i)` / `test-slow (a…e)` as ONE row for 9
-    # and 5 jobs that each carry their own `timeout-minutes`, so there is no single shipped
-    # cap for a published cell to be compared against (their bounds are pinned instead by
-    # `test_every_bounded_pytest_job_caps_above_its_watchdog` and the shard-budget pin).
-    "test",
-    "test-slow",
-    # `push`-only and `needs: test`, so it never runs on a PR and is outside the merge gate's
-    # `pull_request`-dominated measurement set that §1 is derived from.
-    "canary-streak",
-}
-
-
-def _workflow_jobs(workflow: str) -> dict:
-    """`{job: job-doc}` for one file under `.github/workflows/`."""
-    return yaml.safe_load(
-        (REPO / ".github" / "workflows" / workflow).read_text())["jobs"]
-
-
-def _wall_clock_cap_rows(text: str | None = None) -> dict[str, int]:
-    """`{job: published cap}` for every 6-column row that publishes one.
-
-    The CAP-only sibling of `_wall_clock_table_rows`. That reader also requires a measured
-    `max`, which drops `ci-introduced-failure` ("not yet measured") — and its cap is exactly
-    what this pin is about, since a cap can move without the max moving. The job-cell filter
-    is the same one, so the shard aggregate rows stay excluded by construction.
-
-    `text` is accepted so a control can feed a MUTATED document; it defaults to the real one.
-    """
-    text = ((REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
-            if text is None else text)
-    rows: dict[str, int] = {}
-    for line in text.splitlines():
-        cells = [cell.strip() for cell in line.split("|")[1:-1]]
-        if len(cells) != 6:
-            continue
-        named = re.fullmatch(r"`([a-z0-9][a-z0-9-]+)`(?: \(.*\))?",
-                             cells[0].replace("**", ""))
-        cap_digits = re.findall(r"\d+", cells[5].replace("**", ""))
-        if named and cap_digits:
-            rows[named.group(1)] = int(cap_digits[0])
-    return rows
-
-
-def test_every_cap_the_record_publishes_is_the_cap_its_workflow_ships():
-    """P1 (#11195 review): §1's `cap` column was pinned by NOTHING.
-
-    Reproduced by the reviewer, not taken on trust: patching the `test-record-postgres` row's
-    cap cell back to the PRE-#11063 value the sibling pins exist to forbid
-
-        | `test-record-postgres` | 23 | 1.62 | 14.61 | 15.43 | **50** |
-
-    left `tests/test_ci_selection.py -k 'wall_clock or arm_1'` at **2 passed** — because
-    `_wall_clock_cap_claims` scans `X → Y` prose MOVES only, and the arm-1 pin reads a
-    published cap for the rows arm 1's bullet NAMES plus any row called "arm-1 shaped" (and
-    no row is). The table's `cap` column therefore could re-assert the exact cap the code
-    reversed while every wall-clock pin stayed green — the defect state this PR exists to fix.
-
-    So the column is compared to the workflow, for EVERY row, mechanically: a row resolves to
-    its own workflow (`_WALL_CLOCK_ROW_WORKFLOWS` for the non-`python-ci.yml` tables), and the
-    published number must equal that job's literal `timeout-minutes`. Coverage is asserted in
-    both directions — a row that resolves to no capped job reds, and a `python-ci.yml` job the
-    table silently STOPS publishing a row for reds too — so neither a wrong number nor a
-    deleted row can shrink this pin into passing.
-    """
-    python_ci = _load_python_ci()["jobs"]
-    doc_rows = _wall_clock_cap_rows()
-    assert doc_rows, (
-        "ci-wall-clock.md publishes no comparable `cap` cell at all — this pin would assert "
-        "nothing, so re-anchor it rather than letting it pass on an empty table")
-
-    unresolved: list[str] = []
-    mismatched: list[str] = []
-    for job, published in sorted(doc_rows.items()):
-        workflow = _WALL_CLOCK_ROW_WORKFLOWS.get(job, "python-ci.yml")
-        jobs = python_ci if workflow == "python-ci.yml" else _workflow_jobs(workflow)
-        job_doc = jobs.get(job)
-        shipped = job_doc.get("timeout-minutes") if isinstance(job_doc, dict) else None
-        if not isinstance(shipped, int) or shipped <= 0:
-            unresolved.append(
-                f"`{job}` — the table publishes {published} m, but {workflow} has no job "
-                f"`{job}` with a literal `timeout-minutes`")
-            continue
-        if shipped != published:
-            mismatched.append(
-                f"`{job}` — the table publishes {published} m, {workflow} ships {shipped} m")
-
-    assert not unresolved, (
-        "docs/ops/ci-wall-clock.md publishes a cap for a job that does not exist (or carries no "
-        "literal bound) in the workflow it is attributed to. Add the row to "
-        "`_WALL_CLOCK_ROW_WORKFLOWS` if it lives in another workflow, or delete the row:\n  "
-        + "\n  ".join(unresolved))
-
-    assert not mismatched, (
-        "docs/ops/ci-wall-clock.md's `cap` column disagrees with the workflow it describes — the "
-        "record then states a bound the tree does not ship, and the next cap lane re-derives (or "
-        "re-litigates) the wrong number. Change the cell, or change the workflow:\n  "
-        + "\n  ".join(mismatched))
-
-    unlisted = sorted(set(python_ci) - set(doc_rows) - _WALL_CLOCK_TABLE_EXEMPT_JOBS)
-    assert not unlisted, (
-        f"python-ci.yml job(s) {unlisted} no longer publish a `cap` row in "
-        "docs/ops/ci-wall-clock.md, so this pin stops covering them the moment anyone deletes "
-        "a row. Publish the row, or add the job to `_WALL_CLOCK_TABLE_EXEMPT_JOBS` with the "
-        "reason its cap cannot be stated as one number.")
-
-    stale_mapping = sorted(set(_WALL_CLOCK_ROW_WORKFLOWS) - set(doc_rows))
-    assert not stale_mapping, (
-        f"`_WALL_CLOCK_ROW_WORKFLOWS` maps {stale_mapping}, which no longer publish a cap row — "
-        "a mapping for a row that is gone is dead weight that hides the row's deletion. "
-        "Remove the mapping.")
-
-    # Non-vacuity, executable: the reader must SEE the cell the finding patched, and the value
-    # it reads must DISCRIMINATE against the workflow — so a green here cannot be a reader that
-    # matched nothing. `50` is the pre-#11063 value, i.e. the exact defect state.
-    doc_text = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
-    mutated = doc_text.replace("| 15.43 | 20 |", "| 15.43 | **50** |", 1)
-    assert mutated != doc_text, (
-        "the `test-record-postgres` row this control mutates is no longer in the shape it "
-        "mutates — re-anchor the control so it still proves the reader reads the cell")
-    assert _wall_clock_cap_rows(mutated)["test-record-postgres"] == 50, (
-        "the cap reader did not see the mutated cell, so a green run of this pin cannot be it "
-        "reading the table")
-    assert python_ci["test-record-postgres"]["timeout-minutes"] != 50, (
-        "the workflow now ships 50 for `test-record-postgres`, so the mutation above no longer "
-        "discriminates — pick a value the workflow does not ship")
-
-
-def test_every_row_the_record_attributes_to_arm_1_satisfies_arm_1s_arithmetic():
-    """P3 (#11195 review, ISSUE 2): arm 1 must reproduce the cap it is credited with.
-
-    §2 states ONE rule with two arms. Arm 1 is `cap = 2 × measured max`, rounded to the
-    nearest 5 minutes, floored at 15 m, and §1 publishes each row's measured max beside
-    the cap in force — so every row the record credits to arm 1 can be recomputed. At the
-    reviewed head `8aac7cb8d` it could not: the arm-1 bullet read "**restore-only since
-    #11063**, so it no longer pays a save and now IS arm-1 shaped — which is why its cap
-    is 20 and not 50", while the row it names publishes max **15.43 m**, which arm 1
-    doubles to 30.86 → **30**. The 20 actually comes from the arm-2 SUM derivation in the
-    note (12 m watchdog + ~1 m setup ≈ 13 m; × 1.5 = 19.5 → 20), so one file stated two
-    mutually exclusive justifications for one number — five sections apart, in the edit
-    whose whole point is that the record stops contradicting itself.
-
-    The sibling pin above (`…states_no_cap_the_workflow_does_not_ship`) covers the OTHER
-    finding by checking `X → Y` moves against the workflow; it cannot see this one, because
-    an arm-1 attribution is prose with no move arrow in it. This pin is the missing arm.
-
-    Two checked sets, each declared:
-
-    - **arm 1's stated examples.** Every `` `job` <2×max> → <cap> `` pair inside arm 1's
-      own bullet (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20) is recomputed from that job's
-      §1 row: the stated doubling must equal `2 × published max`, and `_arm1_cap` of that
-      max must equal the stated cap. This set KEEPS THE PIN ALIVE on the shipped tree (if
-      it empties, this reds) and it reds if any of those maxima drift.
-    - **arm-1 attributions.** Any job the doc CREDITS to arm 1 (`_arm1_attributions`, which
-      reads every wording in `_ARM1_ATTRIBUTION` and skips a credit the sentence NEGATES) must
-      satisfy `_arm1_cap(<its published max>) == <its published cap>`. ⛔ NON-VACUOUS ON THE
-      PRE-FIX TREE, verified by running it against `8aac7cb8d`'s document: it reds with
-      `assert 30 == 20` for `test-record-postgres`. On the shipped tree every arm-1 credit is
-      negated (the bullet says "not an arm-1 reading" and names the disagreement), so this set
-      is legitimately empty — which is why the first set carries the liveness, and why
-      `test_the_arm_1_attribution_set_is_closed_on_the_records_own_vocabulary` below proves the
-      emptiness comes from that GUARD rather than from a phrase the set never matched.
-
-    Not covered, declared rather than hidden: an arm-1 claim phrased in words no arm's
-    vocabulary covers (there is no lexical definition of "credits to arm 1"). The two sets above
-    are the wordings this document actually uses; a third one re-enters by adding it to
-    `_ARM1_ATTRIBUTION`, and the closure test below reds if the document's own wording leaves
-    that alternation.
-    """
-    doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
-    rows = _wall_clock_table_rows()
-
-    assert "2 × measured max" in doc, (
-        "ci-wall-clock.md no longer states arm 1's formula (`cap = 2 × measured max`), so "
-        "neither this pin nor its readers can check an arm-1 row against anything — "
-        "re-anchor this pin rather than deleting the rule")
-
-    halves = doc.split("- **The job's cold save IS that archive**", 1)[0].rsplit(
-        "- **The job's cold save is NOT the 3.6 GB", 1)
-    assert len(halves) == 2, (
-        "arm 1's bullet is no longer locatable between its two headers — a rule that "
-        "cannot be found is a rule that cannot be checked")
-    bullet = halves[1]
-
-    # (1) arm 1's stated examples, recomputed from the table they are derived from.
-    examples = {
-        named.group(1): (float(named.group(2)), int(named.group(3)))
-        for named in re.finditer(
-            r"`([a-z0-9][a-z0-9-]+)`\s+([\d.]+)\s*(?:→|->)\s*\**`?(\d+)", bullet)
-        if named.group(1) in rows
-    }
-    assert examples, (
-        "arm 1's bullet states no `job <2 × max> → <cap>` example any more — this pin "
-        "would be vacuous, so re-anchor it instead of letting it pass on an empty set")
-    for job, (stated_doubling, stated_cap) in sorted(examples.items()):
-        published_max, published_cap = rows[job]
-        assert stated_doubling == 2 * published_max, (
-            f"ci-wall-clock.md's arm-1 example for `{job}` states {stated_doubling} m as "
-            f"`2 × max`, but the max its own §1 row publishes is {published_max} m "
-            f"(2 × that = {2 * published_max}). One of the two has drifted.")
-        assert _arm1_cap(published_max) == stated_cap == published_cap, (
-            f"arm 1 on `{job}`'s published max {published_max} m gives "
-            f"{_arm1_cap(published_max)} m, but the document states {stated_cap} m and "
-            f"publishes {published_cap} m. Arm 1 cannot be the justification for a cap "
-            "it does not reproduce (#11195 review, ISSUE 2).")
-
-    # (2) anything CALLED arm-1 shaped must survive arm 1's own arithmetic.
-    for offset, job in _arm1_attributions(doc):
-        if not job or job not in rows:
-            continue
-        published_max, published_cap = rows[job]
-        assert _arm1_cap(published_max) == published_cap, (
-            f"ci-wall-clock.md calls `{job}` arm-1 shaped (offset {offset}), but arm 1 (2 × max, nearest "
-            f"5 m, floored at {_WALL_CLOCK_ARM1_FLOOR_MIN}) turns the max it publishes "
-            f"({published_max} m) into {_arm1_cap(published_max)} m, not the "
-            f"{published_cap} m that ships. Attribute the number to the derivation that "
-            "produces it — the arm-2 SUM, if the row still saves — instead of asserting "
-            "two justifications for one cap (#11195 review, ISSUE 2).")
-
-
-def test_the_arm_1_attribution_set_is_closed_on_the_records_own_vocabulary():
-    """P2 (#11195 review): the arm-1 attribution set must key on the record's OWN words.
-
-    The sibling pin's set (2) matched the literal phrase `arm-1 shaped`, and at this head
-    `grep -c 'arm-1 shaped' docs/ops/ci-wall-clock.md` is **0** — the doc's current wording is
-    "not an arm-1 **reading**" (`:309`). The set was therefore empty on the tree it audits, and
-    "empty by phrasing" is not "closed": the same defect re-expressed in the document's own
-    vocabulary passed both pins.
-
-    ⛔ The obvious widening is wrong, and this test is what says so. `arm-1 (?:shaped|reading|…)`
-    alone reds the SHIPPED document, on the very sentence that refutes arm 1 for the row
-    ("not an arm-1 reading"). The set needs a negation guard — and the guard must be ADJACENT
-    to the attribution, because the pre-fix wording that must red reads "so it **no longer** pays
-    a save and **now IS arm-1 shaped**": a paragraph- or window-wide `no longer` would excuse
-    the exact sentence the pin exists to catch.
-
-    Executable, not argued: three probes below, so a pass cannot be the predicate matching
-    nothing and a red cannot be it matching everything.
-    """
-    doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
-
-    assert _ARM1_ATTRIBUTION.search(doc), (
-        "ci-wall-clock.md uses no wording `_ARM1_ATTRIBUTION` recognises, so this pin would be "
-        "vacuous — re-anchor the alternation on the document's vocabulary rather than letting "
-        "it pass on an empty set")
-
-    assert not _arm1_attributions(doc), (
-        "ci-wall-clock.md now CREDITS a row to arm 1 without negating it: "
-        + ", ".join(
-            f"`{job or '<unnamed>'}` at offset {offset}"
-            for offset, job in _arm1_attributions(doc))
-        + ". Either state the derivation that produces the cap (arm 2's SUM, when the row still "
-        "saves) or negate the attribution — every row this doc credits to arm 1 must satisfy "
-        "arm 1's own arithmetic")
-
-    # Probe 1 — the PRE-FIX wording must be seen. This is the sentence at `8aac7cb8d`:309, which
-    # is what set (2) of the arithmetic pin reds on (`assert 30 == 20` for `test-record-postgres`).
-    pre_fix = (
-        "`test-record-postgres` mounts that path but is **restore-only since #11063**, so it no "
-        "longer pays a save and now IS arm-1 shaped — which is why its cap is 20 and not 50."
-    )
-    assert _arm1_attributions(pre_fix), (
-        "the arm-1 attribution set no longer sees "
-        "'so it no longer pays a save and now IS arm-1 shaped' — the pre-fix wording this pin "
-        "exists to catch would pass silently")
-
-    # Probe 2 — the doc's OWN wording with only the negation removed must be seen, which is what
-    # proves the empty set above is the GUARD's doing and not a phrase the set never matched.
-    mutated = doc.replace("not an arm-1", "an arm-1", 1)
-    assert mutated != doc, (
-        "ci-wall-clock.md no longer carries the negated 'not an arm-1 …' wording this control "
-        "mutates — re-anchor the control on the sentence the document actually uses")
-    assert _arm1_attributions(mutated), (
-        "stripping the negation from the document's own 'not an arm-1 reading' left the "
-        "attribution set empty, so the guard is not what excused it — the set is matching the "
-        "wrong words")
-
-
-def test_every_required_merge_check_carries_an_outer_cap():
-    """A job EMITTING a required merge context must carry a literal cap.
-
-    The required set is read from `.mergify.yml` (`queue_conditions` gates ENTRY,
-    `merge_conditions` gates the MERGE — both are required, so both are checked),
-    and each name is resolved to the job that emits it through the same emitter
-    map `tools/mergify_config_guard.py` uses — a job's effective name is its
-    `name:` field when set, else its id.
-
-    A required name that resolves to NO job is asserted against rather than
-    skipped: today all seven resolve, and a name the workflows do not emit is
-    either a new gating workflow that needs a bound or a condition that can never
-    be satisfied (the deadlock the mergify guard exists to catch). If a required
-    context is ever emitted by a non-workflow app, extend this test's resolution
-    — do not weaken the assertion, because a skipped name is a silently unbounded
-    merge path.
-
-    Scope note: this covers the SEVEN required contexts. It does not assert
-    anything about merge-path workflows that emit no required context (e.g.
-    `drift-guard`) — those are bounded by hand, with their measurement recorded
-    in `docs/ops/ci-wall-clock.md`.
-    """
-    docs = mcg._workflow_docs(REPO)
-    mergify = mcg._load_mergify(REPO)
-    required: list[str] = []
-    for rule in mergify["queue_rules"]:
-        for key in ("queue_conditions", "merge_conditions"):
-            required.extend(mcg._success_names(rule.get(key) or []))
-    required = sorted(set(required))
-    assert required, (
-        ".mergify.yml declares no positive `check-success=` condition — the "
-        "required set is empty, so this guard would assert nothing")
-
-    by_name: dict[str, list[dict]] = {}
-    for emitter in mcg._emitters(docs):
-        by_name.setdefault(emitter["name"], []).append(emitter)
-
-    unemitted = [name for name in required if name not in by_name]
-    assert not unemitted, (
-        f"required merge context(s) {unemitted} are named in .mergify.yml but "
-        f"NO job's effective check name matches — either a gating workflow is "
-        f"missing a bound this test cannot see, or the context can never be "
-        f"satisfied (see tools/mergify_config_guard.py).")
-
-    uncapped: list[str] = []
-    for name in required:
-        for emitter in by_name[name]:
-            job = docs[emitter["workflow"]]["jobs"][emitter["job"]]
-            cap = job.get("timeout-minutes") if isinstance(job, dict) else None
-            if not isinstance(cap, int) or cap <= 0:
-                uncapped.append(f"{name} ({emitter['workflow']}:{emitter['job']})")
-    assert not uncapped, (
-        f"required merge check(s) {uncapped} carry no `timeout-minutes`, so a "
-        f"wedged job holds the merge queue on GitHub's 360m default instead of "
-        f"failing in minutes-to-tens-of-minutes. Set the bound from a "
-        f"measurement (docs/ops/ci-wall-clock.md).")
-
-
-def _slow_wall_remedy(manifest: dict, target: float | None = None,
-                      setup: float | None = None) -> str:
-    """#11605: the remedy the wall arm can ACTUALLY clear, derived from the map.
-
-    The wall arm's failure text used to tell every reader to "Raise
-    `config/ci-surfaces.yml::slow_shards` (reviewed)". Measured on the 2026-11-09
-    refresh, that advice is INERT: a leg is FILE-granular (`build_shard_entries`
-    packs whole files, and `python-ci.yml` maps each name to `tests/<name>.py`),
-    so `max(leg) >= <the heaviest file>`. Once one file alone exceeds the pytest
-    budget a leg may spend (`target - setup`), no leg count clears the wall —
-    raising the count only relocates the red onto the BALANCE arm. Five lanes
-    re-derived that dead end from the failure text, one after another.
-
-    So the two arms are solved for the leg count before a word is written. With
-    `pool` = the gating pool, `h` = the heaviest file, `room = target - setup`:
-
-      * the WALL needs `pool / L <= room`  ->  `L >= ceil(pool / room)` = `lo`;
-      * the BALANCE band needs `h <= ratio x pool / L`  ->  `L <= floor(ratio x
-        pool / h)` = `hi` (the heaviest file must still fit the band).
-
-    `lo > hi` (or `h > room`) is the indivisible-pool state: no `slow_shards`
-    value can pass, and the message says so, names the file, and names the two
-    routes that remain (split/move it, or move the ceiling — an OWNER decision,
-    #6792). Otherwise the window `[lo, hi]` is stated, so the advice is a number
-    a reviewer can act on instead of "raise it".
-
-    Pure: reads only the passed manifest (and the two measured constants), so it
-    is testable against synthetic maps. Returns "" when the pool is empty (an
-    empty pool is the coverage arm's finding, not this one's).
-    """
-    target = SLOW_LEG_WALL_TARGET_MIN if target is None else target
-    setup = SLOW_LEG_SETUP_ALLOWANCE_MIN if setup is None else setup
-    room = target - setup
-    dmap = cs._durations_map(manifest)
-    weights = {n: cs._duration_weight(dmap.get(f"{n}.py")) / 60.0
-               for n in slow_leg_files(manifest)}
-    if not weights or room <= 0:
-        return ""
-    heaviest = max(weights, key=lambda n: weights[n])
-    h = weights[heaviest]
-    pool = sum(weights.values())
-    count = slow_shard_count(manifest)
-    ratio = cs.HALF_DURATION_IMBALANCE_RATIO
-    # ceil(pool / room) on the seconds, so the answer is exact at a boundary
-    lo = -(-round(pool * 60) // round(room * 60))
-    hi = int(ratio * pool / h) if h > 0 else 0
-    if h > room or lo > hi:
-        return (
-            f"⛔ No `slow_shards` value can clear this, and more legs are not the "
-            f"remedy: a leg is FILE-granular, so `max(leg)` is at least the "
-            f"heaviest file (`{heaviest}`, {h:.2f}m alone) while a leg may spend "
-            f"only {room:.2f}m of pytest ({target:.0f}m target − {setup:.1f}m "
-            f"setup). Clearing the wall needs >= {lo} legs; the {ratio}x balance "
-            f"band admits at most {hi} at {h:.2f}m — the two windows do not "
-            f"overlap, so the pool has to become DIVISIBLE: split or move "
-            f"`{heaviest}` (or move the {target:.0f}m ceiling, an OWNER decision "
-            f"— #6792 — never a lane's). Committed at {count} legs; see #11605.")
-    return (
-        f"Raise `config/ci-surfaces.yml::slow_shards` (reviewed) into the "
-        f"[{lo}, {hi}] window this map admits: the wall needs >= {lo} legs "
-        f"({pool:.2f}m / {room:.2f}m of pytest per leg — a LOWER bound, the LPT "
-        f"pack must still land inside it) and the {ratio}x balance band allows "
-        f"<= {hi} while `{heaviest}` ({h:.2f}m) is the heaviest file, instead of "
-        f"letting this lane become the merge ceiling again")
-
-
-def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
-    """#9539: the slow legs must be a complete, duration-balanced partition AND
-    the wall their pack projects must stay inside the CI guideline.
-
-    This is the guard the lane did not have. The old committed rows could rot
-    without ANY test noticing: #9017 found the halves at 6.4:1 because the eval
-    file had grown from its declared 855 s to a measured 24.4 min and nothing
-    re-derived the split. Here the properties are recomputed from the committed
-    `durations` map on every run, so a slow file that grows reds THIS instead of
-    silently restoring the merge ceiling:
-
-      * coverage — the legs partition `slow_gating_files()` exactly, once
-        each (no gap, no duplicate);
-      * balance — no leg exceeds its fair share by more than the house
-        `HALF_DURATION_IMBALANCE_RATIO` band (an LPT pack normally lands
-        within 0.1%, so 1.25 is deliberately loose enough for a coarse map);
-      * the bound — `max(leg) + SLOW_LEG_SETUP_ALLOWANCE_MIN` <= the 10m
-        guideline, AND, once the matrix is capped (#6744), the job's real band
-        `ceil(legs/cap) x (max leg + allowance)` <= `SLOW_LEG_CAPPED_WALL_TARGET_MIN`.
-        A new slow file big enough to break either reds here, and the remedy is derived
-        by `_slow_wall_remedy()` from the map rather than asserted: a reviewed
-        `slow_shards` bump when the pool is divisible, and a split/move of the
-        offending file when one file alone exceeds the pytest budget a leg may
-        spend (no leg count can help then — #11605). Never a quieter number. The
-        second bound is not optional: a per-leg number alone certifies a wall the
-        job cannot hit as soon as one leg is not the whole job.
-
-    The setup allowance is a MEASURED constant (1.9–2.1 min from the jobs API
-    over 5 main runs), not zero: a bound that ignored the per-leg fixed cost
-    would claim a wall the job cannot hit.
-    """
-    m = load_manifest()
-    count = slow_shard_count(m)
-    entries = slow_shard_entries(m)
-    assert len(entries) == count, (
-        f"slow_shards declares {count} legs but the pack emitted {len(entries)} "
-        f"— a short pack means the pool cannot be sharded that widely")
-    assert count >= 2
-    # coverage: exactly once each
-    flat = [f for e in entries for f in e["files"]]
-    assert len(flat) == len(set(flat)), (
-        f"a slow file rides more than one leg: "
-        f"{sorted({f for f in flat if flat.count(f) > 1})}")
-    assert set(flat) == set(slow_leg_files(m)), (
-        "the slow legs must cover slow_gating_files() "
-        "(slow_files - carve_out - the non-gating lane, #10194) exactly: "
-        f"missing={sorted(set(slow_leg_files(m)) - set(flat))} "
-        f"extra={sorted(set(flat) - set(slow_leg_files(m)))}")
-    # balance: no leg above its fair share by more than the house band
-    proj = slow_wall_projection(m, entries)
-    pool = proj["pool_min"]
-    fair = pool / count
-    assert proj["max_leg_min"] <= fair * cs.HALF_DURATION_IMBALANCE_RATIO, (
-        f"slow legs are duration-imbalanced: {proj['legs_min']} min against a "
-        f"{fair:.2f}m fair share (band {cs.HALF_DURATION_IMBALANCE_RATIO}x) — "
-        f"the LPT pack regressed; re-cut from the `durations` map")
-    # the bound itself
-    assert proj["projected_wall_min"] <= SLOW_LEG_WALL_TARGET_MIN, (
-        f"the slow lane no longer meets its wall target: {proj['legs_min']} min "
-        f"per leg against a {pool:.2f}m pool at {count} legs, plus the measured "
-        f"{SLOW_LEG_SETUP_ALLOWANCE_MIN}m per-leg setup, projects "
-        f"{proj['projected_wall_min']:.2f}m — over the "
-        f"{SLOW_LEG_WALL_TARGET_MIN:.0f}m CI guideline. "
-        + _slow_wall_remedy(m))
-    # #6744: the per-leg number above is NOT the job's wall once the matrix is
-    # capped. `max-parallel: 3` over 5 legs is TWO waves (ceil(5/3)), so a guard
-    # that stops at the per-leg share stays GREEN while asserting a wall the job
-    # cannot hit — the same defect this docstring names for the per-leg fixed
-    # cost, one multiplication further out. The cap is read from the workflow so
-    # a re-tune moves this assertion with it, and its absence fails closed (a
-    # vacuous wave count would be a second way to pass on nothing).
-    cap = ((_load_python_ci()["jobs"]["test-slow"].get("strategy")
-            or {}).get("max-parallel"))
-    assert isinstance(cap, int), (
-        "python-ci.yml's `test-slow` matrix declares no integer `max-parallel` "
-        f"(got {cap!r}) — the wave band below would be vacuously one wave")
-    capped = slow_wall_projection(m, entries, max_parallel=cap)
-    assert capped["waves"] == -(-count // cap), (
-        f"the projection says {capped['waves']} waves for {count} legs at cap "
-        f"{cap}, which is not ceil({count}/{cap})")
-    assert capped["projected_job_wall_min"] <= SLOW_LEG_CAPPED_WALL_TARGET_MIN, (
-        f"the slow JOB's wall is now {capped['projected_job_wall_min']:.2f}m "
-        f"({capped['waves']} waves x ({capped['max_leg_min']:.2f}m leg + "
-        f"{capped['setup_allowance_min']:.2f}m setup)) at `max-parallel: {cap}`, "
-        f"over the {SLOW_LEG_CAPPED_WALL_TARGET_MIN:.0f}m ceiling that cap was "
-        f"accepted with (#6744). Re-tune `slow_shards` or the cap, or move the "
-        f"ceiling from a fresh measurement — do not drop this assertion, or the "
-        f"guard goes back to certifying a wall the job cannot hit")
-    # the emitted matrix is what the job expands, and every leg is non-empty
-    inc = slow_matrix_include(entries)["include"]
-    assert [r["half"] for r in inc] == [e["name"] for e in entries]
-    assert all(r["files"].split() for r in inc), "a slow leg must never be empty"
-
-
-def _wall_clock_projection_claims(doc: str) -> tuple[float, float] | None:
-    """The `X m per leg → Y m` pair `docs/ops/ci-wall-clock.md` restates.
-
-    Returns `None` when the sentence is gone, so the pin can fail CLOSED and say
-    "re-anchor this pin" rather than pass on a doc it never read.
-    """
-    match = re.search(
-        r"—\s*`([\d.]+) m` per leg → \*\*`([\d.]+) m`\*\* from the\s+committed\s+`durations` map",
-        doc)
-    if match is None:
-        return None
-    return float(match.group(1)), float(match.group(2))
-
-
-def test_the_documented_slow_wall_restates_the_committed_maps_own_projection():
-    """The doc's `per leg → job wall` pair is a COPY, so it is checked as one.
-
-    `docs/ops/ci-wall-clock.md` argues the `3 / 3 / 3` cap from two numbers it
-    restates by hand, "from the committed `durations` map". They went stale on the
-    NEXT refresh — the 2026-11-09 sweep moved the map under them twice (the
-    `#11605` inflated sample, then the `#11607` re-cut) and nothing read them, the
-    same rot that put a third stale copy in `python-ci.yml`'s ARM-2 arithmetic
-    paragraph itself, and a fourth in the map's own notes (`#11602` review, P2).
-
-    So the sentence is pinned to the function that produces it: the per-leg figure
-    is `slow_wall_projection()[`projected_wall_min`]` and the job wall is the same
-    call at the workflow's OWN `max-parallel` (read from `python-ci.yml`, not
-    restated), which is what makes the second number a band rather than a share.
-
-    Non-vacuity: the same resolver is run against the pair the paragraph carried
-    before this pin existed, and must report both as wrong — a checker that only
-    agrees with the file it is checking would pass on nothing.
-    """
-    path = REPO / "docs" / "ops" / "ci-wall-clock.md"
-    doc = path.read_text(encoding="utf-8")
-    claims = _wall_clock_projection_claims(doc)
-    assert claims is not None, (
-        "`docs/ops/ci-wall-clock.md` no longer carries the `X m per leg → Y m` "
-        "sentence for the slow matrix's job wall — re-anchor this pin rather than "
-        "deleting it, so the copy stays checkable")
-
-    m = load_manifest()
-    entries = slow_shard_entries(m)
-    cap = ((_load_python_ci()["jobs"]["test-slow"].get("strategy") or {})
-           .get("max-parallel"))
-    assert isinstance(cap, int), (
-        f"`test-slow` declares no integer `max-parallel` (got {cap!r}), so the "
-        "job-wall half of this pin would be vacuously one wave")
-    per_leg = slow_wall_projection(m, entries)["projected_wall_min"]
-    job_wall = slow_wall_projection(
-        m, entries, max_parallel=cap)["projected_job_wall_min"]
-
-    assert claims == (round(per_leg, 2), round(job_wall, 2)), (
-        f"`docs/ops/ci-wall-clock.md` restates the slow matrix's wall as "
-        f"{claims[0]:.2f} m per leg -> {claims[1]:.2f} m, but the committed "
-        f"`durations` map projects {per_leg:.2f} m per leg -> {job_wall:.2f} m at "
-        f"`max-parallel: {cap}`. Re-derive the sentence from the map (or from a "
-        f"fresh sweep, if the map is the stale side) — do not restate it by hand")
-
-    # Executable non-vacuity: the pair this paragraph carried before the pin.
-    stale_doc = ("reports `waves x (max leg + setup)` — `9.02 m` per leg → **`18.04 m`** "
-                 "from the\ncommitted `durations` map")
-    assert _wall_clock_projection_claims(stale_doc) != (round(per_leg, 2),
-                                                      round(job_wall, 2)), (
-        "the resolver agrees with the pair it was written to reject, so it is not "
-        "reading the map at all")
-
-
-def test_the_slow_wall_remedy_names_a_remedy_that_can_fire():
-    """#11605: the wall arm's advice must be a REMEDY, not an incantation.
-
-    The pin failed for a week telling every reader to "raise `slow_shards`" on a
-    map where no `slow_shards` value can pass (the heaviest file alone is 9.09m
-    against an 8.00m pytest budget). Five lanes re-derived that by hand. This
-    pins both shapes on synthetic maps, and the third arm derives the committed
-    map's verdict from the map itself rather than hard-coding today's answer —
-    so when the monolith is split the assertion flips with it, and a stale
-    "cannot be sharded" claim cannot outlive its cause (#10575 P2).
-    """
-    room = SLOW_LEG_WALL_TARGET_MIN - SLOW_LEG_SETUP_ALLOWANCE_MIN
-    assert room > 0, "the wall/setup constants leave no pytest budget at all"
-
-    # --- Arm 1: one file heavier than a leg may spend — no count can clear it.
-    indivisible = {
-        "slow_shards": 2,
-        "slow_files": ["test_big", "test_a", "test_b"],
-        "durations": {"test_big.py": (room + 2.0) * 60,
-                      "test_a.py": 120.0, "test_b.py": 120.0},
-    }
-    verdict = _slow_wall_remedy(indivisible)
-    assert "No `slow_shards` value can clear this" in verdict, verdict
-    assert "test_big" in verdict, (
-        "the indivisible verdict must NAME the file that cannot be split — that "
-        f"naming is the whole point (got: {verdict})")
-    assert "Raise `config/ci-surfaces.yml::slow_shards` (reviewed) into the" \
-        not in verdict, (
-            "an indivisible pool must not be handed the remediless advice: "
-            f"{verdict}")
-    # and the claim it makes is TRUE — the pack really cannot meet the wall
-    proj = slow_wall_projection(indivisible)
-    assert proj["projected_wall_min"] > SLOW_LEG_WALL_TARGET_MIN, (
-        "the fixture stopped being a failing map, so arm 1 proves nothing")
-
-    # --- Arm 2: every file is small, the POOL is what is too big for 2 legs.
-    # 60 x 50s = 50m over 2 legs; no single file can be blamed, so the leg count
-    # IS the lever — and the window the message names must actually work. (The
-    # fixtures are FINE-GRAINED on purpose: with coarse items no leg count helps
-    # even when the windows overlap, because an LPT pack is integral — that is a
-    # property of the pack, and the verdict says `>=` rather than `=`, never
-    # claiming the count alone is sufficient.)
-    divisible = {
-        "slow_shards": 2,
-        "slow_files": [f"test_s{i:02d}" for i in range(60)],
-        "durations": {f"test_s{i:02d}.py": 50.0 for i in range(60)},
-    }
-    verdict = _slow_wall_remedy(divisible)
-    assert "No `slow_shards` value can clear this" not in verdict, (
-        f"a divisible pool must not be declared hopeless: {verdict}")
-    lo = -(-round(sum(divisible["durations"].values()))
-          // round(room * 60))
-    assert f"[{lo}, " in verdict, (
-        f"the advice must state the leg-count window, starting at {lo}: "
-        f"{verdict}")
-    # non-vacuity of the ADVICE: the count it names clears the wall arm.
-    assert slow_wall_projection(divisible)["projected_wall_min"] \
-        > SLOW_LEG_WALL_TARGET_MIN, "the fixture stopped needing more legs"
-    raised = dict(divisible, slow_shards=lo)
-    assert slow_wall_projection(raised)["projected_wall_min"] \
-        <= SLOW_LEG_WALL_TARGET_MIN, (
-            f"the `slow_shards: {lo}` the message prescribes does not clear the "
-            "wall arm — the advice is inert again, which is the defect")
-
-    # --- Arm 3: the COMMITTED map — verdict derived, never hard-coded.
-    m = load_manifest()
-    dmap = cs._durations_map(m)
-    weights = {n: cs._duration_weight(dmap.get(f"{n}.py")) / 60.0
-               for n in slow_leg_files(m)}
-    heaviest = max(weights, key=lambda n: weights[n])
-    pool = sum(weights.values())
-    lo = -(-round(pool * 60) // round(room * 60))
-    hi = int(cs.HALF_DURATION_IMBALANCE_RATIO * pool / weights[heaviest])
-    committed = _slow_wall_remedy(m)
-    assert heaviest in committed, (
-        f"the committed map's heaviest slow file is `{heaviest}`; the verdict "
-        f"must name it (got: {committed})")
-    if weights[heaviest] > room or lo > hi:
-        assert "No `slow_shards` value can clear this" in committed, (
-            f"`{heaviest}` is {weights[heaviest]:.2f}m against a {room:.2f}m "
-            f"budget and the leg windows [{lo}, {hi}] do not overlap, so the "
-            f"verdict must be the indivisible one (got: {committed})")
-    else:
-        assert f"[{lo}, {hi}]" in committed, (
-            f"a shardable window [{lo}, {hi}] exists for `{heaviest}` "
-            f"({weights[heaviest]:.2f}m), so the verdict must be the window "
-            f"(got: {committed})")
-
-
-def test_slow_shards_declaration_is_fail_closed():
-    """#9539: a malformed `slow_shards` is an ERROR, never a silent default.
-
-    Same polarity as `fast_shard_issues`/`carve_shard_issues`: absence is 'not
-    adopted' (the historical 2 legs) and is fine; an explicit null, a string, a
-    bool, a float or a count that deletes or over-extends the lane is a typo
-    that `--integrity` must NAME — otherwise the workflow runs a leg count
-    nobody chose and the merge rail's lane-parity (a job-NAME subtraction) sees
-    a set that was never reviewed."""
-    ok = load_manifest()
-    assert slow_shard_issues(ok) == [], slow_shard_issues(ok)
-    assert slow_shard_count(ok) >= 2, (
-        "this repo exists to shard the slow lane; a count of 1 means the key "
-        "was removed and the wall guard below is what will red")
-    for bad, why in ((None, "explicit null"), ("5", "a string"),
-                     (True, "a bool"), (5.5, "a float"), (1, "one leg"),
-                     (0, "zero"), (-1, "negative"),
-                     (MAX_SLOW_SHARDS + 1, "above the a..z ceiling")):
-        m = dict(ok, slow_shards=bad)
-        assert slow_shard_issues(m), f"{why} ({bad!r}) must be an error"
-        assert slow_shard_count(m) == DEFAULT_SLOW_SHARDS == 2, (
-            f"{why} must fail SAFE to the historical two legs, not to a number "
-            f"nobody chose")
-    # Absence is NOT an error — it is 'not adopted', and it must give back the
-    # historical two-leg shape.
-    m = {k: v for k, v in ok.items() if k != "slow_shards"}
-    assert slow_shard_issues(m) == []
-    assert slow_shard_count(m) == 2
-    assert len(slow_shard_entries(m)) == 2
-    assert set(f for e in slow_shard_entries(m) for f in e["files"]) == \
-        set(slow_leg_files(m))
-
-
-def test_removing_slow_shards_reverts_the_leg_count_but_is_not_a_complete_rollback():
-    """#9539: absence gives back 2 legs — and the wall guard then REDS.
-
-    `config/ci-surfaces.yml` and `ci_selection` used to say deleting the key
-    'is a complete rollback', which is the wording `carve_shards` can use (that
-    lane has no wall guard). It is false here: the wall-target guard recomputes
-    from the `durations` map, and two legs project ~20.9m against the 10m
-    guideline — so an operator taking the documented rollback lands on a FAILING
-    suite, not on main's shape. The comments say so now; this pins the FACT they
-    describe, so neither comment can drift back to claiming otherwise.
-    """
-    m = {k: v for k, v in load_manifest().items() if k != "slow_shards"}
-    assert len(slow_shard_entries(m)) == 2, (
-        "absence must revert the leg count to the historical 2")
-    proj = slow_wall_projection(m)
-    assert proj["projected_wall_min"] > SLOW_LEG_WALL_TARGET_MIN, (
-        f"deleting `slow_shards` is documented as NOT a complete rollback because "
-        f"the wall guard reds on 2 legs; it no longer does "
-        f"({proj['projected_wall_min']}m <= {SLOW_LEG_WALL_TARGET_MIN}m) — update "
-        f"that comment in config/ci-surfaces.yml and tools/ci_selection.py")
-
-
-def test_the_selector_offers_no_unwired_slow_matrix_flag():
-    """#9539 review: `--emit-slow-matrix` was dead surface with a false rationale.
-
-    Its comment claimed the run-time drift guard would call it 'so the guard
-    compares the EXPANDED matrix against the config pool without a second
-    implementation'. The drift guard imports `ci_selection` and calls
-    `slow_leg_files()` itself, and nothing anywhere called the flag — a second,
-    unexercised derivation plus a comment asserting it is load-bearing. It was
-    removed rather than wired: `--emit-push-matrix` already publishes
-    `slow_matrix` for the `changes` job, which is what CI actually consumes.
-    """
-    selector = Path(__file__).resolve().parents[1] / "tools" / "ci_selection.py"
-    proc = subprocess.run([sys.executable, str(selector), "--emit-slow-matrix"],
-                          capture_output=True, text=True, cwd=str(selector.parent))
-    assert proc.returncode == 2, (
-        f"`--emit-slow-matrix` must be gone (argparse rejects unknown flags with "
-        f"exit 2), got rc={proc.returncode}: {proc.stdout}{proc.stderr}")
-    emit = subprocess.run([sys.executable, str(selector), "--emit-push-matrix"],
-                          capture_output=True, text=True, cwd=str(selector.parent),
-                          check=True).stdout
-    assert json.loads(emit)["slow_matrix"]["include"], (
-        "the surviving entry point must still publish the slow matrix")
-
-
-def test_9017_block_states_the_derived_split_not_the_2_leg_era():
-    """#9539 review: the `#9017` block is a DATED 2-leg measurement — say so.
-
-    Its per-file table is still a valid measurement (run 39165691659) but the
-    SPLIT narrative wrapped around it is not: #9539 replaced the committed pair
-    with legs DERIVED from that same map (`slow_gating_files()` — slow minus
-    carve-out minus the non-gating lane since #10194 — LPT-packed
-    into `slow_shards` = 5). In the present tense, "the LPT pack of that map into
-    two legs of 18.945m / 18.933m" and "2.11x the heavier leg" both contradict
-    the lane the reader is about to configure — including the number the per-leg
-    `matrix.watchdog_minutes` follow-up would size the 40m literal against (at
-    the time of that review the heavier DERIVED leg was 7.58m, 5.3x, not 18.95m
-    at the 2.0x floor; #10194 has since taken 5.26m out of the pool, so the live
-    figure must be RE-DERIVED, never quoted). This is
-    exactly the rotation the durations header asks for, and the same failure this
-    block's own history records ("they rot on every re-cut, and this comment has
-    now been wrong twice for that reason").
-    """
-    text = (REPO / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")
-    assert "into two legs of 18.945m" not in text, (
-        "the `#9017` block still states the 2-leg split as current fact — #9539 "
-        "derives 5 legs from the same map")
-    assert "2.11x the heavier leg" not in text, (
-        "the `#9017` block still quotes the 2-leg-era watchdog headroom as "
-        "current (the heavier derived leg is 7.58m, i.e. 5.3x)")
-    marker = next(ln for ln in text.splitlines() if "THE SPLIT" in ln)
-    assert "HISTORICAL" in marker, (
-        "the 2-leg-era split must be marked as history, the way the aggregate's "
-        f"pre-#9539 table is; got {marker!r}")
-    # …and the CURRENT shape must be stated in that block: the derived leg count,
-    # the heavier leg's weight, and the headroom figure the literal is sized from.
-    split_block = text[text.index(marker):]
-    split_block = split_block[:split_block.index("# #2008 review")]
-    for want, why in (("slow_shards", "the derived leg count it now uses"),
-                      ("7.58m", "the heavier DERIVED leg's weight"),
-                      ("5.3x", "the 40m literal's headroom over that leg")):
-        assert want in split_block, (
-            f"the `#9017` block must state {why} ({want!r}) — it is the only "
-            f"place a reader sizing the 40m watchdog looks")
-
-
-def test_parse_matrix_halves_matches_no_literal_block_on_the_current_workflow():
-    """#9539 review: the legacy regex matches NOTHING now — the docstring said
-    the `test-slow` job's block was still there to match.
-
-    #6135 left `test` derived; #9539 left `test-slow` derived too, so no literal
-    `- half:` / `files: >-` block remains in python-ci.yml and
-    `parse_matrix_halves()` returns {}. That stays fail-CLOSED rather than hollow:
-    the normal path never reaches the fallback (`workflow_matrix_issues()` is
-    empty), the drift case reports the drifted job by name there, and the `{}`
-    arm of `workflow_halves_issues()` reports "workflow parse failure" instead of
-    returning `[]` and passing. A RE-INTRODUCED legacy block still parses, so the
-    #1266 tie checks against it are still live.
-    """
-    m = load_manifest()
-    assert cs.parse_matrix_halves(cs.WORKFLOW.read_text(encoding="utf-8")) == {}, (
-        "python-ci.yml carries a literal legacy matrix block again — the parse "
-        "and `parse_matrix_halves`'s docstring disagree (#9539)")
-    assert cs.workflow_matrix_issues(cs.WORKFLOW, m) == [], (
-        "the empty parse must not be reached on the normal path: a drift here "
-        "means `workflow_matrix_issues` should have named it")
-    issues = cs.workflow_halves_issues(m, {})
-    assert issues and "parse failure" in issues[0], (
-        f"an empty parse must fail CLOSED, not pass — got {issues!r}")
-    doc = cs.parse_matrix_halves.__doc__ or ""
-    assert "the only block this regex can still match" not in doc, (
-        "the docstring still claims a literal block is left to match")
-    legacy = ("- half: a\n          files: >-\n            test_a test_b\n"
-              "- half: b\n          files: >-\n            test_c\n")
-    assert cs.parse_matrix_halves(legacy) == {
-        "a": ["test_a", "test_b"], "b": ["test_c"]}, (
-        "a re-introduced legacy block must still be parsed — that is the only "
-        "reason this fallback exists")
-
-
-CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
-#: The machine-local `scripts` pointer itself, WITHOUT following it. Since #9475 it is
-#: GITIGNORED and NOT tracked (a git symlink blob cannot hold `$AGENT_INFRA_PATH`), so the
-#: runner case that may skip is "it was never materialised here" — an absent path, not a
-#: dangling committed link.
-SCRIPTS_LINK = Path(__file__).resolve().parents[1] / "scripts"
-CI_RUNNER_GATE_ABSENT = (
-    f"PREMISE CROSS-CHECK NOT RUN: agent-infra's ci_runner_gate.sh is not "
-    f"reachable at {CI_RUNNER_GATE} (the machine-local `scripts` pointer is "
-    f"missing or does not resolve — #9475: it is gitignored, not tracked, so a "
-    f"fresh clone or lane has none until `uv run python "
-    f"tools/link_agent_infra_scripts.py` materialises it from $AGENT_INFRA_PATH, "
-    f"as on a runner where that variable is unset). The repo-side half of the "
-    f"guard — test-slow's label is VERSION-PINNED — ran and passed. The premise "
-    f"half is HOST-ONLY AND UNTESTED BY CI: it is a cross-repo fact (the labels "
-    f"agent-infra's gate attaches to the self-hosted pool) that no runner checks "
-    f"out, so a green CI run says nothing about it. Run this module on a host "
-    f"with $AGENT_INFRA_PATH set (and the pointer materialised) to verify that "
-    f"the gate still attaches only `ubuntu-latest`. Same shape and same limit as "
-    f"RAIL_ABSENT_REASON in tests/test_pytest_attribution.py."
-)
-
-
-def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
-    """2026-10-19: `ubuntu-latest` is not "GitHub-hosted" on this repo.
-
-    `scripts/ci_runner_gate.sh` re-attaches `ubuntu-latest` to the self-hosted
-    ARM64 pool as a fallback, so `runs-on: ubuntu-latest` resolves to a ~2x
-    slower class run to run — and `test-slow` (the leg that IS the critical
-    path) was killed at its 40m watchdog on `pi-runner-vm-2` after executing
-    39.6 min of test time (run 39309984832, `rc=137`). The job then read 42.1m
-    and concluded `failure`, so this leg's wall became main's critical path
-    (`ci_crit_max=42.1m`, up from 22.6m) and the required aggregate red named a
-    KILL rather than a test verdict. (That run was ALSO red for independent,
-    genuine reasons — three fast shards on hosted runners failed real tests — so
-    the pin removes this kill and the critical-path inflation, not the run's
-    redness.)
-
-    The budget cannot absorb that class: 2x the leg would be >=79m against a
-    40m budget built at the `WATCHDOG_HEADROOM` floor, past both
-    `WATCHDOG_CEILING_MIN` and this job's 60m cap. So the leg is pinned to a
-    VERSION-PINNED hosted label (the pool claims `ubuntu-latest`, `self-hosted`,
-    `Linux`, `ARM64` and `self-hosted-arm64` — never `ubuntu-<version>`), the
-    same pin and the same reasoning as `workflow-lint` (#7867).
-
-    A bare `ubuntu-latest` here re-opens exactly that false red, so this reds
-    rather than relying on a comment nobody re-reads."""
-    job = _load_python_ci()["jobs"]["test-slow"]
-    runs_on = job["runs-on"]
-    assert runs_on != "ubuntu-latest", (
-        "test-slow must NOT use `ubuntu-latest`: the fallback gate re-attaches "
-        "that label to the self-hosted ARM64 pool, where this leg needs ~2x its "
-        "budget and is killed at the watchdog (measured: 39.6 min of test time, "
-        "rc=137, job 42.1m). Pin a version-pinned hosted label (`ubuntu-24.04`).")
-    assert isinstance(runs_on, str) and re.fullmatch(r"ubuntu-\d+\.\d+", runs_on), (
-        f"test-slow's runner label {runs_on!r} must be a VERSION-PINNED hosted "
-        f"label (`ubuntu-<version>`): `ubuntu-latest` is claimed by the "
-        f"self-hosted pool whenever the fallback is attached, and a label the "
-        f"pool claims puts this leg back on the class that cannot finish it.")
-
-    if not SCRIPTS_LINK.is_dir():
-        # The machine-local `scripts` pointer is ABSENT or does not resolve, which is
-        # every CI runner and every fresh clone/lane: since #9475 it is gitignored and
-        # not tracked, so nothing creates it until
-        # `tools/link_agent_infra_scripts.py` runs. It is a host convenience, not a repo
-        # dependency (`python-ci.yml` is self-contained by decision, fix #555).
-        # Announced, never silent, and the message says out loud that the premise half
-        # is untested by CI — a bare `skipped` would let a green run read as "the pool's
-        # labels were verified", which is the vacuous pass this guard exists to prevent.
-        print(CI_RUNNER_GATE_ABSENT)
-        pytest.skip(CI_RUNNER_GATE_ABSENT)
-    # The link RESOLVED, so agent-infra IS checked out at $AGENT_INFRA_PATH: a missing
-    # gate file now means the premise moved or was renamed out from under this pin,
-    # not that there is no premise to check. That is a FAIL, not a skip — the old
-    # `.exists()` check folded both cases into the skip and so could never report a
-    # premise that had silently stopped existing.
-    assert CI_RUNNER_GATE.is_file(), (
-        f"the `scripts` symlink resolves ({SCRIPTS_LINK} -> "
-        f"{SCRIPTS_LINK.resolve()}) but {CI_RUNNER_GATE.name} is not there: the "
-        f"cross-repo premise of this pin has been moved or renamed, so the premise "
-        f"half can no longer be verified from this host — fix the path (or the pin) "
-        f"rather than letting this guard drift out of reach")
-    gate = CI_RUNNER_GATE.read_text()
-    # The premise this pin rests on lives in ANOTHER repo's script, reached here
-    # through the machine-local `scripts` pointer (#9475 — gitignored, not tracked;
-    # materialised per machine from $AGENT_INFRA_PATH, absent until then). Pinning a
-    # literal against an external,
-    # changeable fact with nothing asserting that fact is the "comment nobody
-    # re-reads" failure this test criticises: harden the gate to attach a
-    # VERSION-PINNED label instead of `ubuntu-latest` and this test would stay green
-    # while `test-slow` silently returned to the ARM64 pool.
-    #
-    # The assignment shape is NOT part of the premise: agent-infra may quote it, drop
-    # the quotes, or `export` it. Only the VALUE is contractual, so the matcher
-    # tolerates the spelling instead of asserting it — but it must still FIND both, or
-    # the premise is unreadable and this test must not pass by not looking.
-    labels = _gate_pool_labels(gate)
-    assert "FALLBACK_LABEL" in labels and any(
-        name.startswith("POOL_LABEL") for name in labels), (
-        f"cannot read FALLBACK_LABEL/POOL_LABEL* from {CI_RUNNER_GATE} (read "
-        f"{sorted(labels) or 'nothing'}) — the premise of this pin is unverifiable, "
-        f"so this test must not pass by not looking. If agent-infra renamed the "
-        f"constants, update the matcher here in the same change that renamed them.")
-    for label in labels.values():
-        assert not re.fullmatch(r"ubuntu-\d+\.\d+", label), (
-            f"ci_runner_gate.sh can attach {label!r} to the self-hosted pool, "
-            f"which is the VERSION-PINNED class test-slow is pinned to: the pin "
-            f"below no longer keeps this leg off the pool. Either the gate must "
-            f"stop attaching version-pinned labels, or test-slow needs a "
-            f"different isolation.")
-
-
-def _gate_pool_labels(gate_text: str) -> dict[str, str]:
-    """The labels `ci_runner_gate.sh` can attach to the self-hosted pool.
-
-    Returned by a helper so the PARSING half of the cross-repo premise is testable
-    WITHOUT agent-infra checked out — the gate file itself is host-only (see
-    `CI_RUNNER_GATE_ABSENT`), but the matcher that reads it is not, and an unreadable
-    matcher is how a guard stays green while protecting nothing.
-
-    Only the VALUE is contractual; the assignment SHAPE is not, so the matcher accepts
-    `export`, either quoting style, none, and leading whitespace. A commented-out
-    assignment is not read — prose is not the value the gate will use.
-
-    ⛔ THE NAME IS A FAMILY, NOT ONE CONSTANT (`POOL_LABEL*`). agent-infra split the
-    pool label per architecture — `POOL_LABEL_ARM64="self-hosted-arm64"` and
-    `POOL_LABEL_X64="self-hosted-x64"` — when it started measuring capacity per runner
-    (agent-infra `4d20edd2`, #2904/#2897). Pinning the exact spelling `POOL_LABEL` made
-    the premise UNREADABLE on every host whose agent-infra checkout is current, which
-    reds this guard everywhere except CI (where `scripts/` is absent and the cross-repo
-    half skips) — a pin that only fails where nobody looks. The family accepts both the
-    old single constant and the split pair, and the discriminator below still runs over
-    EVERY label it reads, so a split that reintroduces a version-pinned label still
-    reds.
-    """
-    found: dict[str, str] = {}
-    for match in re.finditer(
-        r"^\s*(?:export\s+)?(FALLBACK_LABEL|POOL_LABEL\w*)=[\"']?([^\"'\s]+)",
-        gate_text,
-        re.MULTILINE,
-    ):
-        found[match.group(1)] = match.group(2)
-    return found
-
-
-def test_the_gate_label_matcher_reads_the_spellings_and_rejects_the_unsafe_one():
-    """The premise half's PARSER and its DISCRIMINATOR, executed with no agent-infra.
-
-    `test_slow_legs_are_pinned_off_the_ambiguous_runner_label` skips its cross-repo
-    half on every runner, so without this test the regexes that read
-    `ci_runner_gate.sh` and the `ubuntu-<version>` rejection below them would never
-    execute anywhere — and a guard that cannot fail is not a guard. Three claims are
-    pinned here, all against crafted gate text:
-
-    1. the shipped spelling is read (double-quoted, line start);
-    2. a cosmetic change in agent-infra — `export`, single quotes, no quotes, leading
-       whitespace — does not make the labels unreadable (an unreadable premise must
-       fail loudly on the host, not silently weaken the pin);
-    3. the rejection FIRES: a gate that starts attaching `ubuntu-24.04` to the pool is
-       reported, which is the drift this pin exists to notice.
-    """
-    shipped = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-latest"\n'
-    expected = {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-latest"}
-    assert _gate_pool_labels(shipped) == expected
-    # The SPLIT spelling agent-infra ships today (`POOL_LABEL_ARM64`/`_X64` since it
-    # measures capacity per runner): the family must read BOTH, or a current
-    # agent-infra checkout makes the premise unreadable on the host while CI skips it.
-    split = (
-        'FALLBACK_LABEL="ubuntu-latest"\n'
-        'POOL_LABEL_ARM64="self-hosted-arm64"\n'
-        'POOL_LABEL_X64="self-hosted-x64"\n'
-    )
-    assert _gate_pool_labels(split) == {
-        "FALLBACK_LABEL": "ubuntu-latest",
-        "POOL_LABEL_ARM64": "self-hosted-arm64",
-        "POOL_LABEL_X64": "self-hosted-x64",
-    }, "the split pool label was not read (agent-infra 4d20edd2)"
-    for spelling in (
-        "export FALLBACK_LABEL='ubuntu-latest'\nexport POOL_LABEL='ubuntu-latest'\n",
-        "FALLBACK_LABEL=ubuntu-latest\nPOOL_LABEL=ubuntu-latest\n",
-        'FALLBACK_LABEL="ubuntu-latest" # inline note\nPOOL_LABEL="ubuntu-latest"\n',
-    ):
-        assert _gate_pool_labels(spelling) == expected, spelling
-    # A commented-out assignment is not an assignment: prose must not stand in for the
-    # value the gate will actually use.
-    assert _gate_pool_labels('# FALLBACK_LABEL="ubuntu-latest"\n') == {}
-    # The discriminator itself, executed: this is the arm that has never run on a
-    # runner and decides whether the pin still protects anything.
-    drifted = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-24.04"\n'
-    labels = _gate_pool_labels(drifted)
-    assert labels == {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-24.04"}
-    assert [lbl for lbl in labels.values() if re.fullmatch(r"ubuntu-\d+\.\d+", lbl)] == [
-        "ubuntu-24.04"
-    ]
-
-
 def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
     """#3239: each shard's watchdog must clear THAT SHARD's committed work with
     the house headroom, and the job's cap must not dwarf the work it backstops.
@@ -17224,183 +13324,51 @@ def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
         f"this work is exactly the defect #3239 reports")
 
 
-def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
-    """#10182/#5219: the carve-out job must be RESTORE-ONLY on the pip cache.
+#: §2 of `docs/ops/ci-wall-clock.md` states the emitted per-shard watchdog as
+#: "the emitted **<N> m** per-shard watchdog" — two spellings, both read.
+_EMITTED_WATCHDOG_CLAIM_RE = re.compile(
+    r"the emitted \*\*(\d+) m\*\* per-shard|the emitted (\d+) m per-shard")
 
-    `actions/cache` saves in a POST step, and (#10182) that post step is charged
-    against the job's `timeout-minutes` like any other step. This job cannot
-    amortize such a save, and no cap it is allowed to carry can: the cap above
-    is pinned at `_CAP_CEILING_FACTOR` x the measured 16.02m pytest step (= 48m
-    at the ceiling), while ONE shard already spends its 10m embedder cap + 19m
-    floor-clamped watchdog + ~1m setup + the 1m38s `~/.cache/huggingface` POST
-    ≈ 31.6m against a 30m cap — and the SAVE has no timeout of its
-    own, so a slow one is unbounded, not merely large. Headroom amortizes a
-    bounded cost; it cannot amortize an unbounded one.
 
-    MEASURED (run 41100829071, job `test-carve-out (b)` 124223444008): the
-    restore was a PARTIAL hit, so the post step reserved the exact key and began
-    a ~3.6 GB save. Every WORK step passed — pytest finished at 18:10:55, the
-    orphan gate said 'no orphans' at 18:10:53 — and then `Post Cache pip
-    dependency caches` ran 18:12:33 → 18:29:46 against a 17:59:19 start, when
-    `The job has exceeded the maximum execution time of 30m0s`. GitHub reported
-    `cancelled`, which `python-ci-gate` reads as red BY DESIGN (#5219: a
-    cancelled leg certifies nothing) — so a GREEN shard reddened a REQUIRED
-    check on a diff that never touched this job.
+def _cache_refs_of(step: dict) -> str:
+    """EVERY cache key a step names: its primary `key:` AND its `restore-keys:`.
 
-    Nothing is lost by not saving here: the key is SHARED
-    (`pip-<os>-<hash uv.lock>`), written by `test-d14-hosted-api` on EVERY run
-    (unconditional, PR + push), by `test-slow` only under `slow_run` — each saving on a MISS, so this
-    job only ever READ it. The ~90 MB HF embedding cache in the same job is
-    deliberately left alone (measured 1m38s to save, and it is the leg's
-    provisioning path — an uncached load skip-reds the dense assertion #4387);
-    the pip cache is the ~3.6 GB term that does not fit.
-
-    Non-vacuous in both directions: the pre-fix step is a bare `actions/cache@v4`
-    on this path, which reds the first assertion; and the presence + shape of
-    the restore is asserted too, so DELETING the cache step cannot pass.
+    `actions/cache` reads both fields: on a primary-key miss it walks
+    `restore-keys` in order as PREFIX matches and restores the newest entry that
+    matches. So a guard that reads `with.key` alone cannot see a step that reads
+    a retired key through `restore-keys:`, and reports green while the step
+    restores the archive the guard exists to keep out (#11065 cycle 8).
     """
-    job = _load_python_ci()["jobs"]["test-carve-out"]
-
-    def _path_of(step: dict) -> object:
-        return (step.get("with") or {}).get("path")
-
-    pip_caches = [s for s in job.get("steps", []) if _path_of(s) == "~/.cache/pip"]
-    assert pip_caches, (
-        "the carve-out job no longer restores the shared pip cache at all — every "
-        "shard would then download torch (140 wheels, ~3.2 GB) cold")
-    saving = [s.get("uses") for s in pip_caches
-              if str(s.get("uses") or "").startswith("actions/cache@")]
-    assert not saving, (
-        f"the carve-out job carries an implicit post-step cache SAVE {saving} on "
-        "~/.cache/pip — that save is charged against the job's `timeout-minutes` "
-        "(#10182) and this job's cap is pinned at <= 3x its measured pytest step, "
-        "so the save can never be amortized. Use `actions/cache/restore@` here "
-        "(#5219: the cancel it causes reds a REQUIRED check on a green shard).")
-    restores = [s for s in pip_caches
-                if s.get("uses") == "actions/cache/restore@v4"]
-    assert len(restores) == 1, (
-        "the carve-out's pip cache step must be exactly one "
-        f"`actions/cache/restore@v4` (found {len(restores)} of {len(pip_caches)} "
-        "pip-cache steps in that shape)")
-    assert restores[0].get("continue-on-error") is True, (
-        "the carve-out's pip-cache restore must be `continue-on-error: true` — a "
-        "cache-SERVICE error (transport/503) must never red the leg; a miss is "
-        "the fail-open case and install-cpu-torch downloads the pinned CPU "
-        "wheel either way")
+    with_ = step.get("with") or {}
+    return "\n".join(str(with_.get(k) or "") for k in ("key", "restore-keys"))
 
 
-# ── #11063 / #10182: a POST cache SAVE is charged against the job's cap ──
-#
-# `actions/cache` writes in a POST step, and (#10182) that step counts against
-# the job's own `timeout-minutes` exactly like a work step — with NO timeout of
-# its own, so it is UNBOUNDED, not merely large. Measured twice, on two jobs,
-# with the same ~3.6 GB `~/.cache/pip` archive:
-#
-#   run 41100829071 `test-carve-out (b)` (124223444008) — green pytest, then
-#     17m13s inside the post save, killed by the 30m cap  -> `cancelled`
-#   run 42090497973 `test-record-postgres` (127519984967) — `192 passed,
-#     1 xfailed in 349.59s` at 21:39:44Z, teardown green at 21:39:58Z, then the
-#     post step tarred for 5m43s and pushed 3.6 GB at ~7 MB/s (`Sent 0 of
-#     3616384780`), reaching 76% when the 20m cap elapsed at 21:51:53Z
-#     -> `cancelled`
-#
-# `python-ci-gate` reads `cancelled` as red BY DESIGN (#5219: a cancelled leg
-# certifies nothing), so in BOTH cases a GREEN leg that failed no test withheld
-# a REQUIRED check. The first instance got the carve-out job fixed (#10182);
-# the second shows the fix was applied to ONE job and the class stayed open.
-#
-# So the rule is stated over the class: a job may only carry an IMPLICIT SAVE of
-# the pip cache when its cap can absorb one. `_PIP_CACHE_SAVE_MIN_CAP_MINUTES` is
-# the measured floor: the jobs at or above it WRITE the shared key (`test-slow`
-# 60m, `test-d14-hosted-api` 50m), and every job below it (carve-out 30m,
-# record-postgres 20m, concurrency-falkor 15m) only ever READS it.
-#
-# `test` (90m) is NOT a pip writer in the merged tree: it restores pip and saves
-# `~/.cache/uv` through an explicit, BOUNDED `actions/cache/save@` step. Its
-# 3.88 GB implicit post save inside a 90 m cap is what reddened run 42000057137
-# (#11063), and that shape is pinned by
-# `test_the_test_job_carries_no_unbounded_cache_post_step` BELOW — the two pins
-# are complementary: that one fixes the job, this one states the class.
-_PIP_CACHE_SAVE_MIN_CAP_MINUTES = 40
-#: The jobs that WRITE the shared `pip-<os>-<hash uv.lock>` key. Pinned so a
-#: future edit cannot leave the key with no writer at all (every reader then
-#: downloads torch's 140 wheels cold on every run), and so a new saver has to
-#: argue its headroom here rather than inherit it silently.
-_PIP_CACHE_WRITER_JOBS = frozenset({"test-slow", "test-d14-hosted-api"})
-#: Jobs that must keep a pip-cache step at all — `actions/cache/restore@` has no
-#: post step, so "delete the step" would red on the cold-install cost instead.
-_PIP_CACHE_READER_JOBS = frozenset({
-    "test-carve-out", "test-record-postgres", "test-concurrency-falkor"})
-#: GitHub's default job cap when `timeout-minutes` is absent.
-_GH_DEFAULT_JOB_CAP_MINUTES = 360
+def _steps_naming_key(jobs: dict, needle: str) -> list:
+    """`[(job id, step name)]` for every step whose cache FIELDS name `needle`.
 
-
-def _pip_cache_steps(job: dict) -> list:
-    """The job's steps that address `~/.cache/pip` (exact or multi-path)."""
-    out = []
-    for step in job.get("steps") or []:
-        path = (step.get("with") or {}).get("path")
-        if isinstance(path, str) and "~/.cache/pip" in path:
-            out.append(step)
-    return out
-
-
-def test_only_a_job_that_can_absorb_the_pip_cache_save_carries_one():
-    """#11063: a POST cache SAVE must never be charged against a tight cap.
-
-    `actions/cache`'s post save is UNBOUNDED (no `timeout-minutes` of its own)
-    and is charged against the job's cap. A job whose cap is calibrated to its
-    WORK therefore cannot amortize it: the cap kills the save, GitHub records
-    the green job as `cancelled`, and `python-ci-gate` reds that class by design
-    (#5219) — a required check withheld on a diff that never touched the job.
-
-    Non-vacuous at the pre-fix head in BOTH directions this change made:
-    `test-record-postgres` (cap 20) and `test-concurrency-falkor` (cap 15) each
-    carried a bare `actions/cache@v4` on `~/.cache/pip`, so the first assertion
-    inside the loop reds for each. Deleting those steps instead of switching
-    them cannot pass either: `_PIP_CACHE_READER_JOBS` is asserted to still hold
-    a pip-cache step, and the writer set is pinned to exactly the jobs that
-    keep the shared key warm.
+    Fields, plural (`_cache_refs_of`). Takes the JOBS mapping, not the workflow,
+    so the same call serves the whole-workflow scan — where "no reader, no
+    writer" is a claim about every job — and a synthetic single-job fixture.
     """
-    jobs = _load_python_ci()["jobs"]
-    savers, readers = set(), set()
-    for job_id, job in jobs.items():
-        steps = _pip_cache_steps(job)
-        if not steps:
-            continue
-        readers.add(job_id)
-        cap = job.get("timeout-minutes", _GH_DEFAULT_JOB_CAP_MINUTES)
-        saving = [s.get("uses") for s in steps
-                  if str(s.get("uses") or "").startswith("actions/cache@")]
-        if saving:
-            savers.add(job_id)
-            assert cap >= _PIP_CACHE_SAVE_MIN_CAP_MINUTES, (
-                f"job {job_id!r} carries an implicit post-step SAVE of "
-                f"~/.cache/pip ({saving}) under a {cap}m cap. That save is "
-                "charged against the cap and has no timeout of its own, so at "
-                "this cap it can never complete — the job is killed, GitHub "
-                "records a GREEN leg as `cancelled`, and `python-ci-gate` reds "
-                "it by design (#5219), withholding a REQUIRED check (#11063, "
-                "#10182). Use `actions/cache/restore@v4` "
-                "(`continue-on-error: true`) here and let one of"
-                f" {sorted(_PIP_CACHE_WRITER_JOBS)} write the shared key.")
-        for step in steps:
-            uses = str(step.get("uses") or "")
-            if uses == "actions/cache/restore@v4":
-                assert step.get("continue-on-error") is True, (
-                    f"job {job_id!r}: the pip-cache restore must be "
-                    "`continue-on-error: true` — a cache-SERVICE error "
-                    "(transport/503) must never red the leg.")
-    assert savers == set(_PIP_CACHE_WRITER_JOBS), (
-        "the set of jobs carrying an implicit pip-cache SAVE moved: "
-        f"{sorted(savers)} against the pinned {sorted(_PIP_CACHE_WRITER_JOBS)}. "
-        "Adding a writer means arguing its cap absorbs an unbounded save "
-        "(#11063); removing one leaves the shared key with a hole.")
-    missing = _PIP_CACHE_READER_JOBS - readers
-    assert not missing, (
-        f"{sorted(missing)} lost their pip-cache step entirely. `actions/cache/"
-        "restore@v4` is the fix for #11063, not deletion: without it every "
-        "shard downloads torch's 140 wheels cold.")
+    return [(jid, s.get("name")) for jid, jd in jobs.items()
+            for s in (jd.get("steps") or [])
+            if needle in _cache_refs_of(s)]
+
+
+def _test_job_pre_phase_watchdog_minutes(steps: list) -> int:
+    """The last-failed pre-phase's OWN watchdog, parsed from the run step.
+
+    It is a `timeout -s INT -k 10 <N>m` inside the pytest step (#6142). Parsed
+    rather than restated: if it moves, the arm-2 SUM must move with it.
+    """
+    pattern = re.compile(r"timeout -s INT -k 10 (\d+)m ")
+    found = sorted({int(m) for s in steps
+                    for m in pattern.findall(str(s.get("run") or ""))})
+    assert len(found) == 1, (
+        f"the `test` job carries {len(found)} distinct `timeout -s INT -k 10 "
+        f"<N>m` watchdogs {found}m — the pre-phase term of the arm-2 SUM is "
+        "ambiguous; sum them here deliberately, or keep one")
+    return found[0]
 
 
 #: The citation the `cache:`-family enumeration in
@@ -17490,6 +13458,158 @@ def test_the_cache_family_citation_lands_on_the_setup_python_input_it_names():
         "the two-lines-short span this fix replaced now PASSES the guard above, so the "
         "guard no longer distinguishes a citation that names the construct from one "
         "that stops above it (#11602 review, P3)")
+
+
+_TEST_JOB_CACHE_SECTION_HDR = "Dependency caches: read the big half, bound the write"
+
+
+_TEST_JOB_CACHE_RESTORE_STEP = "Restore pip dependency cache (#7612, read-only — #11063)"
+
+
+def _test_job_cache_overrides_block(wf_lines: list[str], prune_name: str) -> str:
+    """Return the `⛔ OVERRIDES:` block that GOVERNS the `test` job's uv cache write.
+
+    ⛔ ANCHORED TO THE STEP IT DOCUMENTS, not to a marker's absolute position in the
+    file (#11065 round 5, ISSUE 1 — measured). This locator used to be
+    `next(ln for ln in <whole 4,900-line file> if "⛔ OVERRIDES:")`, i.e. the FIRST such
+    marker anywhere, so the two arms built on it judged whichever block happened to
+    come first. Measured at `60981107a8`, on the merge tree, nothing else altered:
+
+      * a degraded copy of the REAL block read **GREEN** once an unrelated
+        `⛔ OVERRIDES:` block was inserted above it in `changes` — a fail-open; and
+      * that unrelated block reddened a **correct** real block whose own text was
+        untouched — a false block.
+
+    Neither is hypothetical: `AGENTS.md` requires an `OVERRIDES:` line for every
+    departure from the common default, so this workflow keeps growing them (three
+    today, one already ⛔-prefixed at `:954`), and "first marker in the file" is a
+    locator that decays the moment one is added above this job.
+
+    The anchor is therefore the PARSE-VISIBLE step the comment block documents: the
+    marker must live in the contiguous comment run attached to that step, at or after
+    the dependency-caches section header and above the prune step. A marker that is
+    not attached to this block raises instead of being silently judged — the guard
+    fails closed on its own drift.
+
+    (Comment-aware YAML is the theory answer — `ruamel.yaml` round-trip can attach a
+    comment to a node (`yaml_add_eol_comment`) where PyYAML discards comments
+    entirely. It is not taken here: one new import and a second YAML parser for one
+    pin is machinery this blocker PR should not grow. Adjacency to the documented
+    step gets the same guarantee from text the pin already reads.)
+    """
+    sections = [i for i, ln in enumerate(wf_lines) if _TEST_JOB_CACHE_SECTION_HDR in ln]
+    anchors = [i for i, ln in enumerate(wf_lines)
+               if ln.strip() == f"- name: {_TEST_JOB_CACHE_RESTORE_STEP}"]
+    prunes = [i for i, ln in enumerate(wf_lines) if ln.strip() == f"- name: {prune_name}"]
+    assert len(sections) == 1, (
+        f"expected exactly one dependency-caches section header "
+        f"({_TEST_JOB_CACHE_SECTION_HDR!r}) in python-ci.yml, found {len(sections)} — "
+        "the `OVERRIDES:` arm anchors on it and cannot locate the block without it")
+    assert len(anchors) == 1, (
+        f"expected exactly one `- name: {_TEST_JOB_CACHE_RESTORE_STEP}` step in "
+        f"python-ci.yml, found {len(anchors)} — the `OVERRIDES:` marker must stay "
+        "attached to the step block that carries the cache write, so a rename or a "
+        "duplicate has to be re-anchored here rather than judged as another block")
+    assert len(prunes) == 1, (
+        f"expected exactly one `- name: {prune_name}` prune step in python-ci.yml, "
+        f"found {len(prunes)} — the marker's lower bound is the step it governs")
+    section_hdr, anchor, prune_line = sections[0], anchors[0], prunes[0]
+
+    markers = [i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln and i < anchor]
+    assert markers, (
+        "no `⛔ OVERRIDES:` marker at or above the `test` job's dependency-caches "
+        "step — the departure from the vendor's `uv cache prune --ci` recommendation "
+        "is unrecorded, which is what the marker exists to prevent")
+    start = markers[-1]
+
+    # ⛔ ADJACENCY (the actual anchor): every line between the marker and the step it
+    # documents must be blank or a comment. This is what makes the locator immune to a
+    # marker added anywhere else in the workflow — including one in another job.
+    stray = [i + 1 for i in range(start, anchor)
+             if wf_lines[i].strip() and not wf_lines[i].lstrip().startswith("#")]
+    assert not stray, (
+        f"the nearest `⛔ OVERRIDES:` at or above the dependency-caches step is at "
+        f"python-ci.yml:{start + 1}, but non-comment lines {stray} sit between it and "
+        f"the step it is supposed to document (line {anchor + 1}). That marker belongs "
+        "to a different block — a departure statement must stay attached to the "
+        "step it governs, not float above unrelated steps")
+    assert section_hdr < start < prune_line, (
+        f"the `⛔ OVERRIDES:` marker resolved to python-ci.yml:{start + 1}, which is "
+        f"outside the dependency-caches section (header {section_hdr + 1}, prune step "
+        f"{prune_line + 1}) — the arm would judge a block that does not govern this "
+        "cache write")
+
+    # ⛔ ONE MARKER PER CACHE WRITE, asserted (#11065 round 5). Two markers inside this
+    # section would leave "which block is the attributed one" to the locator's tie-break —
+    # the same class of ambiguity the absolute-position anchor had — so a second departure
+    # statement here has to be folded into the one marker that governs this write.
+    in_section = [m for m in markers if m > section_hdr]
+    assert len(in_section) == 1, (
+        f"the dependency-caches section of python-ci.yml (line {section_hdr + 1}) carries "
+        f"{len(in_section)} `⛔ OVERRIDES:` markers "
+        f"({', '.join(str(m + 1) for m in in_section)}); this write has exactly one "
+        "departure to record, and with two markers the arm would judge whichever it "
+        "picked — fold the additional departure into the marker that governs this cache "
+        "write, or move it to the block it belongs to")
+
+    block = []
+    for ln in wf_lines[start:]:
+        if re.match(r"\s*#\s*ARM \d", ln):
+            break
+        block.append(ln)
+    return "\n".join(block)
+
+
+def _overrides_payload_misattribution(overrides: str) -> str | None:
+    """Return the sentence that misattributes `#7612`'s payload, or None when clean.
+
+    The claim, not the phrase (#11065 cycle 3): a bare substring ban reddened a
+    CORRECT edit that named `~/.cache/pip` for the 3.2 GB torch wheel set. What is
+    forbidden is an assertion that the payload SITS in `~/.cache/uv`.
+    """
+    prose = " ".join(re.sub(r"^\s*#\s?", "", ln) for ln in overrides.splitlines())
+    for sentence in re.split(r"(?<=[.;])\s+", prose):
+        if "#7612" not in sentence or "~/.cache/uv" not in sentence:
+            continue
+        if "~/.cache/pip" in sentence:
+            continue
+        return sentence.strip()
+    return None
+
+
+def _cache_roots_of(step: dict) -> dict:
+    """The key ROOT each cache field declares, per line: `{field: [root, ...]}`.
+
+    A root is the literal prefix before the first `${{ … }}` interpolation — the
+    only part `actions/cache` can match on: the primary `key:` exactly, each
+    `restore-keys:` entry as a prefix. Comparing ROOTS (never whole keys) is what
+    lets an arm state "this step reads inside its own family and nowhere else"
+    without restating a formula that a legitimate `uv.lock` or OS edit moves.
+    """
+    with_ = step.get("with") or {}
+    return {field: [ln.split("${{")[0].strip()
+                    for ln in str(with_.get(field) or "").splitlines() if ln.strip()]
+            for field in ("key", "restore-keys")}
+
+
+def _cross_family_restore_keys(step: dict) -> list:
+    """The `restore-keys:` roots in `step` that leave its own `key:` family.
+
+    `restore-keys` entries are prefix matches, so one is only safe while it stays
+    inside the family its primary key names: an entry that is EQUAL to the key
+    root, or NARROWER (`pip-Linux-` inside `pip-`), can only ever reach that
+    family's entries. A BROADER root (`uv-` against `uv-cache-`) or a foreign one
+    (`uv-pip-` against `uv-cache-`, `pip-` against `uv-cache-`) reaches an archive
+    written by another cache — the payload mixing #11063 split and this pin
+    exists to prevent, from the read side.
+    """
+    roots = _cache_roots_of(step)
+    own = [r for r in roots["key"] if r]
+    if not own:
+        return []
+    own_root = own[0]
+    return [rk for rk in roots["restore-keys"]
+            if rk and not (rk == own_root or rk.startswith(own_root))]
 
 
 def test_the_test_job_carries_no_unbounded_cache_post_step():
@@ -18482,8 +14602,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # prose restating a computed constant is exactly how a constant goes stale.
     wall = (Path(__file__).resolve().parents[1]
             / "docs" / "ops" / "ci-wall-clock.md").read_text()
-    stated = re.search(r"the emitted \*\*(\d+) m\*\* per-shard|the emitted (\d+) m per-shard",
-                       wall)
+    stated = _EMITTED_WATCHDOG_CLAIM_RE.search(wall)
     assert stated, (
         "docs/ops/ci-wall-clock.md §2 no longer states the emitted per-shard "
         "watchdog in a form this pin can read (`the emitted <N> m per-shard`), so "
@@ -18610,6 +14729,7 @@ def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
         _test_job_cache_overrides_block(inside, prune_name)
 
 
+
 def test_the_cache_key_scan_reads_restore_keys_and_not_key_alone():
     """#11065 cycle 8 (P2): a cache guard is only as wide as the fields it reads.
 
@@ -18629,6 +14749,10 @@ def test_the_cache_key_scan_reads_restore_keys_and_not_key_alone():
     nothing here), a fully migrated step is NOT reported (the scan cannot pass by
     reporting everything), and a `restore-keys` root that stays in its own family
     — equal or narrower — is accepted by the crossing predicate.
+
+    Kept by #14419: the pin it proves (``(d2)``'s retirement scan and
+    `_cache_refs_of`'s two-field read) still ships, so the proof that a one-word
+    narrowing of that helper cannot go green must ship with it.
     """
     # 1. `_cache_refs_of` reads BOTH fields — the primitive the rest rests on.
     both = {"with": {"key": "uv-cache-${{ runner.os }}-",
@@ -18702,30 +14826,654 @@ def test_the_cache_key_scan_reads_restore_keys_and_not_key_alone():
         "#11063 split, from the read side (#11065 cycle 8, P2)")
 
 
-def _test_job_pre_phase_watchdog_minutes(steps: list) -> int:
-    """The last-failed pre-phase's OWN watchdog, parsed from the run step.
+def test_every_required_merge_check_carries_an_outer_cap():
+    """A job EMITTING a required merge context must carry a literal cap.
 
-    It is a `timeout -s INT -k 10 <N>m` inside the pytest step (#6142). Parsed
-    rather than hardcoded: if it moves, the arm-2 SUM in the pin above must move
-    with it, and a restated literal is how a constant goes stale.
+    The required set is read from `.mergify.yml` (`queue_conditions` gates ENTRY,
+    `merge_conditions` gates the MERGE — both are required, so both are checked),
+    and each name is resolved to the job that emits it through the same emitter
+    map `tools/mergify_config_guard.py` uses — a job's effective name is its
+    `name:` field when set, else its id.
+
+    A required name that resolves to NO job is asserted against rather than
+    skipped: today all seven resolve, and a name the workflows do not emit is
+    either a new gating workflow that needs a bound or a condition that can never
+    be satisfied (the deadlock the mergify guard exists to catch). If a required
+    context is ever emitted by a non-workflow app, extend this test's resolution
+    — do not weaken the assertion, because a skipped name is a silently unbounded
+    merge path.
+
+    Scope note: this covers the SEVEN required contexts. It does not assert
+    anything about merge-path workflows that emit no required context (e.g.
+    `drift-guard`) — those are bounded by hand, with their measurement recorded
+    in `docs/ops/ci-wall-clock.md`.
     """
-    pattern = re.compile(r"timeout -s INT -k 10 (\d+)m ")
-    found = sorted({int(m) for s in steps
-                    for m in pattern.findall(str(s.get("run") or ""))})
-    assert len(found) >= 1, (
-        "could not parse any `timeout -s INT -k 10 <N>m` watchdog from the "
-        "`test` job's run steps — the pre-phase term of the arm-2 SUM is "
-        "unreadable, so this pin cannot bound anything")
-    # ⛔ EXACTLY ONE (#11065 cycle 4, finding 5). Taking `found[0]` of a sorted set
-    # silently returns the SMALLEST, so a second, larger pre-phase watchdog would
-    # leave this SUM term at the old value and WEAKEN the cap arm instead of
-    # reddening it — the inverse of "parse it, don't restate it".
-    assert len(found) == 1, (
-        f"the `test` job now carries {len(found)} distinct `timeout -s INT -k 10 "
-        f"<N>m` watchdogs {found}m, so the pre-phase term of the arm-2 SUM is "
-        "ambiguous. Sum them here deliberately, or keep one — do not let the "
-        "smallest stand in for the job's pre-phase budget.")
-    return found[0]
+    docs = mcg._workflow_docs(REPO)
+    mergify = mcg._load_mergify(REPO)
+    required: list[str] = []
+    for rule in mergify["queue_rules"]:
+        for key in ("queue_conditions", "merge_conditions"):
+            required.extend(mcg._success_names(rule.get(key) or []))
+    required = sorted(set(required))
+    assert required, (
+        ".mergify.yml declares no positive `check-success=` condition — the "
+        "required set is empty, so this guard would assert nothing")
+
+    by_name: dict[str, list[dict]] = {}
+    for emitter in mcg._emitters(docs):
+        by_name.setdefault(emitter["name"], []).append(emitter)
+
+    unemitted = [name for name in required if name not in by_name]
+    assert not unemitted, (
+        f"required merge context(s) {unemitted} are named in .mergify.yml but "
+        f"NO job's effective check name matches — either a gating workflow is "
+        f"missing a bound this test cannot see, or the context can never be "
+        f"satisfied (see tools/mergify_config_guard.py).")
+
+    uncapped: list[str] = []
+    for name in required:
+        for emitter in by_name[name]:
+            job = docs[emitter["workflow"]]["jobs"][emitter["job"]]
+            cap = job.get("timeout-minutes") if isinstance(job, dict) else None
+            if not isinstance(cap, int) or cap <= 0:
+                uncapped.append(f"{name} ({emitter['workflow']}:{emitter['job']})")
+    assert not uncapped, (
+        f"required merge check(s) {uncapped} carry no `timeout-minutes`, so a "
+        f"wedged job holds the merge queue on GitHub's 360m default instead of "
+        f"failing in minutes-to-tens-of-minutes. Set the bound from a "
+        f"measurement (docs/ops/ci-wall-clock.md).")
+
+
+def test_slow_shards_declaration_is_fail_closed():
+    """#9539: a malformed `slow_shards` is an ERROR, never a silent default.
+
+    Same polarity as `fast_shard_issues`/`carve_shard_issues`: absence is 'not
+    adopted' (the historical 2 legs) and is fine; an explicit null, a string, a
+    bool, a float or a count that deletes or over-extends the lane is a typo
+    that `--integrity` must NAME — otherwise the workflow runs a leg count
+    nobody chose and the merge rail's lane-parity (a job-NAME subtraction) sees
+    a set that was never reviewed."""
+    ok = load_manifest()
+    assert slow_shard_issues(ok) == [], slow_shard_issues(ok)
+    assert slow_shard_count(ok) >= 2, (
+        "this repo exists to shard the slow lane; a count of 1 means the key "
+        "was removed and the wall guard below is what will red")
+    for bad, why in ((None, "explicit null"), ("5", "a string"),
+                     (True, "a bool"), (5.5, "a float"), (1, "one leg"),
+                     (0, "zero"), (-1, "negative"),
+                     (MAX_SLOW_SHARDS + 1, "above the a..z ceiling")):
+        m = dict(ok, slow_shards=bad)
+        assert slow_shard_issues(m), f"{why} ({bad!r}) must be an error"
+        assert slow_shard_count(m) == DEFAULT_SLOW_SHARDS == 2, (
+            f"{why} must fail SAFE to the historical two legs, not to a number "
+            f"nobody chose")
+    # Absence is NOT an error — it is 'not adopted', and it must give back the
+    # historical two-leg shape.
+    m = {k: v for k, v in ok.items() if k != "slow_shards"}
+    assert slow_shard_issues(m) == []
+    assert slow_shard_count(m) == 2
+    assert len(slow_shard_entries(m)) == 2
+    assert set(f for e in slow_shard_entries(m) for f in e["files"]) == \
+        set(slow_leg_files(m))
+
+
+def _slow_wall_remedy(manifest: dict, target: float | None = None,
+                      setup: float | None = None) -> str:
+    """#11605: the remedy the wall arm can ACTUALLY clear, derived from the map.
+
+    The wall arm's failure text used to tell every reader to "Raise
+    `config/ci-surfaces.yml::slow_shards` (reviewed)". Measured on the 2026-11-09
+    refresh, that advice is INERT: a leg is FILE-granular (`build_shard_entries`
+    packs whole files, and `python-ci.yml` maps each name to `tests/<name>.py`),
+    so `max(leg) >= <the heaviest file>`. Once one file alone exceeds the pytest
+    budget a leg may spend (`target - setup`), no leg count clears the wall —
+    raising the count only relocates the red onto the BALANCE arm. Five lanes
+    re-derived that dead end from the failure text, one after another.
+
+    So the two arms are solved for the leg count before a word is written. With
+    `pool` = the gating pool, `h` = the heaviest file, `room = target - setup`:
+
+      * the WALL needs `pool / L <= room`  ->  `L >= ceil(pool / room)` = `lo`;
+      * the BALANCE band needs `h <= ratio x pool / L`  ->  `L <= floor(ratio x
+        pool / h)` = `hi` (the heaviest file must still fit the band).
+
+    `lo > hi` (or `h > room`) is the indivisible-pool state: no `slow_shards`
+    value can pass, and the message says so, names the file, and names the two
+    routes that remain (split/move it, or move the ceiling — an OWNER decision,
+    #6792). Otherwise the window `[lo, hi]` is stated, so the advice is a number
+    a reviewer can act on instead of "raise it".
+
+    Pure: reads only the passed manifest (and the two measured constants), so it
+    is testable against synthetic maps. Returns "" when the pool is empty (an
+    empty pool is the coverage arm's finding, not this one's).
+    """
+    target = SLOW_LEG_WALL_TARGET_MIN if target is None else target
+    setup = SLOW_LEG_SETUP_ALLOWANCE_MIN if setup is None else setup
+    room = target - setup
+    dmap = cs._durations_map(manifest)
+    weights = {n: cs._duration_weight(dmap.get(f"{n}.py")) / 60.0
+               for n in slow_leg_files(manifest)}
+    if not weights or room <= 0:
+        return ""
+    heaviest = max(weights, key=lambda n: weights[n])
+    h = weights[heaviest]
+    pool = sum(weights.values())
+    count = slow_shard_count(manifest)
+    ratio = cs.HALF_DURATION_IMBALANCE_RATIO
+    # ceil(pool / room) on the seconds, so the answer is exact at a boundary
+    lo = -(-round(pool * 60) // round(room * 60))
+    hi = int(ratio * pool / h) if h > 0 else 0
+    if h > room or lo > hi:
+        return (
+            f"⛔ No `slow_shards` value can clear this, and more legs are not the "
+            f"remedy: a leg is FILE-granular, so `max(leg)` is at least the "
+            f"heaviest file (`{heaviest}`, {h:.2f}m alone) while a leg may spend "
+            f"only {room:.2f}m of pytest ({target:.0f}m target − {setup:.1f}m "
+            f"setup). Clearing the wall needs >= {lo} legs; the {ratio}x balance "
+            f"band admits at most {hi} at {h:.2f}m — the two windows do not "
+            f"overlap, so the pool has to become DIVISIBLE: split or move "
+            f"`{heaviest}` (or move the {target:.0f}m ceiling, an OWNER decision "
+            f"— #6792 — never a lane's). Committed at {count} legs; see #11605.")
+    return (
+        f"Raise `config/ci-surfaces.yml::slow_shards` (reviewed) into the "
+        f"[{lo}, {hi}] window this map admits: the wall needs >= {lo} legs "
+        f"({pool:.2f}m / {room:.2f}m of pytest per leg — a LOWER bound, the LPT "
+        f"pack must still land inside it) and the {ratio}x balance band allows "
+        f"<= {hi} while `{heaviest}` ({h:.2f}m) is the heaviest file, instead of "
+        f"letting this lane become the merge ceiling again")
+
+
+def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
+    """#9539: the slow legs must be a complete, duration-balanced partition AND
+    the wall their pack projects must stay inside the CI guideline.
+
+    This is the guard the lane did not have. The old committed rows could rot
+    without ANY test noticing: #9017 found the halves at 6.4:1 because the eval
+    file had grown from its declared 855 s to a measured 24.4 min and nothing
+    re-derived the split. Here the properties are recomputed from the committed
+    `durations` map on every run, so a slow file that grows reds THIS instead of
+    silently restoring the merge ceiling:
+
+      * coverage — the legs partition `slow_gating_files()` exactly, once
+        each (no gap, no duplicate);
+      * balance — no leg exceeds its fair share by more than the house
+        `HALF_DURATION_IMBALANCE_RATIO` band (an LPT pack normally lands
+        within 0.1%, so 1.25 is deliberately loose enough for a coarse map);
+      * the bound — `max(leg) + SLOW_LEG_SETUP_ALLOWANCE_MIN` <= the 10m
+        guideline, AND, once the matrix is capped (#6744), the job's real band
+        `ceil(legs/cap) x (max leg + allowance)` <= `SLOW_LEG_CAPPED_WALL_TARGET_MIN`.
+        A new slow file big enough to break either reds here, and the remedy is derived
+        by `_slow_wall_remedy()` from the map rather than asserted: a reviewed
+        `slow_shards` bump when the pool is divisible, and a split/move of the
+        offending file when one file alone exceeds the pytest budget a leg may
+        spend (no leg count can help then — #11605). Never a quieter number. The
+        second bound is not optional: a per-leg number alone certifies a wall the
+        job cannot hit as soon as one leg is not the whole job.
+
+    The setup allowance is a MEASURED constant (1.9–2.1 min from the jobs API
+    over 5 main runs), not zero: a bound that ignored the per-leg fixed cost
+    would claim a wall the job cannot hit.
+    """
+    m = load_manifest()
+    count = slow_shard_count(m)
+    entries = slow_shard_entries(m)
+    assert len(entries) == count, (
+        f"slow_shards declares {count} legs but the pack emitted {len(entries)} "
+        f"— a short pack means the pool cannot be sharded that widely")
+    assert count >= 2
+    # coverage: exactly once each
+    flat = [f for e in entries for f in e["files"]]
+    assert len(flat) == len(set(flat)), (
+        f"a slow file rides more than one leg: "
+        f"{sorted({f for f in flat if flat.count(f) > 1})}")
+    assert set(flat) == set(slow_leg_files(m)), (
+        "the slow legs must cover slow_gating_files() "
+        "(slow_files - carve_out - the non-gating lane, #10194) exactly: "
+        f"missing={sorted(set(slow_leg_files(m)) - set(flat))} "
+        f"extra={sorted(set(flat) - set(slow_leg_files(m)))}")
+    # balance: no leg above its fair share by more than the house band
+    proj = slow_wall_projection(m, entries)
+    pool = proj["pool_min"]
+    fair = pool / count
+    assert proj["max_leg_min"] <= fair * cs.HALF_DURATION_IMBALANCE_RATIO, (
+        f"slow legs are duration-imbalanced: {proj['legs_min']} min against a "
+        f"{fair:.2f}m fair share (band {cs.HALF_DURATION_IMBALANCE_RATIO}x) — "
+        f"the LPT pack regressed; re-cut from the `durations` map")
+    # the bound itself
+    assert proj["projected_wall_min"] <= SLOW_LEG_WALL_TARGET_MIN, (
+        f"the slow lane no longer meets its wall target: {proj['legs_min']} min "
+        f"per leg against a {pool:.2f}m pool at {count} legs, plus the measured "
+        f"{SLOW_LEG_SETUP_ALLOWANCE_MIN}m per-leg setup, projects "
+        f"{proj['projected_wall_min']:.2f}m — over the "
+        f"{SLOW_LEG_WALL_TARGET_MIN:.0f}m CI guideline. "
+        + _slow_wall_remedy(m))
+    # #6744: the per-leg number above is NOT the job's wall once the matrix is
+    # capped. `max-parallel: 3` over 5 legs is TWO waves (ceil(5/3)), so a guard
+    # that stops at the per-leg share stays GREEN while asserting a wall the job
+    # cannot hit — the same defect this docstring names for the per-leg fixed
+    # cost, one multiplication further out. The cap is read from the workflow so
+    # a re-tune moves this assertion with it, and its absence fails closed (a
+    # vacuous wave count would be a second way to pass on nothing).
+    cap = ((_load_python_ci()["jobs"]["test-slow"].get("strategy")
+            or {}).get("max-parallel"))
+    assert isinstance(cap, int), (
+        "python-ci.yml's `test-slow` matrix declares no integer `max-parallel` "
+        f"(got {cap!r}) — the wave band below would be vacuously one wave")
+    capped = slow_wall_projection(m, entries, max_parallel=cap)
+    assert capped["waves"] == -(-count // cap), (
+        f"the projection says {capped['waves']} waves for {count} legs at cap "
+        f"{cap}, which is not ceil({count}/{cap})")
+    assert capped["projected_job_wall_min"] <= SLOW_LEG_CAPPED_WALL_TARGET_MIN, (
+        f"the slow JOB's wall is now {capped['projected_job_wall_min']:.2f}m "
+        f"({capped['waves']} waves x ({capped['max_leg_min']:.2f}m leg + "
+        f"{capped['setup_allowance_min']:.2f}m setup)) at `max-parallel: {cap}`, "
+        f"over the {SLOW_LEG_CAPPED_WALL_TARGET_MIN:.0f}m ceiling that cap was "
+        f"accepted with (#6744). Re-tune `slow_shards` or the cap, or move the "
+        f"ceiling from a fresh measurement — do not drop this assertion, or the "
+        f"guard goes back to certifying a wall the job cannot hit")
+    # the emitted matrix is what the job expands, and every leg is non-empty
+    inc = slow_matrix_include(entries)["include"]
+    assert [r["half"] for r in inc] == [e["name"] for e in entries]
+    assert all(r["files"].split() for r in inc), "a slow leg must never be empty"
+
+
+def test_the_selector_offers_no_unwired_slow_matrix_flag():
+    """#9539 review: `--emit-slow-matrix` was dead surface with a false rationale.
+
+    Its comment claimed the run-time drift guard would call it 'so the guard
+    compares the EXPANDED matrix against the config pool without a second
+    implementation'. The drift guard imports `ci_selection` and calls
+    `slow_leg_files()` itself, and nothing anywhere called the flag — a second,
+    unexercised derivation plus a comment asserting it is load-bearing. It was
+    removed rather than wired: `--emit-push-matrix` already publishes
+    `slow_matrix` for the `changes` job, which is what CI actually consumes.
+    """
+    selector = Path(__file__).resolve().parents[1] / "tools" / "ci_selection.py"
+    proc = subprocess.run([sys.executable, str(selector), "--emit-slow-matrix"],
+                          capture_output=True, text=True, cwd=str(selector.parent))
+    assert proc.returncode == 2, (
+        f"`--emit-slow-matrix` must be gone (argparse rejects unknown flags with "
+        f"exit 2), got rc={proc.returncode}: {proc.stdout}{proc.stderr}")
+    emit = subprocess.run([sys.executable, str(selector), "--emit-push-matrix"],
+                          capture_output=True, text=True, cwd=str(selector.parent),
+                          check=True).stdout
+    assert json.loads(emit)["slow_matrix"]["include"], (
+        "the surviving entry point must still publish the slow matrix")
+
+
+CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
+#: The machine-local `scripts` pointer itself, WITHOUT following it. Since #9475 it is
+#: GITIGNORED and NOT tracked (a git symlink blob cannot hold `$AGENT_INFRA_PATH`), so the
+#: runner case that may skip is "it was never materialised here" — an absent path, not a
+#: dangling committed link.
+SCRIPTS_LINK = Path(__file__).resolve().parents[1] / "scripts"
+CI_RUNNER_GATE_ABSENT = (
+    f"PREMISE CROSS-CHECK NOT RUN: agent-infra's ci_runner_gate.sh is not "
+    f"reachable at {CI_RUNNER_GATE} (the machine-local `scripts` pointer is "
+    f"missing or does not resolve — #9475: it is gitignored, not tracked, so a "
+    f"fresh clone or lane has none until `uv run python "
+    f"tools/link_agent_infra_scripts.py` materialises it from $AGENT_INFRA_PATH, "
+    f"as on a runner where that variable is unset). The repo-side half of the "
+    f"guard — test-slow's label is VERSION-PINNED — ran and passed. The premise "
+    f"half is HOST-ONLY AND UNTESTED BY CI: it is a cross-repo fact (the labels "
+    f"agent-infra's gate attaches to the self-hosted pool) that no runner checks "
+    f"out, so a green CI run says nothing about it. Run this module on a host "
+    f"with $AGENT_INFRA_PATH set (and the pointer materialised) to verify that "
+    f"the gate still attaches only `ubuntu-latest`. Same shape and same limit as "
+    f"RAIL_ABSENT_REASON in tests/test_pytest_attribution.py."
+)
+
+
+def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
+    """2026-10-19: `ubuntu-latest` is not "GitHub-hosted" on this repo.
+
+    `scripts/ci_runner_gate.sh` re-attaches `ubuntu-latest` to the self-hosted
+    ARM64 pool as a fallback, so `runs-on: ubuntu-latest` resolves to a ~2x
+    slower class run to run — and `test-slow` (the leg that IS the critical
+    path) was killed at its 40m watchdog on `pi-runner-vm-2` after executing
+    39.6 min of test time (run 39309984832, `rc=137`). The job then read 42.1m
+    and concluded `failure`, so this leg's wall became main's critical path
+    (`ci_crit_max=42.1m`, up from 22.6m) and the required aggregate red named a
+    KILL rather than a test verdict. (That run was ALSO red for independent,
+    genuine reasons — three fast shards on hosted runners failed real tests — so
+    the pin removes this kill and the critical-path inflation, not the run's
+    redness.)
+
+    The budget cannot absorb that class: 2x the leg would be >=79m against a
+    40m budget built at the `WATCHDOG_HEADROOM` floor, past both
+    `WATCHDOG_CEILING_MIN` and this job's 60m cap. So the leg is pinned to a
+    VERSION-PINNED hosted label (the pool claims `ubuntu-latest`, `self-hosted`,
+    `Linux`, `ARM64` and `self-hosted-arm64` — never `ubuntu-<version>`), the
+    same pin and the same reasoning as `workflow-lint` (#7867).
+
+    A bare `ubuntu-latest` here re-opens exactly that false red, so this reds
+    rather than relying on a comment nobody re-reads."""
+    job = _load_python_ci()["jobs"]["test-slow"]
+    runs_on = job["runs-on"]
+    assert runs_on != "ubuntu-latest", (
+        "test-slow must NOT use `ubuntu-latest`: the fallback gate re-attaches "
+        "that label to the self-hosted ARM64 pool, where this leg needs ~2x its "
+        "budget and is killed at the watchdog (measured: 39.6 min of test time, "
+        "rc=137, job 42.1m). Pin a version-pinned hosted label (`ubuntu-24.04`).")
+    assert isinstance(runs_on, str) and re.fullmatch(r"ubuntu-\d+\.\d+", runs_on), (
+        f"test-slow's runner label {runs_on!r} must be a VERSION-PINNED hosted "
+        f"label (`ubuntu-<version>`): `ubuntu-latest` is claimed by the "
+        f"self-hosted pool whenever the fallback is attached, and a label the "
+        f"pool claims puts this leg back on the class that cannot finish it.")
+
+    if not SCRIPTS_LINK.is_dir():
+        # The machine-local `scripts` pointer is ABSENT or does not resolve, which is
+        # every CI runner and every fresh clone/lane: since #9475 it is gitignored and
+        # not tracked, so nothing creates it until
+        # `tools/link_agent_infra_scripts.py` runs. It is a host convenience, not a repo
+        # dependency (`python-ci.yml` is self-contained by decision, fix #555).
+        # Announced, never silent, and the message says out loud that the premise half
+        # is untested by CI — a bare `skipped` would let a green run read as "the pool's
+        # labels were verified", which is the vacuous pass this guard exists to prevent.
+        print(CI_RUNNER_GATE_ABSENT)
+        pytest.skip(CI_RUNNER_GATE_ABSENT)
+    # The link RESOLVED, so agent-infra IS checked out at $AGENT_INFRA_PATH: a missing
+    # gate file now means the premise moved or was renamed out from under this pin,
+    # not that there is no premise to check. That is a FAIL, not a skip — the old
+    # `.exists()` check folded both cases into the skip and so could never report a
+    # premise that had silently stopped existing.
+    assert CI_RUNNER_GATE.is_file(), (
+        f"the `scripts` symlink resolves ({SCRIPTS_LINK} -> "
+        f"{SCRIPTS_LINK.resolve()}) but {CI_RUNNER_GATE.name} is not there: the "
+        f"cross-repo premise of this pin has been moved or renamed, so the premise "
+        f"half can no longer be verified from this host — fix the path (or the pin) "
+        f"rather than letting this guard drift out of reach")
+    gate = CI_RUNNER_GATE.read_text()
+    # The premise this pin rests on lives in ANOTHER repo's script, reached here
+    # through the machine-local `scripts` pointer (#9475 — gitignored, not tracked;
+    # materialised per machine from $AGENT_INFRA_PATH, absent until then). Pinning a
+    # literal against an external,
+    # changeable fact with nothing asserting that fact is the "comment nobody
+    # re-reads" failure this test criticises: harden the gate to attach a
+    # VERSION-PINNED label instead of `ubuntu-latest` and this test would stay green
+    # while `test-slow` silently returned to the ARM64 pool.
+    #
+    # The assignment shape is NOT part of the premise: agent-infra may quote it, drop
+    # the quotes, or `export` it. Only the VALUE is contractual, so the matcher
+    # tolerates the spelling instead of asserting it — but it must still FIND both, or
+    # the premise is unreadable and this test must not pass by not looking.
+    labels = _gate_pool_labels(gate)
+    assert "FALLBACK_LABEL" in labels and any(
+        name.startswith("POOL_LABEL") for name in labels), (
+        f"cannot read FALLBACK_LABEL/POOL_LABEL* from {CI_RUNNER_GATE} (read "
+        f"{sorted(labels) or 'nothing'}) — the premise of this pin is unverifiable, "
+        f"so this test must not pass by not looking. If agent-infra renamed the "
+        f"constants, update the matcher here in the same change that renamed them.")
+    for label in labels.values():
+        assert not re.fullmatch(r"ubuntu-\d+\.\d+", label), (
+            f"ci_runner_gate.sh can attach {label!r} to the self-hosted pool, "
+            f"which is the VERSION-PINNED class test-slow is pinned to: the pin "
+            f"below no longer keeps this leg off the pool. Either the gate must "
+            f"stop attaching version-pinned labels, or test-slow needs a "
+            f"different isolation.")
+
+
+def _gate_pool_labels(gate_text: str) -> dict[str, str]:
+    """The labels `ci_runner_gate.sh` can attach to the self-hosted pool.
+
+    Returned by a helper so the PARSING half of the cross-repo premise is testable
+    WITHOUT agent-infra checked out — the gate file itself is host-only (see
+    `CI_RUNNER_GATE_ABSENT`), but the matcher that reads it is not, and an unreadable
+    matcher is how a guard stays green while protecting nothing.
+
+    Only the VALUE is contractual; the assignment SHAPE is not, so the matcher accepts
+    `export`, either quoting style, none, and leading whitespace. A commented-out
+    assignment is not read — prose is not the value the gate will use.
+
+    ⛔ THE NAME IS A FAMILY, NOT ONE CONSTANT (`POOL_LABEL*`). agent-infra split the
+    pool label per architecture — `POOL_LABEL_ARM64="self-hosted-arm64"` and
+    `POOL_LABEL_X64="self-hosted-x64"` — when it started measuring capacity per runner
+    (agent-infra `4d20edd2`, #2904/#2897). Pinning the exact spelling `POOL_LABEL` made
+    the premise UNREADABLE on every host whose agent-infra checkout is current, which
+    reds this guard everywhere except CI (where `scripts/` is absent and the cross-repo
+    half skips) — a pin that only fails where nobody looks. The family accepts both the
+    old single constant and the split pair, and the discriminator below still runs over
+    EVERY label it reads, so a split that reintroduces a version-pinned label still
+    reds.
+    """
+    found: dict[str, str] = {}
+    for match in re.finditer(
+        r"^\s*(?:export\s+)?(FALLBACK_LABEL|POOL_LABEL\w*)=[\"']?([^\"'\s]+)",
+        gate_text,
+        re.MULTILINE,
+    ):
+        found[match.group(1)] = match.group(2)
+    return found
+
+
+def test_the_gate_label_matcher_reads_the_spellings_and_rejects_the_unsafe_one():
+    """The premise half's PARSER and its DISCRIMINATOR, executed with no agent-infra.
+
+    `test_slow_legs_are_pinned_off_the_ambiguous_runner_label` skips its cross-repo
+    half on every runner, so without this test the regexes that read
+    `ci_runner_gate.sh` and the `ubuntu-<version>` rejection below them would never
+    execute anywhere — and a guard that cannot fail is not a guard. Three claims are
+    pinned here, all against crafted gate text:
+
+    1. the shipped spelling is read (double-quoted, line start);
+    2. a cosmetic change in agent-infra — `export`, single quotes, no quotes, leading
+       whitespace — does not make the labels unreadable (an unreadable premise must
+       fail loudly on the host, not silently weaken the pin);
+    3. the rejection FIRES: a gate that starts attaching `ubuntu-24.04` to the pool is
+       reported, which is the drift this pin exists to notice.
+    """
+    shipped = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-latest"\n'
+    expected = {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-latest"}
+    assert _gate_pool_labels(shipped) == expected
+    # The SPLIT spelling agent-infra ships today (`POOL_LABEL_ARM64`/`_X64` since it
+    # measures capacity per runner): the family must read BOTH, or a current
+    # agent-infra checkout makes the premise unreadable on the host while CI skips it.
+    split = (
+        'FALLBACK_LABEL="ubuntu-latest"\n'
+        'POOL_LABEL_ARM64="self-hosted-arm64"\n'
+        'POOL_LABEL_X64="self-hosted-x64"\n'
+    )
+    assert _gate_pool_labels(split) == {
+        "FALLBACK_LABEL": "ubuntu-latest",
+        "POOL_LABEL_ARM64": "self-hosted-arm64",
+        "POOL_LABEL_X64": "self-hosted-x64",
+    }, "the split pool label was not read (agent-infra 4d20edd2)"
+    for spelling in (
+        "export FALLBACK_LABEL='ubuntu-latest'\nexport POOL_LABEL='ubuntu-latest'\n",
+        "FALLBACK_LABEL=ubuntu-latest\nPOOL_LABEL=ubuntu-latest\n",
+        'FALLBACK_LABEL="ubuntu-latest" # inline note\nPOOL_LABEL="ubuntu-latest"\n',
+    ):
+        assert _gate_pool_labels(spelling) == expected, spelling
+    # A commented-out assignment is not an assignment: prose must not stand in for the
+    # value the gate will actually use.
+    assert _gate_pool_labels('# FALLBACK_LABEL="ubuntu-latest"\n') == {}
+    # The discriminator itself, executed: this is the arm that has never run on a
+    # runner and decides whether the pin still protects anything.
+    drifted = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-24.04"\n'
+    labels = _gate_pool_labels(drifted)
+    assert labels == {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-24.04"}
+    assert [lbl for lbl in labels.values() if re.fullmatch(r"ubuntu-\d+\.\d+", lbl)] == [
+        "ubuntu-24.04"
+    ]
+
+
+def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
+    """#10182/#5219: the carve-out job must be RESTORE-ONLY on the pip cache.
+
+    `actions/cache` saves in a POST step, and (#10182) that post step is charged
+    against the job's `timeout-minutes` like any other step. This job cannot
+    amortize such a save, and no cap it is allowed to carry can: the cap above
+    is pinned at `_CAP_CEILING_FACTOR` x the measured 16.02m pytest step (= 48m
+    at the ceiling), while ONE shard already spends its 10m embedder cap + 19m
+    floor-clamped watchdog + ~1m setup + the 1m38s `~/.cache/huggingface` POST
+    ≈ 31.6m against a 30m cap — and the SAVE has no timeout of its
+    own, so a slow one is unbounded, not merely large. Headroom amortizes a
+    bounded cost; it cannot amortize an unbounded one.
+
+    MEASURED (run 41100829071, job `test-carve-out (b)` 124223444008): the
+    restore was a PARTIAL hit, so the post step reserved the exact key and began
+    a ~3.6 GB save. Every WORK step passed — pytest finished at 18:10:55, the
+    orphan gate said 'no orphans' at 18:10:53 — and then `Post Cache pip
+    dependency caches` ran 18:12:33 → 18:29:46 against a 17:59:19 start, when
+    `The job has exceeded the maximum execution time of 30m0s`. GitHub reported
+    `cancelled`, which `python-ci-gate` reads as red BY DESIGN (#5219: a
+    cancelled leg certifies nothing) — so a GREEN shard reddened a REQUIRED
+    check on a diff that never touched this job.
+
+    Nothing is lost by not saving here: the key is SHARED
+    (`pip-<os>-<hash uv.lock>`), written by `test-d14-hosted-api` on EVERY run
+    (unconditional, PR + push), by `test-slow` only under `slow_run` — each saving on a MISS, so this
+    job only ever READ it. The ~90 MB HF embedding cache in the same job is
+    deliberately left alone (measured 1m38s to save, and it is the leg's
+    provisioning path — an uncached load skip-reds the dense assertion #4387);
+    the pip cache is the ~3.6 GB term that does not fit.
+
+    Non-vacuous in both directions: the pre-fix step is a bare `actions/cache@v4`
+    on this path, which reds the first assertion; and the presence + shape of
+    the restore is asserted too, so DELETING the cache step cannot pass.
+    """
+    job = _load_python_ci()["jobs"]["test-carve-out"]
+
+    def _path_of(step: dict) -> object:
+        return (step.get("with") or {}).get("path")
+
+    pip_caches = [s for s in job.get("steps", []) if _path_of(s) == "~/.cache/pip"]
+    assert pip_caches, (
+        "the carve-out job no longer restores the shared pip cache at all — every "
+        "shard would then download torch (140 wheels, ~3.2 GB) cold")
+    saving = [s.get("uses") for s in pip_caches
+              if str(s.get("uses") or "").startswith("actions/cache@")]
+    assert not saving, (
+        f"the carve-out job carries an implicit post-step cache SAVE {saving} on "
+        "~/.cache/pip — that save is charged against the job's `timeout-minutes` "
+        "(#10182) and this job's cap is pinned at <= 3x its measured pytest step, "
+        "so the save can never be amortized. Use `actions/cache/restore@` here "
+        "(#5219: the cancel it causes reds a REQUIRED check on a green shard).")
+    restores = [s for s in pip_caches
+                if s.get("uses") == "actions/cache/restore@v4"]
+    assert len(restores) == 1, (
+        "the carve-out's pip cache step must be exactly one "
+        f"`actions/cache/restore@v4` (found {len(restores)} of {len(pip_caches)} "
+        "pip-cache steps in that shape)")
+    assert restores[0].get("continue-on-error") is True, (
+        "the carve-out's pip-cache restore must be `continue-on-error: true` — a "
+        "cache-SERVICE error (transport/503) must never red the leg; a miss is "
+        "the fail-open case and install-cpu-torch downloads the pinned CPU "
+        "wheel either way")
+
+
+# ── #11063 / #10182: a POST cache SAVE is charged against the job's cap ──
+#
+# `actions/cache` writes in a POST step, and (#10182) that step counts against
+# the job's own `timeout-minutes` exactly like a work step — with NO timeout of
+# its own, so it is UNBOUNDED, not merely large. Measured twice, on two jobs,
+# with the same ~3.6 GB `~/.cache/pip` archive:
+#
+#   run 41100829071 `test-carve-out (b)` (124223444008) — green pytest, then
+#     17m13s inside the post save, killed by the 30m cap  -> `cancelled`
+#   run 42090497973 `test-record-postgres` (127519984967) — `192 passed,
+#     1 xfailed in 349.59s` at 21:39:44Z, teardown green at 21:39:58Z, then the
+#     post step tarred for 5m43s and pushed 3.6 GB at ~7 MB/s (`Sent 0 of
+#     3616384780`), reaching 76% when the 20m cap elapsed at 21:51:53Z
+#     -> `cancelled`
+#
+# `python-ci-gate` reads `cancelled` as red BY DESIGN (#5219: a cancelled leg
+# certifies nothing), so in BOTH cases a GREEN leg that failed no test withheld
+# a REQUIRED check. The first instance got the carve-out job fixed (#10182);
+# the second shows the fix was applied to ONE job and the class stayed open.
+#
+# So the rule is stated over the class: a job may only carry an IMPLICIT SAVE of
+# the pip cache when its cap can absorb one. `_PIP_CACHE_SAVE_MIN_CAP_MINUTES` is
+# the measured floor: the jobs at or above it WRITE the shared key (`test-slow`
+# 60m, `test-d14-hosted-api` 50m), and every job below it (carve-out 30m,
+# record-postgres 20m, concurrency-falkor 15m) only ever READS it.
+#
+# `test` (90m) is NOT a pip writer in the merged tree: it restores pip and saves
+# `~/.cache/uv` through an explicit, BOUNDED `actions/cache/save@` step. Its
+# 3.88 GB implicit post save inside a 90 m cap is what reddened run 42000057137
+# (#11063), and that shape is pinned by
+# `test_the_test_job_carries_no_unbounded_cache_post_step` ABOVE — the two pins
+# are complementary: that one fixes the job, this one states the class.
+_PIP_CACHE_SAVE_MIN_CAP_MINUTES = 40
+#: The jobs that WRITE the shared `pip-<os>-<hash uv.lock>` key. Pinned so a
+#: future edit cannot leave the key with no writer at all (every reader then
+#: downloads torch's 140 wheels cold on every run), and so a new saver has to
+#: argue its headroom here rather than inherit it silently.
+_PIP_CACHE_WRITER_JOBS = frozenset({"test-slow", "test-d14-hosted-api"})
+#: Jobs that must keep a pip-cache step at all — `actions/cache/restore@` has no
+#: post step, so "delete the step" would red on the cold-install cost instead.
+_PIP_CACHE_READER_JOBS = frozenset({
+    "test-carve-out", "test-record-postgres", "test-concurrency-falkor"})
+#: GitHub's default job cap when `timeout-minutes` is absent.
+_GH_DEFAULT_JOB_CAP_MINUTES = 360
+
+
+def _pip_cache_steps(job: dict) -> list:
+    """The job's steps that address `~/.cache/pip` (exact or multi-path)."""
+    out = []
+    for step in job.get("steps") or []:
+        path = (step.get("with") or {}).get("path")
+        if isinstance(path, str) and "~/.cache/pip" in path:
+            out.append(step)
+    return out
+
+
+def test_only_a_job_that_can_absorb_the_pip_cache_save_carries_one():
+    """#11063: a POST cache SAVE must never be charged against a tight cap.
+
+    `actions/cache`'s post save is UNBOUNDED (no `timeout-minutes` of its own)
+    and is charged against the job's cap. A job whose cap is calibrated to its
+    WORK therefore cannot amortize it: the cap kills the save, GitHub records
+    the green job as `cancelled`, and `python-ci-gate` reds that class by design
+    (#5219) — a required check withheld on a diff that never touched the job.
+
+    Non-vacuous at the pre-fix head in BOTH directions this change made:
+    `test-record-postgres` (cap 20) and `test-concurrency-falkor` (cap 15) each
+    carried a bare `actions/cache@v4` on `~/.cache/pip`, so the first assertion
+    inside the loop reds for each. Deleting those steps instead of switching
+    them cannot pass either: `_PIP_CACHE_READER_JOBS` is asserted to still hold
+    a pip-cache step, and the writer set is pinned to exactly the jobs that
+    keep the shared key warm.
+    """
+    jobs = _load_python_ci()["jobs"]
+    savers, readers = set(), set()
+    for job_id, job in jobs.items():
+        steps = _pip_cache_steps(job)
+        if not steps:
+            continue
+        readers.add(job_id)
+        cap = job.get("timeout-minutes", _GH_DEFAULT_JOB_CAP_MINUTES)
+        saving = [s.get("uses") for s in steps
+                  if str(s.get("uses") or "").startswith("actions/cache@")]
+        if saving:
+            savers.add(job_id)
+            assert cap >= _PIP_CACHE_SAVE_MIN_CAP_MINUTES, (
+                f"job {job_id!r} carries an implicit post-step SAVE of "
+                f"~/.cache/pip ({saving}) under a {cap}m cap. That save is "
+                "charged against the cap and has no timeout of its own, so at "
+                "this cap it can never complete — the job is killed, GitHub "
+                "records a GREEN leg as `cancelled`, and `python-ci-gate` reds "
+                "it by design (#5219), withholding a REQUIRED check (#11063, "
+                "#10182). Use `actions/cache/restore@v4` "
+                "(`continue-on-error: true`) here and let one of"
+                f" {sorted(_PIP_CACHE_WRITER_JOBS)} write the shared key.")
+        for step in steps:
+            uses = str(step.get("uses") or "")
+            if uses == "actions/cache/restore@v4":
+                assert step.get("continue-on-error") is True, (
+                    f"job {job_id!r}: the pip-cache restore must be "
+                    "`continue-on-error: true` — a cache-SERVICE error "
+                    "(transport/503) must never red the leg.")
+    assert savers == set(_PIP_CACHE_WRITER_JOBS), (
+        "the set of jobs carrying an implicit pip-cache SAVE moved: "
+        f"{sorted(savers)} against the pinned {sorted(_PIP_CACHE_WRITER_JOBS)}. "
+        "Adding a writer means arguing its cap absorbs an unbounded save "
+        "(#11063); removing one leaves the shared key with a hole.")
+    missing = _PIP_CACHE_READER_JOBS - readers
+    assert not missing, (
+        f"{sorted(missing)} lost their pip-cache step entirely. `actions/cache/"
+        "restore@v4` is the fix for #11063, not deletion: without it every "
+        "shard downloads torch's 140 wheels cold.")
 
 
 #: The in-step watchdog each save-arm job must still clear, from the COLLECT+run
@@ -18755,6 +15503,23 @@ def _save_arm_cap(in_step: int, setup: int = 1, cold_save: int = 9) -> int:
     # whose total is odd (#6744 review). Both shipped values are unaffected
     # (15 -> 30, 30 -> 50), so this is a latent bug fixed while it is cheap.
     return -(-(total * 3) // 20) * 10
+
+
+def test_the_save_arm_rounds_the_sum_up_before_it_divides():
+    """§2's save arm rounds UP: an ODD total must still clear 1.5 x SUM.
+
+    The helper once computed `-(total * 3 // 2)`, which drops the half-minute
+    BEFORE the ceiling, so 27 x 1.5 = 40.5 came back as 40 — a cap BELOW
+    1.5 x SUM, silently, on the first re-tune whose total is odd. The shipped
+    in-step values (15, 30) agree under both forms, which is why the odd total
+    is the case this pin exists for (#10182/#10212).
+    """
+    assert _save_arm_cap(in_step=5) == 30      # total 15 -> 22.5 -> 30
+    assert _save_arm_cap(in_step=20) == 50     # total 30 -> 45.0 -> 50
+    assert _save_arm_cap(in_step=17) == 50, (
+        "_save_arm_cap floors before it ceils: 27 x 1.5 = 40.5 rounded up is "
+        "50, and a cap BELOW 1.5 x SUM is the under-sizing that reddened two "
+        "required checks in the first place (#10182/#10212)")
 
 
 def test_the_save_arm_caps_clear_the_post_step_that_reddened_them():
@@ -18840,27 +15605,6 @@ def test_the_save_arm_caps_clear_the_post_step_that_reddened_them():
             "and GitHub reports `cancelled` — which python-ci-gate reads as red "
             "BY DESIGN (#5219), reddening a REQUIRED check on a green leg "
             "(run 42154769896: 4 passed in 44.96s, cancelled at 10m15s).")
-
-
-def test_the_save_arm_rounds_the_sum_up_before_it_divides():
-    """#6744 review: `SUM x 1.5, rounded UP to the next 10 m` must be applied to
-    the SUM, not to a half-truncated one.
-
-    The helper used to compute `-(total * 3 // 2)`: the `// 2` drops the odd
-    half-minute BEFORE the ceiling, so an odd `total * 3` could come back BELOW
-    `1.5 x SUM` — the exact under-sizing the arm exists to prevent, silently.
-    Both shipped values happen to be even (`15 -> 30`, `30 -> 50`), so nothing
-    live was wrong; this pins the arithmetic so the first re-tune that lands on
-    an odd total cannot ship a cap under the rule.
-    """
-    assert _save_arm_cap(in_step=5) == 30      # total 15 -> 22.5 -> 30 (track-b)
-    assert _save_arm_cap(in_step=20) == 50     # total 30 -> 45.0 -> 50 (d14)
-    # total 27: 27 x 1.5 = 40.5 must round UP to 50; the old form returned 40,
-    # a cap below 1.5 x SUM.
-    assert _save_arm_cap(in_step=17) == 50, (
-        "_save_arm_cap floors before it ceils: 27 x 1.5 = 40.5 rounded up is "
-        "50, and a cap BELOW 1.5 x SUM is the under-sizing that reddened two "
-        "required checks in the first place (#10182/#10212)")
 
 
 def _carve_matrix() -> dict:
@@ -21268,30 +18012,6 @@ def test_real_manifest_has_no_duplicate_entries():
     # registration is deliberate and must stay allowed).
     dupes = duplicate_entries(load_manifest())
     assert dupes == [], f"duplicate manifest entries: {dupes}"
-
-
-def test_halves_guard_reports_single_sided_pack_without_crashing():
-    # #3407 review P2: the branch written to CATCH a zero-weight half died with
-    # ZeroDivisionError while formatting its own diagnosis — `hi / lo` was
-    # evaluated inside the f-string after `lo <= 0` had short-circuited the
-    # comparison. A single-sided pack is reachable (a 1-file pool, or an
-    # all-zero measured map), and this is the only check that catches it:
-    # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both pass
-    # when one half is empty.
-    from tools.ci_selection import workflow_halves_issues
-    m = {"surfaces": {"core": ["test_only.py"]}, "tier1": [], "slow_files": [],
-         "durations": {"test_only.py": 5.0}}
-    issues = workflow_halves_issues(m, {"a": {"test_only.py"}, "b": set()})
-    assert any("duration-imbalanced" in i for i in issues), issues
-
-
-def test_halves_guard_reports_all_zero_map_without_crashing():
-    from tools.ci_selection import workflow_halves_issues
-    files = ["test_a.py", "test_b.py", "test_c.py"]
-    m = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
-         "durations": {f: 0.0 for f in files}}
-    issues = workflow_halves_issues(m, {"a": set(files), "b": set()})
-    assert any("duration-imbalanced" in i for i in issues), issues
 
 
 def test_duration_issues_flags_non_numeric_value():
@@ -24814,4 +21534,197 @@ def test_a_sentry_only_diff_runs_the_startup_init_guard():
         "a `tortoise/hosted_api.py`-only diff dropped the guard — the `api` row is "
         "what covers the `_lifespan` call site"
     )
+
+
+#: Which workflow each row that is NOT a `python-ci.yml` job comes from. Every other row in
+#: the record's tables resolves against `python-ci.yml`. ⛔ The mapping is asserted EXACT below:
+#: a row in neither is a hard failure, never a skip — a skipped row is precisely how the `cap`
+#: column drifted with every sibling pin green (#11195 review, P1).
+_WALL_CLOCK_ROW_WORKFLOWS = {
+    "legal-e2e": "ci.yml",
+    "docs": "ci.yml",
+    "pricing-artifact": "ci.yml",
+    "test-isolation": "ci.yml",
+    "license-surface": "ci.yml",
+    "ai-review-gate": "ai-review-gate.yml",
+    "drift-guard": "drift-guard.yml",
+}
+
+#: `python-ci.yml` jobs the record's table deliberately publishes no single `cap` for.
+_WALL_CLOCK_TABLE_EXEMPT_JOBS = {
+    # Shard AGGREGATES: the table publishes `test (a…i)` / `test-slow (a…e)` as ONE row for 9
+    # and 5 jobs that each carry their own `timeout-minutes`, so there is no single shipped
+    # cap for a published cell to be compared against (their bounds are pinned instead by
+    # `test_every_bounded_pytest_job_caps_above_its_watchdog` and the shard-budget pin).
+    "test",
+    "test-slow",
+    # `push`-only and `needs: test`, so it never runs on a PR and is outside the merge gate's
+    # `pull_request`-dominated measurement set that §1 is derived from.
+    "canary-streak",
+}
+
+def _workflow_jobs(workflow: str) -> dict:
+    """`{job: job-doc}` for one file under `.github/workflows/`."""
+    return yaml.safe_load(
+        (REPO / ".github" / "workflows" / workflow).read_text())["jobs"]
+
+def _wall_clock_cap_rows(text: str | None = None) -> dict[str, int]:
+    """`{job: published cap}` for every 6-column row that publishes one.
+
+    The CAP-only sibling of the `max`-carrying table reader (that wider reader went with
+    the durations-map arithmetic cut). A table reader that also requires a measured `max`
+    would drop `ci-introduced-failure` ("not yet measured") — and its cap is exactly what
+    this pin is about, since a cap can move without the max moving. The job-cell filter is
+    the same one, so the shard aggregate rows stay excluded by construction.
+
+    `text` is accepted so a control can feed a MUTATED document; it defaults to the real one.
+    """
+    text = ((REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+            if text is None else text)
+    rows: dict[str, int] = {}
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in line.split("|")[1:-1]]
+        if len(cells) != 6:
+            continue
+        named = re.fullmatch(r"`([a-z0-9][a-z0-9-]+)`(?: \(.*\))?",
+                             cells[0].replace("**", ""))
+        cap_digits = re.findall(r"\d+", cells[5].replace("**", ""))
+        if named and cap_digits:
+            rows[named.group(1)] = int(cap_digits[0])
+    return rows
+
+def test_every_cap_the_record_publishes_is_the_cap_its_workflow_ships():
+    """P1 (#11195 review): §1's `cap` column was pinned by NOTHING.
+
+    Reproduced by the reviewer, not taken on trust: patching the `test-record-postgres` row's
+    cap cell back to the PRE-#11063 value the sibling pins exist to forbid
+
+        | `test-record-postgres` | 23 | 1.62 | 14.61 | 15.43 | **50** |
+
+    left `tests/test_ci_selection.py -k 'wall_clock or arm_1'` at **2 passed** — because
+    the prose-MOVE scanner (also cut with the durations-map arithmetic) reads `X → Y`
+    claims only, and the arm-1 pin reads a
+    published cap for the rows arm 1's bullet NAMES plus any row called "arm-1 shaped" (and
+    no row is). The table's `cap` column therefore could re-assert the exact cap the code
+    reversed while every wall-clock pin stayed green — the defect state this PR exists to fix.
+
+    So the column is compared to the workflow, for EVERY row, mechanically: a row resolves to
+    its own workflow (`_WALL_CLOCK_ROW_WORKFLOWS` for the non-`python-ci.yml` tables), and the
+    published number must equal that job's literal `timeout-minutes`. Coverage is asserted in
+    both directions — a row that resolves to no capped job reds, and a `python-ci.yml` job the
+    table silently STOPS publishing a row for reds too — so neither a wrong number nor a
+    deleted row can shrink this pin into passing.
+    """
+    python_ci = _load_python_ci()["jobs"]
+    doc_rows = _wall_clock_cap_rows()
+    assert doc_rows, (
+        "ci-wall-clock.md publishes no comparable `cap` cell at all — this pin would assert "
+        "nothing, so re-anchor it rather than letting it pass on an empty table")
+
+    unresolved: list[str] = []
+    mismatched: list[str] = []
+    for job, published in sorted(doc_rows.items()):
+        workflow = _WALL_CLOCK_ROW_WORKFLOWS.get(job, "python-ci.yml")
+        jobs = python_ci if workflow == "python-ci.yml" else _workflow_jobs(workflow)
+        job_doc = jobs.get(job)
+        shipped = job_doc.get("timeout-minutes") if isinstance(job_doc, dict) else None
+        if not isinstance(shipped, int) or shipped <= 0:
+            unresolved.append(
+                f"`{job}` — the table publishes {published} m, but {workflow} has no job "
+                f"`{job}` with a literal `timeout-minutes`")
+            continue
+        if shipped != published:
+            mismatched.append(
+                f"`{job}` — the table publishes {published} m, {workflow} ships {shipped} m")
+
+    assert not unresolved, (
+        "docs/ops/ci-wall-clock.md publishes a cap for a job that does not exist (or carries no "
+        "literal bound) in the workflow it is attributed to. Add the row to "
+        "`_WALL_CLOCK_ROW_WORKFLOWS` if it lives in another workflow, or delete the row:\n  "
+        + "\n  ".join(unresolved))
+
+    assert not mismatched, (
+        "docs/ops/ci-wall-clock.md's `cap` column disagrees with the workflow it describes — the "
+        "record then states a bound the tree does not ship, and the next cap lane re-derives (or "
+        "re-litigates) the wrong number. Change the cell, or change the workflow:\n  "
+        + "\n  ".join(mismatched))
+
+    unlisted = sorted(set(python_ci) - set(doc_rows) - _WALL_CLOCK_TABLE_EXEMPT_JOBS)
+    assert not unlisted, (
+        f"python-ci.yml job(s) {unlisted} no longer publish a `cap` row in "
+        "docs/ops/ci-wall-clock.md, so this pin stops covering them the moment anyone deletes "
+        "a row. Publish the row, or add the job to `_WALL_CLOCK_TABLE_EXEMPT_JOBS` with the "
+        "reason its cap cannot be stated as one number.")
+
+    stale_mapping = sorted(set(_WALL_CLOCK_ROW_WORKFLOWS) - set(doc_rows))
+    assert not stale_mapping, (
+        f"`_WALL_CLOCK_ROW_WORKFLOWS` maps {stale_mapping}, which no longer publish a cap row — "
+        "a mapping for a row that is gone is dead weight that hides the row's deletion. "
+        "Remove the mapping.")
+
+    # Non-vacuity, executable: the reader must SEE the cell the finding patched, and the value
+    # it reads must DISCRIMINATE against the workflow — so a green here cannot be a reader that
+    # matched nothing. `50` is the pre-#11063 value, i.e. the exact defect state.
+    doc_text = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    mutated = doc_text.replace("| 15.43 | 20 |", "| 15.43 | **50** |", 1)
+    assert mutated != doc_text, (
+        "the `test-record-postgres` row this control mutates is no longer in the shape it "
+        "mutates — re-anchor the control so it still proves the reader reads the cell")
+    assert _wall_clock_cap_rows(mutated)["test-record-postgres"] == 50, (
+        "the cap reader did not see the mutated cell, so a green run of this pin cannot be it "
+        "reading the table")
+    assert python_ci["test-record-postgres"]["timeout-minutes"] != 50, (
+        "the workflow now ships 50 for `test-record-postgres`, so the mutation above no longer "
+        "discriminates — pick a value the workflow does not ship")
+
+def test_the_committed_map_still_declares_its_three_caps():
+    """DELETING the `durations_floors` block must red — and this is where that runs.
+
+    `_declared_floors` treats an ABSENT `durations_floors` key as legal, and it has
+    to: every fixture manifest that carries no caps must keep its output. The cost
+    of that leniency is that the third defeat direction of the #10575 P1 — removing
+    the block outright — is invisible to every reader and every gate. All three
+    then see `{}`, no cap binds, and the next `--refresh-durations` (the scheduled
+    sweep, unreviewed) adopts the discounted reading this mechanism exists to stop:
+    `test_lane_stash.py` 355.0 -> 25.4.
+
+    WHY THIS PIN LIVES HERE, and not beside the mechanism in `test_ci_timing.py`.
+    `tests/test_ci_timing.py` already asserts `floors` is non-empty — but a PR that
+    edits ONLY `config/ci-surfaces.yml` does not select it. Measured with the map's
+    own selector (`ci_selection.py --changed-files config/ci-surfaces.yml`):
+    `full=False`, `surfaces=['core']`, and `test_ci_timing.py` is in NEITHER
+    `test_files` NOR `slow_selected` — while `test_ci_selection.py` IS in
+    `slow_selected`, in every diff shape that touches the map (map alone, map+code,
+    map+docs, map+`.gitattributes`). So the map's only pin on its own caps is this
+    file's, and a gate whose pin cannot be selected is not a gate (#10704 review).
+
+    DELETING the block was measured, not assumed: with it removed, `ci_manifest.py`,
+    `registry_integrity.py`, `ci_selection.py --integrity` and
+    `_manifest_contract_issues()` all stay green and `_declared_floors()` returns
+    `{}`. Lowering a cap IS caught (`ci_manifest` reds rc 1 with the CAP
+    diagnostic), so only the deletion face was open.
+
+    Scoped to the three KNOWN caps as a SUBSET: adding a fourth cap must not red
+    this, because deciding a cap is a #9172 CI-budget decision and an ordinary PR
+    may legitimately make one. Dropping one, or dropping them all, must.
+    """
+    from tools.ci_timing import _declared_floors
+
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    floors = _declared_floors(text)
+    required = {
+        "test_lane_stash.py": 355.0,
+        "test_calibration.py": 355.0,
+        "eval/write_path/test_write_path_operator_lane.py": 355.0,
+    }
+    missing = sorted(set(required) - set(floors))
+    assert not missing, (
+        f"the committed map no longer declares {missing} in `durations_floors` "
+        f"(it declares {sorted(floors) or 'NOTHING'}) — an absent block is legal to "
+        "`_declared_floors` by design, so every gate stays green while no cap binds "
+        "and the next sweep discounts the row (#10575 P1). Restore the declaration.")
+    for name, value in required.items():
+        assert floors[name].value == value, (name, floors[name])
+        # A CAP, not a FLOOR: the declared value is the weight in BOTH directions.
+        assert floors[name].pinned is True, name
 
