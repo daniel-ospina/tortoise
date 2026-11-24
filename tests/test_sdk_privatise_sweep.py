@@ -2515,3 +2515,202 @@ def _assert_not_tier1(manifest):
         "is now selected unconditionally and the suite-selection assert above no longer tests "
         "the `CORE_ALSO` row: it would pass with the row deleted. The row is no longer what "
         "selects it, so this pin must be RE-DERIVED rather than assumed still load-bearing")
+# ── THE RESIDUE RATCHET: growth REDS naming the line, removal PASSES ─────────────
+#
+# `SWEEP_RESIDUE` was an EQUALITY pin over a WHOLE-TREE count, so every merge that touched an
+# audited call invalidated it and the only repair was a PR that pasted a fresh pair. The arms
+# below are the two directions the ratchet has to get right, plus the baseline reconstruction
+# it rests on: no arm here runs the tree-wide walk (the `surface-guard` job's `--check` step
+# does, at depth 0).
+
+
+def _verdict(measured, baseline, files=None, base_files=None, sites=None):
+    return privatise.ratchet_verdict(
+        Counter(measured), Counter(baseline), files or {}, base_files or {}, sites or {},
+        "a fixture baseline",
+    )
+
+
+def test_the_ratchet_reds_an_added_untyped_receiver_and_names_its_line():
+    """The ONE signal the equality pin carried, kept: a NEW untyped receiver is a RED.
+
+    ⛔ And it has to be ACTIONABLE — by how much, and at which `file:line` — because a failure
+    that only says "the set moved" leaves re-pinning as the only repair a lane can find, which
+    is the treadmill this change deletes.
+    """
+    ok, lines = _verdict(
+        {"client.update": 46},
+        {"client.update": 45},
+        files={"tortoise/hosted_api.py": Counter({"client.update": 46})},
+        base_files={"tortoise/hosted_api.py": Counter({"client.update": 45})},
+        sites={"tortoise/hosted_api.py": {"client.update": [123]}},
+    )
+    assert ok is False, "an added untyped receiver must still red — that is the pin's signal"
+    text = "\n".join(lines)
+    assert "+1" in text, f"the failure must say BY HOW MUCH: {text}"
+    assert "client.update" in text, text
+    assert "tortoise/hosted_api.py" in text and "line 123" in text, (
+        f"the failure must name the offending file:line, or it is not actionable: {text}")
+
+
+def test_the_ratchet_passes_a_removed_untyped_receiver():
+    """⛔ THE INVERSE ARM: a ratchet that reds on improvement is worse than the pin it replaced."""
+    ok, lines = _verdict(
+        {"client.update": 44},
+        {"client.update": 45},
+        files={"tortoise/hosted_api.py": Counter({"client.update": 44})},
+        base_files={"tortoise/hosted_api.py": Counter({"client.update": 45})},
+    )
+    assert ok is True, "removing an untyped receiver must PASS — that is the whole point"
+    assert "FEWER than the baseline" in "\n".join(lines)
+
+
+def test_the_ratchet_passes_an_unchanged_count():
+    """The ordinary case: a PR that adds no untyped receiver is not asked to re-pin anything."""
+    ok, lines = _verdict({"client.update": 45}, {"client.update": 45})
+    assert ok is True, "an unchanged count must not red"
+    assert "equal to the baseline" in "\n".join(lines), lines
+
+
+def _git_repo(path: Path) -> Path:
+    """A throwaway repo the baseline reconstruction can be measured against."""
+    path.mkdir(parents=True, exist_ok=True)
+    # ⛔ `init` only: an empty `commit` exits non-zero (`nothing to commit`), so the fixture
+    # leaves the first commit to the caller that has actually written the base tree.
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, capture_output=True)
+    return path
+
+
+def _commit_all(path: Path, message: str) -> None:
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+         "commit", "-q", "-m", message],
+        cwd=path, check=True, capture_output=True, text=True)
+
+
+#: One untyped receiver: `reg` is not an SDK, so `reg.update(` is residue, not an edit.
+_UNTYPED = "def probe(reg):\n    reg.update({'a': 1})\n"
+
+
+def test_the_baseline_is_reconstructed_from_only_the_moved_paths(tmp_path, monkeypatch):
+    """The ratchet's baseline is the MERGE BASE's row set, measured without checking it out.
+
+    A file whose blob did not move cannot have a different residue, so only the paths
+    `git diff --name-status` names are measured from the object store. This arm is that
+    claim: an ADDED file contributes nothing to the baseline, a MODIFIED one contributes its
+    baseline rows and not the working tree's.
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+
+    (repo / "a.py").write_text(_UNTYPED + "    reg.update({'b': 2})\n", encoding="utf-8")
+    (repo / "c.py").write_text(_UNTYPED, encoding="utf-8")
+    measured = {
+        "a.py": privatise.edits_for(repo / "a.py", rmap).residue,
+        "c.py": privatise.edits_for(repo / "c.py", rmap).residue,
+    }
+    assert sum(measured["a.py"].values()) == 2 and sum(measured["c.py"].values()) == 1, (
+        "premise: the working tree carries three untyped receivers, two of them in `a.py`")
+
+    base, base_files, base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base.values()) == 1, (
+        f"the baseline is the committed tree's ONE receiver — an added file contributes "
+        f"nothing: {base}")
+    assert sum(base_files["a.py"].values()) == 1, base_files
+    assert "c.py" not in base_files, "a file absent from the baseline has no baseline rows"
+
+    sites = {
+        "a.py": privatise.edits_for(repo / "a.py", rmap).sites,
+        "c.py": privatise.edits_for(repo / "c.py", rmap).sites,
+    }
+    total = Counter()
+    for rows in measured.values():
+        total += rows
+    ok, lines = privatise.ratchet_verdict(
+        total, base, measured, base_files, sites, "HEAD", baseline_sites=base_sites)
+    assert ok is False, "three against a baseline of one is growth"
+    text = "\n".join(lines)
+    assert "a.py" in text and "line 3" in text, (
+        f"the NEW line in `a.py` is 3 — the baseline already had line 2, so an arm that prints "
+        f"every site would name the wrong one first: {text}")
+    assert "c.py" in text, f"the added file's site must be named too: {text}"
+
+
+def test_a_rename_is_not_growth(tmp_path, monkeypatch):
+    """A file that only MOVED keeps its baseline rows: renaming is not adding a receiver.
+
+    Without the `R<score>` arm reading the OLD path's blob, every rename would read as its new
+    rows added, and the ratchet would red an innocent refactor — the false block that gets a
+    gate disabled.
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+    subprocess.run(["git", "mv", "a.py", "d.py"], cwd=repo, check=True, capture_output=True)
+
+    measured = {"d.py": privatise.edits_for(repo / "d.py", rmap).residue}
+    base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base.values()) == 1, f"the moved file's baseline row must survive: {base}"
+    ok, lines = privatise.ratchet_verdict(
+        Counter({"reg.update": 1}), base, measured, base_files,
+        {"d.py": {"reg.update": [2]}}, "HEAD")
+    assert ok is True, f"a rename must not read as growth: {lines}"
+
+
+def test_an_added_file_is_not_baseline_rows(tmp_path, monkeypatch):
+    """A file the baseline tree does not have contributes NOTHING to it — the `A` arm.
+
+    ⛔ STAGED, not merely written. An UNTRACKED file never appears in `git diff`, so an earlier
+    cut of this test measured the `ls-tree` seeding hole while claiming to measure `A` — it stayed
+    green with the `A` arm deleted. The premise assertion below is what keeps the two apart.
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+    (repo / "b.py").write_text(_UNTYPED, encoding="utf-8")
+    subprocess.run(["git", "add", "b.py"], cwd=repo, check=True, capture_output=True)
+    status = privatise._git("diff", "--name-status", "-M", "HEAD").splitlines()
+    assert "A\tb.py" in status, f"premise: the staged file IS the `A` arm, not the untracked one: {status}"
+
+    measured = {
+        "a.py": privatise.edits_for(repo / "a.py", rmap).residue,
+        "b.py": privatise.edits_for(repo / "b.py", rmap).residue,
+    }
+    base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base.values()) == 1, f"`b.py` is added, so the baseline holds only `a.py`: {base}"
+    assert "b.py" not in base_files, base_files
+
+
+def test_a_rename_out_of_archive_does_not_donate_baseline_rows(tmp_path, monkeypatch):
+    """⛔ The mirror of the untracked-file hole, on the SOURCE arm.
+
+    `py_files()` never counts `archive/`, so a file RESTORED out of it must not carry its
+    receivers into the baseline — otherwise the ratchet reports them as pre-existing and grants
+    a restoring PR exactly that much headroom (this repo holds 111 `.py` files under `archive/`).
+    """
+    repo = _git_repo(tmp_path / "r")
+    (repo / "archive").mkdir()
+    (repo / "archive" / "old.py").write_text(_UNTYPED, encoding="utf-8")
+    _commit_all(repo, "base")
+    monkeypatch.setattr(privatise, "ROOT", repo)
+    rmap = {"update": "_update"}
+    subprocess.run(
+        ["git", "mv", "archive/old.py", "restored.py"], cwd=repo, check=True,
+        capture_output=True)
+    status = privatise._git("diff", "--name-status", "-M", "HEAD").splitlines()
+    assert status and status[0].startswith("R"), f"premise: this is a RENAME row: {status}"
+
+    measured = {"restored.py": privatise.edits_for(repo / "restored.py", rmap).residue}
+    assert sum(measured["restored.py"].values()) == 1, "premise: the restored file carries one"
+    base, base_files, _base_sites = privatise.baseline_rows("HEAD", rmap, measured)
+    assert sum(base.values()) == 0, (
+        f"an archived file was never counted, so its receivers are NOT baseline rows: {base}")
+    assert not base_files, base_files
