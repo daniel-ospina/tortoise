@@ -981,7 +981,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     (`entities.py:6458`, `excluded = _terminal_object_statuses()` at `:6124` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:56412-56421`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:56529-56538`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,7 +1100,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:56412-56421`) — so each poll minted another `-reopened`
+    `sdk.py:56529-56538`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6458`).
@@ -1451,7 +1451,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:56260-56262`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:56377-56379`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3324,12 +3324,33 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # each row below was re-found by its own pinned text on the MERGED tree. The historical
     # paragraphs are kept because they record real measurements of real trees; the pin
     # table is what resolves HERE.
-    ("sdk.py", 56260, 56262): (
+    #
+    # ⛔ RE-DERIVED ONCE MORE, and this move belongs to `main`, not to this branch: the block
+    # above was TRUE at `main` `b2d1e9086a92` (#14434), and the very next commit on `main`'s
+    # first-parent — `bbe54363ad65` (#14220, "one embedder seam", 44 files → 14) — moved BOTH
+    # regions by DIFFERENT amounts, so one offset applied to the block would have re-pinned the
+    # wrong function: **+53** above `update_knowledge` (`22988→23041`, its range end located as
+    # the function's own last line `return self._update_entity_any(id, **props)`, `23163→23216`)
+    # and **+117** BELOW it (`56260→56377`, `56412→56529`, `56918→57035`). Each address was
+    # re-found here by its own pinned FIRST-line text (and, for the arm, its own LAST-line text
+    # `continue`) at THIS tree; `git show <sha>:tortoise/sdk.py | grep -n` each own text at
+    # `b2d1e9086a92` and at `bbe54363ad65` is what attributes the move, and the `+53` / `+117`
+    # pair is the CONSISTENCY CHECK on that measurement, never its input.
+    # ⛔ THIS IS A MAIN-RED INHERITED, NOT ONE THIS CHANGE CAUSED — stated so that nobody hunts
+    # for a branch commit to blame: `git diff HEAD -- tortoise/sdk.py` is EMPTY, and all four
+    # addresses are identical at this head, at `origin/main` `af40c97ca312` and at the pre-fold
+    # branch head `7ce74ac20fc0`. The branch's own `sdk.py` never moved this region; `main` did,
+    # and no later `main` commit re-derived this table. The table, and the citations quoting it
+    # (here and in `tortoise/indexer/github_indexer.py`), are re-cut to those measurements.
+    # ⛔ The un-supersede arm's start text occurs TWICE (`56529`, `56568`), so its row is located
+    # by its own `continue` terminator (`56538`) — never by the start text alone, which would
+    # admit either occurrence.
+    ("sdk.py", 56377, 56379): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 56412, 56421): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22988, 23163): (
+    ("sdk.py", 56529, 56538): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 23041, 23216): (
         "def update_knowledge(", "return self._update_entity_any(id, **props)"),
-    ("sdk.py", 56918, 56918): (
+    ("sdk.py", 57035, 57035): (
         "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 

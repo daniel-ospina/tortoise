@@ -4612,6 +4612,42 @@ def test_workflow_names_whose_staging_is_conditional_are_not_called_unconditiona
         )
 
 
+def test_the_capture_in_flight_tunable_is_staged_UNCONDITIONALLY():
+    """`TORTOISE_CAPTURE_IN_FLIGHT` must be classified UNCONDITIONAL by the deploy itself.
+
+    ⛔ THIS IS THE ARM THE PROSE CANNOT SATISFY (#14448 reviews at `dc3f5f25e39` and
+    `5b477e059cc`, P3). `tests/test_deploy_workflow.py` pins the value at `16` and
+    that exactly one site assigns it, but its `staging[0].strip().startswith(
+    "ARGS+=(")` check cannot see a guard on the lines ABOVE. The arm credited with
+    covering the guard — `test_workflow_names_whose_staging_is_conditional_are_not_
+    called_unconditional` — only reds while the runbook still CLAIMS unconditionality:
+    wrap the append in an `if [ -n … ]; then … fi`, edit the runbook sentence to
+    "staged **only when** …", and BOTH arms pass while the deploy silently stops
+    restating the value (measured at `5b477e059cc`; the provenance gate also stays
+    green, because it merely reclassifies the name to `conditionally propagated`).
+
+    So the property is asserted HERE against the workflow's own shell structure,
+    through the SAME derived reader `§2`'s clause uses — no prose, no list kept here.
+    Why it matters: with a guard, Fly's hand-set value survives every deploy and
+    "the tunable is unset" is indistinguishable from "deliberately using the live
+    value" (the #4126 shape) — which is worse than the quiet `16 -> 8` the value pin
+    guards, because the deploy no longer touches the number at all.
+    """
+    staging = _workflow_arg_staging(REAL_WORKFLOW)
+    assert "TORTOISE_CAPTURE_IN_FLIGHT" in staging, (
+        "the deploy no longer assigns TORTOISE_CAPTURE_IN_FLIGHT at all — the "
+        "provenance gate then reports it STALE DECLARATION, and this arm would "
+        "pass vacuously if it only checked the classification"
+    )
+    assert staging["TORTOISE_CAPTURE_IN_FLIGHT"] == "unconditional", (
+        "TORTOISE_CAPTURE_IN_FLIGHT is assigned only inside a conditional branch "
+        f"({staging['TORTOISE_CAPTURE_IN_FLIGHT']!r}) — the deploy then skips the "
+        "assignment on some runs, Fly's hand-set value survives them, and the "
+        "unconditional re-statement this entry's OVERRIDES block depends on is "
+        "gone (#4126, #12992)"
+    )
+
+
 # ── #11122 — the mitigation ledger ────────────────────────────────────────────
 #
 # `fly-managed-secrets.txt` declares what the deploy MANAGES. The ledger declares

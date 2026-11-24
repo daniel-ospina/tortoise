@@ -1788,6 +1788,51 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_measure_4211_session_hierarchy.py::
              # test_a_receipt_only_diff_selects_this_pin.
              "docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json",
+             # #14062 / PR #14445: the privatisation RESIDUE instrument. Same silent-drop
+             # class as the rows above, and MEASURED before this entry: `--changed-files
+             # tools/sdk_privatise.py` -> `surfaces: []`, `full: false`, and only the tier-1
+             # smoke set selected, with `test_sdk_privatise_sweep.py` ABSENT. (No count is
+             # quoted: that set is `manifest["tier1"] - slow - uri_requiring - on_demand`, whose size today
+             # equals `len(manifest["tier1"])` but is NOT that population — it moves with every
+             # registration, and the `tier1:` block's own comment forbids typing it.) `tools/` is a flat `NON_PYTHON_PREFIXES`
+             # entry and this file has no `SOURCE_PATTERNS` bridge, so a diff that edits ONLY
+             # the residue pin runs none of the arms that grade this file's pins — the pinned
+             # pair itself (`test_the_residue_pin_is_a_reading_of_the_whole_set`) and the
+             # addresses the block publishes (`test_every_addressed_rev_names_a_fetchable_refspec`,
+             # which grades `_ARM_REFSPECS` rather than the pin).
+             # ⛔ WHAT THE GAP IS — the loose version of this comment is FALSE: the
+             # required `surface-guard` step runs `--check`, which DOES compare the
+             # `(rows, digest)` pair against the tree, so a stale PAIR reds there and does not
+             # need this row. What a `tools/sdk_privatise.py`-only diff leaves ungraded — the
+             # whole suite, since `surfaces: []` selects ZERO of its files — includes, but is
+             # not limited to: the pin's SHAPE (rows > 0, and a digest that separates SHAPES
+             # and COUNTS, not only counts), the
+             # vacuous-map REFUSAL (an empty map must exit 2 with its own
+             # diagnosis — without it a map that silently derived nothing still exits 1, but
+             # reported as `the residue SET moved off its pin`, which sends the reader to the
+             # pin instead of to the map), the
+             # import-shape arm `test_reading_the_approved_set_does_not_shadow_the_package_star_import`,
+             # the scope-local typing arms and the refspec arms. ⛔ `--check` carries only PART
+             # of the floor: it compares the DERIVED map's size against `SWEEP_NAMES` (a map of
+             # the wrong size is `VACUOUS CHECK`, exit 2, on every PR), so a re-pin that moved
+             # `SWEEP_BASE` and `SWEEP_NAMES` together (66 -> 60) stays GREEN there. The literal
+             # `SWEEP_NAMES == 66` floor is pinned ONLY by the depth-0 `assert` inside
+             # `test_the_pinned_base_still_derives_the_whole_batch`, which this row still does
+             # NOT recover on a PR: that arm is `_base_is_readable`-gated on `SWEEP_BASE`, so it
+             # SKIPS on the `fetch-depth: 1` `test` job the row selects. The arm's
+             # map/private-spelling assertions are ungraded on a PR for the same reason.
+             # ⛔ THIS INCLUDES THE GRADED PROSE, and that is the point: the block's own
+             # published extent is asserted against `_residue_block()`'s walk, so a re-cut that
+             # grows or shrinks the `#:` run reds THAT arm — but only on a diff that selects the
+             # suite. Without this row a stale figure can only be caught by the NEXT
+             # `core`-selecting PR, on rows its author never wrote. The claim is written
+             # against the suite AS IT IS — `_residue_block()` and the extent arm are present
+             # today — not against any episode of them being cut and restored, because naming
+             # the wrong commits for such an episode is exactly the ungraded-prose defect this
+             # row exists to catch. With the entry: `surfaces=['core']` and the suite is
+             # selected. Pinned by
+             # tests/test_sdk_privatise_sweep.py::test_a_tool_only_diff_selects_this_suite.
+             "tools/sdk_privatise.py",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
              # /docs formula guard lives there), and a SOURCE_PATTERNS match
              # REPLACES the `core` fallback (#2938) — so without this entry the
@@ -1996,28 +2041,32 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # core pool is the lowest-cost leg it can run in. Pinned by
              # tests/test_ci_selection.py::test_batch_review_tool_change_selects_core_not_tier1.
              "tools/batch_review.py",
-             # #10465 review P1: tools/dod_5090_probe.py owns
-             # tests/test_dod_5090_probe.py (registered `core` + `eval`), but
-             # `tools/` is a flat NON_PYTHON_PREFIXES entry and NO SOURCE_PATTERNS
-             # row matches the instrument — so a probe-only change filtered to
-             # `changed == []`, took the docs-only early return and ran 70
-             # unrelated files. Measured before this entry:
-             # `select(["tools/dod_5090_probe.py"])` -> surfaces=[], full=False,
-             # 70 files, test_dod_5090_probe.py ABSENT. That matters more than the
-             # usual silent drop: the instrument's whole deliverable is a count a
-             # reader QUOTES into an epic body, so the diff that hard-wires
-             # `count_embed_predicates` to 1 (turning the falsifier into
-             # machinery) would merge with every pin that catches it green-by-
-             # omission. Same #1349/#3332/#3616/#4309 class as the entries
-             # around it. Pinned by
-             # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
-             "tools/dod_5090_probe.py",
-             # #13108/#13121 review F4: tools/dense_leg_probe_13108.py owns
+             # ⛔ RETIRED — the entry this note replaces is
+             # `"tools/dod_5090_probe.py"` (NOT the live entry below it:
+             # `tools/dense_leg_probe_13108.py` still has its own pin), and the
+             # retirement is a COST, not a cleanup, so it is
+             # not recorded as one. This entry was LOAD-BEARING while the probe's
+             # test file held a `core` row: with that row in place,
+             # `select(["tools/dod_5090_probe.py"])` -> ['core'], 960 files,
+             # `test_dod_5090_probe.py` PRESENT (re-derived by restoring the row to
+             # measure the counterfactual). ⛔ An earlier draft of this note quoted
+             # two POST-cut readings — 959 files with the entry, 106 without, the
+             # file ABSENT in both — and concluded the entry was inert. Both were
+             # taken after the row was gone, so neither measured what the entry did
+             # when it existed, and the note was false. With the `core` row removed
+             # the entry can only add `core`, which no longer holds the file: a
+             # probe-only diff now selects NO surface, so the census's
+             # read-only/injection arms do not run on the tool that holds their bug.
+             # That is the disclosed price of taking a document/status-word
+             # scorecard off nearly every PR (AGENTS.md §Product Over Process);
+             # re-adding BOTH rows is the way back if the trade is judged wrong.
+             # #13108/#13121 review F4: the LIVE entry below is
+             # `tools/dense_leg_probe_13108.py`, which owns
              # tests/test_dense_leg_probe_13108.py (registered `core`), and the
              # same flat `tools/` swallow applies: a probe-only change filters to
              # `changed == []`, takes the docs-only early return and runs tier-1
              # smoke, where that file is NOT registered. That matters here for the
-             # reason it matters for the entry directly above — this instrument's
+             # reason it mattered for the retired entry above — this instrument's
              # deliverable is the latency/mechanism table `#13108` reopens
              # `STORAGE-ARCHITECTURE.md` §14.3 V3 on, so a diff that hard-wires
              # `over_budget` or drops `percentile`'s `None`-for-empty would merge

@@ -2157,7 +2157,19 @@ SWEEP_NAMES = 66
 #: 6a02515: 0, merge-base 2cccf90: 2, resolved tree: 0 — so the fold removes exactly those two and
 #: adds none. A FALLING pin cannot hide a new untyped reference, which is the direction this arm
 #: exists to catch; every other parent record above stays verbatim.
-SWEEP_RESIDUE = (11920, "932d96bdb7151f75")
+#: ⛔ THIS FOLD — `origin/main` `e66997b81e76` (#14544's DoD-probe cut, #14445's
+#: `tools/sdk_privatise.py`-only suite selection, #14540's pool/extent re-cut and #14537's
+#: capture-in-flight pin) — is RE-CUT ON THE RESOLVED TREE, never inherited from either parent:
+#: `--repin` HERE prints **(11913, "4953069e1b2ae57c")**. The movement against this branch's own
+#: published 11920 is -7, and against `main`'s committed 11903 it is +10. ⛔ NEITHER SIDE'S NUMBER
+#: IS THIS ONE, which is why the pair is re-derived rather than side-picked: the fold's tree is a
+#: THIRD tree. The -7 from the branch is attributed by the fold's own subject rather than waved
+#: through — `#14544` CUT `tests/test_dod_5090_probe.py` from 14,426 to 440 lines, deleting the
+#: untyped receivers that test carried, and this branch's `batch_ingest.py` contributes none of the
+#: census-VISIBLE shapes (#14422: its fifteen statements go through an injected callable, so
+#: `self._query(` matches no door predicate). A FALLING pin cannot hide a new untyped reference,
+#: which is the direction this arm exists to catch; every parent record above stays verbatim.
+SWEEP_RESIDUE = (11913, "4953069e1b2ae57c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

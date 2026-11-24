@@ -104,6 +104,89 @@ def _wait_for(predicate, timeout: float = 8.0) -> bool:
     return predicate()
 
 
+def _breadcrumb_body(text: str) -> dict | None:
+    """The parsed body of a breadcrumb RECORD, or None while it is not COMPLETE.
+
+    The shipped SHELL hooks emit their record with ONE ``printf`` whose output
+    reaches the file one ``write()`` per LINE, so a concurrent reader can
+    sample any PREFIX of it: EMPTY first (the redirect's truncate window), then
+    the successive line boundaries. Measured on the real writer (400 writes, a
+    concurrent poller) for a 289-byte record: empty, then 2 bytes, then 24,
+    220, 261 and 287 — the ends of the record's four interior lines. The
+    2-byte state is ``b'{\\n'``, and ``json.loads`` of it raises ``Expecting
+    property name enclosed in double quotes: line 2 column 1 (char 2)``,
+    which is the failure that reddened #14445's shard `d`.
+
+    So readiness is COMPLETENESS — the bytes parse as a JSON object — never
+    "the file exists" and never "the file is non-empty". Both of those are the
+    instrument-not-effect mistake this module exists to catch (#4314): a
+    non-empty reading is not the record it is taken to prove.
+    """
+    if not text.strip():
+        return None
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _read_text(path: Path) -> str | None:
+    """The file as text, or None when it cannot be read (absent, or bytes
+    that are not valid UTF-8)."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _read_complete_breadcrumb(path: Path) -> dict | None:
+    """The breadcrumb's parsed body, or None while it is not yet complete."""
+    text = _read_text(path)
+    return None if text is None else _breadcrumb_body(text)
+
+
+def _wait_for_breadcrumb(path: Path, what: str, *,
+                        timeout: float = 8.0) -> dict:
+    """Wait for a COMPLETE breadcrumb at ``path``; return the body it READ.
+
+    The body is returned from the same read the predicate accepted, so the
+    caller never re-reads a file a writer may have truncated in between.
+
+    The failure message carries the LAST BYTES OBSERVED. Without that, a
+    complete-but-unparseable record — the escaping defect two arms below are
+    specifically about — is reported as "not recorded", which is the same
+    unparseable-reads-as-absent inversion ``session_verify`` is documented for
+    (#4314). An unescaped writer must be diagnosable from the message, not by
+    re-running with a debugger.
+    """
+    seen: list[dict] = []
+    last: list[str] = []
+
+    def _complete() -> bool:
+        text = _read_text(path)
+        if text is None:
+            last.append("<absent, or bytes that are not valid UTF-8>")
+            return False
+        last.append(text)
+        body = _breadcrumb_body(text)
+        if body is None:
+            return False
+        seen.append(body)
+        return True
+
+    # The wait must RUN before the diagnostic is built, and the diagnostic is
+    # total on an empty list: one that can itself raise (`last[-1]` with nothing
+    # appended) would replace the message with an IndexError — the failure mode
+    # this whole change is about.
+    ok = _wait_for(_complete, timeout=timeout)
+    observed = last[-1][:600] if last else "<no read was attempted>"
+    assert ok, (
+        f"{what} — no COMPLETE breadcrumb at {path} (absent, still being "
+        f"written, or not a JSON object); last observed: {observed!r}")
+    return seen[-1]
+
+
 def _breadcrumb(home: Path, harness: str) -> dict:
     """Wait for a COMPLETE install-inert breadcrumb and return its parsed body.
 
@@ -111,12 +194,9 @@ def _breadcrumb(home: Path, harness: str) -> dict:
     separate from the ``capture-failure`` slot — this helper is used only for
     the inert writers, so it reads the install slot.
     """
-    path = (home / ".tortoise" / "capture-errors"
-            / f"{harness}-install.json")
-    assert _wait_for(lambda: path.is_file()
-                     and path.read_text(encoding="utf-8").strip() != ""), (
+    return _wait_for_breadcrumb(
+        home / ".tortoise" / "capture-errors" / f"{harness}-install.json",
         "an inert install left no breadcrumb — the failure is invisible")
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _argv(log: Path) -> list[str]:
@@ -866,12 +946,12 @@ def test_breadcrumb_dir_agrees_with_verify_for_a_trailing_slash(
     looked_for = session_verify._local_capture_error_file(
         "claude", {"HOME": str(home),
                    "TORTOISE_IMPORT_RECEIPT_DIR": receipt_dir})
-    assert _wait_for(lambda: looked_for.is_file()), (
+    body = _wait_for_breadcrumb(
+        looked_for,
         f"the hook's breadcrumb is invisible to verify for "
         f"TORTOISE_IMPORT_RECEIPT_DIR={receipt_dir!r}: verify reads "
         f"{looked_for} but the hook wrote "
         f"{sorted(str(p) for p in tmp_path.rglob('*.json'))}")
-    body = json.loads(looked_for.read_text(encoding="utf-8"))
     assert body["kind"] == "install-inert", body
 
 
@@ -1416,8 +1496,12 @@ def test_a_refusal_naming_a_hostile_path_is_still_valid_json(
     whole file exists to prevent. Five of the seven seams were raw while codex's
     and cursor's ``session-end`` escaped, which is the same "one-sided fix" class.
 
-    Mutation: interpolate ``detail`` raw — ``json.loads`` REDs with
-    ``Invalid \\escape``."""
+    Mutation: interpolate ``detail`` raw — the record is then COMPLETE but
+    unparseable, so no COMPLETE breadcrumb is ever read and the assertion REDs,
+    naming the last observed bytes. What the message carries is ``repr()`` of
+    the RAW RECORD — which is where the unescaped ``\\`` and the closing ``"``
+    are visible. ``Invalid \\escape`` is the JSON decoder's own text and does
+    NOT appear in it: read the record in the message, not the decoder."""
     hook = REPO_ROOT / "tortoise" / seam
     home = tmp_path / "home"
     homedir = home / (".codex" if seam.startswith("codex") else ".cursor") / "hooks"
@@ -1451,10 +1535,11 @@ def test_a_refusal_naming_a_hostile_path_is_still_valid_json(
 
     harness = "codex" if seam.startswith("codex") else "cursor"
     crumb = home / ".tortoise" / "capture-errors" / f"{harness}-install.json"
-    assert _wait_for(lambda: crumb.is_file()), (
+    # RED if unescaped: the record is then complete but unparseable, so it
+    # never satisfies readiness — and the message carries the raw bytes.
+    body = _wait_for_breadcrumb(
+        crumb,
         "the refusal was not recorded at all — no evidence, no diagnosis")
-    raw = crumb.read_text(encoding="utf-8")
-    body = json.loads(raw)  # the assertion: unescaped writers raise here
     assert str(stale) in body["detail"], body
     assert body["kind"] == "install-inert", body
 
@@ -1764,6 +1849,75 @@ def test_the_claude_refusal_naming_a_hostile_path_is_valid_json(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     crumb = home / ".tortoise" / "capture-errors" / "claude-install.json"
-    assert _wait_for(lambda: crumb.is_file()), "the refusal was not recorded"
-    body = json.loads(crumb.read_text(encoding="utf-8"))  # RED if unescaped
+    # RED if unescaped (complete-but-unparseable: named, with its bytes)
+    body = _wait_for_breadcrumb(crumb, "the refusal was not recorded")
     assert str(stale) in body["detail"], body
+
+
+@pytest.mark.parametrize("prefix", [b"", b"{", b'{\n', b'{\n  "harness": "codex"'],
+                         ids=["empty", "one-brace", "brace-newline",
+                              "mid-object"])
+def test_a_breadcrumb_reads_only_once_it_is_COMPLETE(tmp_path, prefix):
+    """A PREFIX of the record is not the record.
+
+    The shipped shell hooks flush their body one ``write()`` per line, so a
+    concurrent reader can sample EMPTY (the truncate window) or any line
+    boundary — and ``json.loads(b'{\\n')`` is verbatim the ``Expecting
+    property name enclosed in double quotes: line 2 column 1 (char 2)`` that
+    reddened #14445's shard `d`, off a 2-byte prefix of the record.
+
+    Readiness used to be a non-empty check at ONE of the four replaced sites,
+    and the bare ``path.is_file()`` the other THREE used. Only the first rejects
+    this arm's empty document, so the two spellings red it by different
+    amounts: ``is_file()`` on all four prefixes, ``.read_text().strip() != ""``
+    on the three non-empty ones only — the EMPTY arm passes under that spelling,
+    because readiness rejects the document before the caller can parse it (no
+    assertion in this arm covers that case for that mutation).
+
+    Mutation, and what it grades: make ``_breadcrumb_body``'s readiness a
+    non-emptiness (or ``is_file()``) check again — this REDs, because the prefix
+    is then accepted as COMPLETE and the caller's parse raises
+    ``JSONDecodeError``. The four call sites are graded only THROUGH this helper,
+    so reverting one SITE to its own predicate would not red this arm."""
+    path = tmp_path / "codex-install.json"
+    path.write_bytes(prefix)
+    assert _read_complete_breadcrumb(path) is None, (
+        f"a {len(prefix)}-byte prefix was read as a complete breadcrumb")
+    with pytest.raises(AssertionError, match="no COMPLETE breadcrumb"):
+        _wait_for_breadcrumb(path, "the writer never finished", timeout=0.2)
+
+    # …and the helper is not simply always-None: the completed record reads.
+    path.write_text(json.dumps({"harness": "codex",
+                                "kind": "install-inert"}), encoding="utf-8")
+    body = _wait_for_breadcrumb(path, "the completed record was never read")
+    assert body["kind"] == "install-inert", body
+
+
+def test_an_unparseable_record_is_NAMED_by_its_bytes_not_reported_as_absent(
+        tmp_path):
+    """A COMPLETE-but-unparseable record is not "never recorded".
+
+    The two ``*_refusal_naming_a_hostile_path*`` arms are about an UNESCAPED
+    ``detail``: their record is fully written, and invalid. Reporting that state
+    as "the refusal was not recorded at all" would put the diagnosis back where
+    the product already loses it — ``session_verify._local_capture_error``
+    folds ``ValueError`` to ``None``, so an unparseable breadcrumb reads as no
+    breadcrumb and an inert install reports PROVEN (#4314). The message must
+    carry the bytes a reader would have to see.
+
+    Mutation: drop the ``last observed`` half of ``_wait_for_breadcrumb``'s
+    assertion — this REDs, because the message then says only "no COMPLETE
+    breadcrumb" over a writer whose real defect is an unescaped ``detail``."""
+    path = tmp_path / "codex-install.json"
+    # A path with a backslash: legal on disk, invalid raw inside a JSON string.
+    path.write_text(
+        '{\n  "harness": "codex",\n'
+        '  "detail": "resolved a dir at /tmp/weird\\dir",\n'
+        '  "kind": "install-inert"\n}\n', encoding="utf-8")
+    assert _read_complete_breadcrumb(path) is None
+    with pytest.raises(AssertionError) as excinfo:
+        _wait_for_breadcrumb(path, "the refusal was not recorded", timeout=0.2)
+    message = str(excinfo.value)
+    assert "last observed:" in message, message
+    assert "/tmp/weird" in message, (
+        f"the message does not carry the record that WAS written: {message}")
