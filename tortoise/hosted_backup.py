@@ -1066,8 +1066,21 @@ def _restore_retires_vector(node_labels) -> bool:
     A node with NO gated label answers ``False``, and so does one carrying a label no
     gate covers, or an unreadable/unknown answer, because the predicate behind it is
     conservative.
+
+    ⛔ EVERY ASK IS ``require_substantive`` (`#14560`). This function DROPS a restored
+    vector and `#5004` forbids re-encoding it, so a TRIVIAL coverage verdict — one whose
+    count compared two zeroes and therefore proved nothing about THIS node's row — must
+    not license the drop (`#13798`'s marker exists for exactly this consumer). ⚠️ Until
+    `#14560` the `:Point` pair was protected by an accident instead: `operator`'s graph
+    denominator was its parent `:Point` label, so that conjunct could never answer stop.
+    The denominator is kind-aware now (which is what lets the strip's `:Point` gate open at
+    all), so the door states the rule it actually needs.
     """
     from tortoise.projection.entities import _derived_mirror_required
+
+    def _required(entity_type: str) -> bool:
+        """The gate, asked in the form a DELETE may act on."""
+        return _derived_mirror_required(entity_type, require_substantive=True)
 
     # ⛔ A NON-GATED label means the vector may not be a mirror at all (#13854 review, P1):
     # a restored ``:Session:Object`` node carries a :Session's OWN vector, which no counter
@@ -1078,19 +1091,17 @@ def _restore_retires_vector(node_labels) -> bool:
     # an instruction to un-gate ``:Point``.
     if set(node_labels or ()) - set(_GATED_RESTORE_LABELS):
         return False
-    if "Object" in node_labels and _derived_mirror_required("object"):
+    if "Object" in node_labels and _required("object"):
         return False
-    if "Subject" in node_labels and _derived_mirror_required("subject"):
+    if "Subject" in node_labels and _required("subject"):
         return False
-    if "Event" in node_labels and _derived_mirror_required("event"):
+    if "Event" in node_labels and _required("event"):
         return False
-    if "Source" in node_labels and (_derived_mirror_required("document")
-                                    or _derived_mirror_required("source")):
+    if "Source" in node_labels and (_required("document") or _required("source")):
         return False
     # `:Point` is ONE label serving TWO entity types (`point`, `operator`), so — exactly
     # like `:Source` — the vector may go only when BOTH counters answer stop (`#13971`).
-    if "Point" in node_labels and (_derived_mirror_required("point")
-                                   or _derived_mirror_required("operator")):
+    if "Point" in node_labels and (_required("point") or _required("operator")):
         return False
     return bool(_gated_labels_of(node_labels))
 

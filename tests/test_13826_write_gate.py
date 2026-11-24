@@ -69,9 +69,16 @@ def sdk(tmp_path):
 
 def _gate(monkeypatch, required: bool) -> None:
     """Force the ONE predicate. `_derived_mirror_required` imports it per call, so this
-    reaches every writer — folds, sdk doors and the restore alike."""
+    reaches every writer — folds, sdk doors and the restore alike.
+
+    ⛔ ``**_kw`` for the same reason as :func:`_gate_map` (`#14560`): the DR restore asks
+    with ``require_substantive=True``, and a positional-only stub would raise into the
+    caller's fail-closed `except` — turning every "stop" into "keep" and greening these
+    arms over a fold that never actually stopped. The keyword is ignored deliberately: the
+    triviality rule is pinned separately.
+    """
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: required, raising=False)
+                        lambda entity_type, **_kw: required, raising=False)
 
 
 def _gate_map(monkeypatch, keep: set[str]) -> None:
@@ -83,7 +90,14 @@ def _gate_map(monkeypatch, keep: set[str]) -> None:
     labels SHARE — measured, all three were green under `_gate` alone.
     """
     monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: entity_type in keep, raising=False)
+                        lambda entity_type, **_kw: entity_type in keep, raising=False)
+    # ⛔ ``**_kw`` IS NOT TIDINESS (#14560): the DR restore asks with
+    # ``require_substantive=True`` so a TRIVIAL verdict cannot license a drop, and a
+    # one-positional-arg stub would raise into the caller's fail-closed `except` and turn
+    # every "stop" answer into "keep" — the per-label AND below would then be green over
+    # a door that never opened. The keyword is IGNORED here on purpose: what these arms
+    # measure is the per-label conjunction, and the triviality rule has its own pin
+    # (`tests/test_14560_operator_vectors.py::test_a_TRIVIAL_verdict_cannot_license_the_restore_drop`).
 
 
 def _prop(g, match: str, prop: str):
