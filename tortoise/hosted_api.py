@@ -17354,16 +17354,31 @@ def _drain_batch(org: dict, batch_id: str) -> None:
             else:
                 leftover = True
                 try:
-                    leftover = any(not item.terminal
-                                   for item in store.items(org["org_id"], batch_id))
+                    # ⛔ AN EXHAUSTED ITEM IS NOT "LEFTOVER WORK" (#14415 review
+                    # round 22, MEDIUM — measured). `any(not item.terminal)` is the
+                    # re-drive decision, and an item the ceiling has given up on
+                    # WITHOUT being able to write `failed` (its row was the thing
+                    # that could not be read) is non-terminal for ever — so this
+                    # arm re-drove the batch on every retry tick for the life of
+                    # the process, which is the unbounded loop the ceiling's
+                    # comment claims to bound. A pass that could not read the row
+                    # still counted, so the counter is the honest answer here.
+                    leftover = any(
+                        not item.terminal
+                        and not _batch_ingest.passes_exhausted(
+                            org["org_id"], batch_id, item.item_id)
+                        for item in store.items(org["org_id"], batch_id))
                 except Exception:
                     # ⛔ COULD NOT READ ⇒ RE-DRIVE BLIND (#14415 review round 3,
-                    # BLOCKING 1 arm A). This is the same `store.items()` the
-                    # failure may have broken, so exiting here is how the
-                    # process-lifetime wedge survived the previous fix.
+                    # BLOCKING 1 arm A) — unless EVERY item this process has seen
+                    # in this batch is already exhausted, in which case the read
+                    # fault IS the condition the ceiling is for and re-driving
+                    # blind is the same unbounded loop.
                     _logger.exception(
                         "batch %s: leftover read failed; re-driving blind",
                         batch_id)
+                    leftover = not _batch_ingest.batch_passes_exhausted(
+                        org["org_id"], batch_id)
                 if leftover:
                     _batch_retry_enqueue(org, batch_id)
                 elif not _batch_row_is_terminal(store, org["org_id"], batch_id):
