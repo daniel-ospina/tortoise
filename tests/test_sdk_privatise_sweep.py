@@ -256,10 +256,14 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2437 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on the LATEST fold of `origin/main` `e216ca91b07e`: both sides' prose blocks
-    are (2294 is `main`'s own reading on `2cccf90f4dd4`'s folded tree, 2350 this branch's on the
-    `e627ca89375c` fold — each is the tree that measured it, neither is this head's);
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2446 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED on THIS fold of `origin/main` `5163c3ee8b`, which KEPT both sides' prose
+    blocks as every fold before it did; the LATEST earlier fold of `origin/main` `e216ca91b07e`
+    kept both sides' blocks too, and the two parent readings are recorded rather than inherited —
+    2294 is `main`'s own reading on `2cccf90f4dd4`'s folded tree, 2350 this branch's on the
+    `e627ca89375c` fold, each the tree that measured it, neither is this head's; ⛔ AND RE-WALKED on
+    the EARLIER fold of `origin/main` `2cccf90f4dd4`, where both sides' prose blocks are
+    kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
     the pre-merge branch `7ce74ac` walked 2006, `main` `6a02515` walked 1954 and their merge-base
@@ -271,7 +275,10 @@ def _residue_block() -> str:
     the run reads the figure above, measured by THIS function on the RESOLVED file. The 2047 named
     above is the PREVIOUS fold's reading (`60db4d7`), and the 2059 this head read before `main`'s
     block was restored; both are kept because every fold's record stays — neither is this head's
-    figure. ⛔ THOSE NUMBERS ARE A
+    figure. ⛔ AND RE-WALKED ONCE MORE for the `#14583` review's P3 (the carried-parent label below):
+    restating `KEPT VERBATIM` as `CARRIED IN SUBSTANCE rather than verbatim` added four `#:` lines
+    INSIDE the run, so the figure above is RE-MEASURED by this walk (`2295` -> `2299`) rather than
+    adjusted by arithmetic on the last reading. ⛔ THOSE NUMBERS ARE A
     MEASUREMENT, NOT A MEMORY: each is `_residue_block()`'s own walk at that commit (`git show
     <sha>:tools/sdk_privatise.py`, then the same contiguous `#:` climb this function does), and each
     re-takes. An earlier cut of this sentence carried 2006 as the RESOLVED file's figure and 1989 as
@@ -870,6 +877,87 @@ def test_the_extent_figure_is_the_walks_own_count():
     assert published == actual, (
         f"the block publishes its extent as {published} lines; its own walk returns {actual} — a "
         "prose edit changed the run, so re-derive the figure instead of carrying it forward")
+
+
+#: The label `main`'s RESTORED fold records carry, and why it may not say `VERBATIM` (#14583
+#: review, P3). The block restores 146 `#:` lines from `main`'s records at `e66997b81e76`, and a
+#: minority of them were RESTATED rather than carried, because the carried line was false of the
+#: resolved tree (`#14491` → `#14506`; a "three-row" gap that is two). Nothing graded the label,
+#: which is exactly why it survived: the block's OWN rebase paragraph already says the resolution
+#: "applies those three corrections on top of" `main`'s chain, so `KEPT VERBATIM` contradicted the
+#: text beside it — a reader had to notice, which is the ungraded-prose class this suite closes.
+_CARRIED_PARENT_LABEL = re.compile(r"OWN RECORDS FROM THE FOLD OF", re.I)
+
+#: The qualifiers that make a `verbatim` mention HONEST: a negation, the substance-vs-verbatim
+#: contrast, or an explicit EXCEPT clause naming the restated lines. Keyed on the shape so an
+#: honest rewrite in either casing stays GREEN.
+_VERBATIM_QUALIFIER = re.compile(
+    r"(?i)(?:not|never|rather\s+than|instead\s+of)\s+verbatim|in\s+substance|except")
+
+
+def _verbatim_carried_parent_claims(block: str) -> list[str]:
+    """Sentences that call `main`'s restored fold records VERBATIM without a qualifier.
+
+    Windowed to the FIRST sentence that follows the marker, because the block legitimately uses
+    `verbatim` elsewhere (other folds' records, `paths VERBATIM` in the git helpers) and a
+    phrase-keyed ban would red those honest sentences.
+    """
+    flow = re.sub(r"\n#:\s?", " ", block)
+    found: list[str] = []
+    for marker in _CARRIED_PARENT_LABEL.finditer(flow):
+        sentence = flow[marker.start():marker.start() + 400].split(". ")[0]
+        if not re.search(r"verbatim", sentence, re.I):
+            continue
+        if _VERBATIM_QUALIFIER.search(sentence):
+            continue
+        found.append(sentence)
+    return found
+
+
+def test_the_carried_parent_records_claim_substance_not_verbatim():
+    """#14583 review P3 — the label said KEPT VERBATIM over lines the block says were RESTATED.
+
+    `main`'s block held 230 `#:` lines the pre-fold branch lacked; 29 of them were restated rather
+    than carried, so "KEPT VERBATIM" was literally false for those lines while the block's own
+    rebase paragraph stated the corrections were applied "on top of" `main`'s chain. No arm read
+    the label, so it shipped. This arm reads it.
+    """
+    block = _residue_block()
+    # ⛔ NON-VACUITY FIRST: the section the arm polices must still EXIST. Deleting the restored
+    # records is not the fix — they are `main`'s provenance for the pair below.
+    restored = _CARRIED_PARENT_LABEL.search(re.sub(r"\n#:\s?", " ", block))
+    assert restored, (
+        "the block must still carry `main`'s restored fold records (`OWN RECORDS FROM THE FOLD "
+        "OF …`) — dropping them is not the fix for a wrong label")
+    bad = _verbatim_carried_parent_claims(block)
+    assert not bad, (
+        "`main`'s restored fold records may not be called VERBATIM: a minority of the lines are "
+        "RESTATED because the carried line was false of this tree, so say CARRIED IN SUBSTANCE "
+        f"(rather than verbatim) and name the corrections — found: {bad[0]!r}")
+    # ⛔ THE ARM'S OWN FALSIFIER, on the PRE-FIX text and on two honest rewrites. This is what
+    # makes the fix falsifiable without a git object, so the arm also runs in the sharded job.
+    pre_fix = (
+        "⛔ `main`'S OWN RECORDS FROM THE FOLD OF `origin/main` `e66997b81e76`, KEPT VERBATIM —\n"
+        "#: the distinct paragraphs this branch's resolution did not already carry (146 lines, in\n"
+        "#: `main`'s own order, no figure added or moved). The pair below is still `--repin`'s own")
+    assert _verbatim_carried_parent_claims(pre_fix), (
+        "the PRE-FIX label must be refused — it called restated lines VERBATIM, and nothing "
+        "graded it before this arm existed")
+    honest = (
+        "⛔ `main`'S OWN RECORDS FROM THE FOLD OF `origin/main` `e66997b81e76`, CARRIED IN\n"
+        "#: SUBSTANCE rather than verbatim: the distinct paragraphs this branch's resolution did "
+        "not already carry (146 lines, in `main`'s own order, each correction named below).",
+        "⛔ `main`'S OWN RECORDS FROM THE FOLD OF `origin/main` `e66997b81e76` ARE NOT VERBATIM —\n"
+        "#: a minority are restated where the carried line was false of this tree.",
+        "⛔ `main`'S OWN RECORDS FROM THE FOLD OF `origin/main` `e66997b81e76` — carried verbatim\n"
+        "#: EXCEPT the restated lines named below.",
+    )
+    # ⛔ the third honest form leans on its EXCEPT clause naming the restated lines, which is why
+    # `except` is part of the qualifier set: an arm that demanded one spelling of the fix would red
+    # an honest rewrite — the false-block shape this file rejects everywhere else.
+    for sentence in honest:
+        assert not _verbatim_carried_parent_claims(sentence), (
+            f"an honest, qualified label must NOT red this arm: {sentence!r}")
 
 
 #: The PRs that legitimately OWN `RESIDUE_REWRITE_PARENT`: its squash subject reads

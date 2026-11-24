@@ -434,6 +434,10 @@
     ],
     "report": [
       [
+        "fly-secret-declaration-drift.yml",
+        "report"
+      ],
+      [
         "release-artifact-canary.yml",
         "report"
       ]
@@ -563,7 +567,7 @@
       ]
     ]
   },
-  "gate_digest": "2e6c7aa3bf9c92d6c9b8e1f0cbdada6791d827243085c75b91369efb49a09967",
+  "gate_digest": "5cb62cd56cec8819f8843188e0aa365a90ebf9ab055b5aeeb9ac1e63d4866576",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -587,5 +591,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-11-24T19:57:27Z"
+  "verified_at": "2026-11-24T22:25:44Z"
 }

@@ -56,35 +56,21 @@ version: 1
 # 2026-11-23 sweep took it to the 28 m this block grades.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
-# `10f0107689b9` folded in over `#14565`'s merge base, after the `#14419` B7 cut took the
-# durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool, plus
-# this PR's OWN row in `fast_pool()` (`tests/test_14559_reaper_schedule.py`, `core`, at the flat
-# 2.0 s `DEFAULT_FAST_WEIGHT`) — the block states ONE graded emission, and it is the clause set
-# ABOVE, re-derived on this PR's resolved tree; this paragraph is the PROVENANCE of that pool, not a
-# second reading of it. ⛔ IT STATES NO FIGURE ON PURPOSE (its own pre-fold text published eleven
-# shards at one weight, which is a reading of `10f0107689b9` and not of this tree): two graded clause
-# sets in one block is the two-partitions defect this header records, and the emission guard reds on
-# exactly that. Measured with the verb on each tree's own map, `main` `10f0107689b9` alone packs
-# nine shards at 825.4 s and two at 825.5 s — quoted WITHOUT name lists on purpose, because a name
+# `5163c3ee8b` folded in, after the `#14419` B7 cut took the durations-map arithmetic bulk out of
+# `tests/test_ci_selection.py` and re-packed the pool, plus this PR's OWN row in `fast_pool()`
+# (`tests/test_expansion_fusion_14344.py`, `core`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) — the
+# verb packs seven shards at 826.0 s (a, f, g, h, i, j, k) and four at 825.9 s (b, c, d, e), so
+# `ceil(826.0/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.03`
+# (1680 / 826.0 = 2.0339), so the two agree by construction rather than by a hand re-read.
+# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE: measured with the verb on `main`'s own map at
+# its own sha, `main` packs its own split — quoted WITHOUT name lists on purpose, because a name
 # list would parse as a second clause and red the guard — so no parent's figure may be carried
-# here, and none is. The delta is measurable and
-# small: `fast_pool()` holds **1331** files at this head — `main`'s 1330 (which already carries
-# `#14565`'s `tests/test_14559_reaper_schedule.py`) plus exactly ONE row of THIS branch's,
-# `tests/test_expansion_fusion_14344.py`, re-counted on the resolved tree rather than carried from
-# either parent's paragraph. ⛔ `#14415`'s two rows
-# `69dda95ab9f8` folded into `fix/14344-expansion` — the verb packs nine shards at 825.8 s
-# (a, b, e, f, g, h, i, j, k) and two at 825.7 s (c, d), so `ceil(825.8/60 x 2.0)` = 28 m governs
-# (a shard's job-level wall clock is the SLOWEST shard's) — and the same emission prints
-# `watchdog_minutes: 28` with `watchdog_headroom: 2.03` (1680 / 825.8 = 2.0344), so the two agree
-# by construction rather than by a hand re-read. Never carry this 825.8/825.7.
-# ⛔ THAT PAIR IS THE FOLDED TREE'S ALONE, and the move is THIS PR's: measured with the verb on
-# each tree's own map, `main` alone packs its own split at its own sha — quoted there WITHOUT name
-# lists on purpose, because a name list would parse as a second clause and red the guard — so no
-# parent's figure may be carried here, and none is. ⛔ AND THIS BRANCH'S OWN ROW IS PART OF THE
-# DELTA: this PR (#14344) adds exactly ONE fast-file registration of its own,
-# `tests/test_expansion_fusion_14344.py`, at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (the #3400/#4348
-# trap: a file a PR ADDS cannot carry a junit reading yet) — so the partition stated above is the
-# union of BOTH parents' pools and is NOT `main`'s reading, and `#14415`'s two rows
+# here, and none is. The delta is measurable and small: `fast_pool()` holds **1332** files at this
+# head — `main`'s **1331** (which already carries `#14565`'s `tests/test_14559_reaper_schedule.py`
+# and `#14574`'s `tests/test_fly_secret_declaration_report.py`) plus exactly ONE row of THIS
+# branch's, `tests/test_expansion_fusion_14344.py`, re-counted on the resolved tree rather than
+# carried from either parent's paragraph. ⛔ `#14415`'s rows
 # (`tests/test_14219_batch_ingest.py`, `tests/test_14219_batches_api.py`) are `main`'s at this head,
 # NOT this PR's: they were that PR's own additions and they landed before this fold.
 # ⛔ The one cause this paragraph does NOT claim is `#14544`'s removal of
@@ -7803,6 +7789,19 @@ surfaces:
   # guard tests key presence); a ZERO row packs it at weight 0. Neither is a
   # substitute for the measured value (#4259 review).
   - test_fly_secret_drift.py
+  # #14574: the SCHEDULED reader of the same registry — an undeclared Fly secret
+  # used to be invisible until a deploy was attempted (measured 2026-11-21..24: ~2
+  # days and 75+ commits behind a frozen deploy). Registered `core` beside the
+  # guard it reports on (`test_fly_secret_drift.py`), because the subjects it
+  # guards are `.github/workflows/fly-secret-declaration-drift.yml` (which matches
+  # no `SOURCE_PATTERNS` row) and `tools/fly_secret_declaration_report.py` (a
+  # `tools/` path, which `_keep_changed` DROPS — the #12363 silent-drop class, so
+  # the tool also carries a `CORE_ALSO` entry). Without this row `--integrity`
+  # reds (`manifest drift: test_fly_secret_declaration_report.py`). Hermetic: the
+  # workflow is parsed as YAML, its `run:` bodies are executed against a stub `gh`,
+  # and the reporter's Fly read is the gate's own `FLY_SECRETS_FILE` fixture seam —
+  # no Fly call, no credential, no network.
+  - test_fly_secret_declaration_report.py
   # #10488: the consent bridge's key-fingerprint halves. Registered in `core` beside the other
   # deploy-time config guards (test_fly_secret_drift.py, test_fly_machines_guard.py,
   # test_deploy_workflow.py) because the defect it closes is the SAME class one provider along: a
