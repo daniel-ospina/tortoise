@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1796 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1855 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -280,9 +280,17 @@ def _residue_block() -> str:
     `38f2ab7fc594` re-read 1363 on ITS tree), while the RESOLVED run here reads 1741, re-measured by
     this walk rather than inherited from either side,
     — and the `#12039` residue re-cut below (`SWEEP_RESIDUE` `11896` → `11898`, stale ON ARRIVAL on
-    `main`) appended 24 `#:` lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED
-    on this tree at 1765 (1741 + the 24 the re-cut declares) rather than carried forward from the
-    fold's own reading, which is what the graded figure exists to force:
+    `main`) appended 24 `#:` lines to `tools/sdk_privatise.py`, which took the run to 1765 (1741 +
+    the 24 that re-cut declared) — and then the `#14062` re-cut below (`SWEEP_RESIDUE` `11898` →
+    `11901`, stale ON ARRIVAL on `main` a SECOND time, and measured on `main` itself rather than on
+    a branch tree) appended a further 28 `#:` lines, and `main`'s own `#14423` fold then appended 43
+    more while its docstring moved 1765 → 1796 — TWELVE SHORT of the 1808 its walk returned, a stale
+    carry of exactly this class, RED on `main` before this rebase touched it and repaired HERE rather
+    than left for the next lander. This rebase's own fold (both sides' blocks KEPT, plus the note
+    recording that `main` had already landed the same pair) adds a further 47 `#:` lines, so the
+    figure above is RE-MEASURED by this walk on THIS tree at **1855** (1808 + the 47 this fold
+    declares) rather than carried forward or summed from either side's reading, which is what the
+    graded figure exists to force:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
@@ -2307,3 +2315,54 @@ def test_the_parent_pair_attribution_is_only_ever_quoted_as_falsified():
             "an UNREFUTED `same pair as the parent` claim is the round-14 defect: the pair one "
             "rev commits is not its parent's, so the claim is only honest where the block itself "
             "calls it wrong")
+
+
+def test_a_tool_only_diff_selects_this_pin():
+    """`tools/` is in `NON_PYTHON_PREFIXES`, so a tool-only path is dropped BEFORE the
+    "not matched -> core" fallback and `select()` takes the docs-only early return.
+
+    ⛔ MEASURED before the `CORE_ALSO` entry (PR #14445 review, F2):
+
+        tools/ci_selection.py --changed-files tools/sdk_privatise.py
+            -> {"surfaces": [], "full": false, ...}   # test_sdk_privatise_sweep.py ABSENT
+
+    So the one diff class able to STALE this file's subject — a re-cut of `SWEEP_RESIDUE`
+    together with its `#:` prose record — ran none of the arms below. The required
+    `surface-guard` job does not cover it either: that job runs `--check` (the `(rows,
+    digest)` pair), never the prose arms that grade the block's PUBLISHED figures. That is
+    exactly how #14445 first shipped a stale extent figure (`1765` while its own walk
+    returned `1793`), which then lands on the next `core`-selecting PR — on rows no later
+    author wrote. This pins the entry that closes it, in the file it protects.
+    """
+    from tools import ci_selection
+
+    manifest = ci_selection.load_manifest()
+    selection = ci_selection.select(
+        ["tools/sdk_privatise.py"], "pull_request", manifest
+    )
+    assert "core" in (selection.get("surfaces") or []), selection.get("surfaces")
+    files = selection.get("test_files")
+    if files == "ALL":
+        return
+    assert "test_sdk_privatise_sweep.py" in files, (
+        "a diff to tools/sdk_privatise.py no longer selects its own pins — the `CORE_ALSO` "
+        "entry was dropped or the prefix behaviour changed"
+    )
+    _assert_not_tier1(manifest)
+
+
+def _assert_not_tier1(manifest: dict) -> None:
+    """NON-VACUITY of the surface row the pin above asserts on.
+
+    `tier1` is unioned into EVERY PR selection, so if this file ever joins `tier1` the
+    `core` row stops being what selects it — and the pin above would then pass over a lost
+    arm, which is the silent direction. Asserted rather than left implicit, the same idiom
+    `tests/test_ci_selection.py` uses (#9778 review P2), applied here in the file whose own
+    non-vacuity it protects.
+    """
+    assert "tier1" in manifest, (
+        "the manifest no longer carries `tier1` — this non-vacuity guard has lost its "
+        "subject, so it must be re-derived rather than left passing on nothing")
+    assert "test_sdk_privatise_sweep.py" not in (manifest["tier1"] or []), (
+        "this file joined `tier1` — the `core` row is now decorative, so the selection pin "
+        "above must be RE-DERIVED rather than assumed still load-bearing")
