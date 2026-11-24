@@ -70,21 +70,86 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
-# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
-# `da4b76a585` — ten landings past the `88cd00a068` head the block last named (three since this
-# branch's last merge, at `e6b3cf2908b`), and a tree whose `da4b76a585` landing REGISTERED a fast
-# file of its own: `tests/test_13526_quota_refusal_figures.py` (#14471), `core`, in shard `e` —
-# which is what repacked these bins) the verb packs seven shards at 837.5 s
-# (a, c, d, e, i, j, k) and four at 837.4 s (b, f, g, h) — re-derived here rather than carried, and
-# NOT the nine/two that `main` stated before this commit (see the note below) — so
-# `ceil(837.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
+# `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
+# durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
+# 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
+# `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
+# re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
+# and re-measures the graded extent on the resolved tree, 1915 → 1921, rather than accepting the
+# cut or carrying either side's figure — folded over the #14371, #14186, #14434,
+# #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
+# own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`) the verb packs five shards at 837.7 s (a, c, d, e, k) and six at
+# 837.6 s (b, f, g, h, i, j), so
+# `ceil(837.7/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. The registrations this block's own reading
-# counts are the ones `main` has landed at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's
-# `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`, #14220's
-# `tests/test_14186_embedder_seam_batching.py`, #14423's `tests/test_14350_drain_convergence.py`,
-# #14038's `tests/test_13998_capacity_notice.py` and #14429's `tests/test_spool_drain_rehearsal.py`
-# (listed in shard `k`) — FIVE of them on top of #14038's row, which the 836.4 s baseline below
+# agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
+# differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
+# SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
+# 835.5 s to 837.7 s while the seconds moved under it. So NO arithmetic on the minute can catch a
+# carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
+# instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
+# the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
+# `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
+# nine/two split this branch last derived (837.3/837.2) with the minute unmoved, and #14423's
+# `tests/test_14350_drain_convergence.py` sits in shard d. That map is the union of both parents'
+# registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
+# (`--emit-push-matrix` lists it in shard i) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
+# matters only because it sits one main fold from rounding again. #14407 registered
+# `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
+# `test_notify`), and that registration is part of the partition stated above — the minute did not
+# move (28 m either way), which is exactly why the SECONDS are the graded claim. Re-run
+# `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds, or split.
+# ⛔ AND THESE PARAGRAPHS ARE HISTORY, NOT A SECOND CLAIM. Every fold of `origin/main` re-derived
+# this emission and left its own reading behind, so the block accumulated five stacked restatements
+# of the same sentence — and a restatement the guard reads as `<est … stated twice>` is how a block
+# ends up claiming two partitions while looking like one. The graded clause is the ONE in the
+# paragraph above, measured on the tree that SHIPS (`main` at `da4b76a5851c`). What is kept here is
+# only what a reader cannot get from that clause: which registrations `main` has landed at the flat
+# 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's `tests/test_14371_offline_embed_json.py`, #14434's
+# `tests/test_7879_record_chain.py`, #14220's `tests/test_14186_embedder_seam_batching.py`, #14423's
+# `tests/test_14350_drain_convergence.py`, #14038's `tests/test_13998_capacity_notice.py` and
+# #14429's `tests/test_spool_drain_rehearsal.py` (listed in shard `i`) — FIVE of them on top of
+# #14038's row, which the 836.4 s baseline below already counts (measured: that row is in shard c at
+# `4993fa08`, so the baseline's total includes it), and why every one of them moves the split.
+# `test_notify`) — the `core` row is registered in its own right, so the shard letter is MEASURED
+# (shard `c` at this head) rather than inferred from `test_notify`'s (shard `e`): a `core` neighbour
+# sits in a different bin because the packer is greedy, and every shard letter in this block is a
+# `push_legs()` reading at the head it names, not a placement inherited from a neighbouring row.
+# The minute did not move (28 m either way), which is exactly why the SECONDS are the graded claim.
+# Re-run `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds,
+# or split.
+#
+# ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
+# figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
+# reading of this pool while the seconds moved under it (835.5 -> 837.7 s). So NO arithmetic on the
+# minute can catch a carried figure - only the `est_seconds` partition can, which is why the
+# sentence is GRADED above instead of trusted.
+#
+# ⛔ The partition moves on EVERY landed registration, which is why a rebase that interleaves two
+# sides of this block REDS rather than picking one: it was re-emitted for the #14371 row at a
+# six/five split, then for #7879 at a four/seven one within the hour (reddening `main` in
+# between), #14220 moved it to a two/nine split, merging `main`'s #14350 row collapsed it to a
+# single eleven-shard one, and #14429's `core` registration re-split it to nine/two at 837.3 s. Two
+# parents re-deriving this paragraph is what produced the `<est 837.3 stated twice>` /
+# `<ceil stated 2 times>` reds, so the claims live in ONE paragraph (above) and the readings below
+# are HISTORY, deliberately not restated as clauses.
+#
+# That pool is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`,
+# landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
+# shard `i`) - each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
+# shard `i`) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
+# one main fold from rounding again.
+# The registrations this block's own reading counts are the ones `main` has landed at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`, each with the shard `push_legs()` puts it in AT THE HEAD NAMED (a letter is
+# a measurement, never an inference from a neighbouring row): #14409's
+# `tests/test_14371_offline_embed_json.py` (shard k), #14434's `tests/test_7879_record_chain.py`
+# (shard i), #14220's `tests/test_14186_embedder_seam_batching.py` (shard f), #14423's
+# `tests/test_14350_drain_convergence.py` (shard d), #14038's
+# `tests/test_13998_capacity_notice.py` (shard i) and #14429's
+# `tests/test_spool_drain_rehearsal.py` (shard i) - FIVE of them on top of #14038's row, which the
+# 836.4 s baseline below
 # already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
 # it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
 # only the worst figure: five registrations x 2.0 s is the whole of 9200.1 -> 9210.1.
@@ -99,15 +164,7 @@ version: 1
 # #14423, the twelve that touch this manifest are each split (and the other fourteen do not touch it
 # at all), while `024387f5` emitted 721.6 s on all eleven BEFORE that refresh — so "first at S=11"
 # unscoped is FALSE and is not what this block claims. Then #14429's `core` registration re-packed
-# them back into the nine/two that `main` stated, and then #14471's registration of
-# `tests/test_13526_quota_refusal_figures.py` moved it AGAIN — to the seven/four above — while the
-# sentence kept the nine/two. That left `main` itself
-# RED on `test_the_fast_shards_header_block_states_the_measured_emission` (measured at
-# `da4b76a585`: stated {837.3: a,b,c,d,e,g,h,j,k; 837.2: f,i} vs emitted
-# {837.5: a,c,d,e,i,j,k; 837.4: b,f,g,h}), which is the base-owned red #14406 inherited and re-cut
-# here rather than merging over. ⛔ It is the FIFTH time this block went stale on a landing it did
-# not name — #14434's, #14220's, #14423's and #14296's are the four this paragraph already records
-# — and the guard is the only reason any of them were caught.
+# them back into the nine/two above.
 # ⛔ A rebase that interleaves two sides of this paragraph REDS rather than picking one — which is
 # why this one had to be RE-EMITTED rather than merged: `main` had re-cut these same
 # sentences (#14423's single eleven-shard reading, then #14429's nine/two at 837.3 s) while this
@@ -741,6 +798,23 @@ surfaces:
   - test_3998_raw_absent_state.py
   - test_abuse.py
   - test_abuse_integration.py
+  # #14407: the abuse NOTIFICATION delivery contract (attributable + rate-bounded).
+  # Dual-registered, and the REASON is measured rather than asserted (#14407 review —
+  # the same class the branch already corrected once in `a9d04640e464`):
+  # `select(['tortoise/abuse.py'])` -> `['core']`, `select(['tortoise/notify.py'])` ->
+  # `['core']`, `select(['tortoise/alert_store.py'])` -> `['core']`, and this file is
+  # selected in all three — so the `core` row below is the arm that covers EVERY half
+  # of this change, and this `api` entry covers none of them (it sits beside
+  # `test_abuse.py` for lineage, not because the abuse ENGINE is an `api` source: it is
+  # not, it falls through to `core`).
+  # What this row DOES buy, stated so a reader does not remove it as a duplicate: it
+  # selects this suite on `api`-resolving diffs — `select(['tortoise/hosted_api.py'])`
+  # -> `['api', 'onboarding']`, where this file is selected only because of this row.
+  # That is the same idiom as `test_10156_alert_registers.py` below (the alert feed /
+  # ack routes are `api`), and the honest limit is that this suite monkeypatches the
+  # notify store seam, so an api-only diff runs it without exercising hosted_api
+  # itself. Two DISTINCT surfaces are deliberate; a same-surface duplicate is not.
+  - test_14407_alert_delivery.py
   # #10156: the `api` arm of the dual registration. `tortoise/hosted_api.py` (the
   # `GET /v1/team/alerts` feed and the new `POST /v1/team/alerts/ack` route with
   # its owner/admin gate) is an exact `api` SOURCE_PATTERN, so a hosted_api-only
@@ -8080,6 +8154,13 @@ surfaces:
   - test_capture_fold_evidence_9437.py
   - test_no_tests_imports_in_production.py
   - test_notify.py
+  # #14407: the `core` arm of the dual registration, and the arm measured to be the
+  # one that actually covers the change: every source file it pins —
+  # `tortoise/notify.py` (the delivery bound), `tortoise/abuse.py` (the episode end),
+  # `tortoise/alert_store.py` (lifecycle + migration), `tortoise/incident_kinds.py`
+  # (the declared kinds) — resolves to `core`, so a diff to any of them selects this
+  # file from here.
+  - test_14407_alert_delivery.py
   - test_notify_offloop_4456.py  # #4456: billing notify off-loop + never-raise in webhooks_stripe (dual: api)
   - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)
   # #3301: the four search legs must apply the canonical OBJECT vocabulary —
