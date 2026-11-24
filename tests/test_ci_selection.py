@@ -11727,20 +11727,21 @@ def _durations_row_tail(key: str) -> str:
     return ""
 
 
-#: `docs/ops/ci-wall-clock.md` §7 states the runner pool as a dated measurement
-#: (`| runners registered / online | 12 / 12 (… at read) |`). Read it rather than
-#: hard-code it here: the doc is the artifact that owns the measurement, so a
-#: re-tune is ONE edit there, and a pool that GREW keeps the shipped caps
-#: conservative instead of red on a stale literal.
+#: `docs/ops/ci-wall-clock.md` §7 states the runner pool as a dated measurement, in
+#: its `runners registered / online` row. Read it rather than hard-code it here: the
+#: doc is the artifact that owns the measurement, so a re-tune is ONE edit there, and
+#: a pool that GREW keeps the shipped caps conservative instead of red on a stale
+#: literal. ⛔ This comment deliberately quotes NO figure — it is beside the input, not
+#: a second copy of it, so it cannot go stale on a re-tune.
 _RUNNER_POOL_ROW_RE = re.compile(
     r"^\|\s*runners registered / online\s*\|\s*(?P<pool>\d+)\s*/\s*\d+",
     re.MULTILINE)
 
-#: MATRIX slots kept free for other PRs — the doc's `sum <= 12 - 3 = 9`. It reserves
+#: MATRIX slots kept free for other PRs (the doc's `sum <= pool - 3`, §7 invariant 2). It reserves
 #: MATRIX headroom only, and is deliberately not a total-concurrency budget. ⛔ A
-#: POLICY literal, not a read: the doc states the 3 in prose (§7, invariant 2), so
-#: this constant is the code's copy of that decision and a re-tune that changes the
-#: RESERVE needs this edit (only the POOL is read from the doc).
+#: POLICY literal, not a read: the doc states it in prose (§7, invariant 2), so this
+#: constant is the code's copy of that decision and a re-tune that changes the RESERVE
+#: needs this edit (only the POOL is read from the doc).
 _RESERVED_FOR_OTHER_PRS = 3
 
 #: The measured start stagger (4.0–23.9 m) against the measured per-shard wall
