@@ -2271,7 +2271,7 @@ def test_a_HEALTHY_pass_CLEARS_the_recorded_claim_fact(tmp_path):
     the earlier sentence an unattributable catch. The Pi twin reaches the same VERDICT
     by a DIFFERENT route — its spool is EMPTY on purpose, so `attempted == 0` and that
     `ok` write never executes at all — so its reasoning cannot simply be borrowed: two
-    legs, two mechanisms, one conclusion (#14480 review, cycle 12 F3 / cycle 14 P3).
+    legs, two mechanisms, one conclusion (#14480 review, cycle 11 F3 / cycle 14 P3).
     """
     root = tmp_path / "spool"
     root.mkdir(parents=True)
