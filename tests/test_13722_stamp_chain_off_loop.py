@@ -55,16 +55,22 @@ this one would also need a real Postgres). It asserts, for EVERY
    Graded, i.e. decided by `_literal_truth`: falsy and empty-collection literals
    (an unpack is decided by its OPERAND, so `{*()}` is empty and `{*{1}}` is not),
    signed numeric literals (`-0.0`), `f''`, a zero-argument builtin constructor
-   (`set()`, `dict()`, `list()`, …), a comparison of literals (`1 < 0`, `1 == 2` — `is`/`is not` only over
-   `None`/`True`/`False`, since no other literal has program-determined identity),
+   (`set()`, `dict()`, `list()`, …), a comparison of literals (`1 < 0`, `1 == 2`).
+   For `is`/`is not` identity, graded only where the PROGRAM decides it: a
+   singleton operand (`None`/`True`/`False`), or two operands that cannot be the
+   same object (`1 is 2`, `(1, 2) is (1, 3)`, `0.0 is 0`) — never two EQUAL
+   non-singleton literals (`'ab' is 'ab'`, `() is ()`), whose identity is an
+   interning detail that CPython happens to answer True and another
+   implementation need not,
    `not X`, `and`/`or` over them, a conditional expression whose test — or whose
    two branches — decide it (`` X if False else Y ``, `` X if PAYLOAD else X ``,
    and an `if`-expression IN test position such as `` if (0 if True else 1): ``),
    and a `match` case's `if` guard (`case _ if False:`). Ungraded: anything
    `_literal_truth` answers `None` for — a run-time constant (`if _FEATURE:`), an
-   unpack of a run-time value, an arbitrary call, and an expression-position short
-   circuit (`False and await …`), where the submission sits inside the `BoolOp`
-   rather than under an `if`/`while`/`if`-expression/match guard.
+   unpack of a run-time value, an arbitrary call, two equal non-singleton
+   literals compared by `is`, and an expression-position short circuit
+   (`False and await …`), where the submission sits inside the `BoolOp` rather
+   than under an `if`/`while`/`if`-expression/match guard.
 
 ⛔ NESTING IS NOT THE PROPERTY, and a first cut of this file asserted it: the
 chain already lives in `_report_capture`, a nested `async def`, and nesting a
@@ -136,9 +142,6 @@ _COMPARE_OP = {
     ast.In: lambda a, b: a in b,
     ast.NotIn: lambda a, b: a not in b,
 }
-
-#: The only literals whose `is` identity the program determines.
-_SINGLETON = lambda value: value is None or isinstance(value, bool)  # noqa: E731
 
 #: Zero-argument builtin constructors whose result is always EMPTY (falsy).
 _EMPTY_CONSTRUCTORS = frozenset({
@@ -324,6 +327,49 @@ def _submitted_callables(tree: ast.Module) -> list[ast.AST]:
     return out
 
 
+def _identical_literals(left: object, right: object) -> bool | None:
+    """Is `left is right` decided by the PROGRAM — and if so, which way?
+
+    ⛔ `ast.literal_eval` hands back the AST's own `Constant` objects, so asking
+    `left is right` of THEM measures the AST's object graph, not the program:
+    `'ab' is 'ab'` is False of those objects while CPython shares one
+    `LOAD_CONST` slot and RUNS the body — the false RED this arm was fixed for
+    (review P2, measured).
+
+    Decided, because no interning accident can change the answer:
+      * either operand is a singleton (`None`/`True`/`False`) — their identity is
+        the program's, so `None is None` is True and `None is not None` is False;
+      * the operands CANNOT be the same object — their types differ (`0.0 is 0`)
+        or their values differ (`1 is 2`, `(1, 2) is (1, 3)`). Identity implies
+        equality, so `is` there is ALWAYS False and `is not` ALWAYS True, which
+        is the "always false" criterion this file grades by. ⛔ Grading these
+        `None` is a FAIL-OPEN, not caution: the pre-fix code reddened them
+        correctly and a bare singleton test un-graded them (measured: `if 1 is
+        2:` around the only submission → GREEN).
+
+    Undecided (`None`): two EQUAL non-singleton literals — `'ab' is 'ab'`,
+    `(1, 2) is (1, 2)`, `() is ()`. CPython merges equal constants into one code
+    object so those bodies usually RUN, but the language does not require it (3.8
+    emits a `SyntaxWarning` for `is` on literals for exactly this reason).
+    ⛔ NOT CLOSED, and declared here so the arm is not over-read: `'ab' is not
+    'ab'` is DEAD in CPython and stays GREEN, because grading it False would red a
+    body that runs wherever the constants are not merged.
+    """
+    if left is None or left is True or left is False:
+        return right is left
+    if right is None or right is True or right is False:
+        return False
+    if type(left) is not type(right):
+        return False
+    # `==` is reflexive for every literal `ast.literal_eval` can build (it cannot
+    # produce a NaN — `float("nan")` is a Call, not a literal), so "unequal ⇒ not
+    # one object" is sound here; the reflexivity guard keeps that honest rather
+    # than assumed.
+    if left != left or right != right:  # pragma: no cover - unreachable for literals
+        return None
+    return None if left == right else False
+
+
 def _literal_truth(node: ast.expr) -> bool | None:
     """The statically decidable truth of a literal-ish expression, or None.
 
@@ -397,23 +443,26 @@ def _literal_truth(node: ast.expr) -> bool | None:
         comparators = [_COMPARE_OP.get(kind) for kind in operators]
         if any(fn is None for fn in comparators):
             return None
-        # ⛔ `is` IS NOT DECIDED BY VALUE, and `ast.literal_eval` returns the AST's
-        # own Constant objects — so grading `'ab' is 'ab'` from them answers False
-        # while CPython (which shares one constant slot, `LOAD_CONST` twice) runs
-        # the body. Only `None`/`True`/`False` have identity the PROGRAM determines;
-        # anything else is undecidable here.
+        # ⛔ `is` IS NOT DECIDED BY VALUE — see `_identical_literals` for the
+        # criterion and for the two directions it has been wrong in: grading
+        # equal literals from `literal_eval`'s objects false-REDded a body that
+        # runs, and grading only singletons un-graded `1 is 2`, which is always
+        # dead (review P2, measured both ways).
         answer = True
         for fn, kind, right in zip(comparators, operators, rights, strict=True):
-            if kind in (ast.Is, ast.IsNot) and not (
-                _SINGLETON(left) and _SINGLETON(right)
-            ):
-                return None
-            try:
-                if not fn(left, right):  # type: ignore[misc]
-                    answer = False
-                    break
-            except TypeError:
-                return None
+            if kind is ast.Is or kind is ast.IsNot:
+                identical = _identical_literals(left, right)
+                if identical is None:
+                    return None
+                holds = identical if kind is ast.Is else not identical
+            else:
+                try:
+                    holds = bool(fn(left, right))  # type: ignore[misc]
+                except TypeError:
+                    return None
+            if not holds:
+                answer = False
+                break
             left = right
         return answer
     if isinstance(node, ast.IfExp):
@@ -788,6 +837,29 @@ def live(value):
         ("1 == 1", True),
         ("'a' in 'abc'", True),
         ("1 < _x", None),
+        # `is`/`is not`: graded where the PROGRAM decides identity — a singleton
+        # operand, or operands that cannot be one object — and nowhere else.
+        # ⛔ NON-VACUOUS BOTH WAYS, measured: grading equal literals from
+        # `ast.literal_eval`'s own Constant objects answered False for
+        # `'ab' is 'ab'`, whose body CPython RUNS (a false RED, the defect class
+        # this PR removes); a bare singleton test then answered `None` for
+        # `1 is 2`, which is ALWAYS dead (a fail-open — `if 1 is 2:` around the
+        # only submission went GREEN).
+        ("None is None", True),
+        ("None is not None", False),
+        ("True is False", False),
+        ("True is 1", False),
+        ("1 is 2", False),
+        ("(1, 2) is (1, 3)", False),
+        ("0.0 is 0", False),
+        ("'a' is 1", False),
+        ("1 is 2 is 3", False),
+        # Equal NON-singleton literals: CPython merges the constants so the body
+        # runs, but the language does not require it — undecided, never False.
+        ("'ab' is 'ab'", None),
+        ("(1, 2) is (1, 2)", None),
+        ("1000 is 1000", None),
+        ("'ab' is not 'ab'", None),
         ("-0.0", False),
         ("(0 if True else 1)", False),
         ("None if False else None", False),
@@ -852,6 +924,44 @@ def test_an_if_expression_guard_is_graded_as_a_guard() -> None:
     assert sorted(targets) == ["dead", "live"], targets
     assert [source for _line, source in _dead_guards(tree, targets["dead"])] == [
         "0 if _x else 0"]
+    assert _dead_guards(tree, targets["live"]) == []
+
+
+#: An identity guard around a submission: `1 is 2` cannot be one object, so that
+#: body is ALWAYS dead and the arm must grade it; `'ab' is 'ab'` is the shape whose
+#: body RUNS (one shared `LOAD_CONST`), so grading it would be a false RED.
+_IDENTITY_SOURCE = '''
+async def dead():
+    if 1 is 2:
+        await _run_off_loop(_CAPTURE_EXECUTOR, chain)
+
+async def live():
+    if 'ab' is 'ab':
+        await _run_off_loop(_CAPTURE_EXECUTOR, chain)
+'''
+
+
+def test_a_literal_identity_guard_is_graded_end_to_end() -> None:
+    """`if 1 is 2:` reaches the dead-guard arm; `if 'ab' is 'ab':` must not.
+
+    ⛔ NON-VACUOUS, measured: dropping the identity decision from
+    `_literal_truth`'s compare arm (grading `is` with `operator.is_` over
+    `literal_eval`'s objects) leaves `dead`'s guard ungraded — so this reds — and
+    a singleton-only test reds it too, because `1 is 2` is then undecidable. The
+    `live` control pins the other direction: `'ab' is 'ab'` RUNS, so a pin that
+    reds it is the false-RED defect this PR exists to remove.
+    """
+    tree = ast.parse(_IDENTITY_SOURCE)
+    targets = {
+        _enclosing_functions(tree, node)[-2]: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == _OFF_LOOP
+    }
+    assert sorted(targets) == ["dead", "live"], targets
+    assert [source for _line, source in _dead_guards(tree, targets["dead"])] == [
+        "1 is 2"]
     assert _dead_guards(tree, targets["live"]) == []
 
 
