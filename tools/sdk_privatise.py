@@ -144,9 +144,12 @@ SWEEP_NAMES = 66
 #:     `integrations/cli-extraction/extract_turns.py`, …), and every one of those was an
 #:     untyped-receiver row of this residue. The pinned row set holds exactly the ordinary
 #:     words that remain, `reg.query` still at 409.
-#: A re-pin here is a DECLARATION of a known shape, not a new allowance: adding an
-#: SDK-holding receiver to the residue still requires the same deliberate re-pin with its
-#: own reason.
+#: A re-pin here WAS a DECLARATION of a known shape, not a new allowance — and under the ratchet
+#: (#14548, stated at the top of this record) there is no declaration left to make. A re-pin was
+#: never an allowance; today it is not even a repair. An SDK-holding receiver ADDED to the residue
+#: is a RED naming the row and the `file:line` — type the receiver, or convert the call — and
+#: pasting a fresh pair into this file does not clear it, nor does any `--repin`: the gate compares
+#: this tree against its own base point, not against the number recorded here.
 #:
 #: RE-PINNED (11769, 3dc892001700a031) → (11758, d2311d5af77fe5d5) by the same round, and again the
 #: intended direction: eleven side effects in `tests/test_tortoise_client.py` sat on the RETIRED
@@ -154,8 +157,10 @@ SWEEP_NAMES = 66
 #: the client calls `_query` / `_create_point` / `_summarize_structure`, so eleven untyped-receiver
 #: rows that pinned nothing are gone. The ordinary-word rows are unchanged (`reg.query` 409,
 #: `graph.query` 267, `cp.query` 263, `sdk._get_registry().query` 263, `self.g.query` 202) and typed
-#: references to a public name are still 0. An SDK-holding receiver is still residue: adding one
-#: still requires this same deliberate step, with its own reason.
+#: references to a public name are still 0. An SDK-holding receiver is still residue — but the
+#: deliberate step an addition required was a re-pin only while the pin was the gate: under the
+#: ratchet an addition is a RED naming the row and the `file:line`, to type or convert, and a
+#: re-pin clears nothing (see the record's opening).
 #: RE-PINNED → (11757, 7a53ce4f33a41246) by the commit that re-keyed
 #: `tools/window_quality_m2.py`'s `cur["sdk"].tortoise_fts_query(` to the private
 #: `._tortoise_fts_query(`: that receiver is a SUBSCRIPT, so the sweep could not type it and had
@@ -1490,8 +1495,10 @@ SWEEP_NAMES = 66
 #: merged in, and `--repin` printed the same pair before and after that merge, so the merge
 #: contributes no row here either — nor do the sibling commits merged after it (all on this
 #: branch's census file, and named by log rather than counted here, because a count restated in this
-#: block goes stale at the next sibling push, the class `2465cda150` was written to stop). The
-#: pin is RE-DERIVED after every integration rather than carried forward. ⛔ EVERY PAIR HERE IS
+#: block goes stale at the next sibling push, the class `2465cda150` was written to stop). At that
+#: time the pin was RE-DERIVED after every integration rather than carried forward; since #14548 no
+#: integration re-pins anything, because `--check` ratchets against the tree's own base point
+#: instead of against this pair. ⛔ EVERY PAIR HERE IS
 #: SCOPED TO THE TREE IT WAS MEASURED ON, and an earlier cut of this paragraph attributed one to
 #: another (review of #14287, round 4, P1): `(11861, "f0647020531c078c")` is what `main` COMMITS
 #: at `0467ba329d` and again at `47e28b549e76` (measured: `git show <rev>:tools/sdk_privatise.py`),
@@ -2158,7 +2165,20 @@ SWEEP_NAMES = 66
 #: rows `#4625` retires (measured `git grep -c '_JSONB_CACHE.update'` → **2** on that tree, **0** on
 #: `origin/main`), which is exactly the pair the block above already accounts for. Adopting main's
 #: deletion is what makes this tree read main's count; nothing fell unaccounted in either direction.
-SWEEP_RESIDUE = (11910, "3216395d35345904")
+#:
+#: ⛔ RE-PINNED DOWN 11910 -> 11903 ON THE `#14544` CUT, AND THE 7 IS ATTRIBUTED ROW BY ROW. That
+#: PR deletes 270 cases from `tests/test_dod_5090_probe.py`, and `--repin` on THIS tree prints
+#: **(11903, "1fb861e2c8163aec")**. Measured with this module's own `edits_for`, not reasoned from
+#: the diff: the pre-cut file carried **8** residue rows (`graph.query` x3, `declared.update`,
+#: `se._BREAKERS.update`, `db.list_graphs`, `degraded.update`, `graph.delete`) and the surviving
+#: 677-line file keeps **1** (`se._BREAKERS.update`), so 8 - 1 = 7 is exactly the movement — and no
+#: other file in that PR touches a `.query`/`.update`/`.delete` receiver.
+#: ⚠️ A FALLING PIN CANNOT HIDE A NEW UNTYPED REFERENCE, the direction this arm catches, so the fall
+#: is the pin's HARMLESS direction and the row set is otherwise identical. It is re-pinned rather
+#: than left red because that PR moves the very tree this pin grades, and `surface-guard` is a
+#: code-measuring check on the PR's EVALUATED tree that the land rail refuses to merge red,
+#: required or not (`scripts/admin-merge.sh`, "the PR's evaluated-tree surface BLOCKS").
+SWEEP_RESIDUE = (11903, "1fb861e2c8163aec")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
@@ -2304,7 +2324,9 @@ def residue_digest(rows: Counter) -> str:
 # re-pin treadmill (#4625's block above counts its own re-cuts). The pin is kept ABOVE as a
 # historical reading, and `--check` no longer requires it: the assertion is a RATCHET against a
 # baseline MEASURED at check time, so
-#   * a new untyped receiver still REDS (that is the signal the pin existed to carry),
+#   * a NET increase in untyped receivers still REDS (the signal the pin existed to carry);
+#     one added and one removed is a net-zero PASS, and the SHAPE note names the swap — that is
+#     why the digest is REPORTED rather than graded,
 #   * removing one PASSES (a ratchet that reds on improvement is useless),
 #   * nobody re-pins, because there is no number to keep in step with the tree.
 
@@ -2350,6 +2372,23 @@ def baseline_rev(explicit: str | None = None) -> tuple[str | None, str]:
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
     return None, "no origin/main in this clone"
+
+
+def _is_own_base(rev: str) -> bool:
+    """True when `rev` IS this commit — the post-merge case, where a ratchet cannot red.
+
+    ⛔ STATED RATHER THAN LEFT INERT (#14548 review, P3/F4). `baseline_rev()` prefers the merge
+    base with `origin/main`, and on a `push: main` run `HEAD == origin/main`, so the merge base
+    IS `HEAD`, `git diff --name-status -M HEAD` is empty, `baseline_rows` seeds the whole
+    measured tree and `then == now` — `--check` passes on `main` whatever the tree holds, and
+    `shape_notes` is silent as well (identical digest). The pin this change demotes is what
+    caught the merges that moved the census, so the loss is named at the point where it happens
+    and the recorded pin is still printed as a NON-BLOCKING delta beside it.
+    """
+    try:
+        return _git("rev-parse", "HEAD").strip() == rev
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
 
 
 def baseline_rows(
@@ -3152,6 +3191,15 @@ def main() -> int:
             )
             for note in shape_notes(after_residue, base_rows):
                 print(note)
+            if _is_own_base(base_rev):
+                print(
+                    f"⛔ the baseline IS this commit (HEAD == {base_rev[:12]}), so there is no "
+                    "other tree to ratchet against and this check cannot go red: on a "
+                    "`push: main` run it grades nothing, and a census move that lands there "
+                    "unseen is NOT detectable here. Comparison only, never a gate: "
+                    f"{sum(after_residue.values())} now vs {SWEEP_RESIDUE[0]} on the recorded "
+                    f"pin (Δ {sum(after_residue.values()) - SWEEP_RESIDUE[0]:+d})."
+                )
         print(
             f"recorded pin (historical, no longer required): {SWEEP_RESIDUE[0]}, "
             f"{SWEEP_RESIDUE[1]!r}"

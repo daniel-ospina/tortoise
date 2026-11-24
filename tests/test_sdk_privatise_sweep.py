@@ -256,7 +256,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2048 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2068 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -345,8 +345,10 @@ def _residue_block() -> str:
     naming both numbers instead of shipping the stale one. The MERGE with `origin/main` then
     moved it again — `main`'s `seen.update(kwargs)` row took the pin UP to `11909` and the block
     gained prose stating that attribution — and the LATEST fold re-derived the pair at `11910`
-    on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk:
-    — and the PR was `CONFLICTING` against `origin/main` again, so its commits were REBASED onto
+    on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk —
+    ⛔ TWO EARLIER NARRATIVES OF THIS SENTENCE, KEPT RATHER THAN REWRITTEN (each clause was true of
+    the tree it names, and neither is inherited here):
+    — the branch's commits, CONFLICTING against `origin/main` again, were REBASED onto
     `533e256f2c89` rather than merged into it: a rebase rewrites the head, so the fold narrative
     this sentence used to carry is replaced by what the rebase actually did. The suite's conflict
     was a PURE DOUBLE-APPEND at EOF of this file — `main`'s `#14445` added
@@ -358,14 +360,30 @@ def _residue_block() -> str:
     not `#14491`, TWO rows not three, and `_JSONB_CACHE.update` 2 rows at `2cccf90f4dd4` rather
     than on `origin/main`). The rebase ALSO added the paragraph that restates the mechanism — the
     pin is a historical reading and every `--check` exit recorded in the run is a PRE-RATCHET
-    reading — which is prose INSIDE the walked run, so the figure above is RE-MEASURED by this
-    walk on the rebased file and is not inherited from the pre-rebase `2019` or from either side's
-    published numeral,
-    and the pair did NOT follow the run: `--check` on this rebased tree reports
+    reading — which is prose INSIDE the walked run, so the figure was RE-MEASURED by that walk on
+    the rebased file and was not inherited from the pre-rebase `2019` or from either side's
+    published numeral, and the pair did NOT follow the run: `--check` on that rebased tree reported
     `(11910, "3216395d35345904")`, byte-identical to the pair `main` commits, because this change
-    adds no row — the 11912 this branch once carried sat 2 above it only while the branch still
+    adds no row — the 11912 the branch once carried sat 2 above it only while the branch still
     held the two `_JSONB_CACHE.update` rows `#4625` retires (measured 2 on that tree, 0 on
-    `origin/main`), and that pair is what adopting main's deletion removes,
+    `origin/main`), and that pair is what adopting main's deletion removes;
+    — and THEN `origin/main`'s own fold of `6a02515d14ad` kept BOTH sides' blocks once more (each
+    side had appended its own re-cut record above the SAME assignment, so every conflicted hunk was
+    prose), and that resolution kept both verbatim rather than trimming the run to one side's
+    reading, so the figure was RE-MEASURED by that walk on ITS resolved file, never inherited from
+    either side's published `1953` or `1954`; and `#14544` then cut this PR's test probe, moving
+    the pair 11910 -> `11903` on a tree that is neither of the fold's parents.
+    ⛔ AND THIS FOLD — `origin/main` `af40c97ca3`, carrying `#14544`'s cut and `#14550` — is a THIRD
+    tree. THIS resolution was a MERGE rather than a rebase, and the conflict surface had shrunk to
+    ONE file: `tools/sdk_privatise.py` AUTO-MERGED (main's `#14544`/`#14550` prose and this
+    branch's records do not overlap), so only this docstring's two hunks needed a decision — and
+    both sides' records are kept above, in the order they happened, because each is a true reading
+    of a tree this branch no longer has. The figure above is therefore NEITHER side's numeral
+    (`2048` on the rebased branch, `2032` on `main`): it is this resolved file's OWN walk, and the
+    mechanism paragraph that moved it (three false claims restated, then this review round's
+    re-pin instructions restated) is prose INSIDE the run. The pair did not follow the run —
+    `--repin` on the resolved tree prints `(11903, "1fb861e2c8163aec")`, byte-identical to the
+    pair `main` commits, because this change adds no untyped receiver of its own,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
@@ -2704,6 +2722,102 @@ def test_without_origin_main_the_RECORDED_PIN_is_the_ceiling(monkeypatch, tmp_pa
     err = capsys.readouterr().err
     assert "the PIN is the only ceiling here, and it is frozen" in err, err
     assert "--baseline REV" in err, f"the red must name the way out of the degraded path: {err!r}"
+
+
+def test_baseline_rev_prefers_the_MERGE_BASE_then_falls_back_to_origin_main(monkeypatch):
+    """The TWO resolution branches `baseline_rev()` is made of, neither of which had an arm.
+
+    ⛔ THE CHOICE OF BASELINE IS THE WHOLE MECHANISM (#14548 review, P2/F3). `--check`'s verdict
+    is a comparison against whatever this returns, so a resolver that stopped preferring the
+    merge base would silently grade a PR against the branch it is about to merge INTO — a
+    baseline that already contains the change — and every added receiver would be absorbed. A
+    resolver that lost the `origin/main` fallback would degrade to the frozen pin on a detached
+    clone. Both are one-line deletions that leave every other arm green, so each is graded by
+    its own stub.
+
+    Mutation: delete the `_git("merge-base", …)` attempt -> the first call's rev is the
+    `origin/main` sha and the RED is immediate; delete the `rev-parse --verify origin/main`
+    fallback -> the second call returns `(None, "no origin/main in this clone")`.
+    """
+    merge_sha, main_sha = "a" * 40, "b" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def _no_merge_base(*args):
+        calls.append(args)
+        raise subprocess.CalledProcessError(1, args[0] if args else "git")
+
+    def _merge_base(*args):
+        calls.append(args)
+        assert args[0] == "merge-base", f"the merge base must be asked for FIRST: {args}"
+        return f"{merge_sha}\n"
+
+    monkeypatch.setattr(privatise, "_git", _merge_base)
+    rev, why = privatise.baseline_rev()
+    assert rev == merge_sha, (
+        f"the merge base with `origin/main` is the tree the question is asked against; got {rev!r}")
+    assert "merge base" in why, why
+
+    def _detached(*args):
+        calls.append(args)
+        if args[0] == "merge-base":
+            raise subprocess.CalledProcessError(1, "git")
+        assert args[:2] == ("rev-parse", "--verify"), args
+        assert args[2] == "origin/main", args
+        return f"{main_sha}\n"
+
+    monkeypatch.setattr(privatise, "_git", _detached)
+    rev, why = privatise.baseline_rev()
+    assert rev == main_sha, (
+        "a detached `origin/main` resolves no merge base, and the fallback is `origin/main` "
+        f"itself — not the frozen pin; got {rev!r}")
+    assert "no merge base" in why, why
+
+    assert calls, "the stub was never called — the arm is vacuous"
+
+
+def test_on_a_post_merge_tree_the_dead_ratchet_is_STATED(monkeypatch, tmp_path, capsys):
+    """When the baseline IS this commit, `--check` cannot red — and it must SAY so.
+
+    ⛔ THE INERT CASE (#14548 review, P3/F4). `baseline_rev()` prefers the merge base, and on the
+    `push: main` trigger `HEAD == origin/main`, so the baseline tree is this tree: the diff is
+    empty, `then == now`, and `--check` passes whatever the census did. That is a real loss — the
+    pin this change demotes is what caught a census move landing on `main` — so the loss is
+    printed at the point it happens, with the recorded pin as a NON-BLOCKING delta beside it.
+
+    Both directions are graded: the notice APPEARS for the own-base case, and does NOT appear
+    when the baseline is a distinct tree (where the ratchet is doing real work and the notice
+    would be noise).
+
+    Mutation: delete the `_is_own_base(...)` print -> the first assert REDs; print it
+    unconditionally -> the inverse assert REDs.
+    """
+    _main_fixture(monkeypatch, tmp_path, "x = 1\n")
+    monkeypatch.setattr(privatise, "baseline_rows", lambda *a, **k: (Counter(), {}, {}))
+    monkeypatch.setattr(privatise, "SWEEP_RESIDUE", (0, "0" * 16))
+    # The REAL `_is_own_base()` is graded: only `git` is stubbed, so the comparison it makes is
+    # the one that runs on `main` — `HEAD == <the resolved baseline>`.
+    monkeypatch.setattr(
+        privatise, "_git",
+        lambda *a: ("c" * 40) if tuple(a) == ("rev-parse", "HEAD") else "")
+    monkeypatch.setattr(
+        privatise, "baseline_rev",
+        lambda explicit=None: ("c" * 40, "the merge base with origin/main"))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+    assert privatise.main() == 0, "an own-base run still exits 0 — the notice is not a verdict"
+    out = capsys.readouterr().out
+    assert "the baseline IS this commit" in out, (
+        "a `push: main` run that grades nothing must say so, or the check reads as a green it "
+        f"never earned: {out!r}")
+    assert "NOT detectable here" in out, out
+    assert "never a gate" in out, f"the delta must not read as a red: {out!r}"
+
+    monkeypatch.setattr(
+        privatise, "baseline_rev", lambda explicit=None: ("d" * 40, "named by --baseline"))
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check", "--baseline", "d" * 40])
+    assert privatise.main() == 0
+    out = capsys.readouterr().out
+    assert "the baseline IS this commit" not in out, (
+        f"a DISTINCT baseline means the ratchet is live, and the notice would be noise: {out!r}")
 
 
 def _git_repo(path: Path) -> Path:
