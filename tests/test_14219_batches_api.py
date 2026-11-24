@@ -2505,11 +2505,36 @@ def test_a_store_fault_at_acceptance_answers_retry_not_a_misconfiguration(
 
 def test_a_storage_misconfiguration_still_gets_its_own_copy(
         client, monkeypatch):
-    """The negative half of the pair above: a `ValueError` (no storage configured for
-    inline text) must still say so — the fault copy must not swallow it."""
-    r = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md", "text": "hi"}]})
+    """The negative half of the pair above: the `ValueError` arm's copy survives.
+
+    ⛔ IT MUST DRIVE THE ARM, NOT A PRE-GATE (#14415 recut review, LOW —
+    measured). This test used to post an inline-text body and assert the copy,
+    but that body is refused EARLIER by the route's write probe
+    (`inline_stage_root is None`), so `BatchCoordinator.submit` — and therefore
+    the `except ValueError` arm at the route — was never executed. Collapsing that
+    arm's copy onto the fault copy left this test GREEN. It was also the only test
+    in the file that depended on the ambient env: with `TORTOISE_INGEST_BASE_DIR`
+    exported (a documented variable) the request was accepted `201` and the test
+    failed.
+
+    So the raise is injected at the layer boundary, which is what actually
+    distinguishes the arms — the no-storage case has its own pin
+    (`test_inline_text_without_configured_storage_is_a_503_not_a_fake_ack`).
+    """
+    def _refuse(*a, **kw):
+        raise ValueError("inline text with nowhere durable to put it")
+
+    monkeypatch.setattr(ha._batch_ingest.BatchCoordinator, "submit", _refuse)
+
+    r = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md"}]})
     assert r.status_code == 503, r.text[:200]
-    assert r.json()["detail"].startswith("Batch storage is unavailable"), r.json()
+    detail = r.json()["detail"]
+    assert detail.startswith("Batch storage is unavailable"), (
+        "the `ValueError` arm's storage-misconfiguration copy is gone — the fault "
+        f"copy has swallowed it: {detail}")
+    assert "retry shortly" not in detail, (
+        "a staging refusal was rendered with the STORE-FAULT copy, so the two "
+        f"arms have been collapsed: {detail}")
 
 
 def test_a_root_that_can_be_created_but_not_written_is_refused_before_the_ack_gate(

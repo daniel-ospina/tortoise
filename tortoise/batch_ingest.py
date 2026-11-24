@@ -2421,15 +2421,39 @@ class BatchCoordinator:
                     "batch %s: the create write faulted twice — re-reading the row "
                     "rather than discarding a batch that may be live", bid,
                     exc_info=True)
+                # ⛔ THE READ DECIDES OWNERSHIP, NOT MERE PRESENCE (#14415 recut
+                # review, MEDIUM — measured). This arm used to raise
+                # `_BatchStoreFault` on ANY present row, without consulting the
+                # ownership predicate the lost-create block below already applies.
+                # For a MINTED id (the route's only case) a present row almost
+                # always carries THIS call's stamp — `put_batch_if_absent` writes
+                # `created_at=stamp`, and a recovery adoption copies the same stamp
+                # from our own item rows — so the arm refused work it could PROVE
+                # was its own, and the route then answered "nothing was accepted"
+                # over rows that survive, sit in `pending_batches()`, drain and get
+                # CHARGED, inviting a retry that opens a second billable batch.
+                #
+                # Only two facts belong to THIS arm: an unreadable row (unknown is
+                # not permission to delete) and a positively ABSENT one (nothing of
+                # ours is live, so the rollback below is correct). Everything else
+                # is an ownership question, and the block below already answers it:
+                # our stamp takes the row over with the identity write, another
+                # writer's stamp is a `_BatchIdConflict`, a read fault is a
+                # `_BatchStoreFault`, and a row that moved past every takeover state
+                # returns the RECORD as the truth.
                 try:
-                    present = self._store.get_batch(org_id, bid) is not None
+                    current = self._store.get_batch(org_id, bid)
                 except Exception:
-                    present = True          # unknown is NOT permission to delete
-                if present:
                     raise _BatchStoreFault(
-                        f"batch {bid!r}: the create write failed and the row may "
-                        "be live") from exc
-                raise
+                        f"batch {bid!r}: the create write failed and the row could "
+                        "not be read") from exc
+                if current is None:
+                    # Positively no row: nothing this call wrote is live, so the
+                    # compensating rollback is the right answer. Re-raise the write
+                    # fault to reach it.
+                    raise
+                created = False
+                break
         if not created:
             # Lost the create. Do not pretend it is ours — and do NOT discard:
             # `discard(org_id, bid)` removes the batch row AND its item rows, and

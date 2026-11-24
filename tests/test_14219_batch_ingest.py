@@ -3718,20 +3718,75 @@ def test_a_create_write_fault_never_discards_a_published_batch():
     coord = BatchCoordinator(store)
     raised: BaseException | None = None
     try:
-        coord.submit(ORG, ["/d/a.md"])
+        coord.submit(ORG, ["/d/a.md"],
+                     estimate={"estimated_hours": 12.5})
     except BaseException as exc:      # asserted below, never swallowed
         raised = exc
 
-    assert raised is not None, "the create fault was not refused"
+    # ⛔ THE TAKEOVER, NOT A REFUSAL (#14415 recut review, MEDIUM — measured).
+    # This pin used to assert `raised is not None` — i.e. it pinned the DEFECT.
+    # The published row carries OUR OWN stamp (`created_at=batch.created_at`
+    # above; a real recovery adoption copies it from our item rows), so ownership
+    # is PROVABLE and the lost-create block below already has the machinery for
+    # this exact row shape: a CAS takeover plus the identity write. Refusing it
+    # instead left the rows live and billable while the route told the customer
+    # "nothing was accepted" — and invited a retry that opens a second batch over
+    # the same content and charges for it twice, which is the harm this guard was
+    # written to prevent, arriving through the copy rather than through a delete.
+    assert raised is None, (
+        f"a create fault over a row carrying OUR OWN stamp refused provable work: "
+        f"{type(raised).__name__}: {raised}")
     assert store.attempts == 2, (
         f"the create write was not retried once ({store.attempts} attempts)")
     assert store.discarded == [], (
         "a CREATE fault discarded a batch the recovery scan had published: "
         f"{store.discarded}")
     bid = store.bids[0]
-    assert store.get_batch(ORG, bid) is not None, (
-        "the published batch row was deleted by a write fault")
+    row = store.get_batch(ORG, bid)
+    assert row is not None, "the published batch row was deleted by a write fault"
     assert store.items(ORG, bid), "its item rows were deleted with it"
+    assert row.state in (BatchState.ACCEPTED, BatchState.RESUMING,
+                         BatchState.RUNNING), (
+        f"the taken-over row was left in {row.state}")
+    assert row.estimate and row.estimate.get("estimated_hours"), (
+        "the takeover did not write the IDENTITY, so the ACK comes back "
+        f"unpriced beside the caller's own estimate: {row.estimate}")
+
+
+def test_a_create_fault_over_ANOTHER_writers_row_still_refuses():
+    """The negative half of the pin above (#14415 recut review, MEDIUM).
+
+    The takeover is scoped on `created_at == stamp`, NOT on "a row exists". A row
+    carrying a DIFFERENT writer's stamp is not ours: it must still be refused (a
+    `_BatchIdConflict`, the route's 409), and never adopted or discarded.
+    """
+    class _ForeignStampStore(InMemoryBatchStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.discarded: list[str] = []
+            self.attempts = 0
+
+        def put_batch_if_absent(self, batch) -> bool:
+            self.attempts += 1
+            super().put_batch(Batch(
+                batch_id=batch.batch_id, org_id=batch.org_id,
+                state=BatchState.RUNNING,
+                created_at="2001-01-01T00:00:00+00:00",   # NOT our stamp
+                updated_at="2001-01-01T00:00:00+00:00"))
+            raise RuntimeError("graph statement timeout (write)")
+
+        def discard(self, org_id, batch_id):
+            self.discarded.append(batch_id)
+            return super().discard(org_id, batch_id)
+
+    store = _ForeignStampStore()
+    coord = BatchCoordinator(store)
+    with pytest.raises(bi_module._BatchIdConflict):
+        coord.submit(ORG, ["/d/a.md"])
+    assert store.discarded == [], (
+        "a refusal discarded another writer's batch: "
+        f"{store.discarded}")
+    assert store.attempts == 2, store.attempts
 
 
 def test_the_acceptance_copy_names_no_window_when_the_record_has_no_duration():
