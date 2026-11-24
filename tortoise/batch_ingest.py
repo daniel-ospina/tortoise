@@ -665,7 +665,9 @@ class BatchStore(Protocol):
         and corpus_name BLANKED (owner §4's arithmetic gone from the record) and
         the row relabelled `resuming` over work that never stopped. Every other
         writer of this row is a compare-and-set; a create has no state to compare,
-        so it compares ABSENCE instead.
+        so it compares ABSENCE instead — the ACCEPTANCE create included (review
+        round 17: it was the last blind overwrite on this row, and a create over an
+        existing id reset a cancelled batch's items and re-drained them).
         """
         ...
 
@@ -2004,12 +2006,27 @@ class BatchCoordinator:
         # ⛔ THE WHOLE SET IN ONE STATEMENT (#14415 review round 13, P2), and it
         # still lands BEFORE the batch row below, so an orphaned acceptance is the
         # case `_resume_batch` adopts rather than a row pointing at nothing.
+        # ⛔ THE ROW IS AN INSERT-IF-ABSENT TOO, AND THE ID IS CHECKED **FIRST**
+        # (#14415 review round 17, P2). `put_items` is a blind `MERGE … SET` and
+        # `put_batch` a blind overwrite, so accepting over a batch id that already
+        # exists — reachable through this method's own `batch_id` argument — reset
+        # a `cancelled` batch's item rows to `queued`, zeroed `attempts` (defeating
+        # `BATCH_MAX_ATTEMPTS`) and `tokens_in/out`, and relabelled the row
+        # `accepted` with `cancelled_at`/`cancel_reason` CLEARED: the cancelled work
+        # would be re-drained and charged again. The existence check has to come
+        # BEFORE the item write, because that write is what does the damage.
+        if self._store.get_batch(org_id, bid) is not None:
+            raise ValueError(f"batch id {bid!r} already exists for this org")
         self._store.put_items(org_id, items)
         batch = Batch(batch_id=bid, org_id=org_id, state=BatchState.ACCEPTED,
                       created_at=stamp, updated_at=stamp,
                       corpus_name=str(corpus_name or ""),
                       estimate=dict(estimate or {}))
-        self._store.put_batch(batch)
+        if not self._store.put_batch_if_absent(batch):
+            # Lost the create to a concurrent writer with the same minted id (only
+            # possible for a caller-supplied one). Do not pretend it is ours.
+            self._store.discard(org_id, bid)
+            raise ValueError(f"batch id {bid!r} was created concurrently")
         return batch, items
 
     # -- reads -----------------------------------------------------------
