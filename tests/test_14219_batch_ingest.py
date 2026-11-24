@@ -1726,6 +1726,13 @@ def _every_store_statement_pairs() -> list[tuple[str, dict]]:
     # recut review, P3). A pin wider than its reach is the no-op-gate class.
     store.add_item_tokens(ORG, batch.batch_id, items[0].item_id,
                           tokens_in=1, tokens_out=1)
+    # ⛔ AND THE SET-BASED CANCEL (#14415 review round 9, P2). This helper claims
+    # "every Cypher statement `GraphBatchStore` can emit", but it did not drive the
+    # one statement the round-7 change introduced — so deleting `"updated"` from
+    # its parameter map left all 154 tests green while FalkorDB answered `Missing
+    # parameters` on EVERY cancel (the round-9 BLOCKING class, retuned). The only
+    # test that drives it needs a live DB, which skips here.
+    store.cancel_queued_items(ORG, batch.batch_id, reason="r", updated_at="t")
     return pairs
 
 
@@ -1849,9 +1856,17 @@ def test_a_cancel_landing_during_the_resume_scan_is_not_erased():
     store.put_item(ORG, stale)
 
     real_put = store.put_batch_if_state
+    fired = {"done": False}
 
     def _cancel_first(b, expected):
-        BatchCoordinator(store).cancel(ORG, batch.batch_id, reason="customer")
+        # ⛔ FIRE ONCE (#14415 review round 9). `cancel()` is itself a
+        # compare-and-set now, so an unguarded hook re-enters itself through the
+        # cancel's own write: the recursion ends in a swallowed RecursionError and
+        # the row is left `accepted`, which made this test red for a reason that
+        # had nothing to do with the resume scan.
+        if not fired["done"]:
+            fired["done"] = True
+            BatchCoordinator(store).cancel(ORG, batch.batch_id, reason="customer")
         return real_put(b, expected)
 
     store.put_batch_if_state = _cancel_first  # type: ignore[method-assign]
@@ -2345,3 +2360,53 @@ def test_a_non_accumulating_graph_cas_names_no_token_column():
     assert "coalesce(i.tokens_in, 0) + $tin" in cypher, (
         f"an accumulating CAS must ADD, not write a total: {cypher}")
     assert params["tin"] == 700 and params["tout"] == 0
+
+
+def test_a_cancel_cannot_erase_a_settlement_that_landed_first(monkeypatch):
+    """⛔ ROUND-9 REVIEW P2: `cancel()`'s final write was the last unconditional one.
+
+    It was a plain `put_batch` (`MERGE … SET`, no compare), so a `settle()` that
+    derived a TERMINAL state inside `cancel()`'s read→write window was erased for
+    good. Measured: item A `queued` (which the cancel stops) and item B
+    `extracting`; the drain settles B `indexed` with 60 000 tokens and `settle()`
+    writes `partial`; this write stamped `cancelled` with an INVENTED
+    `cancelled_at` over a charged document — and nothing repairs it, because
+    `cancelled` is terminal, `pending_batches()` drops the row and a later
+    `settle()` returns it unchanged.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG, items[0], BatchItemState.INDEXED, tokens_in=60_000)
+    # Item 1 stays `queued`, so the cancel has something to stop and takes its
+    # `stopped` arm.
+
+    real_cas = store.put_batch_if_state
+    fired = {"done": False}
+
+    def settle_lands_first(row, expected):
+        if not fired["done"] and row.state is BatchState.CANCELLED:
+            fired["done"] = True
+            # The drain's `settle()` derives the terminal truth first.
+            real = store.get_batch(ORG, row.batch_id)
+            real.state = BatchState.PARTIAL
+            real.updated_at = "2026-01-01T00:00:05+00:00"
+            store.put_batch(real)
+        return real_cas(row, expected)
+
+    store.put_batch_if_state = settle_lands_first
+    try:
+        out_batch, _ = coord.cancel(ORG, batch.batch_id, reason="customer")
+    finally:
+        store.put_batch_if_state = real_cas
+
+    assert fired["done"], "the interleaving never fired — the test proves nothing"
+    row = store.get_batch(ORG, batch.batch_id)
+    assert row.state is BatchState.PARTIAL, (
+        "the cancel overwrote a settlement that landed first — the status now "
+        f"claims work was stopped over a charged document: {row.state}")
+    assert row.cancelled_at == "", (
+        f"the cancel invented a cancellation stamp over a finished batch: {row.cancelled_at}")
+    assert out_batch.state is BatchState.PARTIAL, (
+        "the returned row must be the truth, not this call's intent")

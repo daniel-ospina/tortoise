@@ -82,13 +82,6 @@ version: 1
 # greedy, so one new `core` row re-packs every bin — which is why the names are stated and
 # graded, not only the seconds. Re-run `--emit-push-matrix` on the MERGED tree; never carry the
 # last revision's minute, seconds, or split.
-# agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
-# reading of this pool from 835.5 s to 837.0 s while the SECONDS moved under it, so NO arithmetic
-# on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
-# sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a
-# fast file is registered — the packer is greedy, so a seventh file re-packs every bin — which is
-# why the names are stated and graded, not only the seconds. Re-run `--emit-push-matrix` on the
-# merged tree; never carry the last revision's minute, seconds, or split.
 #
 # The history, so a reader can see the direction: the 2026-11-16 durations sweep re-packed the same
 # 11 shards to a 23 m worst-shard watchdog, #12926's own 10.0 s row moved that emission to 24 m,

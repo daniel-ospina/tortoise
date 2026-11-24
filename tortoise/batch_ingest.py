@@ -2398,7 +2398,22 @@ class BatchCoordinator:
         batch.updated_at = stamp
         batch.cancelled_at = stamp
         batch.cancel_reason = reason or "cancelled by the customer"
-        self._store.put_batch(batch)
+        # ⛔ THE LAST WRITER OF THIS ROW IS A COMPARE-AND-SET TOO (#14415 review
+        # round 9, P2). It was the one remaining unconditional `put_batch` —
+        # `MERGE … SET`, no state compare — so a `settle()` that derived a
+        # TERMINAL state inside this call's read→write window was erased for good:
+        # measured, a batch with one `queued` item and one `extracting` item had
+        # its cancel stop the queued one, the drain then settled the other
+        # `indexed` with 60 000 tokens and `settle()` wrote `partial` — and this
+        # write stamped `cancelled` with an INVENTED `cancelled_at` over a charged
+        # document. Nothing repairs that: `cancelled` is terminal,
+        # `pending_batches()` drops the row, and a later `settle()` returns it
+        # unchanged. A lost compare returns the ROW, which is the truth.
+        if not self._store.put_batch_if_state(
+                batch, (BatchState.ACCEPTED, BatchState.RUNNING,
+                        BatchState.RESUMING)):
+            return (self._store.get_batch(org_id, batch_id) or batch,
+                    self._store.items(org_id, batch_id))
         return batch, self._store.items(org_id, batch_id)
 
     # -- resume (brief item 4) -------------------------------------------

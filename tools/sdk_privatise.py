@@ -1121,8 +1121,11 @@ SWEEP_NAMES = 66
 #: for the door it exercises, so it is reported rather than avoided — and `typed references still
 #: pointing at a public name` stays **0**, so no typed site moved and the SDK population is untouched.
 #:
-#: ⛔ MERGED `origin/main` at `ba0eab1d86` — measured on THAT merge tree with `--repin`, never
-#: combined from the two sides' figures: it printed `(11911, "270de036aa1b72b7")`. `--report --base 28ca66878d… --top 5000` reads "UNTYPED receivers NOT swept
+#: ⛔ MERGED `origin/main` at `ba0eab1d86`, and the pin that SHIPS is
+#: `(11911, "270de036aa1b72b7")`, re-measured with `--repin` on the shipping tree — never
+#: combined from the two sides' figures. ⛔ The deltas below were measured at EARLIER heads and
+#: are a cross-check of direction, not the basis for the pin (a reader who recomputes the pair
+#: from them lands ~58 rows short, because `main` advanced between those heads and this one). `--report --base 28ca66878d… --top 5000` reads "UNTYPED receivers NOT swept
 #: (the visible edge): 11837", `proj.g.query` 3642 and `g.query` 1492 — this branch's OWN rows,
 #: carried unchanged through the merge — and NO `create_subject` residue row anywhere (the rename
 #: map still lists `create_subject → _create_subject`, which is the map, not a residue), so the 11
@@ -1259,7 +1262,9 @@ SWEEP_NAMES = 66
 #: evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
 #: ⛔ MERGED `origin/main` (`69908d006b`) INTO THIS BRANCH, one merge after the block above — and
-#: the pin is RE-MEASURED on THIS tree with `--repin`, never carried: `(11911, "270de036aa1b72b7")`.
+#: the pin that SHIPS is `(11911, "270de036aa1b72b7")`, RE-MEASURED with `--repin` on the shipping
+#: tree, never carried. ⛔ The `+8` row diff below was taken at THAT merge; `main` advanced again
+#: afterwards, so the shipping pair is not `11848 + 8` and must not be recomputed from it.
 #: ⛔ THE +8 IS ATTRIBUTED BY THE TOOL'S OWN ROW DIFF, not by arithmetic: `--report --base
 #: 28ca66878d… --top 5000` was run in a detached worktree at the pre-merge head `aaf341542b` AND on
 #: this tree, both row sets sorted and diffed, and EXACTLY TWO rows differ, both `main`'s and neither
