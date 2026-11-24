@@ -46,7 +46,9 @@ import pytest
 from tortoise import drain_claim
 from tortoise.capture_spool import (
     CAPTURE_CAPACITY_CODE,
+    DEFAULT_BOUNDS,
     DRAIN_CAPACITY_YIELDS,
+    Bounds,
     PostOutcome,
     Snapshot,
     _age_key,  # noqa: F401  — the ordering the monotonicity argument rests on
@@ -73,6 +75,22 @@ CAPACITY_BODY = json.dumps({
         "limit": 8,
     }
 })
+
+
+def _spool_at(root: Path, sessions: int = 3, prefix: str = "sess") -> Path:
+    """Materialise `sessions` pending entries at an EXPLICIT root.
+
+    `_spool` below hard-codes `<tmp>/spool`; the cross-leg parity matrix needs one
+    spool per row, on both legs, with identical content.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    for i in range(sessions):
+        write_spool_entry(
+            root,
+            Snapshot(session_id=f"{prefix}-{i}", turns=ROOT_TURNS, source="test",
+                     machine_id="machine-1"),
+        )
+    return root
 
 
 def _spool(tmp_path: Path, sessions: int = 3, prefix: str = "sess") -> Path:
@@ -1391,65 +1409,168 @@ def test_the_HEALTH_LINE_is_BYTE_IDENTICAL_on_both_legs(tmp_path):
     punctuation, spacing or suffix left both suites green while the two legs told
     an operator two different things about one spool (found in review).
 
-    This executes the real Pi leg over a status matrix and compares its FULL line
-    with the Python leg's, byte for byte.
+    This executes the real Pi leg over a matrix of SPOOL SHAPES (not just status
+    records) and compares its FULL line with the Python leg's, byte for byte.
 
-    MUTATION THAT REDS THIS: change either leg's `, NO drain exclusion` separator
-    (comma, spacing) or its suffix wording.
+    ⛔ THE MATRIX REACHES EVERY VERDICT THE SUFFIX MUST SURVIVE (#14480 review,
+    F1). The predecessor's `blocked` row carried `queued == 0`, so the self-heal
+    rewrote it to `ok` and the row rendered `capture: OK (0 queued)` — it never
+    reached the BLOCKED branch at all, which is exactly the branch the durable fact
+    was disappearing on. Every row here therefore names the SPOOL it is about
+    (`sessions`), the credential (`api_key`) and the ceilings (`max_entries`), and
+    the rows cover BLOCKED-with-a-backlog, SATURATED, INACTIVE, DRAINING and
+    UNREADABLE — all five with the claim fact present.
+
+    MUTATION THAT REDS THIS: apply the claim term to the final verdict only (the
+    pre-fix code) — the blocked/saturated/inactive/unreadable rows lose the suffix
+    on BOTH legs, and while parity still holds, `test_every_VERDICT_carries_the…`
+    below reds; change either leg's separator (`", NO drain exclusion"`) and THIS
+    test reds.
     """
     from tests.test_capture_spool import _node_that_can_strip_ts
 
     node = _node_that_can_strip_ts()
     ext = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").as_uri()
+    stamp = "2026-01-01T00:00:00+00:00"
+    claim = {"claim_unavailable": True,
+             "claim_unavailable_reason": "/x/drain.claim exists and is not a claim record"}
+    ok = {"version": 1, "state": "ok", "updated_at": stamp}
+    blocked = {"version": 1, "state": "blocked", "reason": "402 quota",
+               "status": 402, "updated_at": stamp}
+    # (label, recorded status.json, spool entries, api key, max_entries, unlistable)
     rows = [
-        {"version": 1, "state": "ok", "updated_at": "2026-01-01T00:00:00+00:00"},
-        {"version": 1, "state": "ok", "claim_unavailable": True,
-         "claim_unavailable_reason": "/x/drain.claim exists and is not a claim record",
-         "updated_at": "2026-01-01T00:00:00+00:00"},
-        {"version": 1, "state": "blocked", "reason": "402 quota", "status": 402,
-         "claim_unavailable": True, "claim_unavailable_reason": "/x/drain.claim",
-         "updated_at": "2026-01-01T00:00:00+00:00"},
+        ("ok", ok, 0, "present", None, False),
+        ("ok+claim", {**ok, **claim}, 0, "present", None, False),
+        ("blocked-healed+claim", {**blocked, **claim}, 0, "present", None, False),
+        ("blocked+backlog+claim", {**blocked, **claim}, 1, "present", None, False),
+        ("saturated+claim", {**ok, **claim}, 1, "present", 1, False),
+        ("saturated-keyless+claim", {**ok, **claim}, 1, "", 1, False),
+        ("inactive+claim", {**ok, **claim}, 1, "", None, False),
+        ("draining+claim", {**ok, **claim}, 1, "present", None, False),
+        ("unreadable+claim", {**ok, **claim}, 0, "present", None, True),
     ]
+    big = 1 << 40
     driver = tmp_path / "health-parity.mjs"
     driver.write_text(
         'import { captureHealthLine } from "' + ext + '";\n'
-        "const rows = JSON.parse(process.argv[2]);\n"
+        "const jobs = JSON.parse(process.argv[2]);\n"
         "const out = [];\n"
-        "for (const r of rows) {\n"
-        "  const dir = process.argv[3] + '/s' + out.length;\n"
-        "  await (await import('node:fs')).promises.mkdir(dir, { recursive: true });\n"
-        "  await (await import('node:fs')).promises.writeFile(\n"
-        "    dir + '/status.json', JSON.stringify(r));\n"
-        "  out.push(captureHealthLine(dir, { apiKey: 'present' }).line);\n"
+        "for (const j of jobs) {\n"
+        "  const opts = { apiKey: j.apiKey };\n"
+        "  if (j.maxEntries) opts.bounds = { maxEntries: j.maxEntries,\n"
+        "    maxTotalBytes: j.big, maxEntryBytes: j.big };\n"
+        "  out.push(captureHealthLine(j.dir, opts).line);\n"
         "}\n"
         "console.log(JSON.stringify(out));\n",
         encoding="utf-8",
     )
+    jobs = []
+    for i, (_label, record, sessions, api_key, max_entries, unlistable) in enumerate(rows):
+        for leg in ("pi", "py"):
+            root = tmp_path / f"{leg}{i}"
+            if sessions:
+                _spool_at(root, sessions)
+            if unlistable:
+                root.mkdir(parents=True, exist_ok=True)
+                (root / "entries").write_text("not a directory")
+            else:
+                root.mkdir(parents=True, exist_ok=True)
+            write_capture_status(root, record)
+        jobs.append({"dir": str(tmp_path / f"pi{i}"), "apiKey": api_key,
+                     "maxEntries": max_entries, "big": big})
     proc = subprocess.run(
         [node, "--experimental-strip-types", str(driver),
-         json.dumps(rows), str(tmp_path)],
+         json.dumps(jobs)],
         capture_output=True, text=True, timeout=120, cwd=str(REPO),
     )
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     pi_lines = json.loads(proc.stdout.strip().splitlines()[-1])
     py_lines = []
-    for i, row in enumerate(rows):
-        root = tmp_path / f"py{i}"
-        root.mkdir(parents=True)
-        write_capture_status(root, row)
-        py_lines.append(capture_health_line(root, api_key="present").line)
-    assert pi_lines == py_lines, (
+    for i, (_label, _record, _sessions, api_key, max_entries, _unlistable) in enumerate(rows):
+        bounds = (Bounds(max_entries=max_entries, max_total_bytes=big, max_entry_bytes=big)
+                  if max_entries else DEFAULT_BOUNDS)
+        py_lines.append(capture_health_line(
+            tmp_path / f"py{i}", api_key=api_key, bounds=bounds).line)
+    # The UNREADABLE verdict names the entries directory it could not list, and the
+    # two legs necessarily run on two different ones — normalise ONLY the spool
+    # root, so every other byte of every row is still compared exactly.
+    def _norm(lines: list[str]) -> list[str]:
+        return [ln.replace(str(tmp_path / "pi"), "<root>").replace(
+            str(tmp_path / "py"), "<root>") for ln in lines]
+
+    assert _norm(pi_lines) == _norm(py_lines), (
         "the two legs describe the SAME spool with different words:\n  pi: "
         + repr(pi_lines) + "\n  py: " + repr(py_lines))
+    # ⛔ AND EVERY ROW ACTUALLY REACHED A VERDICT WITH THE FACT ON IT: a matrix of
+    # rows that all collapse to `ok` is a parity test for one branch (the shape the
+    # predecessor had). The expected head-word per row is derived from the row, so a
+    # row that silently takes another branch fails HERE rather than passing by
+    # agreeing on the wrong sentence.
+    expected = [("OK", False), ("OK", True), ("OK", True), ("BLOCKED", True),
+                ("SATURATED", True), ("SATURATED", True), ("INACTIVE", True),
+                ("DRAINING", True), ("UNREADABLE", True)]
+    for (label, _r, _s, _k, _m, _u), (verb, fact), line in zip(
+            rows, expected, py_lines, strict=True):
+        assert line.startswith(f"capture: {verb}"), (
+            f"row {label!r} took a different branch than the matrix intends: {line!r}")
+        assert line.count("NO drain exclusion") == (1 if fact else 0), (
+            f"row {label!r} must carry the durable claim fact exactly "
+            f"{1 if fact else 0}x: {line!r}")
+
+
+def test_every_VERDICT_carries_the_durable_claim_fact(tmp_path):
+    """⛔ THE HEADLINE CLAIM OF THIS PR, ASSERTED DIRECTLY (#14480 review, F1).
+
+    `status.json` is written with BOTH facts and the firing path DISCARDS stderr
+    (`nohup … >/dev/null 2>&1 &`), so the health line is the only surface through
+    which an operator can learn that the drain exclusion is off. It was applied to
+    the final `DRAINING`/`OK` verdict only, so on four of six verdicts the fact was
+    invisible — including the shape the PR exists for: a CAPACITY 429 with a
+    backlog (`state: blocked`) whose claim path is broken reads `BLOCKED` and
+    nothing else, for the whole duration of the block.
+
+    MUTATION THAT REDS THIS: `return verdict._replace(line=...)` on the last branch
+    only (the pre-fix code) — the BLOCKED, SATURATED, INACTIVE and UNREADABLE
+    rows lose the suffix.
+    """
+    stamp = "2026-01-01T00:00:00+00:00"
+    claim = {"claim_unavailable": True, "claim_unavailable_reason": "/x/drain.claim"}
+    blocked = {"version": 1, "state": "blocked", "reason": CAPTURE_CAPACITY_CODE,
+               "status": 429, "updated_at": stamp}
+    big = 1 << 40
+    small = Bounds(max_entries=1, max_total_bytes=big, max_entry_bytes=big)
+    shapes = [
+        ("ok", 0, "present", DEFAULT_BOUNDS, False),
+        ("blocked", 1, "present", DEFAULT_BOUNDS, False),
+        ("saturated", 1, "present", small, False),
+        ("inactive", 1, "", DEFAULT_BOUNDS, False),
+        ("draining", 1, "present", DEFAULT_BOUNDS, False),
+        ("unreadable", 0, "present", DEFAULT_BOUNDS, True),
+    ]
+    for i, (label, sessions, api_key, bounds, unlistable) in enumerate(shapes):
+        root = tmp_path / f"s{i}"
+        if sessions:
+            _spool_at(root, sessions)
+        if unlistable:
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entries").write_text("not a directory")
+        else:
+            root.mkdir(parents=True, exist_ok=True)
+        write_capture_status(root, ({**blocked, **claim} if label == "blocked"
+                                    else {"version": 1, "state": "ok", **claim,
+                                          "updated_at": stamp}))
+        line = capture_health_line(root, api_key=api_key, bounds=bounds).line
+        assert "NO drain exclusion (/x/drain.claim)" in line, (
+            f"the {label} verdict dropped the durable claim fact: {line!r}")
 
 
 def test_a_peer_RELEASING_during_the_clear_is_RETRIED_not_called_unclearable(tmp_path):
     """⛔ `GONE` IS NOT `REFUSED` — the distinction a boolean could not make, and
     collapsing them ran a whole pass UNCLAIMED beside a live peer claim.
 
-    Two legs meet at a FIFO at `<spool>/drain.claim`: this one `lstat`s it, a peer
-    `unlink`s it (its own release or takeover), and this one's `unlink` then answers
-    `ENOENT`. The old `except OSError: return False` read that as "cannot be
+    Two legs meet at a FIFO at `<spool>/drain.claim`: this one looks at it, a peer
+    `unlink`s it (its own release or takeover), and this one's removal step then
+    answers `ENOENT`. The old `except OSError: return False` read that as "cannot be
     cleared", `acquire` raised `DrainClaimUnavailable`, and `flush_spool`'s handler
     ran the entire pass without the exclusion — while the peer's own claim sat on
     disk. For the length of a pass the spool had two drainers, which is the defect
@@ -1457,8 +1578,10 @@ def test_a_peer_RELEASING_during_the_clear_is_RETRIED_not_called_unclearable(tmp
     unclaimed pass never holds or re-checks a lease).
 
     The FIFO stands in for "something that is not a claim, that a peer removes
-    under me", and the peer's `unlink` is played by the first `os.unlink` call
-    failing `ENOENT` — the exact errno, reached the exact way.
+    under me", and the peer's `unlink` is played by the `os.rename` into quarantine
+    failing `ENOENT` — the exact errno, reached the exact way (the removal is a
+    `rename` since #14480: `unlink` by name could delete a claim a peer installed in
+    the window).
 
     MUTATION THAT REDS THIS: answer `_CLEAR_REFUSED` (or `False`) from the
     `FileNotFoundError` arm — the FIFO path then raises `DrainClaimUnavailable` and
@@ -1470,18 +1593,18 @@ def test_a_peer_RELEASING_during_the_clear_is_RETRIED_not_called_unclearable(tmp
     fifo = drain_claim.claim_path(root)
     os.mkfifo(fifo)
 
-    real_unlink = os.unlink
+    real_rename = os.rename
     undone: list = []
 
-    def peer_wins(path, *a, **kw):
-        if str(path) == str(fifo) and not undone:
-            undone.append(path)
-            real_unlink(path)                       # the peer's removal lands first
-            raise FileNotFoundError(2, "No such file or directory", str(path))
-        return real_unlink(path, *a, **kw)
+    def peer_wins(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not undone:
+            undone.append(src)
+            os.unlink(src)                          # the peer's removal lands first
+            raise FileNotFoundError(2, "No such file or directory", str(src))
+        return real_rename(src, dst, *a, **kw)
 
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(os, "unlink", peer_wins)
+    monkeypatch.setattr(os, "rename", peer_wins)
     try:
         claim = drain_claim.acquire(root, leg="python")
     finally:
@@ -1494,49 +1617,114 @@ def test_a_peer_RELEASING_during_the_clear_is_RETRIED_not_called_unclearable(tmp
 
 
 def test_the_clear_NEVER_deletes_an_object_it_did_not_judge(tmp_path):
-    """The quarantine compare is not the only place a delete can race: the
-    obstruction clear is the protocol's ONE uncompared removal, and `lstat` →
-    `unlink` is a TOCTOU with a live claim on the other side of it.
+    """The obstruction clear is a delete of something that is NOT ours, so it goes
+    through the same atomic arbiter as every other removal: the object is MOVED
+    ASIDE and the object that landed in the quarantine is what gets judged.
 
-    Judge a FIFO, be preempted, and by the time the `unlink` lands the path can
-    hold a peer's VALID claim — deleting it lets this process win the next `link`
-    and hold a spool a peer is also draining, for up to `ttl/3`, silently. So the
-    `(st_dev, st_ino)` judged is re-read immediately before the removal.
+    ⛔ THE PREDECESSOR OF THIS TEST DROVE AN `lstat` SEAM and asserted `REFUSED`
+    when the identity changed — narrowing the check-then-unlink window without
+    closing it, and pinning the wrong answer while doing so (#14480 review, F2 and
+    P2-4): between the re-read and the `unlink` a peer can still install its claim,
+    and `unlink` deletes by NAME. An inode compare is not sound evidence either —
+    ext4/xfs reuse a freed inode number, so "same dev+ino" can be a different live
+    lockfile (`filelock` GHSA-fq56-3cx3-fjxp, two holders).
 
-    The re-read is driven here by replacing `lstat` on its SECOND call for the
-    claim path with the identity of a file this test substituted — the substitution
-    a preempted process would see.
+    So the interleave driven here is the REAL one: a peer replaces the FIFO with its
+    own VALID claim in the window between the caller's look and the removal. The
+    object that lands in the quarantine is then a regular file, i.e. a claim, and it
+    must be put BACK and reported as CONTENTION — never deleted, and never reported
+    as an unclearable path (which ran a whole pass unclaimed beside it).
 
-    MUTATION THAT REDS THIS: drop the identity re-check (unlink on the strength of
-    the first `lstat`) — the substituted object is then deleted.
+    MUTATION THAT REDS THIS: unlink/quarantine-delete without judging what landed
+    (drop the `landed is not None` arm, or restore the old `os.unlink(path)`).
     """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
     root = tmp_path / "spool"
     root.mkdir(parents=True)
     fifo = root / "drain.claim"
     os.mkfifo(fifo)
-    substitute = root / "live-claim.txt"      # the object a peer installs meanwhile
-    substitute.write_text("a live claim")
-    real_lstat = os.lstat
-    seen: list = []
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
 
-    def racing_lstat(path, *a, **kw):
-        if str(path) == str(fifo):
-            seen.append(path)
-            if len(seen) > 1:
-                # A DIFFERENT object (another inode) now sits at the path.
-                return real_lstat(substitute, *a, **kw)
-        return real_lstat(path, *a, **kw)
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            real_unlink = os.unlink
+            real_unlink(src)                 # the peer's release lands first …
+            Path(src).write_text(peer_raw)   # … and its claim is in the path
+        return real_rename(src, dst, *a, **kw)
 
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(os, "lstat", racing_lstat)
+    monkeypatch.setattr(os, "rename", peer_installs_first)
     try:
         outcome = drain_claim._clear_unusable_claim_path(fifo)
     finally:
         monkeypatch.undo()
-    assert outcome == drain_claim._CLEAR_REFUSED, (
-        "an object that changed identity under the call must be JUDGED AGAIN, not "
-        "deleted — got " + repr(outcome))
-    assert fifo.exists(), "the object this call never judged was deleted"
+    assert installed, "the test never reached the removal"
+    assert outcome == drain_claim._CLEAR_HELD, (
+        "a claim that appears in the window is CONTENTION, not an unclearable "
+        "path — got " + repr(outcome))
+    assert fifo.exists(), "the live claim this call did not judge was deleted"
+    assert json.loads(fifo.read_text())["token"] == "peer-token", (
+        "the peer's claim must be restored BYTE for byte")
+
+
+def test_a_peer_claim_landing_in_the_clear_window_is_NOT_an_unclaimed_pass(tmp_path):
+    """⛔ THE DIAGNOSIS, NOT JUST THE ANSWER (F2). `acquire` used to answer
+    `REFUSED` when the object changed under the clear, which raised
+    `DrainClaimUnavailable("… the spool root is not writable by this process")` —
+    a FALSE diagnosis (the root was writable, the object had moved) that
+    `flush_spool` read as "run the whole pass WITHOUT the one-drainer exclusion"
+    while a peer's claim sat on disk.
+
+    End to end: a FIFO at the claim path, and a peer installs a VALID claim in the
+    window the clear opens. The only correct answers are "somebody holds it" and
+    "that claim still exists" — not an unclaimed pass, and not a deletion.
+
+    MUTATION THAT REDS THIS: answer `_CLEAR_REFUSED` (or delete the object) from the
+    `landed is not None` arm.
+    """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo on this platform")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    fifo = drain_claim.claim_path(root)
+    os.mkfifo(fifo)
+    peer_raw = json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(), "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    })
+    real_rename = os.rename
+    installed: list = []
+
+    def peer_installs_first(src, dst, *a, **kw):
+        if str(src) == str(fifo) and not installed:
+            installed.append(src)
+            os.unlink(src)
+            Path(src).write_text(peer_raw)
+        return real_rename(src, dst, *a, **kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "rename", peer_installs_first)
+    try:
+        claim = drain_claim.acquire(root, leg="python")
+    finally:
+        monkeypatch.undo()
+    assert installed, "the test never reached the clear"
+    assert claim is None, (
+        "a peer's claim that landed in the window must be HONOURED: `acquire` "
+        "answering a claim ran the pass UNCLAIMED beside it")
+    assert fifo.exists(), "the peer's live claim was deleted"
+    held = drain_claim.read_claim(root)
+    assert held is not None and held.get("token") == "peer-token", (
+        f"the peer's claim must still be readable at the path: {held!r}")
 
 
 def test_an_UNCLEARABLE_obstruction_runs_the_pass_UNCLAIMED_and_SAYS_what_it_is(tmp_path):
