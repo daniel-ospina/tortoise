@@ -4160,6 +4160,16 @@ def _css_compound_matches_element(compound: str,
     for match in re.finditer(r"#([\w-]+)", core):
         if attrs.get("id") != match.group(1):
             return False
+    # ⛔ The id has been VALIDATED by the loop above, so it must not survive into
+    # the TAG comparison below — `#pricing-grid` left in `core` made `remainder`
+    # read `#pricing-grid` and the final check compare it to `div`, so an id-only
+    # rightmost compound could never match the element it names. Measured
+    # (#14406 review round 12): `#pricing-grid { align-items: center }` left all
+    # nine rows of `TestProductTeamsPricingCardCtaBaseline` GREEN over three
+    # separate baselines while the class spelling reds, and the element carries
+    # both spellings (`<div class="pricing-grid" id="pricing-grid"`), so the id
+    # form is at least as likely an edit.
+    core = re.sub(r"#[\w-]+", " ", core)
     if re.search(r"\.[\w-]+", core):
         # A class-named compound is `_css_rightmost_selects`'s question, and it
         # is already asked. Returning False here keeps ONE owner per question.
@@ -4181,7 +4191,15 @@ def _css_compound_matches_element(compound: str,
 #: correct page — which is why this floor exists on the AGREEMENT reader and
 #: not on the cascade one, which sorts instead (#14406 review round 10).
 PINNED_OWNER_SELECTOR = {".pricing-card": ".pricing-card",
-                         ".btn": ".pricing-card .btn"}
+                         ".btn": ".pricing-card .btn",
+                         # ⛔ AND THE GRID ITSELF (#14406 review round 12). The
+                         # height precondition is pinned on `.pricing-grid`'s own
+                         # declarations, so a rule that cannot reach its (0,1,0)
+                         # specificity cannot win — without an entry here the
+                         # element branch of `_css_reaching_decls` is dead for
+                         # this subject, which is how `#pricing-grid {
+                         # align-items: center }` shipped as a fail-open.
+                         ".pricing-grid": ".pricing-grid"}
 
 
 def _css_element_reaches(part: str, rightmost: str,
@@ -11968,8 +11986,17 @@ class TestProductTeamsPricingCardCtaBaseline:
         for compound, prop, allowed in (
                 (".pricing-grid", "align-items", {"stretch", "normal"}),
                 (".pricing-grid", "place-items", {"stretch", "normal"}),
-                (".pricing-card", "align-self", {"auto"}),
-                (".pricing-card", "place-self", {"auto"})):
+                # ⛔ `stretch`/`normal` are a CARD's flex default inside a
+                # `stretch` container (#14406 review round 12). The docstring
+                # above keeps `normal` for the grid "because it behaves as
+                # stretch"; the same reasoning applies to these two, and not
+                # applying it here was a measured FALSE RED: a page carrying
+                # `align-self: stretch` on `.pricing-card` renders identically
+                # (boxes one height, CTAs on the shared baseline) and this row
+                # red it, while refusing only the values that MOVE the box is
+                # what the row is for.
+                (".pricing-card", "align-self", {"auto", "stretch", "normal"}),
+                (".pricing-card", "place-self", {"auto", "stretch", "normal"})):
             bad = [(prelude, value)
                    for prelude, value in _css_reaching_decls(css, prop, compound)
                    if _css_align_keyword(prop, value) not in allowed]
@@ -12089,10 +12116,15 @@ class TestProductTeamsPricingCardCtaBaseline:
                    in _css_rules_with_scope(css, ".pricing-card.popular")
                    if not inside_media]
         assert popular, "`.pricing-card.popular` declares no rule"
-        assert _effective_decl(popular[-1], "padding-bottom") == "calc(1.75rem - 1px)", (
-            "the popular card's bottom inset does not compensate for its 2px "
-            "border, so its CTA sits 1px above the other three (measured "
-            "744.78 vs 745.78 at 1440x900 — #13645 item 6)")
+        # ⛔ NO LITERAL HERE ANY MORE (#14406 review round 12). Round 11 added the
+        # DERIVED half below and left this assert in place, so the row still
+        # pinned the constant: a relation-preserving edit — `padding: 2rem`
+        # together with `calc(2rem - 1px)` — is geometrically identical (the
+        # popular card's inset stays the base card's less the extra border
+        # pixel) and still red here, with the message saying it "does not
+        # compensate for its 2px border" when it does. The derivation owns the
+        # row: it grades the cascade WINNER against `expected_pad`, and
+        # `extra_px > 0` keeps a stale-direction edit a FAIL rather than a skip.
         # Same cascade caveat as the flex row above, but this one is answered by
         # RESOLVING the cascade instead of demanding agreement: `.pricing-card`'s
         # `padding` shorthand (0,1,0) and this rule (0,2,0) disagree ON PURPOSE,
