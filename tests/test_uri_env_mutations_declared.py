@@ -1822,6 +1822,25 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # Every site uses `monkeypatch`, so no lane state leaks. The literals are anchored to
     # these exact values on purpose: a FUTURE, different URI in this file must red until
     # it is triaged here, which is the whole point of the census.
+    #
+    # ⛔ ONE ROW, NOT TWO — `main`'s #14491 (`07a483ab38c7`) swept this same file
+    # independently while this branch was open (this branch's `28a56f3d9254`), and the
+    # fold AUTO-merged the two declarations into a DUPLICATE MAPPING KEY at two
+    # different lines. Python silently resolves a duplicate key to the LAST one, and
+    # ⛔ `--integrity` DOES grade duplicate mapping keys — `duplicate_mapping_key_issues()`
+    # is composed into it FIRST (`tools/ci_selection.py:8348`), added for #5373 and
+    # documented as the check to re-run after every merge, rebase or replayed commit —
+    # but that walk reads the MANIFEST (`config/ci-surfaces.yml`), not a dict literal in
+    # a test module. So THIS land still went uncaught: the branch's row would have been
+    # shadowed with nothing red. Resolved by keeping `main`'s row: its patterns are `^…$`-ANCHORED
+    # (strictly stronger scoping than this branch's unanchored ones) and this site map
+    # is the fuller record.
+    # ⛔ THE ARMS MUST STAY VALUE-SCOPED, NOT `setenv`-SHAPED (#14318): a
+    # `docker://`-only row would leave the two gate sites unauthorised while turning
+    # the gate green, and a row matching any `setenv` in this file would authorise the
+    # next site nobody triaged — the #942 vacuity vector this census exists to catch.
+    # `test_the_spool_rehearsal_row_covers_only_its_triaged_values` pins both
+    # directions, so widening this row to a shape reds.
     "test_spool_drain_rehearsal.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://api\.premiselabs\.co:6379/live-v5"\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "bolt://localhost:16379/tortoise"\)$',
@@ -3926,6 +3945,47 @@ def test_declaration_path_rejects_undeclared():
     assert not _is_declared(
         "test_13557_13558_reachable_reads.py",
         'monkeypatch.setenv("TORTOISE_DB_URI", _uri())  # pinned lane')
+
+
+def test_the_spool_rehearsal_row_covers_only_its_triaged_values():
+    """#14318: the `test_spool_drain_rehearsal.py` row is VALUE-scoped, in both directions.
+
+    The file legitimately mutates the URI with three values and no others: a
+    production host (the refusal IS the measurement), the legacy loopback lane that
+    keeps that refusal from being "refuse all", and the docker test lane the
+    `run --mode …` arms drive against `_run`'s own bookkeeping. Every site is
+    additionally scoped by `_run`'s target gate answering BEFORE any connection.
+
+    #14318's warning is the reason the arms are value-scoped and not `setenv`-shaped:
+    a `docker://`-only row would have authorised the five lane sites while leaving the
+    two gate sites red *and* the gate green, and a row matching any `setenv` in this
+    file would authorise the next site nobody triaged — the #942 vacuity vector this
+    census exists to catch. The negatives are taken against the SAME declared file on
+    purpose (the `test_unknown.py` lesson above): a negative against an undeclared file
+    answers False against ANY pattern and pins nothing.
+    """
+    for line in (
+        'monkeypatch.setenv("TORTOISE_DB_URI", '
+        '"bolt://api.premiselabs.co:6379/live-v5")',
+        'monkeypatch.setenv("TORTOISE_DB_URI", "bolt://localhost:16379/tortoise")',
+        'monkeypatch.setenv("TORTOISE_DB_URI", '
+        '"docker://:pw@127.0.0.1:6379/tortoise_test")',
+    ):
+        assert _is_declared("test_spool_drain_rehearsal.py", line), (
+            f"a site this row triaged must be declared: {line!r}")
+    for untriaged in (
+        # another graph on the same host — a NEW site, not one of the five
+        'monkeypatch.setenv("TORTOISE_DB_URI", '
+        '"docker://:pw@127.0.0.1:6379/another_graph")',
+        # the production host under a different database — the value is the claim
+        'monkeypatch.setenv("TORTOISE_DB_URI", '
+        '"bolt://api.premiselabs.co:6379/live-v6")',
+        # the shape-only widening: a bare `setenv`-matching row would take this
+        'monkeypatch.setenv("TORTOISE_DB_URI", uri_var)',
+    ):
+        assert not _is_declared("test_spool_drain_rehearsal.py", untriaged), (
+            "this row must not authorise a value it never triaged — a blanket "
+            f"setenv arm here is the #942 vacuity vector: {untriaged!r}")
 
 
 def test_restoration_exemption_boundary():
