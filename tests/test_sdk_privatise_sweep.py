@@ -285,8 +285,9 @@ def _residue_block() -> str:
     — and the `#12039` residue re-cut below (`SWEEP_RESIDUE` `11896` → `11898`, stale ON ARRIVAL on
     `main`) appended 24 `#:` lines to `tools/sdk_privatise.py`, so the figure above is RE-MEASURED
     on this tree rather than carried forward from the fold's own reading, which is what the graded
-    figure exists to force - and the `#14395` fix lane's re-pin paragraph (11898 -> 11901 on the
-    tree this branch would merge) took it to 1774, re-walked by this function:
+    figure exists to force - and the `#14395` fix lane's re-pin paragraph took it to 1774 on its
+    own tree, while the merge of `origin/main` `953c299c9b` (which KEPT both sides' `#:` prose)
+    re-read 1808 above, re-walked by this function and never adjusted to a carried figure:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
