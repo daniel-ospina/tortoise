@@ -298,6 +298,48 @@ def _lstat_is_regular(path: Path) -> bool:
         return False
 
 
+def claim_path_unreadable(root: Path) -> bool:
+    """Whether a REGULAR file sits at the claim path that this process cannot READ.
+
+    This is the one arm that blocks the drain PERMANENTLY. A regular claim file we
+    cannot read is HONOURED, never taken over (see :func:`acquire`): a transient local
+    error and a mode `000` file are indistinguishable, so "unprovable reads as ALIVE"
+    is the fail-closed answer. The consequence is that every pass returns
+    ``held_by_claim`` with NO holder identity, ``holder()`` cannot name a pid, nothing
+    is attempted, and the spool stops moving until a human looks — and until now
+    nothing told the human. The operator line said ``capture: DRAINING (n queued)``,
+    which describes a working drain: the residual's justification ("blocks the drain
+    until a human looks") had no surface to be looked AT (#14480 review, P2).
+
+    ⛔ A LIVE PROBE, NOT A DURABLE FACT, and that is deliberate. The other claim-axis
+    fact (`claim_unavailable`) is a statement about a PAST pass, so it has to be
+    recorded; this one is a property of the spool root at READ time, so the health
+    line can simply ask. Probing cannot go stale: the line stops saying it the moment
+    the file is cleaned up or its mode is fixed, with no clearing arm, no carry-forward
+    arm, and no way for a dead lock (pid recycled, lease long expired) to keep the
+    warning alive. It also costs nothing on a healthy box — `lstat` says "not a regular
+    file" or the `open` succeeds, and no bytes are ever read.
+
+    Only a REGULAR file is opened (`lstat` first — opening a FIFO or a socket is the
+    block this module already removed from the claim read), and ``FileNotFoundError``
+    is answered ``False``: a claim released between the two syscalls is not a stall.
+    """
+    path = claim_path(root)
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return False
+    except OSError:
+        return False
+    try:
+        with path.open("rb"):
+            pass
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return False
+
+
 def _restore_quarantine(quarantine: Path, path: Path) -> bool:
     """Put a quarantined object BACK, never replacing a newer one.
 

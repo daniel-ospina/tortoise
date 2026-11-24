@@ -6144,10 +6144,24 @@ export function countPendingEntries(dir: string): number | undefined {
 }
 
 /** Read the recorded per-box status. Absent/corrupt reads as `undefined` (the
- *  health line then falls back to what the spool itself proves). */
+ *  health line then falls back to what the spool itself proves).
+ *
+ *  ⛔ `lstatSync` FIRST, AND ONLY A REGULAR FILE IS READ — the Python twin
+ *  (`capture_spool.read_capture_status`) carries the same gate for the same
+ *  reason. This read sits on the DRAIN path: `recordOutcome` calls it while the
+ *  one-drainer claim is HELD, and `flushSpool` releases the claim only after
+ *  the pass returns, so a FIFO (or a socket) at `status.json` used to block
+ *  `open(2)` FOREVER *inside the claimed section* — the spool stayed claimed
+ *  until its lease was judged stale, and `captureHealthLine` blocked on the same
+ *  path, so the health line hung instead of reporting the box. It is the object
+ *  class `readDrainClaim` already gates on the CLAIM file (cycle-5 P1), applied
+ *  to the status file this PR is what put on the drain path (#14480 review, P1).
+ */
 export function readCaptureStatus(dir: string): CaptureStatus | undefined {
+  const path = statusPathFor(dir);
   try {
-    const parsed = JSON.parse(readFileSync(statusPathFor(dir), "utf8")) as CaptureStatus;
+    if (!lstatSync(path).isFile()) return undefined;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as CaptureStatus;
     return parsed && typeof parsed === "object" ? parsed : undefined;
   } catch {
     return undefined;
@@ -6430,7 +6444,12 @@ export function applyClaimPolicy(
     // onto the record it earned. `updated_at` stays this pass's, because the state
     // half of the record IS this pass's observation.
     next.claim_unavailable = true;
-    if (previous?.claim_unavailable_reason !== undefined) {
+    // ⛔ `null` IS CARRIED BY NEITHER LEG: the Python twin tests `is not None`, so a
+    // JSON `null` there is "no reason" — testing `!== undefined` here carried it and
+    // made the same shared record render differently on the two legs (#14480 review,
+    // P3).
+    if (previous?.claim_unavailable_reason !== undefined
+      && previous?.claim_unavailable_reason !== null) {
       next.claim_unavailable_reason = previous.claim_unavailable_reason;
     }
   }
@@ -6449,16 +6468,102 @@ export function applyClaimPolicy(
  * path) is one of those early returns. Mirrors `capture_spool._with_claim_term`
  * byte for byte — the cross-leg parity test compares the FULL rendered line.
  */
+/** The operator-line term for the one claim arm that blocks PERMANENTLY — the
+ *  Python twin's `_UNREADABLE_CLAIM_TEXT`, byte for byte, because the cross-leg
+ *  parity test compares the FULL rendered line. */
+const UNREADABLE_CLAIM_TEXT = "a regular file exists but could not be read";
+
+/** Whether a REGULAR file sits at the claim path that this process cannot READ.
+ *
+ *  This is the one arm that blocks the drain PERMANENTLY. A regular claim file we
+ *  cannot read is HONOURED, never taken over (`acquireDrainClaim`): a transient
+ *  local error and a mode-`000` file are indistinguishable, so "unprovable reads as
+ *  ALIVE" is the fail-closed answer. The consequence is that every pass returns
+ *  `heldByClaim` with NO holder identity, nothing is attempted, and the spool stops
+ *  moving until a human looks — and until now nothing told the human: the line read
+ *  `capture: DRAINING (n queued)`, which describes a WORKING drain (#14480 review,
+ *  P2; the Python twin is `drain_claim.claim_path_unreadable`).
+ *
+ *  ⛔ A LIVE PROBE, NOT A DURABLE FACT. The other claim-axis fact
+ *  (`claim_unavailable`) is about a PAST pass, so it has to be recorded; this one is
+ *  a property of the spool root at READ time, so the health line can simply ask. A
+ *  probe cannot go stale: the term disappears the moment the file is cleaned up or
+ *  its mode is fixed, and a dead lock (pid recycled, lease long expired) can never
+ *  keep the warning alive.
+ *
+ *  Only a REGULAR file is opened (`lstatSync` first — opening a FIFO or a socket is
+ *  the block this module already removed from the claim read), and `ENOENT` is
+ *  answered `false`: a claim released between the two syscalls is not a stall.
+ */
+export function claimPathUnreadable(dir: string): boolean {
+  const claimPath = drainClaimPathFor(dir);
+  try {
+    if (!lstatSync(claimPath).isFile()) return false;
+  } catch {
+    return false;
+  }
+  let fd: number;
+  try {
+    fd = openSync(claimPath, "r");
+  } catch (err) {
+    return (err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT";
+  }
+  try {
+    closeSync(fd);
+  } catch {
+    /* the answer is already known */
+  }
+  return false;
+}
+
+/**
+ * Append the claim-axis facts to WHICHEVER verdict was chosen.
+ *
+ * ⛔ A TERM ON EVERY LINE, NOT A SIXTH PRECEDENCE STATE (#14480 review, F1). The
+ * claim axis is a fact about the SPOOL ROOT — true whatever the queue is doing — so
+ * a `SATURATED` box whose claim path is broken must read BOTH, exactly as a
+ * quota-blocked one must. Applying it only to the final `DRAINING`/`OK` verdict
+ * dropped it on the four early returns, and the case the durable fact exists for (a
+ * capacity 429 with a backlog: `state: blocked` AND a broken claim path) is one of
+ * those early returns. Mirrors `capture_spool._with_claim_term` byte for byte — the
+ * cross-leg parity test compares the FULL rendered line.
+ *
+ * ⛔ TWO TERMS, TWO DIFFERENT KINDS OF FACT, and they must not be merged:
+ *
+ *  * `NO drain exclusion` — DURABLE and about a PAST pass: a pass ran without the
+ *    one-drainer claim, and the reason reaches no one unless it is recorded (the
+ *    firing hook discards stderr).
+ *  * `drain claim UNREADABLE` — LIVE and about the PRESENT state: every pass honours
+ *    a holder it cannot name and attempts nothing, so the spool stops moving until a
+ *    human looks. That residual had no surface at all (#14480 review, P2), and it is
+ *    probed rather than recorded because a recorded copy could outlive the
+ *    condition.
+ *
+ * Order is fixed so the rendered line is byte-identical on both legs.
+ */
 function withClaimTerm(
   health: CaptureHealth,
   recorded: CaptureStatus | undefined,
+  dir: string,
 ): CaptureHealth {
+  const terms: string[] = [];
   if (recorded?.claim_unavailable) {
     const reason = recorded.claim_unavailable_reason;
-    const suffix = reason ? ` (${reason})` : "";
-    return { ...health, line: `${health.line}, NO drain exclusion${suffix}` };
+    // ⛔ BYTE-IDENTICAL TO THE PYTHON LEG'S TERM, for EVERY value the record can
+    // hold — not only for the shapes this leg happens to write. The Python twin
+    // gates on `isinstance(reason, str) and reason`, so a non-string reason (a
+    // hand-edited or foreign `status.json` — the two legs share this file) renders
+    // `…, NO drain exclusion` there and used to render `…, NO drain exclusion (5)` /
+    // `([object Object])` here. This PR's own claim is byte-identical words on both
+    // legs for every verdict (#14480 review, P3).
+    const suffix = typeof reason === "string" && reason ? ` (${reason})` : "";
+    terms.push(`NO drain exclusion${suffix}`);
   }
-  return health;
+  if (claimPathUnreadable(dir)) {
+    terms.push(`drain claim UNREADABLE (${UNREADABLE_CLAIM_TEXT})`);
+  }
+  if (!terms.length) return health;
+  return { ...health, line: `${health.line}, ${terms.join(", ")}` };
 }
 
 function spoolHealthLine(
@@ -6482,7 +6587,7 @@ function spoolHealthLine(
       state: "unreadable",
       queued: 0,
       line: `capture: UNREADABLE (cannot list ${entriesDir(dir)})`,
-    }, recorded);
+    }, recorded, dir);
   }
   const queued = scan.pending;
   if (queued === 0 && recorded && recorded.state !== "ok") {
@@ -6491,12 +6596,19 @@ function spoolHealthLine(
     // ⛔ EXCEPT the claim axis: it is a fact about the SPOOL ROOT, not about the
     // queue, so an empty spool does not make it untrue — erasing it here would make
     // the next capture on a broken box report a healthy drain.
-    const keep = {
-      ...(previous?.claim_unavailable ? { claim_unavailable: true as const } : {}),
-      ...(previous?.claim_unavailable_reason
-        ? { claim_unavailable_reason: previous.claim_unavailable_reason }
-        : {}),
-    };
+    // ⛔ KEY-EXISTENCE, NOT TRUTHINESS — the Python twin's self-heal keeps every
+    // claim-axis key the record CARRIES (`{k: v for k, v in previous.items() if k in
+    // (…)`), whatever the value. Copying only the TRUTHY ones made this leg drop a
+    // `claim_unavailable: false` and a JSON `null` reason that Python keeps, so the
+    // ONE shared `status.json` came out different depending on which leg last ran a
+    // health line (#14480 review, P3 — same class as `withClaimTerm`'s suffix).
+    const keep: Partial<CaptureStatus> = {};
+    if (previous && "claim_unavailable" in previous) {
+      keep.claim_unavailable = previous.claim_unavailable;
+    }
+    if (previous && "claim_unavailable_reason" in previous) {
+      keep.claim_unavailable_reason = previous.claim_unavailable_reason;
+    }
     recorded = { version: 1, state: "ok", queued: 0, updated_at: new Date().toISOString(), ...keep };
     writeCaptureStatus(dir, recorded);
   }
@@ -6551,7 +6663,7 @@ function spoolHealthLine(
       // `blocked` alone would name the status and lose the cause, so the
       // marker's own recorded category is reported when it has one.
       line: `capture: BLOCKED (${queued} queued, ${blockedStatus} ${refusalLabel(recorded.reason)})`,
-    }, recorded);
+    }, recorded, dir);
   }
   if (saturated) {
     // `queued` is the PENDING count, so a ceiling filled by terminal entries
@@ -6568,7 +6680,7 @@ function spoolHealthLine(
           state: "saturated",
           queued,
           line: `capture: SATURATED (${queued} queued, refusing new captures)`,
-        }, recorded);
+        }, recorded, dir);
   }
   if (opts.apiKey === "") {
     // The count is NOT dropped here: a keyless box is exactly the box whose
@@ -6578,7 +6690,7 @@ function spoolHealthLine(
       state: "inactive",
       queued,
       line: `capture: INACTIVE (no TORTOISE_API_KEY, ${queued} queued)`,
-    }, recorded);
+    }, recorded, dir);
   }
   const verdict = queued > 0
     ? { state: "draining" as const, queued, line: `capture: DRAINING (${queued} queued)` }
@@ -6589,7 +6701,7 @@ function spoolHealthLine(
   // divergence here is invisible to everyone but a human who ran the other leg.
   // It goes through `withClaimTerm` like every earlier verdict: the term is an
   // ADDED FACT, not a precedence state.
-  return withClaimTerm(verdict, recorded);
+  return withClaimTerm(verdict, recorded, dir);
 }
 
 /**
