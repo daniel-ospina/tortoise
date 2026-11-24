@@ -3345,13 +3345,13 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # ⛔ The un-supersede arm's start text occurs TWICE (`56529`, `56568`), so its row is located
     # by its own `continue` terminator (`56538`) — never by the start text alone, which would
     # admit either occurrence.
-    # ⛔ Tracked as `#13937`, whose own "suggested scope" item 1 is exactly this:
-    # re-derive every address at the current tree rather than trusting the block.
-    # Two deltas, not one, is why each row was re-found by its own pinned text
-    # rather than by adding a constant — and every row's SPAN is unchanged
-    # (176, 3 and 10 lines), so the addresses moved WITH the statements rather
-    # than being re-pointed at neighbouring code. Re-derived again at
-    # `3e9278e39349` (`#14220`'s embedder seam).
+    # ⛔ THIS IS THE RE-DERIVATION `#13937` ASKS FOR (its own "suggested scope" item 1:
+    # re-derive every address at the current tree), so the note that "no landing re-derived
+    # these four rows" no longer holds. Its figures are above and were re-measured here, not
+    # carried: the mover is `bbe54363ad65` (#14220, on `main`), which is the commit both
+    # `git show <sha>:tortoise/sdk.py | grep -n` probes above name. Every row's SPAN is
+    # unchanged (176, 3, 10 and 1 lines), so the addresses moved with the statements rather
+    # than being re-pointed at neighbouring code.
     ("sdk.py", 56377, 56379): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 56529, 56538): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
