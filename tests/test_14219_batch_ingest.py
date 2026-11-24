@@ -391,6 +391,70 @@ def test_a_cancel_during_an_in_flight_item_keeps_that_item_s_result():
     assert coord.settle(ORG, batch.batch_id).state is BatchState.CANCELLED
 
 
+def test_orphan_adoption_never_wipes_the_estimate_the_ack_carried():
+    """⛔ RECUT REVIEW P2: the FOURTH writer of the batch row was still unconditional.
+
+    `submit()` writes the item rows BEFORE the batch row on purpose (an ACK must
+    never name a document we did not record), and `pending_batches()` UNIONs the
+    ITEM arm — so a recovery scan running while an acceptance is inside its item
+    loop sees items with no batch row and reads `get_batch -> None`. It then
+    constructed a `Batch(estimate={}, corpus_name="")` and called `put_batch`, an
+    UNCONDITIONAL `MERGE ... SET` over `estimate_json`, `corpus_name`,
+    `cancelled_at`: the estimate owner §4 requires on the ACK was WIPED and the
+    batch relabelled `resuming` over work that never stopped. The three other
+    writers of that row were each hardened to a compare-and-set; this one was not.
+
+    The stale read is injected (`get_batch` returns `None` once, exactly what the
+    scan saw), so this reproduces the window without threads and FAILS on the
+    pre-fix code.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    # ⛔ The estimate must be NON-EMPTY or this test is vacuous: `submit()` with no
+    # estimate already stores `{}`, so comparing `{} == {}` would pass over the
+    # very wipe it exists to catch (measured: it did).
+    estimate = {"items": 2, "tokens_per_item": 64799,
+                "estimated_tokens": 129598, "included_tokens": None,
+                "overage_tokens": 0, "overage_usd": 0.0}
+    batch, _items = coord.submit(ORG, ["/d/a.md", "/d/b.md"],
+                                 corpus_name="handbook", estimate=estimate)
+    before = store.get_batch(ORG, batch.batch_id)
+    assert before is not None
+    assert before.estimate, "the premise: the ACK wrote a non-empty estimate"
+    assert before.corpus_name == "handbook", "the premise: the ACK wrote a corpus"
+
+    real_get = store.get_batch
+    fired = {"done": False}
+
+    def stale_get(org_id, batch_id):
+        if not fired["done"]:
+            fired["done"] = True
+            return None          # the read the scan took BEFORE the row was written
+        return real_get(org_id, batch_id)
+
+    store.get_batch = stale_get  # type: ignore[method-assign]
+    coord.recover(ORG)
+
+    assert fired["done"], "the stale read did not fire — the test proves nothing"
+    after = real_get(ORG, batch.batch_id)
+    assert after is not None, "the adoption DELETED the batch row"
+    assert after.estimate == before.estimate, (
+        "the adoption overwrote the ACK's estimate with an empty one — owner §4 "
+        f"requires it on the record: {before.estimate!r} -> {after.estimate!r}")
+    # ⛔ NOT asserted: `state is not RESUMING`. A genuine recovery of an accepted
+    # batch that still has `queued` items SHOULD report `resuming` — that is the
+    # feature, not the defect. What the adoption must never do is rewrite the
+    # fields the ACK put on the record from an orphan-shaped (empty) Batch. The
+    # measurement that isolates it is the estimate, the corpus name and the
+    # creation stamp.
+    assert after.corpus_name == before.corpus_name, (
+        f"the adoption overwrote corpus_name: {before.corpus_name!r} -> "
+        f"{after.corpus_name!r}")
+    assert after.created_at == before.created_at, (
+        "the adoption re-stamped created_at from an orphan item's updated_at, so "
+        "the batch's own age is lost")
+
+
 def test_a_restart_settles_what_a_cancelled_batch_left_in_flight():
     """A crash AFTER a cancel must not leave a permanently non-terminal row."""
     store = InMemoryBatchStore()
@@ -1646,6 +1710,15 @@ def _every_store_statement() -> list[str]:
     store.batch_counts(ORG, [batch.batch_id])
     store.find_settled_by_content_key(ORG, "k")
     store.discard(ORG, batch.batch_id)
+    # ⛔ `add_item_tokens` is the ONE statement whose failure is SWALLOWED
+    # (`_bill` logs and carries on: "the ledger is charged, the row's total is
+    # short"), so a malformed emission here is exactly the bill/receipt
+    # disagreement this branch fixed twice — and this pin, whose docstring claims
+    # "every Cypher statement `GraphBatchStore` can emit", did not drive it, so
+    # neither the brace guard nor the live round-trip could reach it (#14415
+    # recut review, P3). A pin wider than its reach is the no-op-gate class.
+    store.add_item_tokens(ORG, batch.batch_id, items[0].item_id,
+                          tokens_in=1, tokens_out=1)
     return seen
 
 
@@ -1666,7 +1739,7 @@ def test_every_emitted_statement_is_brace_balanced():
     doubled brace anywhere in any statement) and not only that one line.
     """
     seen = _every_store_statement()
-    assert len(seen) >= 14, f"only {len(seen)} statements reached the store"
+    assert len(seen) >= 15, f"only {len(seen)} statements reached the store"
     # ⛔ THREE SHAPES, NOT ONE (#14415 review round 11, LOW). Balanced braces are
     # not enough: an `f` prefix dropped from `f"WHERE 1=1 {attempts_clause}"`
     # leaves the braces balanced and emits the literal text `{attempts_clause}`,
