@@ -814,7 +814,10 @@ def test_the_decoy_interpreter_STARTS_and_survives_the_foreign_argv0(tmp_path: P
     the behavioural arm cannot red at all, so the env rule is also stated directly
     rather than inferred from timing.
     """
-    assert _decoy_env()["PYTHONHOME"] == sys.base_prefix, (
+    # ⛔ `.get(...)`, never `["PYTHONHOME"]`: the pin's own falsifier deletes the
+    # key, so a subscript reds as `KeyError` and the crafted message never renders
+    # (review, delta cycle 2 on #14459).
+    assert _decoy_env().get("PYTHONHOME") == sys.base_prefix, (
         "the decoy's env must carry PYTHONHOME: `executable=` leaves a FOREIGN "
         "argv[0] in front of the interpreter, and CPython resolves its prefix "
         "from it — without this the decoy exits rc=1 before it sleeps (#14122)")

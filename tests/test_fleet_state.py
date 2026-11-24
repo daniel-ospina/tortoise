@@ -4109,7 +4109,12 @@ def test_the_census_env_keeps_a_foreign_argv0_interpreter_alive(tmp_path) -> Non
     compiled in (`/usr/bin/python3`), that arm cannot red at all and the structural
     arm is the only signal, which is the point of having it.
     """
-    assert _census_env()["PYTHONHOME"] == sys.base_prefix, (
+    # ⛔ `.get(...)`, never `["PYTHONHOME"]` — the FALSIFIER for this arm is
+    # exactly the mutant that DELETES the key, and a subscript raises `KeyError`
+    # there: the crafted message below would never render, and a bare `KeyError`
+    # at the assert line reads as a broken fixture rather than as the red the pin
+    # exists to produce (review, delta cycle 2 on #14459).
+    assert _census_env().get("PYTHONHOME") == sys.base_prefix, (
         "the census lane's env must carry PYTHONHOME: `executable=` leaves a "
         "FOREIGN argv[0] in front of the interpreter, and CPython resolves its "
         "prefix from it (#14122)")
