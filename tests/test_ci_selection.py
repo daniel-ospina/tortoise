@@ -14245,15 +14245,16 @@ def test_the_emission_block_guard_is_not_vacuous():
     # measures the BOX, not the citation, because a local-only ref such as `refs/preserved/*`
     # can hold an object no reader has. It was then rewritten to say the splice
     # is at "no reachable commit" — which is also false, so the correction repeated the very
-    # defect it was removing. Both halves are reachable today, measured with this module's own
-    # helpers: `dc42c55baa` (on `integration/14296-on-new-main`) is the RANGE-with-semicolon
-    # spelling — FOUR clauses parse against FIVE shard-figure sentences, so exactly one figure
-    # there is graded by nothing (`_EMISSION_UNREAD_SENTENCE_RE` also matches the tail of every
-    # readable clause, so this arm's two counts agree only when EVERY sentence parses) — and
-    # `4b7e6ecaed`, this PR's own `merge=union` of `origin/main` (an ancestor of this head),
-    # states four groups from two parents' readable clauses with no conflict markers. The
-    # `spliced` fixture below is a HAND-BUILT string, not a checkout of either; the commits are
-    # named so the arm is motivated by a shape a reader can go and check.
+    # defect it was removing. The half that IS citable was measured with this module's own helpers:
+    # `dc42c55baa` (on `integration/14296-on-new-main`) is the RANGE-with-semicolon spelling —
+    # FOUR clauses parse against FIVE shard-figure sentences, so exactly one figure there is graded
+    # by nothing (`_EMISSION_UNREAD_SENTENCE_RE` also matches the tail of every readable clause, so
+    # this arm's two counts agree only when EVERY sentence parses). ⛔ The OTHER half — four groups
+    # spliced out of two parents' readable clauses by `merge=union` — has no sha named here on
+    # purpose: it existed only on this branch's own pre-rebase merge commits, and a rebase leaves no
+    # ref resolving to them, so citing one would be the same uncheckable-sha defect this note
+    # removes. The `spliced` fixture below is a HAND-BUILT string, not a checkout of any commit; the
+    # one commit above is named so the arm is motivated by a shape a reader can go and check.
     spliced = _emission_block_header(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s "
         "(f, g, i),\n"
