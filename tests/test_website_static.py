@@ -3899,6 +3899,18 @@ def _css_desktop_rules(css: str) -> list[tuple[str, str, str | None]]:
         prelude = m.group(1).strip()
         if not prelude or prelude.startswith("@"):
             continue
+        if "<" in prelude:
+            # The FIRST rule of the sheet carries the whole document `<head>`
+            # as its prelude — this scan starts at index 0 — and downstream
+            # readers had to defend against that junk prefix themselves. The
+            # defence one of them chose was `if "\n" in part: continue`, and
+            # that skip also threw away legitimate MULTI-LINE selectors, so a
+            # wrapped `#pricing-section\n  .pricing-card.popular { … }`
+            # (1,2,0, a browser applies it) was invisible to the cascade with
+            # the guard GREEN (#14406 review round 9, measured). Cut the head at
+            # the `<style>` tag HERE, once, so the prelude is the selector list
+            # it actually is and no reader has to skip newlines.
+            prelude = prelude.rsplit(">", 1)[-1].strip()
         condition = next((c for start, end, c in media
                           if start <= m.start() < end), None)
         if condition is not None and not _media_applies_at_desktop(condition):
@@ -4067,6 +4079,19 @@ def _css_reaching_decls(css: str, prop: str, compound: str,
       pin the logical alias it delegates to (`margin-block-start`) and any
       shorthand that resets it (`margin`, `margin-block`) — see
       `SLACK_PROPS` in `TestProductTeamsPricingCardCtaBaseline`.
+    * ⛔ IT ONLY REACHES A SELECTOR THAT NAMES THE SUBJECT'S CLASS. A selector
+      that matches the CTA without naming `.btn` — a bare `a`, `#pricing-grid
+      a`, or `a[href="/auth"]`, which are the page's own CTA tag and
+      destination — is NOT a candidate, and a rule there can move the button.
+      Measured (#14406 review round 9): all three left every row of
+      `TestProductTeamsPricingCardCtaBaseline` GREEN. This is a STATED residual,
+      not an oversight: settling it means modelling which DOM element the
+      subject IS (its tag and attributes), because the cheap approximation in
+      the other direction — "a compound that names no class may match" — reds a
+      correct page on every `p { margin: … }` (measured: the page declares
+      such rules, and a naked `p` cannot select a `.btn`). A lane that fixes
+      this must add the subject's element to the reader's contract, not widen
+      the class test.
     """
     out: list[tuple[str, str]] = []
     for prelude, body, _condition in _css_desktop_rules(css):
@@ -4243,18 +4268,23 @@ def _css_block_end_cascade(css: str, compound: str,
       specific, so an unmodelled override fails closed (red).
     * It does not model `@layer`, `@supports`, inheritance or `revert` — none of
       which this page uses, and each of which would need its own reader.
+      It also reaches only a selector that NAMES `compound`'s class: a bare
+      `a` / `#pricing-grid a` / `a[href="/auth"]` rule is not a candidate —
+      the same stated residual `_css_reaching_decls` documents, measured in
+      #14406 review round 9.
     """
     ranked: list[tuple[tuple, str, str, str]] = []
     for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
         for part in (p.strip() for p in prelude.split(",")):
-            # `_css_desktop_rules` yields everything before a rule's `{`, so the
-            # FIRST rule of the sheet (the `*` reset) carries the document's
-            # `<head>` … `<style>` text as its prelude. A part that still holds
-            # markup or a newline is not a selector — without this, the junk
-            # prefix's `#060b14` / `#d1d5db` out-count every real id in the file
-            # and the `*` reset WINS the cascade with `padding: 0` (measured on
-            # the first draft of this helper).
-            if "<" in part or "\n" in part:
+            # `_css_desktop_rules` cuts the document `<head>` off the FIRST
+            # rule's prelude, so a part can only carry markup if that cut had
+            # nothing to cut at; a NEWLINE is NOT a reason to skip — selectors
+            # wrap, and skipping them hid a wrapped
+            # `#pricing-section` / `.pricing-card.popular { padding-bottom:
+            # 1.75rem }` from the cascade (#14406 review round 9, measured: the
+            # winner stayed `calc(1.75rem - 1px)` while a browser applied the
+            # wrapped rule).
+            if "<" in part:
                 continue
             rightmost = _css_rightmost_compound(part)
             if not _css_rightmost_selects(rightmost, compound) and not (
@@ -11934,14 +11964,15 @@ class TestProductTeamsPricingCardCtaBaseline:
 
 
 class TestCssDesktopReachAndSpecificity:
-    """The two readers `TestProductTeamsPricingCardCtaBaseline` stands on.
+    """The readers `TestProductTeamsPricingCardCtaBaseline` stands on.
 
-    Both are guards-of-the-guard: a cascade row is only as good as the
-    specificity counter and the media-reach predicate behind it, and each of
-    those had a measured FALSE PASS that no page-level row could see, because
-    the mutant lives in the guard's own arithmetic (#14406 review round 6,
-    findings 1 and 4). The rows below mutate the PAGE TEXT the way an editor
-    would — appending a real rule — and assert the reader SEES it.
+    All are guards-of-the-guard: a cascade row is only as good as the
+    specificity counter, the media-reach predicate and the markup readers
+    behind it, and each of those had a measured FALSE PASS that no page-level
+    row could see, because the mutant lives in the guard's own arithmetic
+    (#14406 review rounds 6, 8 and 9). The rows below mutate the PAGE TEXT the
+    way an editor would — appending a real rule, or an attribute in another
+    quoting spelling — and assert the reader SEES it.
     """
 
     #: The standard's columns (MDN, Specificity: the CLASS column holds classes,
@@ -12309,6 +12340,60 @@ class TestCssDesktopReachAndSpecificity:
             "the pricing grid itself now carries an inline `style` attribute — "
             "that is the defect `test_no_card_carries_an_inline_style` exists "
             "for, and this row would mask it by staying green here")
+
+    def test_a_wrapped_selector_is_still_read_by_the_cascade(self):
+        """A selector that WRAPS is still a selector — the cascade skipped it.
+
+        `_css_block_end_cascade` skipped any comma part containing a newline,
+        a defence against the document `<head>` that the first rule's prelude
+        carries. The defence was too wide: it also threw away a selector an
+        editor had simply WRAPPED, which is what a long selector does at a line
+        limit — and the wrapped form is (1,2,0), so a browser applies it and the
+        popular card's 1px compensation is gone. Measured (#14406 review round
+        9) on this tree before the fix: every mutant below left the cascade
+        reader's winner at `calc(1.75rem - 1px)` — the guard GREEN over the
+        owner-reported 744.78-vs-745.78 defect, with every row of
+        `TestProductTeamsPricingCardCtaBaseline` passing.
+
+        The head is now cut at the `<style>` tag where it is CREATED
+        (`_css_desktop_rules`), so no downstream reader has to skip newlines and
+        the junk-prefix defence is still in place for a prelude the cut could
+        not reach.
+        """
+        baseline = _css_block_end_cascade(_product_teams_html(), ".pricing-card")
+        assert baseline[-1][2] == "calc(1.75rem - 1px)", (
+            f"the unmutated page's winning block-end inset is {baseline[-1:]!r}, "
+            "so these rows could not tell a caught mutant from a page that is "
+            "already wrong")
+        for mutant in (
+                # the descendant combinator on its own line
+                "#pricing-section\n  .pricing-card.popular { padding-bottom: 1.75rem }",
+                # ...as the wrapped part of a selector LIST
+                ".pricing-grid .pricing-card,\n#pricing-section\n  .pricing-card.popular "
+                "{ padding-bottom: 1.75rem }",
+                # ...and with the brace on its own line, tying on specificity
+                ".pricing-grid .pricing-card,\n.pricing-card.popular\n"
+                "{ padding-bottom: 1.75rem }",
+        ):
+            cascade = _css_block_end_cascade(self._page_with(mutant), ".pricing-card")
+            assert cascade[-1][2] == "1.75rem", (
+                f"`{mutant.replace(chr(10), ' ')}` is a WRAPPED selector: (1,2,0) "
+                "in a browser, so it takes the popular card's bottom inset and "
+                "its CTA drops 1px — but the cascade reader's winner is still "
+                f"{cascade[-1]!r}. A newline is not a reason to skip a "
+                "selector (#14406 review round 9, measured)")
+
+        # ...and dropping the newline skip did not turn EVERY wrapped rule into
+        # a reach: a wrapped rule that does not select the card is still not a
+        # candidate, or a correct page would be red for an unrelated line break.
+        unrelated = self._page_with(
+            "#pricing-section\n  .pricing-grid { padding-bottom: 1.75rem }")
+        assert _css_block_end_cascade(unrelated, ".pricing-card")[-1][2] == (
+            "calc(1.75rem - 1px)"), (
+            "`#pricing-section\n  .pricing-grid` does not select the pricing "
+            "card, so it must not become the cascade winner — dropping the "
+            "newline skip must widen the reader's ENUMERATION, not its "
+            "matching")
 
     def test_an_or_condition_is_the_same_logical_or_as_a_query_list(self):
         """`or` is a top-level OR too — the round-7 splitter only knew commas.
