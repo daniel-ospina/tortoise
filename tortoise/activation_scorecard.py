@@ -359,10 +359,10 @@ FUNNEL_QUERY = (
 # route — and ``tests/test_demo_session_read_exclusion_8290.py``, which queries it
 # directly on a real embedded engine), and a ``params=…`` argument there does not
 # fit in 100 columns, so it wraps and pushes later lines down. Measured over every
-# ``hosted_api.py:<line>`` cite in the tracked tree: **167** distinct cite
+# ``hosted_api.py:<line>`` cite in the tracked tree: **160** distinct cite
 # targets have a line number LARGER than 27093 (27179 … 99999) and those are the
-# ones that shift; **581** have a number smaller than it (26 … 27090) and cannot
-# move. (749 distinct targets in all — the remainder is 27093 itself, which this
+# ones that shift; **562** have a number smaller than it (26 … 27090) and cannot
+# move. (723 distinct targets in all — the remainder is 27093 itself, which this
 # very comment names. NEVER re-take these by hand — that is how they went wrong
 # twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every
 # figure in this note AND the list-helper's in one command whenever
