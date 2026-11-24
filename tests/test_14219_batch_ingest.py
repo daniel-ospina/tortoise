@@ -1675,22 +1675,28 @@ def test_a_receipt_and_the_meter_agree_when_the_row_moved_on():
 
 # ── round 9: the malformed statement, the cancel a rescan erased, and the
 #    liveness rule's third site ────────────────────────────────────────────
-def _every_store_statement() -> list[str]:
-    """Every Cypher statement `GraphBatchStore` can emit, by driving all of it.
+def _every_store_statement_pairs() -> list[tuple[str, dict]]:
+    """Every `(statement, params)` pair `GraphBatchStore` hands to the engine.
 
     A recording `query` returns an empty result set, so nothing is asserted about
-    RESULTS here — only about the STATEMENTS this module hands to FalkorDB. That
-    is deliberate: the fake `query` in the rest of this suite accepts ANY string,
-    which is exactly why a malformed statement went unnoticed.
+    RESULTS here — only about what this module EMITS. That is deliberate: the
+    fake `query` in the rest of this suite accepts ANY string, which is exactly
+    why a malformed statement went unnoticed.
+
+    ⛔ THE PARAMS ARE COLLECTED TOO. Braces are half of "does the engine accept
+    this"; the other half is the parameters, and a statement that names `$x`
+    without supplying it is FalkorDB's `Missing parameters` — a RUN-time failure
+    invisible to every hermetic test (#14415 recut review, P0, measured on the
+    live round-trip).
     """
-    seen: list[str] = []
+    pairs: list[tuple[str, dict]] = []
 
     class _Res:
         def __init__(self) -> None:
             self.result_set: list = []
 
-    def _record(cypher, params=None, timeout=None, _seen=seen):
-        _seen.append(cypher)
+    def _record(cypher, params=None, timeout=None, _pairs=pairs):
+        _pairs.append((cypher, dict(params or {})))
         return _Res()
 
     store = GraphBatchStore(_record)
@@ -1719,7 +1725,12 @@ def _every_store_statement() -> list[str]:
     # recut review, P3). A pin wider than its reach is the no-op-gate class.
     store.add_item_tokens(ORG, batch.batch_id, items[0].item_id,
                           tokens_in=1, tokens_out=1)
-    return seen
+    return pairs
+
+
+def _every_store_statement() -> list[str]:
+    """The statements alone, for the arms that grade shape and not parameters."""
+    return [cypher for cypher, _params in _every_store_statement_pairs()]
 
 
 def test_every_emitted_statement_is_brace_balanced():
@@ -1940,6 +1951,34 @@ def test_the_graph_store_speaks_real_cypher():
     finally:
         graph.query("MATCH (n) DETACH DELETE n")
         graph.delete()
+
+
+def test_every_emitted_statement_receives_every_parameter_it_names():
+    """⛔ P0: a statement that names `$attempts` without supplying it is DEAD on
+    FalkorDB and green everywhere else.
+
+    Measured at the recut head: a SET-block rewrite dropped
+    `"attempts": int(item.attempts)` from `put_item_if_state`'s params while the
+    statement still wrote `i.attempts=$attempts`. FalkorDB answered
+    `redis.exceptions.ResponseError: Missing parameters` — so EVERY item write
+    (claim, settle, cancel) failed on the production store, and the batch sat
+    `resuming` for ever. The whole hermetic suite was green: a fake `query`
+    accepts any string, and the brace guard grades braces. Only the live
+    round-trip saw it.
+
+    This pins the class hermetically: every `$name` the emitted Cypher references
+    must be present in the params handed to the same call.
+    """
+    import re as _re
+
+    missing: list[tuple[str, str]] = []
+    for cypher, params in _every_store_statement_pairs():
+        for name in set(_re.findall(r"\$([A-Za-z_][A-Za-z0-9_]*)", cypher)):
+            if name not in params:
+                missing.append((name, cypher.split("\n")[0][:110]))
+    assert not missing, (
+        "a statement names a parameter it never supplies — FalkorDB answers "
+        f"`Missing parameters` at run time: {missing}")
 
 
 def test_the_store_statements_carry_the_tenant_filter():
