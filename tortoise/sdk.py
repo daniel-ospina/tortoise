@@ -49834,14 +49834,14 @@ class TortoiseSDK:
         own `rrf_fusion` over both passes, replacing the rank concatenation
         (`expanded + pass-1-only`) it used to be. An id BOTH passes carry earns both
         terms — the entity context AGREEING with the query is the signal the expansion
-        exists to supply — but that is an ADVANTAGE, not a dominance guarantee: two
-        terms beat a single-list rank only while the shared id sits at 1-based rank
-        <= 61 in BOTH lists. At 62 in both the terms TIE a lone rank-1 and
-        `(-score, id)` decides by spelling; past that the better single-list rank
-        wins (`DEFAULT_POOL_SIZE` is 120, so those ranks occur). A pass-1 id can move
-        down only when a candidate out-ranks it in the composed run, when one ties it
-        and wins the id tiebreak (#2952), or by a shared id inside that bound — never
-        because the expansion had more rows. Order is NOT preserved: a re-ranked dense
+        exists to supply — but that is an ADVANTAGE, not a dominance guarantee: it is a
+        PAIR condition, `1/(61+h1) + 1/(61+h2)` vs a single-list rank `r`, beaten only
+        while `r < (h1 + h2 - 61) / 2`. The SYMMETRIC case (both ranks at <= 61) wins,
+        ties a lone rank-1 at 62 (`2/122 == 1/61`, `(-score, id)` decides by spelling)
+        and loses past it — while a top slot in EITHER list beats every single-list term
+        outright. A pass-1 id can move down only when a candidate out-ranks it in the
+        composed run, when one ties it and wins the id tiebreak (#2952), or by a shared
+        id under that pair condition — never because the expansion had more rows. Order is NOT preserved: a re-ranked dense
         leg is the mechanism, not a side effect, and on a lever that ships OFF it stays
         a decision to be measured, not asserted.
 

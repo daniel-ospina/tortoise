@@ -264,18 +264,25 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     is a guarantee this fusion does not give, and it was stated in four places.
 
     ``rrf_fusion`` scores a shared id ``1/(61+h1) + 1/(61+h2)`` (0-based ranks)
-    against an expansion-only id at 0-based rank 0's single ``1/61``, so two
-    terms win only while BOTH 1-based ranks are <= 61; at 62 in both the two
-    terms TIE a lone rank-1 and ``(-score, id)`` decides by spelling, and past
-    that the better single-list rank wins outright. ``DEFAULT_POOL_SIZE`` is 120
-    (``tortoise/retrieval.py``), so ranks past 61 are ordinary in the shipping
-    default — not a corner.
+    against a single-list candidate at 0-based rank ``r``'s ``1/(61+r)``, so the
+    condition is a PAIR of ranks, ``r < (h1 + h2 - 61) / 2`` — never a bound on
+    one rank. Its SYMMETRIC case (``h1 == h2 == h``, the only one a same-rank
+    fixture builds) wins while both 1-based ranks are <= 61, TIES a lone rank-1
+    at 62 and loses past it; its TOP-SLOT case is unconfined. ``DEFAULT_POOL_SIZE``
+    is 120 (``tortoise/retrieval.py``), so ranks past 61 are ordinary in the
+    shipping default — not a corner.
 
     The prose is load-bearing here: it is what tells a reader how the lever
     behaves, and the lever's adoption is the sealed A/B's decision (§3, #2516),
     so an unbounded "agreement dominates" is how the A/B's expectation gets
     mis-designed. This row is the non-vacuity proof for the fix: both carriers
     stated the unbounded claim before it.
+
+    ⛔ BOTH HALVES OF THE CONDITION ARE GRADED, because round 18 found this row
+    grading only one of them — the ``<= 61 in BOTH lists`` half is the SYMMETRIC
+    case, and a sentence that published it as a necessary condition was false in
+    the other direction. The arithmetic row below carries the asymmetric
+    (``h1 != h2``) case that falsifies it; this row carries the wording.
     """
     import re
 
@@ -290,22 +297,33 @@ def test_the_two_term_advantage_is_published_with_its_bound_not_as_dominance():
     }
     unbounded = "outranks either pass alone"
     bound = re.compile(r"(<=|\u2264)\s*61")
+    # ⛔ The POSITIVE half round 18 found missing from every carrier: the condition
+    # is a pair of ranks (`r < (h1 + h2 - 61) / 2`), so a carrier that states only
+    # the symmetric `<= 61` case publishes it as a NECESSARY condition and is false
+    # whenever either rank is 1. Graded positively because enumerating the false
+    # phrasings is what let the mirror error through twice; both the ASCII and the
+    # typographic minus are accepted, since the README uses U+2212.
+    pair_condition = re.compile(r"\(\s*h1\s*\+\s*h2\s*[-\u2212]\s*61\s*\)")
     for where, text in carriers.items():
         assert unbounded not in text, (
             f"{where} still states {unbounded!r} — two terms beat a single-list "
-            "rank only while BOTH 1-based ranks are <= 61; at 62 in both they "
-            "tie and past that the better single-list rank wins")
+            "rank only under the pair condition r < (h1 + h2 - 61) / 2")
         assert bound.search(text), (
             f"{where} states the two-term advantage without its bound — the "
-            "`<= 61 in BOTH lists` clause is what makes the claim true")
+            "`<= 61` clause is what makes the SYMMETRIC half of the claim true")
+        assert pair_condition.search(text), (
+            f"{where} publishes the `<= 61` case without the PAIR condition "
+            "`r < (h1 + h2 - 61) / 2` — the `<= 61` reading is the symmetric "
+            "case only, and a shared id holding the TOP slot in either list "
+            "beats every single-list term whatever its other rank (round 18, P2-1)")
 
 
 def test_the_two_term_advantage_is_bounded_at_1based_61():
     """The ARITHMETIC behind the bound, pinned against the fusion itself.
 
-    The prose row above grades that the bound is *stated*; this one grades that
-    it is *true*, so a formula change cannot leave the docstrings telling a
-    reader something the engine no longer does. ``rrf_fusion`` sums
+    The prose row above grades that the pair condition is *stated*; this one
+    grades that it is *true*, so a formula change cannot leave the docstrings
+    telling a reader something the engine no longer does. ``rrf_fusion`` sums
     ``w / (k + rank + 1)`` over a 0-BASED ``rank`` with ``k = 60``
     (``search_engine.py:5075``), so a shared id at 0-based rank ``h`` in BOTH
     lists scores ``2/(61+h)`` against a single-term rank-0 candidate's
@@ -316,18 +334,30 @@ def test_the_two_term_advantage_is_bounded_at_1based_61():
         ``(-score, id)``, i.e. the id's spelling and not its evidence;
       * ``h >= 62`` — the better single-list rank wins.
 
+    ⛔ THAT IS THE **SYMMETRIC** CASE ONLY, AND ROUND 18 FOUND THE DIFFERENCE
+    MATTERS (P2-1). Every row above puts the shared id at the SAME rank in both
+    lists, so the row could not see the top-slot case at all — and a shared id at
+    rank 0 in one list beats EVERY single-list candidate outright, whatever its
+    rank in the other. The asymmetric leg below pins that (``h1 = 1``,
+    ``h2 = 201``, i.e. 1-based 2 and 202) against a ``newcomer`` at 0-based rank
+    0, which is exactly the fixture that falsified the "only while <= 61 in BOTH
+    lists" sentence this PR shipped while fixing its predecessor.
+
     Non-vacuity (measured, then reverted): flipping ``k + rank + 1`` to a
     1-based ``k + rank`` in ``search_engine.py`` reds the ``h = 60`` row
     (``shared`` lands at index 2, asserted < 1). The ``h >= 62`` row reds on any
-    implementation that made membership dominate, and the ``h == 61`` row reds
-    on one that let a tie fall to insertion order.
+    implementation that made membership dominate, the ``h == 61`` row reds on one
+    that let a tie fall to insertion order, and the ASYMMETRIC row reds on any
+    engine that counted membership once rather than once per list.
     """
-    def _pair(h):
-        # ``shared`` at 0-based rank ``h`` in BOTH lists; ``newcomer`` at rank 0
-        # of the expansion and nowhere else, so it earns exactly ONE term.
+    def _pair(h, h_other=None):
+        # ``shared`` at 0-based rank ``h`` in pass 1 and ``h_other`` (default: the
+        # same) in the expansion; ``newcomer`` at rank 0 of the expansion and
+        # nowhere else, so it earns exactly ONE term.
+        h2 = h if h_other is None else h_other
         pass1 = [(f"a{i}", 1.0 - i / 1000) for i in range(h)] + [("shared", 0.5)]
         expanded = ([("newcomer", 9.0)]
-                    + [(f"b{i}", 1.0 - i / 1000) for i in range(h - 1)]
+                    + [(f"b{i}", 1.0 - i / 1000) for i in range(h2 - 1)]
                     + [("shared", 0.4)])
         return pass1, expanded
 
@@ -354,3 +384,30 @@ def test_the_two_term_advantage_is_bounded_at_1based_61():
     assert ids.index("newcomer") < ids.index("shared"), (
         "beyond 1-based 62 the better single-list rank must win: an id both "
         "passes carry does NOT outrank either pass alone")
+
+    # ⛔ ASYMMETRIC (round 18, P2-1): ``shared`` at 0-based rank 1 in pass 1 and
+    # 201 in the expansion — 1-based 2 and 202, so NOTHING here is `<= 61 in both`
+    # — still beats a ``newcomer`` at rank 0. 1/62 + 1/262 = 0.0199458 > 1/61 =
+    # 0.0163934. This is the leg the symmetric rows cannot build, and it is the
+    # published "only while BOTH are <= 61" sentence's counterexample.
+    pass1, expanded = _pair(1, 201)
+    fused = rrf_fusion([pass1, expanded], 60)
+    assert fused["shared"] == 1 / 62 + 1 / 262, (
+        f"the shared id must earn BOTH terms at (h1, h2) = (1, 201) — got "
+        f"{fused['shared']!r} against {1 / 62 + 1 / 262!r}")
+    assert fused["shared"] > fused["newcomer"], (
+        "a shared id whose LOW rank is 1 must beat the single-term rank-0 "
+        f"candidate even at 1-based 202 in the other list — got shared="
+        f"{fused['shared']!r} newcomer={fused['newcomer']!r}")
+    ids = _ids(fuse_expansion_pass(pass1, expanded))
+    assert ids.index("shared") < ids.index("newcomer"), (
+        f"the asymmetric pair must LEAD the fused order — got {ids}")
+
+    # ⛔ ...and the same asymmetry is NOT a licence to claim dominance: at
+    # (h1, h2) = (64, 64) two terms lose to a rank-0 newcomer, which is why the
+    # prose states a PAIR condition and not a top-slot guarantee either.
+    pass1, expanded = _pair(64)
+    ids = _ids(fuse_expansion_pass(pass1, expanded))
+    assert ids.index("newcomer") < ids.index("shared"), (
+        f"at 1-based 65 in both lists the single-term rank-0 candidate must "
+        f"lead — got {ids}")
