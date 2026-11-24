@@ -82,8 +82,8 @@ version: 1
 #
 # `8c373f59a15ba` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
 # durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
-# 0 removed), the #7949 capstone prose, and the privatise residue counts; at THAT head B8 dropped
-# `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
+# 0 removed, against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue
+# counts; at THAT head B8 dropped `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
 # ⛔ THIS PR neither carries nor re-cuts that file: `git diff origin/main HEAD --
 # tests/test_sdk_privatise_sweep.py` is EMPTY at this head, so the arm is `main`'s and the extent it
 # publishes is graded by the arm itself. ⛔ The live clause that stood here — "because THIS PR
@@ -210,7 +210,7 @@ version: 1
 # the first perfectly balanced eleven-way reading since the refresh — while `024387f5` emitted a
 # flat 721.6 s on all eleven BEFORE it, so "first at S=11" unscoped is FALSE and is not claimed
 # here. Those numerals are a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the named
-# trees — re-derive them with that verb rather than trusting them.
+# trees, and sit under the same rule as the figures above rather than under one of their own.
 #
 # The promise is GRADED, not just stated:
 # `tests/test_ci_selection.py::test_the_fast_shards_header_block_states_the_measured_emission`

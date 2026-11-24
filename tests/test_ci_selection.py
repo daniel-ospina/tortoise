@@ -9206,9 +9206,10 @@ def _emission_block_header(manifest_text: str) -> str:
 #: re-derivations splices this block into a second copy of itself and every gate stays green —
 #: nothing grades this block's prose. Measured 2026-11-24 on the `45dd35ba9a` fold: THREE passages
 #: arrived twice (the `8c373f59a1` provenance paragraph, the "stated at the sha" sentence, and the
-#: ratio line — the last carrying TWO figures, `2.0361` beside `2.0362`, which is the tell), the
-#: header grew 18,453 -> 19,261 characters, and every existing arm stayed green because none of the
-#: three is a shard-figure sentence.
+#: ratio line — the last carrying TWO figures, `2.0361` beside `2.0362`, which is the tell). The
+#: fold's block states `_emission_block_header` length 19,059 chars and **10 repeated spans** (5
+#: passages x 2 copies) against **0 duplicate non-trivial lines**, which is why a line-level recipe
+#: saw nothing and every existing arm stayed green: none of the three is a shard-figure sentence.
 #:
 #: A splice is a REPEATED LONG SPAN, so the detector is one: a `_SPLICE_SHINGLE_WORDS`-word window
 #: that occurs twice in the block. LINE matching cannot see it — the two copies re-wrap, which is why
@@ -9219,12 +9220,14 @@ def _emission_block_header(manifest_text: str) -> str:
 #:
 #: ⛔ 10 IS MEASURED, NOT CHOSEN — and the measurement is the guard's own false negative. This block
 #: states ONE instruction verbatim twice ("never carry the last revision's minute, seconds, or
-#: split.", `config/ci-surfaces.yml:133` and `:152`), so a 9-word window reds on CLEAN prose (2 spans)
-#: and 10 is the smallest window on which the guard is quiet over the tree it guards (0). The cost is
-#: that a repeated span SHORTER than the window — and a header with fewer than this many words at all
-#: — is silently ungraded here, which is why the arm below asserts the real block is long enough to
-#: be gradable rather than trusting this bound. Recorded so the next reader does not lower it to
-#: "catch more" and conclude the guard is broken on a clean block.
+#: split.", `config/ci-surfaces.yml:133` and `:152`), so a 9-word window reds on CLEAN prose —
+#: **2 spans, one per copy** — and 10 is the smallest window on which the guard is quiet over the
+#: tree it guards (**0**, and 0 again at 11). A span is counted PER COPY, so the 2 at window 9 are
+#: one instruction seen twice, not two defects. The cost is that a repeated span SHORTER than the
+#: window — and a header with fewer than this many words at all — is silently ungraded here, which
+#: is why the arm below asserts the real block is long enough to be gradable rather than trusting
+#: this bound. Recorded so the next reader does not lower it to "catch more" and conclude the guard
+#: is broken on a clean block.
 _SPLICE_SHINGLE_WORDS = 10
 _QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
 
@@ -9438,8 +9441,9 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     fold applies both parents' hunks, raises no conflict marker, and the duplicated span is prose
     rather than a shard figure, so `test_the_fast_shards_header_block_states_the_measured_emission`
     reads the one graded clause and passes. The de-splice rounds used a rule of their own — "no
-    duplicated non-trivial LINE in the header block" — and it MISSED two of the three, because both
-    copies re-wrap onto different lines; that rule is graded below instead of remembered.
+    duplicated non-trivial LINE in the header block" — and it MISSED ALL THREE (measured at that
+    fold: 0 duplicate non-trivial lines against 10 repeated spans), because both copies re-wrap onto
+    different lines; that rule is graded below instead of remembered.
     """
     header = _emission_block_header(cs.MANIFEST.read_text(encoding="utf-8"))
     # ⛔ NON-VACUITY ON THE REAL BLOCK, not only on the fixtures: a header with fewer words than the
@@ -9462,8 +9466,9 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     # ⛔ The re-wrap is GRADED below, never asserted in this comment. Measured on this arm's own
     # pre-fix fixture: both copies were line-for-line IDENTICAL (three duplicate `#` lines), so the
     # very check the comment claimed to defeat caught it — while the real spliced base `14b8322eb2`
-    # carries ZERO duplicate lines and five repeated spans. The fixture proved the opposite of its
-    # own comment, in a PR whose thesis is that a claim graded by nothing rots.
+    # carries ZERO duplicate lines and ten repeated spans (five passages x two copies). The fixture
+    # proved the opposite of its own comment, in a PR whose thesis is that a claim graded by nothing
+    # rots.
     spliced_raw = (
         "# the verb packs six shards at 825.1 s (a, b, g, i, j, k) and\n"
         "# five at 825.0 s (c, d, e, f, h), so `ceil(825.1/60 x 2)` = 28 m\n"
@@ -9484,7 +9489,7 @@ def test_the_fast_shards_header_block_states_no_span_twice():
         "the non-vacuity fixture's two copies share a line VERBATIM, so a line-level check would "
         f"catch this shape and the arm proves nothing about the re-wrapped one: {duplicate_lines!r}. "
         "Re-wrap one copy — the real splice's copies differ line for line (measured at the spliced "
-        "base `14b8322eb2`: 0 duplicate lines, 5 repeated spans).")
+        "base `14b8322eb2`: 0 duplicate lines, 10 repeated spans).")
     # …and a DOUBLE-QUOTED retraction is NOT a second claim. This block quotes the clause it
     # retracted, twice, and that quotation is how the retraction stays checkable; masking quotes
     # is what keeps the guard from redding on the block's own honesty.
