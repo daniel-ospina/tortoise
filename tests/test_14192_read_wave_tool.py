@@ -3805,7 +3805,14 @@ def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
 #: on purpose: `_door_read_contract()` derives the same set from the door, and this is the
 #: independent statement that reds when the DOOR moves — a derivation checked only against
 #: itself cannot tell "unchanged" from "widened".
-_EXPECTED_DOOR_ARGS = frozenset({"query", "limit", "read_status_out", "_truncation_out"})
+#:
+#: `_state_route_out` was RE-DERIVED here when the `/v1/search` door gained it (#14140's
+#: state routing), and it was checked as an OUT-SINK rather than assumed to be one:
+#: `hosted_api.py` binds `state_out: dict = {}`, hands it to the read, then publishes it as
+#: `response["state_question"]` — nothing about which rows survive `limit` reads it, so it
+#: is the same class as `read_status_out` / `_truncation_out` and not a lever.
+_EXPECTED_DOOR_ARGS = frozenset(
+    {"query", "limit", "read_status_out", "_truncation_out", "_state_route_out"})
 
 
 def _door_read_contract(
@@ -9705,7 +9712,8 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     the SAME read with a DIFFERENT argument set — seven levers the door does not name
     (``kind``, ``threshold``, ``entity_type``, ``min_confidence``, ``order_by``,
     ``relationship_filter``, ``traversal_path`` — ``tortoise/mcp_server.py``), and
-    NEITHER of the door's two out-sinks (``read_status_out``, ``_truncation_out``) — so
+    NEITHER of the door's three out-sinks (``read_status_out``, ``_truncation_out``,
+    ``_state_route_out``) — so
     the two are INCOMPARABLE, not ordered. The allow-list below is derived from the
     ``/v1/search`` door alone, so it does NOT describe the MCP arm; a harness that
     mirrors THAT arm needs its own contract, not a widened one here.
@@ -12329,7 +12337,7 @@ def test_every_door_contract_clause_reds() -> None:
     sdk = _SDK.read_text()
 
     # Control / non-vacuity: the real sources satisfy the contract, and it carries the
-    # door's four arguments plus this harness's out-sink.
+    # door's five arguments plus this harness's out-sink.
     assert _door_read_contract() == set(_EXPECTED_DOOR_ARGS) | {"leg_trace"}
 
     def raised(needle: str, *, hosted_source: str | None = None,
@@ -12340,25 +12348,29 @@ def test_every_door_contract_clause_reds() -> None:
         assert needle in message, (needle, message)
         return message
 
-    anchor = "_truncation_out=trunc_out),"
+    anchor = "_truncation_out=trunc_out, _state_route_out=state_out),"
     assert hosted.count(anchor) == 1
 
     # 1. the door itself names a BOOL lever -> `not named_levers`
     raised("the door itself already names",
            hosted_source=hosted.replace(
-               anchor, "_truncation_out=trunc_out, _rerank_candidates=False),", 1))
+               anchor,
+               "_truncation_out=trunc_out, _state_route_out=state_out, "
+               "_rerank_candidates=False),", 1))
 
     # 2. the door names a lever the bool-lever intersection cannot see -> the equality
     raised("re-derive this contract and the harness's",
-           hosted_source=hosted.replace(anchor, "_truncation_out=trunc_out, "
-                                               'kind="statement"),', 1))
+           hosted_source=hosted.replace(anchor,
+                                       "_truncation_out=trunc_out, "
+                                       "_state_route_out=state_out, "
+                                       'kind="statement"),', 1))
 
     # 3. a second read call inside `search` (a hoisted `_do_search`, an added arm) -> the
     #    cardinality clause, which is what stops the allow-list being a UNION
     raised("read calls — this contract is derived from exactly one",
            hosted_source=hosted.replace(
                anchor,
-               "_truncation_out=trunc_out),\n"
+               "_truncation_out=trunc_out, _state_route_out=state_out),\n"
                "                lambda: sdk._tortoise_fts_query(q, limit=limit),", 1))
 
     # 4. `_rerank_candidates` stops being a bool-defaulted parameter -> the bool-lever seed,
