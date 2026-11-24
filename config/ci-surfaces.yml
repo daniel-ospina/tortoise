@@ -71,13 +71,13 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree — `origin/main`
-# `2cccf90f4dd4` (this head's own fold, on top of the `#14472` merge base after the `#14419` B7 cut
-# took the durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool)
-# plus this PR's own `core` registrations, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — the verb
-# packs six shards at 838.6 s (a, b, c, i, j, k) and five shards at 838.5 s (d, e, f, g, h), so
-# `ceil(838.6/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
-# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two agree
-# by construction rather than by a hand re-read.
+# `af40c97ca312` folded in over `#14472`'s merge base, after the `#14419` B7 cut took the
+# durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool, and
+# MINUS this PR's own removal of `tests/test_dod_5090_probe.py` from the `core` surface — the verb
+# packs two shards at 825.5 s (b, g) and nine shards at 825.4 s (a, c, d, e, f, h, i, j, k), so
+# `ceil(825.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.04`, so the two
+# agree by construction rather than by a hand re-read.
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, in ONE form.
 # Three lanes have now re-derived it on the same tree and reached the SAME reading, and each fold
 # spliced a second spelling in; the guard then reads it as a `<est stated twice>` /
@@ -143,14 +143,13 @@ version: 1
 # of this spot stated its own partition attributed to `main` `2cccf90f4dd4`; it is DELETED rather
 # than re-pointed, because two spellings of one emission is the failure and re-pointing a duplicate
 # leaves the shape.)
-# MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `6a02515d14ad` folded in, MINUS this PR's own removal of `tests/test_dod_5090_probe.py` from the
-# `core` surface — that row is what put the file in `fast_pool()`, so dropping it takes the file's
-# weight out of the pool and re-packs every bin) the verb packs six shards at 825.1 s
-# (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so
-# `ceil(825.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28`, so the two agree by construction rather than
-# by a hand re-read. Re-derive it on the tree after the next fold; never carry this 825.1/825.0.
+# MERGES INTO, never carried from the branch that first wrote it. The one thing this paragraph keeps
+# is the CAUSE of the last move and not its figure: `main` `6a02515d14ad` folded in, MINUS this PR's
+# own removal of `tests/test_dod_5090_probe.py` from the `core` surface — that row is what put the
+# file in `fast_pool()`, so dropping it takes the file's weight out of the pool and re-packs every
+# bin. ⛔ The re-packed partition, its `ceil(...)` and the minute are stated ONCE, in the paragraph
+# above, and are graded there; this spot deliberately states NO figure, because a second spelling
+# here is exactly the `<est stated twice>` shape the guard reds on.
 # ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
 # SETS move on every landed registration while the minute has stood at 28 m across every reading of
 # this pool from 835.5 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
@@ -162,13 +161,9 @@ version: 1
 # 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
 # `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
 # re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
-# and re-measures the graded extent on the resolved tree, 1915 → 1921 at that fold and **1977** at
+# and re-measures the graded extent on ITS resolved tree, 1915 → 1921 at that fold and **1977** at
 # this one (the resolved run is the UNION of the two sides' `#:` blocks, never one side's figure),
-# rather than accepting the
-# and re-measures the graded extent on ITS resolved tree — that pair is THAT FOLD'S OWN READING,
 # not a count of the tree a reader is holding: the `#:` run has MOVED with every fold since, and the
-# and re-measures the graded extent on ITS resolved tree, not a count of the tree a reader is
-# holding: the `#:` run has MOVED with every fold since, and the
 # figure that may be trusted is the one `_residue_block`'s docstring publishes, graded against its
 # own walk by `tests/test_sdk_privatise_sweep.py::test_the_extent_figure_is_the_walks_own_count`
 # (post-merge review of #14459, P3: this sentence read as a measurement of "the resolved tree" while
