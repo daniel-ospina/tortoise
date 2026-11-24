@@ -126,17 +126,11 @@ version: 1
 # What is kept below is only what a reader cannot get from it: which registrations this reading
 # counts, and the direction the readings have travelled. NO sentence here restates a partition,
 # deliberately — a historical figure spelled as a claim is a claim the guard grades.
-#
-#     the verb packs one shard at 838.1 s (a) and ten at 838.0 s (b – k),
-#     `ceil(838.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's),
-#     and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`.
-#
-# ⛔ BOTH FIGURES ON THAT LAST LINE ARE RE-READ BY HAND WHENEVER THE SECONDS MOVE, because the guard
-# does NOT grade them: `_emission_block_claims` grades the partition and the `ceil(...)` MULTIPLIER
-# (`WATCHDOG_HEADROOM`), not the printed ratio. Measured at this head — the headroom prints `2.0`
-# (1680 / 838.0 = 2.0048) and printed `2.01` at the previous fold's 837.9 s (1680 / 837.9 = 2.0050),
-# so carrying it one fold is exactly how a graded sentence comes to quote a number no run emitted.
-# That is this block's documented residual: an ungraded figure inside a graded sentence.
+# ⛔ ONE RESIDUAL, NAMED: the guard grades the partition and the `ceil(...)` MULTIPLIER
+# (`WATCHDOG_HEADROOM`), NOT the printed `watchdog_headroom:` ratio beside them — so the ratio is
+# re-read by hand whenever the seconds move. It moves: `2.01` at 837.9 s (1680 / 837.9 = 2.0050),
+# `2.0` at 838.0 s (1680 / 838.0 = 2.0048). A carried ratio in a graded sentence is exactly the
+# defect this block exists to prevent, one level below what it grades.
 #
 # ⛔ ONE CLAUSE, NOT A LEDGER. This paragraph was re-emitted at every fold and had accumulated SEVEN
 # stacked restatements of the same sentence; a fold that splices two sides of it is read by the
