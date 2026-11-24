@@ -43,15 +43,23 @@ this one would also need a real Postgres). It asserts, for EVERY
    — any other reference (an inline `_stamp_chain()`, a
    `_CAPTURE_EXECUTOR.submit(_stamp_chain)`) is a second way to run the chain
    and reds, however many submissions also exist elsewhere in the module; and
-5. every submission of that function is REACHABLE — when ALL of them sit under an
-   `if`/`while` the interpreter folds to a false constant, no submission is ever
-   reached and the chain runs nowhere. A dead-guarded duplicate beside a live
-   submission is inert (it runs nothing) and stays green. The foldings graded are
-   the ones a fixer writes to disable a leg — falsy and EMPTY-collection literals,
-   `not <truth>`, `and`/`or` over them, and `X if False else Y`. Ungraded and
-   stated as such: a run-time constant (`if _FEATURE:`), and an
-   expression-position short circuit (`False and await …`), where the submission
-   is inside the `BoolOp` rather than under an `if`/`while`/`if`-expression.
+5. every submission of that function is REACHABLE — when ALL of them sit under a
+   guard whose value is STATICALLY FALSE, no submission is ever reached and the
+   chain runs nowhere. A dead-guarded duplicate beside a live submission is inert
+   (it runs nothing) and stays green.
+
+   ⛔ THE CRITERION IS "always false", NOT "CPython constant-folds it", and the
+   difference is deliberate: a fixer disables a leg by making the guard false, so
+   `[]` / `{}` / `{*()}` are as dead as `False` even though CPython evaluates them
+   at run time (`dis` folds only a literal constant such as `False` / `0` / `()`).
+   Graded: falsy and EMPTY-collection literals (a `*`/`**` unpack does not make a
+   collection non-empty), signed numeric literals (`-0.0`), `not X`, `and`/`or`
+   over them, and a conditional expression whose test or chosen branch is decided
+   (`` X if False else Y ``, and an `if`-expression IN test position such as
+   `` if (0 if True else 1): ``). Ungraded and stated as such: a run-time constant
+   (`if _FEATURE:`), and an expression-position short circuit
+   (`False and await …`), where the submission sits inside the `BoolOp` rather
+   than under an `if`/`while`/`if`-expression.
 
 ⛔ NESTING IS NOT THE PROPERTY, and a first cut of this file asserted it: the
 chain already lives in `_report_capture`, a nested `async def`, and nesting a
@@ -283,51 +291,63 @@ def _submitted_callables(tree: ast.Module) -> list[ast.AST]:
     return out
 
 
-def _statically_false(test: ast.expr) -> bool:
-    """True when the interpreter itself would fold ``test`` to a false value.
+def _literal_truth(node: ast.expr) -> bool | None:
+    """The statically decidable truth of a literal-ish expression, or None.
 
-    The foldings graded are the ones a fixer writes to switch a leg OFF: a falsy
-    literal (`False`, `0`, `None`, `''`, and the EMPTY collection literals `()`,
-    `[]`, `{}`, `{*()}` — all of which CPython folds to a constant and drops the
-    body), `not` of a literal truth, an `and` with any false operand, an `or` whose
-    operands are all false, and a conditional expression whose test folds false
-    (``X if False else Y`` → CPython drops the `X` branch outright, so a submission
-    there is gone).
-
-    Deliberately NOT modelled: a run-time constant (`if _FEATURE:`), which is not
-    statically decidable, and an EXPRESSION-position short circuit
-    (``False and await …``, where the `await` sits inside the BoolOp rather than
-    under an `if`/`while`/`if`-expression) — the header lists both as ungraded
-    rather than pretending to grade them.
+    ⛔ `None` means "not statically decidable" — the caller must NOT read it as
+    false. An UNPACKING element is not an item: `{*()}` and `{**{}}` are EMPTY, and
+    the first cut of this helper counted the `ast.Starred` node and the `**`'s
+    `None` key as items, so `{*()}` read as truthy — it then redded `not {*()}`
+    (a guard whose body RUNS) and greened `if {*()}:` (a guard whose body never
+    runs). Both are the false report this arm exists to avoid.
     """
-    if isinstance(test, ast.Constant):
-        return not test.value
-    if isinstance(test, (ast.Tuple, ast.List, ast.Set)):
-        return not test.elts
-    if isinstance(test, ast.Dict):
-        return not test.keys
-    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-        return _statically_true(test.operand)
-    if isinstance(test, ast.BoolOp):
-        folded = [_statically_false(v) for v in test.values]
-        return any(folded) if isinstance(test.op, ast.And) else all(folded)
-    return False
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return any(not isinstance(e, ast.Starred) for e in node.elts)
+    if isinstance(node, ast.Dict):
+        return any(k is not None for k in node.keys)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        operand = _literal_truth(node.operand)
+        return None if operand is None else not operand
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        try:
+            return bool(ast.literal_eval(node))
+        except (ValueError, TypeError, SyntaxError):
+            return None
+    if isinstance(node, ast.IfExp):
+        behaviour = _literal_truth(node.test)
+        if behaviour is None:
+            return None
+        return _literal_truth(node.body if behaviour else node.orelse)
+    if isinstance(node, ast.BoolOp):
+        values = [_literal_truth(v) for v in node.values]
+        if isinstance(node.op, ast.And):
+            if any(v is False for v in values):
+                return False
+            return True if all(v is True for v in values) else None
+        if any(v is True for v in values):
+            return True
+        return False if all(v is False for v in values) else None
+    return None
+
+
+def _statically_false(test: ast.expr) -> bool:
+    """True when ``test`` is ALWAYS false — the body can never run.
+
+    ⛔ THE CRITERION IS "always false", NOT "CPython constant-folds it". A fixer
+    disables a leg by making the guard false, and `[]`/`{}`/`{*()}` are just as
+    dead as `False` even though CPython evaluates them at run time (`dis` folds only
+    a literal constant such as `False`/`0`/`()`); grading them is what makes the arm
+    catch the disable a fixer actually writes. `_literal_truth` is the one place
+    that decides, so `not X` and `X` cannot disagree.
+    """
+    return _literal_truth(test) is False
 
 
 def _statically_true(test: ast.expr) -> bool:
-    """The complement `_statically_false` needs for `not X` — literal truths only."""
-    if isinstance(test, ast.Constant):
-        return bool(test.value)
-    if isinstance(test, (ast.Tuple, ast.List, ast.Set)):
-        return bool(test.elts)
-    if isinstance(test, ast.Dict):
-        return bool(test.keys)
-    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-        return _statically_false(test.operand)
-    if isinstance(test, ast.BoolOp):
-        folded = [_statically_true(v) for v in test.values]
-        return all(folded) if isinstance(test.op, ast.And) else any(folded)
-    return False
+    """The positive polarity of `_literal_truth` — `not X` needs it."""
+    return _literal_truth(test) is True
 
 
 def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
