@@ -21910,7 +21910,7 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
 # not touch at the reviewed head (`41db40af`) and which `9050b24505c6` corrected,
 # still carried two docstrings calling that reader "CUT in the B7 test cut".
 # ⛔ The clause names the head on purpose: "a file the PR does not touch" was true
-# of `41db40af` and false from `9050b24505c6` onward (`13 7` on that path), and a
+# of `41db40af` and false from `9050b24505c6` onward (`12 7` on that path), and a
 # record that silently moves from true to false under its own commit is this PR's
 # defect class. The reader is LIVE and
 # MERGE-GATING at the same head, so `_row_continuation_lines`' third condition and
@@ -21960,16 +21960,30 @@ _CUT_CLAIM_WINDOW = 200
 #: A restoration defuses a CUT verdict only when it is ATTRIBUTED — "RESTORED by
 #: `#14481`" / "restored by <sha>". A bare `restored` must not defuse, or the false claim
 #: this pin exists to catch passes by carrying the word in an unrelated clause.
+#: ⛔ `[\s#]+` between the words, not `\s+`: these records wrap across a COMMENT
+#: line, so the continuation arrives as "restored\n#   by `#14481`". Measured: with
+#: `\s+` the marker went unread and a TRUE record was charged as a contradiction.
 _CUT_CLAIM_RESTORED_RE = re.compile(
-    r"(?:RESTORED|restored)\s+by\s+`?(?:#\d+|[0-9a-f]{7,40})")
+    r"(?:RESTORED|restored)[\s#]+by[\s#]+`?(?:#\d+|[0-9a-f]{7,40})"
+    r"|`?(?:#\d+|[0-9a-f]{7,40})`?[\s#]+restored")
 #: ⛔ BOTH SPELLINGS, AND ONLY THE VERDICT PHRASE OF THE LOWERCASE ONE. The corpus
 #: writes this verdict in lowercase as often as not — `cut by #14419`, `cut with the B7
 #: arithmetic` — and a `\bCUT\b`-only token read those as CLEAN: measured, a lowercase
 #: verdict on a live arm was a FALSE PASS while the uppercase control redded. The
 #: phrase is narrowed to `cut by|in|with` on purpose: a bare `\bcut\b` (or `re.I`)
 #: also matches `re-cut` and prose like "a better cut of two", which is not a verdict.
-_CUT_CLAIM_VERDICT_RE = re.compile(r"\bCUT\b|\bcut\s+(?:by|in|with)\b")
-_CUT_CLAIM_NAME_RE = re.compile(r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z]\w*)`")
+#: ⛔ `cut on|as|at|from|for` are in the corpus too (`cut on 2026-11-23`, `cut as
+#: arithmetic`), and they were invisible. Widening this ALONE reds a TRUE record — the
+#: restoration next door is spelled in the REVERSE order (`#14481 restored it`), which
+#: `_CUT_CLAIM_RESTORED_RE` did not read — so the two are widened together (measured:
+#: verdict-only widening gives 1 contradiction on `config/ci-surfaces.yml`).
+_CUT_CLAIM_VERDICT_RE = re.compile(
+    r"\bCUT\b|\bcut\s+(?:by|in|with|on|as|at|from|for)\b")
+#: ⛔ THE `tests/` PREFIX IS OPTIONAL: the corpus cites the same arm both ways
+#: (`tests/test_ci_selection.py::arm` and `test_ci_selection.py::arm`), and a scan that
+#: required the prefix read the unprefixed spelling as no claim at all — measured FALSE
+#: PASS on a record this PR itself rewrote (`tools/ci_selection.py`'s fold-row citation).
+_CUT_CLAIM_NAME_RE = re.compile(r"`(?:(?:tests/)?test_ci_selection\.py::)?(_?[A-Za-z]\w*)`")
 #: ⛔ THE WRAP IS PART OF THE NAME, NOT A BREAK IN IT. A long name is often backticked
 #: across a comment's line break — `` `…_and_meet_the_` `` then `` `wall_target` `` — which an
 #: unbroken-token pattern cannot see: measured on `origin/main`'s PRE-FIX
@@ -21985,7 +21999,7 @@ _CUT_CLAIM_NAME_RE = re.compile(r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z]
 #: distant backticks (measured: a `(?:\s*\n\s*#?\s*\w+)*` form matched whole sentences,
 #: produced a non-name, and silently dropped six real claims).
 _CUT_CLAIM_WRAPPED_RE = re.compile(
-    r"`(?:tests/test_ci_selection\.py::)?(_?[A-Za-z][A-Za-z0-9_]*)\n\s*#?\s*([A-Za-z][A-Za-z0-9_]*)`")
+    r"`(?:(?:tests/)?test_ci_selection\.py::)?(_?[A-Za-z][A-Za-z0-9_]*)\n\s*#?\s*([A-Za-z][A-Za-z0-9_]*)`")
 #: A SHAPE FILTER TRIMS NON-NAMES — IT IS NEVER THE AUTHORITY ON WHAT CAN CONTRADICT.
 #: A captured token that is neither `test_…` nor a private helper is *usually* not an arm — the
 #: three an unfiltered scan counted were the sha `e6b3cf2908`, `main` and `ValueError` — and
@@ -22041,15 +22055,18 @@ def _cut_claims() -> list[tuple[str, int, str, bool]]:
     return claims
 
 
-#: Block openers: blank line, markdown bullet, and the `#`-comment spelling of a bullet at
-#: ANY indent (the repo indents them — measured `  #  - …` in `config/ci-surfaces.yml`).
-#: 5 of the 6 files this pin scans are comment prose, so a set that only knew `- ` split
-#: nothing there and let one bullet's verdict charge the next bullet's arm — a FALSE RED.
-#: ⛔ No census of spellings is stated here: an earlier cut enumerated three and two of them
-#: occur zero times in the repo, which is the same "a figure the instrument does not return"
-#: defect this PR repairs. `_COMMENT_BULLET_RE` is the statement.
+#: Block openers. A blank line; a markdown bullet in any of its list spellings (`- `, `* `,
+#: `+ `, `1. `, `1) `), at ANY indent; a quoted bullet (`> - `); a table row (`| … |`); and
+#: the `#`-comment spelling of a bullet at any indent — 5 of the 6 files this pin scans are
+#: comment prose. A set that knew only column-0 `- `/`* ` split nothing in a numbered list, a
+#: table or an indented comment, so one block's verdict charged the next block's arm (a
+#: FALSE RED). ⛔ No census of spellings is stated: the patterns are the statement.
+_LIST_BULLET_RE = re.compile(r"\n[ \t]*(?:[-*+]|\d+[.)])[ \t]")
+_QUOTED_BULLET_RE = re.compile(r"\n[ \t]*(?:>[ \t]*)+[-*+][ \t]")
+_TABLE_ROW_RE = re.compile(r"\n[ \t]*\|")
 _COMMENT_BULLET_RE = re.compile(r"\n[ \t]*#+[ \t]*[-*][ \t]")
-_BLOCK_SEPARATORS = ("\n\n", "\n- ", "\n* ")
+_BLOCK_OPENERS = (_LIST_BULLET_RE, _QUOTED_BULLET_RE, _TABLE_ROW_RE, _COMMENT_BULLET_RE)
+_BLOCK_SEPARATORS = ("\n\n",)
 
 
 def _claim_block_bounds(text: str, pos: int) -> tuple[int, int]:
@@ -22063,11 +22080,13 @@ def _claim_block_bounds(text: str, pos: int) -> tuple[int, int]:
     """
     starts = [i for i in (text.rfind(sep, 0, pos) for sep in _BLOCK_SEPARATORS)
               if i != -1]
-    starts += [m.start() for m in _COMMENT_BULLET_RE.finditer(text, 0, pos)]
+    for opener in _BLOCK_OPENERS:
+        starts += [m.start() for m in opener.finditer(text, 0, pos)]
     lo = (max(starts) + 1) if starts else 0
     ends = [i for i in (text.find(sep, pos) for sep in _BLOCK_SEPARATORS)
             if i != -1]
-    ends += [m.start() for m in _COMMENT_BULLET_RE.finditer(text, pos)]
+    for opener in _BLOCK_OPENERS:
+        ends += [m.start() for m in opener.finditer(text, pos)]
     return lo, (min(ends) if ends else len(text))
 
 
@@ -22282,6 +22301,32 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
     got = {n: c for _o, n, c in _cut_claims_in(indented, {"test_c_arm", "test_d_arm"})}
     assert got == {"test_c_arm": True}, (
         f"an indented `# - ` bullet must bound its verdict: {got!r}")
+
+    # ⛔ THE CORPUS'S OTHER SPELLINGS. Each was a measured FALSE PASS or FALSE RED before
+    # the scan learned it: an unprefixed `test_ci_selection.py::` citation, `cut on` (with
+    # its restoration in the REVERSE order, which is how this PR's own records write it),
+    # and bullets that are numbered, indented, quoted or a table row.
+    live2 = {"test_live", "test_other", "test_c_arm", "test_d_arm"}
+    got = _cut_claims_in(
+        "# (The second `test_ci_selection.py::test_live` citation was cut with #14439's "
+        "re-cut and is gone.)", live2)
+    assert [c for _o, _n, c in got] == [True], (
+        f"an unprefixed citation is still a claim: {got!r}")
+    got = _cut_claims_in("`test_live` was cut on 2026-11-23 and #14481 restored it.", live2)
+    assert [c for _o, _n, c in got] == [False], (
+        f"a reverse-order restoration must defuse: {got!r}")
+    got = _cut_claims_in("`test_live` was cut on 2026-11-23 and is still gone.", live2)
+    assert [c for _o, _n, c in got] == [True], (
+        f"and without the restoration it must red: {got!r}")
+    for tag, passage in (
+        ("table", "| `test_c_arm` | CUT |\n| `test_d_arm` | live |"),
+        ("numbered", "1. `test_c_arm` — CUT (B7).\n2. `test_d_arm` — SURVIVES."),
+        ("indented", "  - `test_c_arm` — CUT (B7).\n  - `test_d_arm` — SURVIVES."),
+        ("quoted", "> - `test_c_arm` — CUT (B7).\n> - `test_d_arm` — SURVIVES."),
+    ):
+        got = {n: c for _o, n, c in _cut_claims_in(passage, live2)}
+        assert got == {"test_c_arm": True}, (
+            f"a {tag} block must bound its verdict: {got!r}")
 
     contradictions = [c for c in claims if c[3]]
     assert not contradictions, (
