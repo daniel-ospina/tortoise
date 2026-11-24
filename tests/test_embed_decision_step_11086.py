@@ -549,10 +549,11 @@ def test_a_docs_only_edit_to_the_design_record_selects_the_step_pins():
 
     ⚠️ **ONE subprocess, not three.** Each invocation YAML-parses the 1.2 MB
     `config/ci-surfaces.yml`, and the CI `test` job's arm-2 invariant
-    (`docs/ops/ci-wall-clock.md` §2, whose SUM-vs-cap term is recomputed by
-    `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`
-    SUM-vs-cap arm from the file's own terms) required the SUM × 1.5 to clear a 90 m cap
-    with ~2 m of headroom — so this file's declared duration is bounded by an
+    (`docs/ops/ci-wall-clock.md` §2, whose "Arm 2" — `assert total * 3 / 2 <= cap`
+    — is recomputed from the file's own terms by
+    `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`)
+    requires the SUM × 1.5 to clear a 90 m cap with 0.5 m of headroom (§2's own row
+    reads `x 1.5 = 89.5 m` against that cap) — so this file's declared duration is bounded by an
     invariant elsewhere in the repo, and a pin that pays 3 parses to assert the
     same thing would spend that budget.
     The selector takes a changed-file LIST, which is also the shape a real PR
