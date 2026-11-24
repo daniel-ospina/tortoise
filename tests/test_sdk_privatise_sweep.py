@@ -147,10 +147,13 @@ def test_check_refuses_a_base_whose_map_is_empty(monkeypatch, capsys):
 
 
 def test_the_residue_pin_is_a_reading_of_the_whole_set():
-    """F6: the residue is pinned as (rows, digest), so a NEW untyped shape reds the check.
+    """F6: the residue is still pinned as `(rows, digest)`, a READING of the whole SET.
 
-    The digest has to be a function of the SET, not of a count: two different shapes with
-    the same number of rows are the case a count cannot see.
+    ⛔ The COUNT is the gate (the ratchet) and a shape change is REPORTED, not graded — gating on
+    the digest would rebuild the re-pin treadmill, since renaming an innocent receiver moves it
+    without adding a call. What this arm still grades is that the reading exists and that the
+    digest is a function of the SET, so `shape_notes` can name what appeared or vanished: two
+    different shapes with the same number of rows are the case a count cannot see.
     """
     rows, digest = privatise.SWEEP_RESIDUE
     assert rows > 0, "an unpinned (0, …) residue means the drift arm is a no-op"
@@ -2597,12 +2600,15 @@ def test_the_baseline_is_reconstructed_from_only_the_moved_paths(tmp_path, monke
     """The ratchet's baseline is the MERGE BASE's row set, measured without checking it out.
 
     A file whose blob did not move cannot have a different residue, so only the paths
-    `git diff --name-status` names are measured from the object store. This arm is that
-    claim: an ADDED file contributes nothing to the baseline, a MODIFIED one contributes its
-    baseline rows and not the working tree's.
+    `git diff --name-status` names are measured from the object store. This arm is that claim:
+    an ADDED file contributes nothing, a MODIFIED one contributes its baseline rows and not the
+    working tree's — and ⛔ an UNMOVED file is still in the per-path map at its real count, so the
+    failure does not blame it for receivers it always had (a map holding only the moved paths
+    read every untouched carrier as "baseline 0 -> now 40").
     """
     repo = _git_repo(tmp_path / "r")
     (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
+    (repo / "b.py").write_text(_UNTYPED, encoding="utf-8")
     _commit_all(repo, "base")
     monkeypatch.setattr(privatise, "ROOT", repo)
     rmap = {"update": "_update"}
@@ -2611,33 +2617,79 @@ def test_the_baseline_is_reconstructed_from_only_the_moved_paths(tmp_path, monke
     (repo / "c.py").write_text(_UNTYPED, encoding="utf-8")
     measured = {
         "a.py": privatise.edits_for(repo / "a.py", rmap).residue,
+        "b.py": privatise.edits_for(repo / "b.py", rmap).residue,
         "c.py": privatise.edits_for(repo / "c.py", rmap).residue,
     }
-    assert sum(measured["a.py"].values()) == 2 and sum(measured["c.py"].values()) == 1, (
-        "premise: the working tree carries three untyped receivers, two of them in `a.py`")
+    assert [sum(measured[p].values()) for p in ("a.py", "b.py", "c.py")] == [2, 1, 1], (
+        "premise: four untyped receivers, two of them in the modified `a.py`")
 
-    base, base_files, base_sites = privatise.baseline_rows("HEAD", rmap, measured)
-    assert sum(base.values()) == 1, (
-        f"the baseline is the committed tree's ONE receiver — an added file contributes "
+    sites = {p: privatise.edits_for(repo / p, rmap).sites for p in measured}
+    base, base_files, base_sites = privatise.baseline_rows(
+        "HEAD", rmap, measured, sites)
+    assert sum(base.values()) == 2, (
+        f"the baseline is the committed tree's TWO receivers — an added file contributes "
         f"nothing: {base}")
     assert sum(base_files["a.py"].values()) == 1, base_files
+    assert sum(base_files.get("b.py", Counter()).values()) == 1, (
+        f"an UNMOVED file must be in the per-path map at its real count: {base_files}")
     assert "c.py" not in base_files, "a file absent from the baseline has no baseline rows"
 
-    sites = {
-        "a.py": privatise.edits_for(repo / "a.py", rmap).sites,
-        "c.py": privatise.edits_for(repo / "c.py", rmap).sites,
-    }
     total = Counter()
     for rows in measured.values():
         total += rows
     ok, lines = privatise.ratchet_verdict(
         total, base, measured, base_files, sites, "HEAD", baseline_sites=base_sites)
-    assert ok is False, "three against a baseline of one is growth"
+    assert ok is False, "four against a baseline of two is growth"
     text = "\n".join(lines)
     assert "a.py" in text and "line 3" in text, (
-        f"the NEW line in `a.py` is 3 — the baseline already had line 2, so an arm that prints "
-        f"every site would name the wrong one first: {text}")
+        f"the NEW line in `a.py` is 3 — the baseline already had line 2: {text}")
     assert "c.py" in text, f"the added file's site must be named too: {text}"
+    assert "b.py" not in text, (
+        f"`b.py` was never touched, so it must not be blamed for growth: {text}")
+
+
+def test_the_reported_line_is_singled_out_only_when_the_baseline_can_explain_it():
+    """Two arms, because a line list is only as good as its worst case.
+
+    ⛔ UNSHIFTED: the site list grew by one and the baseline's own lines are a subset, so the ONE
+    new line is named. SHIFTED: inserting a receiver above existing ones moves every later line,
+    so a set difference would name two shifted survivors and hide the addition — in that case the
+    arm must print every site and SAY the list is not a diff, never a confident wrong line.
+    """
+    flat = privatise._new_sites(
+        "reg.update",
+        {"f.py": Counter({"reg.update": 2})},
+        {"f.py": Counter({"reg.update": 1})},
+        {"f.py": {"reg.update": [10, 11]}},
+        baseline_sites={"f.py": {"reg.update": [10]}},
+    )
+    assert flat == ["f.py  (baseline 1 -> now 2): line 11"], flat
+
+    shifted = privatise._new_sites(
+        "reg.update",
+        {"f.py": Counter({"reg.update": 3})},
+        {"f.py": Counter({"reg.update": 2})},
+        {"f.py": {"reg.update": [10, 11, 21]}},
+        baseline_sites={"f.py": {"reg.update": [10, 20]}},
+    )
+    text = "\n".join(shifted)
+    assert "shifted" in text, f"the report must admit it cannot single the line out: {text}"
+    assert "line 10" in text and "line 21" in text, (
+        f"every site is printed, so the added one IS among them: {text}")
+
+
+def test_an_untouched_carrier_file_is_not_blamed_for_growth():
+    """A row that lives in hundreds of files must blame only the file that gained one."""
+    blame = privatise._new_sites(
+        "proj.g.query",
+        {"edited.py": Counter({"proj.g.query": 3}),
+         "hosted_api.py": Counter({"proj.g.query": 40})},
+        {"edited.py": Counter({"proj.g.query": 2}),
+         "hosted_api.py": Counter({"proj.g.query": 40})},
+        {"edited.py": {"proj.g.query": [9]}, "hosted_api.py": {"proj.g.query": [11, 12]}},
+    )
+    assert len(blame) == 1, blame
+    assert blame[0].startswith("edited.py"), blame
 
 
 def test_a_rename_is_not_growth(tmp_path, monkeypatch):
@@ -2664,11 +2716,13 @@ def test_a_rename_is_not_growth(tmp_path, monkeypatch):
 
 
 def test_an_added_file_is_not_baseline_rows(tmp_path, monkeypatch):
-    """A file the baseline tree does not have contributes NOTHING to it — the `A` arm.
+    """A file the baseline tree does not have contributes NOTHING to it.
 
-    ⛔ STAGED, not merely written. An UNTRACKED file never appears in `git diff`, so an earlier
-    cut of this test measured the `ls-tree` seeding hole while claiming to measure `A` — it stayed
-    green with the `A` arm deleted. The premise assertion below is what keeps the two apart.
+    ⛔ What this grades, precisely: the `git ls-tree` seeding and the object-store read both skip
+    a path the baseline tree lacks. It does NOT grade the `A`/`C` guard — an `A` row's
+    `paths[0] == dest`, so `git show <rev>:<dest>` already fails for it (measured: deleting that
+    guard leaves this arm green), and `-M` without `-C` never emits a `C` row. The premise
+    assertion below keeps the STAGED case distinct from the untracked one.
     """
     repo = _git_repo(tmp_path / "r")
     (repo / "a.py").write_text(_UNTYPED, encoding="utf-8")
