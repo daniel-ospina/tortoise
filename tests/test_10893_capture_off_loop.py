@@ -613,16 +613,19 @@ def test_the_stamp_chain_record_write_does_not_block_the_event_loop(
 
     # ⛔ INSTRUMENT INTEGRITY, not behaviour: this asserts the PROBE, and it is
     # kept because it is REACHABLE — it guards a real vacuum. A probe that missed
-    # the route (a 404 from a moved path, a malformed body) is served by the
-    # router with no I/O, so it is as fast as the real in-memory `/health` and
-    # would sail through the timing row below and be read as a request the loop
-    # served. What is NOT asserted is the status VALUE (`ok`/`degraded`):
-    # `/health` derives it from in-memory state (#2850), so no mutation of this
-    # diff can move it — that row was dead weight and was deleted (review F2,
-    # PR #14520). ⚠️ The sibling `tests/test_graph_write_loop_responsiveness.py`
-    # keeps the status-value row instead, on the rationale that "asserting 200
-    # alone could not fail"; that divergence is deliberate here, and the 200 row
-    # demonstrably reds on a 404.
+    # the route (a 404 from a moved path) is served by the router with no I/O, so
+    # it is as fast as the real in-memory `/health` and would sail through the
+    # timing row below and be read as a request the loop served. ⛔ A BODY-SHAPE
+    # fault is NOT covered here: this row reads the status only, so a 200 whose
+    # body is missing `status` passes it (the deleted value row would have raised
+    # `KeyError` — that coverage went with it, deliberately, because nothing in
+    # THIS diff can move the value). What is NOT asserted is the status VALUE
+    # (`ok`/`degraded`): `/health` derives it from in-memory state (#2850), so no
+    # mutation of this diff can move it — that row was dead weight and was
+    # deleted (review F2, PR #14520). ⚠️ The sibling
+    # `tests/test_graph_write_loop_responsiveness.py` keeps the status-value row
+    # instead, on the rationale that "asserting 200 alone could not fail"; that
+    # divergence is deliberate here, and the 200 row demonstrably reds on a 404.
     assert health.status_code == 200, (
         "the /health probe never reached the handler "
         f"({health.status_code} {health.text[:200]!r}), so the in-window timing "
