@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import itertools
 import json
 import os
 import re
@@ -9227,32 +9228,66 @@ def _emission_block_header(manifest_text: str) -> str:
 #: one instruction seen twice, not two defects. The cost is that a repeated span SHORTER than the
 #: window — and a header with fewer than this many words at all — is silently ungraded here, which
 #: is why the arm below asserts the real block is long enough to be gradable rather than trusting
-#: this bound. Recorded so the next reader does not lower it to "catch more" and conclude the guard
-#: is broken on a clean block.
+#: this bound. A DIVERGENT pair is a DIFFERENT residual, not a shorter one: the repeats stop at the
+#: token the copies disagree on, so the span covers their COMMON PREFIX only (measured on the
+#: spliced fold `14b8322eb2`: an 11-word span against ~30-word copies) and is exact only while the
+#: copies AGREE. That span locates the seam but is NOT a deletion unit there — deleting it severs
+#: both copies and leaves the block holding an unreadable `2.0361).` fragment beside the duplicated
+#: tail, with this guard GREEN over it (measured). `_splice_divergences` names the differing token
+#: so the repair is a reconciliation rather than a deletion. Recorded so the next reader does not
+#: lower it to "catch more" and conclude the guard is broken on a clean block.
 _SPLICE_SHINGLE_WORDS = 10
+#: The gap a DIVERGENT pair is read across. `merge=union` keeps both sides of one edited LINE, so the
+#: canonical artefact is one sentence stated twice with a single token differing (`1680 / 825.1 =
+#: 2.0361` beside `… = 2.0362` — measured on the spliced fold, where the second digit is the wrong
+#: one). `_splice_divergences` reports the two tokens that disagree when the copies are otherwise the
+#: same claim, and its three bounds all answer ONE question — "is this the same sentence twice, or
+#: two different sentences that happen to start alike?": `_SPLICE_DIVERGENCE_MAX_GAP_WORDS` is how
+#: much may differ (a figure, a shard letter, a count), `_SPLICE_DIVERGENCE_RESYNC_WORDS` is how much
+#: must AGREE again afterwards (the discriminator — two IDENTICAL copies placed side by side also
+#: diverge once the first copy ends, but do not re-agree), and `_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS`
+#: bounds the read on a ~2,900-word block. jscpd's clone taxonomy draws the same line: divergent
+#: copies are reported as separate EXACT clones, and merging across a gap is opt-in there
+#: (`--max-gap-lines`), reported as a `similar` clone WITH its similarity score.
+_SPLICE_DIVERGENCE_MAX_GAP_WORDS = 3
+_SPLICE_DIVERGENCE_RESYNC_WORDS = 6
+_SPLICE_DIVERGENCE_LOOKAHEAD_WORDS = 80
 _QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
 
 
-def _repeated_header_spans(header: str) -> list[str]:
-    """Long spans this block states twice — a `merge=union` splice, or a claim stated twice."""
+def _splice_shingle_positions(header: str) -> tuple[str, dict[str, list[int]]]:
+    """The block as one flat string, plus the WORD positions of every window stated twice.
+
+    Both readers below need the same subject — double-quoted spans masked (the block quotes the
+    clause it retracted), comment line breaks joined (a splice re-wraps, so a break is
+    presentation), whitespace collapsed — and the same window, so one enumeration keeps their
+    notions of "repeat" from drifting apart.
+    """
     masked = _QUOTED_SPAN_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', header)
     flat = re.sub(r"\s+", " ", masked).strip()
     words = flat.split()
     window = _SPLICE_SHINGLE_WORDS
-    counts: dict[str, int] = {}
+    positions: dict[str, list[int]] = {}
     for i in range(len(words) - window + 1):
-        shingle = " ".join(words[i:i + window])
-        counts[shingle] = counts.get(shingle, 0) + 1
+        positions.setdefault(" ".join(words[i:i + window]), []).append(i)
+    return flat, {s: p for s, p in positions.items() if len(p) > 1}
+
+
+def _repeated_header_spans(header: str) -> list[str]:
+    """Long spans this block states twice — a `merge=union` splice, or a claim stated twice."""
+    flat, repeated = _splice_shingle_positions(header)
     # ⛔ EVERY occurrence, not just the first — `flat.find` reports one position per repeated
     # shingle, so a passage stated THREE times reported copy 1 whole and copy 2's first
     # `window - 1` words, stopping short of its end. Detection was still correct, but the span this
-    # returns is what the failure message tells a maintainer to delete ("keep ONE copy"), and
-    # deleting a truncated span leaves a severed fragment behind — the artefact this arm exists to
-    # catch. Overlapping shingles within one copy merge into that copy's extent below.
-    spans: list[tuple[int, int]] = []
-    for s, n in counts.items():
-        if n > 1:
-            spans.extend((m.start(), m.start() + len(s)) for m in re.finditer(re.escape(s), flat))
+    # returns is the unit the failure message tells a maintainer to keep ONE of, and deleting a
+    # truncated span leaves a severed fragment behind — the artefact this arm exists to catch.
+    # Overlapping shingles within one copy merge into that copy's extent below: EXACT while the
+    # copies agree, and stopping at the differing token when they DIVERGE (`_splice_divergences`
+    # names that token, because there the span locates the seam but is not a deletion unit).
+    spans: list[tuple[int, int]] = [
+        (m.start(), m.start() + len(s))
+        for s in repeated
+        for m in re.finditer(re.escape(s), flat)]
     if not spans:
         return []
     spans.sort()
@@ -9263,6 +9298,51 @@ def _repeated_header_spans(header: str) -> list[str]:
         else:
             merged.append([start, end])
     return [flat[s:e] for s, e in merged]
+
+
+def _splice_divergences(header: str) -> list[tuple[str, str]]:
+    """The tokens two copies of one claim DISAGREE on — the figure a divergent splice hides.
+
+    `merge=union` keeps both sides' lines, so when two re-derivations edited the same VALUE the
+    block ends up stating the sentence twice with one token differing (`2.0361` beside `2.0362`,
+    measured on the spliced fold `14b8322eb2`, where the second digit is the wrong one).
+    `_repeated_header_spans` reports such a pair as their COMMON PREFIX — 11 words against ~30-word
+    copies — because the repeats stop at the differing token, so that span LOCATES the seam and is
+    not a deletion unit: deleting it severs both copies. This names the divergence instead, which is
+    the tell the arm's message already asks a maintainer to look for.
+
+    The discriminator is RE-AGREEMENT: the tails agree up to a gap of at most
+    `_SPLICE_DIVERGENCE_MAX_GAP_WORDS`, then agree again for `_SPLICE_DIVERGENCE_RESYNC_WORDS`. Two
+    identical copies placed side by side also diverge once the first copy ends (one tail continues
+    into the second copy, the other into the text after it) and do NOT re-agree, which is what keeps
+    an exact duplicate from being reported as a figure to reconcile.
+    """
+    flat, repeated = _splice_shingle_positions(header)
+    words = flat.split()
+    window = _SPLICE_SHINGLE_WORDS
+    found: list[tuple[str, str]] = []
+    for positions in repeated.values():
+        for first, second in itertools.pairwise(positions):
+            left = words[first + window:first + window + _SPLICE_DIVERGENCE_LOOKAHEAD_WORDS]
+            right = words[second + window:second + window + _SPLICE_DIVERGENCE_LOOKAHEAD_WORDS]
+            agreed = 0
+            while agreed < min(len(left), len(right)) and left[agreed] == right[agreed]:
+                agreed += 1
+            if agreed >= min(len(left), len(right)):
+                # The tails agree over the whole read — identical copies, or a divergence further
+                # out than the lookahead. Either way this window names no differing token.
+                continue
+            for gap in range(1, _SPLICE_DIVERGENCE_MAX_GAP_WORDS + 1):
+                tail_left, tail_right = left[agreed + gap:], right[agreed + gap:]
+                resync = min(len(tail_left), len(tail_right), _SPLICE_DIVERGENCE_RESYNC_WORDS)
+                if resync < _SPLICE_DIVERGENCE_RESYNC_WORDS:
+                    break
+                if tail_left[:resync] == tail_right[:resync]:
+                    pair = (left[agreed], right[agreed])
+                    if pair not in found:
+                        found.append(pair)
+                    break
+    return sorted(found)
 
 
 def _emission_block_claims(
@@ -9461,8 +9541,12 @@ def test_the_fast_shards_header_block_states_no_span_twice():
     assert not repeated, (
         "the `fast_shards` header states the same span twice, which is what a `merge=union` "
         f"fold (#5373) leaves behind when both parents rewrote it: {repeated!r}. Keep ONE copy — "
-        "the newer spelling usually wins, and where the copies disagree on a FIGURE the figure "
-        "is the tell — then re-derive the emission with the verb rather than around the splice.")
+        "the newer spelling usually wins — and where the copies DISAGREE on a FIGURE the figure "
+        "is the tell. ⛔ A reported span is a copy's full extent while the copies AGREE; a "
+        "DIVERGENT pair stops at the differing token, so there it LOCATES the seam and is not a "
+        "deletion unit (deleting it severs both copies and would leave this guard green over the "
+        f"fragments). This block's differing token(s): {_splice_divergences(header)!r} — "
+        "reconcile those, then re-derive the emission with the verb rather than around the splice.")
     # NON-VACUITY: the shape measured on `45dd35ba9a`, RE-WRAPPED — so a line-level check calls
     # this clean and the guard above would be decoration. Both copies are the same claim; only the
     # FIRST copy's line breaks differ, which is exactly how the real splice hid.
@@ -9520,6 +9604,42 @@ def test_the_fast_shards_header_block_states_no_span_twice():
         "three CONTIGUOUS copies must merge into ONE 36-word span — a first-occurrence-only reader "
         f"returns a severed fragment instead: {[len(s.split()) for s in three_copies]} word(s) "
         f"across {len(three_copies)} span(s)")
+    # ⛔ …and that extent is exact only while the copies AGREE. A DIVERGENT pair — the canonical
+    # `merge:union` artefact when both sides edited one LINE — stops at the differing token, so its
+    # span LOCATES the seam and is not a deletion unit: measured on the spliced fold `14b8322eb2`,
+    # the ratio line reads as 11-word spans against ~30-word copies, and running the message's own
+    # advice there leaves an unreadable `2.0361).` fragment beside the duplicated tail with this
+    # guard GREEN. `_splice_divergences` names the tokens the repair must reconcile.
+    divergent = _emission_block_header(
+        "# at 28 m the ratio is `2.04` (1680 / 825.1 = 2.0361). A carried ratio in a graded\n"
+        "# sentence is exactly the defect this block exists to prevent, one level below.\n"
+        "# at 28 m the ratio is `2.04` (1680 / 825.1 = 2.0362). A carried ratio in a graded\n"
+        "# sentence is exactly the defect this block exists to prevent, one level below.\n"
+        "\nfast_shards: 11\n")
+    assert len(_repeated_header_spans(divergent)) == 4, (
+        "the divergent fixture no longer states the ratio sentence twice in two fragments — the "
+        f"divergence read below is not exercising that shape: "
+        f"{[len(s.split()) for s in _repeated_header_spans(divergent)]!r} words per span")
+    assert _splice_divergences(divergent) == [("2.0361).", "2.0362).")], (
+        "a divergent pair's differing tokens were not reported, so the failure message cannot name "
+        f"the figure to reconcile: {_splice_divergences(divergent)!r}")
+    # …and two copies that merely END differently are NOT a divergence: this block legitimately
+    # states one sentence twice, so a read that reported every first difference would send a
+    # maintainer to reconcile nothing. Measured: these copies diverge at `the` / `while` and never
+    # re-agree, so a naive first-difference read reports `('the', 'while')` and this one reports
+    # none — re-agreement is what separates a carried FIGURE from a repeated claim.
+    ends_differently = _emission_block_header(
+        "# twelve words stated twice make one splice seam and no more here\n"
+        "# the prose after the FIRST copy appears exactly once in this block, and\n"
+        "# twelve words stated twice make one splice seam and no more here\n"
+        "# while the prose after the SECOND copy is a different sentence entirely.\n"
+        "\nfast_shards: 11\n")
+    assert [len(s.split()) for s in _repeated_header_spans(ends_differently)] == [12, 12], (
+        "the fixture below is not the shape it must be — it has to state the passage exactly twice")
+    assert not _splice_divergences(ends_differently), (
+        "two copies that differ only in what FOLLOWS them were reported as a DIVERGENT pair — the "
+        "re-agreement requirement is what tells a carried figure from a repeated claim, and "
+        f"without it every duplicate reads as one: {_splice_divergences(ends_differently)!r}")
     # …and a DOUBLE-QUOTED retraction is NOT a second claim. This block quotes the clause it
     # retracted, twice, and that quotation is how the retraction stays checkable; masking quotes
     # is what keeps the guard from redding on the block's own honesty.
