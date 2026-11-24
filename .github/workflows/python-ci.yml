@@ -237,7 +237,7 @@ jobs:
     # shape that keeps the gate clean AND the lever live;
     # `tests/test_ci_selection.py::test_the_fold_lever_reaches_every_matrix_emitter_in_the_changes_job`
     # discovers the emitters from their `run:` commands, so a third one added
-    # later cannot silently miss it (the `_label_set` arm was cut by #14439 and restored by #14481).
+    # later cannot silently miss it (the opt-in arm, `test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`, was cut by #14439 and restored by #14481).
     outputs:
       python: ${{ steps.select.outputs.python }}
       full: ${{ steps.select.outputs.full }}
