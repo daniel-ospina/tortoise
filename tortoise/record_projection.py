@@ -2080,12 +2080,15 @@ def _resident_entry() -> dict[str, Any]:
     `tests/test_health_build_identity_10447.py`; a patched resolver is honoured
     by the NEXT resolution, i.e. after :func:`_release_schema_cache`.
 
-    ⚠️ AN ABSENT SCHEMA DOES NOT SELF-HEAL HERE. `_entry_sql` memoises `""` when
-    no migration is readable, and `table_columns()` raises before caching its
-    map, so an absence→appear transition on the resident path keeps raising until
-    :func:`_release_schema_cache`. An explicit directory heals by itself (the
-    fingerprint key changes). Loud, and cured by the documented verb — the same
-    trade as the freshness one, in the direction that fails closed.
+    ⚠️ AN ABSENT SCHEMA DOES SELF-HEAL HERE, and the cost of that is bounded.
+    `_entry_sql` does NOT memoise an empty read, so an absence→appear transition
+    on the resident path is seen by the very next consult — the same self-heal
+    the pre-#4625 code had, kept because the alternative is a permanent,
+    self-inflicted `RecordProjectionError` on the record write path with no
+    production caller for the refresh verb to cure it (#4625 review). While the
+    schema is absent the process pays one read per consult, on a path that is
+    raising anyway; once any registered migration is readable the parse is
+    memoised and the zero-filesystem-operations property holds from then on.
     """
     with _SCHEMA_CACHE_LOCK:
         entry = _RESIDENT_SCHEMA.get("entry")
@@ -2248,11 +2251,30 @@ def _schema_entry(migrations_dir: Path | None) -> dict[str, Any]:
 
 
 def _entry_sql(entry: dict[str, Any]) -> str:
-    """The concatenated migration SQL for `entry`, read at most once per file set."""
+    """The concatenated migration SQL for `entry`, read at most once per file set.
+
+    ⛔ AN ABSENT READ IS NOT MEMOISED (#4625 review). `_read_migrations` returns
+    `""` when no registered migration is readable, and a resident entry that
+    stored that would freeze the absence for the life of the process: every
+    later `table_columns()` raises `RecordProjectionError` without touching the
+    disk again, because `entry["sql"]` is no longer `None`. The only cure would
+    be `_release_schema_cache()`, which has no production caller — so a process
+    that served a write before its migrations were readable would never
+    recover, and pre-#4625 it healed on the next consult. Losing the memo only
+    while the schema is ABSENT costs a read on a path that is already raising;
+    the healthy path is untouched (a first read that finds a file still memoises,
+    so a warm process keeps its zero-filesystem-operations property).
+
+    The explicit-directory mode is unaffected in the direction that matters: its
+    entry is keyed on the migration fingerprint (`_schema_entry`), so the
+    absence→appear transition is a cache MISS there whether or not this is
+    memoised.
+    """
     sql = entry["sql"]
     if sql is None:
         sql = _read_migrations(entry["base"])
-        entry["sql"] = sql
+        if sql:
+            entry["sql"] = sql
     return sql
 
 
@@ -2426,10 +2448,31 @@ _ALTER_COLUMN_TYPE_RE = re.compile(
 #: `replay_plan`, and `jsonb_columns()` is read once per string PARAMETER — but
 #: all three answer from the process's RESIDENT schema
 #: (:func:`_resident_entry`): resolved once, then zero filesystem operations per
-#: call. The map cannot go stale mid-process, and the reason is stated rather
-#: than implied: the migrations are baked into the deployed image, and the
-#: refresh a caller needs exists as a verb (`_release_schema_cache()`,
-#: `_jsonb_cache_clear()`) instead of a per-call `stat`.
+#: call. ⛔ WHAT FRESHNESS REMAINS, STATED NO WIDER THAN THE CODE (#4625 review):
+#: an edit to the migration FILES of a running process is NEVER seen by that
+#: process — there is no per-call `stat` and no TTL left to notice it, so an
+#: already-resolved entry answers from its first parse for the life of the
+#: process. What is guaranteed is narrower and is the reason that is acceptable:
+#: (a) the migrations are baked into the deployed image (`migrations_source:
+#: "checkout"`), so an edit is a redeploy there; (b) an ABSENT schema is not
+#: memoised, so absence→appear heals on the next consult (:func:`_entry_sql`);
+#: and (c) a caller that must SEE an edit has a verb — `_release_schema_cache()`
+#: or `_jsonb_cache_clear()` — instead of paying a per-call `stat` on the write
+#: path. The earlier wording in this block ("The map cannot go stale
+#: mid-process") was wider than the code and is corrected here rather than
+#: deleted, because the invariant it once carried is worth answering in place:
+#: *"`supabase/migrations` is applied by a workflow separate from the app deploy,
+#: so a long-lived process must never keep answering a map it parsed before a
+#: migration landed"*. Both halves now measure differently — the DEPLOY half is
+#: real (`.github/workflows/supabase-deploy.yml` does apply migrations in a run
+#: separate from `deploy-hosted.yml`), but the SKEW it describes is between the
+#: database and the files this reader parses, and those files come from the
+#: process's own IMAGE (`migrations_source: "checkout"` names the image, not the
+#: DB). A migration landing in Postgres cannot rewrite the image's files under a
+#: running process, so this cache does not widen that skew: it is a code-level
+#: read of code-shipped DDL either way. A deployment that mounts a mutable
+#: checkout is the one shape where that stops holding, and it refreshes by
+#: redeploying like the image does.
 #: ⚠️ IT USED TO BE A 5 s TTL, and #4625 is the measurement that retired it: the
 #: TTL expiring under load put a 20-file `read_text` sweep inside `replay_plan`
 #: on the single serving thread. A "cheap" expiry is not cheap when the work

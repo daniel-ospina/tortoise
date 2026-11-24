@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,36 @@ def _plan() -> None:
                    position=False)
 
 
+class _Clock:
+    """A settable `time.monotonic`, so a BOUNDED-WINDOW mutant cannot hide.
+
+    ⛔ WHY THIS EXISTS AT ALL (#4625 review). The pre-fix shape was not "no
+    cache" — it was a 5 s TTL on `jsonb_columns()`, and a pin that makes three
+    calls inside one sub-second burst is answered by the TTL itself, so it stays
+    GREEN with the defect restored. Freezing the clock and then advancing it past
+    any plausible window makes the assertion able to fail against the shape that
+    actually shipped the 52.406 s block — "resolve once, but re-check every N
+    seconds" — as well as against an uncached reader. ONE hour, so no bounded
+    window a future lane might pick (5 s, 60 s, 600 s) can hide behind it.
+    """
+
+    STEP_SECONDS = 3600.0
+
+    def __init__(self) -> None:
+        # ⛔ START FROM THE REAL CLOCK, not from an arbitrary constant: a TTL
+        # mutant compares `now - at` and a fake reading BELOW the real one it
+        # was set against makes that difference NEGATIVE, which a `< window`
+        # test reads as fresh — the pin would then pass over the mutant it
+        # exists to catch (measured on a first cut of this very test).
+        self.now = time.monotonic()
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self) -> None:
+        self.now += self.STEP_SECONDS
+
+
 def _tree(base: Path) -> Path:
     """A copy of the record migrations the process reads, so a parse is a real one."""
     source = _real_migrations()
@@ -124,7 +155,8 @@ def fs_ops(monkeypatch) -> list[str]:
     return ops
 
 
-def test_a_warm_record_write_performs_no_migration_filesystem_operation(fs_ops):
+def test_a_warm_record_write_performs_no_migration_filesystem_operation(
+        fs_ops, monkeypatch):
     """THE PIN: the second and every later record write touches no file.
 
     WHY THE COLD BUILD IS ASSERTED FIRST: a probe that never records anything is
@@ -136,8 +168,10 @@ def test_a_warm_record_write_performs_no_migration_filesystem_operation(fs_ops):
     FALSIFIER (executed — see the PR body): restoring
     `key = (str(migrations_dir or _migrations_dir()), _migrations_fingerprint(…))`
     in `_schema_entry` reds this with a non-empty `fs_ops` naming
-    `stat:`/`exists:` per migration, and restoring the 5 s TTL in
-    `jsonb_columns` reds it with `read_text:`/`open:` per migration.
+    `stat:`/`exists:` per migration. Restoring `_JSONB_CACHE_TTL_SECONDS = 5.0`
+    and its `time.monotonic` memo reds it too, because the warm plans below run
+    past the window on a clock this test controls — the calls are NOT a
+    sub-second burst that the TTL itself would answer (#4625 review).
     """
     rp._release_schema_cache()
     rp._jsonb_cache_clear()
@@ -147,7 +181,10 @@ def test_a_warm_record_write_performs_no_migration_filesystem_operation(fs_ops):
         "the probe is not observing the schema resolution at all, so the "
         "assertion below would pass over any implementation")
     del fs_ops[:]
+    clock = _Clock()
+    monkeypatch.setattr(time, "monotonic", clock)
     for _ in range(3):
+        clock.advance()
         _plan()
     assert fs_ops == [], (
         "a WARM process re-touched the migration files while writing a record: "
@@ -250,7 +287,7 @@ def test_a_named_directory_is_still_revalidated_per_call(tmp_path):
         rp._release_schema_cache()
 
 
-def test_the_jsonb_reader_reads_nothing_on_a_warm_process(fs_ops):
+def test_the_jsonb_reader_reads_nothing_on_a_warm_process(fs_ops, monkeypatch):
     """The exact frame the production stack caught, pinned on its own.
 
     `jsonb_columns()` is called once per STRING PARAMETER of every statement, so
@@ -258,15 +295,92 @@ def test_the_jsonb_reader_reads_nothing_on_a_warm_process(fs_ops):
     The production stack is that expiry, seen from inside `replay_plan`
     (`record_projection.py:2608 → :2524 → :2481 → pathlib.py:1027 read_text` at
     `e74cf1d13d`). It must now be a dict lookup.
+
+    ⛔ AND THE PIN MUST BE ABLE TO FAIL AGAINST *THAT* SHAPE (#4625 review). Three
+    warm calls microseconds apart are answered by a restored 5 s TTL itself, so
+    a burst-only pin stays green over the defect it documents. Two independent
+    probes close that, and either one alone would be enough:
+
+    1. the warm calls run on a CLOCK THIS TEST OWNS, advanced an hour before
+       each one — a TTL, a fingerprint, or any "re-check every N seconds"
+       window therefore expires and its re-read lands in `fs_ops`;
+    2. the producer is POISONED after the cold read, in the shape
+       `test_the_write_path_never_fingerprints_the_migrations` already uses, so
+       ANY re-parse reds regardless of what clock it consults. The poison's own
+       reachability is proven with a positive control (an explicit-directory
+       read DOES call the producer, so it must raise the poison's message).
+
+    FALSIFIER (executed): restore `_JSONB_CACHE_TTL_SECONDS = 5.0` and its
+    `time.monotonic` memo — the warm loop reds with `read_text:`/`open:` per
+    migration. Remove the memoisation entirely and the poison reds it.
     """
     rp._release_schema_cache()
     rp._jsonb_cache_clear()
     rp.jsonb_columns()
     assert fs_ops, "the cold read touched nothing — the probe proves nothing"
     del fs_ops[:]
+
+    clock = _Clock()
+    monkeypatch.setattr(time, "monotonic", clock)
     for _ in range(3):
+        clock.advance()
         rp.jsonb_columns()
     assert fs_ops == [], (
         "`jsonb_columns()` re-read the migration files on a warm process: "
         f"{sorted(set(fs_ops))} — this is the #4625 stack frame, and it runs "
-        "once per bound string parameter of every statement")
+        "once per bound string parameter of every statement. The warm calls "
+        "above run on an ADVANCING clock, so a bounded-window cache (the 5 s "
+        "TTL that shipped the 52.406 s block) reds here too, not only an "
+        "uncached reader.")
+
+    def _poison(base: Path) -> frozenset[str]:
+        raise AssertionError(
+            "`jsonb_columns()` re-parsed the migrations on a WARM process — the "
+            "resident map was not reused, so every bound string parameter pays "
+            "a file read again (#4625)")
+
+    monkeypatch.setattr(rp, "_jsonb_columns_for_dir", _poison)
+    # ⛔ POSITIVE CONTROL FIRST: an explicit-directory read parses directly, so
+    # it must reach the poison. Without this, the silence below is about a patch
+    # that never applied rather than about the resident read.
+    with pytest.raises(AssertionError, match="re-parsed the migrations on a WARM"):
+        rp.jsonb_columns(_real_migrations())
+    clock.advance()
+    rp.jsonb_columns()
+
+
+def test_an_absent_schema_heals_without_the_refresh_verb(monkeypatch, tmp_path):
+    """Absence→appear on the RESIDENT path heals by itself (#4625 review).
+
+    The fix made the resident entry permanent, so a process that served a write
+    BEFORE its migrations were readable would otherwise raise
+    `RecordProjectionError` on every later write for the life of the process —
+    cured only by `_release_schema_cache()`, which has no production caller.
+    Pre-#4625 the next consult healed, and it still must: the fix buys zero
+    filesystem operations on the HEALTHY path, never a permanent hard failure
+    while the schema is merely not there yet.
+
+    FALSIFIER (executed): memoise the empty read again (`entry["sql"] = sql`
+    unconditionally in `_entry_sql`) and the second `table_columns()` below keeps
+    raising.
+    """
+    source = _real_migrations()          # the real tree, captured BEFORE the patch
+    tree = tmp_path / "migrations"
+    tree.mkdir()
+    monkeypatch.setattr(rp, "_migrations_dir", lambda: tree)
+    rp._release_schema_cache()
+    try:
+        with pytest.raises(rp.RecordProjectionError, match="not on disk"):
+            rp.table_columns()
+        # …the schema becomes readable under the SAME process, no refresh verb.
+        for name in rp.RECORD_MIGRATIONS:
+            shutil.copy(source / name, tree / name)
+        assert "point" in rp.table_columns(), (
+            "an absence→appear transition on the RESIDENT schema did not heal: "
+            "the empty read is memoised, so every record write raises for the "
+            "life of the process and the only cure (`_release_schema_cache()`) "
+            "has no production caller. Do not memoise an ABSENT read.")
+        # …and the healthy path still resolves ONCE: the memo is taken now.
+        assert "point" in rp.table_columns()
+    finally:
+        rp._release_schema_cache()

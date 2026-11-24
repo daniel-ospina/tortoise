@@ -272,11 +272,14 @@ the call count itself to 1 would require a caller-held map, which is the
 batching/lifecycle change this issue explicitly defers.
 
 ⚠️ **`column_types()` is NOT cached** (a contract read a pin performs, not a
-per-record read) and **`jsonb_columns()` keeps its 5 s TTL** (it runs once per
-string PARAMETER, where even a stat pass would be a regression). TWO caches, two
-call frequencies, two invalidation costs — plus `column_types()`, deliberately
-uncached. The division is stated at `_JSONB_CACHE_TTL_SECONDS` and at
-`column_types`.
+per-record read). **`jsonb_columns()` no longer has a TTL** (#4625): it runs once
+per string PARAMETER, where even a stat pass would be a regression, so it now
+answers from the process's RESIDENT schema — resolved once per process, zero
+filesystem operations per call, with `_release_schema_cache()` /
+`_jsonb_cache_clear()` as the refresh verbs. A bounded window is only cheap when
+the work behind it is cheap, and the work behind this one is a twenty-file read:
+the 5 s expiry is what #4625 caught inside `replay_plan` on the serving thread.
+The division is stated at `_resident_entry` and at `column_types`.
 
 ⚠️ **Not what this measures.** Per-record cost of ONE door's write path on a
 local loopback Postgres. It is not a capture-throughput claim (the door is one of

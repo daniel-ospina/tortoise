@@ -575,13 +575,16 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         f"what is left on the loop (methods wrapped: {len(saved)}; "
         f"methods observed: {sorted(totals) or 'none'})")
 
-    # ⛔ AND THE SAME LIVE-BAR FOR THE SECOND SURFACE (#4625) — satisfied only by
-    # the self-check above, which is the point: the capture does not reach these
-    # readers today, so this row is evidence about the INSTRUMENT, not about the
-    # path measured here.
-    assert "rp.table_columns" in totals, (
-        "the wrapped record-projection reader was not charged at all, so this "
-        f"surface is uninstrumented (observed legs: {sorted(totals) or 'none'})")
+    # ⛔ AND NO SEPARATE LIVE-BAR FOR THE SECOND SURFACE (#4625 review — a dead
+    # assertion was DELETED here). A pin `assert "rp.table_columns" in totals`
+    # used to sit at this point, and it could never fail: `totals` is summed over
+    # the same `rows` the self-check above already counted, and `charged == 2`
+    # requires two `rp.table_columns` rows to exist in it. No mutation could red
+    # it without reddening that earlier assertion first, so it read as extra
+    # coverage while adding none (mutation contract rule 3). The live-bar for
+    # this surface IS the self-check above — both shapes, asserted by count — and
+    # the capture path cannot carry a second one today, because it does not reach
+    # these readers at all (`saved_rp` / the surface comment above say why).
 
     # A leg at or above `_ON_LOOP_BAR_MS` of TOTAL on-loop time is the "this is
     # work, not probe overhead" bar (see the docstring for why it is a magnitude
