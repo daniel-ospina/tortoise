@@ -91,9 +91,9 @@ version: 1
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
 # `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
 # nine/two split this branch last derived (837.3/837.2) with the minute unmoved, and #14423's
-# `tests/test_14350_drain_convergence.py` sits in shard a. That map is the union of both parents'
+# `tests/test_14350_drain_convergence.py` sits in shard d. That map is the union of both parents'
 # registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
-# (`--emit-push-matrix` lists it in shard c) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
+# (`--emit-push-matrix` lists it in shard i) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
 # matters only because it sits one main fold from rounding again. #14407 registered
 # `tests/test_14407_alert_delivery.py` on two surfaces (`api`, beside `test_abuse`; `core`, beside
 # `test_notify`), and that registration is part of the partition stated above — the minute did not
@@ -111,28 +111,45 @@ version: 1
 # #14429's `tests/test_spool_drain_rehearsal.py` (listed in shard `k`) — FIVE of them on top of
 # #14038's row, which the 836.4 s baseline below already counts (measured: that row is in shard c at
 # `4993fa08`, so the baseline's total includes it), and why every one of them moves the split.
+# `test_notify`) — the `core` row is registered in its own right, so the shard letter is MEASURED
+# (shard `c` at this head) rather than inferred from `test_notify`'s (shard `e`): a `core` neighbour
+# sits in a different bin because the packer is greedy, and every shard letter in this block is a
+# `push_legs()` reading at the head it names, not a placement inherited from a neighbouring row.
+# The minute did not move (28 m either way), which is exactly why the SECONDS are the graded claim.
+# Re-run `--emit-push-matrix` on the merged tree; never carry the last revision's minute, seconds,
+# or split.
 #
 # ⛔ The split is 0.1 s WIDE, which is why the NAMES are quoted and not only the seconds: a carried
 # figure and a re-derived one differ in the SET, and the MINUTE has stood at 28 m across every
-# reading of this pool while the seconds moved under it (835.5 → 837.7 s). So NO arithmetic on the
-# minute can catch a carried figure — only the `est_seconds` partition can, which is why the
-# sentence is GRADED below instead of trusted.
+# reading of this pool while the seconds moved under it (835.5 -> 837.7 s). So NO arithmetic on the
+# minute can catch a carried figure - only the `est_seconds` partition can, which is why the
+# sentence is GRADED above instead of trusted.
 #
 # ⛔ The partition moves on EVERY landed registration, which is why a rebase that interleaves two
-# sides of this paragraph REDS rather than picking one: it was re-emitted for the #14371 row at a
+# sides of this block REDS rather than picking one: it was re-emitted for the #14371 row at a
 # six/five split, then for #7879 at a four/seven one within the hour (reddening `main` in
 # between), #14220 moved it to a two/nine split, merging `main`'s #14350 row collapsed it to a
-# single eleven-shard one, #14429's `core` registration re-split it to nine/two at 837.3 s, and
-# merging `main`'s own copy left this block stating the emission TWICE — each parent had rewritten
-# this paragraph and git kept BOTH spellings, so the guard read `<est 837.3 stated twice>` and
-# `<ceil stated 2 times>` rather than a clean claim. It is RE-EMITTED once more here, from the
-# merged tree. Re-run `--emit-push-matrix` on the merged tree; never carry the last revision's
-# minute, seconds, or split.
+# single eleven-shard one, and #14429's `core` registration re-split it to nine/two at 837.3 s. Two
+# parents re-deriving this paragraph is what produced the `<est 837.3 stated twice>` /
+# `<ceil stated 2 times>` reds, so the claims live in ONE paragraph (above) and the readings below
+# are HISTORY, deliberately not restated as clauses.
 #
 # That pool is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`,
 # landed on `main` with #14038, plus #14429's `tests/test_spool_drain_rehearsal.py` (listed in
-# shard `k`) — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
+# shard `i`) - each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only because it sits
 # one main fold from rounding again.
+# The registrations this block's own reading counts are the ones `main` has landed at the flat 2.0 s
+# `DEFAULT_FAST_WEIGHT`, each with the shard `push_legs()` puts it in AT THE HEAD NAMED (a letter is
+# a measurement, never an inference from a neighbouring row): #14409's
+# `tests/test_14371_offline_embed_json.py` (shard k), #14434's `tests/test_7879_record_chain.py`
+# (shard i), #14220's `tests/test_14186_embedder_seam_batching.py` (shard f), #14423's
+# `tests/test_14350_drain_convergence.py` (shard d), #14038's
+# `tests/test_13998_capacity_notice.py` (shard i) and #14429's
+# `tests/test_spool_drain_rehearsal.py` (shard i) - FIVE of them on top of #14038's row, which the
+# 836.4 s baseline below
+# already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
+# it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
+# only the worst figure: five registrations x 2.0 s is the whole of 9200.1 -> 9210.1.
 # ⛔ The partition moves on every landed registration, and this block's own readings show how fast:
 # the guard's landing (#14405) packed eight bins at 836.4 s and three at 836.3 s, #14409's row moved
 # it to six at 836.6 and five at 836.5, #14434's to four at 836.8 and seven at 836.7 (and `main` sat
