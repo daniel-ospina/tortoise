@@ -103,6 +103,18 @@ NOW_ROUTING = [
     ("is the company’s policy archived", "is_predicate"),
     ("is the naïve plan archived", "is_predicate"),
     ("is the café plan archived", "is_predicate"),
+    # ⛔ …and the TYPOGRAPHIC HYPHENS, which are what a design doc, an autocorrect
+    # or a typesetter actually emits for `all-hands`: U+2010 (hyphen), U+2011
+    # (non-breaking hyphen — the one a layout tool uses to keep a compound on one
+    # line) and U+2013 (en dash). Measured before the boundary fold in
+    # `detect_state_question`: all three answered `None`, i.e. `0 rows` from the
+    # relevance read — the #14033 defect class in yet another spelling. A
+    # decomposed (NFD) accent was the same miss (`cafe` + U+0301), which is why the
+    # fold is NFKC and not a longer character class (#14491 review cycle 3, P2).
+    ("is the all‐hands meeting cancelled", "is_predicate"),
+    ("is the all‑hands meeting cancelled", "is_predicate"),
+    ("is the all–hands meeting cancelled", "is_predicate"),
+    ("is the cafe\u0301 plan archived", "is_predicate"),
     # an imperative that asks for the SET by clause, not for one named record.
     # ⛔ `show me the retired onboarding flow` is still refused (it asks for ONE
     # record); the `what we <verb>` clause is what makes this a set request.
@@ -291,7 +303,7 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       `is the policy unless bookings were cancelled` — the ending there belongs
       to an adjunct clause and the question's predicate is `safe` / `accurate` /
       the policy's applicability, so the run would swallow it;
-    * the PREDICATE-MODIFIER stop is the sixth guard, and its falsifier is the
+    * the PREDICATE-MODIFIER stop is the fifth guard, and its falsifier is the
       FIFTY-TWO measured rows of
       :func:`test_a_modified_predicate_is_not_the_question_asked` — re-measure
       `len(MODIFIED_PREDICATE_STAYS_OUT)` rather than trusting any count in prose
@@ -589,13 +601,18 @@ def test_an_affirmative_temporal_modifier_still_routes():
     """The modifier guard is narrower than "any adverb in the slot", measured.
 
     ⛔ These rows are the RECALL half of the P1/P2 remedy, and they are why the
-    stop list is `not|never|neither|nor|longer|to|being|or` rather than that list
-    plus `yet|still|already` (the shape the review measured). Both close the whole
-    over-admission class; the wider list additionally refuses the AFFIRMATIVE
-    strings below, which ask exactly the question the ended population answers —
-    has this named record already ended. Every row here routes on the pre-fix head
-    too, so this test is a RECALL guard, not a non-vacuity pin: it reds only if
-    someone widens the modifier list.
+    stop list is built from `_NP_STOP`'s alternatives — the flat negators, the
+    contracted-auxiliary SUFFIX, the positional approximative arm, the futurity
+    frame, `being`, `or`, the clause linkers and the `of`-complement — rather than
+    that list plus `yet|still|already` (the shape the review measured). Both close
+    the whole over-admission class; the wider list additionally refuses the
+    AFFIRMATIVE strings below, which ask exactly the question the ended population
+    answers — has this named record already ended. ⛔ THIS TEST IS A RECALL GUARD
+    **AND** A NON-VACUITY PIN, and saying which head matters: every row routes at
+    every head of THIS branch (`35c7ab5a5c0e` onwards, the head before the
+    predicate-modifier guard landed), and every row answers `None` on
+    `origin/main`, which has no `is_predicate` shape at all — so it reds both when
+    someone widens the modifier list and when the shape is removed.
 
     ⛔ The two COMPOUND-HEAD-NOUN rows are the same argument applied to the
     futurity tokens: `due` and `going` are ordinary modifiers of the HEAD NOUN in

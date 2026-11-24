@@ -102,6 +102,7 @@ OCCURRENCE_EVENT_KINDS`` (#13128) and the question keeps its own issue.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 # ── the populations a question may select ───────────────────────────────────
@@ -163,6 +164,16 @@ _ENDING_WORDS = (
 #: Admitting the full letter class costs nothing here because
 #: `detect_state_question` LOWERCASES and whitespace-collapses the query before any
 #: shape is tried, so no case-folding assumption is smuggled in.
+#:
+#: ⛔ THE TYPOGRAPHIC VARIANTS ARE FOLDED AT THE BOUNDARY, NOT ENUMERATED HERE. A
+#: character class that lists every spelling of an apostrophe and a hyphen is a
+#: losing game — U+2010/U+2011/U+2012/U+2013/U+2014 hyphens and a decomposed (NFD)
+#: accent each answered `0 rows` while U+2019 and the ASCII forms routed (review
+#: cycle 3, P2). `detect_state_question` now TRANSLATES those code points to their
+#: ASCII forms and NFKC-normalises before any shape is tried, so this class stays
+#: readable and the fold is the single place that knows about typography. The
+#: `’` member is therefore a redundant safety net, kept because it costs nothing
+#: and because a future caller may match `_NP_WORD` on un-normalised text.
 _NP_WORD = r"[^\W_](?:[^\W_]|['’-])*"
 
 #: What a ``is_predicate`` subject NP's word run may NOT cross. A word run alone
@@ -821,7 +832,31 @@ def detect_state_question(text: str | None) -> StateQuestion:
     """
     if not text or not str(text).strip():
         return StateQuestion()
-    t = " ".join(str(text).lower().split())
+    # ⛔ ONE NORMALISATION POINT, BEFORE ANY SHAPE MATCHES. The shapes carry
+    # hand-written character classes (`_NP_WORD` admits `'`/`-`), and enumerating
+    # every typographic spelling of an apostrophe or a hyphen inside those classes
+    # is a losing game: a word processor, an autocorrect or a typesetter emits
+    # U+2019 for an apostrophe and U+2010..U+2014 for a hyphen, and a decomposed
+    # (NFD) `é` is a different string from the composed one. Measured before this
+    # fold, each of these answered `0 rows` — the silent-empty answer the whole
+    # shape exists to remove, because the relevance read excludes terminal
+    # statuses (PR #14491 review cycle 3, P2):
+    #     is the all–hands meeting cancelled     (U+2013)
+    #     is the all‑hands meeting cancelled     (U+2011)
+    #     is the all‐hands meeting cancelled     (U+2010)
+    #     is the café plan archived             (NFD `e` + U+0301)
+    # Folding here fixes them all at once, and keeps the regexes readable; NFKC
+    # also maps compatibility forms (ligatures, full-width) onto their plain
+    # spellings. The transform is idempotent, so a caller that already sent ASCII
+    # passes through unchanged.
+    folded = str(text).translate(
+        {
+            0x2018: "'", 0x2019: "'", 0x02BC: "'",  # quotes / modifier apostrophe
+            0x2010: "-", 0x2011: "-", 0x2012: "-",  # hyphens
+            0x2013: "-", 0x2014: "-", 0x2212: "-",  # dashes / minus sign
+        }
+    )
+    t = " ".join(unicodedata.normalize("NFKC", folded).lower().split())
     for shape, pattern in _ENDING_SHAPES:
         m = pattern.search(t)
         if m:
