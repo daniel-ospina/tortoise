@@ -6065,6 +6065,29 @@ def _cmd_create_point(args) -> int:
     # verb — the same coercion `_doctor_hosted_rows` applies belongs here.
     api_url = api_url if isinstance(api_url, str) else str(api_url or "")
     api_url = (api_url or "https://api.premiselabs.co").rstrip("/")
+    # ⛔ REFUSE A NON-URL **BEFORE** BUILDING THE REQUEST — this is the only place in
+    # this verb that may say "nothing was sent", because nothing has been. The
+    # coercion above only makes the value a STRING, not a URL: a store `api_url`
+    # of `42` becomes `"42"`, and `Request(...)` raises
+    # `ValueError: unknown url type: '42/v1/points'`.
+    #
+    # ⛔ AND IT MUST BE A PRE-FLIGHT, not a `except ValueError` alone. A bare
+    # `except ValueError` over the `try` below ALSO catches the ValueErrors that
+    # `urlopen` raises AFTER the request was sent — `Invalid IPv6 URL` from a
+    # redirect handler, for one (measured: a server that answers the POST with a
+    # `302` whose `Location` is malformed; the server received and processed the
+    # write, and the handler then raised). Saying "nothing was sent" there is the
+    # same false safety fact the neighbouring `URLError` arm was rewritten to
+    # avoid, and `test_an_unreachable_api_does_not_claim_nothing_was_written`
+    # exists to keep that claim out of this verb.
+    if not api_url.startswith(("http://", "https://")):
+        print(f"Cannot reach API at "
+              f"{_printable(_mask_display_target(api_url))}: not an http(s) "
+              f"URL.", file=_sys.stderr)
+        print("The request was never built, so nothing was sent — check the "
+              "configured API URL (it must start with http:// or https://).",
+              file=_sys.stderr)
+        return 1
 
     payload = {
         "content": args.content,
@@ -6164,28 +6187,27 @@ def _cmd_create_point(args) -> int:
               "`--dedup` to make the retry safe.", file=_sys.stderr)
         return 1
     except ValueError as e:
-        # ⛔ THE COERCION ABOVE ONLY MAKES THE VALUE A STRING — NOT A URL.
-        # `_resolve_config_path` passes store `api_url` through VERBATIM and
-        # `./.tortoise` is repo-controllable, so `{"api_url": 42}` coerces to
-        # "42", and `Request(...)` (inside this `try`) raises
-        # `ValueError: unknown url type: '42/v1/points'`. Without this arm it
-        # escapes `main()` as a raw traceback — the same "a repository can crash
-        # the WRITE verb" class the coercion was added for, one shape further on
-        # (list/dict were the shapes that arm closed; int/bool/`"notaurl"` were
-        # not).
+        # ⛔ HEDGED ON PURPOSE. This arm catches what the pre-flight above could
+        # not: a `ValueError` raised by `urlopen`/the redirect handler AFTER the
+        # request was on the wire (`Invalid IPv6 URL` is the measured one). So it
+        # may NOT claim the write was not sent — see the `URLError` arm for the
+        # same reasoning, and `test_an_unreachable_api_does_not_claim_nothing_was_written`.
         #
-        # ⛔ ORDER: this arm sits AFTER `_json.JSONDecodeError`, which SUBCLASSES
-        # `ValueError` — hoisting it would swallow the unreadable-body arm and
-        # mis-report a landed write as "nothing was sent".
-        #
-        # "Nothing was sent" IS provable here, unlike the `URLError` arm: the
-        # ValueError is raised building the request, before any connection.
+        # ⛔ AND REDACT THE TEXT: `{e}` quotes the URL it failed on, so a store
+        # `api_url` carrying `?token=…`/`user:pw@` would reach stderr unmasked —
+        # and a malformed `api_key` is echoed too
+        # (`Invalid header value b'Bearer tt_…'`), which is the PRIMARY credential.
+        # The masked target beside it made the line look already handled.
+        _err_text = str(e).replace(api_url, "<api_url>")
+        if api_key:
+            _err_text = _err_text.replace(api_key, "<api_key>")
         print(f"Cannot reach API at "
-              f"{_printable(_mask_display_target(api_url))}: {e}",
-              file=_sys.stderr)
-        print("The request was never built, so nothing was sent — check the "
-              "configured API URL (it must start with http:// or https://).",
-              file=_sys.stderr)
+              f"{_printable(_mask_display_target(api_url))}: "
+              f"{_printable(_err_text)}", file=_sys.stderr)
+        print("The request did not complete — that does not prove it failed to "
+              "land. Check the configured API URL and API key, and re-run with "
+              "`--dedup` (or read back first) so a retry cannot duplicate the "
+              "write.", file=_sys.stderr)
         return 1
 
     # #14424 review P3: a 2xx this verb cannot READ is not a success, and until
@@ -16381,22 +16403,12 @@ def _cmd_doctor(args):
                 # ADR-010). Omitting it here left the same one-screen
                 # contradiction this gate exists to remove, narrowed to `oat_`: a
                 # Graph row saying "Run `tortoise init`" beside a Hosted row
-<<<<<<< HEAD
                 # naming an OAuth identity. The row then names the MCP door for
                 # that family rather than `create-point`, because `oat_` tokens
                 # are MCP-only and REST `/v1/*` refuses them — the deferral that
                 # used to excuse this (`the Hosted row below says …`) no longer
                 # ships, and it was wrong anyway: the pointer must name a step
                 # the key can take, not a row that may decline to grade.
-||||||| df2bed17f9
-                # naming an OAuth identity. The row's own wording defers
-                # (`the Hosted row below says whether that will work`), which is
-                # what makes the deferral correct for a REST-only verb.
-=======
-                # naming an OAuth identity. The row names the command that answers
-                # it (`tortoise doctor` without `--offline`), which is what makes
-                # the deferral correct for a REST-only verb.
->>>>>>> b279a1d49b078cb48bed3eb9d0793e8941879896
                 # ⛔ Do NOT widen `_HOSTED_KEY_PREFIXES` itself —
                 # `test_the_hosted_prefixes_match_the_auth_contract` pins it to
                 # `tortoise/auth.py::API_KEY_PREFIXES`.
