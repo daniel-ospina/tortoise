@@ -191,11 +191,32 @@ def _off_loop_submissions(
     return out
 
 
+def _refers_to(node: ast.AST, name: str) -> bool:
+    """Does `node` NAME the callable `name` — as a bare name OR as an attribute?
+
+    ⛔ THIS EXISTS SO THE TWO ARMS CANNOT DISAGREE (measured FAIL-OPEN).
+    `_off_loop_submissions` resolves its callable argument through `getattr(arg,
+    "attr", None)`, so it accepts an ATTRIBUTE shape — `await
+    _run_off_loop(_CAPTURE_EXECUTOR, holder._stamp_chain)` — as a submission, while
+    the reference walk below matched `ast.Name` only. The two then disagreed: a
+    mutant that moves the chain into a class method, calls `holder._stamp_chain()`
+    INLINE and also submits it by attribute satisfied arms 1-3 and produced ZERO
+    references, so this pin went GREEN with the chain running on the loop
+    (measured: `1 passed`, rc=0). A walk that cannot see a reference the submission
+    arm accepts is not a gate.
+    """
+    if isinstance(node, ast.Name):
+        return node.id == name
+    return isinstance(node, ast.Attribute) and node.attr == name
+
+
 def _submitted_names(tree: ast.Module) -> list[ast.Name]:
-    """The `ast.Name` nodes that ARE the callable of an awaited off-loop submission.
+    """The callable nodes that ARE an awaited off-loop submission's second argument.
 
     i.e. the second positional argument of every awaited
-    `_run_off_loop(_CAPTURE_EXECUTOR, <name>)`.
+    `_run_off_loop(_CAPTURE_EXECUTOR, <name>)` — a bare name or an attribute whose
+    `.attr` is the name (the same shapes `_off_loop_submissions` accepts, resolved
+    through `_refers_to` so the two arms cannot drift apart).
     """
     awaited = {
         id(node.value)
@@ -216,7 +237,7 @@ def _submitted_names(tree: ast.Module) -> list[ast.Name]:
             len(args) > 1
             and isinstance(args[0], ast.Name)
             and args[0].id == _OFF_LOOP_POOL
-            and isinstance(args[1], ast.Name)
+            and isinstance(args[1], (ast.Name, ast.Attribute))
         ):
             out.append(args[1])
     return out
@@ -225,8 +246,9 @@ def _submitted_names(tree: ast.Module) -> list[ast.Name]:
 def _off_loop_references(tree: ast.Module, name: str) -> list[tuple[int, bool]]:
     """Every REFERENCE to `name` in the module: (line, is_the_submitted_one).
 
-    ⛔ The legal reference is a bare `ast.Name` that IS the second positional
-    argument of an awaited `_run_off_loop(_CAPTURE_EXECUTOR, name)` — nothing else.
+    ⛔ The legal reference is the second positional argument of an awaited
+    `_run_off_loop(_CAPTURE_EXECUTOR, name)` — a bare name OR an attribute that
+    resolves to it (see `_refers_to`) — and nothing else.
     `name(…)` is an inline run on the caller's thread; `_CAPTURE_EXECUTOR.submit(
     name)` is the same fire-and-forget defect under another helper (it skips
     `_run_off_loop`'s `confine_context` snapshot and is never awaited). Both are
@@ -237,7 +259,7 @@ def _off_loop_references(tree: ast.Module, name: str) -> list[tuple[int, bool]]:
     return sorted(
         (node.lineno, id(node) in submitted)
         for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and node.id == name
+        if _refers_to(node, name)
     )
 
 
@@ -416,7 +438,8 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # `confine_context`).
     #
     # This arm needs no dataflow: the only legal reference to an owner in this
-    # module is the bare `ast.Name` in `_run_off_loop(_CAPTURE_EXECUTOR, owner)`,
+    # module is the callable argument of `_run_off_loop(_CAPTURE_EXECUTOR, owner)`
+    # (a bare name or an attribute resolving to it — `_refers_to`),
     # so every other reference it finds is a second way to run the chain and reds.
     # All three mutants above red here; the shipped tree has exactly one reference
     # per owner, at the submission.
@@ -443,12 +466,16 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # warning, and every arm above stays green. That is the same silent-loss state
     # arm 3 rejects for `async def`, reached by "disabling" the offload instead of
     # mis-typing it. Run-time-constant guards stay ungraded (see the header).
+    # ⛔ `_refers_to`'s NAME, not `node.id`: the submitted node may be an ATTRIBUTE
+    # (`holder._stamp_chain`), which carries `.attr` and no `.id` — reading `.id`
+    # here raised `AttributeError` on a shape the arms above deliberately accept.
     dead_guards = {
         name: guards
         for name, guards in (
-            (node.id, _dead_guards(tree, node))
+            (getattr(node, "id", None) or getattr(node, "attr", None),
+             _dead_guards(tree, node))
             for node in _submitted_names(tree)
-            if node.id in owners
+            if (getattr(node, "id", None) or getattr(node, "attr", None)) in owners
         )
         if guards
     }
