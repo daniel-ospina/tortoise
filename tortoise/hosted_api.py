@@ -8601,6 +8601,11 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
+                # #14582: present-and-null for the same reason as every key above
+                # — a missing key must not read as "no uncut graphs".
+                "armed_but_uncut": None,
+                "armed_but_uncut_untracked": None,
+                "armed_but_uncut_reasons": None,
                 # Present-and-null for the same reason (#12943): a missing key
                 # must not read as "the cache is fine".
                 "cache_leg_failures": None,
@@ -8645,6 +8650,26 @@ def _record_health() -> dict:
         # reports, so inventing one would fabricate the finding.
         "record_writes_applied": None,
         "record_last_write_at": None,
+        # ⛔ #14582: THE GAP ITSELF, beside the counters (#14582). Seeded ``None``
+        # for the same reason as every key above — a key assigned only in the
+        # ``else`` arm is ABSENT exactly when the snapshot failed, and an absent
+        # key reads as "no uncut graphs".
+        #
+        # ⛔ THIS ONE IS **NOT** A COUNTER OF DECLINES, and it is the one field
+        # here that can make an armed, otherwise-healthy deployment red: a graph
+        # created on an armed deployment that has no `active` `record_cursor` row
+        # writes NO record rows at all while `write_live_record` (fail-soft by
+        # contract) reports success to its caller. That is a DEPLOYMENT problem,
+        # not one tenant's fault — the same class as the ``armed`` key itself —
+        # and a surface that reads it and still says ``ok`` is the silence this
+        # field exists to end.
+        #
+        # It carries NO tenant identifiers: this endpoint is unauthenticated, and
+        # a graph id is a customer's own name for a tenant (`_change_feed_health`
+        # states the same rule). Counts and reasons only.
+        "armed_but_uncut": None,
+        "armed_but_uncut_untracked": None,
+        "armed_but_uncut_reasons": None,
         # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
         # is "not evaluated" (the counter snapshot could not be read); ``False``
         # is "no armed write was refused inside the window"; ``True`` is "rows
@@ -8715,6 +8740,13 @@ def _record_health() -> dict:
         # The POSITIVE pair (#9548) rides the SAME snapshot for the same reason.
         applied = record_write_applied_count()
         last_write_at = record_last_write_at()
+        # #14582: the uncut-graph observation. It is PROCESS MEMORY (a bounded
+        # map fed from the write path and the creation hook), so it costs no I/O
+        # and cannot delay a liveness probe — which is the whole reason the
+        # deployment's population is not COUNTED here (that is a query, and
+        # `record_allocator_cli.py sweep` is the verb that runs it).
+        uncut = record_writer.armed_but_uncut()
+        uncut_reasons = record_writer.armed_but_uncut_reasons()
     except Exception as exc:  # liveness must answer, always
         block["counters_error"] = str(exc)[:200]
         block["ok"] = False
@@ -8724,6 +8756,10 @@ def _record_health() -> dict:
         block["record_position_unproven"] = unproven
         block["record_writes_applied"] = applied
         block["record_last_write_at"] = last_write_at
+        block["armed_but_uncut"] = uncut["armed_but_uncut"]
+        block["armed_but_uncut_untracked"] = uncut[
+            "armed_but_uncut_untracked"]
+        block["armed_but_uncut_reasons"] = uncut_reasons
         block["cache_leg_failures"] = cache_leg
         block["cache_write_targets"] = cache_targets
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
@@ -8852,6 +8888,26 @@ def _record_health() -> dict:
     if dsn is not None:
         block["armed"] = True
         block["dsn"] = record_writer.dsn_fingerprint(dsn)
+    # ⛔ #14582 THE FOLD, AND IT IS THE POINT OF THE FIELD. An ARMED deployment
+    # carrying uncut graphs is a deployment problem: every record those graphs
+    # write is refused while `write_live_record` (fail-soft by contract) reports
+    # success, so nothing reds and the loss only shows at a rebuild. ``ok`` is
+    # therefore False while any is visible — and ``armed`` gates it, because an
+    # UNARMED deployment cannot have an uncut graph: with no DSN there is no
+    # record for a graph to be missing a row in.
+    #
+    # ⚠️ ``degraded`` is deliberately NOT moved: its documented meaning is "a
+    # refusal inside the bounded window" (#10185), which clears on its own. This
+    # state does not clear on its own — it clears when the graphs are seeded — so
+    # folding it into a window would be a second, weaker statement of the same
+    # thing. ``ok`` is the cumulative channel it belongs on, exactly like a
+    # malformed DSN above.
+    uncut_count = block.get("armed_but_uncut")
+    uncut_untracked = block.get("armed_but_uncut_untracked")
+    if (block["armed"] and isinstance(uncut_count, int)
+            and isinstance(uncut_untracked, int)
+            and (uncut_count + uncut_untracked) > 0):
+        block["ok"] = False
     return block
 
 
@@ -30886,6 +30942,40 @@ def _provision_lock(org_id: str) -> asyncio.Lock:
         return lock
 
 
+def _provision_graph_record(org_id: str, graph_id: str) -> None:
+    """#14582 — give a JUST-CREATED graph its `record_cursor` row.
+
+    `tortoise.record_writer.provision_graph_record` is the hook; this wrapper
+    exists for ONE reason: the import itself can fail (a partially-shipped
+    install, an import-time error in the seam's dependencies) and a graph
+    creation must not fail for it. ⛔ A failed import is NOT silent — it is
+    logged at ERROR naming the graph as UNCUT and the verb that heals it, which
+    is the same failure class the hook's own best-effort arm reports on
+    `/health`.
+
+    ⛔ THE HOOK IS BEST-EFFORT AND THAT IS A DECISION, not an oversight. It is
+    called AFTER every rollback arm of the mint (see the call site), so nothing
+    here can undo a graph; and a record outage must not 500 a user's graph
+    creation when the record itself is optional and `write_live_record` is
+    fail-soft by contract. What is NOT acceptable is silence, and that is what
+    `/health`'s `record.armed_but_uncut` + `record_allocator_cli.py backfill`
+    are for. (The atomic form the plan asked for — §A7.8 item 8's
+    one-transaction RPC — is not buildable from here: the record's app role has
+    no grant on `public.graphs`. Tracked against #14582.)
+    """
+    try:
+        from tortoise.record_writer import provision_graph_record
+
+        provision_graph_record(org_id=org_id, graph_id=graph_id)
+    except Exception:
+        _logger.error(
+            "graph %s (%s) was created but its record cursor could NOT be "
+            "provisioned (the record seam is unimportable) — every record this "
+            "graph writes is refused until it is seeded: run "
+            "`uv run python tools/record_allocator_cli.py backfill --org-id %s`",
+            graph_id, org_id, org_id, exc_info=True)
+
+
 async def _graph_quota_gate(org: dict) -> None:
     """Quota gate — 409 + X-Graph-Quota when at cap (distinct from the
     402 tier gate; D2/D3). Fail-closed: counting errors raise 500, never
@@ -31053,6 +31143,20 @@ def _provision_graph(org: dict, name: str,
         minted = _mint_graph_key(org["id"], graph["id"],
                                  requested_scopes, caller_key_id,
                                  session_user_id=session_user_id)
+        # ⛔ #14582: THE CREATION HOOK, AND HERE IS WHY EXACTLY HERE. The graph is
+        # now DURABLE — every rollback arm of this mint (packs, the post-insert
+        # re-count, the key cap) is BEHIND us, so provisioning cannot leave a
+        # counter row behind a graph that was rolled back. Both HTTP doors reach
+        # this line (`create_org_graph`, key-driven; `create_graph`, the session
+        # alias), which is why the hook is here and not at either endpoint: a
+        # per-endpoint call site is how the NEXT create path ships without one.
+        #
+        # It provisions BOTH arms: on Supabase, `insert_graph` persisted this id
+        # above; on the registry the `:Graph` node exists. A brand-new graph has
+        # an empty journal, so `enumerated_floor=0` is the door's own fact — and
+        # the seed's SQL guard REFUSES rather than seeds if the record already
+        # holds a position for this id.
+        _provision_graph_record(org["id"], graph["id"])
         result = {
             "graph": {
                 "id": graph["id"], "name": graph["name"],

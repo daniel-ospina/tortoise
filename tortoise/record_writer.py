@@ -237,10 +237,13 @@ __all__ = [
     "RecordWriteError",
     "RecordWriteOutcome",
     "RecordWriter",
-    "current_record_tenant",
+    "armed_but_uncut",
+    "armed_but_uncut_reasons",
     "dsn_fingerprint",
     "is_usable_tenant",
     "live_write_refusal",
+    "note_uncut_graph",
+    "provision_graph_record",
     "record_dsn",
     "record_holds_turns",
     "record_live_allocate",
@@ -2894,7 +2897,262 @@ def record_owns_position(*, tenant: tuple[str, str] | None = None,
                 connection.commit()
             with contextlib.suppress(Exception):
                 connection.close()
-    return row is not None and row[1] == active
+    # ⛔ #14582: THIS READ IS ALSO THE OBSERVATION. It is the only per-write read
+    # of the graph's cursor row on an armed deployment, so a graph with no usable
+    # row is VISIBLE here without one extra statement — and it is exactly the
+    # population `/health` could not see (`record.ok: true` over a graph whose
+    # record leg was off). No tenant identifiers are published; see
+    # :func:`armed_but_uncut`.
+    usable = row is not None and row[1] == active
+    if not usable:
+        reason = "no_cursor_row" if row is None else f"mode_{row[1]}"
+        note_uncut_graph(resolved[0], resolved[1], reason=reason)
+        _warn_uncut_graph(resolved[0], resolved[1], reason=reason)
+    return usable
+
+
+# ── #14582: the creation hook, and the gap it can leave ────────────────────
+#
+# TWO FACTS, ONE PLACE. A graph created on an armed deployment must come out of
+# creation with a `record_cursor` row in mode `active`, or its record leg
+# accumulates nothing while the fleet reads healthy (`write_live_record` is
+# fail-soft by contract, so the refusal is a counter and a WARNING, never an
+# exception a user sees). The hook closes the first fact; this registry makes the
+# SECOND fact — a graph the hook did not reach — impossible to hide.
+
+#: How many DISTINCT tenants the registry remembers by name. The set is PROCESS
+#: state fed from the write path, so it must be bounded: a per-graph label is
+#: unbounded cardinality (the same rule `cache_leg.cache_write_targets` states for
+#: the same reason). Past the cap the observation is still COUNTED
+#: (`armed_but_uncut_untracked`), so nothing is lost — only the distinctness is.
+UNCUT_GRAPH_CAP = 32
+
+_UNCUT_GRAPHS: dict[str, str] = {}
+_UNCUT_REASONS: dict[str, int] = {}
+_UNCUT_OBSERVATIONS = 0
+_UNCUT_UNTRACKED = 0
+_UNCUT_GUARD = threading.Lock()
+
+
+def note_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
+    """Record that `(org_id, graph_id)` was OBSERVED with no usable cursor row.
+
+    ⛔ NEVER RAISES, and that is a contract rather than politeness: this is called
+    from the live write path (`record_owns_position`) and from the creation hook,
+    and a monitoring counter that can fail a write or a graph creation is worse
+    than no counter. The whole body is guarded for that reason.
+
+    `reason` is one of `no_cursor_row` / `mode_<mode>` (observed on the write
+    path) or a provisioning outcome (`provision_failed`,
+    `provision_refused:<reason>`, `malformed_dsn`). A tenant already tracked has
+    its reason REPLACED — the newest observation is the current one.
+    """
+    global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED
+    try:
+        key = f"{org_id}\u0000{graph_id}"
+        with _UNCUT_GUARD:
+            _UNCUT_OBSERVATIONS += 1
+            _UNCUT_REASONS[reason] = _UNCUT_REASONS.get(reason, 0) + 1
+            if key in _UNCUT_GRAPHS or len(_UNCUT_GRAPHS) < UNCUT_GRAPH_CAP:
+                _UNCUT_GRAPHS[key] = reason
+            else:
+                _UNCUT_UNTRACKED += 1
+    except Exception:  # noqa: BLE001, RUF100 - observability must not fail a write
+        pass
+
+
+def armed_but_uncut() -> dict[str, int]:
+    """The uncut-graph observation, for `/health` (#14582).
+
+    ⛔ IT CARRIES NO TENANT IDENTIFIERS. `/health` is unauthenticated and a graph
+    id is a customer's own name for a tenant (`_change_feed_health` states the
+    same rule for the same reason: counts per stage, never names).
+
+    ⛔ IT IS NOT THE DEPLOYMENT'S POPULATION — it is what THIS PROCESS has
+    observed, on the write path or at creation. The org-wide population is a
+    QUERY and `/health` collects no I/O (#2850: an unreachable record must never
+    delay or fail a liveness probe), so the authoritative list is
+    `tools/record_allocator_cli.py sweep|backfill`.
+
+    `armed_but_uncut` is exact up to :data:`UNCUT_GRAPH_CAP` distinct graphs;
+    `armed_but_uncut_untracked` counts the observations past that cap, so the two
+    together can never read as "none" when there are some.
+    """
+    with _UNCUT_GUARD:
+        return {
+            "armed_but_uncut": len(_UNCUT_GRAPHS),
+            "armed_but_uncut_untracked": _UNCUT_UNTRACKED,
+            "armed_but_uncut_observations": _UNCUT_OBSERVATIONS,
+        }
+
+
+def armed_but_uncut_reasons() -> dict[str, int]:
+    """`{reason: count}` behind :func:`armed_but_uncut`, for `/health`."""
+    with _UNCUT_GUARD:
+        return dict(_UNCUT_REASONS)
+
+
+def reset_uncut_graphs() -> None:
+    """Zero the registry. For tests, and for a process that re-arms."""
+    global _UNCUT_OBSERVATIONS, _UNCUT_UNTRACKED
+    with _UNCUT_GUARD:
+        _UNCUT_GRAPHS.clear()
+        _UNCUT_REASONS.clear()
+        _UNCUT_OBSERVATIONS = 0
+        _UNCUT_UNTRACKED = 0
+
+
+#: How often the "this graph has no usable cursor" WARNING may repeat, in
+#: seconds. Same posture and same reason as the two constants above it: the
+#: condition repeats on EVERY write to that graph while it lasts, so an
+#: unthrottled line would be the whole log.
+UNCUT_GRAPH_WARN_SECONDS = 60.0
+_uncut_warned_at: dict[str, float] = {}
+
+
+def _warn_uncut_graph(org_id: str, graph_id: str, *, reason: str) -> None:
+    """Say, rate-limited per TENANT, that this graph's record leg is off.
+
+    The remedy is named, because the two populations have different ones: a graph
+    created before the hook landed (or whose hook failed) needs
+    `record_allocator_cli.py` `seed`/`backfill`; a graph an operator halted needs
+    its halt respected. Saying "check the cursor" without the verb is how an
+    operator re-runs the wrong thing.
+    """
+    key = f"{org_id}\u0000{graph_id}"
+    now = time.monotonic()
+    with _UNCUT_GUARD:
+        last = _uncut_warned_at.get(key)
+        if last is not None and (now - last) < UNCUT_GRAPH_WARN_SECONDS:
+            return
+        # Bounded like the registry above: a per-tenant timestamp map is process
+        # state fed from the write path.
+        if len(_uncut_warned_at) >= UNCUT_GRAPH_CAP:
+            _uncut_warned_at.clear()
+        _uncut_warned_at[key] = now
+    _logger.warning(
+        "the record's cursor for %s/%s is not usable (%s), so every record this "
+        "graph writes is REFUSED and its journal lines are the only durable "
+        "copy — `/health` reports this under `record.armed_but_uncut`. Remedy: "
+        "`tools/record_allocator_cli.py status --org-id %s --graph-id %s`, then "
+        "`backfill` (or `seed` + `arm` for this one graph) if it should be cut "
+        "over; a `halted` graph stays halted BY DESIGN until an operator "
+        "reopens it. This line repeats at most once per %.0fs per graph",
+        org_id, graph_id, reason, org_id, graph_id, UNCUT_GRAPH_WARN_SECONDS,
+    )
+
+
+def provision_graph_record(*, org_id: str, graph_id: str,
+                           enumerated_floor: int = 0) -> dict[str, Any]:
+    """The CREATION HOOK the doors call (#14582): give a new graph its counter row.
+
+    Called from every graph-creation door the census found
+    (`hosted_api._provision_graph`, `supabase_control.ensure_default_graph_row`,
+    `sdk._graph_create`'s registry arm).
+
+    THREE PROPERTIES, each of which a tidy-looking variant would lose:
+
+    1. ⛔ **UNARMED IS A NO-OP, NOT A FAILURE.** Without `TORTOISE_RECORD_DSN`
+       there is no record:
+       nothing is uncut, nothing is counted, and nothing is logged. This is the
+       embedded/selfhost lane and most of CI.
+    2. ⛔ **IT NEVER RAISES.** A graph creation must not fail because the record
+       is briefly unreachable. `write_live_record` is fail-soft by contract and
+       the DSN may be absent entirely, so making an OPTIONAL store a hard
+       dependency of provisioning would trade a silent record gap for a 500 on
+       the user's create — and the plan's `§A7.8` item 8, which says "fail-hard",
+       presupposed the ONE-TRANSACTION RPC that made a hard failure atomic; this
+       carrier cannot be atomic (the record app role has no grant on
+       `public.graphs`, so the cursor row is written by a different role on a
+       different connection), so a hard failure here would leave an orphan row
+       behind every refusal AND 500 the create. The failure is therefore made
+       LOUD and VISIBLE instead: counted and named on `/health` as
+       `armed_but_uncut`, and healed by `record_allocator_cli.py backfill`.
+    3. ⛔ **IT COMMITS, ONCE, AND ONLY ON SUCCESS.** The seed and the arm are one
+       transaction (`record_allocator.provision_graph_record` does not commit),
+       so a graph is never left in the state that allocates nothing.
+
+    The floor defaults to `0` because the door's own fact is that it JUST minted
+    the id: a brand-new graph enumerates an empty journal. ⛔ That is not a guess
+    and it is not trusted — `SEED_SQL` refuses when the record already holds a
+    position above the floor (`SeedRefused(reason="divergence")`), so a graph id
+    the record has seen before is REFUSED rather than silently seeded.
+    """
+    from . import record_allocator as ra
+
+    try:
+        dsn = record_dsn()
+    except RecordWriteError as exc:
+        # SET and REFUSED by the seam — a typo'd DSN. Nothing can be provisioned
+        # and every record write on this deployment is refused the same way.
+        note_uncut_graph(org_id, graph_id, reason="malformed_dsn")
+        _logger.warning(
+            "the graph's record cursor could NOT be provisioned for %s/%s: "
+            "%s is set but the seam refused it (%s). `/health` reports this "
+            "under `record.error` and `record.armed_but_uncut`",
+            org_id, graph_id, RECORD_DSN_ENV, exc)
+        return {"provisioned": False, "reason": "malformed_dsn"}
+    if dsn is None:
+        return {"provisioned": False, "reason": "unarmed"}
+
+    connection: Any | None = None
+    try:
+        connection = _default_connect(dsn)
+        outcome = ra.provision_graph_record(
+            connection, org_id=org_id, graph_id=graph_id,
+            enumerated_floor=enumerated_floor)
+    except ra.SeedRefused as exc:
+        # REFUSED, NEVER SEEDED (#12894's divergence rule). The graph keeps
+        # working on whatever allocator it had; what it loses is the record leg,
+        # which is exactly why it is published.
+        note_uncut_graph(org_id, graph_id,
+                         reason=f"provision_refused:{exc.reason}")
+        _warn_uncut_graph(org_id, graph_id,
+                          reason=f"provision_refused:{exc.reason}")
+        _logger.warning(
+            "the graph's record cursor was REFUSED for %s/%s (%s): %s",
+            org_id, graph_id, exc.reason, _bounded_cause(exc))
+        return {"provisioned": False, "reason": f"refused:{exc.reason}"}
+    except Exception as exc:
+        note_uncut_graph(org_id, graph_id, reason="provision_failed")
+        _logger.warning(
+            "the graph's record cursor could NOT be provisioned for %s/%s "
+            "(%s: %s) — the graph was created and every record it writes is "
+            "refused until it is seeded (`record_allocator_cli.py backfill`). "
+            "`/health` reports this under `record.armed_but_uncut`",
+            org_id, graph_id, type(exc).__name__, _bounded_cause(exc))
+        return {"provisioned": False, "reason": "provision_failed"}
+    else:
+        try:
+            connection.commit()
+        except Exception as exc:
+            note_uncut_graph(org_id, graph_id, reason="provision_failed")
+            _logger.warning(
+                "the graph's record cursor could not be COMMITTED for %s/%s "
+                "(%s: %s) — the graph exists and is uncut; remedy: "
+                "`record_allocator_cli.py backfill --org-id <org>`",
+                org_id, graph_id, type(exc).__name__, _bounded_cause(exc))
+            return {"provisioned": False, "reason": "commit_failed"}
+        return {
+            "provisioned": True,
+            "graph_id": graph_id,
+            "org_id": org_id,
+            "seq": outcome.seq,
+            "mode": outcome.mode,
+            "already_cut_over": outcome.already_cut_over,
+            "seeded": outcome.seeded,
+            "reason": None,
+        }
+    finally:
+        if connection is not None:
+            # A failed statement leaves the transaction ABORTED; rolling it back
+            # explicitly before the RELEASE keeps the pooled handle reusable
+            # (the pool resets a leftover transaction on the next borrow, and
+            # `close()` is a RELEASE to the pool, not a kernel goodbye).
+            with contextlib.suppress(Exception):
+                connection.rollback()
+            with contextlib.suppress(Exception):
+                connection.close()
 
 
 def _live_write_verdict(
