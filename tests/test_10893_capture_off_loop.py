@@ -489,7 +489,12 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
 # moves WHERE the same callable runs and nothing else (batching is #13722's
 # second half, and it can reorder a load-bearing stamp chain — a data defect,
 # not a perf win).
-_STAMP_STALL_S = 1.0
+#: The blocked window, 2.0 s for the reason `tests/test_graph_write_loop_responsiveness.py`
+#: uses the same value: a 1.0 s window was measured FLAKY on a loaded box (one run in
+#: four red on the tick count / the in-window probe, the identical selection green on
+#: the next two runs). Widening the window is the fix that does not weaken the bound —
+#: the bar (10 ticks) is unchanged, so a loop that is truly blocked still yields 0.
+_STAMP_STALL_S = 2.0
 _STAMP_TICK_S = 0.02
 _STAMP_MIN_TICKS_IN_STALL = 10
 
