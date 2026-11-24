@@ -57,7 +57,9 @@ only safe if it costs no precision:
 
 The population itself is not re-tested here: `tests/test_13557_13558_reachable_reads.py`
 owns the set semantics (live graph). This file is the ROUTING table, offline and
-deterministic, so it runs anywhere.
+deterministic, so it runs anywhere **with `TORTOISE_TEST_CARVE_OUT=1`** — the file
+is in the embedded carve-out lane, and a bare `pytest <this file>` fails the
+suite-wide DB gate with 45 errors that are not a regression (epic #1647 P4).
 """
 from __future__ import annotations
 
@@ -414,6 +416,14 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     # module's `_NP_STOP` note; the CONTRACTED copula `isn't the plan cancelled`
     # is refused by the start anchor instead, which is a different string)
     "is the plan n't archived",
+    # the APPROXIMATIVE negations — the same polarity inversion as `not`, in the
+    # spelling a caller actually writes (`is the plan hardly archived` was served
+    # the CANCELLED population on the head that stopped only the literal negators;
+    # PR #14491 review, P3)
+    "is the plan hardly archived",
+    "is the plan barely archived",
+    "is the plan scarcely archived",
+    "is the report rarely withdrawn",
     # futurity / intent — the ending has not happened, so the ended population
     # cannot answer it (the second row is the NP-bound boundary pin above)
     "is the v2 api to be retired",
