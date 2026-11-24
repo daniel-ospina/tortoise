@@ -16759,12 +16759,15 @@ def test_halves_ratio_decides_at_the_published_precision():
     at 2 dp, so a fire inside (1.25, 1.255) printed "ratio 1.25x, tolerance
     1.25x" — a diagnosis that reads as compliant while the check refuses, the
     very contradiction the #6145 change removes next door. The ratio is now
-    decided at the precision it publishes, so no message can print a value that
-    reads as within tolerance.
+    decided at the precision it publishes, and the `beyond` block below pins the
+    RENDERED pair as well, so no message can print a value that reads as within
+    tolerance.
 
     RESTORED on `main`: this arm lived at `test_halves_ratio_decides_at_the_published_precision`
-    on `edd9c68585` and was removed with #14419's squash, whose restore commit
-    (`6afb683573`) landed after the merge window — so the subject code
+    on `edd9c68585` and was removed with #14419's squash. Its restore landed
+    after #14419's merge window and is on this branch as `6bcc1fc7bb` (the same
+    arm was written earlier on the B7 branch as `6afb683573`, which is reachable
+    only from there) — so the subject code
     (`ratio = float("inf") if lo <= 0 else round(hi / lo, 2)` in
     `workflow_halves_issues`) has been live on `main` with no killer since.
     """
@@ -16791,8 +16794,16 @@ def test_halves_ratio_decides_at_the_published_precision():
     beyond = _halves_manifest()
     beyond["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
                            "test_crypto.py": 256.0}
-    assert any("imbalanced" in i
-               for i in workflow_halves_issues(beyond, halves))
+    messages = [i for i in workflow_halves_issues(beyond, halves)
+                if "imbalanced" in i]
+    assert messages
+    # The headline above is about the MESSAGE, not only the decision, so pin the
+    # pair it renders: a render-only mutant (decision still 2 dp, message at
+    # 1 dp) prints "ratio 1.2x, tolerance 1.25x" and passes every decision-side
+    # arm above — this is the only killer of it.
+    rendered = re.search(r"\(ratio ([\d.]+)x, tolerance ([\d.]+)x\)", messages[0])
+    assert rendered, messages[0]
+    assert float(rendered[1]) > float(rendered[2]), messages[0]
     assert HALF_DURATION_IMBALANCE_RATIO == 1.25
 
 
