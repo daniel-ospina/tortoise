@@ -253,10 +253,13 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1953 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1998 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED at `#14445`, whose pin re-cut added the 10 `#:` lines that attribute the
-    re-pin, so the figure was re-derived rather than carried across that edit; before it, and
-    ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
+    re-pin, so the figure was re-derived rather than carried across that edit; and ⛔ RE-WALKED
+    AGAIN on the fold of `origin/main` `6a02515d14` (`#14459`), which landed its own re-pin and its
+    own `#4625` attribution — `main` read 1954 at its own head there, this lane 1953 before the
+    fold, so NEITHER figure is this file's — and ⛔ RE-WALKED on this PR's merge tree (`origin/main`
+    `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
     GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
@@ -309,16 +312,35 @@ def _residue_block() -> str:
     RESOLVED file, never an adjustment of a carried figure:
     — and THIS PR's own two record notes inside that block (`SWEEP_RESIDUE`'s re-pin note, and the
     note recording that the pair was re-derived on the MERGE tree rather than carried from either
-    side) added nine `#:` lines to the walked run, so the figure above is RE-MEASURED by this walk
-    on this tree at 1953 rather than adjusted by arithmetic from the unmodified tree's 1921 — the
-    merge itself and the peer's reflow of the first note add nothing to the count, which is why the
-    figure is MEASURED here and never computed from a parent's reading,
+    side) added `#:` lines to the walked run, so the figure above is RE-MEASURED by this walk on
+    this tree rather than adjusted by arithmetic from the unmodified tree's 1921 — the merge itself
+    and the peer's reflow of the first note add nothing to the count, which is why the figure is
+    MEASURED here and never computed from a parent's reading,
     — and the FOLD of this re-cut onto `origin/main` `2cccf90f4dd` (the `#14350` D1 follow-up) KEPT
     both sides' prose blocks in the pin file, as every fold before it did, and added this fold's own
     `#:` note recording that the pair was re-derived on the resolved tree — so the figure above is
     RE-MEASURED by this walk on the RESOLVED file and inherited from neither side: the two parents'
     pin blocks differ in LINE COUNT as well as in text, so no subtraction of one from the other
     yields this run,
+    — and the `2cccf90f4dd4` fold's own re-cut record (`SWEEP_RESIDUE` re-derived on ITS merge tree,
+    with main's unpinned `seen.update(kwargs)` row named row by row there) added `#:` lines to the
+    walked run, so the figure above is RE-MEASURED by this walk on the folded file rather than
+    adjusted by arithmetic from either parent's reading,
+    — and `#4625`'s OWN residue re-pin block above (`SWEEP_RESIDUE` `11910` → `11908`, the two
+    `_JSONB_CACHE.update({...})` rows the 5 s `jsonb` TTL retired) appended `#:` lines to
+    `tools/sdk_privatise.py`, so the figure above is RE-MEASURED on this tree rather than carried
+    forward from it — which is the defect THIS arm exists to catch, and it caught it here: the
+    figure and the walk are now graded together
+    (`test_the_extent_figure_is_the_walks_own_count`), so a prose edit that moves the run REDS
+    naming both numbers instead of shipping the stale one. The MERGE with `origin/main` then
+    moved it again — `main`'s `seen.update(kwargs)` row took the pin UP to `11909` and the block
+    gained prose stating that attribution — and the LATEST fold re-derived the pair at `11910`
+    on a tree that is neither parent's, so the figure is the FINAL folded tree's own walk,
+    — and the FOLD of `origin/main` `6a02515d14` (`#14459`), whose own tree already carried the
+    re-pin, KEPT both sides' prose blocks and added this fold's own `#:` note recording the
+    re-derivation on the resolved tree — so the figure above is RE-MEASURED by this walk on the
+    RESOLVED file at 1998 rather than inherited from either side, and no parent's arithmetic
+    reaches it,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
@@ -2432,8 +2454,27 @@ def test_a_tool_only_diff_selects_this_suite(tmp_path):
     assert "core" in surfaces, (
         "a diff to tools/sdk_privatise.py selects no `core` surface — the `CORE_ALSO` row in "
         f"tools/ci_selection.py is gone or shadowed; measured surfaces={surfaces}, full={got.get('full')}")
+    # ⛔ THE `full` FLAG NEEDS A REACHABLE SUBJECT (#14538 review, F2). The bare
+    # `assert not got.get("full")` that stood here was DEAD: `tools/` is in `NON_PYTHON_PREFIXES`,
+    # so with the `CORE_ALSO` row deleted the path is DROPPED by `_keep_changed`, `changed` empties
+    # and the docs-only early return emits `full: False` as well — no edit that reverts the row
+    # could redden it, so it read as an escalation guard while nothing in this diff could make it
+    # fire. The subject is now the fail-closed branch the flag exists for, measured through the
+    # SAME CLI: an unknown path MUST escalate, and this suite's own one-file diff MUST NOT. The
+    # pair is what makes each half falsifiable — a `full` that is never emitted reds the second
+    # assertion, and a tool-only diff that joins the unknown-path branch reds the first.
     assert not got.get("full"), (
         "the diff escalated to the FULL matrix — that costs the whole suite for a one-file change")
+    escalated = _sp.run(
+        [_sys.executable, str(sel), "--changed-files", "tools/sdk_privatise.py,mystery-dir/x.py"],
+        cwd=ROOT, capture_output=True, text=True,
+        env={**os.environ, "CI_SELECTION_ARTIFACT_DIR": str(tmp_path / ".ci-selection-escalated")})
+    assert escalated.returncode == 0, (
+        f"the selector failed on an unknown-path diff: {escalated.stderr[-800:]}")
+    assert json.loads(escalated.stdout).get("full") is True, (
+        "an unknown path no longer escalates to the FULL matrix, so the `full: False` assertion "
+        "above grades NOTHING: the flag it reads is no longer emitted by any branch. Measured: "
+        f"{escalated.stdout[:400]}")
     assert "test_sdk_privatise_sweep.py" in files, (
         "a diff to tools/sdk_privatise.py no longer selects its own pins: "
         f"{len(files)} test files, this one absent — the selection gap #14062 describes")

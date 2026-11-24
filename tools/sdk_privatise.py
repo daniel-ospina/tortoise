@@ -2063,7 +2063,52 @@ SWEEP_NAMES = 66
 #: pair is neither parent's: the count is one above either, and the digest is the merged tree's own.
 #: Neither parent's pair is inherited — both parents' blocks stay because the diff between their
 #: readings is the substance of the fold, not a decoration around it.
-SWEEP_RESIDUE = (11912, "73827c80583e139f")
+#:
+#: #4625's own fold then RE-PINNED DOWN 11910 -> **11908** — the pin's HARMLESS direction, because a
+#: residue count that FALLS cannot hide a new untyped reference. The two rows that left are the last
+#: `_JSONB_CACHE.update({...})` calls in `tortoise/record_projection.py`, deleted with the 5 s `jsonb`
+#: TTL this PR retires: the TTL was the only reason that dict was refreshed in place rather than
+#: cleared through `_release_schema_cache()` — measured `--repin` on the branch's tree printed
+#: `(11908, 'f03fb8e5f6e44a9c')`, no shape added or absorbed.
+#: ⛔ THE MERGE WITH `origin/main` MOVED IT BACK UP BY ONE, to **11909 / `1f020f859e887f94`** — the
+#: OTHER direction, so it is attributed ROW BY ROW rather than accepted as a flake: `main`'s rewrite
+#: of `tests/test_collision_preflight.py` adds exactly one untyped `.update` receiver,
+#: `seen.update(kwargs)` in its new `spy()` fixture, and that merge deleted no `.update` line anywhere
+#: (`#4625`'s own -2 is still in this tree: `_JSONB_CACHE.update` is 2 rows on `origin/main` and 0
+#: here). A rising pin is the direction the guard exists to CATCH, and here the row is main's, so the
+#: pin followed `main` — measured `--repin` on that merged tree, never arithmetic on the old number.
+#: ⛔ AND THE NEXT FOLD OF `origin/main` RE-DERIVED IT AGAIN RATHER THAN INHERITING EITHER SIDE, because
+#: the fold's own tree is a THIRD tree: this merge brings main's durable `claim_unavailable` self-heal,
+#: whose `recorded.update(keep)` in `tortoise/capture_spool.py` is one new untyped `.update(`
+#: receiver, and `--repin` on THIS resolved tree prints **(11910, "3216395d35345904")**. The -3
+#: between that and main's committed 11911 is attributed ROW BY ROW, not waved through:
+#:   * `main` `2cccf90f4dd4` pinned 11911 while ITS OWN tree derives **11912** — the missing +1 is
+#:     `seen.update(kwargs)` in `tests/test_collision_preflight.py`'s `spy()` fixture, which arrived
+#:     with `#14491`'s rewrite and which that re-pin did not count. So `--check` exits 1 on `main`
+#:     ITSELF right now (the `#14062` recurrence the blocks above record a sixth time); this branch
+#:     inherits main's row set, not main's number.
+#:   * `#4625`'s own -2 is the pair of `_JSONB_CACHE.update({...})` rows the retired 5 s `jsonb` TTL
+#:     took with it — 2 rows on `origin/main`, 0 here, and the report row sets are otherwise IDENTICAL
+#:     (`--report --top 5000` on both trees, 862 shape-carrying lines either side, one differing line).
+#: 11912 - 2 = 11910, and the pair below is `--repin`'s own output on THIS tree, never arithmetic; a
+#: pin that FALLS cannot hide a new untyped reference, which is the direction this arm exists to catch.
+#:
+#: ⛔ THE NEXT FOLD IS THIS LANE'S RE-CUT, AND IT MEETS `main` HAVING ALREADY LANDED THE PIN — the
+#: `#14062` recurrence closing in the OTHER direction, which is this pin's ordinary failure mode.
+#: `origin/main` `6a02515d14` (`#14459`) carries ITS OWN re-pin, (11910, "3216395d35345904"), so the
+#: required `surface-guard` red this branch was opened to repair was repaired on `main` in the same
+#: window. What remains of THIS branch is therefore its own work and not a duplicate: the
+#: completeness waiter in `tests/test_4314_inert_hooks.py`, the `CORE_ALSO` row in
+#: `tools/ci_selection.py`, and the `test_spool_drain_rehearsal.py` census row. ⛔ THE PAIR BELOW IS
+#: RE-DERIVED ON THE RESOLVED TREE, neither parent's arithmetic: `--repin` HERE prints
+#: **(11910, "3216395d35345904")**, and `--check` exits 0 on it. ⛔ THAT DIGEST IS THE ROW-SET
+#: IDENTITY ARGUMENT: it equals `main`'s committed digest, so this branch adds no untyped
+#: `.update(` receiver and removes none — folded onto `#14459`'s tree the rows are `main`'s rows.
+#: The count is BELOW the 11912 the pre-fold tree carried by exactly the two
+#: `_JSONB_CACHE.update({...})` rows `#4625` retired (0 rows here, 2 on `2cccf90f4dd4`, and the
+#: `--report --base 28ca66878d… --top 5000` row sets otherwise identical). A pin that FALLS cannot
+#: hide a new untyped reference, which is the direction this arm exists to catch.
+SWEEP_RESIDUE = (11910, "3216395d35345904")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

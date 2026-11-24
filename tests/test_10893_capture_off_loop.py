@@ -71,6 +71,7 @@ import pytest
 
 from tests.test_hosted_api import TEST_ORG_ID, TEST_TEAM  # noqa: F401  (fixture side effects)
 from tests.test_hosted_api import client as client
+from tortoise import record_projection as rp
 from tortoise.sdk import TortoiseSDK
 
 _CONV = [
@@ -93,6 +94,33 @@ def _on_loop() -> bool:
 def _is_sync_callable(raw) -> bool:
     return not (inspect.iscoroutinefunction(raw)
                 or inspect.isasyncgenfunction(raw))
+
+
+#: The `record_projection` schema readers the census charges as their own legs (#4625).
+#: ⛔ ONE tuple, used by the wrap loop AND by the probe below, so a reader can never be
+#: wrapped without being driven (or driven without being wrapped). The ASSERTION names its
+#: names a second time on purpose: narrowing this tuple would otherwise shrink the wrap loop,
+#: the probe and the expectation together — reddening nothing, which is exactly the
+#: unpinned-instrument shape the #4625 review found here (F3).
+_RP_READERS = ("table_columns", "refused_props_names", "jsonb_columns")
+
+
+async def _charge_one_schema_read() -> None:
+    """A `record_projection` schema read ON a running loop — in BOTH shapes.
+
+    The census charges a leg only when `_on_loop()` is true, so the only way to
+    prove its second surface intercepts is to call a reader from inside a
+    coroutine. `asyncio.run(...)` around this gives exactly that: a real loop,
+    one DIRECT read of every reader, and one read made from INSIDE a charged SDK
+    leg — the shape a capture actually uses, and the one a SHARED re-entry guard
+    swallows.
+
+    The scratch leg is installed on `TortoiseSDK` by the caller (so the census's
+    own wrap loop instruments it) and deleted afterwards.
+    """
+    for name in _RP_READERS:
+        getattr(rp, name)()
+    TortoiseSDK._census_scratch_read()  # type: ignore[attr-defined]
 
 
 def _undeclared_blocking(totals: dict[str, float]) -> dict[str, float]:
@@ -243,13 +271,23 @@ def test_capture_event_mint_runs_off_the_event_loop(client, llm_mock,
 
 def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         client, llm_mock):
-    """THE CENSUS: every sync `TortoiseSDK` method, observed on the loop.
+    """THE CENSUS: every sync `TortoiseSDK` method, plus the record-projection
+    schema readers (#4625), observed on the loop.
 
-    The invariant test above pins one leg. This one pins the CLASS: it wraps all
-    381 synchronous SDK methods (guarding against nested re-entry, which would
-    otherwise charge a whole call tree to its outer method) and asserts that the
+    The invariant test above pins one leg. This one pins the CLASS: it wraps every
+    synchronous SDK method the filter below selects (the count is whatever the SDK
+    has — the failure message prints `methods wrapped: N` rather than this
+    docstring restating a figure that re-stales; it read 381 when the SDK had a
+    different surface) guarding against nested re-entry, which would
+    otherwise charge a whole call tree to its outer method — and asserts that the
     set of them observed running on the loop is the declared residual — each
-    entry naming its owning issue.
+    entry naming its owning issue. It also wraps the three `record_projection`
+    schema readers as their own legs (`rp.table_columns`,
+    `rp.refused_props_names`, `rp.jsonb_columns`), because they are reached from
+    INSIDE an SDK leg and a file read there is otherwise invisible to this
+    census — see `saved_rp`, which states both why they get no exemption and
+    that the capture this test drives does not reach them (so the surface is
+    proven live by a direct on-loop call, not by the capture).
 
     A leg that costs effectively nothing on the loop (a flag read, an
     environment probe) is not a blocker and is not required to be listed; the
@@ -290,9 +328,60 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     """
     rows: list[dict] = []
     depth = threading.local()
+    #: A SECOND re-entry guard, for the record-projection readers (#4625). They
+    #: are LEAVES of the SDK legs that call them (`_emit_event` →
+    #: `_write_record_projection` → `replay_plan` → `table_columns()`), so a
+    #: SHARED guard makes the reader probes take the re-entry early-return and
+    #: record NOTHING on the only path that matters — the cost stays absorbed in
+    #: the `_emit_event` row, which is the blindness this surface exists to end.
+    #: ⛔ MEASURED on a first cut that shared `depth`: reached from inside a
+    #: charged SDK leg → `rows == ['_emit_event']`; a direct on-loop call →
+    #: `rows == ['rp.table_columns']`. The self-check below therefore drives BOTH
+    #: shapes and counts them, because a direct call alone cannot see that bug.
+    rp_depth = threading.local()
     saved: dict[str, object] = {}
+    #: ⛔ THE SECOND SURFACE THIS CENSUS CHARGES (#4625). Wrapping the SDK alone
+    #: made the record-projection schema readers INVISIBLE as legs: they are
+    #: reached from inside an SDK leg (`_emit_event` → `_write_record_projection`
+    #: → `replay_plan`), so their cost was folded into that SDK row — and a
+    #: 20-file `Path.read_text` sweep inside `replay_plan` cannot be told apart
+    #: from the emit that contains it. #4625 is exactly that shape in production
+    #: (the loop blocked 52.406 s, the captured leaf a migration `read_text`).
+    #: Charged by NAME, on the module every caller looks them up on —
+    #: `record_projection`'s own sites, `cache_projection`
+    #: (`from .record_projection import table_columns`, resolved at call time) and
+    #: `outside_view` (`_rp.table_columns()`) — so patching here intercepts every
+    #: production caller.
+    #: ⛔ THEY CARRY THEIR OWN GUARD (`rp_depth`), not the SDK's: sharing it makes
+    #: every read reached from inside an SDK leg record nothing, which is the
+    #: shape a first cut shipped and this lane's VGATE reproduced.
+    #: ⚠️ WHAT THE CAPTURE THIS TEST DRIVES ACTUALLY REACHES, measured rather
+    #: than assumed: nothing on this surface. The record write is not armed here
+    #: (the only SDK legs observed are `_emit_event`, `_graph_write_with_retry`,
+    #: `_get_registry` and `_probe_embedded_busy`), so wrapping the readers alone
+    #: would leave a SILENT instrument — which is why the wrap is proven live by
+    #: the self-check below instead of by this capture.
+    #: ⛔ SO THIS SURFACE IS NOT #4625's FALSIFIER, and must not be read as one.
+    #: The falsifier is `tests/test_4625_schema_reads_off_write_path.py` (executed:
+    #: restoring the per-consult fingerprint reds it with 360 `stat`/`exists`
+    #: operations for three records; restoring the TTL shape reds it with 360 too
+    #: on this pin — re-measured: 720 is the figure of the two restorations
+    #: COMBINED, not the TTL's own). What
+    #: this surface adds is that a schema read a capture DOES reach on the loop is
+    #: priced instead of absorbed into `_emit_event`'s row — the blindness #14112
+    #: names, one module over.
+    #: ⛔ AND THERE IS NO EXEMPTION FOR THESE READS, deliberately: after #4625
+    #: the warm path performs NO filesystem operation, so they price at ~0 and
+    #: need no row. A row keyed on a reader name would be the generic-wrapper
+    #: hole (#14112) one module over — it would exempt any FUTURE on-loop cost
+    #: added inside them — so this surface only makes the cost VISIBLE.
+    saved_rp: dict[str, object] = {}
+    #: A SCRATCH sync method, so the census's OWN wrap loop instruments it and
+    #: the self-check can drive the NESTED shape (a schema read made from inside
+    #: a charged SDK leg). Deleted in the `finally` below.
+    _SCRATCH = "_census_scratch_read"
 
-    def _wrap(name: str, fn):
+    def _wrap(name: str, fn, guard: threading.local | None = None):
         # ⛔ `*a, **kw` and NO named `self`: the probe is installed back under
         # the SAME descriptor kind it was read from (plain / `staticmethod` /
         # `classmethod`), so the descriptor machinery binds exactly the first
@@ -307,15 +396,17 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         # on `_dedup_match_clauses`, `sdk.py:32756` (+31 from `32725` after the same
         # merge), on the point-creation
         # path).
+        guard = depth if guard is None else guard
+
         def _probe(*a, **kw):
             # Re-entry guard: a sync SDK method calling another one must be
             # charged to the OUTER method, or the census reports the whole call
             # tree as one leg per level.
-            if getattr(depth, "n", 0):
+            if getattr(guard, "n", 0):
                 return fn(*a, **kw)
             if not _on_loop():
                 return fn(*a, **kw)
-            depth.n = 1
+            guard.n = 1
             t0 = time.monotonic()
             err = None
             try:
@@ -324,7 +415,7 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
                 err = f"{type(exc).__name__}: {exc}"
                 raise
             finally:
-                depth.n = 0
+                guard.n = 0
                 rows.append({"method": name,
                              "ms": (time.monotonic() - t0) * 1000.0,
                              "thread": threading.current_thread().name,
@@ -334,6 +425,19 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         _probe.__doc__ = getattr(fn, "__doc__", None)
         return _probe
 
+    # ⛔ WARM THE READERS BEFORE PROBING (#4625). The FIRST consult in a process
+    # RESOLVES the schema — a read of every registered migration, measured at
+    # ~10.5 ms on this tree (`rp.table_columns`, cold) — and that one-off would
+    # otherwise be charged to this capture and red the bar on whichever shard
+    # runs this test first, i.e. a gate that is red only on the first run and
+    # green on every later one. The one-off is real, but it is
+    # `tests/test_4625_schema_reads_off_write_path.py`'s subject (its cold
+    # assertion SEES the read and pins that it is once, not per record); what
+    # this census prices is the per-request path, which is now zero.
+    rp.table_columns()
+    rp.refused_props_names()
+    rp.jsonb_columns()
+
     # ⛔ THE INSTALLATION IS INSIDE THE `try` THAT RESTORES IT. The check below
     # RAISES on purpose — a `staticmethod` installed as an instance method is the
     # one defect it exists to make loud — and a raise between `setattr` and this
@@ -342,6 +446,17 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     # that no longer named its cause. Registering each wrap in `saved` before it
     # is installed, and wrapping the whole loop in the same `try/finally`, is what
     # makes the restore unconditional (#14086 review F1).
+    def _census_scratch_read(*_a, **_kw):
+        """A charged SDK leg whose BODY reads the schema — the nested shape.
+
+        Installed on `TortoiseSDK` BEFORE the wrap loop, so the census's own loop
+        instruments it like any other sync method; the self-check then calls it
+        on the loop and every reader it reaches must still be charged (#4625).
+        """
+        for name in _RP_READERS:
+            getattr(rp, name)()
+
+    setattr(TortoiseSDK, _SCRATCH, _census_scratch_read)
     try:
         for name, attr in list(vars(TortoiseSDK).items()):
             if name.startswith("__"):
@@ -380,10 +495,49 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
                     "the loop, where this census records nothing, so the run "
                     "would look clean over a broken capture.")
 
+        # ⛔ THE RECORD-PROJECTION READERS, charged as their own legs (#4625),
+        # under their OWN re-entry guard: sharing the SDK's `depth` makes a read
+        # reached from INSIDE an SDK leg record nothing, which is the only path a
+        # capture reaches them by (see `rp_depth`).
+        for name in _RP_READERS:
+            raw = getattr(rp, name)
+            saved_rp[name] = raw
+            setattr(rp, name, _wrap(f"rp.{name}", raw, guard=rp_depth))
+
+        # ⛔ THE INSTRUMENT CHECKS ITSELF, because the capture below does NOT
+        # reach this surface (see `saved_rp`). It drives BOTH shapes and counts
+        # them: a DIRECT on-loop call, and one made from inside a CHARGED SDK leg
+        # — the shape a shared guard silently swallows, and the only shape a
+        # capture ever uses. One call would pass over that bug.
+        asyncio.run(_charge_one_schema_read())
+        # ⛔ EVERY wrapped reader is counted, not only `table_columns` (#4625 review
+        # F3): with one name in the expectation, dropping `refused_props_names` or
+        # `jsonb_columns` from the wrap tuple reddened NOTHING on any shard, so two
+        # of the three legs the docstring above calls "charged as their own legs"
+        # were unpinned instrument. The literal names here are what make the tuple
+        # load-bearing: a narrowed `_RP_READERS` leaves the removed reader
+        # unwrapped, so its count is 0 and this assertion reds.
+        charged = {name: sum(1 for row in rows if row["method"] == f"rp.{name}")
+                   for name in ("table_columns", "refused_props_names",
+                                "jsonb_columns")}
+        assert all(n == 2 for n in charged.values()), (
+            f"the record-projection reader probe charged {charged}, not 2 each — "
+            "the DIRECT one and the one made INSIDE a charged SDK leg. A surface "
+            "that sees only the direct call is blind on the only path a capture "
+            "reaches it, and that blindness is what this surface exists to end "
+            "(#4625): the reader probes must carry their OWN re-entry guard, not "
+            "the SDK's. A reader at 0 is one the wrap loop no longer installs.")
+
         r = client.post("/v1/sessions", json={"conversation": _CONV})
     finally:
         for name, original in saved.items():
             setattr(TortoiseSDK, name, original)
+        for name, original in saved_rp.items():
+            setattr(rp, name, original)
+        # …and the scratch leg does not outlive the test (it is not in `saved`
+        # when the wrap loop never reached it, e.g. a raise before it).
+        if _SCRATCH in vars(TortoiseSDK):
+            delattr(TortoiseSDK, _SCRATCH)
 
     assert r.status_code == 200, r.text[:300]
     assert saved, "no synchronous TortoiseSDK methods were instrumented"
@@ -428,6 +582,17 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         "intercept the capture's SDK path, so this run proves nothing about "
         f"what is left on the loop (methods wrapped: {len(saved)}; "
         f"methods observed: {sorted(totals) or 'none'})")
+
+    # ⛔ AND NO SEPARATE LIVE-BAR FOR THE SECOND SURFACE (#4625 review — a dead
+    # assertion was DELETED here). A pin `assert "rp.table_columns" in totals`
+    # used to sit at this point, and it could never fail: `totals` is summed over
+    # the same `rows` the self-check above already counted, and `charged`
+    # requires two `rp.table_columns` rows to exist in it. No mutation could red
+    # it without reddening that earlier assertion first, so it read as extra
+    # coverage while adding none (mutation contract rule 3). The live-bar for
+    # this surface IS the self-check above — both shapes, asserted by count — and
+    # the capture path cannot carry a second one today, because it does not reach
+    # these readers at all (`saved_rp` / the surface comment above say why).
 
     # A leg at or above `_ON_LOOP_BAR_MS` of TOTAL on-loop time is the "this is
     # work, not probe overhead" bar (see the docstring for why it is a magnitude

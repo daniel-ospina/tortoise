@@ -387,21 +387,27 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
     Counted, not timed: the assertion is the NUMBER of PARSES a plan build
     performs, so it cannot flake on a loaded box.
 
-    ⚠️ TWO counters, because the two readers no longer share a parsing path
-    (#9558 review cycle 2, P1). `jsonb_columns()` answers through
-    `_declared_types_for_dir`, which reads the migration files DIRECTLY — it does
-    not go through `_read_migrations`, which is the only thing an earlier version
-    of this test counted. Measured on that version: `reads` was 0 in a warm
-    process while the jsonb map was re-parsed once per plan, and the TTL disabled
-    (`_JSONB_CACHE_TTL_SECONDS = -1`) produced **100 jsonb parses with
-    `reads = 0`** — the assertion passed while the regression it names was
-    happening. So:
+    ⚠️ TWO counters, because the READ seam and the PARSE seam are different
+    names and a pin has to survive either reader moving (#9558 review cycle 2,
+    P1; re-stated for the #4625 shape). At HEAD the resident `jsonb_columns()`
+    answers through `_entry_sql_state` → `_read_migrations_state`, and the parse
+    it performs is `_declared_types_from_chunks` — the SAME parse the explicit-
+    directory reader uses, so "the two readers share a parsing path" is now true
+    and the earlier "no longer share" wording was stale prose, not a rule.
+    `reads` counts the READ seam and `parses` the PARSE seam, so a regression that
+    re-parses per bound parameter stays visible even while the read is memoised.
+    The historic measurement that motivated the second counter: on the pre-#9558
+    shape `reads` was 0 in a warm process while the jsonb map was re-parsed once
+    per plan, and with the 5 s TTL disabled (`_JSONB_CACHE_TTL_SECONDS = -1`) the
+    count read **100 jsonb parses with `reads = 0`** — the assertion passed while
+    the regression it names was happening. So:
 
-    * `parses` counts `_declared_types_for_dir` — THE parse — and is the assertion
+    * `parses` counts `_declared_types_from_chunks` — THE parse, shared by the
+      directory reader and the resident one (#4625) — and is the assertion
       that matters: one per plan build, never one per bound parameter (the
       regressed shape measured ~180 for this plan);
-    * `reads` counts `_read_migrations` as a cross-check on the column map, which
-      is now memoised per TREE (`_entry_sql`), so a cleared-cache build reads once
+    * `reads` counts `_read_migrations_state` as a cross-check on the column map, which
+      is now memoised per TREE (`_entry_sql_state`), so a cleared-cache build reads once
       and a warm one reads zero.
 
     Both caches are cleared first (#9558): the column map has its own
@@ -412,19 +418,28 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
 
     reads: list[int] = []
     parses: list[int] = []
-    real_reads = rp._read_migrations
-    real_parse = rp._declared_types_for_dir
+    # ⛔ `_read_migrations_state` is the seam `_entry_sql_state` calls (#4625); it
+    # returns `(sql, complete)`. `_read_migrations` is a `[0]` wrapper over it, so
+    # patching that would count nothing.
+    real_reads = rp._read_migrations_state
+    # ⛔ THE PARSE IS NOW `_declared_types_from_chunks` (#4625, fourth round). The
+    # resident `jsonb` reader parses the schema entry's CERTIFIED SQL rather than
+    # re-reading the directory, so a directory-parse counter would read 0 and this
+    # pin would pass for the wrong reason. `_declared_types_from_chunks` is THE
+    # parse on both paths (the directory reader feeds it one chunk per file), so
+    # counting it is the same subject one seam over.
+    real_parse = rp._declared_types_from_chunks
 
     def _counting_reads(migrations_dir=None):
         reads.append(1)
         return real_reads(migrations_dir)
 
-    def _counting_parse(migrations_dir):
+    def _counting_parse(chunks):
         parses.append(1)
-        return real_parse(migrations_dir)
+        return real_parse(chunks)
 
-    monkeypatch.setattr(rp, "_read_migrations", _counting_reads)
-    monkeypatch.setattr(rp, "_declared_types_for_dir", _counting_parse)
+    monkeypatch.setattr(rp, "_read_migrations_state", _counting_reads)
+    monkeypatch.setattr(rp, "_declared_types_from_chunks", _counting_parse)
     rp._jsonb_cache_clear()
     rp._release_schema_cache()
     tenant = _tenant()
