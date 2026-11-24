@@ -8447,11 +8447,15 @@ surfaces:
   # and its `run:` bodies are executed as shell against tmp dirs, no graph and no
   # docker.
   - test_14559_reaper_schedule.py
-  # ⛔ #13205's own suite, made selectable by the reap-tool entry above: it is
-  # the ONLY file that pins `tools/reap_empty_test_graphs.py` (the four refusals
-  # and this PR's `TestMemoryDelta`); `test_14559_reaper_schedule.py` never
-  # imports the tool, it parses the workflow. `fast_pool()` carries it once, so
-  # the graded partition is unmoved — measured with the row added.
+  # ⛔ #13205's own suite pins the tool's four refusals and this PR's
+  # `TestMemoryDelta`; `test_14559_reaper_schedule.py` ALSO imports the tool
+  # (`from tools import reap_empty_test_graphs`, for the `reserved` row stamping)
+  # but its subject is the WORKFLOW, not the tool's classification. Both rows are
+  # needed for a different reason: without the row above, a diff to
+  # `tools/reap_empty_test_graphs.py` selects NO surface at all (a `tools/` path is
+  # in `NON_PYTHON_PREFIXES`, so the subject is dropped before this map is read).
+  # `fast_pool()` carries each file once, so the graded partition is unmoved —
+  # measured with the row added.
   - test_13205_graph_provision_leak.py
   - test_reaper.py
   - test_reaper_orphan.py

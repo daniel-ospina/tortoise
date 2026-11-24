@@ -389,13 +389,25 @@ jobs:
               if not row.get("reserved")
               and row.get("bucket") == "refused-unresolved"
           ]
+          # ⛔ NOT every non-reserved `refused-unresolved` row is an ORPHAN, and
+          # saying so is a false claim about a row that names its own owner: the
+          # tool puts a CREDENTIAL/tombstone refusal in this same bucket WITH the
+          # org row present (`classify_graph`'s `entry["refused"]` arm — the org
+          # DOES own the graph; what cannot be attributed is its ACL user), and
+          # `build_report` stamps `reserved: false` beside a populated `org_id`
+          # for it. So the two states are counted apart, and only the one that
+          # actually names no owner is labelled "no owning org".
+          orphan_no_owner = [row for row in orphan_unresolved if not row.get("org_id")]
+          refused_with_owner = len(orphan_unresolved) - len(orphan_no_owner)
           if total > 0 and unresolved == total and orphan_unresolved:
               reasons.append(
                   f"the control plane ANSWERED but resolved none of the {total} "
                   f"graph(s): {len(orphan_unresolved)} of them are orphan-shaped "
-                  f"(`refused-unresolved` and not reserved), so `reapable` is 0 "
-                  f"without a single owner being consulted. That is a control-plane "
-                  f"fault, not a clean sweep")
+                  f"(`refused-unresolved` and not reserved) — {len(orphan_no_owner)} "
+                  f"name no owning org and {refused_with_owner} were refused with an "
+                  f"owner (credential/tombstone) — so `reapable` is 0 and nothing "
+                  f"was deleted. An estate where the control plane answers but "
+                  f"resolves NO graph is a control-plane fault, not a clean sweep")
 
           if execute_ran and execute is None:
               # A crashed or refused reap writes no document at all, so there is
@@ -432,16 +444,33 @@ jobs:
           if unresolved:
               # NOT a failure: the tool refusing an orphan is it working as
               # designed. Counted, named and warned on so it is visible — and
-              # SPLIT, so the warning cannot contradict the reason above it about
-              # the same rows (a reserved graph is not an orphan).
-              reserved_unresolved = unresolved - len(orphan_unresolved)
+              # SPLIT THREE WAYS, so the warning cannot contradict the reason above
+              # it about the same rows (a reserved graph is not an orphan) and so no
+              # label names a cause the predicate does not carry: reserved
+              # control-plane rows, orphan-shaped rows that name no owner, and rows
+              # REFUSED WITH an owner (credential/tombstone). Counting the last two
+              # together published "no owning org" over a row whose own artifact
+              # names its org — and the subtraction that built `reserved_unresolved`
+              # then called an owned refusal "reserved control-plane", a second
+              # false label on the same row.
+              reserved_unresolved = sum(
+                  1 for row in (plan.get("graphs") or [])
+                  if row.get("bucket") == "refused-unresolved"
+                  and row.get("reserved")
+              )
               detail = []
-              if orphan_unresolved:
-                  detail.append(f"{len(orphan_unresolved)} orphan-shaped — no owning org")
+              if orphan_no_owner:
+                  detail.append(f"{len(orphan_no_owner)} orphan-shaped — no owning org")
+              if refused_with_owner:
+                  detail.append(
+                      f"{refused_with_owner} refused with an owner "
+                      f"(credential/tombstone)"
+                  )
               if reserved_unresolved:
                   detail.append(f"{reserved_unresolved} reserved control-plane")
-              notes.append(f"{unresolved} graph(s) REFUSED as unresolved "
-                           f"({'; '.join(detail)}) — adjudication, not cleaning")
+              suffix = f" ({'; '.join(detail)})" if detail else ""
+              notes.append(f"{unresolved} graph(s) REFUSED as unresolved{suffix} "
+                           f"— adjudication, not cleaning")
           if total > band:
               reasons.append(f"resident total {total} is above the stated band {band} — the sweep is not keeping up with the leak RATE; that is a test-org question (#13218), not a cleaning one")
 
