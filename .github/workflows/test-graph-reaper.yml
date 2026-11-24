@@ -98,11 +98,13 @@ name: test-graph-reaper
 #     graph that explains it).
 #   * `refused-unreadable` > 0 — the sweep is partly BLIND, which is a defect in
 #     the sweep. `refused-unresolved` is DELIBERATELY NOT a failure: it is the
-#     tool working as designed on an orphan that needs adjudication, so it is
+#     tool declining to delete something it cannot adjudicate (an orphan, or a
+#     graph refused for a credential/tombstone reason), so it is
 #     counted, named and warned on, not red. (The issue says exactly this:
 #     "a refusal is visible rather than silent".) The one exception is the
-#     ALL-unresolved case above, which is a control-plane fault wearing the same
-#     bucket — and only while an orphan-shaped row is among them.
+#     ALL-unresolved case above — every row in the same bucket, which covers BOTH
+#     an ownership fault and the tool's own credential/tombstone guard tripping
+#     across the whole set — and only while a row is not reserved.
 #
 # WHO RUNS IT. GitHub Actions, not a box timer and not an in-process thread: the
 # fleet's own scheduling doctrine (billing-reconcile-cron, registry-backup-cron)
@@ -379,11 +381,15 @@ jobs:
           # permanently-red schedule is a schedule nobody reads: the #2140 deaf
           # monitor, arriving from the other side.
           #
-          # So the arm fires only when an UNRESOLVED row is ORPHAN-SHAPED, which
-          # is the case it was written for (a restored/empty project, a key
-          # scoped elsewhere, namespace drift: tenant-shaped graphs, HTTP 200,
-          # zero owners). A row that carries no `reserved` key counts as
-          # NON-reserved — fail closed, never fail open.
+          # So the arm fires when an UNRESOLVED row is NOT RESERVED — which is an
+          # ORPHAN (`org_id` null: a restored/empty project, a key scoped
+          # elsewhere, namespace drift — tenant-shaped graphs, HTTP 200, zero
+          # owners) OR a refusal that NAMES its owner (the credential/tombstone
+          # guard). Both mean the estate resolved nothing, which is what the arm
+          # is for. ⛔ The predicate does NOT test `org_id`: an owned refusal is
+          # not reserved, so the arm fires with ZERO orphans in the estate. A row
+          # that carries no `reserved` key counts as NON-reserved — fail closed,
+          # never fail open.
           orphan_unresolved = [
               row for row in (plan.get("graphs") or [])
               if not row.get("reserved")
