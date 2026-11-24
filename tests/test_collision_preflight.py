@@ -613,6 +613,62 @@ def _write_ps_stub(directory: Path, rows: list[str]) -> Path:
     return stub
 
 
+#: The PROGRAM the fake lane's process image is — a SHELL, deliberately.
+#:
+#: ⛔ THE FAKE LANE MUST RUN SOMETHING THAT IGNORES ITS OWN NAME.
+#: `fleet_state.pi_processes()` matches `basename(argv[0]) == "pi"`, so the fixture
+#: necessarily hands a FOREIGN argv[0] to some program — and every candidate that
+#: reads its own name has died on a runner this suite runs on:
+#:
+#: * a `#!` script — the kernel rewrites argv[0] to the interpreter, so `ps` reads
+#:   `bash /…/pi 120` and the census legitimately sees no lane;
+#: * a copy of `/bin/sleep` — on Ubuntu 26.04 that is a symlink into the uutils
+#:   MULTI-CALL binary, which dispatches on `basename(argv[0])` and dies with
+#:   `coreutils: unknown program 'pi'` (exit 1) — #12358;
+#: * `executable=PYTHON` with argv[0] `pi` — a BARE argv[0] is resolved on `$PATH`,
+#:   so CPython adopts whatever program called `pi` it finds there as ITS OWN
+#:   executable (`sys._base_executable = '<host>/…/pi'`, in CPython's own words) and
+#:   derives its path configuration from that unrelated program. On a box whose
+#:   `$PATH` holds a `pi` binary — every self-hosted runner that runs fleet lanes,
+#:   and this suite's own fixtures, which put one there — it dies at startup with
+#:   **exit 1** (#14506: deterministic on the self-hosted `pi-runner-x64-2` leg —
+#:   all four `_start_fake_pi` arms failed with `EXITED with rc=1` on every attempt,
+#:   while the same arms pass on the hosted pool and on a workstation).
+#:
+#: `/bin/sh` reads `-c` and nothing else about its name, so it is the one program
+#: here that survives a foreign argv[0].
+FAKE_LANE_PROGRAM = "/bin/sh"
+
+
+def _fake_lane_argv(seconds: int = 120) -> list[str]:
+    """argv for a process the census reads as `pi` that stays inside its cwd.
+
+    ⛔ THE TRAILING `; :` IS LOAD-BEARING. A POSIX shell `exec`s a `-c` command
+    it would run LAST, which replaces argv[0] `pi` with `sleep` — the census then
+    sees no lane, and the failure reads as a process-census gap instead of as the
+    fixture's own doing. The second command keeps the shell as the process.
+    """
+    return ["pi", "-c", f"sleep {seconds}; :"]
+
+
+def _fake_lane(cwd, *, env: dict[str, str] | None = None,
+               stderr=subprocess.DEVNULL, seconds: int = 120) -> subprocess.Popen:
+    """A live `pi`-named process standing in `cwd` — the census fixtures' ONE spawn.
+
+    One helper, so the argv[0]/program contract above is stated once and every
+    arm that needs a lane inherits it instead of re-deriving it (six sites did,
+    and the `executable=PYTHON` form #12358 introduced outlived the environment
+    it was verified on).
+
+    `stderr` is passed through so a fixture that dies can be asked WHAT IT SAID —
+    an `rc` with no text is not a cause (`_fake_lane_stderr_note`).
+    """
+    return subprocess.Popen(
+        _fake_lane_argv(seconds), executable=FAKE_LANE_PROGRAM, cwd=str(cwd),
+        env=env if env is not None else os.environ.copy(),
+        stdout=subprocess.DEVNULL, stderr=stderr)
+
+
 def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
     """Block until `/proc/<pid>/cwd` reads back with the ` (deleted)` suffix."""
     deadline = time.monotonic() + timeout
@@ -8786,22 +8842,15 @@ class CollisionPreflightTest(unittest.TestCase):
         # ⛔ argv[0] MUST READ `pi`. `fleet_state.pi_processes` matches
         # `basename(argv[0]) == "pi"`, and the kernel rewrites argv[0] to the
         # INTERPRETER for a `#!` script — `ps` then reads `bash /…/pi 120` and the census
-        # legitimately does not see a lane named `pi`.
-        # ⛔ THE INTERPRETER RUNS, THE COPY DOES NOT: `executable=PYTHON` execs python
-        # while argv[0] stays `pi` (a native `execve` keeps the argv[0] it is handed).
-        # Do NOT "tidy" this back to `[str(pi), "120"]`: on Ubuntu 26.04 (what
-        # `ubuntu-latest` resolves to) `/bin/sleep` is a symlink into the uutils
-        # MULTI-CALL binary, which dispatches on `basename(argv[0])` and dies with
-        # `coreutils: unknown program 'pi'` — before this census takes its first
-        # sample. The copy below is inert setup: nothing reads that path any more
-        # (the interpreter is what `execve`s, and the census stub rows are literal
-        # text while `/proc` supplies only the cwd). It is retained so this change
-        # stays on the failure mode it fixes; deleting the now-dead copies — and the
-        # `/bin/sleep` host dependency they carry — is separate work (#12039).
+        # legitimately does not see a lane named `pi`. The PROGRAM is a shell and not the
+        # interpreter: handing a foreign argv[0] to `python` makes CPython derive its path
+        # configuration from that name, which kills it at startup on some runner layouts
+        # (#14506 — see `_fake_lane`). The copied binary below is inert setup, retained
+        # only so this change stays on the failure mode it fixes; deleting the now-dead
+        # copies — and the `/bin/sleep` host dependency they carry — is #12039.
         pi = fake_bin / "pi"
         shutil.copy("/bin/sleep", pi)
-        proc = subprocess.Popen([str(pi), "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(wt),
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = _fake_lane(wt)
         # The census the TOOL reads is the STUBBED table (`_write_ps_stub`), so the
         # lane this test really spawned must be SERVED to it — otherwise the tool
         # would see no owner and the assertion below would fail on a fixture gap.
@@ -9623,21 +9672,19 @@ class CollisionPreflightTest(unittest.TestCase):
         """Serve ONE more row (a fixture's own fake lane) beside the default."""
         self.set_process_table(*self.ps_stub_rows, row)
 
-    def _start_fake_pi(self, cwd: Path) -> subprocess.Popen:
+    def _start_fake_pi(self, cwd: Path, *, env: dict[str, str] | None = None) -> subprocess.Popen:
         """A process the census will see as `pi`, standing in `cwd` (see test (c2) above).
 
         argv[0] is the bare name `pi` — short, so no `ps` column width can truncate it, and
-        `basename(argv[0])` is exactly what the matcher reads. A `#!` script would instead
-        carry the interpreter as argv[0]. ⛔ The interpreter itself runs (`executable=PYTHON`);
-        the copied binary is inert — see the warning at
-        `test_a_live_process_in_the_worktree_still_blocks`.
+        `basename(argv[0])` is exactly what the matcher reads. The PROGRAM is a shell:
+        ⛔ never the interpreter and never a copied coreutils binary — `_fake_lane` states
+        the three ways that died on a real runner, including the `executable=PYTHON` form
+        CI #14506 reddened with (`EXITED with rc=1`) on every attempt.
         """
-        fake_bin = self.tmp / "fakebin-empty"
-        fake_bin.mkdir(exist_ok=True)
-        pi = fake_bin / "pi"
-        if not pi.exists():
-            shutil.copy("/bin/sleep", pi)
-        env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+        if env is None:
+            fake_bin = self.tmp / "fakebin-empty"
+            fake_bin.mkdir(exist_ok=True)
+            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
         # ⛔ THE CHILD'S STDERR IS THE ONLY EVIDENCE A DEAD FIXTURE HAS (#14506). #14388
         # exists so this harness can "name its own cause" and then closed the child's
         # stderr to `DEVNULL` — so every DEAD FIXTURE the CI pool produced reported
@@ -9647,8 +9694,7 @@ class CollisionPreflightTest(unittest.TestCase):
         errs = self._fake_pi_stderr_paths()
         err_log = self.tmp / f"fake-pi-{len(errs)}-{os.getpid()}.stderr"
         with open(err_log, "wb") as err_fh:
-            proc = subprocess.Popen(["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON,
-                                    cwd=str(cwd), env=env, stdout=subprocess.DEVNULL, stderr=err_fh)
+            proc = _fake_lane(cwd, env=env, stderr=err_fh)
         errs[proc.pid] = err_log
         # ⛔ The census the TOOL reads is the STUBBED table, so the fixture's own
         # lane must be SERVED to it as well (`_write_ps_stub`). Without this the
@@ -9972,6 +10018,40 @@ class CollisionPreflightTest(unittest.TestCase):
         for measured in ("the census returned", "wanted cwd", "DEAD FIXTURE"):
             self.assertIn(measured, rest)
             self.assertNotIn(measured, first)
+
+    def test_the_fake_lane_kit_survives_an_environment_that_cannot_start_python(self):
+        """⛔ THE FIXTURE MUST NOT DEPEND ON THE INTERPRETER'S OWN PATH CONFIG (#14506).
+
+        MEASURED on PR #14506's `test (b)` on the self-hosted `pi-runner-x64-2` leg, on
+        EVERY attempt: all four arms built on `_start_fake_pi` failed with
+        `the fake lane pid … EXITED with rc=1 — a DEAD FIXTURE, not a census gap`, while
+        the same arms pass on the hosted pool and on a workstation. Cause: the spawn
+        handed a FOREIGN argv[0] (`pi`) to `executable=PYTHON`, and a BARE argv[0] is
+        resolved on `$PATH` — so CPython adopted whatever program called `pi` it found
+        there as its own executable and derived its path configuration from it:
+
+            Python path configuration:
+              program name = 'pi'
+              sys._base_executable = '<host>/…/pi'
+
+        — which kills it at startup with exit 1 on any host where a `pi` binary is on
+        `$PATH`, before the first census sample. A broken `PYTHONHOME` forces that same
+        fatal exit DETERMINISTICALLY on any box (this one included), which is the
+        mutation here; the shell-based `_fake_lane` ignores it, and so does the real
+        cause it stands in for.
+
+        Non-vacuity: revert `_fake_lane` to the pre-fix
+        `subprocess.Popen(["pi", "-c", "import time; time.sleep(120)"],
+        executable=PYTHON, …)` and this arm reds with the same `DEAD FIXTURE` text CI
+        reported (verified: `rc=1`).
+        """
+        hostile = {**os.environ, "PYTHONHOME": str(self.tmp / "no-such-python-home")}
+        proc = self._start_fake_pi(self.repo, env=hostile)
+        try:
+            self._wait_for_pi_cwd(self.repo, timeout=15.0, proc=proc)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
 
     def _wait_cwd_attributable(self, pid: int, wt: Path, timeout: float = 10.0) -> None:
         """Block until the TOOL's OWN cwd reader can attribute `pid` to `wt` (#12039).
@@ -10661,10 +10741,8 @@ exec {real} "$@"
         binary = pi / "pi"
         if not binary.exists():
             shutil.copy("/bin/sleep", binary)
-        proc = subprocess.Popen(
-            ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(peer_wt),
-            env={**os.environ, "PATH": f"{pi}:{os.environ.get('PATH', '')}"},
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = _fake_lane(peer_wt,
+                          env={**os.environ, "PATH": f"{pi}:{os.environ.get('PATH', '')}"})
         try:
             # ⛔ WAIT ON THE TOOL'S OWN READER BEFORE ASKING THE TOOL (#12039). The
             # census row below is served from a seam, so the tool's only REAL input is
@@ -11115,10 +11193,8 @@ exec {real} "$@"
         binary = fakebin / "pi"
         if not binary.exists():
             shutil.copy("/bin/sleep", binary)
-        proc = subprocess.Popen(
-            ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
-            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = _fake_lane(lane_wt,
+                          env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"})
         try:
             table = self.tmp / "table-own-subagent.txt"
             table.write_text(
@@ -11159,10 +11235,8 @@ exec {real} "$@"
         binary = fakebin / "pi"
         if not binary.exists():
             shutil.copy("/bin/sleep", binary)
-        proc = subprocess.Popen(
-            ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
-            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = _fake_lane(lane_wt,
+                          env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"})
         try:
             table = self.tmp / "table-samecwd-not-mine.txt"
             # ⛔ `ppid = 1`, i.e. NOT an ancestor of the tool: parentage fails.
@@ -11201,10 +11275,8 @@ exec {real} "$@"
         binary = fakebin / "pi"
         if not binary.exists():
             shutil.copy("/bin/sleep", binary)
-        proc = subprocess.Popen(
-            ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
-            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = _fake_lane(lane_wt,
+                          env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"})
         try:
             table = self.tmp / "table-dispatched-lane.txt"
             table.write_text(
