@@ -6002,14 +6002,12 @@ class _ManifestShapeError(RuntimeError):
 #: only reader, `*_BUNDLE_TOOL_SOURCES.items()`) and then DELETED a day later by
 #: #14482's orphan sweep (2026-11-24, "delete the 81 names the volume cut
 #: orphaned"). ⚠️ Two events, two dates: dating the CUT alone points a reader at
-#: `8c373f59a1`, where the table is still DEFINED, which is the same
-#: not-verifiable-at-the-point-of-reading failure the named CALL removes (#14493
-#: review, P2 — and the reason this clause says "the named CALL" rather than
-#: pointing: the revision this one replaces said "the CALL reference BELOW" about a
-#: reference in the sentence ABOVE it, which is cycle 1's direction defect re-minted).
-#: The CALL is named instead of a direction for that same
-#: reason: it sits ABOVE this block, so the earlier "the sweep below" sent a reader
-#: looking the wrong way — and a reader who found no sweep below would conclude
+#: `8c373f59a1`, where the table is still DEFINED — the same
+#: not-verifiable-at-the-point-of-reading failure the named CALL removes. The CALL
+#: is named rather than pointed at (#14493 review, P2) because it sits ABOVE this
+#: block: the revision this one replaces said "the CALL reference BELOW" about a
+#: reference ABOVE it — cycle 1's direction defect, re-minted — and "the sweep
+#: below" sends a reader the wrong way, so one who finds no sweep concludes
 #: `_BUNDLE_SOURCES` is unconsumed, which is the "both were CUT" error this sentence
 #: exists to remove. No linter reads prose (ruff's F841 is function-scope only, and
 #: no rule resolves comment line references), so nothing but this note's own
