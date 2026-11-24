@@ -5806,14 +5806,15 @@ def slow_wall_projection(manifest: dict,
                          max_parallel: int | None = None) -> dict:
     """#9539: the projected slow-leg wall, from the committed `durations` map.
 
-    `projected_wall_min = max(leg est) + SLOW_LEG_SETUP_ALLOWANCE_MIN`. This WAS
-    the number the wall guard held to `SLOW_LEG_WALL_TARGET_MIN`; ⛔ ITS CALLERS
-    WERE THE B7-CUT ARMS (`test_slow_shards_are_duration_packed_and_meet_the_
-    wall_target` and the wall-clock/cap arithmetic around it, CUT 2026-11-23), so
-    this function now has NO caller and NO grader in the tree — the projection is
-    a reading a human takes, not a gate. It is kept because it is the documented
-    re-derivation for the two targets below; retire it deliberately if that is
-    the decision. It is a PROJECTION from the map (never a measurement), which is
+    `projected_wall_min = max(leg est) + SLOW_LEG_SETUP_ALLOWANCE_MIN`. This IS
+    the number the wall guard holds to `SLOW_LEG_WALL_TARGET_MIN`:
+    `tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_the_wall_target`
+    calls it and asserts `proj["projected_wall_min"] <= SLOW_LEG_WALL_TARGET_MIN`,
+    plus the capped form below. That arm was CUT by the B7 cut (#14419) and cut
+    again by #14439's re-cut, and #14481 RESTORED it — so this function has a
+    caller AND a grader again, and must not be retired. It is also the documented
+    re-derivation for the two targets below. It is a PROJECTION from the map
+    (never a measurement), which is
     why the setup allowance is a measured constant rather than an assumption
     inside it.
 
