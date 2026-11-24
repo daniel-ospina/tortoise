@@ -6253,18 +6253,6 @@ function healthScan(
 }
 
 /**
- * Append the durable claim fact to WHICHEVER verdict was chosen.
- *
- * ⛔ IT IS ONE TERM ON EVERY LINE, NOT A SIXTH PRECEDENCE STATE (#14480 review,
- * F1). The claim axis is a fact about the SPOOL ROOT — true whatever the queue is
- * doing — so a `SATURATED` box whose claim path is broken must read BOTH, exactly
- * as a quota-blocked one must. Applying it only to the final `DRAINING`/`OK`
- * verdict dropped it on the four early returns, and the case the durable fact
- * exists for (a capacity 429 with a backlog: `state: blocked` AND a broken claim
- * path) is one of those early returns. Mirrors `capture_spool._with_claim_term`
- * byte for byte — the cross-leg parity test compares the FULL rendered line.
- */
-/**
  * ⛔ ONLY A PASS THAT **HELD** THE CLAIM MAY **CLEAR** THE DURABLE EXCLUSION FACT —
  * every other write CARRIES IT FORWARD. One function, because the rule is one rule.
  *
@@ -6302,7 +6290,7 @@ export function applyClaimPolicy(
       ...(next ?? previous ?? { version: 1, state: "ok" }),
       claim_unavailable: true,
       claim_unavailable_reason: (summary.claimUnavailableReason
-        ?? "the spool root cannot hold a claim").slice(0, 300),
+        || "the spool root cannot hold a claim").slice(0, 300),
       updated_at: new Date().toISOString(),
     } as CaptureStatus;
   }
@@ -6336,6 +6324,18 @@ export function applyClaimPolicy(
   return next;
 }
 
+/**
+ * Append the durable claim fact to WHICHEVER verdict was chosen.
+ *
+ * ⛔ IT IS ONE TERM ON EVERY LINE, NOT A SIXTH PRECEDENCE STATE (#14480 review,
+ * F1). The claim axis is a fact about the SPOOL ROOT — true whatever the queue is
+ * doing — so a `SATURATED` box whose claim path is broken must read BOTH, exactly
+ * as a quota-blocked one must. Applying it only to the final `DRAINING`/`OK`
+ * verdict dropped it on the four early returns, and the case the durable fact
+ * exists for (a capacity 429 with a backlog: `state: blocked` AND a broken claim
+ * path) is one of those early returns. Mirrors `capture_spool._with_claim_term`
+ * byte for byte — the cross-leg parity test compares the FULL rendered line.
+ */
 function withClaimTerm(
   health: CaptureHealth,
   recorded: CaptureStatus | undefined,

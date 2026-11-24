@@ -8623,6 +8623,14 @@ test("#14350: the claim policy agrees between both legs on every summary shape",
     ["unclaimed, earned nothing", null, { claimUnavailable: true }, true, true],
     ["unclaimed AND holder", null, { claimUnavailable: true, claimHeld: true },
       true, true],
+    // ⛔ THE EMPTY-REASON ROW (review, cycle 14, P3). An empty reason is NO reason:
+    // both legs must fall back to the SAME default, because they write the same
+    // `<spool>/status.json`. This leg used `??` (so `""` was written verbatim) while
+    // the Python leg used `or` (so `""` defaulted) — the predicate class
+    // `client_captured_at_source` was fixed for, missed here because no row carried
+    // `""`.
+    ["unclaimed, reason is EMPTY", null,
+      { claimUnavailable: true, claimUnavailableReason: "" }, true, true],
   ];
   for (const [label, earnedRec, summary, writes, expected] of matrix) {
     const out = applyClaimPolicy(earnedRec as never, fact, summary as never);
@@ -8630,6 +8638,13 @@ test("#14350: the claim policy agrees between both legs on every summary shape",
     if (writes) {
       assert.equal(Boolean(out?.claim_unavailable), expected,
         label + " → " + JSON.stringify(out));
+    }
+    if (writes && (summary as { claimUnavailableReason?: string })
+        .claimUnavailableReason === "") {
+      assert.equal(out?.claim_unavailable_reason,
+        "the spool root cannot hold a claim",
+        "an EMPTY reason is no reason on BOTH legs, not empty on one: "
+          + JSON.stringify(out));
     }
   }
 });

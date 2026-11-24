@@ -1980,9 +1980,14 @@ def test_a_HEALTHY_pass_CLEARS_the_recorded_claim_fact(tmp_path):
     """The other direction: a durable field nobody clears is a one-way latch, and a
     one-way latch is how an operator learns to ignore the line.
 
-    MUTATION THAT REDS THIS: keep the stale field when a claimed pass writes `ok`
-    (e.g. merge the previous record into every write instead of only into the
-    claim-decorated one).
+    MUTATION THAT REDS THIS: delete the `elif held_claim:` clearing arm
+    (`capture_spool.py`, the arm that pops `claim_unavailable` /
+    `claim_unavailable_reason`). ⛔ NOT "keep the stale field when a claimed pass
+    writes `ok` / merge the previous record into every write": this pass FILES an
+    entry, so it holds the claim AND attempted something, and the clearing arm pops
+    the fields again after any merge — measured GREEN under that mutant, which made
+    the earlier sentence an unattributable catch. The Pi twin says the same thing for
+    the same reason (#14480 review, cycle 12 F3 / cycle 14 P3).
     """
     root = tmp_path / "spool"
     root.mkdir(parents=True)
@@ -2098,6 +2103,14 @@ def test_the_claim_policy_agrees_on_every_summary_shape(tmp_path):
         ("holder, earned ok", 3, {"held": True}, True, False),
         ("unclaimed, earned nothing", 0, {"unavailable": True}, True, True),
         ("unclaimed AND holder", 0, {"unavailable": True, "held": True}, True, True),
+        # ⛔ THE EMPTY-REASON ROW (review, cycle 14, P3). An empty reason is NO
+        # reason: both legs must fall back to the same default, because they write the
+        # same `<spool>/status.json`. This leg tested truthiness (so "" defaulted) and
+        # the Pi leg tested nullish (so "" was written verbatim) — the exact predicate
+        # class `client_captured_at_source` was fixed for in this same file, and no row
+        # here carried `""`, which is why five rounds of parity work missed it.
+        ("unclaimed, reason is EMPTY", 0, {"unavailable": True, "empty_reason": True},
+         True, True),
     ]
     for index, (label, attempted, state, writes, expected) in enumerate(matrix):
         root = tmp_path / f"row-{index}"
@@ -2108,7 +2121,8 @@ def test_the_claim_policy_agrees_on_every_summary_shape(tmp_path):
             summary.claim_unavailable = False
         if state.get("unavailable"):
             summary.claim_unavailable = True
-            summary.claim_unavailable_reason = "obstructed"
+            summary.claim_unavailable_reason = (
+                "" if state.get("empty_reason") else "obstructed")
         _record_capture_status(
             root, summary,
             held_claim=bool(state.get("held")),
@@ -2120,6 +2134,11 @@ def test_the_claim_policy_agrees_on_every_summary_shape(tmp_path):
         if writes:
             assert bool(recorded.get("claim_unavailable")) is expected, (
                 label + " → " + repr(recorded))
+        if writes and state.get("empty_reason"):
+            assert recorded.get("claim_unavailable_reason") == (
+                "the spool root cannot hold a claim"), (
+                "an EMPTY reason is no reason on BOTH legs, not empty on one: "
+                + repr(recorded))
 
 
 def _receipt(**race) -> dict:
