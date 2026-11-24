@@ -57,9 +57,13 @@ only safe if it costs no precision:
 
 The population itself is not re-tested here: `tests/test_13557_13558_reachable_reads.py`
 owns the set semantics (live graph). This file is the ROUTING table, offline and
-deterministic, so it runs anywhere **with `TORTOISE_TEST_CARVE_OUT=1`** — the file
-is in the embedded carve-out lane, and a bare `pytest <this file>` fails the
-suite-wide DB gate with 45 errors that are not a regression (epic #1647 P4).
+deterministic, so it runs anywhere **with `TORTOISE_TEST_CARVE_OUT=1`**. ⛔ It is
+NOT in the `carve_out:` list — `config/ci-surfaces.yml` registers it as its own
+`core` surface row (it must be, so that a diff to `tortoise/state_intent.py`
+SELECTS it) — the flag is simply what lets an embedded-only run skip the
+suite-wide DB gate. Without the flag a bare `pytest <this file>` fails that gate
+with one error PER COLLECTED TEST (**84** at this head, not a fixed number and
+not a regression: the count is the population size; epic #1647 P4).
 """
 from __future__ import annotations
 
@@ -285,17 +289,17 @@ def test_the_six_guards_inside_is_predicate_are_each_load_bearing():
       to an adjunct clause and the question's predicate is `safe` / `accurate` /
       the policy's applicability, so the run would swallow it;
     * the PREDICATE-MODIFIER stop is the sixth guard, and its falsifier is the
-      FORTY-SEVEN measured rows of
+      FIFTY-TWO measured rows of
       :func:`test_a_modified_predicate_is_not_the_question_asked` — re-measure
       `len(MODIFIED_PREDICATE_STAYS_OUT)` rather than trusting any count in prose
-      (twelve NEGATED, six FUTURE, three PROGRESSIVE, one DISJUNCTIVE, four
-      CONTRACTION, seven ADJUNCT/LINKER, four `of`-COMPLEMENT, and ten
+      (twelve NEGATED, six FUTURE, three PROGRESSIVE, one DISJUNCTIVE, eight
+      CONTRACTION, seven ADJUNCT/LINKER, four `of`-COMPLEMENT, and eleven
       APPROXIMATIVE at this head).
       Dropping the stop routes that class, which answers the question with the
       POLARITY-INVERTED (or a not-yet-existing, or an in-flight) population.
       ⛔ The APPROXIMATIVE rows are the ones that pin the POSITIONAL arm: a flat
       `hardly|barely|scarcely|rarely` stop word refuses
-      `is the old barely visible notice archived` and its two siblings — see
+      `is the old barely visible notice archived` and its THREE siblings — see
       :data:`STOP_WORDS_KEEP_THIS_RECALL`, which reds if anyone flattens it.
       ⛔ The FUTURITY rows are held by the FRAME
       `(to|going|about|due|scheduled) (to) be`, not by a bare `be`: measured,
@@ -382,11 +386,12 @@ def test_the_imperative_lookup_for_one_record_is_still_refused():
 #: A PREDICATE MODIFIER between the head noun and the ending — the slot can only
 #: be modifying the predicate, and every row here was answered with the ended
 #: population on the pre-fix head EXCEPT the one BOUNDARY row named below
-#: (`is the plan not going to be cancelled`, which the four-word bound already
+#: (`is the plan not going to be cancelled`, which the NP bound already
 #: refused) — measured row by row against
-#: `git show 4aecc782d3^:tortoise/state_intent.py`, 37 of 38 routed there.
+#: `git show 4aecc782d3^:tortoise/state_intent.py`, 46 of 47 routed there.
 #:
-#: Four classes, one failure each, and none of them is the question asked:
+#: EIGHT classes, each with its own failure, and none of them is the question
+#: asked:
 #:
 #: * NEGATION — `is the plan not cancelled` was served the population of
 #:   **cancelled** records: the polarity-INVERTED answer to the question. That is
@@ -427,7 +432,7 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     # the APPROXIMATIVE negators — they leak to the polarity-INVERTED population
     # without the POSITIONAL arm in ``_NP_STOP`` (P1: all six routed before it).
     # ⛔ They cannot be flat stop words: see
-    # :data:`STOP_WORDS_KEEP_THIS_RECALL` for the three real state questions a
+    # :data:`STOP_WORDS_KEEP_THIS_RECALL` for the FOUR real state questions a
     # flat word would refuse.
     "is the plan hardly cancelled",
     "is the plan barely cancelled",
@@ -435,6 +440,8 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     "is the plan far from cancelled",
     "is the plan anything but cancelled",
     "is the plan hardly been cancelled",
+    # the HYPHENATED spelling, where the separator is `-` not whitespace
+    "is the plan hardly-ever cancelled",
     # a standalone `n't` token, which `_NP_WORD` accepts because a word-run
     # element may begin with `n` — the guard is live, not inert (see the
     # module's `_NP_STOP` note; the CONTRACTED copula `isn't the plan cancelled`
@@ -468,6 +475,15 @@ MODIFIED_PREDICATE_STAYS_OUT = (
     "is the report wasn't archived",
     "is the ticket hasn't been archived",
     "is the api doesn't work retired",
+    # ⛔ AND THE SMART-APOSTROPHE CONTRACTIONS, which the ASCII `n't` suffix
+    # MISSED while `_NP_WORD` admits U+2019: the token `isn’t` then read as an
+    # ordinary NP word and the question was served the CANCELLED population
+    # (measured, PR #14491 review — the hole was created by the two changes
+    # together, and exists on neither alone).
+    "is the plan isn’t cancelled",
+    "is the ticket hasn’t been archived",
+    "is the plan won’t be cancelled",
+    "is the api doesn’t work retired",
     # an ADJUNCT/CLAUSE LINKER — the ending is inside the adjunct, so the
     # question's predicate is `safe` / `accurate` / the policy's applicability
     "is the data safe once archived",
@@ -611,3 +627,25 @@ def test_a_head_noun_joined_by_or_is_the_stated_cost_of_that_guard():
         f"the `or`-joined head noun now routes to {got.population!r} — that may be "
         f"fine, but the module's ``_NP_STOP`` residual #5 says it does NOT, so the "
         f"disclosure has to move in the same change")
+
+
+def test_a_two_word_adverbial_negation_is_the_stated_cost_of_the_positional_arm():
+    """A KNOWN COST, pinned so it cannot drift silently (module ``_NP_STOP``, r6).
+
+    The approximative-negation arm is POSITIONAL and its lookahead allows ONE
+    intervening word, so `is the plan hardly at all cancelled` still reaches the
+    CANCELLED population — the polarity-INVERTED answer, and the residual the
+    module states as #6. ⛔ Widening the lookahead to two words is NOT the fix:
+    it would refuse `is the old barely visible notice archived`, a real state
+    question whose negator modifies a noun (see
+    :data:`STOP_WORDS_KEEP_THIS_RECALL`). This pin is not a virtue — if a later
+    change closes the residual, the module's residual list must move in the same
+    diff, which is what this test forces.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    got = detect_state_question("is the plan hardly at all cancelled")
+    assert got.population is not None, (
+        f"the two-word adverbial negation now refuses ({got.population!r}) — that "
+        f"may be better, but the module's ``_NP_STOP`` residual #6 says it ROUTES, "
+        f"so the disclosure has to move in the same change")

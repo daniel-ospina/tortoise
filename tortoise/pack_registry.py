@@ -2213,8 +2213,12 @@ class PackRegistry:
             # whose `-> list[str]` contract forbids it (#8661, the "validator
             # not total" class). ⛔ Do NOT re-wrap this sentence onto a line
             # that BEGINS with `# type:` — mypy reads such a line as a TYPE
-            # COMMENT and rejects `'list'` as invalid syntax (mypy < 2.4), which
-            # reds `mypy tortoise/` on an otherwise clean tree (#14491).
+            # COMMENT and rejects `'list'` as invalid syntax, which reds
+            # `mypy tortoise/` on an otherwise clean tree (#14491). ⛔ THE TRAP IS
+            # NOT VERSION-BOUNDED: `error: Syntax error in type comment` measured
+            # on BOTH 2.3.1 and 2.4.1 (the box resolves 2.4.1), so do not "fix" a
+            # red by narrowing a version pin — keep the line from beginning with
+            # `# type:`.
             # `load_all`'s except turned it into
             # `✗ acme: unhashable type: 'list'` — no field, no index (round-14
             # review P2, measured). The element loop above already refuses a
