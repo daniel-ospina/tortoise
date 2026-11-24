@@ -171,6 +171,7 @@ _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
 _TEST = "tests/test_demo_session_read_exclusion_8290.py"
 _CENSUS = "tools/hosted_api_cite_census.py"
+_EVIDENCE_13094 = "docs/evidence/13094-graphevent/README.md"
 
 #: `(label, path, pattern, figure keys)` — the sentence each figure lives in, and
 #: the figure it must state. Both `--check` and `--refresh` read exactly these: a
@@ -223,6 +224,21 @@ _NOTES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     # `pass --pivot explicitly` message, neither of which carries a figure.
     ("census --pivot example", _CENSUS,
      r"(?m)--pivot (\d+)$", ("pivot",)),
+    # ⛔ THE EVIDENCE BUNDLE'S OWN RESTATEMENT (#14428 review, P3):
+    # `docs/evidence/13094-graphevent/README.md` states the SAME three figures to
+    # justify the blocks it re-derived, and while that sentence sat outside this
+    # table nothing graded it — mutating `from 724 in all` to `723` left
+    # `test_13094_graphevent_home.py` + `test_docs_citation_refs.py` at 80 passed
+    # (measured at `5391e008`). A fast-suite equality arm is NOT the remedy, and
+    # the module docstring says why: the population belongs to EVERY tracked file,
+    # so a per-PR test comparing it to prose reds unrelated PRs (~1 commit in 30
+    # adds a `hosted_api.py:<n>` citation). The row puts it under the NIGHTLY
+    # `--check` — the same channel, and the same `--refresh`, the two notes are
+    # graded and re-stated on.
+    ("13094 evidence figures", _EVIDENCE_13094,
+     r"\(`(\d+)` distinct cite targets above the pivot from `(\d+)` in all, over "
+     r"`(\d+)` citing files",
+     ("above_pivot", "distinct_targets", "citing_files")),
 )
 
 
