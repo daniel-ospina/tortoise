@@ -49825,30 +49825,30 @@ class TortoiseSDK:
         pass fires at most once. It is additionally skipped entirely when the
         composition adds nothing (``_entity_key_dense_query`` returns ``None``).
 
-        Merge contract — no id is ever DROPPED (that is what "additive" means
-        here, exactly as in A4), and the candidate SET only grows. The ORDER is
-        the fusion in the paragraph below, NOT the rank concatenation this pass
-        used to apply: "additive" here is a claim about the set, about nothing else.
+        Merge contract — no id is ever DROPPED (that is what "additive" means, as in
+        A4), and the candidate SET only grows. The ORDER is the fusion below, NOT the
+        rank concatenation this pass used to apply: "additive" claims the set alone.
 
-        ⛔ The ORDER, stated because "additive" is read as more than it means:
-        the merge is `expansion_merge.fuse_expansion_pass` (#14344), i.e. this
-        module's own `rrf_fusion` over the two passes, not the rank
-        concatenation (`expanded + pass-1-only`) it used to be. Displacement is
-        by RANK now, never by the expansion run's LENGTH. An id BOTH passes
-        carry earns TWO terms (the entity context AGREEING with the query, the
-        signal this pass exists to supply) — strong, but BOUNDED: with k = 60
-        it beats a single-list rank-0 candidate up to 1-based 61 in both lists;
-        at 62 they tie and the (-score, id) tiebreak (#2952) decides; beyond
-        that a better single-list rank wins. What is NOT claimed: order preservation — a
-        re-ranked dense leg is the mechanism, not a side effect, and on a lever
-        that ships OFF it stays a decision to be measured, not asserted.
+        ⛔ The ORDER, stated because "additive" is read as more than it means: the
+        merge is `expansion_merge.fuse_expansion_pass` (#14344), i.e. this module's
+        own `rrf_fusion` over both passes, replacing the rank concatenation
+        (`expanded + pass-1-only`) it used to be. An id BOTH passes carry earns both
+        terms — the entity context AGREEING with the query is the signal the expansion
+        exists to supply — but that is an ADVANTAGE, not a dominance guarantee: two
+        terms beat a single-list rank only while the shared id sits at 1-based rank
+        <= 61 in BOTH lists. At 62 in both the terms TIE a lone rank-1 and
+        `(-score, id)` decides by spelling; past that the better single-list rank
+        wins (`DEFAULT_POOL_SIZE` is 120, so those ranks occur). A pass-1 id can move
+        down only when a candidate out-ranks it in the composed run, when one ties it
+        and wins the id tiebreak (#2952), or by a shared id inside that bound — never
+        because the expansion had more rows. Order is NOT preserved: a re-ranked dense
+        leg is the mechanism, not a side effect, and on a lever that ships OFF it stays
+        a decision to be measured, not asserted.
 
-        Fail-open (mirrors A4 #2070 / the sparse half): no embedder, an encode
-        failure, a query failure or an empty result returns ``None`` and the
-        caller keeps the ORIGINAL dense leg — byte-identical behavior. The
-        expansion's trace entries are appended ONLY on success (the sparse
-        half's own pattern), so a leg-local failure here can never declare a
-        healthy read degraded — the same false-positive the #8488 arm refuses.
+        Fail-open (mirrors A4 #2070 / the sparse half): no embedder, a failed encode
+        or query, or an empty result returns ``None`` and the caller keeps the
+        ORIGINAL dense leg — byte-identical. Trace entries append ONLY on success, so
+        a leg-local failure can never declare a healthy read degraded (#8488).
 
         Stand-downs, both deliberate:
         * the caller only calls this when the read's dense leg PRODUCED rows, so

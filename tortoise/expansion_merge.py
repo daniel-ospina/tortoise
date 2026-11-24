@@ -52,19 +52,18 @@ def fuse_expansion_pass(
     first pass already reached down by up to ``len(expanded)`` positions, and
     once the fused page is cut at ``limit`` that evidence leaves the answer.
     The mechanism that closes it is the product's own: ``rrf_fusion``, whose
-    formula gives a document credit for its rank in EACH list, so
+    formula gives a document credit for its rank in EACH list — ``w / (k + rank
+    + 1)`` over a 0-BASED rank, ``k=60`` for equal-weighted legs — so
 
-      * an id both passes carry earns TWO terms — the entity context AGREES
-        with the query, which is exactly the signal the expansion exists to
-        supply — and that is a BOUND, not a blanket win: with ``k = 60`` a
-        shared id at 0-based rank ``h`` in BOTH lists scores ``2/(61+h)``
-        against a single-term rank-0 candidate's ``1/61``, so agreement wins
-        up to 1-based 61 in both lists; at 62 they tie and ``(-score, id)``
-        decides on the id's spelling, not on its evidence; beyond that a
-        better single-list rank wins. The crossover is reachable in the
-        shipping default — the legs are pool-depth (``DEFAULT_POOL_SIZE`` is
-        120 rows), not short pages — and past it a newcomer leads because it
-        is new, which is the mechanism this module exists to remove.
+      * an id both passes carry earns both terms, and that is an ADVANTAGE, not
+        dominance. Two terms beat any single-list rank only while the shared id
+        sits at 1-based rank <= 61 in BOTH lists: at 62 in both its two terms
+        TIE a lone rank-1 (``2/122 == 1/61``) and ``rrf_fusion``'s ``(-score,
+        id)`` order decides by spelling rather than evidence, and past that a
+        better single-list rank wins outright. Behind that bound the entity
+        context AGREES with the query, which is exactly the signal the
+        expansion exists to supply — and ``DEFAULT_POOL_SIZE`` is 120, so ranks
+        past 61 are ordinary in the shipping default, not a corner;
       * an id only one pass carries is ranked by its own reciprocal rank, so a
         new candidate must out-rank the incumbent to pass it — or TIE it and win
         ``rrf_fusion``'s ``(-score, id)`` tiebreak (#2952), which at equal rank
@@ -77,11 +76,10 @@ def fuse_expansion_pass(
     candidate in both passes still lands below it. What changes is the
     BOUND: pass-1 evidence can no longer be displaced by the expansion's
     LENGTH — only by a candidate that out-ranks it in the expanded run, or by
-    an id BOTH passes carry ranked 1-based 61 or better in both lists
-    (agreement earns two terms there, so a shared candidate can pass an
-    incumbent that out-ranks it in the expanded run; at 62 they tie and the
-    ``(-score, id)`` tiebreak decides, beyond that the better single-list rank
-    keeps the incumbent ahead).
+    an id BOTH passes carry, whose two terms pass an incumbent that out-ranks
+    it in the expanded run ONLY inside that <=61-in-both bound (at 62 in both
+    they tie and the tiebreak decides; past it the incumbent keeps the lead,
+    which is the half of the sentence this one replaces got wrong).
 
     Scores are carried from the pass that produced the id (``second_pass``
     wins a collision, the order the previous concatenation used), NOT the RRF
