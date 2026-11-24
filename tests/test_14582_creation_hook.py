@@ -278,6 +278,33 @@ def test_the_registry_publishes_no_tenant_identifiers():
     assert all(isinstance(v, (int, str)) for v in published)
 
 
+def test_the_declared_export_surface_is_not_silently_shrunk():
+    """⛔ ADDING TO `__all__` MUST NOT DROP FROM IT (#14582 review P2-8).
+
+    This change added `provision_graph_record` / `note_uncut_graph` /
+    `armed_but_uncut` to `__all__` and, in the same edit, dropped
+    `current_record_tenant` — the SCOPE reader three suites and every
+    scope-aware caller import by name (``tortoise/record_writer.py`` still
+    defines it; only its declaration was cut).
+
+    ⛔ NOTHING REDDED, and that is why this pin exists: a by-name import
+    (``from tortoise.record_writer import current_record_tenant``) bypasses
+    `__all__` entirely, so the loss is visible only to `import *` and to the
+    operator tooling that reads the module's declared surface BY NAME — in
+    production, after the release. Re-adding a name here is free; shrinking the
+    surface is a red that has to be argued for.
+    """
+    assert "current_record_tenant" in rw.__all__, (
+        "`current_record_tenant` is no longer in `record_writer.__all__` — it is "
+        "defined in the module and imported by name by the record suites, so this "
+        "is a silent SHRINK of the declared public surface, not a rename")
+    unresolved = [name for name in rw.__all__ if not hasattr(rw, name)]
+    assert not unresolved, (
+        f"`__all__` declares names the module does not define: {unresolved} — an "
+        f"`import *` would raise AttributeError, and a declared-but-absent name "
+        f"reads as an export in any tool that trusts the list")
+
+
 # ── DB-free: /health cannot hide an uncut armed graph ──────────────────────
 
 def _health(monkeypatch, *, dsn: str | None):
