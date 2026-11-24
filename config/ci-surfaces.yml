@@ -61,7 +61,7 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
-# `main` at `6a02515d14ad`, and the pool it emits is the union of BOTH parents' registrations —
+# `main` at `533e256f2c89`, and the pool it emits is the union of BOTH parents' registrations —
 # ⛔ `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
 # `tests/test_14033_state_cue_gap.py` are BOTH `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, and
 # this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
@@ -98,7 +98,7 @@ version: 1
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
-# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `6a02515d14ad`
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `533e256f2c89`
 # and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
 # is why `main` alone emits this same split. A restatement
 # here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
