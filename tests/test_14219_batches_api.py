@@ -1027,6 +1027,64 @@ def test_a_breakdown_that_hides_the_leftover_still_re_drives(store,
     assert batch.batch_id not in ha._BATCH_DRAINING
 
 
+def test_a_persistent_read_fault_stops_being_re_driven_at_the_ceiling(
+        store, monkeypatch):
+    """#14415 review round 22 (MEDIUM): the loop the ceiling claims to bound.
+
+    `_drain_batch`'s own comment says "`BATCH_MAX_ATTEMPTS` is what bounds the
+    loop", and its re-drive decision was `any(not item.terminal)`. For the fault
+    class `_note_failed_pass` names first — "an unreadable row, a graph timeout on
+    the read" — NOTHING was written (no attempt counted, no `failed` settle), so
+    the row stayed `queued` and every retry tick re-drove it for the life of the
+    process. This pins the bound the comment claims: the drain stops.
+    """
+    bi._reset_failed_passes()
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_batch_item_runner", lambda sdk, corpus, org_id: (
+        lambda item: bi.ItemOutcome(bi.BatchItemState.INDEXED)))
+
+    reads = {"n": 0}
+    enqueues: list[str] = []
+
+    def unreadable(org_id, batch_id, item_id):
+        reads["n"] += 1
+        raise RuntimeError("graph probe timeout")
+
+    real_enqueue = ha._batch_retry_enqueue
+
+    def counting_enqueue(org, bid):
+        enqueues.append(bid)
+        return real_enqueue(org, bid)
+
+    monkeypatch.setattr(store, "get_item", unreadable)
+    monkeypatch.setattr(ha, "_batch_retry_enqueue", counting_enqueue)
+    coord = bi.BatchCoordinator(store)
+    batch, _items = coord.submit(ORG_ID, ["/d/a.md"])
+
+    for _ in range(bi.BATCH_MAX_ATTEMPTS + 5):
+        ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    reads_at_ceiling = reads["n"]
+    enqueues_at_ceiling = len(enqueues)
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert reads["n"] == reads_at_ceiling, (
+        "the drain kept attempting an item whose passes cannot read the row — "
+        "the ceiling does not bound the loop")
+    assert len(enqueues) == enqueues_at_ceiling, (
+        "an exhausted item was re-driven again after the ceiling "
+        f"({enqueues_at_ceiling} -> {len(enqueues)} enqueues)")
+
+    assert bi.failed_pass_count(
+        ORG_ID, batch.batch_id, _items[0].item_id) == bi.BATCH_MAX_ATTEMPTS, (
+        "the passes that could not read the row were not counted to the ceiling")
+    assert not bi.passes_exhausted(ORG_ID, batch.batch_id, "another-item"), (
+        "an unrelated item inherited an exhausted item's count")
+
+
 def test_a_settle_write_that_failed_leaves_the_row_repaired_not_lagging(
         store, monkeypatch):
     """⛔ ROUND-3 BLOCKING 1 arm B: all items terminal, `settle()` lost.

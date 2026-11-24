@@ -1244,6 +1244,96 @@ BATCH_QUERY_TIMEOUT_MS = 10_000
 #: reason: a poison item must not loop by dying repeatedly either.
 BATCH_MAX_ATTEMPTS = 3
 
+# ⛔ THE CEILING MUST BE REACHABLE WHEN THE STORE CANNOT BE READ (#14415 review
+# round 22, MEDIUM — measured at `f665baa4edc6`). `attempts` lives on the ROW, so
+# counting it needs a successful `get_item` — and the fault class this ceiling
+# names is *"an unreadable row, a graph timeout on the read"*. A pass that could
+# not read therefore counted nothing: measured at `f665baa4edc6` with a store
+# whose `get_item` raises on every call, ten passes left `attempts: 0, state:
+# queued`, and `_drain_batch` re-drove the batch on every retry tick for the life
+# of the process (its own comment says "`BATCH_MAX_ATTEMPTS` is what bounds the
+# loop"). The earlier pin reset the fault before each pass, so it only ever
+# exercised a ONE-SHOT fault and never this one.
+#
+# So the consecutive-failure count lives HERE as well, incremented BEFORE any
+# read, and the drain consults it to stop re-driving. It is process-local on
+# purpose: the loop it bounds is a loop in this process, and the alternative —
+# a store-side atomic bump — needs no read but would also count a LIVE peer's
+# claim, which round 22's liveness rule forbids settling. A process-local
+# counter cannot strand a row across restarts: `recover()` still requeues, and a
+# re-submitted item is a new id.
+_FAILED_PASSES: dict[tuple[str, str, str], int] = {}
+#: Items whose ONE visible settle has already been attempted at the ceiling. The
+#: settle needs a read, so it must not become a new unbounded loop of its own:
+#: exactly one attempt per item, ever.
+_SETTLE_TRIED: set[tuple[str, str, str]] = set()
+_FAILED_PASSES_LOCK = threading.Lock()
+
+
+def failed_pass_count(org_id: str, batch_id: str, item_id: str) -> int:
+    """Consecutive failed passes for one item, counted WITHOUT a store read."""
+    with _FAILED_PASSES_LOCK:
+        return _FAILED_PASSES.get((org_id, batch_id, item_id), 0)
+
+
+def passes_exhausted(org_id: str, batch_id: str, item_id: str) -> bool:
+    """True when this item has spent the retry ceiling on failed passes."""
+    return failed_pass_count(org_id, batch_id, item_id) >= BATCH_MAX_ATTEMPTS
+
+
+def batch_passes_exhausted(org_id: str, batch_id: str) -> bool:
+    """True when EVERY item of this batch this process has seen is exhausted.
+
+    Used by the drain's BLIND re-drive arm (`store.items()` itself failed): a
+    batch it cannot read must not be re-driven for ever on the strength of a
+    read that is not going to start working.
+    """
+    with _FAILED_PASSES_LOCK:
+        rows = [n for (o, b, _i), n in _FAILED_PASSES.items()
+                if o == org_id and b == batch_id]
+    return bool(rows) and all(n >= BATCH_MAX_ATTEMPTS for n in rows)
+
+
+def _bump_failed_pass(org_id: str, batch_id: str, item_id: str) -> int:
+    with _FAILED_PASSES_LOCK:
+        key = (org_id, batch_id, item_id)
+        _FAILED_PASSES[key] = _FAILED_PASSES.get(key, 0) + 1
+        return _FAILED_PASSES[key]
+
+
+def _clear_failed_pass(org_id: str, batch_id: str, item_id: str) -> None:
+    """A pass that MADE PROGRESS resets the run of consecutive failures."""
+    with _FAILED_PASSES_LOCK:
+        key = (org_id, batch_id, item_id)
+        _FAILED_PASSES.pop(key, None)
+        _SETTLE_TRIED.discard(key)
+
+
+def _claim_settle_attempt(org_id: str, batch_id: str, item_id: str) -> bool:
+    """True exactly once per item: the ceiling's visible settle is attempted once."""
+    with _FAILED_PASSES_LOCK:
+        key = (org_id, batch_id, item_id)
+        if key in _SETTLE_TRIED:
+            return False
+        _SETTLE_TRIED.add(key)
+        return True
+
+
+def _reset_failed_passes() -> None:
+    """Test seam: the ledger is process-local, so a suite must be able to clear it."""
+    with _FAILED_PASSES_LOCK:
+        _FAILED_PASSES.clear()
+        _SETTLE_TRIED.clear()
+
+
+class RetryCeilingReached(RuntimeError):
+    """This item has spent `BATCH_MAX_ATTEMPTS` consecutive failed passes.
+
+    A `RuntimeError` subclass so every caller that already treats a failed pass
+    as an exception keeps working; the drain additionally recognises it and does
+    not re-enqueue work for an exhausted item.
+    """
+
 
 class GraphBatchStore:
     """``BatchStore`` over the tenant graph, one statement per method.
@@ -2568,6 +2658,28 @@ class BatchCoordinator:
         """
         if item.terminal:
             return item
+        # ⛔ AN EXHAUSTED ITEM IS NOT ATTEMPTED AGAIN (#14415 review round 22,
+        # MEDIUM — measured). The store-side ceiling needs a readable row; the
+        # process-local count does not, so this is the arm that bounds a fault
+        # that never lets the row be read. No read, no runner, no spend — the
+        # drain sees `passes_exhausted` and stops re-driving instead of burning
+        # a retry tick per `TORTOISE_BATCH_RETRY_S` for the process lifetime.
+        if passes_exhausted(org_id, item.batch_id, item.item_id):
+            # ⛔ ONE best-effort VISIBLE settle, then refuse (#14415 round 23).
+            # Refusing without it would leave a row `queued` for ever in the case
+            # that matters most: the store RECOVERS after the ceiling. The
+            # ceiling's contract is that the item settles `failed` with a reason
+            # naming the attempt count — visible, terminal, actionable — so try
+            # once (a settle needs a read, and a read may still fault), and never
+            # again, or the settle would become a new unbounded loop.
+            if _claim_settle_attempt(org_id, item.batch_id, item.item_id):
+                settled = self._settle_exhausted(org_id, item)
+                if settled is not None:
+                    return settled
+            raise RetryCeilingReached(
+                f"item {item.item_id}: {BATCH_MAX_ATTEMPTS} consecutive passes "
+                "failed before this item could be claimed — no further passes "
+                "are attempted in this process")
         try:
             fresh = self._fresh(org_id, item)
         except Exception as exc:
@@ -2698,6 +2810,9 @@ class BatchCoordinator:
             # distinguishes my write from theirs.
             if not won or claimed.state is not BatchItemState.EXTRACTING:
                 return claimed
+            # The claim landed: this pass MADE PROGRESS, so the run of
+            # consecutive failed passes ends here (#14415 round 22, MEDIUM).
+            _clear_failed_pass(org_id, item.batch_id, item.item_id)
             fresh = claimed
         elif fresh.state in (BatchItemState.EXTRACTING,
                              BatchItemState.EMBEDDED):
@@ -2749,6 +2864,9 @@ class BatchCoordinator:
             # tell them apart and the loser would run the runner too.
             if not won or claimed.state is not BatchItemState.EXTRACTING:
                 return claimed
+            # The claim landed: this pass MADE PROGRESS, so the run of
+            # consecutive failed passes ends here (#14415 round 22, MEDIUM).
+            _clear_failed_pass(org_id, item.batch_id, item.item_id)
             fresh = claimed
         try:
             outcome = active(fresh)
@@ -2901,6 +3019,40 @@ class BatchCoordinator:
         stored = self._store.get_item(org_id, item.batch_id, item.item_id)
         return stored if stored is not None else item
 
+    def _settle_exhausted(self, org_id: str, item: BatchItem) -> BatchItem | None:
+        """Settle an item whose passes could not claim it. Best effort, once.
+
+        Returns the ROW when the item is (or already was) terminal, and None when
+        settling was not possible or not ALLOWED:
+
+        * a read fault ⇒ None (the caller refuses; the row is left as it is);
+        * a LIVE peer claim ⇒ None. The ceiling may never settle a claim nobody
+          has proved abandoned (round 22's liveness rule) — an unlandable outcome
+          bills the spend and drops the document, which is worse than a row that
+          keeps its claimant.
+        """
+        try:
+            row = self._store.get_item(org_id, item.batch_id, item.item_id)
+        except Exception:
+            return None
+        if row is None:
+            return None
+        if row.terminal:
+            _clear_failed_pass(org_id, row.batch_id, row.item_id)
+            return row
+        if (row.state in (BatchItemState.EXTRACTING, BatchItemState.EMBEDDED)
+                and _age_seconds(row.updated_at) < float(BATCH_RECLAIM_AFTER_S)):
+            return None
+        try:
+            return self.advance(
+                org_id, row, BatchItemState.FAILED,
+                reason=(f"could not be claimed in {BATCH_MAX_ATTEMPTS} "
+                        "consecutive passes (the row could not be read or "
+                        "advanced) — retry ceiling reached"),
+                expected=row.state)
+        except Exception:
+            return None
+
     def _note_failed_pass(self, org_id: str, item: BatchItem,
                           exc: BaseException) -> None:
         """Count a pass that failed BEFORE it could claim the row. Best effort.
@@ -2927,12 +3079,27 @@ class BatchCoordinator:
         The ceiling's write is a compare-and-set against `attempts`, so a peer
         that claimed the row between our read and the write keeps its work: only
         an exhausted row that nobody else advanced is settled `failed`.
+
+        ⛔ AND THE PASS IS COUNTED BEFORE THE READ, SO AN UNREADABLE ROW IS
+        STILL BOUNDED (#14415 review round 22, MEDIUM — measured). The count in
+        `_FAILED_PASSES` does not need the store, so "a graph timeout on the
+        read" — this function's own docstring's first example — reaches the
+        ceiling instead of returning uncounted. `run_item` consults it, and
+        `_drain_batch` stops re-driving an exhausted item.
         """
+        passes = _bump_failed_pass(org_id, item.batch_id, item.item_id)
         try:
             row = self._store.get_item(org_id, item.batch_id, item.item_id)
         except Exception:
+            if passes >= BATCH_MAX_ATTEMPTS:
+                _logger.error(
+                    "batch %s: item %s reached the retry ceiling (%d) on passes "
+                    "that could not read the row — no further passes will be "
+                    "attempted in this process (%s: %s)",
+                    item.batch_id, item.item_id, passes, type(exc).__name__, exc)
             return
         if row is None or row.terminal:
+            _clear_failed_pass(org_id, item.batch_id, item.item_id)
             return
         if (row.state in (BatchItemState.EXTRACTING, BatchItemState.EMBEDDED)
                 and _age_seconds(row.updated_at) < float(BATCH_RECLAIM_AFTER_S)):
@@ -2957,6 +3124,9 @@ class BatchCoordinator:
         except Exception:
             return
         if not landed or bumped.attempts < BATCH_MAX_ATTEMPTS:
+            # Not the row's ceiling yet: the next pass may still succeed, so the
+            # process-local count waits for the same bound (it is what bounds the
+            # UNREADABLE case, where `bumped.attempts` could not be written).
             return
         try:
             self.advance(
@@ -2967,6 +3137,7 @@ class BatchCoordinator:
                 expected=row.state, expected_attempts=bumped.attempts)
         except Exception:
             return
+        _clear_failed_pass(org_id, item.batch_id, item.item_id)
 
     # -- cancel (owner requirement, brief item 6) ------------------------
     def cancel(self, org_id: str, batch_id: str, *, reason: str = ""

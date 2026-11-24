@@ -3660,16 +3660,89 @@ def test_the_acceptance_copy_names_no_window_when_the_record_has_no_duration():
 
 
 def test_a_caller_supplied_id_that_was_adopted_is_still_a_conflict():
-    """The takeover is scoped to MINTED ids — a caller's clash stays a refusal.
+    """A caller's clash stays a refusal — but NOT because the takeover is scoped.
 
     Two submissions carrying the same caller-supplied id are the #14498 race, and
     the loser must not adopt the winner's row on the strength of this fix.
+
+    ⛔ CORRECTED (#14415 review round 22, LOW — measured). This docstring used to
+    say "the takeover is scoped to MINTED ids", which the code does not do and
+    never did: the refusal here comes from `submit`'s PRE-EXISTING-ID CHECK, a
+    statement before `put_items`, so the takeover arm is never reached. The
+    takeover's actual scope — `created_at == this call's own stamp` — is pinned by
+    `test_a_takeover_is_refused_when_the_row_carries_another_writers_stamp`
+    below, which is the one that reddens when that compare is deleted (this test
+    did not, even with the compare removed: measured, 185 passed).
     """
     store = _AdoptingStore()
     coord = BatchCoordinator(store)
     coord.submit(ORG, ["/d/a.md"], batch_id="dup-1")
     with pytest.raises(ValueError, match="already exists"):
         coord.submit(ORG, ["/d/b.md"], batch_id="dup-1")
+
+
+class _RowInvisibleToThePreChecksStore(InMemoryBatchStore):
+    """`get_batch` MISSES for the two pre-write id checks, so the takeover arm runs.
+
+    `submit` refuses a pre-existing id before writing anything, so a store that
+    always answers truthfully never lets a second writer into the takeover arm.
+    Hiding the row for exactly two reads is the lost-create shape: the writer
+    cannot see the row, writes its items, loses `put_batch_if_absent`, and then
+    reads the winner's row back.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hide_reads = 0
+        self.hidden = 0
+
+    def get_batch(self, org_id, batch_id):
+        if self.hide_reads:
+            self.hide_reads -= 1
+            self.hidden += 1
+            return None
+        return super().get_batch(org_id, batch_id)
+
+
+def test_a_takeover_is_refused_when_the_row_carries_another_writers_stamp():
+    """#14415 round 22 (LOW): the takeover's safety scope had no pin at all.
+
+    "the takeover can never become a way for a losing writer to claim a winner's
+    row" is scoped on `created_at == stamp` — the identity the acceptance itself
+    wrote onto the item rows. Measured before this pin: deleting ONLY that compare
+    left the whole suite green (185 passed), so the invariant was carried by a
+    comment and nothing else.
+
+    The row here is the shape the RECOVERY SCAN leaves behind (`resuming`), which
+    is the state the takeover is allowed to write — the other two states it may
+    write (`running`) likewise prove nothing about a settled row, whose refusal
+    comes from `put_batch_if_state`, not from the stamp. Two writers with DIFFERENT
+    stamps: the second must be refused, so it cannot take a winner's row and move
+    its identity / ACK estimate (owner #14275 §4).
+    """
+    store = _RowInvisibleToThePreChecksStore()
+    store.put_batch(Batch(batch_id="shared-1", org_id=ORG,
+                          state=BatchState.RESUMING,
+                          created_at="2020-01-01T00:00:00+00:00",
+                          updated_at="2020-01-01T00:00:00+00:00"))
+
+    store.hide_reads = 2          # both pre-write id checks miss
+    with pytest.raises(ValueError, match="created concurrently"):
+        BatchCoordinator(
+            store, now=lambda: "2021-01-01T00:00:00+00:00"
+        ).submit(ORG, ["/d/b.md"], batch_id="shared-1",
+                 estimate={"items": 1, "estimated_tokens": 64_799})
+
+    assert store.hidden == 2, (
+        f"the writer did not reach the takeover arm ({store.hidden} hidden reads)")
+    after = store.get_batch(ORG, "shared-1")
+    assert after.created_at == "2020-01-01T00:00:00+00:00", (
+        "a losing writer's takeover moved the winner's identity: "
+        f"{after.created_at!r}")
+    assert after.state is BatchState.RESUMING, (
+        f"the loser claimed a row it does not own: {after.state}")
+    assert after.estimate == {}, (
+        f"the loser wrote its ACK arithmetic onto the winner's row: {after.estimate}")
 
 
 # ── round 21: the retry ceiling must bound a PRE-CLAIM fault too ─────────────
@@ -3719,6 +3792,90 @@ def test_a_pre_claim_read_fault_is_counted_and_reaches_the_retry_ceiling():
         "a condition that never clears must settle `failed` visibly, not stay "
         "`queued` for the life of the process")
     assert "retry ceiling" in settled.reason
+
+
+def test_a_persistent_read_fault_reaches_the_ceiling_without_a_successful_read():
+    """#14415 round 22 (MEDIUM): the count lived on the row it could not read.
+
+    The pin above resets the fault to ONE raise per pass, so it only ever proved
+    the one-shot case. Measured at `f665baa4edc6` with a store whose `get_item`
+    raises on EVERY call: ten passes left `attempts: 0, state: queued` — identical
+    to the pre-fix reading — while `_drain_batch` re-drove the batch every retry
+    tick under the comment "`BATCH_MAX_ATTEMPTS` is what bounds the loop".
+
+    The count therefore cannot depend on the read: `_FAILED_PASSES` is bumped
+    before it, `run_item` refuses an exhausted item without touching the store,
+    and the drain stops re-driving on what it counted.
+    """
+    bi_module._reset_failed_passes()
+    store = _FlakyReadStore(faults=10 ** 6)      # EVERY get_item raises
+    coord = BatchCoordinator(store)
+    _, items = coord.submit(ORG, ["/d/a.md"])
+    item = items[0]
+
+    for _ in range(bi_module.BATCH_MAX_ATTEMPTS):
+        with pytest.raises(RuntimeError):
+            coord.run_item(ORG, item, lambda *a, **k: None)
+
+    assert bi_module.passes_exhausted(ORG, item.batch_id, item.item_id), (
+        "a pass that could not read the row was never counted, so the ceiling "
+        "is unreachable for the fault class it names")
+    assert bi_module.batch_passes_exhausted(ORG, item.batch_id), (
+        "the drain has no way to see that every item it knows in this batch is "
+        "exhausted, so it re-drives blind for the process lifetime")
+
+    reads_before = store.raises
+    with pytest.raises(bi_module.RetryCeilingReached):
+        coord.run_item(ORG, item, lambda *a, **k: None)
+    # ONE read is allowed here: the ceiling makes exactly one best-effort attempt
+    # to settle the item VISIBLY (see the recovery pin below). What must not
+    # happen is an attempt per pass.
+    extra = store.raises - reads_before
+    assert extra <= 1, (
+        f"an exhausted item was re-read and attempted on every pass ({extra} "
+        "reads for one refusal) — the bound is not process-local")
+    with pytest.raises(bi_module.RetryCeilingReached):
+        coord.run_item(ORG, item, lambda *a, **k: None)
+    assert store.raises == reads_before + extra, (
+        "the one-shot settle became a per-pass read: an unreadable store still "
+        "spins")
+
+    store.faults = 0                              # read the row afterwards
+    row = store.get_item(ORG, item.batch_id, item.item_id)
+    assert row.state is BatchItemState.QUEUED and row.attempts == 0, (
+        "the honest residual is an UNWRITTEN row: with every write path also "
+        f"faulting nothing can settle it ({row.state}, attempts {row.attempts})")
+
+
+def test_a_store_that_recovers_after_the_ceiling_settles_the_item_visibly():
+    """#14415 round 23: refusing without settling would strand a RECOVERED row.
+
+    The ceiling's contract is that the item settles `failed`, with a reason naming
+    the attempt count — visible, terminal, actionable. An exhausted item that is
+    refused before touching the store keeps that contract only if the refusal
+    FIRST tries the settle: the fault that filled the ceiling may be transient, and
+    a `queued` row nothing will ever re-drive is precisely the inert row this layer
+    exists to prevent. Exactly ONE attempt, so the settle cannot become a new
+    unbounded loop of its own.
+    """
+    bi_module._reset_failed_passes()
+    # Each failed pass reads TWICE (the fresh read, then `_note_failed_pass`'s own),
+    # so a fault that covers the ceiling is 2 × BATCH_MAX_ATTEMPTS raises; the very
+    # next read — the ceiling's one-shot settle — succeeds, which is the scenario.
+    store = _FlakyReadStore(faults=2 * bi_module.BATCH_MAX_ATTEMPTS)
+    coord = BatchCoordinator(store)
+    _, items = coord.submit(ORG, ["/d/a.md"])
+    item = items[0]
+
+    for _ in range(bi_module.BATCH_MAX_ATTEMPTS):
+        with pytest.raises(RuntimeError):
+            coord.run_item(ORG, item, lambda *a, **k: None)
+
+    settled = coord.run_item(ORG, item, lambda *a, **k: None)
+    assert settled.state is BatchItemState.FAILED, (
+        f"a store that recovered at the ceiling left the row {settled.state}")
+    assert "retry ceiling" in settled.reason, (
+        f"the settled row does not say why: {settled.reason!r}")
 
 
 # ── round 22: the adoption's liveness rule, the takeover's compare, and the ──
