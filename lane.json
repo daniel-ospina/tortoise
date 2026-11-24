@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-14491-1795530005-p135321-d61936d6",
+  "_sha": "1dd323e6d5d1cdf75c4c7d3b31d9ab77439c3dcf",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-14491.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/14532-weld-apostrophe"
+    },
+    {
+      "kind": "sha",
+      "value": "1287076714112c83ca24b3a3320df15c2b08e204"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/fix-14491"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 4271,
+  "ended_at": 1795534276,
+  "exit_code": 0,
+  "heartbeat_at": 1795534276,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-14491-1795530005-p135321-d61936d6",
+  "lease_until": 1795570876,
+  "pid": 135321,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795530005,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-14491",
+  "worktree": "/home/cmux/tortoise/.worktrees/fix-14491"
+}
