@@ -96,6 +96,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -118,6 +119,31 @@ SOURCES = (
         "only with a recorded ruling on that issue — never as a synonym for `unmanaged`",
     ),
 )
+
+#: The issue title is the DEDUPE KEY (`auto-file-issue.sh` searches open issues by
+#: exact title, authored by the Actions app) and, simultaneously, the discriminator
+#: the clean-run sweep uses to decide which open issues this workflow OWNS. Both
+#: roles are why it lives HERE, in one place, and not in the workflow's shell:
+#: a title grammar spelled in two languages drifts, and the drift files duplicates
+#: on one side while closing nothing on the other. ⛔ It embeds the VARIABLE and
+#: nothing that varies per occurrence — no run id, no timestamp, no count (the
+#: #2706 duplicate-spam defect).
+TITLE_PREFIX = "Fly secret "
+TITLE_SUFFIX = (
+    " is undeclared — the deploy gate refuses every run until it is declared (#4126)"
+)
+#: A permissive name class (`\S+`, the whole title is whitespace-delimited) because
+#: `read_fly_secret_names` accepts ANY non-empty name: a name this grammar could not
+#: round-trip would be reported by `file` and then never resolved by the sweep, i.e.
+#: an issue that outlives its own fix.
+_TITLE_RE = re.compile(
+    r"^" + re.escape(TITLE_PREFIX) + r"(\S+)" + re.escape(TITLE_SUFFIX) + r"$"
+)
+
+
+def issue_title(name: str) -> str:
+    """The stable title (= dedupe key) for an undeclared NAME."""
+    return f"{TITLE_PREFIX}{name}{TITLE_SUFFIX}"
 
 
 def _gate() -> ModuleType:
@@ -190,7 +216,15 @@ def report(
             for label, member in (("live", live), ("staged", staged))
             if name in member
         ]
-        remainder.append({"name": name, "classes": classes})
+        remainder.append(
+            {
+                "name": name,
+                "classes": classes,
+                # The FIX, carried as data so the issue body (and any future
+                # renderer) cannot drift from the shapes `read_manifest` accepts.
+                "fix": declaration_help(name),
+            }
+        )
     return {
         "verdict": "DRIFT" if remainder else "CLEAN",
         "app": app,
@@ -262,9 +296,59 @@ def main(argv: list[str] | None = None) -> int:
         help="deploy workflow path (default: $DEPLOY_WORKFLOW or deploy-hosted.yml)",
     )
     parser.add_argument(
+        "--explain",
+        metavar="NAME",
+        default=None,
+        help=(
+            "print the copy-paste declaration line(s) for NAME and exit (no reading is "
+            "taken, so no Fly credential is needed) — the workflow renders the issue "
+            "body's fix section through this, so the text has one owner"
+        ),
+    )
+    parser.add_argument(
         "--toml", default=None, help="fly.toml path (default: $FLY_TOML or ./fly.toml)"
     )
+
+    parser.add_argument(
+        "--title",
+        metavar="NAME",
+        default=None,
+        help="print the stable issue title for NAME and exit (the dedupe key)",
+    )
+    parser.add_argument(
+        "--filter-owned-titles",
+        action="store_true",
+        help=(
+            "read issue TITLES on stdin and print the SECRET NAME of each one this "
+            "workflow owns (the exact grammar `--title` produces), so a clean-run "
+            "sweep can only ever resolve its own issues"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.title:
+        print(issue_title(args.title))
+        return 0
+
+    if args.filter_owned_titles:
+        # A title is ours IFF it is exactly what `--title` would produce. Anything
+        # else — a sibling monitor's finding, a stranger's look-alike on this PUBLIC
+        # repo, a look-alike that merely CONTAINS our wording — is ignored.
+        owned = 0
+        for line in sys.stdin:
+            match = _TITLE_RE.match(line.strip())
+            if match:
+                owned += 1
+                print(match.group(1))
+        print(f"{owned} open issue(s) belong to fly-secret-declaration-drift", file=sys.stderr)
+        return 0
+
+    if args.explain:
+        # No reading: this is the FIX text, not a measurement. Kept in the same module
+        # because the four shapes it names are `read_manifest`'s, and a second copy of
+        # that grammar is exactly what this tool refuses to create.
+        print(declaration_help(args.explain))
+        return 0
 
     manifest_path = Path(
         args.manifest or os.environ.get("FLY_MANAGED_SECRETS_FILE") or DEFAULT_MANIFEST

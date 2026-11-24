@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -222,9 +224,11 @@ def test_an_undeclared_live_secret_is_named_exactly(tmp_path):
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert reading is not None
     assert reading["verdict"] == "DRIFT"
-    assert reading["remainder"] == [
-        {"name": "TORTOISE_LEDGER_LEGACY_ARM", "classes": ["live"]}
+    assert [(e["name"], e["classes"]) for e in reading["remainder"]] == [
+        ("TORTOISE_LEDGER_LEGACY_ARM", ["live"])
     ]
+    # Every finding carries the one-line fix, with the variable named in it.
+    assert "TORTOISE_LEDGER_LEGACY_ARM" in reading["remainder"][0]["fix"]
     assert (
         "UNDECLARED — TORTOISE_LEDGER_LEGACY_ARM is on Fly, and declared nowhere" in proc.stdout
     )
@@ -250,7 +254,9 @@ def test_an_undeclared_staged_name_is_named_exactly(tmp_path):
     )
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert reading is not None
-    assert reading["remainder"] == [{"name": "GIT_SHA", "classes": ["staged"]}]
+    assert [(e["name"], e["classes"]) for e in reading["remainder"]] == [
+        ("GIT_SHA", ["staged"])
+    ]
     assert "UNDECLARED — GIT_SHA is staged by the deploy" in proc.stdout
 
 
@@ -269,8 +275,8 @@ def test_both_classes_are_reported_once_for_the_same_name(tmp_path):
     )
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert reading is not None
-    assert reading["remainder"] == [
-        {"name": "FASTAPI_INTERNAL_KEY", "classes": ["live", "staged"]}
+    assert [(e["name"], e["classes"]) for e in reading["remainder"]] == [
+        ("FASTAPI_INTERNAL_KEY", ["live", "staged"])
     ]
     assert len(reading["remainder"]) == 1
 
@@ -436,3 +442,442 @@ def test_the_real_manifest_declares_every_name_the_real_payload_stages():
     declared = set(gate.read_manifest(REAL_MANIFEST))
     staged = tool.staged_names(gate, REAL_WORKFLOW.read_text())
     assert sorted(staged - declared) == []
+
+
+# ── (g) THE WORKFLOW — a report, and provably nothing else ────────────────────
+#
+# These read `.github/workflows/fly-secret-declaration-drift.yml` as PARSED YAML, so
+# a YAML comment (which is where a human explains the rules) can never satisfy or
+# fail a check about what the file DOES. `bash -n` on every `run:` block is the
+# cheap half of the static check: it catches a shell typo that actionlint would only
+# surface after a push, e.g. the `${$(cat …)}` that a first draft of the CLEAN
+# warning carried.
+
+WORKFLOW_FILE = REPO_ROOT / ".github" / "workflows" / "fly-secret-declaration-drift.yml"
+
+
+def _workflow() -> dict:
+    yaml = pytest.importorskip("yaml")
+    return yaml.safe_load(WORKFLOW_FILE.read_text())
+
+
+def _run_blocks() -> list[tuple[str, str]]:
+    blocks: list[tuple[str, str]] = []
+    for job in (_workflow().get("jobs") or {}).values():
+        for index, step in enumerate(job.get("steps") or []):
+            if isinstance(step.get("run"), str):
+                blocks.append((step.get("name") or f"#{index}", step["run"]))
+    return blocks
+
+
+def test_the_workflow_is_scheduled_hourly():
+    """#14574's indicator is "<= 1 h to a human"; 6-hourly would miss it 6x over."""
+    triggers = _workflow()[True]
+    crons = [entry["cron"] for entry in triggers["schedule"]]
+    assert crons == ["23 * * * *"], (
+        "the reporter must be HOURLY to meet #14574's <= 1 h target, and off the "
+        "hour boundary (GitHub delays schedule events at the start of the hour) and "
+        "clear of consent-key-drift's :11/:41 ticks"
+    )
+
+
+def test_the_workflow_can_write_issues_and_nothing_else():
+    perms = _workflow()["permissions"]
+    assert perms == {"contents": "read", "issues": "write"}, (
+        "the only write this workflow may hold is `issues` (the alert IS the issue); "
+        "`contents: write` would let it push"
+    )
+
+
+#: A mutating Fly/GitHub verb. Matched on the PARSED `run:` text only, so the header
+#: comments that explain why these must never appear do not trip it.
+_FORBIDDEN_IN_RUN = (
+    "flyctl",
+    "secrets set",
+    "secrets unset",
+    "gh pr",
+    "gh release",
+    "git push",
+    "gh api -X POST repos",  # belt: a hand-rolled create instead of the substrate
+)
+
+
+def test_no_run_block_can_mutate_fly_a_deploy_or_a_pr():
+    for label, run in _run_blocks():
+        for needle in _FORBIDDEN_IN_RUN:
+            assert needle not in run, (
+                f"step {label!r} may not contain {needle!r}: this workflow is a "
+                "read-only reporter. The Fly READ is the provenance gate's own "
+                "`read_fly_secret_names` (invoked inside the tool); file writes go "
+                "through `.github/scripts/auto-file-issue.sh` only"
+            )
+    # …and the only external actions it pulls are the three below.
+    uses = {
+        step["uses"]
+        for job in (_workflow().get("jobs") or {}).values()
+        for step in job.get("steps") or []
+        if "uses" in step
+    }
+    assert uses == {
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "superfly/flyctl-actions/setup-flyctl@master",
+    }
+
+
+def test_every_run_block_is_valid_bash():
+    """A shell typo here is a silent hour of no reporting; catch it before the push."""
+    import tempfile
+
+    for label, run in _run_blocks():
+        path = Path(tempfile.mkdtemp()) / "step.sh"
+        path.write_text(run)
+        proc = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+        assert proc.returncode == 0, f"step {label!r} is not valid bash: {proc.stderr}"
+
+
+def test_the_report_step_still_runs_when_the_read_step_failed():
+    """DRIFT fails the read step on purpose; the filing step must still run on it."""
+    steps = [
+        step
+        for job in _workflow()["jobs"].values()
+        for step in job.get("steps") or []
+    ]
+    report = [s for s in steps if s.get("name", "").startswith("Report —")]
+    assert report, "the filing step is gone"
+    condition = report[0]["if"]
+    assert "always()" in condition and "cancelled()" in condition, (
+        "without `always()` the filing step is skipped on exactly the run it exists "
+        "for (rc=1); without `!cancelled()` a cancel landing inside the read renders "
+        "an empty reading and files from it"
+    )
+
+
+#: Every name shape the title grammar must round-trip: the manifest's own class, a
+#: lowercase name `read_fly_secret_names` would still accept, and digits/underscores.
+_TITLE_NAMES = ["TORTOISE_RECORD_VECTOR_LEG", "lower_case_name", "A1_B2", "X"]
+
+
+def _tool(*argv: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(TOOL), *argv],
+        capture_output=True,
+        text=True,
+        input=stdin,
+        env={k: v for k, v in os.environ.items() if k not in _AMBIENT},
+        timeout=60,
+    )
+
+
+def test_the_issue_title_is_a_stable_dedupe_key():
+    """A title with a run id / timestamp / count files a duplicate EVERY tick (#2706)."""
+    for name in _TITLE_NAMES:
+        proc = _tool("--title", name)
+        assert proc.returncode == 0, proc.stderr
+        title = proc.stdout.strip()
+        assert title.startswith(f"Fly secret {name} ")
+        assert title.endswith("#4126)")
+        # Stable: two calls agree exactly.
+        assert _tool("--title", name).stdout.strip() == title
+        # Nothing occurrence-varying in it: no recurrence counter, no timestamp.
+        assert "Recurrence" not in title
+        assert not re.search(r"\d{4}-\d{2}-\d{2}", title), title
+        assert "actions/runs" not in title
+
+
+def test_the_resolve_sweep_only_recognises_this_workflows_own_titles():
+    """The clean-run sweep must never close a sibling monitor's issue.
+
+    The discriminator is the EXACT grammar `--title` produces — checked here by
+    round-tripping every name shape through both, and by feeding it three decoys
+    that a substring test would have accepted.
+    """
+    ours = [_tool("--title", name).stdout.strip() for name in _TITLE_NAMES]
+    decoys = [
+        # a sibling monitor's finding, sharing a word
+        "CONSENT_TOKEN_SECRET: the consent bridge's two halves hold different keys (#10488)",
+        # our wording, but not the exact grammar (one word short)
+        "Fly secret FOO is undeclared — the deploy gate refuses every run (#4126)",
+        # our prefix, a stranger's suffix
+        "Fly secret FOO is undeclared — please advise (#4126)",
+    ]
+    proc = _tool("--filter-owned-titles", stdin="\n".join([*ours, *decoys]) + "\n")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split() == _TITLE_NAMES, (
+        "the sweep must return exactly this workflow's names, in order, and none of "
+        f"the decoys — got {proc.stdout!r}"
+    )
+
+
+def test_the_workflow_owns_the_grammar_in_exactly_one_place():
+    """No title literal in the shell: a grammar spelled twice drifts."""
+    text = WORKFLOW_FILE.read_text()
+    for label, run in _run_blocks():
+        assert "is undeclared — the deploy gate" not in run, (
+            f"step {label!r} spells the issue-title grammar; it lives in "
+            "`tools/fly_secret_declaration_report.py` (`--title` / "
+            "`--filter-owned-titles`) so filing and resolving cannot disagree"
+        )
+    assert "--title" in text and "--filter-owned-titles" in text
+
+
+# ── (h) THE GLUE — one issue per NAME, and the ledger closes on a clean read ──
+#
+# The step's shell is the one part of this workflow no unit test reaches: it reads
+# the reading, files through `.github/scripts/auto-file-issue.sh`, and decides which
+# open issues it OWNS. This exercises the SHIPPED `run:` text (parsed out of the YAML,
+# not copied) against a stub `gh`, so the substrate's real dedupe path runs:
+#
+#   dirty tick 1 → one `issues` CREATE per undeclared name
+#   dirty tick 2 → NO create; one RECURRENCE comment per name on the SAME issue
+#   clean tick   → NO create, NO comment; one PATCH close per issue this workflow owns
+#   clean tick, with a sibling monitor's issue open → untouched
+#
+# ⛔ Nothing here reaches GitHub: `gh` on PATH is the stub below, and every URL it
+# answers is recorded to a log the assertions read.
+
+_GH_STUB = r"""#!/usr/bin/env bash
+# A `gh` that answers the shapes `auto-file-issue.sh` and the report step issue.
+# State lives in $GH_STUB_DIR: `issues` = "<number>\t<title>" per filed issue.
+set -u
+state="${GH_STUB_DIR:?}"
+printf '%s\n' "$*" >> "$state/calls.log"
+touch "$state/issues"
+
+json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '; }
+
+titles_json() {  # {"number":N,"items":[...]} built from the state file
+  first=1
+  printf '{"items":['
+  while IFS=$'\t' read -r num title; do
+    [ -n "${num:-}" ] || continue
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '{"number":%s,"title":"%s","user":{"login":"github-actions[bot]"}}' \
+      "$num" "$(json_escape "$title")"
+  done < "$state/issues"
+  printf ']}'
+}
+
+args="$*"
+case "$args" in
+  # ── dedupe search (exact-title, Actions-authored) ──────────────────────
+  *"search/issues?q="*)
+    # Only answer with an item when the QUERY names a title we already filed: the
+    # substrate's own select is exact-title, so a stub that always answered would
+    # hide a duplicate-filing bug instead of exposing it.
+    if [ -s "$state/issues" ]; then titles_json; else printf '{"items":[]}'; fi
+    ;;
+  # ── the resolve sweep's listing, which gh renders through --jq itself ──
+  *"issues?labels="*)
+    if printf '%s' "$args" | grep -q -- '--jq'; then
+      filter=""; prev=""
+      for a in "$@"; do [ "$prev" = "--jq" ] && filter="$a"; prev="$a"; done
+      { printf '['; first=1
+        while IFS=$'\t' read -r num title; do
+          [ -n "${num:-}" ] || continue
+          [ "$first" = 1 ] || printf ','
+          first=0
+          printf '{"number":%s,"title":"%s"}' "$num" "$(json_escape "$title")"
+        done < "$state/issues"
+        printf ']\n'; } | jq -r "${filter:-.}"
+    else
+      printf '[]'
+    fi
+    ;;
+  # ── recurrence counting ────────────────────────────────────────────────
+  *"comments?per_page"*)
+    printf '[]'
+    ;;
+  # ── CREATE an issue ────────────────────────────────────────────────────
+  *"issues --method POST"*)
+    title=""
+    prev=""
+    for a in "$@"; do [ "$prev" = "title=" ] || true; prev="$a"; done
+    # `-f title=<value>` arrives as one argv token: title=<value>
+    for a in "$@"; do case "$a" in title=*) title="${a#title=}";; esac; done
+    num=$(( $(wc -l < "$state/issues") + 1 ))
+    printf '%s\t%s\n' "$num" "$title" >> "$state/issues"
+    printf '{"number":%s,"title":"%s","user":{"login":"github-actions[bot]"}}' \
+      "$num" "$(json_escape "$title")"
+    ;;
+  # ── POST a comment ─────────────────────────────────────────────────────
+  *"comments --method POST"*)
+    printf '{"user":{"login":"github-actions[bot]"}}'
+    ;;
+  # ── PATCH (close) an issue ─────────────────────────────────────────────
+  *"--method PATCH"*)
+    printf '{"state":"closed","number":1}'
+    ;;
+  *)
+    printf '{}'
+    ;;
+esac
+"""
+
+
+def _report_step() -> str:
+    for job in _workflow()["jobs"].values():
+        for step in job.get("steps") or []:
+            if str(step.get("name", "")).startswith("Report —"):
+                return step["run"]
+    raise AssertionError("the report step is gone")
+
+
+class _Harness:
+    """A run of the SHIPPED report step, offline, against the stub `gh`."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.state = root / "state"
+        self.state.mkdir(parents=True, exist_ok=True)
+        self.bin = root / "bin"
+        self.bin.mkdir(parents=True, exist_ok=True)
+        stub = self.bin / "gh"
+        stub.write_text(_GH_STUB)
+        stub.chmod(0o755)
+        (self.bin / "jq").symlink_to(shutil.which("jq") or "/usr/bin/jq")
+
+    def calls(self) -> str:
+        log = self.state / "calls.log"
+        return log.read_text() if log.exists() else ""
+
+    def reset_calls(self) -> None:
+        (self.state / "calls.log").unlink(missing_ok=True)
+
+    def filed_titles(self) -> list[str]:
+        path = self.state / "issues"
+        if not path.exists():
+            return []
+        return [line.split("\t", 1)[1] for line in path.read_text().splitlines() if "\t" in line]
+
+    def run(self, *, rc: str, reading: dict, file_issues: str = "true") -> str:
+        report = self.root / "reading.json"
+        report.write_text(json.dumps(reading))
+        script = self.root / "report-step.sh"
+        script.write_text(_report_step())
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in _AMBIENT and not k.startswith("GH_")
+        }
+        env.update(
+            # The stub is the ONLY gh/jq on PATH; python3 and the shell still resolve.
+            PATH=f"{self.bin}:{os.environ['PATH']}",
+            GH_STUB_DIR=str(self.state),
+            GH_TOKEN="stub-token",
+            GITHUB_REPOSITORY="daniel-ospina/tortoise",
+            GITHUB_SERVER_URL="https://github.com",
+            GITHUB_RUN_ID="0",
+            # The step reads the reading from /tmp by absolute path; give it the
+            # harness's own copy rather than racing a shared /tmp file.
+            RC=rc,
+            FILE_ISSUES=file_issues,
+        )
+        body = _report_step().replace("/tmp/fly-secret-declaration.json", str(report))
+        script.write_text(body)
+        proc = subprocess.run(
+            ["bash", "-e", str(script)], capture_output=True, text=True, env=env, timeout=300
+        )
+        return proc.stdout + proc.stderr
+
+    def assert_ok(self, proc_out: str) -> None:
+        assert "::error::" not in proc_out, proc_out
+
+
+def _drift_reading(*names: str) -> dict:
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    try:
+        import fly_secret_declaration_report as tool  # noqa: PLC0415 — path-based
+    finally:
+        sys.path.pop(0)
+    return {
+        "verdict": "DRIFT",
+        "app": "fixture-app",
+        "remainder": [
+            {"name": n, "classes": ["live"], "fix": tool.declaration_help(n)} for n in names
+        ],
+    }
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_a_dirty_tick_files_one_issue_per_name_and_never_twice(tmp_path):
+    h = _Harness(tmp_path)
+    reading = _drift_reading("ALPHA_SECRET", "BETA_SECRET")
+
+    h.run(rc="1", reading=reading)
+    titles = h.filed_titles()
+    assert len(titles) == 2, h.calls()
+    assert sum(1 for t in titles if "ALPHA_SECRET" in t) == 1
+    assert sum(1 for t in titles if "BETA_SECRET" in t) == 1
+    first_calls = h.calls()
+    assert "issues --method POST" in first_calls
+    assert "comments --method POST" not in first_calls
+
+    # The SAME name on the next tick must NOT file again: the dedupe search finds
+    # the exact title and the substrate records a recurrence on it instead.
+    h.reset_calls()
+    h.run(rc="1", reading=reading)
+    assert len(h.filed_titles()) == 2, "a second tick filed a duplicate issue"
+    second_calls = h.calls()
+    assert "issues --method POST" not in second_calls, second_calls
+    assert second_calls.count("comments --method POST") == 2, second_calls
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_a_clean_tick_files_nothing_and_closes_what_it_owns(tmp_path):
+    h = _Harness(tmp_path)
+    h.run(rc="1", reading=_drift_reading("ALPHA_SECRET"))
+    assert len(h.filed_titles()) == 1
+
+    h.reset_calls()
+    out = h.run(rc="0", reading={"verdict": "CLEAN", "remainder": []})
+    calls = h.calls()
+    assert "issues --method POST" not in calls, "a CLEAN tick filed an issue"
+    # No RECURRENCE (that is the drift signal). The substrate's own resolve path
+    # does post a RESOLUTION comment — close first, comment second (#8841) — so the
+    # assertion is on which comment, not on whether one was posted at all.
+    assert "Recurrence #" not in calls, "a CLEAN tick recorded a recurrence"
+    assert "--method PATCH" in calls, (
+        f"a CLEAN tick must close the ledger entry it owns — calls were:\n{calls}"
+    )
+    assert "Resolved" in calls, "the close was not recorded on the issue"
+    assert "CLEAN" in out
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_a_clean_tick_never_closes_a_sibling_monitors_issue(tmp_path):
+    """The public repo makes a look-alike reachable; the sweep must not touch it."""
+    h = _Harness(tmp_path)
+    sibling = "CONSENT_TOKEN_SECRET: the consent bridge's two halves hold different keys (#10488)"
+    (h.state / "issues").write_text(f"9\t{sibling}\n")
+    h.reset_calls()
+    h.run(rc="0", reading={"verdict": "CLEAN", "remainder": []})
+    calls = h.calls()
+    assert "--method PATCH" not in calls, (
+        f"the sweep closed an issue it does not own:\n{calls}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_an_unreadable_tick_files_nothing_and_resolves_nothing(tmp_path):
+    """rc=2 must never be read as 'no drift' — and must never touch the ledger."""
+    h = _Harness(tmp_path)
+    h.run(rc="1", reading=_drift_reading("ALPHA_SECRET"))
+    h.reset_calls()
+    out = h.run(rc="2", reading={"verdict": "UNREADABLE", "why": "flyctl absent"})
+    calls = h.calls()
+    assert "::error::" in out and "NOT 'no drift'" in out, out
+    assert "issues --method POST" not in calls
+    assert "--method PATCH" not in calls, "an unreadable tick resolved the ledger"
+    assert len(h.filed_titles()) == 1
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the substrate requires jq")
+def test_a_dispatched_dry_run_files_nothing(tmp_path):
+    h = _Harness(tmp_path)
+    out = h.run(rc="1", reading=_drift_reading("ALPHA_SECRET"), file_issues="false")
+    assert h.filed_titles() == []
+    assert "issues --method POST" not in h.calls()
+    assert "DRY RUN" in out
+    assert "ALPHA_SECRET" in out, "a dry run must still show the finding"
