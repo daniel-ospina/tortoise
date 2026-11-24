@@ -187,7 +187,7 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
     return tuple(kinds)
 
 #: Delivery windows (#14407). One message per ``(kind, subject)`` per window —
-#: ⛔ WITH ONE SHAPE AS THE EXCEPTION, and only for the two RULE-EPISODE kinds:
+#: ⛔ WITH TWO SHAPES AS THE EXCEPTION, and only for the two RULE-EPISODE kinds:
 #: in the NO-INCIDENT-CHANNEL fallback a confirmed episode end re-arms the ledger
 #: unconditionally, so THERE the bound for a rule that flaps is one message per
 #: episode (one per crossing for an alternating rule, which is the pre-fix rate),

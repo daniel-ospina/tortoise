@@ -1901,8 +1901,10 @@ class AbuseEngine:
           the store did not answer `SKIPPED_WINDOW`), because a NEW episode must
           page at once — the episode end is the RELEASE SITE. Which BOUND that window is
           depends on the shape: on the NO-INCIDENT-CHANNEL path it is the
-          ceiling only for a CONTINUOUSLY breaching subject, because there a
-          flapping rule pages once per episode end (no `SKIPPED_WINDOW` gate
+          ceiling for a CONTINUOUSLY breaching subject — and for a new episode
+          FOLDED into a window whose predecessor's end the engine could not
+          observe — because there a flapping rule pages once per episode end (no
+          `SKIPPED_WINDOW` gate
           holds that release); WITH a store the gate normally holds an
           alternating rule inside the window, so the 24h ceiling applies there
           too — the module docstring in `notify` carries the scopes. And only
