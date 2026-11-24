@@ -16777,6 +16777,16 @@ def test_halves_ratio_decides_at_the_published_precision():
                            "test_crypto.py": 250.4}
     assert not any("imbalanced" in i
                    for i in workflow_halves_issues(inside, halves))
+    # ⛔ THE PUBLISHED PRECISION IS 2 dp, NOT "AT LEAST 2 dp": 1250.9 / 1000 =
+    # 1.2509 renders as `1.25` but is > 1.25 at THREE dp, so an arm that only
+    # sampled 1250.4 would let `round(hi / lo, 3)` survive — and that mutant
+    # fires here printing `ratio 1.25x, tolerance 1.25x`, the exact
+    # self-contradiction this arm exists to forbid. Third sample closes it.
+    finer = _halves_manifest()
+    finer["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
+                          "test_crypto.py": 250.9}
+    assert not any("imbalanced" in i
+                   for i in workflow_halves_issues(finer, halves))
     # 1256.0 / 1000 = 1.256 -> prints 1.26 -> still refused.
     beyond = _halves_manifest()
     beyond["durations"] = {"test_api.py": 1000.0, "test_auth.py": 1000.0,
