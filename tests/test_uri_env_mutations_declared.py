@@ -1803,10 +1803,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #   :395  the loopback twin is the NON-VACUITY half: the same call must get far
     #         enough to trip the next guard, so "refusing a production target" is
     #         not satisfied by a gate that refuses everything.
-    #   :568, :590, :614, :649, :676  the run/refusal rehearsals drive a LOCAL
-    #         `docker://:pw@127.0.0.1:6379/tortoise_test` graph with `_stub_one_mode`,
-    #         i.e. the drain sequence is exercised against a throwaway graph this
-    #         box serves, never the shared lane.
+    #   :568, :590, :614, :649, :676  the run/refusal rehearsals SET a LOCAL
+    #         `docker://:pw@127.0.0.1:6379/tortoise_test` URI, and `_stub_one_mode`
+    #         replaces the mode's work with a stub — no graph is driven and no
+    #         server is contacted. (SUPERSEDED: this clause used to say the drain
+    #         "is exercised against a throwaway graph this box serves", which is
+    #         false on this tree and on `main` — `_stub_one_mode` monkeypatches
+    #         `_one_mode` outright. The `#14429` block below is the canonical
+    #         statement of this site group; the two must not disagree.)
     # every site uses `monkeypatch.setenv`, so the parent env is reverted at teardown.
     #
     # ── #14429 (`test_spool_drain_rehearsal.py`) — the spool-drain rehearsal, and why
