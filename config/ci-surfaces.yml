@@ -61,18 +61,16 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
 # tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
-# `main` at `533e256f2c89`, and the pool it emits is the union of BOTH parents' registrations —
+# `main` at `af40c97ca312`, and the pool it emits is the union of BOTH parents' registrations —
 # ⛔ `main`'s rows alone: `tests/test_4625_schema_reads_off_write_path.py` and
 # `tests/test_14033_state_cue_gap.py` are BOTH `main`'s flat 2.0 s `DEFAULT_FAST_WEIGHT` rows, and
 # this PR ADDS NO FAST-FILE REGISTRATION — its own pool is byte-identical to `main`'s at this head
 # (measured: the only `durations` lines this PR touches are comment rewrites of two existing rows,
 # `test_7949_capstone_measure.py` and `test_e2e_wrangler_prewarm.py`, whose values are unchanged), so
-# the split below is `main`'s reading too. On that merged tree the verb packs
-# one shard at 838.1 s (g) and ten at
-# 838.2 s (a, b, c, d, e, f, h, i, j, k), so
-# `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
-# agree by construction rather than by a hand re-read.
+# the ONE split stated below is `main`'s reading too. ⛔ THIS BRANCH'S OWN READING WAS HERE and is
+# DELETED, not merged: it said one shard at 838.1 s and ten at 838.2 s, which was true of the previous
+# fold and is not true of this one — the `merge=union` driver (#5373) kept both parents' clauses, so
+# the block briefly claimed two partitions. Re-derived below with the verb.
 # `8c373f59a1` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the durations
 # map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added, 0 removed,
 # against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue counts; at
@@ -86,18 +84,23 @@ version: 1
 # graded against its own walk by
 # `tests/test_sdk_privatise_sweep.py::test_the_extent_figure_is_the_walks_own_count` (post-merge
 # review of #14459, P3: this sentence used to read as a measurement of "the resolved tree" while
+# describing a run that had already moved — nothing in this file grades an extent, so a figure here
+# can only be history).
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS merged tree (`main` at
-# `6a02515d14ad` folded in, MINUS this PR's own removal of `tests/test_dod_5090_probe.py` from the
-# `core` surface — that row is what put the file in `fast_pool()`, so dropping it takes the file's
-# weight out of the pool and re-packs every bin) the verb packs six shards at 825.1 s
+# `af40c97ca312` folded in) the verb packs six shards at 825.1 s
 # (a, b, g, i, j, k) and five at 825.0 s (c, d, e, f, h), so
 # `ceil(825.1/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28`, so the two agree by construction rather than
-# by a hand re-read. Re-derive it on the tree after the next fold; never carry this 825.1/825.0.
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.04`, so the two
+# agree by construction rather than by a hand re-read. Re-derive it on the tree after the next fold;
+# never carry this 825.1/825.0. ⛔ The CAUSAL story this sentence used to carry is DELETED because it
+# is false at this tree: it said removing `tests/test_dod_5090_probe.py` from the `core` surface took
+# that file's weight out of the pool — but the file is registered on the `eval` surface, so
+# `fast_pool()` still carries it and dropping a `core` row would not move the bin. The FIGURES above
+# were re-derived with the verb, and the verb is the only thing that made them true.
 # ⛔ ONE CLAUSE, AND IT IS GRADED BELOW INSTEAD OF TRUSTED. The split is 0.1 s wide and the NAME
 # SETS move on every landed registration while the minute has stood at 28 m across every reading of
-# this pool from 835.5 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
+# this pool from 825.1 s to 838.2 s — so NO arithmetic on the minute can catch a carried figure;
 # only the `est_seconds` partition can. Re-run `--emit-push-matrix` on the merged tree; never carry
 # the last revision's minute, seconds, or split.
 #
@@ -123,7 +126,7 @@ version: 1
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
-# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `533e256f2c89`
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `af40c97ca312`
 # and adds NO fast-file registration of its own — every registration counted here is `main`'s, which
 # is why `main` alone emits this same split. A restatement
 # here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
@@ -131,7 +134,7 @@ version: 1
 # `<est … stated twice>` and reds the required leg. ⛔ The split is 0.1 s WIDE and the NAME SETS
 # differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
 # SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
-# 835.5 s to 838.2 s while the seconds moved under it. So NO arithmetic on the minute can catch a
+# 825.1 s to 838.2 s while the seconds moved under it. So NO arithmetic on the minute can catch a
 # carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
 # instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
@@ -221,7 +224,7 @@ version: 1
 # #14407's `tests/test_14407_alert_delivery.py` and #14504's
 # `tests/test_13722_stamp_chain_off_loop.py`. EVERY one of them re-partitions every bin, which is
 # why the split is quoted and not only the worst figure — and why the minute, which has NOT moved
-# (28 m at every reading from 835.5 s to 838.2 s), could never be the operand that catches a
+# (28 m at every reading from 825.1 s to 838.2 s), could never be the operand that catches a
 # carried one.
 # The figures above are a
 # SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at the NAMED head — re-derive them
