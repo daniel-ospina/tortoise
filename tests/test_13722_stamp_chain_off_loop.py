@@ -32,7 +32,7 @@ this one would also need a real Postgres). It asserts, for EVERY
    NOT `asyncio.to_thread`'s shared default executor (see `_run_off_loop`'s own
    comment) — so the per-id record writes do not run on the loop; and
 2. that submission is AWAITED, so a raise in the worker still reaches the
-   handler's own `except` (#8501's non-fatal warning arm); and
+   submitter's own `except` (#8501's non-fatal warning arm); and
 3. the containing function is a SYNC `def`, because `_run_off_loop` runs `fn`
    synchronously inside the worker (`monitoring.confine_context`) — handed an
    `async def` it returns an unawaited coroutine object and NOTHING runs: no
@@ -76,13 +76,6 @@ def _module() -> ast.Module:
     return ast.parse(HOSTED_API.read_text(encoding="utf-8"))
 
 
-def _find_function(tree: ast.Module, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            return node
-    raise AssertionError(f"{name} not found in {HOSTED_API.name}")
-
-
 def _enclosing_functions(tree: ast.Module, target: ast.AST) -> list[str]:
     """The names of the functions enclosing ``target``, innermost first."""
 
@@ -107,10 +100,11 @@ def _enclosing_functions(tree: ast.Module, target: ast.AST) -> list[str]:
     return chain
 
 
-def _stamp_calls(handler: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.Call]:
+def _stamp_calls(tree: ast.Module) -> list[ast.Call]:
+    """Every `_stamp_capture_provenance(...)` call in the WHOLE module."""
     return [
         node
-        for node in ast.walk(handler)
+        for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == _STAMP_DOOR
@@ -118,16 +112,16 @@ def _stamp_calls(handler: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.Ca
 
 
 def _off_loop_submissions(
-    handler: ast.FunctionDef | ast.AsyncFunctionDef,
+    tree: ast.Module,
 ) -> list[tuple[int, str | None, str | None, bool]]:
-    """Every `_run_off_loop(...)` in the handler: (line, pool, fn, awaited)."""
+    """Every `_run_off_loop(...)` in the module: (line, pool, fn, awaited)."""
     awaited = {
         id(node.value)
-        for node in ast.walk(handler)
+        for node in ast.walk(tree)
         if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)
     }
     out: list[tuple[int, str | None, str | None, bool]] = []
-    for node in ast.walk(handler):
+    for node in ast.walk(tree):
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
