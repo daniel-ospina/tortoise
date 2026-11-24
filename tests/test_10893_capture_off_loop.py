@@ -382,7 +382,9 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     #: ⛔ SO THIS SURFACE IS NOT #4625's FALSIFIER, and must not be read as one.
     #: The falsifier is `tests/test_4625_schema_reads_off_write_path.py` (executed:
     #: restoring the per-consult fingerprint reds it with 360 `stat`/`exists`
-    #: operations for three records; restoring the TTL reds it with 720). What
+    #: operations for three records; restoring the TTL shape reds it with 360 too
+    #: on this pin — re-measured: 720 is the figure of the two restorations
+    #: COMBINED, not the TTL's own). What
     #: this surface adds is that a schema read a capture DOES reach on the loop is
     #: priced instead of absorbed into `_emit_event`'s row — the blindness #14112
     #: names, one module over.

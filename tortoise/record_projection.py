@@ -2267,10 +2267,11 @@ def _schema_entry(migrations_dir: Path | None) -> dict[str, Any]:
 
     One stat pass (:func:`_migrations_fingerprint`) replaces "read and
     regex-parse twenty migration files" — measured at 1.546–1.588 ms per call
-    (median, when the population was fifteen) against a warm page cache — which the live record door paid ONCE PER JOURNAL RECORD
+    (median, when the population was fifteen) against a warm page cache — which the live record door paid ONCE PER PLAN
     (`replay_plan` calls :func:`table_columns` and :func:`refused_props_names`
-    for every record). It is still exactly that for an explicit directory; it is
-    now zero for the resident one.
+    once, BEFORE its record loop — `record_projection.py`'s `columns = table_columns()`
+    / `refused = refused_props_names()`). It is still exactly that for an explicit
+    directory; it is now zero for the resident one.
 
     ⚠️ The lock guards the DICT, not the entries. `entry["sql"]` and
     `entry["parsed"][…]` are filled OUTSIDE it — deliberately, and only because
@@ -2518,11 +2519,12 @@ _ALTER_COLUMN_TYPE_RE = re.compile(
 #: (a) the migrations are baked into the deployed image (`migrations_source:
 #: "checkout"`), so an edit is a redeploy there; (b) an ABSENT or
 #: PARTIALLY-PRESENT schema is not memoised, so absence→appear AND
-#: incomplete→complete heal on the next consult (:func:`_entry_sql` gates its
-#: memo on `_complete`, so a PARTIAL tree — some registered migrations readable,
-#: others not — is re-read per consult instead of freezing a silently SHORT map;
-#: and :func:`refused_props_names` / :func:`table_columns` / :func:`jsonb_columns`
-#: each gate their own memo on that read having been taken);
+#: incomplete→complete heal on the next consult (:func:`_entry_sql_state` /
+#: :func:`_read_migrations_state` gate the SQL memo on a per-FILE completeness
+#: flag — every registered migration actually read — so a PARTIAL tree is re-read
+#: per consult instead of freezing a silently SHORT map; and
+#: :func:`table_columns` / :func:`refused_props_names` / :func:`jsonb_columns`
+#: each gate their own memo on the completeness of their own parse);
 #: and (c) a caller that must SEE an edit has a verb — `_release_schema_cache()`
 #: or `_jsonb_cache_clear()` — instead of paying a per-call `stat` on the write
 #: path. The earlier wording in this block ("The map cannot go stale
@@ -2765,10 +2767,28 @@ def _declared_types_for_dir(migrations_dir: Path) -> dict[str, dict[str, str]]:
     Comments are stripped first (:func:`_strip_sql_comments`), so a migration's
     recorded DOWN direction cannot be read as its UP.
     """
+    return _declared_types_for_dir_state(migrations_dir)[0]
+
+
+def _declared_types_for_dir_state(
+        migrations_dir: Path) -> tuple[dict[str, dict[str, str]], bool]:
+    """`(the map, whether EVERY registered migration was read)`.
+
+    ⛔ THE COMPLETENESS IS THIS CALL'S, DECIDED BY THE SAME `exists()` THAT
+    DECIDES WHETHER TO READ (#4625 review, F2). A caller that memoises an answer
+    built from a tree missing one migration stores a SHORTER, plausible map — and
+    for `jsonb_columns` that silently changes how a bound parameter is encoded
+    (a `jsonb` column read as a scalar is JSON-quoted; a narrowed one read as a
+    container is not), with no error anywhere. Deciding it here, per file, from
+    the stat this loop already performs, costs nothing and cannot disagree with
+    the map it returns.
+    """
     found: dict[str, dict[str, str]] = {}
+    complete = True
     for name in RECORD_MIGRATIONS:
         path = migrations_dir / name
         if not path.exists():
+            complete = False
             continue
         sql = _strip_sql_comments(path.read_text(encoding="utf-8"))
         # (position, table, column, type-or-None-for-a-drop)
@@ -2800,7 +2820,7 @@ def _declared_types_for_dir(migrations_dir: Path) -> dict[str, dict[str, str]]:
                 here.pop(column, None)
             else:
                 here[column] = type_name
-    return found
+    return found, complete
 
 
 def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
@@ -2813,7 +2833,22 @@ def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
     cannot delete a column that is `jsonb` in ANOTHER record table; flattened to
     names at the end (the one caller is handed a column name and nothing else).
     """
-    declared = _declared_types_for_dir(migrations_dir)
+    return _jsonb_columns_for_dir_state(migrations_dir)[0]
+
+
+def _jsonb_columns_for_dir_state(
+        migrations_dir: Path) -> tuple[frozenset[str], bool]:
+    """`(the jsonb names, whether EVERY registered migration was read)`.
+
+    The completeness half exists for the RESIDENT memo (#4625 review, F2): the
+    names come from this reader's own parse, so the flag that certifies them must
+    come from the same parse. Certifying them with a flag from a DIFFERENT read
+    (`_entry_sql_state`'s, which answers `True` without reading anything once the
+    SQL is memoised) let a tree whose migration was removed AFTER the SQL memo was
+    taken store a short name set for the life of the process — measured, and the
+    window is unbounded rather than the microseconds an earlier comment claimed.
+    """
+    declared, complete = _declared_types_for_dir_state(migrations_dir)
     if not declared:
         # ⛔ FAIL CLOSED, like `table_columns()`. An EMPTY set is the worst
         # answer this function can give: it silently stops the #9548 encoding
@@ -2833,7 +2868,7 @@ def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
         for table, columns in declared.items()
         for column, type_name in columns.items()
         if type_name == "jsonb"
-    )
+    ), complete
 
 
 def column_types(migrations_dir: Path | None = None) -> dict[str, dict[str, str]]:
@@ -2899,26 +2934,23 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
     entry = _resident_entry()
     names = entry["parsed"].get("jsonb_columns")
     if names is None:
-        _sql, complete = _entry_sql_state(entry)
-        names = _jsonb_columns_for_dir(entry["base"])
-        # ⛔ MEMOISE ONLY WHEN THIS CALL'S OWN READ WAS COMPLETE (#4625 review,
+        names, complete = _jsonb_columns_for_dir_state(entry["base"])
+        # ⛔ MEMOISE ONLY WHEN THIS CALL'S OWN PARSE WAS COMPLETE (#4625 review,
         # the same rule as `table_columns` and `refused_props_names`).
         # `_jsonb_columns_for_dir` fails CLOSED on a tree with no record table at
         # all, but it cannot see a tree that is merely MISSING one migration —
         # that yields a shorter, plausible name set (a `jsonb` column added by a
         # forward migration would be read as a scalar and JSON-quoted, or a
         # narrowed one as a container: silent corruption, no error). Memoising it
-        # would freeze that for the life of the process. Gating on
-        # `_entry_sql_state`'s flag costs NOTHING on the healthy path — on a warm
-        # process `entry["sql"]` is already memoised, so the state call is a dict
-        # read, and this block is never reached at all.
-        # ⚠️ Residual, stated: the jsonb parse performs its OWN reads
-        # (`_declared_types_for_dir`), so a migration REMOVED between the
-        # certification above and that parse can still yield a short name set.
-        # That direction is a shrink nobody has measured a production path for,
-        # and closing it needs a parser over the certified SQL rather than a
-        # second reader over the directory; the growth direction — the one #4625
-        # measured — is closed here.
+        # would freeze that for the life of the process.
+        # ⛔ THE FLAG MUST COME FROM THIS PARSE, not from `_entry_sql_state`: that
+        # one answers `True` WITHOUT READING when the SQL is already memoised (a
+        # batch that bound no string parameter memoises the SQL and skips this
+        # reader entirely), so certifying this parse with it let a migration
+        # removed AFTER the SQL memo be frozen as a short name set — the window is
+        # unbounded, not the microseconds an earlier revision of this comment
+        # claimed. `_jsonb_columns_for_dir_state` reports its own read's
+        # completeness from the same `exists()` that skipped each absent file.
         if complete:
             entry["parsed"]["jsonb_columns"] = names
     return names

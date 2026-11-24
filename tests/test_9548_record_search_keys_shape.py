@@ -397,7 +397,7 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
     `reads = 0`** — the assertion passed while the regression it names was
     happening. So:
 
-    * `parses` counts `_declared_types_for_dir` — THE parse — and is the assertion
+    * `parses` counts `_declared_types_for_dir_state` — THE parse — and is the assertion
       that matters: one per plan build, never one per bound parameter (the
       regressed shape measured ~180 for this plan);
     * `reads` counts `_read_migrations_state` as a cross-check on the column map, which
@@ -416,7 +416,10 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
     # returns `(sql, complete)`. `_read_migrations` is a `[0]` wrapper over it, so
     # patching that would count nothing.
     real_reads = rp._read_migrations_state
-    real_parse = rp._declared_types_for_dir
+    # ⛔ `_declared_types_for_dir_state` is the primitive (#4625): it returns
+    # `(map, complete)` and `_declared_types_for_dir` is a `[0]` wrapper over it,
+    # so patching the wrapper would count nothing.
+    real_parse = rp._declared_types_for_dir_state
 
     def _counting_reads(migrations_dir=None):
         reads.append(1)
@@ -427,7 +430,7 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
         return real_parse(migrations_dir)
 
     monkeypatch.setattr(rp, "_read_migrations_state", _counting_reads)
-    monkeypatch.setattr(rp, "_declared_types_for_dir", _counting_parse)
+    monkeypatch.setattr(rp, "_declared_types_for_dir_state", _counting_parse)
     rp._jsonb_cache_clear()
     rp._release_schema_cache()
     tenant = _tenant()

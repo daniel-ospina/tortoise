@@ -450,15 +450,18 @@ def test_a_partially_present_schema_heals_without_the_refresh_verb(monkeypatch, 
     row-drop class `#9548` exists to end — and no raise ever surfaces it, so
     `table_columns()`'s own guard is not the protection here.
 
-    ⛔ ALL THREE READERS ARE DRIVEN, because the gate is per reader: a partial
-    tree that omits a migration adding a `jsonb` column leaves
-    `jsonb_columns()` short without raising (it only fails closed when NO record
-    table is parseable at all), and its own reader performs its own reads.
+    ⛔ THE GATE IS PER READER, so the discriminating arm here is `table_columns`'
+    own: measured, dropping THAT gate reds this test, while dropping
+    `refused_props_names`' gate reds
+    `test_an_absent_schema_heals_without_the_refresh_verb` instead (this tree
+    omits a migration that declares no refusal, so the gate is unobservable
+    here — the `refused_props_names()` call below runs only after the heal), and
+    `jsonb_columns` has its own pin
+    (`test_a_partial_jsonb_read_does_not_freeze_the_name_set`). An earlier
+    revision of this docstring claimed all three red HERE, which was not true.
 
     FALSIFIER (executed): restore `if sql: entry["sql"] = sql` (memoise any
-    non-empty read) and `amount_minor` never appears below; drop the `complete`
-    gate from `table_columns` / `jsonb_columns` / `refused_props_names`
-    individually and the matching arm below reds.
+    non-empty read) and `amount_minor` never appears below.
     """
     source = _real_migrations()          # the real tree, captured BEFORE the patch
     tree = tmp_path / "migrations"
@@ -502,7 +505,9 @@ def test_a_partial_jsonb_read_does_not_freeze_the_name_set(monkeypatch, tmp_path
     container is not), with no error anywhere.
 
     FALSIFIER (executed): drop ONLY the `if complete:` gate in `jsonb_columns` and
-    `embedding` never appears below.
+    the assertion below reds on `payload` — one of the names the short read DROPS.
+    (`embedding` would NOT discriminate here: it survives the omission, so an
+    earlier revision of this docstring named the wrong witness.)
     """
     source = _real_migrations()
     tree = tmp_path / "migrations"
@@ -524,5 +529,52 @@ def test_a_partial_jsonb_read_does_not_freeze_the_name_set(monkeypatch, tmp_path
             "the absent migration declares is missing for the life of the "
             "process, so every parameter bound to it is encoded on the wrong "
             "side of the rule — silently. Memoise only a COMPLETE read.")
+    finally:
+        rp._release_schema_cache()
+
+
+def test_the_jsonb_gate_certifies_its_OWN_parse_not_the_memoised_sql(
+        monkeypatch, tmp_path):
+    """The jsonb memo must be certified by the jsonb read (#4625 review, F2).
+
+    `_entry_sql_state` answers `(sql, True)` WITHOUT READING when the SQL is
+    already memoised, and a batch that binds no string parameter memoises the SQL
+    and never reaches `jsonb_columns()`. So certifying the jsonb parse with THAT
+    flag is not a statement about the jsonb parse at all: a migration removed
+    after the SQL memo was taken then yields a SHORT name set which is stored for
+    the life of the process — an UNBOUNDED window, not the microseconds a
+    certify-then-parse comment describes.
+
+    FALSIFIER (executed): certify with `_entry_sql_state`'s flag instead of
+    `_jsonb_columns_for_dir_state`'s and `payload` never comes back.
+    """
+    source = _real_migrations()
+    tree = tmp_path / "migrations"
+    tree.mkdir()
+    for name in rp.RECORD_MIGRATIONS:
+        shutil.copy(source / name, tree / name)
+    monkeypatch.setattr(rp, "_migrations_dir", lambda: tree)
+    rp._release_schema_cache()
+    try:
+        # …the SQL memo is taken here, and `jsonb_columns` is NOT consulted — the
+        # exact shape a parameter-free batch leaves behind.
+        assert "point" in rp.table_columns()
+        assert "jsonb_columns" not in rp._resident_entry()["parsed"]
+        # …now the tree goes partial BEHIND the memoised SQL.
+        (tree / _PARTIAL_JSONB_OMITTED).unlink()
+        short = rp.jsonb_columns()
+        assert "payload" not in short, (
+            "the removed migration's names survived its file — the fixture does "
+            "not produce a short parse")
+        assert "jsonb_columns" not in rp._resident_entry()["parsed"], (
+            "the jsonb name set was memoised on the strength of the SQL memo, so "
+            "a tree that lost a migration AFTER the SQL was read freezes a SHORT "
+            "set for the life of the process — every parameter bound to those "
+            "columns is then encoded on the wrong side of the rule, silently. "
+            "Certify the jsonb parse with the completeness of ITS OWN read.")
+        # …and it heals with no refresh verb once the file is back.
+        shutil.copy(source / _PARTIAL_JSONB_OMITTED, tree / _PARTIAL_JSONB_OMITTED)
+        assert "payload" in rp.jsonb_columns(), (
+            "a short jsonb name set survived the file being restored")
     finally:
         rp._release_schema_cache()
