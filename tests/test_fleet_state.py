@@ -4212,6 +4212,20 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
         # `pi`, and the child is a live process on every image (see the docstring).
         proc = subprocess.Popen([str(pi), "-c", "import time; time.sleep(60)"],
                                 executable=sys.executable,
+                                # ⛔ `PYTHONHOME` IS LOAD-BEARING (#14122 root cause, measured
+                                # on #14459). `executable=` leaves a FOREIGN `argv[0]` — the long
+                                # path the census matcher reads — and CPython derives its install
+                                # PREFIX from `argv[0]`, so on a RELOCATABLE interpreter (venv,
+                                # uv-managed, toolcache: what CI runs) the child aborts in
+                                # `init_fs_encoding` (`Could not find platform independent
+                                # libraries` / `No module named 'encodings'`) and exits rc=1 in
+                                # milliseconds. The census then finds no such process and this
+                                # pin reads a dead fixture as a census gap — the `INCONCLUSIVE`
+                                # shape its own expiry classification exists to separate. Measured
+                                # on `cpython-3.9` (uv-managed): identical spawn rc=1 without the
+                                # variable, rc=0 with it; `/usr/bin/python3` needs neither
+                                # (compiled-in prefix), which is why it passed on some hosts.
+                                env={**os.environ, "PYTHONHOME": sys.base_prefix},
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             # Bounded poll on the CENSUS ITSELF — never a widened or loosened match

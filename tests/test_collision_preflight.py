@@ -77,6 +77,29 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "collision_preflight.py"
 PYTHON = sys.executable
+
+
+def _fake_lane_env(*prepend_path: str) -> dict[str, str]:
+    """The fake lane's env: the REAL interpreter under a FOREIGN `argv[0]`.
+
+    ⛔ `PYTHONHOME` IS LOAD-BEARING, NOT DEFENSIVE (#14122 root cause, measured on
+    #14459). Every fake lane here is spawned as `["pi", "-c", …]` with
+    `executable=PYTHON` — a foreign `argv[0]` in front of the real interpreter,
+    which is the only portable way to put the name `pi` in front of a live process
+    (#12039). CPython resolves its install PREFIX from `argv[0]`, so on a
+    RELOCATABLE interpreter (venv, uv-managed, toolcache — what CI runs) the child
+    aborts in `init_fs_encoding`: `Could not find platform independent libraries`,
+    `ModuleNotFoundError: No module named 'encodings'`, exit rc=1, in milliseconds.
+    Measured on shard `test (b)` of run 45367815168: `the fake lane pid 2706268
+    EXITED with rc=1`. `/usr/bin/python3` is unaffected (its prefix is compiled
+    in), which is why this fixture passed on some hosts and not others.
+
+    `PYTHONHOME` is CPython's own named remedy; it costs the child the venv's
+    `site-packages`, which the fake lane never uses (`time` only).
+    """
+    parts = [p for p in (*prepend_path, os.environ.get("PATH", "")) if p]
+    return {**os.environ, "PATH": os.pathsep.join(parts),
+            "PYTHONHOME": sys.base_prefix}
 ISSUE = 3061
 #: The slug the fixture's git remote resolves to. `_fleet_board_state` stamps it
 #: as the board's `repo`, so a cached board matches the queried slug by default.
@@ -8801,6 +8824,7 @@ class CollisionPreflightTest(unittest.TestCase):
         pi = fake_bin / "pi"
         shutil.copy("/bin/sleep", pi)
         proc = subprocess.Popen([str(pi), "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(wt),
+                                env=_fake_lane_env(str(fake_bin)),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # The census the TOOL reads is the STUBBED table (`_write_ps_stub`), so the
         # lane this test really spawned must be SERVED to it — otherwise the tool
@@ -9637,7 +9661,7 @@ class CollisionPreflightTest(unittest.TestCase):
         pi = fake_bin / "pi"
         if not pi.exists():
             shutil.copy("/bin/sleep", pi)
-        env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+        env = _fake_lane_env(str(fake_bin))
         proc = subprocess.Popen(["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(cwd), env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # ⛔ The census the TOOL reads is the STUBBED table, so the fixture's own
@@ -9647,6 +9671,41 @@ class CollisionPreflightTest(unittest.TestCase):
         # would pass VACUOUSLY: nothing would be standing anywhere.
         self.add_process_row(f"{proc.pid} 1 {os.getuid()} pi")
         return proc
+
+    def test_the_fake_lane_interpreter_actually_starts(self) -> None:
+        """The fake lane must be a LIVE interpreter, not one that aborts at startup.
+
+        ⛔ WHAT THIS PIN EXISTS FOR, measured on #14459's shard `test (b)` (run
+        45367815168): `the fake lane pid 2706268 EXITED with rc=1`. Every fake lane
+        in this file is spawned as `["pi", "-c", …]` with `executable=PYTHON` — a
+        FOREIGN `argv[0]` in front of the real interpreter (#12039) — and CPython
+        resolves its install PREFIX from `argv[0]`, so a RELOCATABLE interpreter
+        (venv / uv-managed / toolcache, i.e. every CI runner) aborts in
+        `init_fs_encoding` in milliseconds. The census fixtures then stand a DEAD
+        process in the worktree, which is exactly the `DEAD FIXTURE` red #14388
+        taught them to name.
+
+        FALSIFIER (executed): drop `PYTHONHOME` from `_fake_lane_env()` and the
+        behavioural arm reds with `rc=1` here. ⚠️ The structural arm is deliberate —
+        on a host whose interpreter is NOT relocatable (`/usr/bin/python3`,
+        compiled-in prefix) removing the variable leaves the child alive, so the
+        env rule cannot be inferred from timing alone.
+        """
+        self.assertEqual(_fake_lane_env()["PYTHONHOME"], sys.base_prefix)
+        proc = self._start_fake_pi(self.repo)
+        try:
+            # 0.5 s is far outside every start-up path (the abort is tens of ms)
+            # and costs this suite nothing on the green path.
+            time.sleep(0.5)
+            self.assertIsNone(
+                proc.poll(),
+                f"the fake lane's interpreter EXITED rc={proc.returncode} instead of "
+                "sleeping 120 s, so the census fixtures in this file would stand a "
+                "DEAD process in the worktree (#14122)")
+        finally:
+            proc.terminate()
+            with suppress(OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -10561,7 +10620,7 @@ exec {real} "$@"
             shutil.copy("/bin/sleep", binary)
         proc = subprocess.Popen(
             ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(peer_wt),
-            env={**os.environ, "PATH": f"{pi}:{os.environ.get('PATH', '')}"},
+            env=_fake_lane_env(str(pi)),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             # ⛔ WAIT ON THE TOOL'S OWN READER BEFORE ASKING THE TOOL (#12039). The
@@ -11015,7 +11074,7 @@ exec {real} "$@"
             shutil.copy("/bin/sleep", binary)
         proc = subprocess.Popen(
             ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
-            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
+            env=_fake_lane_env(str(fakebin)),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             table = self.tmp / "table-own-subagent.txt"
@@ -11059,7 +11118,7 @@ exec {real} "$@"
             shutil.copy("/bin/sleep", binary)
         proc = subprocess.Popen(
             ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
-            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
+            env=_fake_lane_env(str(fakebin)),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             table = self.tmp / "table-samecwd-not-mine.txt"
@@ -11101,7 +11160,7 @@ exec {real} "$@"
             shutil.copy("/bin/sleep", binary)
         proc = subprocess.Popen(
             ["pi", "-c", "import time; time.sleep(120)"], executable=PYTHON, cwd=str(lane_wt),
-            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
+            env=_fake_lane_env(str(fakebin)),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             table = self.tmp / "table-dispatched-lane.txt"
