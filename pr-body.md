@@ -15,11 +15,11 @@ Two independent mechanisms, both measured:
 
 | | |
 |---|---|
-| **One drainer** | `tortoise/drain_claim.py` (new): a lease on `<spool>/drain.claim`, taken by an **untargeted** `flush_spool` pass. A second drainer returns immediately (`held_by_claim`, zero POSTs) — nothing is lost, the holder is working the same oldest-first list. |
+| **One drainer** | `tortoise/drain_claim.py` (new in #14423; this PR adds the durable-exclusion fact, the `status.json` gate and the restore rule on top): a lease on `<spool>/drain.claim`, taken by an **untargeted** `flush_spool` pass. A second drainer returns immediately (`held_by_claim`, zero POSTs) — nothing is lost, the holder is working the same oldest-first list. |
 | **A stated ceiling** | `DRAIN_MAX_IN_FLIGHT = 1` POST in flight, *per box*. It is a cap on how much of the shared 8-slot budget the drain may hold (7 stay available to live captures), not a throughput knob, and no configuration raises it. |
 | **Capacity charges nobody** | `capacity_refusal()` + `_flush_one`'s early return: no `attempts` increment, no backoff armed, and the **pass stops**. It then yields, honouring the server's own `retry_after`, bounded at `DRAIN_CAPACITY_YIELDS = 3`, and retries **the same** entry — so a busy box starves nothing and a head never rises. |
 | **Named, durably** | The refusal is recorded as `blocked` + 429 + the code, so the health line reads `capture: BLOCKED (n queued, 429 capture capacity)` instead of a box that cannot file looking healthy. Self-healing on both ends. |
-| **Both legs** | The Pi seam implements the same file, the same three staleness rules and the same capacity rule — including the same on-disk timestamp UNIT, which a review cycle proved was not true at first (seconds vs milliseconds: each leg stole the other's live claim). Hook generation 32 → 33. A lock one leg cannot take is a lock the other leg does not have, and four cross-leg tests now RUN the real TypeScript predicate under `node` against a claim this leg wrote (and the reverse) rather than trusting either leg's opinion of the other. |
+| **Both legs** | The Pi seam implements the same file, the same three staleness rules and the same capacity rule — including the same on-disk timestamp UNIT, which a review cycle proved was not true at first (seconds vs milliseconds: each leg stole the other's live claim). Hook generation 32 → 33 in #14423, and **34** here (a byte change at an already-shipped generation must move the number — see the P1 in cycle 19). A lock one leg cannot take is a lock the other leg does not have, and four cross-leg tests now RUN the real TypeScript predicate under `node` against a claim this leg wrote (and the reverse) rather than trusting either leg's opinion of the other. |
 
 ### Why a lease and not a lockfile or a config promise
 
@@ -90,7 +90,7 @@ The last rows matter as much as the first: on today's main the free server is **
 * **R3** — a `429` capacity refusal charges no entry (`attempts`, `next_attempt_at_ms` untouched) and ends the pass; on the Python leg the pass retries the *same* entry after a bounded yield, and on the Pi leg it ends and lets the next opportunity continue (its pass is `await`ed on `session_shutdown`, so it must not sleep). Both legs charge nothing — that is the rule; the yield is the Python leg's implementation of it.
 * **R4** — no behaviour change for a spool whose box is not saturated and whose drain is the only one running (guarded: the free-server measurement and the existing suites).
 * **R5** — nothing here writes a raw captured turn to the graph, moves extraction into the drain, or changes the spool's on-disk format.
-* **R6** — both legs implement ONE protocol; a divergence is a defect. **The one deliberate asymmetry is R3's yield** (Python sleeps and retries, Pi ends the pass), stated here rather than left for a reviewer to re-derive as a defect; everything else — the claim record and its version, the staleness rules, the compare-and-delete takedown, the capacity rule, the on-disk unit, the refusal's rendering — is the same on both sides and pinned by cross-leg tests that run one leg's predicate under the other's runtime.
+* **R6** — both legs implement ONE protocol; a divergence is a defect. **The one deliberate asymmetry is R3's yield** (Python sleeps and retries, Pi ends the pass), stated here rather than left for a reviewer to re-derive as a defect. Everything else **in this contract's enumerated surface** — the claim record and its version, the staleness rules, the compare-and-delete takedown, the capacity rule, the on-disk unit, the refusal's rendering, and (as of cycle 19) the `claim_unavailable_reason` suffix including its type guard — is the same on both sides and pinned by cross-leg tests that run one leg's predicate under the other's runtime. ⛔ **One known gap, outside this PR's diff and FILED, not claimed clean:** the contention/holder SENTENCE still differs (Python prints the lease deadline and the claim path, the Pi leg neither, and the leg-field predicate differs on `""`) — #14508.
 
 ## Tests
 
@@ -414,8 +414,15 @@ and the P3 it reported as already closed is confirmed closed at the commit it na
 
 ## Residuals, stated
 
-* **Generation 33 is introduced by this PR and has never shipped**, so its recorded
-  seam digest in `test_capture_install.py` was updated in place at each head
+* **Generation 34 is this PR's; generation 33 SHIPPED on `main` in #14423** (`da82ece4226`,
+  marker 33, capture digest `746075470aab…`). ⛔ Every earlier head of this PR re-cut
+  generation 33 IN PLACE on the premise that it had never shipped — that premise was
+  FALSE, and re-cutting it would have kept the marker at 33 while the bytes moved, so
+  `detect_artifact_install` would have graded every Pi install made from `main` as a
+  BLOCKING `modified-artifact` ("local edit"). 33's entry is now frozen at `main`'s
+  digest and this PR ships **34** on both halves (a marker change on one half alone
+  makes `contract_version_for("pi")` answer `None`). The historical record of what 33's
+  bytes became before it shipped, re-cut at each head
   (capture half `f36b8c84…` at this head, re-cut at every byte change: for the export-only
   test seam, for the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
   changes, for cycle 12's claim-policy extraction, for cycle 13's three fixes (the
@@ -444,11 +451,18 @@ and the P3 it reported as already closed is confirmed closed at the commit it na
   live session's own shutdown filing, which takes no claim by design) overlaps the
   claim holder. `DRAIN_MAX_IN_FLIGHT` is a stated ceiling read by no code; the claim
   is what serialises UNTARGETED passes.
-* **`acquireDrainClaim`'s `state.raced` flag has no forcing test.** The flag is set
-  at the three sites where a takeover is lost and consumed by one `if` in
-  `flushSpool`; the arm that IS tested is the neighbouring one (an unmakeable root
-  is not a race). Forcing the interleaving needs a peer process inside the two
-  acquisition attempts, which this suite does not stage.
+* **`acquireDrainClaim`'s `state.raced` flag: the `gone`/`done` arm HAS a forcing row;
+  the rest are staged at the seam only.** The flag is set at **six** sites
+  (`markRaced()` at `tortoise-capture.ts:5853, 5872, 5886, 5891, 5896, 5905`) and
+  consumed by one `if` in `flushSpool`. The `gone`/`done` retry — the arm that used to
+  leave no record and run the whole pass UNCLAIMED — is forced end-to-end by
+  *"the gone/done retry IS a lost race, and marks it"* (it drives `acquireDrainClaim`
+  with the `clearClaimPath` seam and asserts `state.raced === true`). ⚠️ A predecessor
+  of this line said the flag had NO forcing test and was set at "three sites"; both
+  halves were false and contradicted this record's own cycle-13 F4 row (#14480
+  cycle-19 review, P3 — the third time this row was reported and the second time the
+  merge re-introduced it). What remains true: the takedown/disposal lost-race arms are
+  staged only at the seam, not by a peer process inside the two acquisition attempts.
 * **A wedged pass holds the claim until its lease (≤120 s).** That is what a lease is; the bound is derived from the transport (`REQUEST_TIMEOUT_MS` 10 s / `urlopen` 30 s), and a real fetch always ends. A hung *mock* does not — which is why the #2100 case above had to release it.
 * **A claim we cannot READ is HONOURED, not taken over** (both legs): a transient
   local error on a regular claim file is not evidence about its holder, and the
