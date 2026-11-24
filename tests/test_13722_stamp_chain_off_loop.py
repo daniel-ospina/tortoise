@@ -89,7 +89,9 @@ intended submission. Arm 4 closes that: it grades every REFERENCE to the chain,
 not the existence of some submission.
 
 ⛔ THE ARMS ARE ASSERTED IN THAT ORDER, and the order is load-bearing. Property 3
-is checked LAST on purpose: the PRE-#13722 chain lives in `_report_capture`, a
+is checked AFTER the submission and await arms — not first, and deliberately not
+last (the mention count, the stray-reference and the dead-guard arms follow it) —
+because the PRE-#13722 chain lives in `_report_capture`, a
 nested `async def`, so a plain revert satisfies "the owner is an `async def`" and
 a 3-check written first reds THERE — reporting "the chain silently does NOT run"
 about a shape where it runs, inline on the loop, which is the 53 s wedge. The
@@ -434,7 +436,12 @@ def _statically_false(test: ast.expr) -> bool:
 
 
 def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
-    """`(line, source)` of every enclosing `if`/`while` that folds to false.
+    """`(line, source)` of every enclosing guard that is ALWAYS FALSE.
+
+    ⛔ THE CRITERION IS "always false", NOT "CPython folds it away" (the header
+    states why), and the guards graded are every shape a submission can hide
+    under: an `if`/`while` test, an `if`-expression's test, and a `match` case's
+    `if` guard. The polarity comes from `_literal_truth` and nowhere else.
 
     ⛔ `orelse` is NOT descended with the guard pushed: the else-branch of a
     statically-false `if` is exactly the branch that RUNS, so a submission there is
@@ -598,8 +605,10 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
             "keeps a stamp failure non-fatal (#8501/#1529), and a detached task "
             "moves that failure where nothing reports it (#13722)")
 
-    # ⛔ SYNC, NOT `async def` (review finding 3) — ASSERTED LAST ON PURPOSE
-    # (cycle-10 finding 1, falsified against `origin/main`): `_run_off_loop` hands
+    # ⛔ SYNC, NOT `async def` (review finding 3) — ASSERTED AFTER SUBMISSION+AWAIT,
+    # NOT FIRST, AND NOT LAST (the mention-count, stray-reference and dead-guard
+    # arms follow it; review P3 at `807a1014` measured that this comment said
+    # "LAST" about an arm three arms from the end). `_run_off_loop` hands
     # `fn` to `_submit_off_loop`, which runs it SYNCHRONOUSLY inside the worker
     # (`monitoring.confine_context`'s `ctx.run(fn, ...)`). Given a coroutine
     # function it returns an unawaited coroutine OBJECT — the future resolves to
@@ -638,8 +647,10 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # `confine_context`).
     #
     # This arm needs no dataflow: the only legal reference to an owner in this
-    # module is the bare `ast.Name` in `_run_off_loop(_CAPTURE_EXECUTOR, owner)`,
-    # so every other reference it finds is a second way to run the chain and reds.
+    # module is the callable argument of `_run_off_loop(_CAPTURE_EXECUTOR, owner)`
+    # — a bare `ast.Name` OR an attribute, since `_refers_to` accepts both and the
+    # two arms must not disagree about what a submission is — so every other
+    # reference it finds is a second way to run the chain and reds.
     # All three mutants above red here; the shipped tree has exactly one reference
     # per owner, at the submission.
     # ⛔ INDIRECTION THE AST CANNOT SEE (same review finding, second measured
@@ -719,9 +730,10 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     }
     assert not dead_guards, (
         f"EVERY submission of {_STAMP_DOOR}'s chain sits under a STATICALLY-FALSE "
-        f"guard at {dead_guards} (owner: [(line, test)]) — the interpreter folds "
-        "those tests away, so no submission is ever reached and the chain "
-        "silently does NOT run: no record, no `PointRevised`, no warning "
+        f"guard at {dead_guards} (owner: [(line, test)]) — each of those guards is "
+        "ALWAYS FALSE (`_literal_truth` decided it), so no submission is ever "
+        "reached and the chain silently does NOT run: no record, no "
+        "`PointRevised`, no warning "
         "(#13722). Remove the dead guard rather than leaving the offload "
         "unreachable")
 
@@ -765,6 +777,12 @@ def live(value):
         ("-0.0", False),
         ("(0 if True else 1)", False),
         ("None if False else None", False),
+        # An `if`-expression decided by its TWO BRANCHES agreeing rather than by
+        # its test (review P1 at `807a1014`: these two lines were the one arm with
+        # no assertion, so deleting them left the suite green).
+        ("0 if _x else 0", False),
+        ("1 if _x else 1", True),
+        ("0 if _x else 1", None),
         ("not {*()}", True),
         # Undecidable — the caller must NOT read these as a polarity.
         ("_x", None),
@@ -780,10 +798,47 @@ def test_literal_truth_decides_the_shapes_the_dead_guard_arm_relies_on(
     under `if set():` / `if f'':` / `if 1 < 0:` stayed GREEN although its body can
     never run — the silent-loss state the arm exists to refuse. The `{*…}`/
     `{**…}` rows are the P2-1 fix, which read a spread from its operand instead of
-    treating it as empty. The `None` rows pin the other direction: nothing may
-    grade a run-time value, or a correct tree reds with a false diagnosis.
+    treating it as empty. The `0 if _x else 0` / `1 if _x else 1` rows pin the
+    branch-agreement arm (deleting its two lines reds them and nothing else), and
+    `0 if _x else 1` is its control: disagreeing branches stay undecidable. The
+    `None` rows pin the other direction: nothing may grade a run-time value, or a
+    correct tree reds with a false diagnosis.
     """
     assert _literal_truth(ast.parse(expr, mode="eval").body) is expected
+
+
+#: An `if`-expression guard around a submission whose test is a SAME-POLARITY
+#: conditional — the shape `_dead_guards`' `IfExp` branch exists to grade.
+_IFEXP_SOURCE = '''
+def dead():
+    _run_off_loop(_CAPTURE_EXECUTOR, chain) if (0 if _x else 0) else None
+
+def live():
+    _run_off_loop(_CAPTURE_EXECUTOR, chain) if (0 if _x else 1) else None
+'''
+
+
+def test_an_if_expression_guard_is_graded_as_a_guard() -> None:
+    """An `if`-expression test is a guard, and a same-polarity one is ALWAYS false.
+
+    ⛔ NON-VACUOUS, measured: dropping the `ast.IfExp` arm from `_dead_guards`
+    (review P3 at `807a1014`: its docstring still said "every enclosing
+    `if`/`while`") leaves the `dead` submission unguarded, so this reds. The
+    `live` control pins the other direction — branches that DISAGREE are
+    undecidable and must not be read as a polarity.
+    """
+    tree = ast.parse(_IFEXP_SOURCE)
+    targets = {
+        _enclosing_functions(tree, node)[-2]: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == _OFF_LOOP
+    }
+    assert sorted(targets) == ["dead", "live"], targets
+    assert [source for _line, source in _dead_guards(tree, targets["dead"])] == [
+        "0 if _x else 0"]
+    assert _dead_guards(tree, targets["live"]) == []
 
 
 def test_a_match_case_guard_is_graded_as_a_guard() -> None:
