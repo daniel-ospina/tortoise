@@ -1892,6 +1892,15 @@ def _every_store_statement_pairs() -> list[tuple[str, dict]]:
                             token_delta=(1, 1))
     store.cancel_queued_items(ORG, batch.batch_id, reason="stopped",
                               updated_at="t")
+    # ⛔ AND THE CREATE-IF-ABSENT (#14415 review round 12, P2). The orphan
+    # adoption's write — the one this PR hardened over three rounds — was graded by
+    # NEITHER emission guard and by no live test: doubling a brace in it, or naming
+    # a `$param` it does not supply, left the whole suite green while FalkorDB
+    # refused the statement on `_resume_batch`.
+    store.put_batch_if_absent(
+        Batch(batch_id="batch_absent", org_id=ORG, state=BatchState.RESUMING,
+              created_at="2026-01-01T00:00:00+00:00",
+              updated_at="2026-01-01T00:00:00+00:00"))
     return pairs
 
 
@@ -2749,3 +2758,85 @@ def test_an_orphan_adoption_cannot_blank_an_acceptance_that_landed_first(monkeyp
         f"the adoption blanked the ACK's estimate: {row.estimate!r}")
     assert row.corpus_name == "handbook", (
         f"the adoption blanked the corpus name: {row.corpus_name!r}")
+
+
+def test_duplicate_of_round_trips_through_the_production_store():
+    """⛔ ROUND-12 REVIEW P2: `duplicate_of` was the ONE field never persisted.
+
+    `submit()` sets it, `as_dict()` puts it on the wire and `run_item` branches on
+    it, but `GraphBatchStore.put_item`'s SET listed no column and neither read
+    projection returned one — so on the real store the wire always said
+    `duplicate_of: ""` and the twin branch (the one that stops a repeat being
+    SKIPPED when its twin FAILED) was unreachable there, while the test that pins it
+    ran against the in-memory store, which does preserve it.
+    """
+    from tortoise.batch_ingest import GraphBatchStore
+
+    class _Rec:
+        def __init__(self):
+            self.cyphers: list[str] = []
+            self.params: list[dict] = []
+
+        def __call__(self, cypher, params=None, **kw):
+            self.cyphers.append(cypher)
+            self.params.append(dict(params or {}))
+
+            class _Res:
+                result_set: list = []
+
+            return _Res()
+
+    rec = _Rec()
+    store = GraphBatchStore(rec)
+    item = BatchItem(batch_id="b", item_id="b-00001", ref="/d/b.md",
+                     duplicate_of="b-00000", updated_at="t")
+    store.put_item(ORG, item)
+    assert "duplicate_of=$duplicate" in rec.cyphers[-1], (
+        "the production store never writes duplicate_of: "
+        f"{rec.cyphers[-1][:200]}")
+    assert rec.params[-1]["duplicate"] == "b-00000"
+
+    store.items(ORG, "b")
+    assert "i.duplicate_of" in rec.cyphers[-1], (
+        "the production read projection omits duplicate_of, so the wire always "
+        "reports an empty twin")
+    store.get_item(ORG, "b", "b-00001")
+    assert "i.duplicate_of" in rec.cyphers[-1]
+
+
+def test_the_create_if_absent_reports_creation_not_state_equality():
+    """⛔ ROUND-12 REVIEW P3: the verdict compared STATE, not existence.
+
+    It returned `b.state` and compared that, which is TRUE for a pre-existing row
+    whose stored state equals the caller's — the exact concurrent shape it is used
+    in, where two adoptions of one orphan row both pass `RESUMING`. The caller then
+    trusted its own object (created_at from the orphan item) instead of re-reading.
+    `created_at` is written only by `ON CREATE SET`, so the created timestamp is a
+    creation test.
+    """
+    from tortoise.batch_ingest import GraphBatchStore
+
+    batch = Batch(batch_id="b", org_id=ORG, state=BatchState.RESUMING,
+                  created_at="2026-01-01T00:00:00+00:00",
+                  updated_at="2026-01-01T00:00:00+00:00")
+
+    class _Rec:
+        def __init__(self, rows):
+            self.rows = rows
+            self.cyphers: list[str] = []
+
+        def __call__(self, cypher, params=None, **kw):
+            self.cyphers.append(cypher)
+            rows = self.rows
+
+            class _Res:
+                result_set = rows
+
+            return _Res()
+
+    created = _Rec([["2026-01-01T00:00:00+00:00"]])
+    assert GraphBatchStore(created).put_batch_if_absent(batch) is True
+    reused = _Rec([["2025-12-31T00:00:00+00:00"]])
+    assert GraphBatchStore(reused).put_batch_if_absent(batch) is False, (
+        "a pre-existing row whose state string matches the caller's was reported "
+        "as CREATED — the caller then trusts its own object")
