@@ -1972,7 +1972,7 @@ SWEEP_NAMES = 66
 #: already gives for its own `+3`: the committed pin stores a COUNT and a DIGEST, never the row set.
 #: `--check` exits 0 on the new pair with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11910, "93429504f32ddc7c")
+SWEEP_RESIDUE = (11914, "4732a51728684cca")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
