@@ -351,15 +351,7 @@ NOT_SELECTED = [
     "what ended, and what replaced it",
     # ── STATEMENTS, third-party actions, and boundaries stated in the module ─
     "did the customer cancel their order",
-    # ⛔ `what has ended recently` WAS PINNED HERE AND IS NOW SELECTED (#14033).
-    # It was this table's own example of "a trailing adverb keeps the relevance
-    # read", and #14033 measured what that boundary cost: the question is
-    # plainly about state, it fell through to a relevance read, and nothing in
-    # the reply said so — a confident answer to a different question. It now
-    # routes through the `wh_whole_question` adverb tail, which admits only the
-    # VAGUE adverbs (`recently` / `lately`) and still refuses an actual window
-    # (`what has ended in Q3`), because a window is a narrowing the population
-    # read cannot apply. See `tests/test_14033_state_cue_gap.py`.
+    "what has ended recently",
     "what commitments do we have",
     "",
     "   ",
