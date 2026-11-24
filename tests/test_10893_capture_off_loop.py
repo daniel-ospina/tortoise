@@ -608,13 +608,22 @@ def test_the_stamp_chain_record_write_does_not_block_the_event_loop(
         f"{_STAMP_MIN_TICKS_IN_STALL}) — the write is blocking the loop, so "
         "every concurrent request waits for it (#13722)")
 
-    # ⛔ THIS ASSERTS THE PROBE, NOT THE BEHAVIOUR, and says so rather than
-    # posing as a behavioural row: `/health` answers `ok`/`degraded` from
-    # in-memory state (#2850), so no mutation of this diff can move the value.
-    # What it does catch is the probe missing the route — a 404 body has no
-    # `status`, so a `/health` request that never reached the handler fails here
-    # instead of being read as a served request below.
-    assert health.json()["status"] in {"ok", "degraded"}, health.text
+    # ⛔ INSTRUMENT INTEGRITY, not behaviour: this asserts the PROBE, and it is
+    # kept because it is REACHABLE — it guards a real vacuum. A probe that missed
+    # the route (a 404 from a moved path, a malformed body) is served by the
+    # router with no I/O, so it is as fast as the real in-memory `/health` and
+    # would sail through the timing row below and be read as a request the loop
+    # served. What is NOT asserted is the status VALUE (`ok`/`degraded`):
+    # `/health` derives it from in-memory state (#2850), so no mutation of this
+    # diff can move it — that row was dead weight and was deleted (review F2,
+    # PR #14520). ⚠️ The sibling `tests/test_graph_write_loop_responsiveness.py`
+    # keeps the status-value row instead, on the rationale that "asserting 200
+    # alone could not fail"; that divergence is deliberate here, and the 200 row
+    # demonstrably reds on a 404.
+    assert health.status_code == 200, (
+        "the /health probe never reached the handler "
+        f"({health.status_code} {health.text[:200]!r}), so the in-window timing "
+        "asserted below measures nothing (#13722)")
     assert health_done < exited, (
         "/health was NOT served while the stamp write was blocked (answered "
         f"{(health_done - exited) * 1000:.0f} ms AFTER the block released) — a "
