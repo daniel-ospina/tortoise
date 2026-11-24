@@ -58,9 +58,10 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
-# `e6b3cf2908b` — three landings past the `8bc2c3d0643` this block last named — plus this PR's
-# comment-only re-cut, which registers no fast file at all) the verb packs nine shards at 837.3 s
-# (a, b, c, d, e, g, h, j, k) and two at 837.2 s (f, i), so
+# `e6b3cf2908b` — seven landings past the `88cd00a068` head the block last named, and a tree that
+# registers no fast file of its own) the verb packs nine shards at 837.3 s
+# (a, b, c, d, e, g, h, j, k) and two at 837.2 s (f, i) — the SAME partition that reading produced,
+# re-derived here rather than carried — so
 # `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. The registrations this block's own reading
@@ -68,7 +69,7 @@ version: 1
 # `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`, #14220's
 # `tests/test_14186_embedder_seam_batching.py`, #14423's `tests/test_14350_drain_convergence.py`,
 # #14038's `tests/test_13998_capacity_notice.py` and #14429's `tests/test_spool_drain_rehearsal.py`
-# (listed in shard k) — FIVE of them on top of #14038's row, which the 836.4 s baseline below
+# (listed in shard `k`) — FIVE of them on top of #14038's row, which the 836.4 s baseline below
 # already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
 # it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
 # only the worst figure: five registrations x 2.0 s is the whole of 9200.1 -> 9210.1.
@@ -77,9 +78,11 @@ version: 1
 # it to six at 836.6 and five at 836.5, #14434's to four at 836.8 and seven at 836.7 (and `main` sat
 # RED between that landing and the next re-cut, which is the failure this block exists to prevent),
 # #14220's to two at 837.0 and nine at 836.9, #14423's flattened all eleven onto 837.1 s — the first
-# perfectly balanced reading since the 2026-11-23 durations refresh. That scope is MEASURED, not a
-# guess about superlatives: of the 26 landings between that refresh and #14423, the twelve that touch
-# this manifest are each split (and the other fourteen do not touch it at all), while `024387f5`
+# perfectly balanced reading since the 2026-11-23 durations refresh. (Each of those five readings was
+# re-derived with `--emit-push-matrix` at its own landing, not quoted from the one before it.) That
+# scope is MEASURED, not a guess about superlatives: of the 26 landings between that refresh and
+# #14423, the twelve that touch this manifest are each split (and the other fourteen do not touch it
+# at all), while `024387f5`
 # emitted 721.6 s on all eleven BEFORE that refresh — so "first at S=11" unscoped is FALSE and is
 # not what this block claims. Then #14429's re-packed them back into the nine/two above.
 # ⛔ Which is why a rebase that interleaves two sides of this paragraph REDS rather than picking
