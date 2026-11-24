@@ -13145,6 +13145,39 @@ def _literal_pytest_watchdog(job: dict) -> int | None:
     return None
 
 
+def test_duration_coverage_guard_fires_below_the_floor_and_not_at_it():
+    """#3400: the coverage floor FIRES, and it is INCLUSIVE.
+
+    ⛔ RESTORED (#14439, 2026-11-24). `#14419`'s B7 cut deleted this arm with the rest
+    of the durations arithmetic, which left `duration_coverage_issues` with NO
+    falsifier: every surviving caller only asserts that it COMPOSES (this file's
+    `integrity(...) + ... + duration_coverage_issues(m)`), and
+    `tests/test_ci_timing.py` only names it in a validator tuple — so a floor that
+    returned `[]` unconditionally keeps the required `manifest-integrity` leg green.
+    That is the no-op-gate class the cut is not allowed to create, and the only
+    question is whether the deleted arm was the SOLE pin on a live gate. It was:
+    `git grep -c DURATION_COVERAGE_MIN -- tests/` is 0 at `#14419`'s merge.
+    """
+    from tools.ci_selection import DURATION_COVERAGE_MIN, duration_coverage_issues, load_manifest
+
+    assert DURATION_COVERAGE_MIN == 0.90, DURATION_COVERAGE_MIN
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+
+    def _manifest(covered: int) -> dict:
+        return {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+                "durations": {f: 2.0 for f in files[:covered]}}
+
+    assert duration_coverage_issues(_manifest(89)) != [], "89% must fire"
+    assert duration_coverage_issues(_manifest(90)) == [], "90% is at the floor, not below"
+    assert duration_coverage_issues(_manifest(95)) == [], "95% must be silent"
+    # The documented PASS state: a repo that has not adopted durations at all.
+    assert duration_coverage_issues({"surfaces": {"core": files}, "tier1": [],
+                                     "slow_files": []}) == [], (
+        "an ABSENT map is not a coverage failure (#3400's fail-closed-once-populated rule)")
+    # And the real map is above its own floor, so this arm is not asserting a red tree.
+    assert duration_coverage_issues(load_manifest()) == []
+
+
 def test_every_bounded_pytest_job_caps_above_its_watchdog():
     """#3239: a pytest job whose in-step watchdog kills it must ALSO carry an
     outer `timeout-minutes` strictly above that watchdog.
@@ -13187,6 +13220,18 @@ def test_every_bounded_pytest_job_caps_above_its_watchdog():
         f"the carve-out's largest per-shard watchdog ({worst}m) must stay "
         f"BELOW its outer cap ({carve_cap}m), or the runner kills the step "
         f"before it can print its pass/fail counts (#798)")
+    # ⛔ AND THE CAP MAY NOT DWARF THAT WATCHDOG. ORDER alone is satisfied by
+    # GitHub's 360m default, so `#14419`'s B7 cut left the ratio ungraded while
+    # `_CAP_CEILING_FACTOR`/`_MEASURED_PYTEST_MAX_MIN` stayed defined and unread:
+    # a cap of 360m passed every surviving assertion while holding the per-PR
+    # concurrency slot for six hours on a hung shard — the very #3239 state the
+    # ORDER arm exists to prevent. The ratio IS the bound (`cap <= 3x`), so it is
+    # asserted here, restored by #14439 (2026-11-24).
+    assert carve_cap <= 3 * worst, (
+        f"the carve-out's cap ({carve_cap}m) must stay within 3x its largest "
+        f"per-shard watchdog ({worst}m) — ORDER alone does not bound it, and "
+        f"GitHub's 360m default satisfies ORDER while holding the concurrency "
+        f"slot for six hours (#3239)")
     # The fast shards' watchdog is per-shard, clamped by the selector at
     # WATCHDOG_CEILING_MIN — so the cap must clear that ceiling, not a literal.
     fast_cap = jobs["test"].get("timeout-minutes")

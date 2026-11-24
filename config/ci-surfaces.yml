@@ -27,6 +27,17 @@ version: 1
 # SUM paragraph below).
 # The other live pin, the lane-parity superset test below, does NOT read the map —
 # it pins the
+# S is chosen by that formula on the committed map, and the minutes it yields
+# are deliberately NOT restated here — they move with every re-cut, which is
+# how this block went stale twice. The authoritative pins WERE the balance-band
+# test (`test_real_workflow_halves_are_consistent`, CUT in the B7 test cut on
+# 2026-11-23) and the lane-parity superset test below, which recomputes from the
+# map and stays.
+# The ONE live pin left is the emission guard
+# (`test_the_fast_shards_header_block_states_the_measured_emission`), which grades
+# the per-shard `--emit-push-matrix` sentence further down in this block against
+# the LIVE emission, so the figures in it are a graded claim and not merely prose.
+# The lane-parity superset test below does NOT read the map either — it pins the
 # label POLARITY (`shard_labels(2)` ⊂ `shard_labels(9)`), which is what the merge rail
 # subtracts main's published job names against.
 #
