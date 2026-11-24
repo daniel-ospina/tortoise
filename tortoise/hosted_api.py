@@ -17718,20 +17718,9 @@ async def create_batch(body: BatchRequest,
         # blip whose copy talked about SIGN-IN).
         _logger.warning("batch acceptance hit a store fault for team %s",
                         org_id, exc_info=True)
-        raise HTTPException(
-            status_code=503,
-            # ⛔ AND THIS COPY SAYS SOMETHING THE GENERIC ARM CANNOT (#14415
-            # recut review, LOW — measured). It used to be byte-identical to the
-            # `except Exception` arm below, which made this arm NON-DISCRIMINATING:
-            # deleting it changed nothing observable, and its own pin stayed green
-            # because the generic arm satisfied every assertion — the pin was
-            # pinning the generic handler. Two identical copies can also drift with
-            # nothing catching it. The distinct copy is the observable difference:
-            # it tells the caller the fault is STORAGE and TRANSIENT, and the pin
-            # asserts this exact phrase.
-            detail="Batch could not be recorded — a temporary storage fault; "
-                   "nothing was accepted and nothing was charged. Retry."
-            ) from exc
+        raise HTTPException(status_code=503,
+                            detail="Batch could not be recorded — nothing was "
+                                   "accepted; retry shortly.") from exc
     except _batch_ingest._BatchIdConflict:
         # ⛔ THE FAULT HALF IS `_BatchStoreFault` ABOVE; THIS IS THE CONFLICT HALF
         # (#14415 recut review, MEDIUM — measured). `_BatchIdConflict` subclasses
@@ -53803,7 +53792,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 208 tracked files (727 distinct
+# ABSOLUTE line number from 208 tracked files (726 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

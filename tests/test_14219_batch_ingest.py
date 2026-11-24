@@ -3543,20 +3543,26 @@ def test_a_staging_fault_does_not_discard_a_rivals_id(tmp_path):
     guard: `discarded: ['b-race']`, and the rival's row was gone.
     """
     class _StagingFaultStore(InMemoryBatchStore):
+        """The rival's row EXISTS BEFORE `submit` is called (round 24, P2 — the pin
+        used to create it from inside `get_batch`, so the assertion that the row
+        survived was planting the very row it checked: a mutant that deleted it went
+        green). Only the pre-check is blinded, which is the interleaving that lets a
+        caller-supplied id reach the item write at all.
+        """
+
         def __init__(self) -> None:
             super().__init__()
             self.discarded: list[str] = []
             self.reads = 0
-
-        def get_batch(self, org_id, batch_id):
-            # The pre-check misses; the rival's row appears immediately after it.
-            self.reads += 1
-            if self.reads == 1:
-                return None
-            super().put_batch(Batch(batch_id=batch_id, org_id=org_id,
+            super().put_batch(Batch(batch_id="b-race", org_id=ORG,
                                     state=BatchState.RUNNING,
                                     created_at="2026-01-01T00:00:00+00:00",
                                     updated_at="2026-01-01T00:00:00+00:00"))
+
+        def get_batch(self, org_id, batch_id):
+            self.reads += 1
+            if self.reads == 1:
+                return None            # the pre-check cannot see the rival's row
             return super().get_batch(org_id, batch_id)
 
         def discard(self, org_id, batch_id):
@@ -3633,6 +3639,99 @@ def test_a_refusal_after_staging_unlinks_the_bytes_it_wrote(tmp_path):
     assert files == [], (
         "the refusal left the caller's documents on disk for ever: "
         f"{[str(p) for p in files]}")
+
+
+def test_a_conflict_refusal_unlinks_the_bytes_it_staged(tmp_path):
+    """⛔ THE CONFLICT ARM IS THE OTHER REFUSAL THAT STAGES FIRST (round 24, P2).
+
+    `_BatchIdConflict` skips the rollback by design — for BOTH its arms — so the
+    documents staged before the refusal must be unlinked by the arm itself. Nothing
+    else does: the rollback is `_discard_staged`'s only caller and no sweeper exists
+    for `_batches/`. Unpinned, deleting this unlink left the whole ingest suite green.
+    """
+    class _HiddenThenExisting(InMemoryBatchStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = 0
+            super().put_batch(Batch(batch_id="b-taken", org_id=ORG,
+                                    state=BatchState.RUNNING,
+                                    created_at="2026-01-01T00:00:00+00:00",
+                                    updated_at="2026-01-01T00:00:00+00:00"))
+
+        def get_batch(self, org_id, batch_id):
+            self.reads += 1
+            if self.reads == 1:
+                return None            # the pre-check is blinded
+            return super().get_batch(org_id, batch_id)
+
+    coord = BatchCoordinator(_HiddenThenExisting())
+    raised: BaseException | None = None
+    try:
+        coord.submit(ORG, ["/d/a.md", "/d/b.md"], contents=["one", "two"],
+                     stage_base=str(tmp_path), batch_id="b-taken")
+    except BaseException as exc:      # asserted below, never swallowed
+        raised = exc
+
+    assert isinstance(raised, ValueError), f"no conflict raised: {raised!r}"
+    written = [p for p in tmp_path.rglob("*") if p.is_file()]
+    assert written == [], (
+        "a conflict refusal left the caller's documents on disk for ever: "
+        f"{[str(p) for p in written]}")
+
+
+def test_a_create_write_fault_never_discards_a_published_batch():
+    """⛔ THE CREATE IS THE LAST UNGUARDED CALL AFTER `put_items` (round 24, P1).
+
+    By the time `put_batch_if_absent` runs, the recovery scan can already have
+    published the row (`pending_batches()` UNIONs the item arm) and a drain can have
+    claimed an item. A fault there reaching the rollback therefore deletes a batch
+    that is VISIBLE and being processed, silently drops that drain's settlement, and
+    answers `503 … retry` — so the retry opens a second batch over the same content
+    and charges for it twice. Measured before the guard: `discard('BID')`, row gone,
+    items gone, `pending_batches` empty, the drain's 4 200/900 tokens lost.
+    """
+    class _CreateFaultStore(InMemoryBatchStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.discarded: list[str] = []
+            self.bids: list[str] = []
+            self.attempts = 0
+
+        def put_items(self, org_id, items):
+            self.bids.append(items[0].batch_id)
+            return super().put_items(org_id, items)
+
+        def put_batch_if_absent(self, batch) -> bool:
+            self.attempts += 1
+            # The recovery scan publishes the row; OUR write then faults.
+            super().put_batch(Batch(batch_id=batch.batch_id, org_id=batch.org_id,
+                                    state=BatchState.RESUMING,
+                                    created_at=batch.created_at,
+                                    updated_at=batch.updated_at))
+            raise RuntimeError("graph statement timeout (write)")
+
+        def discard(self, org_id, batch_id):
+            self.discarded.append(batch_id)
+            return super().discard(org_id, batch_id)
+
+    store = _CreateFaultStore()
+    coord = BatchCoordinator(store)
+    raised: BaseException | None = None
+    try:
+        coord.submit(ORG, ["/d/a.md"])
+    except BaseException as exc:      # asserted below, never swallowed
+        raised = exc
+
+    assert raised is not None, "the create fault was not refused"
+    assert store.attempts == 2, (
+        f"the create write was not retried once ({store.attempts} attempts)")
+    assert store.discarded == [], (
+        "a CREATE fault discarded a batch the recovery scan had published: "
+        f"{store.discarded}")
+    bid = store.bids[0]
+    assert store.get_batch(ORG, bid) is not None, (
+        "the published batch row was deleted by a write fault")
+    assert store.items(ORG, bid), "its item rows were deleted with it"
 
 
 def test_the_acceptance_copy_names_no_window_when_the_record_has_no_duration():

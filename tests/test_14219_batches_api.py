@@ -2493,16 +2493,23 @@ def test_a_store_fault_at_acceptance_answers_retry_not_a_misconfiguration(
     detail = r.json()["detail"]
     assert detail.startswith("Batch could not be recorded"), (
         f"a store fault was answered with the storage-misconfiguration copy: {detail}")
-    assert "retry" in detail.lower(), detail
     assert "send items as paths" not in detail, detail
-    # ⛔ AND THE ARM ITSELF MUST BE OBSERVABLE (#14415 recut review, LOW). Its copy
-    # used to be byte-identical to the generic `except Exception` arm's, so deleting
-    # the dedicated arm left this pin GREEN — it was pinning the generic handler.
-    # This phrase exists only in the store-fault arm.
-    assert "temporary storage fault" in detail, (
-        "this detail is the GENERIC arm's, not the store-fault arm's — the "
-        "dedicated `except _BatchStoreFault` arm is missing, or its copy was "
-        f"collapsed back onto `except Exception`: {detail}")
+    # ⛔ THE ARM MUST BE DISTINGUISHABLE FROM THE GENERIC ONE (round 24, P2): both
+    # used to emit a BYTE-IDENTICAL detail, so deleting this arm left the pin green
+    # — it could not see the arm it named. A fault is the retry-soon case.
+    assert detail.endswith("retry shortly."), (
+        "the store-fault arm is indistinguishable from the generic fault arm, so "
+        f"nothing pins it: {detail}")
+    assert r  # (kept explicit: the negative below is what proves the ValueError arm)
+
+
+def test_a_storage_misconfiguration_still_gets_its_own_copy(
+        client, monkeypatch):
+    """The negative half of the pair above: a `ValueError` (no storage configured for
+    inline text) must still say so — the fault copy must not swallow it."""
+    r = client.post("/v1/batches", json={"items": [{"ref": "/d/a.md", "text": "hi"}]})
+    assert r.status_code == 503, r.text[:200]
+    assert r.json()["detail"].startswith("Batch storage is unavailable"), r.json()
 
 
 def test_a_root_that_can_be_created_but_not_written_is_refused_before_the_ack_gate(
