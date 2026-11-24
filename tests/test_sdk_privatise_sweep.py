@@ -2787,6 +2787,40 @@ def test_baseline_rev_prefers_the_MERGE_BASE_then_falls_back_to_origin_main(monk
     assert calls, "the stub was never called — the arm is vacuous"
 
 
+def test_the_check_WIRES_the_resolved_baseline_into_the_ratchet(monkeypatch, tmp_path, capsys):
+    """⛔ THE WIRING ITSELF, which is the mutant that survived every other arm (#14548 review, F3).
+
+    Replacing `base_rev, why = baseline_rev(args.baseline)` with `base_rev, why = None, "x"` left
+    all fifteen ratchet arms green: they grade `ratchet_verdict` / `baseline_rows` directly, and
+    the only other `main()` arm returns at the VACUOUS CHECK 67 lines earlier. That mutant puts
+    `--check` back on the frozen-pin ceiling — the headline behaviour of this PR, gone, with a
+    green suite. So this arm drives `main()` through the RESOLVED-baseline path and grades both
+    the wiring (`ratchet baseline: <sha>`) and the verdict (a growth REDS, exit 1).
+
+    Mutation: `main(): base_rev, why = None, "x"` -> the run takes the degraded pin path, prints
+    no `ratchet baseline:`, and exits 0 (1 <= the pin) — both asserts RED.
+    """
+    _main_fixture(monkeypatch, tmp_path, "def probe(reg):\n    reg.update({'a': 1})\n")
+    base = "e" * 40
+    monkeypatch.setattr(
+        privatise, "baseline_rev", lambda explicit=None: (base, "the merge base with origin/main"))
+    monkeypatch.setattr(privatise, "baseline_rows", lambda *a, **k: (Counter(), {}, {}))
+    monkeypatch.setattr(privatise, "_git", lambda *a: "0" * 40)  # HEAD is NOT the baseline
+    monkeypatch.setattr(sys, "argv", ["sdk_privatise.py", "--check"])
+
+    assert privatise.main() == 1, (
+        "one receiver above the RESOLVED baseline must red — taking the degraded pin instead "
+        "would pass it, which is the mutant this arm exists to kill")
+    captured = capsys.readouterr()
+    assert f"ratchet baseline: {base[:12]}" in captured.out, (
+        f"`--check` must grade against the baseline it resolved: {captured.out!r}")
+    assert "ROSE by 1" in captured.err, (
+        f"the growth must be reported as a ratchet failure: {captured.err!r}")
+    assert "the PIN is the only ceiling here" not in captured.err, (
+        f"the resolved baseline was a real tree, so the degraded pin path must not run: "
+        f"{captured.err!r}")
+
+
 def test_on_a_post_merge_tree_the_dead_ratchet_is_STATED(monkeypatch, tmp_path, capsys):
     """When the baseline IS this commit, `--check` cannot red — and it must SAY so.
 
