@@ -1138,8 +1138,10 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
     # deliberately excluded from :data:`_EPISODE_INCIDENT_KINDS` (it records an
     # operator decision, not a rule's flag window), and even for the rule-episode
     # kinds the re-arm is CONDITIONAL ON THE SHAPE — with a store the release is
-    # gated on ``SKIPPED_WINDOW`` until ``DR_RECOVERY_STREAK`` clean observations,
-    # so an alternating rule stays inside the window there; only the
+    # gated on ``SKIPPED_WINDOW`` while that gate applies (a resolve leg that raises
+    # or answers ``CloseCooldown`` leaves it false and pops the ledger at every
+    # episode end; ``ALERT_RECOVERY_STREAK=1`` closes per crossing), so an
+    # alternating rule normally stays inside the window there; only the
     # no-incident-channel ledger is released on every confirmed episode end.
     # Stating one kind's rule for all three sends an operator diagnosing a page
     # that did not arrive to look for an episode end that never runs for that

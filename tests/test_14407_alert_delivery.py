@@ -1516,8 +1516,8 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
     _emit("abuse_suspended")
     log = captured["abuse_suspended"]
     assert "RE-ARMED by a confirmed episode end" not in log, (
-        "the log credits an episode re-arm to a kind that has no episode; its own "
-        f"runbook row says the window is never re-armed early: {log!r}")
+        "the log credits an episode re-arm to a kind that has no rule episode; its "
+        f"runbook row says an episode end never re-arms it: {log!r}")
     assert "NOT re-armed by an episode end" in log, (
         f"the suspension shape must state the limit it actually has: {log!r}")
     assert "NO rule episode" in log, log
