@@ -780,7 +780,9 @@ def test_restore_graph_asks_the_gate(proj, monkeypatch):
         "the restore dropped a vector it was told to keep — a restored graph left short")
     assert "retired_vectors" not in result
 
-    proj.g.query("MATCH (n) DETACH DELETE n")
+    # `_query` is the guarded handle's own delegate (`#14548`'s ratchet counts a NEW
+    # untyped `.query(` receiver as growth); `query()`/`ro_query()` both route here.
+    proj.g._query("MATCH (n) DETACH DELETE n")
     _gate(monkeypatch, False)
     result = restore_graph(proj.g, dump)
     assert _prop(proj.g, "(n:Event {eventId:'ev-13826-restore'})",
