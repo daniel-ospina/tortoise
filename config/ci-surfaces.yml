@@ -64,6 +64,13 @@ version: 1
 # `6a02515d14ad` — the last fold; the registrations from earlier folds are in `main` too, which is
 # why this clause is `main`'s reading as well — plus `tests/test_4625_schema_reads_off_write_path.py`
 # at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) the verb packs one shard at 838.1 s (g) and ten at
+# ⛔ THIS PARAGRAPH IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the
+# tree this block MERGES INTO, never carried from the branch that first wrote it. THIS head folds
+# `main` at `6a02515d14ad`, and the pool it emits is the union of BOTH parents' registrations —
+# that `main`'s own `core` row for `tests/test_4625_schema_reads_off_write_path.py`, plus this
+# PR's own `tests/test_14033_state_cue_gap.py` — each at the flat 2.0 s `DEFAULT_FAST_WEIGHT`,
+# because a file a PR ADDS cannot carry a junit reading yet. On that merged tree the verb packs
+# one shard at 838.1 s (g) and ten at
 # 838.2 s (a, b, c, d, e, f, h, i, j, k), so
 # `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
@@ -85,7 +92,7 @@ version: 1
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
 # paragraph is the fold's PROVENANCE: which registrations the single graded clause counts, and on
-# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `2cccf90f4dd4`
+# which tree. ⛔ It is MEASURED ON THIS PR'S MERGED HEAD, which sits on `main` at `6a02515d14ad`
 # and adds this PR's own registration only
 # (`tests/test_14033_state_cue_gap.py`, which the same emission puts in shard `f`). A restatement
 # here would be graded as a SECOND claim — `test_the_fast_shards_header_block_states_the_measured_emission`
