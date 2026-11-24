@@ -1949,15 +1949,17 @@ SWEEP_NAMES = 66
 #: drift is the OPPOSITE direction from the `43182ac0` fold: `main` has ALREADY re-cut its own pin
 #: to `(11901, "953c70c05b55923b")` (the `#14350` D1 lane, `#14423`, cut it on its own merged tree),
 #: so this side has no stale pin to repair — what moved is the TREE the two sides resolve to, and
-#: the pair below is `--repin`'s own output on it, never arithmetic on either parent's pin. The
-#: +4 over the `11909` measured before this fold is `main`'s: `#14423` added
-#: `tests/test_14350_drain_convergence.py`, whose rows are ordinary-word receivers of exactly the
-#: class this pin DECLARES. ⛔ THE PAIR DID NOT MOVE ON THIS FOLD, and that is measured rather than
-#: assumed: `--repin` on the resolved tree prints the SAME `(11909, "55c8de942f8d2747")` the
-#: `43182ac0` fold recorded, because `#14423` re-cut `main`'s pin ON ITS OWN MERGED TREE (including
-#: its new test file) rather than leaving one step of drift, so the two sides fold onto a tree whose
-#: reading is unchanged while the tree itself moved. `11909 − 8 = 11901` is the CROSS-CHECK of
-#: that reading against `main`'s own pin, never the source. `--check` exits 0 on this tree with
+#: the pair below is `--repin`'s own output on it, never arithmetic on either parent's pin.
+#: ⛔ THE PAIR DID NOT MOVE ON THIS FOLD, and that is measured rather than assumed: `--repin` on the
+#: resolved tree prints the SAME `(11909, "55c8de942f8d2747")` the `43182ac0` fold recorded, even
+#: though `#14423` added `tests/test_14350_drain_convergence.py` to the pool in `da82ece4` —
+#: because that same commit re-cut `main`'s pin ON ITS OWN MERGED TREE instead of leaving a step of
+#: drift, so its rows are already inside the `11901` `main` now carries and the two sides fold onto
+#: a tree whose reading is unchanged while the tree itself moved. ⛔ The +4 an earlier draft of this
+#: block predicted from the new test file is NOT there, and the prediction is recorded rather than
+#: quietly dropped: the number came from `#14423`'s own re-cut, not from a row this branch added.
+#: `11909 − 8 = 11901` is the CROSS-CHECK of that reading against `main`'s own pin, never the
+#: source. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11909, "55c8de942f8d2747")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
