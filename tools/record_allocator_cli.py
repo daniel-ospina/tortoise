@@ -596,7 +596,13 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT backfill_graph")
             refused += 1
-            entry.update({
+            # `|=`, not `dict.update(…)`: the privatisation ratchet
+            # (`tools/sdk_privatise.py --check`) counts an ordinary-word
+            # `.update(` receiver as untyped residue because `update` is a
+            # RETIRED SDK name, so a plain dict merge spelled `.update(` reads as
+            # a new swept-name reference. `|=` is PEP 584's dict merge — the same
+            # operation, and it cannot be mistaken for a Graph/SDK call.
+            entry |= {
                 "outcome": "refused",
                 "reason": exc.reason,
                 "row_max": exc.row_max,
@@ -610,7 +616,7 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
                     f"seed --org-id {args.org_id} --graph-id {graph_id} "
                     f"--enumerated-floor {journal_max_seq}"
                     if exc.reason == "divergence" else None),
-            })
+            }
             entries.append(entry)
             continue
         if dry_run:
@@ -622,9 +628,9 @@ def _cmd_backfill(conn: Any, args: argparse.Namespace) -> dict[str, Any]:
         else:
             conn.commit()
             entry["outcome"] = "seeded"
-            entry.update({"seq": result.seq, "mode": result.mode,
-                          "healed_tail": result.healed_tail,
-                          "burned": result.burned})
+            entry |= {"seq": result.seq, "mode": result.mode,
+                      "healed_tail": result.healed_tail,
+                      "burned": result.burned}
             if arm_them:
                 entry["armed"] = True
         seeded += 1
