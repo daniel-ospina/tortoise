@@ -263,6 +263,67 @@ def _off_loop_references(tree: ast.Module, name: str) -> list[tuple[int, bool]]:
     )
 
 
+def _string_value(node: ast.AST) -> str | None:
+    """The string a CONSTANT-FOLDABLE expression evaluates to, or ``None``.
+
+    ⛔ SPLITTING THE LITERAL IS STILL SPELLING IT (review finding, P2, measured).
+    The string arm below started as an exact `ast.Constant` compare, and the name
+    assembled from fragments — `locals()["_stamp_" + "chain"]()`,
+    `eval(f"{'_stamp'}{'_chain'}")()` — contains a literal equal to NO whole owner,
+    so it stayed invisible to both this arm and the reference walk and the chain
+    ran inline on the loop with the pin GREEN (measured on `/tmp` copies: `1
+    passed` for each of five spellings). Folding what the interpreter would fold
+    closes the whole family: `+` of string constants, and f-strings whose parts are
+    themselves literal. Anything it cannot fold returns ``None``.
+
+    ⛔ WHAT IS GRADED, AND WHAT IS NOT — stated because two earlier drafts of this
+    paragraph claimed more than the code does. MEASURED on `/tmp` copies, all of
+    them spliced beside the legal submission and grep-proven applied:
+
+      RED (every spelling this pass can constant-fold) — the whole literal, `+` of
+      literals, and a literal-part f-string:
+        locals().get("_stamp_chain")()
+        locals()["_stamp_" + "chain"]()
+        eval(f"{'_stamp'}{'_chain'}")()
+        eval(f"{chr(95)}_stamp_chain")()   # the whole literal survives inside
+
+      GREEN (no arm sees it; do not read this as coverage) — any composition by an
+      operator or call this pass does not fold, or any run-time-computed part:
+        eval("%s%s" % ("_stamp", "_chain"))()
+        eval("".join(["_stamp", "_chain"]))()
+        eval("_stamp{}".format("_chain"))()
+        eval("_stamp" + chr(95) + "chain")()
+
+    So the boundary is "everything `_string_value` folds reds", NOT "every static
+    spelling reds" — Python has unbounded ways to assemble a string, and a static
+    pass cannot enumerate them. Closing the class properly needs a RUN-TIME guard
+    (the chain must never execute on the loop thread), which is a different
+    mechanism — filed as #14528 rather than claimed here.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _string_value(node.left)
+        right = _string_value(node.right)
+        if left is None or right is None:
+            return None
+        return left + right
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            elif isinstance(value, ast.FormattedValue) and value.format_spec is None:
+                inner = _string_value(value.value)
+                if inner is None:
+                    return None
+                parts.append(inner)
+            else:
+                return None
+        return "".join(parts)
+    return None
+
+
 def _statically_false(test: ast.expr) -> bool:
     """True when the interpreter itself would fold ``test`` to a false value.
 
@@ -457,13 +518,14 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # leave it reporting ONLY the legal submission, and the pin stayed GREEN
     # (`1 passed`, rc=0) for both. This arm closes the shape the walk cannot
     # follow: the owner's name must not appear as a STRING LITERAL in the module
-    # at all. Fail-closed on purpose — a diagnostic string naming the chain reds
+    # at all — folded to its value first (`_string_value`), so `"_stamp_" +
+    # "chain"` and a literal f-string count as the name. Fail-closed on purpose — a diagnostic string naming the chain reds
     # too, and a name worth spelling in a string is a name worth grading
     # explicitly. Measured cost today: zero (`grep` finds the name at its `def`
     # and at its submission, and nowhere else).
     string_built = {
         owner: [node.lineno for node in ast.walk(tree)
-                if isinstance(node, ast.Constant) and node.value == owner]
+                if _string_value(node) == owner]
         for owner in sorted(owners)
     }
     string_built = {owner: lines for owner, lines in string_built.items() if lines}
