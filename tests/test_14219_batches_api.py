@@ -2175,11 +2175,15 @@ def test_a_configured_but_unusable_storage_root_is_refused_before_the_ack_gate(
     def _root(org_id, *, create=False):
         calls.append(bool(create))
         # Configured, and creatable only when the caller actually asks to create —
-        # i.e. the shape that refuses BEFORE collecting an acknowledgement.
-        return "/tmp/ingest" if create else "/tmp/ingest"
+        # i.e. the shape that refuses BEFORE collecting an acknowledgement. The
+        # else-arm answers "nothing configured", so a pre-gate check that omits
+        # `create=True` cannot pass by accident (it used to be the SAME string in
+        # both arms, a no-op ternary ruff flags as RUF034 and a reader would read
+        # as a real distinction).
+        return "/tmp/ingest" if create else ""
 
     monkeypatch.setattr(ha, "_batch_org_root", _root)
-    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)  # noqa: F821
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
     items = [{"ref": f"/d/{i}.md", "text": "hello"} for i in range(60)]
     r = client.post("/v1/batches", json={"items": items})
     assert True in calls, (
