@@ -100,26 +100,6 @@ version: 1
 # a different bin because the packer is greedy). EVERY one of them re-partitions every bin, which is
 # why the split is quoted and not only the worst figure.
 #
-# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
-# `f379299c64`) the verb packs seven shards at 837.5 s (a, c, d, e, i, j, k) and four at 837.4 s
-# (b, f, g, h) — the partition `#14471`'s `tests/test_13526_quota_refusal_figures.py` registration
-# produced (a fast file at the flat 2.0 s `DEFAULT_FAST_WEIGHT` re-packs EVERY bin, so the
-# nine/two at 837.3 s this block last stated moved by two tenths of a second per shard
-# with no `durations:` row changing (both heads carry the SAME 1,493-row map, measured with
-# `yaml.safe_load` — the emission's total moved by exactly the one 2.0 s flat-default
-# registration, 9210.1 -> 9212.1, which is precisely why the guard grades the SECONDS and the
-# NAMES and not the minute) — re-derived here rather than carried — so
-# `ceil(837.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. The registrations this block's own reading
-# counts are the ones `main` has landed at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — #14409's
-# `tests/test_14371_offline_embed_json.py`, #14434's `tests/test_7879_record_chain.py`, #14220's
-# `tests/test_14186_embedder_seam_batching.py`, #14423's `tests/test_14350_drain_convergence.py`,
-# #14038's `tests/test_13998_capacity_notice.py` and #14429's `tests/test_spool_drain_rehearsal.py`
-# (listed in shard `k`) — FIVE of them on top of #14038's row, which the 836.4 s baseline below
-# already counts (measured: that row is in shard c at `4993fa08`, so the baseline's total includes
-# it) — and EVERY one of them re-partitions every bin, which is why the split is quoted and not
-# only the worst figure: five registrations x 2.0 s is the whole of 9200.1 -> 9210.1.
 # ⛔ The partition moves on every landed registration, and this block's own readings show how fast:
 # the guard's landing (#14405) packed eight bins at 836.4 s and three at 836.3 s, #14409's row moved
 # it to six at 836.6 and five at 836.5, #14434's to four at 836.8 and seven at 836.7 (and `main` sat
