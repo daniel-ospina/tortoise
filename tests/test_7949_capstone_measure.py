@@ -6008,10 +6008,13 @@ class _ManifestShapeError(RuntimeError):
 #: sits ABOVE this block, so "below" would send a reader the wrong way, and one who
 #: then found no sweep would conclude `_BUNDLE_SOURCES` is unconsumed — the "both
 #: were CUT" error this sentence exists to remove. ⛔ No claim in this note points
-#: at an earlier revision of the note itself: those commits do not survive the squash
-#: merge, so a reader cannot check one. No linter reads prose (ruff's F841 is
-#: function-scope only, and no rule resolves comment line references), so nothing
-#: but this note's own accuracy keeps it true.
+#: at an earlier revision of the note: a squash merge lands ONE commit, and a clone
+#: fetches `refs/heads/*` and tags but never `refs/pull/*`, so those revisions are in
+#: no history the reader has. The anchors it DOES rely on outlive the merge —
+#: `8c373f59a1` is in `main`'s history, and `#14439`/`#14482`/`#14493` are tracker
+#: records that stay. No linter reads prose (ruff's F841 is function-scope only, and
+#: no rule resolves comment line references), so nothing but this note's own
+#: accuracy keeps it true.
 #: Every number below was verified by READING, which is why
 #: four of them were still wrong when the commit that re-derived them landed.
 _EPIC_CITE_DOCS = {
