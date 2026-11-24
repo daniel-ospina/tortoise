@@ -1914,28 +1914,52 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
 #: legitimised by the re-cut; the pair below is `--repin`'s own output on THIS tree, never arithmetic
 #: on the last pin, and `--check` exits 0 on it.
-#: Re-pinned by `--repin` on THIS tree, never by arithmetic on the last pair: `(11913, "7f983a0f90145874")`.
-#: The last two re-cuts are attributable and worth knowing: 11896 -> 11900 was this PR's own batch
-#: surface at `4b7be98fb38b`; 11900 -> 11908 is the 402-copy tests added on the recut, whose new
-#: `ha.` / `est.` / `detail` attribute reads are untyped receivers the sweep deliberately leaves alone.
-#: ⛔ MERGED `origin/main` `989765162f` INTO THIS BRANCH — the pair below is `--repin`'s own output on
-#: the RESOLVED merge tree, never inherited from either parent (this branch pinned `(11911,
-#: "270de036aa1b72b7")`, `main` `(11901, "953c70c05b55923b")`). THE +1 IS ATTRIBUTED BY THE TOOL'S
-#: OWN ROW DIFF, not by arithmetic: `--report --base 28ca66878d --top 3000` run at the pre-merge head
-#: `e2f46b75e678` (in a detached worktree) AND on this tree, both row sets sorted and diffed, yields
-#: exactly TWO differences out of an 861-row set, BOTH `main`'s and both in ONE file:
-#:   * `reached.update` absent → **3** — a shape that did not exist before, and main's
-#:   * `projection.g.query` **26 → 24** (−2) — the same edit removing two receiver calls
-#: both in `tests/test_7879_record_chain.py`, from main's `#14446` (`f635f9e00075`): a set-mutation
-#: receiver (`reached.update(...)` over a comprehension of imported names) is exactly the ordinary-word
-#: shape this pin exists to DECLARE and deliberately leave alone — renaming it would rewrite a test's
-#: own bookkeeping. Net **+1 occurrence over +1 row** (861 → 862), and `typed references still
-#: pointing at a public name` stays **0**, so no typed call site is legitimised by this re-cut.
-#: ⛔ AND THE PEER LANE FOLDED `origin/main` IN AGAIN on its own head (its commits, plus
-#: `origin/feat/14219-batches`'s `edd9c68585b7`, are in the tree this record is written on), so the
-#: attribution above describes ONE of the two folds and the pair below is `--repin`'s own output on
-#: the RESOLVED tree — never either parent's, and never the sum of the two.
-SWEEP_RESIDUE = (11913, "7f983a0f90145874")
+#: ⛔ RE-CUT DOWN BY TWO, AND THIS ONE REPAIRS `main` ITSELF — not a branch's residual. `#14446`'
+#: (`tests/test_7879_record_chain.py`) squash-merged at `f635f9e000`, and on `origin/main` `989765162f`
+#: the pin this paragraph precedes read **(11901, "953c70c05b55923b")** while that tree DERIVES
+#: **(11902, "3a694c6f3ff4e36f")**. So `--check` exited 1 on `main`'s OWN tree, and because
+#: `surface-guard` is not deferrable that red travelled into the REQUIRED `python-ci-gate` for every
+#: open PR — the fleet-wide landing block `#14308` describes, not one PR's inconvenience.
+#: BOTH DIRECTIONS OF THE DELTA ARE ATTRIBUTED ROW BY ROW HERE, which the `#14350` blocks above twice
+#: state they could not do: they hold a count and a digest, never the rows. Measured with this tool's
+#: own `edits_for` on both versions of the one drifted file (`git diff --stat` names no other):
+#:   on `main`:  `env.update` 1, `reached.update` 3, `projection.g.query` 0  = 4
+#:   this head:  `env.update` 1                                             = 1
+#: `#14446`'s item 4 replaced two raw `projection.g.query(...)` Cypher calls with the typed
+#: `_label_vector_count` / `_delete_entity_by_id` API (the `#13610` aggregate and the `#3299`/`#3860`
+#: label-scoped delete), a genuine SHRINK of −2; its new `_imported_modules` collector added
+#: `reached.update` ×3, a genuine +3. Net +1 is the red.
+#: ⛔ THE +3 IS FIXED HERE, NOT DECLARED — the tool's own "fix or declare the new shape" arm — and the
+#: choice is measured, not assumed: the collector now accumulates with `|=` set comprehensions, which
+#: carry no meaning `set.update(...)` did not. Declaring it would have re-pinned `main` UP for drift
+#: that is avoidable in three characters of this change's own new code, in a PR whose subject is that
+#: a guard was too narrow. A PEER's `.update` receiver is STILL declared, never rewritten away (the
+#: `declared_markers.update` and `#13998` test-double precedents above); what decides it is that
+#: `reached` is this change's OWN local `set[str]`, not someone else's code being edited to suit a
+#: counter. The −2 is NOT undone: the typed rewrite is the change's point, and the census follows it.
+#: The pair below is `--repin`'s own output on THIS tree with both edits applied, never arithmetic on
+#: the last pin; `--check` exits 0 on it with `typed references still pointing at a public name: 0`.
+#: ⛔ RE-CUT A FOURTH TIME IN THE `#14419` (B7) LANE'S FOLD, AND THIS ONE IS AGAIN `main`'S OWN RED,
+#: MEASURED RATHER THAN ASSUMED. The lane merged `origin/main` `148dece31973` (a descendant of the
+#: `88cd00a06879` fold it already carried) and re-measured every tree in its OWN worktree:
+#:   * `origin/main` `148dece31973`'s own tree derives **(11903, "df4f73cd9d41cdd1")** against the
+#:     **(11899, "543a559f66bc5e86")** committed right above — so `--check` exits 1 on `main` ITSELF, in
+#:     a PRISTINE detached worktree (`git status --porcelain` empty, `git ls-files --others` 0), i.e.
+#:     not a dirty measurement. That is the `#14062` recurrence a fifth time: `#14461` re-cut this pin
+#:     and its own tree is 4 rows above the number it committed. Open roots are `#14294` / `#14308`;
+#:     `surface-guard` is not in `DEFERRABLE_LEGS`, so the red travels into the REQUIRED
+#:     `python-ci-gate` for EVERY open PR — it is repaired here for that reason, not absorbed.
+#:   * the RESOLVED merge tree derives **11902 / `f904d86c`**, i.e. one row under `main`'s, and the −1
+#:     is attributed ROW BY ROW rather than waved through: `--report --base 28ca66878d… --top 5000`
+#:     was run on BOTH trees (`origin/main`'s and this one), row sets sorted and diffed, EXACTLY ONE
+#:     row differs — `window.update` **1 → 0**. That row lived in the helper `_wall_clock_cap_claims`
+#:     (`main:tests/test_ci_selection.py:15998`), which this B7 cut DELETES; the row SHAPE set goes
+#:     861 → 860, and no shape is added or absorbed in either direction.
+#: ⛔ The one vanishing row is a DELETION this PR declares; the direction the pin exists to catch is a
+#: NEW shape nothing accounts for. `typed references still pointing at a public name: 0` on this tree,
+#: so no typed call site is legitimised by the re-cut. The pair below is `--repin`'s own output on THIS
+#: tree, never arithmetic on the last pin; `--check` exits 0 on it.
+SWEEP_RESIDUE = (11912, "5283703bcbc10cd4")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
