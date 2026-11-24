@@ -385,11 +385,13 @@ jobs:
           # ORPHAN (`org_id` null: a restored/empty project, a key scoped
           # elsewhere, namespace drift — tenant-shaped graphs, HTTP 200, zero
           # owners) OR a refusal that NAMES its owner (the credential/tombstone
-          # guard). Both mean the estate resolved nothing, which is what the arm
-          # is for. ⛔ The predicate does NOT test `org_id`: an owned refusal is
-          # not reserved, so the arm fires with ZERO orphans in the estate. A row
-          # that carries no `reserved` key counts as NON-reserved — fail closed,
-          # never fail open.
+          # guard). Both leave `reapable` at 0 with nothing deleted, which is what
+          # the arm is for. ⛔ The word is NOT "resolved": this file uses that for
+          # OWNERSHIP resolution, and the owned-refusal half resolved its owner —
+          # what it did not do is reap. ⛔ The predicate does NOT test `org_id`: an
+          # owned refusal is not reserved, so the arm fires with ZERO orphans in
+          # the estate. A row that carries no `reserved` key counts as NON-reserved
+          # — fail closed, never fail open.
           orphan_unresolved = [
               row for row in (plan.get("graphs") or [])
               if not row.get("reserved")
