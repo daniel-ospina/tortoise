@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1921 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1977 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -304,6 +304,18 @@ def _residue_block() -> str:
     `grep -c 14395` on `origin/main`'s copy is 0, so it contributes no `#:` line to the walked
     run and no figure above contains it. The 1862 reading is this function's own walk of the
     RESOLVED file, never an adjustment of a carried figure:
+    — and THIS fold of `origin/main` `ae9bf0f959` kept both sides' blocks in
+    `tools/sdk_privatise.py` once more, and the row-set attribution prose this lane added for it
+    (four shapes, 860 rows on BOTH sides) sits in that run like every fold's prose before it, so
+    the figure above is RE-MEASURED by this walk on the RESOLVED file at 1977 rather than
+    inherited from either side: the pre-merge branch head `abf5fefe` walks **1890** and `main`'s
+    own blob walks **1921**, each measured by THIS function on its own file, and the resolved run
+    is the union of the two blocks plus this lane's attribution — never a sum of them, which is
+    why the branch's reading sitting BELOW `main`'s does not make the resolved figure `main`'s
+    plus a delta. The sentence that carries it arrived from `main`'s copy of this file (the
+    branch's `abf5fefe` copy had no such arm at all), and it was TRUE at `main`: its blob walks
+    the 1921 it published. It is not true of the MERGE tree, which is the whole reason the figure
+    is graded rather than trusted.
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
