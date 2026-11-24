@@ -945,7 +945,7 @@ def _clear_unusable_claim_path(path: Path) -> str:
         # ⛔ NOT `_CLEAR_REFUSED`, which the review proposed: that raises
         # `DrainClaimUnavailable`, whose handler stats the path, finds nothing, and
         # runs the pass UNCLAIMED with the false reason "the spool root cannot hold a
-        # claim" (`capture_spool.py:4366-4375`; the Pi twin takes the same unclaimed
+        # claim" (`capture_spool.py:4412-4473`; the Pi twin takes the same unclaimed
         # arm at `tortoise-capture.ts:4546`) — strictly worse than a contention
         # answer. And when the path is still FREE the restore does not merely leave
         # the copy aside: `_restore_quarantine` `rename`s it back, so the holder
