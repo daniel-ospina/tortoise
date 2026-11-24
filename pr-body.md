@@ -373,6 +373,13 @@ file, running the named row and restoring it (`sha256`-checked):
 | **P3** one of the seven re-pointed citations still said "cycle 13" for a finding owned by cycle 15's table | **fixed**: it names cycle 15 and says which two P2s cycle 13 actually owns. |
 | **P3** the cycle-16 table asserted rows "were deleted rather than reworded" and NO row had been deleted | **fixed**: the claim is removed rather than reworded — the diff shows only the two digest rows, each re-added. |
 
+**Cycle 17** (a second lane on the same head, `a3a80e68`) — one **P3-pinning gap**, no code change:
+the cycle-16 fix touched TWO helpers per leg, and only one of the two was pinned on the Python leg.
+
+| finding | disposition |
+|---|---|
+| **P3** the Pi leg's row asserts both primitives (`restoreQuarantine` AND `disposeQuarantine`), but the Python leg's row drives only `_clear_unusable_claim_path` — so `_dispose_quarantine`'s new `return False` (keep the displaced claim in the quarantine on a non-`EEXIST` restore failure) had NO discriminating assertion, and reverting it left the suite green. The failure mode is the exact one cycle 16 fixed: on `ENOSPC`/`EDQUOT`/`EPERM` the quarantined file is the ONLY copy of that holder's claim. | **fixed with the missing row**: `test_a_DISPLACED_claim_is_PRESERVED_when_its_restore_FAILS` drives the real `_takedown`, refuses only the `link` back (`ENOSPC`, not `EEXIST`) and asserts the quarantine still holds the displaced bytes — the return value alone cannot distinguish the fix, since the pre-fix code also returned `False`, so the preservation assertion IS the pin. Verified RED under the pre-fix unconditional `unlink` and restored `sha256`-verified. |
+
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded

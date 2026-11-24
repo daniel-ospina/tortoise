@@ -902,6 +902,55 @@ def test_a_TAKEDOWN_never_deletes_a_live_claim_installed_under_it(tmp_path):
     fresh.release()
 
 
+def test_a_DISPLACED_claim_is_PRESERVED_when_its_restore_FAILS(tmp_path, monkeypatch):
+    """⛔ THE DISPLACEMENT PATH OBEYS THE SAME RULE AS THE RESTORE (review, cycle 16).
+
+    `_dispose_quarantine` puts a displaced claim BACK with `link` when the bytes are
+    not the ones it judged stale. On a non-`EEXIST` failure the quarantined file is
+    the ONLY copy of that holder's claim — the rename vacated the path — so unlinking
+    it turns "restore failed" into "claim destroyed" and frees the path for the next
+    `link`, which is the double-holder window this whole module closes. That branch
+    now keeps the object and returns `False` (fail closed: `acquire` answers `None`).
+
+    The Pi leg's row asserts BOTH of its primitives
+    (`tortoise-capture.test.ts`, "a FAILED restore does not delete the only copy of a
+    peer claim" — `restoreQuarantine` **and** `disposeQuarantine`); this leg's row
+    covered only `_restore_quarantine`, so half of the same fix was unpinned here.
+
+    MUTATION THAT REDS THIS: delete the `return False` from `_dispose_quarantine`'s
+    `except OSError` arm (the pre-fix code unlinked the quarantine and returned
+    `False` either way, so the RETURN VALUE alone cannot tell the two apart — the
+    preservation assertion is the whole pin).
+    """
+    root = tmp_path / "spool"
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None
+    path = drain_claim.claim_path(root)
+    moved = drain_claim._takedown(path, "contender")
+    assert moved is not None, "the fixture never reached the displacement"
+    quarantine, data = moved
+    assert not path.exists(), "the takedown must vacate the claim path"
+
+    real_link = os.link
+
+    def link_fails(src, dst, *a, **kw):
+        if ".tmp-take-" in Path(src).name:
+            raise OSError(28, "No space left on device")  # ENOSPC, not EEXIST
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "link", link_fails)
+    try:
+        restored = drain_claim._dispose_quarantine(
+            quarantine, data, path, b"<not what was judged stale>")
+    finally:
+        monkeypatch.undo()
+    assert restored is False, "a restore that could not happen must give up this tick"
+    assert quarantine.exists(), (
+        "the only copy of the displaced claim was DELETED when the restore failed")
+    assert quarantine.read_bytes() == data, (
+        "the preserved object must be the claim that was displaced, byte for byte")
+
+
 def test_a_FUTURE_version_claim_is_unattributable_not_reinterpreted(tmp_path):
     """The version field is load-bearing: a record this build does not understand
     must be staled out (then re-verifiable by expiry), never read with today's
