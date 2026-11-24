@@ -671,6 +671,57 @@ def _fake_lane_argv(seconds: int = 120) -> list[str]:
     return ["pi", "-c", f"sleep {seconds}; :"]
 
 
+#: The env var `_forking_lane_argv` reads the marker path from — a variable, not an
+#: interpolation, so no shell quoting can turn a temp path into a syntax error.
+FAKE_LANE_FORK_MARKER_ENV = "FAKE_LANE_FORK_MARKER"
+
+
+def _forking_lane_argv(seconds: int = 120) -> list[str]:
+    """argv for a lane whose sleeper has PROVABLY been forked before it is torn down.
+
+    ⛔ WHY THIS EXISTS — A TEARDOWN PIN THAT COULD NOT FAIL (#14506 review, §2, P1).
+    `_fake_lane_argv`'s `sleep {n}; :` leaves the fork to the SHELL's own schedule: the
+    shell usually forks the sleeper within ~10 ms, but a teardown issued straight after
+    `Popen` can win that race and signal a group holding ONLY the leader — so the
+    pre-#14506 `proc.terminate()` mutant survived **29 of 30 runs** (re-measured here:
+    **12 of 12** green), and the pin guarding the orphan leak proved nothing.
+
+    A BACKGROUND command cannot be `exec`-ed in place and `wait` is a builtin, so this
+    shape forces the fork on every POSIX shell: the shell forks the sleeper, `$!` names
+    the pid it forked, and writing that pid to `$FAKE_LANE_FORK_MARKER` is POSITIVE
+    evidence of the fork — the readiness handshake the process-teardown tests of
+    comparable projects converge on (a readiness file, then poll the group). The caller
+    waits for it (`_wait_for_lane_fork`) BEFORE tearing anything down.
+
+    ⛔ argv[0] is still the bare name `pi` and the program is still the shell, so the
+    census contract `_fake_lane_argv` states is unchanged — this is an ADDITIONAL shape,
+    used by the one arm whose subject IS the fork, not a replacement.
+    """
+    return ["pi", "-c", f'sleep {seconds} & echo $! > "${FAKE_LANE_FORK_MARKER_ENV}"; wait']
+
+
+def _wait_for_lane_fork(marker: Path, timeout: float = 10.0) -> int:
+    """Block until the lane's shell has forked its sleeper; return the sleeper's pid.
+
+    Bounded, and it RAISES rather than returning a sentinel: a caller that silently
+    proceeded would restore exactly the race this removes. A shell that never forks is a
+    broken fixture, and a red is the correct report for one.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            raw = marker.read_text().strip()
+        except OSError:
+            raw = ""
+        if raw.isdigit() and int(raw) > 1:
+            return int(raw)
+        time.sleep(0.005)
+    raise AssertionError(
+        f"the fake lane never forked its sleeper within {timeout:.1f}s — the group "
+        f"teardown pin cannot discriminate without a second group member, so this run "
+        f"proves nothing (marker {marker!r} held {raw!r})")
+
+
 #: pid -> the spool a fake lane's stderr was written to. An `rc` with no text is not a
 #: cause, and the harness #14388 built to "name its own cause" closed the child's
 #: stderr to `DEVNULL` — so every DEAD FIXTURE the CI pool produced reported
@@ -710,7 +761,8 @@ def _dead_lane_note(pid: int) -> str:
 
 
 def _fake_lane(cwd, *, env: dict[str, str] | None = None,
-               stderr=None, seconds: int = 120) -> subprocess.Popen:
+               stderr=None, seconds: int = 120,
+               fork_marker: Path | None = None) -> subprocess.Popen:
     """A live `pi`-named process standing in `cwd` — the census fixtures' ONE spawn.
 
     One helper, so the argv[0]/program contract above is stated once and every arm
@@ -729,7 +781,12 @@ def _fake_lane(cwd, *, env: dict[str, str] | None = None,
       `_fake_lane_stderr_note(pid)`.
     * **an unlinked spool** (`tempfile.TemporaryFile`) — no path to leak and nothing
       for `tearDown` to miss; the fd stays open in THIS process, so the parent can
-      still seek and read it after the child has been reaped.
+      still seek and read it after the child has been reaped. `_stop_fake_lane` is what
+      CLOSES it, so a `stop` without a matching `pop` no longer leaks (see §3a).
+    * **`fork_marker`** — when a caller must tear the lane down only once its sleeper
+      actually EXISTS, pass a path: the argv becomes `_forking_lane_argv` (a background
+      `sleep` plus `echo $!`), and the caller waits with `_wait_for_lane_fork`. Without
+      it the spawn is byte-identical to before, so no census arm changes shape.
     """
     capture = stderr is None
     if capture:
@@ -738,9 +795,17 @@ def _fake_lane(cwd, *, env: dict[str, str] | None = None,
         # back after the child has been reaped. A `with` would close it on return and
         # `_fake_lane_stderr_note` would then answer "could not be read back".
         stderr = tempfile.TemporaryFile()  # noqa: SIM115
+    child_env = env if env is not None else os.environ.copy()
+    argv = _fake_lane_argv(seconds)
+    if fork_marker is not None:
+        # ⛔ A COPY, never a mutation of the caller's dict: the six census arms share
+        # `os.environ.copy()` builds and one of them must not inherit a marker path.
+        child_env = dict(child_env)
+        child_env[FAKE_LANE_FORK_MARKER_ENV] = str(fork_marker)
+        argv = _forking_lane_argv(seconds)
     proc = subprocess.Popen(
-        _fake_lane_argv(seconds), executable=FAKE_LANE_PROGRAM, cwd=str(cwd),
-        env=env if env is not None else os.environ.copy(),
+        argv, executable=FAKE_LANE_PROGRAM, cwd=str(cwd),
+        env=child_env,
         stdout=subprocess.DEVNULL, stderr=stderr, start_new_session=True)
     if capture:
         _FAKE_LANE_STDERR[proc.pid] = stderr
@@ -783,6 +848,11 @@ def _stop_fake_lane(proc: subprocess.Popen) -> None:
 
     Safe on ANY `Popen`: only a proc `_fake_lane` spawned carries `pi_lane_pgid`; for
     anything else it signals that pid alone.
+
+    ⛔ AND IT DRAINS THE STDERR REGISTRY AT BOTH EXITS — see `_drain_lane_stderr`, which
+    owns that mechanism (landed by the lane that implemented §3a; the arm
+    `test_a_stopped_lane_leaves_no_registry_entry_and_no_descriptor` pins the surface it
+    protects — no entry and no fd survives a spawn+stop cycle).
     """
     pgid = getattr(proc, "pi_lane_pgid", None)
     # ⛔ ONLY SIGNAL A GROUP WE STILL OWN (#14506 review, P2). A caller may have REAPED the
@@ -845,26 +915,6 @@ def _peek_child_status(proc: subprocess.Popen) -> int | None:
             return None
         return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
     return proc.poll()  # pragma: no cover — no `waitid` on this platform
-
-
-def _wait_for_grandchild(pid: int, timeout: float = 5.0) -> bool:
-    """True once the lane's shell has FORKED its `sleep` child (Linux `/proc`).
-
-    ⛔ THE STATE A TEARDOWN ARM NAMES HAS TO BE CONSTRUCTED (#14506 review, cycle 4).
-    Terminating the shell before it forks leaves NO member in the group (measured 0/120,
-    against 60/60 with a 2 ms delay), so an arm that assumes the grandchild exists asserts
-    about a group that is already empty — and its cleanup is dead code.
-    """
-    path = Path(f"/proc/{pid}/task/{pid}/children")
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            if path.read_text().split():
-                return True
-        except OSError:  # pragma: no cover — not Linux, or the shell is already gone
-            return False
-        time.sleep(0.01)
-    return False
 
 
 def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
@@ -10070,16 +10120,24 @@ class CollisionPreflightTest(unittest.TestCase):
         # newline), and every datum in that tail is per-run: the HOST's `pi` pid list, the
         # fixture's temp dir, the child's rc. The identity therefore differed on every
         # run — including from the identity `main`'s own table holds for these SAME ids
-        # (pre-#14388, byte-identical to line 1 below) — so the predicate read main's
-        # ambient flake as a NEW failure and BLOCKED PRs that cannot reach this fixture:
-        # measured on #14506, four of these ids refused `python-ci-gate`'s required check
-        # on a PR whose diff is a test-file deletion, twice at an unchanged head, while
-        # `main` failed the identical ids at 7/17. #12399 records the same ids blocked for
-        # the same reason (`signature differs from main's`) — a gate reporting a verdict it
-        # cannot compute. The measurements are all still here, on the lines AFTER the
-        # identity, where a triager reads them and the signature does not; line 1 is
-        # byte-identical to the pre-#14388 message on purpose. Pinned by
+        # (pre-#14388, byte-identical to line 1 below). The measurements are all still
+        # here, on the lines AFTER the identity, where a triager reads them and the
+        # signature does not; line 1 is byte-identical to the pre-#14388 message on
+        # purpose. Pinned by
         # `test_the_census_failure_IDENTITY_is_its_first_line_not_its_measurements`.
+        #
+        # ⛔ AND THE LINE-1 RULE HOLDS ON CI — a review's §1 argued otherwise and is
+        # FALSIFIED by measurement, recorded here so the next lane does not re-apply it.
+        # §1 claimed these ids carry NO signature on a runner, because pytest drops the
+        # short summary's ` - <detail>` when the rendered line does not fit. That is what
+        # happens WITHOUT `CI` set. GitHub Actions always sets `CI=true`, and
+        # `_pytest.compat.running_on_ci()` keys on `CI`/`BUILD_NUMBER`, so on a runner
+        # `_get_line_with_reprcrash_message` takes its VERBATIM branch and the detail IS
+        # rendered — measured on a probe with a same-length id, `COLUMNS=80`:
+        #   CI=      -> `FAILED …::test_a_live_process_in_the_worktree_still_blocks`   (no detail)
+        #   CI=true  -> `FAILED …::test_a_live_process_in_the_worktree_still_blocks - AssertionError: the process census never saw the fake pi lane`
+        # So `_signatures_overlap` is NOT reduced to its empty-set arm here, and line 1 IS
+        # what the exemption engine compares. The rule below is correct as written.
         self.fail(
             "the process census never saw the fake pi lane — the test cannot "
             "discriminate process-cwd liveness\n"
@@ -10230,12 +10288,11 @@ class CollisionPreflightTest(unittest.TestCase):
         Every datum this message measures is per-run (the host's `pi` pid list, the
         fixture's temp dir, the child's rc), so #14388's tail-on-line-1 made the identity
         different on every run — including from the identity `main`'s own failure table
-        holds for these same ids — and the predicate then read main's ambient flake as a
-        NEW failure.
-        Measured on #14506: four of these ids refused the required `python-ci-gate` twice at
-        an unchanged head, on a diff that only deletes test arms, while `main` failed the
-        identical ids at 7/17 (`signature differs from main's`). #12399 records the same
-        ids blocked for the same reason.
+        holds for these same ids.
+
+        ⛔ A REVIEW'S §1 ARGUED THAT RULE IS MOOT ON CI, AND MEASUREMENT REFUTES IT — the
+        refutation sits at the message site in `_wait_for_pi_cwd` so the next lane does not
+        re-apply §1 to a correct comment.
 
         So line 1 is pinned BYTE-FOR-BYTE to the message `main` already recorded, and the
         measurements — and the DEAD FIXTURE / census-gap classification, which is why this
@@ -10268,6 +10325,69 @@ class CollisionPreflightTest(unittest.TestCase):
         for measured in ("the census returned", "wanted cwd", "DEAD FIXTURE"):
             self.assertIn(measured, rest)
             self.assertNotIn(measured, first)
+
+    def test_every_identity_line_is_stable_across_the_per_run_data_it_measures(self):
+        """§3b of the #14506 review (P3) — three of the four line-1 rewrites were UNPINNED.
+
+        MEASURED by the reviewer: restoring `pid`, `want` or `timeout` to line 1 left the
+        whole suite green, so the "identity first" property was held by two comments and
+        ONE arm (`test_the_census_failure_IDENTITY_is_its_first_line_not_its_measurements`,
+        which pins the census message only). Every other failure message that measures a
+        per-run datum was free to drift back, and the cost of that drift is silent by
+        construction: `ci_exemption.py` compares ONE string, so a per-run identity means
+        `main`'s own table can never match and the id is blocked as "a DIFFERENT failure".
+
+        So this arm does not assert WHICH sentence is on line 1 — that is each message's
+        own business. It asserts the PROPERTY that makes line 1 usable as a gate identity:
+        two runs of the same failure, differing in every per-run datum (a different pid, a
+        different wanted cwd, a different timeout — and therefore a different rendered
+        measurement), must produce a BYTE-IDENTICAL first line.
+
+        Mutation: put any one of `pid` / `want` / `timeout` back on line 1 of either
+        message and this reddens, because the two runs then disagree on it.
+        """
+        mod = _tool_module()
+
+        def wait_for_deleted_cwd_identity(pid: int, timeout: float) -> str:
+            with self.assertRaises(AssertionError) as caught:
+                _wait_for_deleted_cwd(pid, timeout=timeout)
+            return str(caught.exception).partition("\n")[0]
+
+        def census_identity(want: Path, proc: subprocess.Popen) -> str:
+            with mock.patch.object(mod.fleet_state, "pi_processes",
+                                   return_value=([], "")), \
+                 mock.patch.object(mod.fleet_state, "process_cwds",
+                                   return_value=({}, "")), \
+                 self.assertRaises(AssertionError) as caught:
+                self._wait_for_pi_cwd(want, timeout=0.3, proc=proc)
+            return str(caught.exception).partition("\n")[0]
+
+        procs = [subprocess.Popen(["/bin/sleep", "30"]) for _ in range(4)]
+        try:
+            # Different pid AND different rendered timeout per run — both datums at once.
+            deleted_1 = wait_for_deleted_cwd_identity(procs[0].pid, 0.15)
+            deleted_2 = wait_for_deleted_cwd_identity(procs[1].pid, 0.22)
+            self.assertEqual(
+                deleted_1, deleted_2,
+                "`_wait_for_deleted_cwd` puts a per-run datum on its identity line, so "
+                "its signature changes on every run — the exemption engine can then never "
+                "match main's table and blocks the id as 'a DIFFERENT failure'")
+
+            # Different wanted cwd AND a different lane pid.
+            for name in ("want-a", "want-b"):
+                (self.tmp / name).mkdir(exist_ok=True)
+            census_1 = census_identity(self.tmp / "want-a", procs[2])
+            census_2 = census_identity(self.tmp / "want-b", procs[3])
+            self.assertEqual(
+                census_1, census_2,
+                "the census message puts a per-run datum on its identity line")
+            self.assertNotIn("want-a", census_1)
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+                with suppress(OSError, subprocess.TimeoutExpired):
+                    proc.wait(timeout=10)
 
     def test_the_dead_fixture_note_reports_the_childs_own_words_in_EVERY_arm(self):
         """#14506 review F1+F3 — the note must fire, in every arm, on the TAIL.
@@ -10416,9 +10536,6 @@ class CollisionPreflightTest(unittest.TestCase):
                         "the early return skipped the close as well as the drain")
 
     @unittest.skipUnless(os.name == "posix", "process groups are POSIX-only")
-    @unittest.skipUnless(Path("/proc/self/cwd").exists(),
-                         "_wait_for_grandchild reads /proc — without it the premise cannot "
-                         "be constructed, and `assertTrue` would report a FALSE red")
     def test_a_lane_leads_its_own_group_and_the_teardown_reaps_the_group(self):
         """#14506 review, P2 — the group-reap is claimed and was pinned by NOTHING.
 
@@ -10439,7 +10556,13 @@ class CollisionPreflightTest(unittest.TestCase):
         treatment). Terminating a shell that has not yet forked `sleep` leaves the group
         EMPTY, so a reverted teardown also passes and the pin cannot fail: MEASURED with
         `_stop_fake_lane` replaced by the pre-#14506 `proc.terminate()` alone, this arm
-        stayed GREEN in **15 of 15** runs. With the bounded wait below it reds every run.
+        stayed GREEN in **15 of 15** runs (and **12 of 12** on this box before the wait was
+        added). With the bounded wait below it reds every run.
+
+        The wait is a marker handshake — the shell reports the pid it forked — not a
+        `/proc/<pid>/task/<pid>/children` read: no kernel feature, and therefore NO
+        `skipUnless`, so the pin cannot disarm itself on the host a `/proc` guard excludes.
+        Three lanes converged on this same finding; ONE mechanism is kept for it.
         """
         real_popen = subprocess.Popen
         seen: dict[str, object] = {}
@@ -10449,8 +10572,10 @@ class CollisionPreflightTest(unittest.TestCase):
             seen.update(kwargs)
             return proc
 
+        marker = self.tmp / "lane-forked"
         with mock.patch.object(subprocess, "Popen", side_effect=spy):
-            proc = _fake_lane(self.tmp)
+            proc = _fake_lane(self.tmp, fork_marker=marker)
+        sleeper = None
         try:
             self.assertTrue(seen.get("start_new_session"),
                             "the lane must lead its own group, or its `sleep` child is "
@@ -10463,14 +10588,14 @@ class CollisionPreflightTest(unittest.TestCase):
             # `6afd8a217a9b`, P1). Measured: 0/120 teardowns of an un-forked shell left any
             # member in the group, against 60/60 with a 2 ms delay — so without this wait
             # the `ProcessLookupError` assertion below is satisfied by an EMPTY group and
-            # a reverted teardown stays green (measured 15/15).
-            self.assertTrue(
-                _wait_for_grandchild(proc.pid),
-                "the lane's shell never forked its `sleep` — the group this arm asserts "
-                "about is empty, so the teardown assertion below would prove nothing")
+            # a reverted teardown stays green (measured 15/15 here; 12/12 before the wait
+            # was added). The wait is the marker handshake, NOT a `/proc` reader: it needs
+            # no kernel feature and no `skipUnless`, so the pin cannot disarm itself on the
+            # host (macOS) a `/proc` guard would exclude.
+            sleeper = _wait_for_lane_fork(marker)
+            self.assertNotEqual(sleeper, proc.pid)
         finally:
             _stop_fake_lane(proc)
-            _FAKE_LANE_STDERR.pop(proc.pid, None)
         # ⛔ BOUNDED, NOT INSTANT (#14506 review, cycle 3). `sleep` was never OUR child, so
         # after the group SIGTERM the shell is reaped by `proc.wait()` while the sleeper is
         # briefly an unreaped ZOMBIE reparented to init — and a zombie keeps the process
@@ -10486,9 +10611,10 @@ class CollisionPreflightTest(unittest.TestCase):
             except ProcessLookupError:
                 break
             if time.monotonic() > deadline:
-                self.fail("a `sleep` outlived the teardown — every arm leaves one, and a "
-                          "leaked process is the ambient state this suite's own census "
-                          "arms exist to stop trusting")
+                self.fail(f"a `sleep` outlived the teardown — every arm leaves one, and a "
+                          f"leaked process is the ambient state this suite's own census "
+                          f"arms exist to stop trusting (the sleeper the lane reported "
+                          f"was pid {sleeper})")
             time.sleep(0.02)
 
     def test_the_status_peek_reports_the_rc_of_a_dead_lane_WITHOUT_reaping_it(self):
@@ -10524,20 +10650,20 @@ class CollisionPreflightTest(unittest.TestCase):
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
 
-    @unittest.skipUnless(Path("/proc/self/cwd").exists(),
-                         "_wait_for_grandchild reads /proc — without it the signalled "
-                         "death cannot be constructed, and the premise would report a "
-                         "FALSE red")
     def test_the_status_peek_reports_a_SIGNALLED_death_without_reaping_it(self):
         """The other `si_code` branch (`CLD_KILLED` → `-signal`), on a landed lane.
 
-        `/proc` is needed twice — to see the grandchild, and to know the shell's own death is
-        the one being reported — so this arm skips where its deterministic sibling runs.
+        ⛔ ONE PREMISE, ONE MECHANISM (integration of two concurrent lanes on #14506). This
+        arm used to need `/proc` TWICE — to see the grandchild, and to know the shell had
+        forked — and so it SKIPPED where `/proc` is unreadable, which is the macOS shape and
+        a pin that disarms itself on the very host the guard exists for. The marker handshake
+        (`fork_marker` + `_wait_for_lane_fork`) establishes the same state from the shell's
+        own report of the child it forked, so this arm now runs everywhere with no skip.
         """
-        proc = _fake_lane(self.tmp)
+        marker = self.tmp / "lane-forked-sigterm"
+        proc = _fake_lane(self.tmp, fork_marker=marker)
         try:
-            self.assertTrue(_wait_for_grandchild(proc.pid),
-                            "the lane's shell never forked its `sleep`")
+            _wait_for_lane_fork(marker)
             proc.terminate()
             deadline = time.monotonic() + 10
             rc = None
@@ -10555,9 +10681,6 @@ class CollisionPreflightTest(unittest.TestCase):
             _FAKE_LANE_STDERR.pop(proc.pid, None)
 
     @unittest.skipUnless(os.name == "posix", "process groups are POSIX-only")
-    @unittest.skipUnless(Path("/proc/self/cwd").exists(),
-                         "_wait_for_grandchild reads /proc — without it the premise cannot "
-                         "be constructed, and `assertTrue` would report a FALSE red")
     def test_the_teardown_does_not_signal_a_group_it_no_longer_owns(self):
         """#14506 review, cycle 3 — the `returncode` guard had no arm of its own.
 
@@ -10578,12 +10701,13 @@ class CollisionPreflightTest(unittest.TestCase):
 
         Mutation: remove `if proc.returncode is not None: return` and this reddens.
         """
-        proc = _fake_lane(self.tmp)
+        marker = self.tmp / "lane-forked-guard"
+        # ⛔ THE STATE IS CONSTRUCTED, NOT ASSUMED (#14506 review, cycle 4), and by the
+        # same portable handshake the group-reap arm uses: the shell reports the pid it
+        # forked, so no `/proc` feature and no `skipUnless` is needed to see it.
+        proc = _fake_lane(self.tmp, fork_marker=marker)
         try:
-            self.assertTrue(
-                _wait_for_grandchild(proc.pid),
-                "the lane's shell never forked its `sleep` — the state this arm names was "
-                "not constructed, so the teardown assertion below would prove nothing")
+            _wait_for_lane_fork(marker)
             # The SHELL alone (no group), so it actually EXITS and can be reaped — the
             # pre-#14506 teardown shape. `returncode` is set only once we have reaped it.
             with suppress(OSError):
@@ -10598,6 +10722,40 @@ class CollisionPreflightTest(unittest.TestCase):
             # being recycled) — reap it, or this arm leaves the very orphan it forbids.
             with suppress(OSError):
                 os.killpg(proc.pid, signal.SIGKILL)
+
+    def test_a_stopped_lane_leaves_no_registry_entry_and_no_descriptor(self):
+        """§3a of the #14506 review (P3) — the capture registry was never drained.
+
+        MEASURED by the reviewer: 30 spawn+stop cycles took `/proc/self/fd` from **4 →
+        34** and `_FAKE_LANE_STDERR` from **0 → 30**. Two consequences, and the second is
+        the one that matters: the fd growth is unbounded across a run, and a SURVIVING
+        ENTRY answers for a pid this suite never spawned once the kernel reuses that
+        number — a note attributing a stranger's words to the fixture.
+
+        Only some arms popped the entry by hand, so the drain belongs in the ONE teardown
+        (`_stop_fake_lane`) that every arm already calls; this arm pins that seam rather
+        than any one call site.
+
+        Mutation: remove the `finally` drain from `_stop_fake_lane` and this reddens with
+        every spawned pid still registered.
+        """
+        before = set(_FAKE_LANE_STDERR)
+        fd_dir = Path("/proc/self/fd")
+        fds_before = len(list(fd_dir.iterdir())) if fd_dir.exists() else None
+        cycles = 8
+        for _ in range(cycles):
+            _stop_fake_lane(_fake_lane(self.tmp))
+        leaked = sorted(set(_FAKE_LANE_STDERR) - before)
+        self.assertEqual(leaked, [],
+                         f"{len(leaked)} stale registry entries survived the teardown — an "
+                         f"entry that outlives its lane answers for a REUSED pid")
+        if fds_before is not None:
+            # ⛔ `/proc` only, so this half is quiet on macOS; the DICT half above is the
+            # portable one, and it is the one that discriminates the mutant.
+            self.assertLessEqual(
+                len(list(fd_dir.iterdir())), fds_before + 1,
+                f"{cycles} spawn+stop cycles grew this process's fd count from "
+                f"{fds_before} — the capture spool is an open fd the teardown must close")
 
     def test_the_fake_lane_kit_survives_an_environment_that_cannot_start_python(self):
         """⛔ THE FIXTURE MUST NOT DEPEND ON THE INTERPRETER'S OWN PATH CONFIG (#14506).
