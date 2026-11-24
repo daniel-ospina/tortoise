@@ -182,11 +182,31 @@ def _off_loop_submissions(
     return out
 
 
+def _refers_to(node: ast.AST, name: str) -> bool:
+    """Does `node` NAME the callable `name` — as a bare name OR as an attribute?
+
+    ⛔ THIS EXISTS SO THE TWO ARMS CANNOT DISAGREE (review finding, P2, measured).
+    `_off_loop_submissions` resolves a callable argument through `getattr(arg,
+    "attr", None)`, so it accepts an ATTRIBUTE shape (`await _run_off_loop(
+    _CAPTURE_EXECUTOR, holder._stamp_chain)`) as a submission — while the
+    reference walk below matched `ast.Name` only. The two then disagreed: a
+    mutant that moves the chain into a class method, calls it INLINE and also
+    submits it by attribute satisfied arms 1-3 and produced ZERO references, so
+    the pin went GREEN with the chain running on the loop (measured: `1 passed`,
+    rc=0). A walk that cannot see a reference the submission arm accepts is a
+    fail-open, so both now answer through this one predicate.
+    """
+    if isinstance(node, ast.Name):
+        return node.id == name
+    return isinstance(node, ast.Attribute) and node.attr == name
+
+
 def _off_loop_references(tree: ast.Module, name: str) -> list[tuple[int, bool]]:
     """Every REFERENCE to `name` in the module: (line, is_the_submitted_one).
 
-    ⛔ The legal reference is a bare `ast.Name` that IS the second positional
-    argument of an awaited `_run_off_loop(_CAPTURE_EXECUTOR, name)` — nothing else.
+    ⛔ The legal reference is the second positional argument of an awaited
+    `_run_off_loop(_CAPTURE_EXECUTOR, name)` — a bare name OR an attribute that
+    resolves to `name` — and nothing else.
     `name(…)` is an inline run on the caller's thread; `_CAPTURE_EXECUTOR.submit(
     name)` is the same fire-and-forget defect under another helper (it skips
     `_run_off_loop`'s `confine_context` snapshot and is never awaited). Both are
@@ -212,13 +232,13 @@ def _off_loop_references(tree: ast.Module, name: str) -> list[tuple[int, bool]]:
             len(args) > 1
             and isinstance(args[0], ast.Name)
             and args[0].id == _OFF_LOOP_POOL
-            and isinstance(args[1], ast.Name)
+            and _refers_to(args[1], name)
         ):
             submitted.add(id(args[1]))
     return sorted(
         (node.lineno, id(node) in submitted)
         for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and node.id == name
+        if _refers_to(node, name)
     )
 
 
@@ -350,6 +370,36 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     # so every other reference it finds is a second way to run the chain and reds.
     # All three mutants above red here; the shipped tree has exactly one reference
     # per owner, at the submission.
+    # ⛔ INDIRECTION THE AST CANNOT SEE (same review finding, second measured
+    # mutant): `_again = locals().get("_stamp_chain"); _again()` and
+    # `getattr(self, "_stamp_chain")` build the callable from a STRING, so no
+    # `ast.Name`/`ast.Attribute` node refers to it and the arm below reported zero
+    # references — measured GREEN with the chain run a second time, inline, on the
+    # loop. The defence is counting: every textual occurrence of an owner's name in
+    # this module must be an AST node we graded (its definition, or a reference
+    # above), so a string occurrence is an UNACCOUNTED one and reds. A COMMENT or
+    # docstring mentioning the name in this module reds too — fail-closed on
+    # purpose: a name worth mentioning is a name worth grading, and the message
+    # says so.
+    unaccounted = {}
+    for owner in sorted(owners):
+        graded = (
+            [line for line, _submitted in _off_loop_references(tree, owner)]
+            + [node.lineno for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and node.name == owner]
+        )
+        occurrences = HOSTED_API.read_text(encoding="utf-8").count(owner)
+        if occurrences != len(graded):
+            unaccounted[owner] = (occurrences, len(graded))
+    assert not unaccounted, (
+        f"{_STAMP_DOOR}'s chain is named {unaccounted} time(s) in "
+        f"{HOSTED_API.name} (textual, graded AST node) — the extra mention builds "
+        "the callable some way this pin cannot follow as a reference (a string in "
+        "`locals().get(…)`/`getattr(…)`, or a comment), so a second, on-loop run of "
+        "the chain would be invisible here. Call it by name at its single "
+        "submission, or re-derive this pin to follow that indirection (#13722)")
+
     stray = {
         owner: [line for line, submitted_here in _off_loop_references(tree, owner)
                 if not submitted_here]
