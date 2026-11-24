@@ -10699,16 +10699,26 @@ class CollisionPreflightTest(unittest.TestCase):
                     "the status was read by REAPING it — `poll()` frees the pid and the "
                     "group with it")
         finally:
+            # ⛔ AND CLEAN UP WHAT THE FALLBACK REAPED — BUT ONLY THEN (#14506 review, cycles
+            # 8-9). Where `_peek_child_status` took `poll()`, the peek REAPED, so
+            # `_stop_fake_lane` takes its early return WITHOUT signalling and the lane's
+            # `sleep` is left orphaned, holding a cwd inside the temp dir `tearDown` deletes
+            # (MEASURED 3/3 on the simulated platform before this cleanup existed: one orphan
+            # per run, `ppid 1`). On the NORMAL path the group was already signalled by
+            # `_stop_fake_lane`, and on the `_wait_for_lane_fork`-failure path — reachable
+            # here, because the `finally` runs when that wait RAISES — the group holds only
+            # the leader, which `proc.wait()` then reaps, so the pgid is FREE. An unguarded
+            # `killpg` there would signal whatever group now holds that number, which is the
+            # one thing `_stop_fake_lane`'s own guard exists to prevent. The predicate is
+            # therefore `returncode is not None` read BEFORE the teardown (a returncode means
+            # the peek reaped; the sleeper was never signalled and still pins the pgid) — not
+            # `_PEEK_LEAVES_ZOMBIE`, which is also true on the fork-failure path.
+            reaped_before_teardown = proc.returncode is not None
             _stop_fake_lane(proc)
             _FAKE_LANE_STDERR.pop(proc.pid, None)
-            # ⛔ AND CLEAN UP WHAT THE FALLBACK REAPED (#14506 review, cycle 8). Where
-            # `_peek_child_status` took `poll()`, the peek REAPED — so `_stop_fake_lane`
-            # takes its early return and the lane's `sleep` is left orphaned, holding a cwd
-            # inside the temp dir `tearDown` deletes. MEASURED 3/3 on the simulated
-            # platform before this line existed: one orphan per run, `ppid 1`. The sleeper
-            # still holds the pgid, so it cannot have been recycled.
-            with suppress(OSError):
-                os.killpg(proc.pid, signal.SIGKILL)
+            if reaped_before_teardown:
+                with suppress(OSError):
+                    os.killpg(proc.pid, signal.SIGKILL)
 
     @unittest.skipUnless(os.name == "posix", "process groups are POSIX-only")
     def test_the_teardown_does_not_signal_a_group_it_no_longer_owns(self):
