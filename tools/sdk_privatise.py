@@ -2039,8 +2039,54 @@ SWEEP_NAMES = 66
 #: not carried from either side of the `origin/main` integration: `--repin` HERE prints
 #: **(11911, "3e92044bab08cc3d")**, which is `main`'s own 11910 plus exactly ONE row — the durable
 #: `claim_unavailable` self-heal's `recorded.update(keep)` (`tortoise/capture_spool.py`, the only new
-#: untyped `.update(` receiver in this diff vs `origin/main`). `--check` exits 0 on it.
-SWEEP_RESIDUE = (11911, "3e92044bab08cc3d")
+#: untyped `.update(` receiver in this diff vs `origin/main`). `--check` exits 0 on it — MEASURED ON
+#: THE MERGE TREE THAT SENTENCE NAMES, and no longer true of `main`, which is the re-cut below.
+#: ── RE-CUT FOR `#14308`: `main`'s OWN RED, AND THE ONE ROW IS A PEER'S TEST DOUBLE, DECLARED ──────
+#: `surface-guard` is RED on `main` ITSELF, not on a branch's bytes. `main` `2cccf90f4d` carries the
+#: `(11911, "3e92044bab08cc3d")` pair above while ITS OWN tree derives **(11912,
+#: "73827c80583e139f")**, so `--check` exits 1 there. Re-measured in this worktree, which is `main`'s
+#: tree for every Python file the census walks: `--check` printed `observed: (11912,
+#: '73827c80583e139f')` against `pinned: (11911, '3e92044bab08cc3d')`, and `--repin` on the same
+#: tree printed the pair below. The red therefore travelled into the REQUIRED `python-ci-gate` of
+#: every open PR, which is the fleet-wide landing block `#14308` describes.
+#: ⛔ THE +1 IS ONE ROW, AND IT IS NAMED BY A CONTROLLED EXPERIMENT RATHER THAN BY ARITHMETIC. The row
+#: is `seen.update` — `tests/test_collision_preflight.py:10584`, `seen.update(kwargs)` inside the
+#: `spy` test double over `seen: dict[str, object] = {}` at `:10580` — and `git blame` binds BOTH
+#: lines to `7d9e7b99c4` (`#14506`). Put that one line back as it stands on `main` and the derivation
+#: moves 11911 → 11912; take it out again and it returns to 11911, with no other edit on either side.
+#: That is the whole delta, measured in both directions, so nothing else on the tree moved and no
+#: second row is being declared under this one's name.
+#: ⛔ IT IS DECLARED, NOT REWRITTEN, AND THAT IS THIS FILE'S RECORDED DECISION RATHER THAN A PREFERENCE.
+#: The `reached.update` block above draws the line in its own words: a PEER's `.update` receiver is
+#: still declared, never rewritten away, because "what decides it is that `reached` is this change's
+#: OWN local `set[str]`, not someone else's code being edited to suit a counter". `seen` is a MERGED
+#: peer's test-local accumulator that this change does not otherwise touch, and the matching precedent
+#: is `#13998`'s `row.update` on `_org_row` — a local DICT accumulator in a test helper, DECLARED in
+#: this file's `#13998` record above rather than rewritten. A local dict accumulator is also exactly
+#: the shape no receiver-typed walk can or should reach, so there is nothing here to legitimately
+#: repair; the pin is what records it.
+#: ⛔ THE REWRITE ARM WAS TRIED ON THIS PR'S EARLIER HEAD AND IS WITHDRAWN — RECORDED SO THE NEXT LANE
+#: DOES NOT REDISCOVER IT AS A CHEAP WAY TO MAKE `--check` GREEN. That head replaced the one
+#: `seen.update(kwargs)` with a `for key, value in kwargs.items(): seen[key] = value` loop, which does
+#: return the derivation to 11911 and DOES make `--check` exit 0 — and it is the arm the paragraph
+#: above forbids, because its author is editing a peer's test double to suit a census.
+#: The loop was also NOT `seen |= kwargs`: augmented assignment REBINDS the name, so the enclosing
+#: `seen` reads as an unbound local (`UnboundLocalError`, measured on that head, even though
+#: `dict.__ior__` itself mutates in place). Neither spelling belongs in a change whose subject is the
+#: pin, and the record above is the reason the pin's two-arm rule is worth more than one green leg.
+#: ⛔ THREE OPEN PRS STATE A PAIR FOR THIS PIN AND ONLY ONE CAN BE GREEN, SO THIS RECORD NAMES THE
+#: PAIR THEY AGREE ON. `#14530` (`fix/14350-census-repin`) and `#14531`
+#: (`fix/14350-residue-repin-2cccf90f`) both set **(11912, "73827c80583e139f")**, which is the pair
+#: below; this PR had reached the same count by a different route (the withdrawn rewrite) and now
+#: carries the same pair instead. The three are therefore IDEMPOTENT rather than mutually exclusive:
+#: whichever lands first, the other two already name that pair, so `--check` stays green on each and
+#: the block `#14308` describes does not recur on the next merge. `#14531` reaches the same ruling on
+#: this same row independently — "`seen` lives in a PEER's test file that this diff does not touch at
+#: all" — which is corroboration of the arm, never its source; this file's own paragraph is.
+#: `typed references still pointing at a public name: 0` on this tree, so the re-cut legitimises no
+#: typed call site: the only movement is one untyped accumulator row, DECLARED. `--check` exits 0 on
+#: the pair below, which is `--repin`'s own output on THIS tree and is not arithmetic on the last pin.
+SWEEP_RESIDUE = (11912, "73827c80583e139f")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

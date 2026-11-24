@@ -10581,17 +10581,7 @@ class CollisionPreflightTest(unittest.TestCase):
 
         def spy(*args, **kwargs):
             proc = real_popen(*args, **kwargs)
-            # ⛔ A LOOP, NOT `seen.update(kwargs)`, and not for style: `tools/sdk_privatise.py
-            # --check` censuses `.update`/`.query`/`.delete` on UNTYPED receivers, and this
-            # `seen.update` row is main's one undeclared drift — the observed set reads 11912
-            # against the shipped 11911 pin, so the `surface-guard` leg reds and, through
-            # `python-ci-gate`'s `needs:` (surface-guard is NOT in DEFERRABLE_LEGS), the
-            # REQUIRED aggregate reds with it. (#14308)
-            # ⛔ NOT `seen |= kwargs`: augmented assignment BINDS the name, so the enclosing
-            # `seen` reads as an unbound local (measured: UnboundLocalError in this test, even
-            # though `dict.__ior__` itself mutates in place). The loop keeps the same dict.
-            for key, value in kwargs.items():
-                seen[key] = value
+            seen.update(kwargs)
             return proc
 
         marker = self.tmp / "lane-forked"

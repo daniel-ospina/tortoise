@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1930 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1976 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -310,6 +310,12 @@ def _residue_block() -> str:
     on this tree at 1930 rather than adjusted by arithmetic from the unmodified tree's 1921 — the
     merge itself and the peer's reflow of the first note add nothing to the count, which is why
     the delta is nine and not more,
+    — and the `#14308` re-cut below (the `seen.update` row DECLARED, `SWEEP_RESIDUE` moved to
+    `(11912, "73827c80583e139f")` on `main`'s own tree) appended its `#:` block to
+    `tools/sdk_privatise.py`, so the figure above is RE-MEASURED by this walk on this tree at 1976
+    rather than adjusted by arithmetic from the 1930 reading — that block is the only edit on this
+    branch touching the walked file, so its lines plus the 1930 reading are the population and the
+    figure is still the walk's own count, never a carried one,
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
