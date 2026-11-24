@@ -133,6 +133,14 @@ _ENDING_WORDS = (
     r"|ended"
 )
 
+#: The trailing adverbs a state question may carry WITHOUT narrowing it — a
+#: vague time reference, which the population read can honour implicitly (every
+#: ended row carries its own ``endedAt``) and which therefore is not a constraint
+#: dropped in silence. Kept deliberately tiny: an explicit window ("in Q3",
+#: "this quarter", "since March") is a narrowing the population cannot apply and
+#: keeps the relevance read (#14033).
+_VAGUE_TIME_TAIL = r"recently|lately"
+
 #: …and the BASE forms of the same words, which is what do-support selects
 #: ("what did we retire"). A closed list with NO ``end``: "what did we end up
 #: doing" is not an ending question.
@@ -251,10 +259,23 @@ _ENDING_BASE = (
 #: where a shape could go either way it does not fire. The phrasings that
 #: therefore do NOT reach this read are stated rather than discovered:
 #:
-#: * "is the onboarding flow retired?" — a yes/no question about an id-less
-#:   record; ``read_entity`` and the ordinary currency read answer it.
-#: * "what has ended recently" / "what ended recently" — a trailing adverb;
-#:   "what ended" and "what has been withdrawn" do route.
+#: ⛔ #14033 WIDENED THIS SET, AND THE WIDENING IS THE POINT OF THE ISSUE. It
+#: measured that the gap around the shapes was itself the defect: a question
+#: that is plainly about state but is not in a shape fell through to the
+#: ordinary relevance read, so the caller got a confident answer to a DIFFERENT
+#: question and nothing said the state route had not engaged — silence that is
+#: indistinguishable from "nothing has ended". `what has ended recently`,
+#: `is the onboarding flow retired?` and `list what we retired` were the three
+#: measured misses, and each now has a shape below (``wh_whole_question``'s
+#: adverb tail, ``is_predicate``, ``list_what``). The widening stays narrow for
+#: the reason the precision rounds established: each new shape fixes the
+#: GRAMMATICAL ROLE of the ending word (a predicated participle ending the
+#: question, or a `what we <verb>` set clause), never a word that happens to be
+#: present. #14033's four content questions still do not route, and they are
+#: pinned as the falsifier in ``tests/test_14033_state_cue_gap.py``:
+#: `have any customers cancelled this month`, `which features are deprecated in
+#: v3`, `do we archive customer emails`, `which claims were retracted by legal`.
+#:
 #: * "what commitments do we have" / "what are the commitments" — a commitment
 #:   noun that does not END the question or is not preceded by a set determiner;
 #:   "current commitments", "our commitments" and "what are we committed to" do
@@ -270,6 +291,20 @@ _ENDING_BASE = (
 #: * "have any claims been retracted in Q3" / "has anything been withdrawn by
 #:   legal" — an appended CONSTRAINT, refused by every shape's tail anchor so the
 #:   caller keeps the relevance read instead of having the narrowing dropped.
+#:   ⛔ #14033 admits a VAGUE adverb and still refuses an actual WINDOW, and the
+#:   line between them is what the population read can honour: "recently" and
+#:   "lately" name no boundary, and every returned row carries its own
+#:   ``endedAt``, so nothing the caller said is discarded — while "in Q3" and
+#:   "this quarter" are a narrowing the population cannot apply, so those keep
+#:   the relevance read (`what has ended in Q3`, `list what we retired last
+#:   quarter`).
+#: * "which of our withdrawn claims affected pricing" — #14033's own fourth table
+#:   row, and it KEEPS the relevance read on purpose: ``withdrawn`` there
+#:   MODIFIES ``claims``, which is the same attributive slot as the pinned
+#:   `which archived report has the Q3 numbers`. A modifier is not the question's
+#:   predicate, and reading it as one is the round-2/4/5 hijack class. The
+#:   caller reaches the population the stated way instead (``ended_scope=True``,
+#:   or the unqualified `which claims were withdrawn`).
 _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "has anything we relied on been withdrawn?" / "have any claims been retired?"
     # An EXISTENCE question about an ending: the auxiliary + quantifier is the
@@ -284,9 +319,15 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # question, anchored at both ends, so a trailing constraint ("what is the
     # archived pricing document") and a wh-word in a subordinate clause cannot
     # reach it.
+    # ⛔ AND A TRAILING VAGUE ADVERB IS STILL THE WHOLE QUESTION (#14033). The
+    # tail admits `recently` / `lately` and nothing else, because those name no
+    # boundary the population read could apply and each row carries its own
+    # `endedAt` — so `what has ended recently` routes while `what has ended in
+    # Q3` and `what was retired this quarter`, which ARE narrowings, do not.
     ("wh_whole_question", re.compile(
         rf"^what\s+(?:(?:is|are|was|were|has|have|had)\s+)?(?:been\s+)?"
-        rf"(?:{_ENDING_WORDS})\s*[?.!]*$")),
+        rf"(?:{_ENDING_WORDS})"
+        rf"(?:\s+(?:{_VAGUE_TIME_TAIL}))?\s*[?.!]*$")),
     # "which claims were archived?" / "which of our endpoints is deprecated?" /
     # "which commitments were withdrawn?" — the wh-word's own predicate.
     # ⛔ THE HEAD NOUN IS ADJACENT TO THE AUXILIARY. The window used to be a free
@@ -318,6 +359,30 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # we do, and every one of those was answered with the whole ended population.
     ("do_support", re.compile(
         rf"^(?:what\s+)?did\s+(?:we|i)\s+(?:{_ENDING_BASE})\b")),
+    # "is the onboarding flow retired?" / "is our pricing decision withdrawn"
+    # (#14033). A YES/NO question whose PREDICATE is the ending is a state
+    # ⛔ The participle ENDS the question, which is the same tail anchor every
+    # other shape uses: `is the report archived in S3` keeps the relevance read,
+    # because `in S3` is a narrowing and the ending is not the whole predicate.
+    # And the subject NP is BOUNDED (a determiner plus at most three words) so a
+    # longer clause cannot smuggle its own finite verb in —
+    # `is the payment terms clause given the contract was archived` and
+    # `is the policy when a booking is cancelled` refuse on this bound. Both
+    # guards are pinned in `tests/test_14033_state_cue_gap.py`; the `what is …`
+    # row of `NOT_SELECTED` cannot exercise either, because `^is` never reaches
+    # it.
+    ("is_predicate", re.compile(
+        rf"^is\s+(?:the|our|your|their|its|my|this|that)\s+"
+        rf"[a-z0-9]+(?:\s+[a-z0-9]+){{0,3}}\s+(?:{_ENDING_WORDS})\s*[?.!]*$")),
+    # "list what we retired" / "list what we archived" (#14033). An IMPERATIVE,
+    # which the `scoped_noun`/`show me` boundary refuses — and the discriminator
+    # is the `what we <verb>` clause, not the imperative: `show me the retired
+    # onboarding flow` and `list our commitments` ask for records BY NAME and
+    # keep the relevance read (both are pinned), while "list WHAT we retired"
+    # asks for a SET. ⛔ The participle ends the question, so an appended window
+    # (`list what we retired last quarter`) is refused rather than dropped.
+    ("list_what", re.compile(
+        rf"^list\s+(?:out\s+)?what\s+(?:we|i)\s+(?:{_ENDING_WORDS})\s*[?.!]*$")),
 )
 
 #: COMMITMENT-question shapes. The issue's own wording — *a commitment is a KIND,
