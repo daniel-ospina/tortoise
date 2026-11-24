@@ -12349,7 +12349,8 @@ tier1:
 # `slow_gating_files()`. Read the live shape with `python3
 # tools/ci_selection.py --non-gating-report` rather than from a figure here.
 # (The arm was among those the #14439 merge cut on 2026-11-23; #14481 restored it,
-# so at this head the floor and the drift guard are graded by a failing test.)
+# so at this head the floor is graded again — `test_slow_leg_bounds_clear_the_committed_work`
+# reds if the floor moves.)
 # NOTHING was deleted, moved off the pre-merge gate, or
 # re-marked: all 65 files still run on a PR, with the same nodeids.
 # ⚠️ #10194 exception to that sentence: the FIVE eval files in this list are no

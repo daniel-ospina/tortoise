@@ -225,12 +225,11 @@ SLOW_LEG_CAPPED_WALL_TARGET_MIN = 20.0
 # i.e. the pin was passing on 0.04 of margin. That sweep then MEASURED
 # `test_calibration.py` at 390.0 s (it had carried the flat 2.0 s default, so no
 # sweep had ever weighed it), which puts 15m at 2.31× and red the shard-scaling
-# pin — cut by `#14439`'s re-cut (2026-11-23), which removed the
-# durations-map arithmetic from `tests/test_ci_selection.py`, and RESTORED by
-# #14481 with the rest of that arithmetic. The floor is PINNED again:
-# `test_watchdog_is_per_shard_and_scales_with_the_shard` asserts
-# `WATCHDOG_FLOOR_MIN == 19`, so a re-tune here is redded by a test rather than
-# reviewed by reading this comment. 19m = ceil(390.0 ×
+# pin `test_watchdog_is_per_shard_and_scales_with_the_shard` — cut by `#14439`'s re-cut
+# (2026-11-23), which removed the durations-map arithmetic from
+# `tests/test_ci_selection.py`, and RESTORED by #14481 with the rest of that arithmetic.
+# The floor is PINNED again: that arm asserts `WATCHDOG_FLOOR_MIN == 19`, so a re-tune
+# here is redded by a test rather than reviewed by reading this comment. 19m = ceil(390.0 ×
 # 2.9 / 60) restores the stated derivation (1140 s / 390.0 s = 2.92×).
 # ⚠️ The alternative — moving that file to `slow_files` — is a SELECTIVITY
 # decision (a change to it would stop running the fast shards), so it is left to
