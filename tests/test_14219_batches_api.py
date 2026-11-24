@@ -2062,7 +2062,7 @@ def test_a_vanished_item_row_is_not_resurrected_by_a_settlement(store):
     # The rollback's `discard()`: the row is gone, the drain still holds a copy.
     store.discard(ORG_ID, batch.batch_id)
 
-    settled, landed = coord._advance_landed(
+    _settled, landed = coord._advance_landed(
         ORG_ID, row, bi.BatchItemState.EXTRACTING, attempt=True)
 
     assert landed is False, "a write that landed on no row must not report landed"
