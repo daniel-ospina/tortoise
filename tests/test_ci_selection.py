@@ -13795,11 +13795,16 @@ _EMISSION_UNREAD_SENTENCE_RE = re.compile(r"\d\.\d+\s*s\s*\([a-z]")
 #: up to 29 m` each kept BOTH rows green while the block claimed two different minutes. A first
 #: attempt matched `[x\u00d7X]` and `=|up to` and was itself spelling-bound (it missed `*`, `→`,
 #: `->`, `=>`), which is why this one anchors on the operand and reads the first `N m` after it.
-_EMISSION_DERIVATION_RE = re.compile(r"(?P<est>\d+\.\d)\s*/\s*60")
+_EMISSION_DERIVATION_RE = re.compile(r"(?P<est>\d+(?:\.\d+)?)\s*(?:s\b)?\s*/\s*60")
 #: The minute a derivation states. The lookbehind matters: without it `85.0 m` yields `0`, because
 #: `\d+` happily matches the decimal's last digit and the unit follows it — a false minute that
-#: would red a CORRECT block.
-_EMISSION_MINUTE_AFTER_RE = re.compile(r"(?<!\d\.)(?<!\d)(?P<minutes>\d+)\s*m\b")
+#: would red a CORRECT block. The unit alternation is ordered longest-first so `minutes` is not read
+#: as `m` plus garbage; measured on this head, `29 mins` and `29-minute` were GREEN before it.
+_EMISSION_MINUTE_AFTER_RE = re.compile(
+    r"(?<!\d\.)(?<!\d)(?P<minutes>\d+(?:\.\d+)?)\s*[-‑]?\s*(?:minutes|minute|mins|min|m)\b")
+#: The emitted key, stated in prose: `watchdog_minutes: 29` inside the block is a claim about THIS
+#: tree's watchdog even when no `X/60` operand sits near it, so it is graded on its own.
+_EMISSION_WATCHDOG_KEY_RE = re.compile(r"watchdog_minutes:\s*(?P<minutes>\d+)\b")
 #: How far either side of an operand its stated minute may sit. ⛔ BOTH directions, and generous
 #: on purpose: measured on this head, a minute placed BEFORE the operand
 #: (`carries a 29 m watchdog, derived as 836.9/60 x 2`) and one placed 64 characters after it
@@ -13938,10 +13943,10 @@ def _emission_block_claims(
         graded = {float(est_str)} | {float(est) for est in groups}
         operands = [(m.start(), m.end(), float(m.group("est")))
                     for m in _EMISSION_DERIVATION_RE.finditer(header)]
-        conflicting: dict[float, int] = {}
+        conflicting: dict[str, int] = {}
         for minute in _EMISSION_MINUTE_AFTER_RE.finditer(header):
-            # Attribute the minute to its NEAREST operand, in either direction. A blind window is
-            # wrong in both directions: it misses a minute stated before its operand, and it
+            # Attribute the minute to its NEAREST operand, in either direction. A blind wide window
+            # is wrong in both directions: it misses a minute stated before its operand, and it
             # sweeps up a NEIGHBOURING derivation's minute and reds a correct block (measured —
             # this file's own historical fixture, where `840.2/60 … up to 29 m` sits inside the
             # window of the graded `836.4/60 … = 28 m` clause).
@@ -13950,15 +13955,25 @@ def _emission_block_claims(
             distance = min(abs(minute.start() - start), abs(minute.start() - end))
             if distance > _DERIVATION_CONTEXT or est not in graded:
                 continue
-            stated = int(minute.group("minutes"))
+            stated = int(float(minute.group("minutes")))
             if stated != int(minutes_str):
-                conflicting[est] = stated
+                conflicting[f"{est:g} s"] = stated
+        # ⛔ The emitted key, stated in prose, is a claim about THIS tree's watchdog even with no
+        # `X/60` operand near it — so `watchdog_minutes: 29` is graded on its own.
+        for key in _EMISSION_WATCHDOG_KEY_RE.finditer(header):
+            stated = int(key.group("minutes"))
+            if stated != int(minutes_str):
+                conflicting["watchdog_minutes"] = stated
+        # ⛔ RESIDUAL, stated rather than hidden: a minute is only attributed when an `X/60`
+        # operand or a `watchdog_minutes:` key is near it, so a claim phrased with neither —
+        # "the worst shard is 836.9 s; watchdog 29 m" — is still unread. Every pattern-based
+        # reader has a residual; this one is disclosed at the arm rather than left for the next
+        # actor to discover.
         assert not conflicting, (
-            f"the block derives {sorted(conflicting)} s to {sorted(conflicting.values())} m in a "
-            f"spelling `_EMISSION_CEIL_RE` cannot read, but its graded clause says {minutes_str} m "
-            "— a derivation nothing grades is how a block claims two different watchdog minutes "
-            "and still reads as one. Spell every derivation of these ests the way "
-            "`_EMISSION_CEIL_RE` reads it, or delete the extra one.")
+            f"the block states {conflicting} where the graded emission says {minutes_str} m, in a "
+            "spelling `_EMISSION_CEIL_RE` cannot read — a derived minute nothing grades is how a "
+            "block claims two different watchdog minutes and still reads as one. Spell every "
+            "derivation the way `_EMISSION_CEIL_RE` reads it, or delete the extra one.")
     return groups, float(est_str), int(minutes_str)
 
 
@@ -14150,15 +14165,19 @@ def test_the_emission_block_guard_is_not_vacuous():
             "# `ceil(836.4/60 * 2)` = 29 m\n",
             "# 836.4/60 x 2 \u2192 29 m\n",
             "# 836.4/60 x 2 -> 29 m\n",
-            "# and `shard_watchdog_minutes()` rounds 836.4/60 x 2.0 up to 29 m\n"):
-        with pytest.raises(AssertionError, match="derivation nothing grades"):
+            "# and `shard_watchdog_minutes()` rounds 836.4/60 x 2.0 up to 29 m\n",
+            "# 836.4/60 x 2 gives a 29-minute watchdog\n",
+            "# 836.4/60 x 2 gives 29 mins\n",
+            "# `watchdog_minutes: 29` beside 836.4/60 x 2\n",
+            "# 836.40/60 x 2 -> 29 m\n"):
+        with pytest.raises(AssertionError, match="derived minute nothing grades"):
             _emission_block_claims(
                 "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at "
                 "836.3 s (f, g, i)\n"
                 "# `ceil(836.4/60 x 2)` = 28 m\n" + alt_spelling + "\nfast_shards: 11\n")
     # …and a derivation at an est the block's own PARTITION names is graded too: `836.3` below is a
     # live group, so a conflicting minute on it must red rather than be excused as "historical".
-    with pytest.raises(AssertionError, match="derivation nothing grades"):
+    with pytest.raises(AssertionError, match="derived minute nothing grades"):
         _emission_block_claims(
             "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
             "# `ceil(836.4/60 x 2)` = 28 m\n# 836.3/60 x 2 \u2192 30 m\n\nfast_shards: 11\n")
@@ -14170,7 +14189,7 @@ def test_the_emission_block_guard_is_not_vacuous():
             "# the emitted worst shard carries a 29 m watchdog, derived as 836.4/60 x 2\n",
             "# `shard_watchdog_minutes()` rounds 836.4/60 x 2.0 — the multiplier the packer "
             "applies to every bin — up to 29 m\n"):
-        with pytest.raises(AssertionError, match="derivation nothing grades"):
+        with pytest.raises(AssertionError, match="derived minute nothing grades"):
             _emission_block_claims(
                 "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at "
                 "836.3 s (f, g, i)\n"
