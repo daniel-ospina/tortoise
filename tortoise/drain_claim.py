@@ -648,7 +648,22 @@ class DrainClaimUnavailable(RuntimeError):
     """
 
 
-def _clear_unusable_claim_path(path: Path) -> bool:
+#: The three answers `_clear_unusable_claim_path` must be able to give. A BOOLEAN
+#: could not, and collapsing two of them into `False` was a live two-drainer hole:
+#: * ``GONE`` — the object vanished under us (a peer released or replaced it). The
+#:   caller must RETRY the loop, not treat the path as unclearable: `git`-less
+#:   reasoning aside, the `ENOENT` of a peer's own `unlink` is the COMMON case, and
+#:   answering "cannot be cleared" sent `flush_spool` down the unclaimed-pass arm
+#:   while the peer's claim sat on disk (#14423 cycle-8 review, P1 — reproduced).
+#: * ``REFUSED`` — it is still not a claim and we could not remove it (a non-empty
+#:   directory, a permission wall). THIS is what `DrainClaimUnavailable` means.
+#: * ``DONE`` — it was removed; retry the loop.
+_CLEAR_GONE = "gone"
+_CLEAR_REFUSED = "refused"
+_CLEAR_DONE = "done"
+
+
+def _clear_unusable_claim_path(path: Path) -> str:
     """Remove something at the claim path that is not a readable claim.
 
     A DIRECTORY, a socket or a dangling symlink at `<spool>/drain.claim` is
@@ -660,25 +675,49 @@ def _clear_unusable_claim_path(path: Path) -> bool:
     removed it.
 
     A symlink is removed WITHOUT following it (`unlink` on the link), so this can
-    never reach through to a target outside the spool. A non-empty directory that
-    refuses `rmdir` is left alone and reported: deleting unknown content is the
-    worse error, and the caller's answer for that is :class:`DrainClaimUnavailable`
-    ("run unclaimed, and SAY so") rather than a silent block.
+    never reach through to a target outside the spool.
+
+    ⛔ THE REMOVAL IS IDENTITY-CHECKED, because it is the protocol's ONLY delete that
+    does not go through the quarantine compare (every other removal does). `lstat`
+    → `unlink` is a TOCTOU with a live claim on the other side of it: judge a FIFO,
+    be preempted, and the path can hold a peer's VALID claim by the time the
+    `unlink` lands — deleting it and letting this process win the next `link`, i.e.
+    two holders for up to `TTL/3`, with nothing logged (#14423 cycle-8 review, P2,
+    reproduced). So the `(st_dev, st_ino)` judged is re-read immediately before the
+    removal and the object is left alone if it is no longer the same one.
     """
     try:
-        mode = os.lstat(path).st_mode
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return _CLEAR_GONE
     except OSError:
-        return False
+        return _CLEAR_REFUSED
+    if stat.S_ISREG(before.st_mode):
+        # The caller has already decided a REGULAR file is a possible holder; never
+        # remove one here (it is the fail-closed direction).
+        return _CLEAR_REFUSED
     try:
-        if stat.S_ISDIR(mode):
+        now = os.lstat(path)
+    except FileNotFoundError:
+        return _CLEAR_GONE
+    except OSError:
+        return _CLEAR_REFUSED
+    if (now.st_dev, now.st_ino) != (before.st_dev, before.st_ino):
+        # It changed under us: judge whatever is there NOW on the next tick rather
+        # than deleting an object this call never looked at.
+        return _CLEAR_REFUSED
+    try:
+        if stat.S_ISDIR(before.st_mode):
             path.rmdir()  # an EMPTY directory; refuses `ENOTEMPTY` otherwise
-            return True
+            return _CLEAR_DONE
         # A symlink is unlinked AS A LINK (never followed), and a FIFO/socket too: it
         # is an object, not content, so `unlink` is the correct removal.
         os.unlink(path)
-        return True
+        return _CLEAR_DONE
+    except FileNotFoundError:
+        return _CLEAR_GONE
     except OSError:
-        return False
+        return _CLEAR_REFUSED
 
 
 def acquire(
@@ -755,13 +794,18 @@ def acquire(
                 # A directory, symlink, FIFO, socket or device: corruption, not a
                 # holder. Rule 1 already says stale, and leaving it would `EEXIST`
                 # every future attempt — a permanent block, which #14350 forbids.
-                if not _clear_unusable_claim_path(path):
+                cleared = _clear_unusable_claim_path(path)
+                if cleared == _CLEAR_REFUSED:
                     # `from None`: the `FileExistsError` we are handling is the
                     # EXPECTED contention signal, not this condition's cause —
                     # chaining it would point a reader at the wrong file (B904).
                     raise DrainClaimUnavailable(
                         f"{path} exists and is not a claim, and cannot be cleared — "
                         "the spool root is not writable by this process") from None
+                # `GONE` or `DONE`: the path changed, so RETRY — the next tick either
+                # installs our claim or judges whatever a peer put there. Answering
+                # "cannot be cleared" for `GONE` ran the whole pass UNCLAIMED beside
+                # a live peer claim, which is the defect this module removes.
                 continue
             # ATOMIC TAKEDOWN, then verify in quarantine: see `_takedown`. The
             # previous read-compare-unlink let two contenders delete each other's

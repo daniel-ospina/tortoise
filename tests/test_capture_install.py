@@ -4968,8 +4968,18 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: fact on this leg (`CaptureStatus.claim_unavailable` + the health-line term, the
 #: Python twin's exact words) and the failed restore of a displaced claim now WARNS
 #: instead of vanishing. Both are BEHAVIOUR on shipped bytes.
+#: ⚠️ …and a SEVENTH, from the review of THAT head, and it is the one that shows why
+#: this list is not bookkeeping: the obstruction clear learned to tell `GONE` from
+#: `REFUSED`. It answered a BOOLEAN, so a peer that removed the obstruction first (the
+#: COMMON case — the `ENOENT` of a peer's own unlink) came back as "cannot be cleared"
+#: and the caller ran the WHOLE PASS unclaimed beside a live peer claim: the
+#: two-drainer defect this generation exists to remove, reproduced from the one path
+#: that was meant to be the safety valve. The removal also became identity-checked
+#: (`lstat` → `unlink` was the protocol's only uncompared delete, and it could take a
+#: claim installed under it). Both are BEHAVIOUR, and both move bytes on THIS file
+#: because the Pi leg carries its own copy of the same fix.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "3eef418bafe653d206a3c10e905e9234640136d79fd20771012d6c17d6beb4a2")
+    33, "4cbd1f02228055aea2fcf33f4a8973693d31bea889a4d755ec7f8ad27100d964")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5159,7 +5169,7 @@ _GENERATION_DIGESTS = {
     # that re-arms a lease which lapsed during the pass's own unbounded whole-spool
     # scan, on both legs. A behaviour change on shipped bytes, and the digest moves
     # with it; 33 still has never shipped, and freezes the moment it reaches `main`.
-    33: "3eef418bafe653d206a3c10e905e9234640136d79fd20771012d6c17d6beb4a2",
+    33: "4cbd1f02228055aea2fcf33f4a8973693d31bea889a4d755ec7f8ad27100d964",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",

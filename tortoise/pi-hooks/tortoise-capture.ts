@@ -1508,6 +1508,11 @@ export interface CaptureStatus {
    *  field the box reports `capture: OK`/`DRAINING` while N drainers POST into the
    *  same ceiling (#14423 cycle-7 review, P1). Mirrors the Python leg's
    *  `claim_unavailable` / `claim_unavailable_reason` fields exactly. */
+  /** ⛔ Whether THIS pass HELD the drain claim. `attempted > 0` is not a proxy: a
+   *  pass over an empty or backoff-only spool holds the claim, attempts nothing,
+   *  and is exactly the pass that must clear a stale `claim_unavailable` fact
+   *  (#14423 cycle-8 review). The Python leg passes the same thing explicitly. */
+  claimHeld?: boolean;
   claim_unavailable?: boolean;
   claim_unavailable_reason?: string;
   updated_at: string;
@@ -4512,6 +4517,7 @@ export async function flushSpool(
   // here: ANY `None` from `acquire` becomes `held_by_claim` (`capture_spool.py`).
   const race: { raced: boolean; obstruction?: string } = { raced: false };
   const claim = acquireDrainClaim(dir, { leg: "pi", state: race });
+  const heldClaim = claim !== undefined;
   if (!claim) {
     const record = readDrainClaim(dir);
     if (record) {
@@ -4573,7 +4579,12 @@ export async function flushSpool(
     return summary;
   }
   try {
-    return await flushSpoolPass(cfg, opts, claim);
+    const summary = await flushSpoolPass(cfg, opts, claim);
+    // The claim was HELD for this pass. Recorded on the summary so whoever writes
+    // the durable fact knows it may CLEAR a stale `claim_unavailable` — a pass over
+    // an empty spool attempts nothing and would otherwise clear nothing.
+    summary.claimHeld = heldClaim;
+    return summary;
   } finally {
     try {
       claim.release();
@@ -5443,19 +5454,60 @@ export function disposeQuarantine(
  * permanent block #14350 forbids, clearable only by a PYTHON drain. The Python
  * twin never had this arm wrong (#14423 cycle-6 review, P1).
  */
-function clearUnusableClaimPath(path: string): boolean {
+//: The three answers `clearUnusableClaimPath` must be able to give — a BOOLEAN
+//: could not, and collapsing two of them into `false` was a live two-drainer hole
+//: (#14423 cycle-8 review, P1): `GONE` (the object vanished under us — a peer
+//: released or replaced it) must make the caller RETRY, never answer "cannot be
+//: cleared", because that sent `flushSpool` down the unclaimed-pass arm while the
+//: peer's claim sat on disk. `REFUSED` is what "unclearable" actually means.
+export type ClaimPathClear = "gone" | "refused" | "done";
+
+/**
+ * Exported for its own unit tests, which drive the `lstat` seam below: the
+ * identity re-check and the `ENOENT`-means-`gone` answer are the two properties
+ * this function exists for, and neither can be observed without interleaving.
+ * ⛔ The `lstat` parameter is a TEST seam with the module default — the same
+ * interleave the Python leg's tests drive by monkeypatching `os.lstat`.
+ */
+export function clearUnusableClaimPath(
+  path: string,
+  lstat: (p: string) => ReturnType<typeof lstatSync> = lstatSync,
+): ClaimPathClear {
+  // ⛔ THE REMOVAL IS IDENTITY-CHECKED: this is the protocol's only delete that does
+  // not go through the quarantine compare, so `lstat` → `unlink` is a TOCTOU with a
+  // live claim on the other side of it. Judge a FIFO, be preempted, and the path can
+  // hold a peer's VALID claim by the time the `unlink` lands — deleting it and
+  // letting this process win the next `link`, i.e. two holders for up to `ttl/3`,
+  // silently. The `(dev, ino)` judged is re-read immediately before the removal.
+  let before: ReturnType<typeof lstatSync>;
   try {
-    const st = lstatSync(path);
-    if (st.isDirectory()) {
+    before = lstat(path);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "gone" : "refused";
+  }
+  if (before.isFile()) return "refused";  // a possible holder: never remove one here
+  let now: ReturnType<typeof lstatSync>;
+  try {
+    now = lstat(path);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "gone" : "refused";
+  }
+  if (now.dev !== before.dev || now.ino !== before.ino) {
+    // It changed under us: judge whatever is there NOW on the next tick rather than
+    // deleting an object this call never looked at.
+    return "refused";
+  }
+  try {
+    if (before.isDirectory()) {
       rmdirSync(path);  // an EMPTY directory; refuses ENOTEMPTY otherwise
-      return true;
+      return "done";
     }
     // A symlink is unlinked AS A LINK (never followed), and a FIFO, a socket or a
     // device too: it is an object, not content, so `unlink` is the correct removal.
     unlinkSync(path);
-    return true;
-  } catch {
-    return false;
+    return "done";
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "gone" : "refused";
   }
 }
 
@@ -5590,10 +5642,13 @@ export function acquireDrainClaim(
         if (mode.isFile()) return undefined;
         // A directory, symlink, FIFO/socket or device: corruption, not a holder.
         // Leaving it would `EEXIST` every future attempt — a permanent block.
-        if (!clearUnusableClaimPath(path)) {
+        const cleared = clearUnusableClaimPath(path);
+        if (cleared === "refused") {
           if (opts.state) opts.state.obstruction = path;
           return undefined;
         }
+        // `gone` / `done`: the path changed, so RETRY — the next tick either installs
+        // our claim or judges whatever a peer put there.
         continue;
       }
       // ATOMIC TAKEDOWN, then verify in quarantine — see `takedownClaim`.
@@ -6555,6 +6610,24 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
           updated_at: new Date().toISOString(),
         } as never);
       }
+      // ⛔ A PASS THAT HELD THE CLAIM CLEARS THE FACT EVEN IF IT ATTEMPTED NOTHING.
+      // `summary.attempted > 0` gates the `ok` write above (an empty spool must not
+      // erase a recorded refusal), which left the claim fields STRANDED: a pass that
+      // held the claim over an empty/backoff-only spool wrote nothing, so the operator
+      // kept reading `NO drain exclusion (<path>)` for an obstruction already removed
+      // (#14423 cycle-8 review, P2 — reproduced). One write, and only when there is
+      // something to clear; `state`/`reason`/`status` are untouched, so the
+      // quota-survives-an-empty-pass rule still holds.
+      if (summary.claimHeld && !summary.claimUnavailable) {
+        const prior = readCaptureStatus(spoolDir);
+        if (prior?.claim_unavailable || prior?.claim_unavailable_reason) {
+          const next = { ...prior } as Record<string, unknown>;
+          delete next.claim_unavailable;
+          delete next.claim_unavailable_reason;
+          next.updated_at = new Date().toISOString();
+          writeCaptureStatus(spoolDir, next as never);
+        }
+      }
       // Say the state out loud whenever it MOVED: the start-of-session line was
       // printed from the marker this pass has just superseded, and leaving that
       // as the last thing the lane logged is the misdiagnosis the supersede
@@ -6871,6 +6944,8 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
       reportFlush(summary, "session_shutdown", { continuing: false });
       // The general pass is the LATER evidence, so it writes last (a quota
       // refusal it saw must win over the live session's 2xx).
+      // The targeted (live) pass takes NO claim by design, so it never CLEARS a
+      // recorded exclusion: only the general pass knows whether the box held one.
       if (liveSummary) recordOutcome(liveSummary);
       recordOutcome(summary);
     } catch (err) {

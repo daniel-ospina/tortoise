@@ -109,6 +109,7 @@ import {
   writeSpoolEntry,
   admissionSaturated,
   cheapSpoolScan,
+  clearUnusableClaimPath,
 } from "./tortoise-capture.ts";
 import tortoiseCapture from "./tortoise-capture.ts";
 
@@ -8293,11 +8294,76 @@ test("#14350: a recorded claim-unavailable FACT is rendered on the health line",
   assert.match(line, /^capture: OK \(0 queued\)/, "the verdict itself must not move");
 });
 
-test("#14350: a HEALTHY pass clears the recorded claim fact (no one-way latch)", () => {
+test("#14350: a PEER's removal during the clear answers `gone`, not `refused`", () => {
+  // ⛔ THE DISTINCTION A BOOLEAN COULD NOT MAKE, and collapsing it ran a whole pass
+  // UNCLAIMED beside a live peer claim: two legs meet at a FIFO at the claim path,
+  // this one `lstat`s it, the peer `unlink`s it, and this one's `unlink` then
+  // answers `ENOENT`. Read as "cannot be cleared", `acquireDrainClaim` returns
+  // `undefined` with `state.obstruction` set and `flushSpool` runs the entire pass
+  // without the exclusion — while the peer's claim sits on disk. `gone` makes the
+  // caller RETRY instead (the Python leg's
+  // `test_a_peer_RELEASING_during_the_clear_is_RETRIED_not_called_unclearable`
+  // drives the same interleave end-to-end).
+  //
+  // The `lstat` seam is the same interleave the Python test drives by
+  // monkeypatching `os.lstat`: the first call sees the FIFO, and the `unlink`
+  // answers `ENOENT` because a peer got there first.
+  //
+  // MUTATION THAT REDS THIS: return `"refused"` from the `ENOENT` arms.
+  const fifo = join(tmpSpool(), "drain.claim");
+  execFileSync("mkfifo", [fifo]);
+  const judged = lstatSync(fifo);          // this leg looks at the FIFO …
+  unlinkSync(fifo);                        // … and the peer's removal lands first.
+  const outcome = clearUnusableClaimPath(fifo, () => judged);
+  assert.equal(outcome, "gone",
+    "a peer that removed the obstruction is not an unclearable path: " + outcome);
+});
+
+test("#14350: the clear NEVER deletes an object it did not judge", () => {
+  // The obstruction clear is the protocol's ONE uncompared removal: `lstat` →
+  // `unlink` is a TOCTOU with a live claim on the other side of it. Judge a FIFO,
+  // be preempted, and by the time the `unlink` lands the path can hold a peer's
+  // VALID claim — deleting it lets this process win the next `link` and hold a
+  // spool a peer is also draining, for up to `ttl/3`, silently. So the
+  // `(dev, ino)` judged is re-read immediately before the removal.
+  //
+  // MUTATION THAT REDS THIS: drop the identity re-check (unlink on the strength of
+  // the first `lstat`) — the substituted object is then deleted.
+  const dir = tmpSpool();
+  const fifo = join(dir, "drain.claim");
+  execFileSync("mkfifo", [fifo]);
+  const substitute = join(dir, "live-claim.txt");
+  writeFileSync(substitute, "a live claim");
+  const judged = lstatSync(fifo);
+  const appeared = lstatSync(substitute);
+  assert.notEqual(judged.ino, appeared.ino, "the two objects must differ by identity");
+  let calls = 0;
+  const outcome = clearUnusableClaimPath(fifo, () => (calls++ === 0 ? judged : appeared));
+  assert.equal(outcome, "refused", "an object that changed identity must be JUDGED AGAIN");
+  assert.ok(existsSync(fifo), "the object this call judged was left alone");
+});
+
+test("#14350: a HEALTHY pass clears the recorded claim fact (no one-way latch)", async () => {
   // The other direction, and the reason the field cannot simply be kept: a durable
   // marker nobody clears teaches an operator to ignore the line.
   //
-  // MUTATION THAT REDS THIS: keep the stale field on every `ok` write.
+  // ⛔ THIS TEST USED TO WRITE THE "HEALTHY" RECORD ITSELF, which made it VACUOUS:
+  // it never called `flushSpool`, so the mutation it named could not reach it
+  // (measured — `pass 1 / fail 0` with the stale field kept on the `ok` write,
+  // while the Python twin redded). It now drives a REAL pass.
+  //
+  // MUTATION THAT REDS THIS: keep `previous?.claim_unavailable` on the `ok` write
+  // (`recordOutcome`, the `summary.attempted > 0` arm).
+  //
+  // ⛔ THE PASS IS DRIVEN THROUGH THE EXTENSION, not `flushSpool(cfg, {dir})`: the
+  // durable write lives in the extension's own `recordOutcome`, which records to
+  // the spool it was REGISTERED with. A direct `flushSpool` call therefore clears
+  // nothing and the assertion would pass for the wrong reason.
+  // ⛔ AND THE SPOOL IS EMPTY, DELIBERATELY: this is the shape the finding names. A
+  // pass that FILES clears the field through the `ok` write's fresh record, so a
+  // test with an entry in the spool cannot discriminate the no-op clearing at all
+  // (measured: disabling it left such a test green). The pass here HOLDS the claim
+  // and attempts NOTHING, which is precisely the pass that used to write nothing.
   const spool = tmpSpool();
   writeCaptureStatus(spool, {
     version: 1, state: "ok",
@@ -8305,7 +8371,15 @@ test("#14350: a HEALTHY pass clears the recorded claim fact (no one-way latch)",
     claim_unavailable_reason: "stale obstruction",
     updated_at: new Date().toISOString(),
   });
-  writeCaptureStatus(spool, { version: 1, state: "ok", updated_at: new Date().toISOString() });
+  const accepted = statusFetch(200);
+  const first = await sessionStartLines(spool, accepted.fetchImpl);
+  assert.equal(
+    first.calls.filter((u) => u.endsWith("/v1/sessions")).length, 0,
+    "this test is about the pass that attempts NOTHING",
+  );
+  const recorded = readCaptureStatus(spool);
+  assert.equal(recorded?.claim_unavailable, undefined,
+    "a pass that HELD the claim must clear the stale fact: " + JSON.stringify(recorded));
   const line = captureHealthLine(spool, { apiKey: "present" }).line;
   assert.doesNotMatch(line, /NO drain exclusion/, line);
 });
