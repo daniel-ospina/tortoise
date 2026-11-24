@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1810 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1858 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -286,6 +286,13 @@ def _residue_block() -> str:
     branch's blob read 1770 on its own tree, `main`'s read 1765, and the RESOLVED run is the figure
     above, 1810 (1770 + `main`'s 24-line re-cut block + this fold's own 16 `#:` lines), re-derived by
     this walk rather than inherited from either side — which is what the graded figure exists to force:
+    — and the FOLD ON TOP OF THAT (`origin/main` `953c299c9b1f`, `#14436`) kept both sides too: this
+    branch's blob read **1810** on its own tree and `main`'s read **1808**, while the RESOLVED run is
+    the figure above, **1858** (1810 + the 43 `#:` lines of `main`'s `#14350`/`#14423` drift block,
+    kept whole — the two trees' runs overlap by 1765, so no line was dropped on either side — + this
+    fold's own 5 `#:` lines recording it), and `SWEEP_RESIDUE`'s pair is **unchanged** by the merge,
+    which is the measurement that says so: `--check` exits 0 on `(11901, "953c70c05b55923b")` before
+    and after, so this fold moved no row.
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
