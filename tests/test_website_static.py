@@ -4282,7 +4282,6 @@ def _css_compound_matches_element(compound: str,
     # a`, `#pricing-grid div`), where the rightmost compound is the bare tag and
     # the bug cannot show (measured, #14406 review round 12).
     remainder = re.sub(r"::?[\w-]+(?:\([^)]*\))?", " ", core).strip()
-    remainder = re.sub(r"::?[\w-]+(?:\([^)]*\))?", " ", remainder).strip()
     if remainder and remainder != "*":
         return remainder.lower() == tag.lower()
     # Nothing but pseudo-classes (`:hover`, `:first-child`, `:root` above): a
@@ -12238,15 +12237,19 @@ class TestProductTeamsPricingCardCtaBaseline:
             where = repr(bad[0][0]) if bad else ""
             assert bad == [], (
                 f"a rule that can select `.pricing-grid` declares "
-                f"`{prop}: {bad[0][1] if bad else ''}` ({where}), "
-                "so the four pricing cards stop sharing one ROW and one height: "
-                "`align-items: stretch` only stretches a flex row's items — a "
-                "block grid leaves every card at its own content height, and a "
-                "flex COLUMN stretches the cross axis (horizontal) — so "
-                "`margin-top: auto` aligns each CTA to its own card's bottom and "
-                "the three-baseline / 70.2px split of #13645 item 6 is back with "
-                "every other row in this class GREEN (#14406 review round 12, "
-                "measured)")
+                f"`{prop}: {bad[0][1] if bad else ''}` ({where}). ⛔ This row pins "
+                "the FLEX IMPLEMENTATION the page ships — not a claim that every "
+                "other layout renders differently. A 4-column grid with "
+                "`grid-template-columns: repeat(4, minmax(0, 1fr))` really does "
+                "stretch its items to one height (measured, #14406 review round "
+                "15) and still reds here, because this reader classifies no track "
+                "counts; a flex COLUMN does split the baselines, since its cross "
+                "axis is horizontal. So `margin-top: auto` stops aligning to a "
+                "shared bottom and the three-baseline / 70.2px split of #13645 "
+                "item 6 is back with every other row in this class GREEN (#14406 "
+                "review rounds 12/15). Migrating to `display: grid` deliberately "
+                "means re-cutting this row with its track pins, not widening "
+                "`allowed` here.")
 
     def test_no_rule_gives_the_cta_a_block_end_margin(self):
         """The CTA's block-END margin must stay 0 — `auto` there SHARES the slack.
