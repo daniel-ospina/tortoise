@@ -996,7 +996,23 @@ class BatchStore(Protocol):
     def find_settled_by_content_key(self, org_id: str, key: str
                                     ) -> BatchItem | None:
         """A previously INDEXED item with this exact content — the cross-batch
-        dedup read. Returns ``None`` when the graph has never seen the bytes."""
+        dedup read. Returns ``None`` when the graph has never seen the bytes.
+
+        ⛔ THIS READ IS OVER THE ITEM ROWS, NOT OVER THE GRAPH, so it answers
+        "a settled row claims these bytes" and NOT "the document those bytes
+        became still exists". The PATH-item arm does not share that property: its
+        indexer gate re-indexes when the stored ``:Source.contentHash`` is gone.
+        The two enforcement points therefore diverge for an inline-text item
+        whose ``:Source`` is removed after indexing — a re-submission would be
+        ``SKIPPED_DUPLICATE`` while the status surface says the document is
+        there. ⚠️ DECLARED RESIDUAL, NOT AN OBSERVED DEFECT: no path in this tree
+        is known to remove a BATCH-CREATED ``:Source`` (measured — the only
+        ``DETACH DELETE src`` sites in ``hosted_api.py`` are ``url =
+        session:{id}``, which a batch never writes). It becomes live if a
+        document-deletion path, a restore or a graph fold can drop ``:Source``
+        while ``IngestBatchItem`` rows survive; the fix then is to re-verify the
+        ``:Source`` inside this predicate, or to clear ``content_key`` when the
+        source is removed."""
         ...
 
 

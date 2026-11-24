@@ -255,10 +255,17 @@ def _residue_block() -> str:
     ⛔ ITS EXTENT IS THE ENTIRE RUN (2047 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
-    RE-MEASURED by this walk on the RESOLVED file at 2006 rather than inherited from either side —
-    the pre-merge branch walked 1989 and `main`'s own blob walked 1930, each measured by THIS
-    function on its own file, and the resolved run is their UNION plus this lane's fold note, never
-    a sum of them. ⛔ Earlier readings, kept because every fold's record stays (1921 at
+    RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
+    the pre-merge branch `7ce74ac` walked 2006, `main` `6a02515` walked 1954 and their merge-base
+    `2cccf90` walked 1930, each measured by THIS function on its own file, and the resolved run is
+    their UNION plus this lane's fold note, never a sum of them. ⛔ THOSE FOUR NUMBERS ARE A
+    MEASUREMENT, NOT A MEMORY: each is `_residue_block()`'s own walk at that commit (`git show
+    <sha>:tools/sdk_privatise.py`, then the same contiguous `#:` climb this function does), and the
+    earlier cut of this sentence carried 2006/1989/1930 — the PRE-MERGE branch's reading published
+    as the resolved one, a branch reading that never existed, and the merge-base's reading named as
+    `main`'s. Only 2047 is graded (`test_the_extent_figure_is_the_walks_own_count` reads the
+    `ITS EXTENT IS THE ENTIRE RUN (N lines` phrase), which is exactly why the three UNGRADED
+    numerals around it were free to rot — the class this PR records in `MEMORY.md`. ⛔ Earlier readings, kept because every fold's record stays (1921 at
     `59a08fdb8b40`, 1930 on `main`): ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — ⛔ AND
