@@ -17315,7 +17315,7 @@ def _drain_batch(org: dict, batch_id: str) -> None:
                 # landing test is `_advance_landed`'s explicit flag, not the
                 # returned row's state: a peer settling to the SAME state is not
                 # this pass's write.
-                if done.charge_in or done.charge_out:
+                if done.tokens_in or done.tokens_out:
                     _batch_ingest.record_item_spend(
                         org["org_id"], tokens_in=done.charge_in,
                         tokens_out=done.charge_out)
