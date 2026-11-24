@@ -243,35 +243,6 @@ from .projection.entities import (  # #3998: the declared :Source surface
 # is the arm that answers "keep the graph copy" when the gate cannot be read at all, which
 # a WRITE path needs (an unreadable arming module must never take a write down).
 from .projection.entities import _derived_mirror_required
-
-
-def _point_drop_hold() -> frozenset[str]:
-    """The labels whose GRAPH vector this door must not retire yet (`#14560` review, P1).
-
-    ⛔ THE SAME HOLD THE RESTORE DOOR CONSULTS, READ HERE FOR THE SAME REASON.
-    `hosted_backup._RESTORE_DROP_HELD` states it: a coverage verdict is an AGGREGATE, and
-    an aggregate is not evidence about the row a DESTRUCTIVE action touches. The restore
-    door deletes a node; this door pops a caller's vector out of the props it is about to
-    `SET n += $p`. `#14560` made `operator`'s coverage VERIFY (the empty slice is TRIVIAL,
-    and `mirror_required` without `require_substantive` reads that as stop), which is what
-    opened this door in the first place — before that change the operator conjunct was
-    unsatisfiable by arithmetic, so `:Point`'s pop could never fire and the pre-change
-    behaviour was KEEP by accident. Holding here makes the same outcome a RULE until
-    `#13971`'s per-ID ask can answer about the row being written.
-
-    ⛔ IMPORTS PER CALL, and any failure returns the HOLD. Two reasons, both measured
-    elsewhere in this file: a module-level `hosted_backup` import in the SDK pulls the
-    backup/hosted-api graph into every SDK import, and this predicate exists so a WRITE
-    path cannot be taken down by an arming module it cannot read. The fallback direction
-    is the conservative one — the graph keeps the vector, which is the only choice that
-    cannot lose a caller's write.
-    """
-    try:
-        from .hosted_backup import _RESTORE_DROP_HELD
-
-        return _RESTORE_DROP_HELD
-    except Exception:  # pragma: no cover - arming-module fault, keep the vector
-        return frozenset({"Point"})
 # #8006: the `search_keys` flatten rule has ONE home — the projection module that
 # owns the Point prop contract (`_POINT_DECLARED_PROPS` / `_POINT_LIST_PROPS` /
 # `_upsert_point_props`). The SDK write doors below call it under their
@@ -325,6 +296,35 @@ from .session_source_display import (
 from .security import redact_secrets
 import threading
 from datetime import UTC
+
+
+def _point_drop_hold() -> frozenset[str]:
+    """The labels whose GRAPH vector this door must not retire yet (`#14560` review, P1).
+
+    ⛔ THE SAME HOLD THE RESTORE DOOR CONSULTS, READ HERE FOR THE SAME REASON.
+    `hosted_backup._RESTORE_DROP_HELD` states it: a coverage verdict is an AGGREGATE, and
+    an aggregate is not evidence about the row a DESTRUCTIVE action touches. The restore
+    door deletes a node; this door pops a caller's vector out of the props it is about to
+    `SET n += $p`. `#14560` made `operator`'s coverage VERIFY (the empty slice is TRIVIAL,
+    and `mirror_required` without `require_substantive` reads that as stop), which is what
+    opened this door in the first place — before that change the operator conjunct was
+    unsatisfiable by arithmetic, so `:Point`'s pop could never fire and the pre-change
+    behaviour was KEEP by accident. Holding here makes the same outcome a RULE until
+    `#13971`'s per-ID ask can answer about the row being written.
+
+    ⛔ IMPORTS PER CALL, and any failure returns the HOLD. Two reasons, both measured
+    elsewhere in this file: a module-level `hosted_backup` import in the SDK pulls the
+    backup/hosted-api graph into every SDK import, and this predicate exists so a WRITE
+    path cannot be taken down by an arming module it cannot read. The fallback direction
+    is the conservative one — the graph keeps the vector, which is the only choice that
+    cannot lose a caller's write.
+    """
+    try:
+        from .hosted_backup import _RESTORE_DROP_HELD
+
+        return _RESTORE_DROP_HELD
+    except Exception:  # pragma: no cover - arming-module fault, keep the vector
+        return frozenset({"Point"})
 
 # #12943: module-scope, not a local import inside ``__init__``. THE IMPORT IS THE
 # ONLY LINE OF THAT HOOK THAT CAN RAISE: ``note_local_cache`` itself is wrapped

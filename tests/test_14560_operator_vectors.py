@@ -400,7 +400,8 @@ def test_the_sdk_UPDATE_door_holds_the_Point_vector_too(sdk, monkeypatch):
     survives — which is the pre-`#14560` behaviour, made deliberate here rather than
     depending on a mis-measured denominator.
     """
-    from tortoise import hosted_backup, sdk as sdk_module
+    from tortoise import hosted_backup
+    from tortoise import sdk as sdk_module
 
     point = sdk._create_point("statement", "the caller will revise this", embedding=_vector(1))
     pid = point["id"]
