@@ -26,11 +26,13 @@ the captures in flight rather than a hidden blocker.
 So the fix is to take that chain OFF the loop, and the pin is structural rather
 than a wall-clock assertion (a timing assertion in a test rots into a pass, and
 this one would also need a real Postgres). It asserts, for every
-`_stamp_capture_provenance(...)` call in `hosted_api` SPELLED as that bare name in
-call position — and, separately, that no STATIC reference this pass can see binds,
-aliases, passes or otherwise reads that name, since an alias (`_prov =
-_stamp_capture_provenance; _prov(…)`), a `getattr(…)`, a `.__call__(…)` or an
-attribute form is the same call under a spelling this walk cannot follow. ⛔ THAT
+`_stamp_capture_provenance(...)` call in `hosted_api` — in CALL position, under a
+bare name or as an `obj.name` attribute, since the door population resolves its
+callee through the same predicate every other arm uses — and, separately, that no
+STATIC reference this pass can see binds, aliases, passes or otherwise reads that
+name outside a call, since a `_prov = _stamp_capture_provenance; _prov(…)` alias, a
+`getattr(…)` or a `.__call__(…)` is the same call under a spelling this walk cannot
+follow. ⛔ THAT
 SEAL IS STATIC-ONLY, exactly as the chain-name paragraph below states: a name
 assembled from an unfoldable string (`eval("".join(["_stamp_capture",
 "_provenance"]))`) or a computed `getattr` is OUTSIDE this pin and needs the
@@ -547,6 +549,17 @@ def _bound_names(tree: ast.Module) -> frozenset[str]:
             names.add(node.id)
         elif isinstance(node, ast.ExceptHandler) and node.name:
             names.add(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            # ⛔ A `match` CAPTURE PATTERN BINDS A NAME WITH NO `ast.Name(Store)`
+            # NODE (review P2, measured): `case _ as set:` left `set` unbound, so
+            # `if set():` inside that case reported the body dead although the
+            # matched value decides it — the same false RED this set exists for.
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+        elif isinstance(node, (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+            # PEP 695: `def f[set]():` binds `set` in the type-parameter scope.
+            names.add(node.name)
     return frozenset(names)
 
 
@@ -762,7 +775,9 @@ def _dead_guards(tree: ast.Module, target: ast.AST) -> list[tuple[int, str]]:
             # (review P2 at `f229af1`, measured): a call in a clause expression is
             # graded too, and the rows below put one in each — the nested-`iter`
             # row reds if a later clause is walked without the earlier guards, and
-            # the bare `if g()` row reds if clause calls stop being graded at all.
+            # `[x for _ in () if (g(),)]` reds if clause expressions stop being
+            # walked at all (the bare `if g()` row alone cannot: it expects `[]`
+            # either way).
             element_guards = list(guards)
             for generator in node.generators:
                 walk(generator.iter, element_guards)
@@ -1065,9 +1080,12 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
     stray = {owner: lines for owner, lines in stray.items() if lines}
 
     # ⛔ THE DOOR UNDER ANOTHER NAME IS STILL THE DOOR (review finding, P2,
-    # measured). `_stamp_calls` above matches ONE SPELLING — `ast.Name` in call
-    # position — so `_prov = _stamp_capture_provenance; _prov(…)` inline in the
-    # handler put the per-id record writes back on the loop and this pin stayed
+    # measured). `_stamp_calls` resolves its callee through `_callable_name`, so a
+    # bare `ast.Name` AND an `obj.name` attribute in call position are both in the
+    # graded population (`:1078-1081` says why: the attribute spelling was a
+    # measured fail-open until `c3955990`). What this arm rejects is a reference to
+    # the door OUTSIDE a call: `_prov = _stamp_capture_provenance; _prov(…)` inline
+    # in the handler put the per-id record writes back on the loop with this pin
     # GREEN (`1 passed`, 4 of the 5 invocations seen); `getattr(mod,
     # "_stamp_capture_provenance")(…)` and `_stamp_capture_provenance.__call__(…)`
     # were green too. Every ARM above keys on the chain NAME, so a door reached
@@ -1103,11 +1121,12 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         "its own name, or re-derive this pin to follow the alias (#13722; the "
         "run-time half is #14528)")
     assert not door_spellings, (
-        f"{_STAMP_DOOR} is referenced OUTSIDE a bare-name call at "
+        f"{_STAMP_DOOR} is referenced OUTSIDE a call position at "
         f"{sorted(door_spellings.items())} (line: node) — an alias, a "
         "`getattr(…)`, or a `.__call__` is the SAME call under a spelling the arms "
         "above cannot follow, so its per-id record writes could run on the event "
-        "loop with this pin GREEN. Call it by name in call position, or re-derive "
+        "loop with this pin GREEN. Call it in call position (a bare name or "
+        "`obj.name` — both are graded), or re-derive "
         "this pin to follow that binding (#13722; the run-time half is #14528)")
 
     # ⛔ A CALLABLE BUILT FROM A STRING IS STILL A WAY TO RUN THE CHAIN (review
@@ -1744,6 +1763,12 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
         (["def f():", "    [x for _ in () for _y in (g(),)]"], ["()"]),
         (["def f():", "    [g() for _ in () if _flag]"], ["()"]),
         (["def f():", "    [x for _ in _xs if g()]"], []),
+        # ⛔ CLAUSE CALLS ARE GRADED AT ALL — the row above cannot pin that on its
+        # own, because it expects `[]` either way (review P2, measured: making the
+        # `ifs` walk a no-op left the whole suite GREEN). Here the element is
+        # unreachable (empty iterable) AND the call sits in the clause, so dropping
+        # the clause walk stops the target being visited at all and this row reds.
+        (["def f():", "    [x for _ in () if (g(),)]"], ["()"]),
         # …and the same for a comprehension's own `iter`: pushing its guard before
         # walking it reports `g()` inside `(0 if g() else 0)`, which RUNS.
         (["def f():", "    [x for _ in (0 if g() else 0)]"], []),
@@ -1776,6 +1801,14 @@ def test_the_dead_guard_arm_fires_only_when_every_submission_is_dead() -> None:
         # measured: `[(3, 'list()')]` before `_bound_names`).
         (["def f(list):", "    if list():", "        g()"], []),
         (["def f():", "    if list():", "        g()"], ["list()"]),
+        # ⛔ AND A `match` CAPTURE BINDS WITH NO `ast.Name(Store)` NODE (review P2,
+        # measured): `case _ as set:` left `set` unbound, so `if set():` inside that
+        # case reported the body dead although the matched value decides it. The
+        # `case _:` control keeps the genuine builtin graded.
+        (["def f(x):", "    match x:", "        case _ as set:", "            if set():",
+          "                g()"], []),
+        (["def f(x):", "    match x:", "        case _:", "            if set():",
+          "                g()"], ["set()"]),
     ],
 )
 def test_a_loop_header_or_comprehension_clause_is_graded_as_a_guard(
