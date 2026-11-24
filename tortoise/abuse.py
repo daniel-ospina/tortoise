@@ -95,8 +95,11 @@ crossing (measured 6 issues / 12 pushes). With NO incident channel there is
 no `SKIPPED_WINDOW` gate to hold the release, so `notify.resolve_abuse_episode`
 re-arms the local ledger on the FIRST confirmed episode end — the bound in that shape
 is the EPISODE, and the 24h window is only the ceiling for a continuously breaching
-org. Whichever shape applies, the bound is the WINDOW and an episode end is what
-releases it — never a mute.
+org. ⛔ WHICH shape applies DECIDES that bound, so do not restate it as the flat
+"the bound is the WINDOW" — a previous cut of this paragraph did, two lines after
+saying the opposite. What holds in EVERY shape is narrower: the window is what a
+message SPENDS, and an episode end (or any per-outcome release) is what re-arms
+it — never a mute.
 The in-process claim below stays as the ATTEMPT bound (it self-heals a store
 failure, which an episode-scoped claim could not), so the honest ceiling across
 replicas is N replicas x 1 attempt per window, and at most one delivery per
@@ -1887,8 +1890,11 @@ class AbuseEngine:
         a caller cannot get one without the other:
 
         * the DELIVERY window is re-armed, because a NEW episode must page at
-          once — the WINDOW is the ceiling, the episode end is the release, and
-          only the engine knows the rule's window went clean;
+          once — the episode end is the RELEASE, and the window is the ceiling
+          only for a CONTINUOUSLY breaching subject (no-channel shape: a flapping
+          rule pages once per episode end, so the window is not its ceiling —
+          the module docstring carries the scopes), and only the engine knows the
+          rule's window went clean;
         * the incidents are closed + deleted-to-resolve, because nothing else ever
           resolved an abuse incident: the sentinel outlived the condition and its
           issue stayed OPEN for the rest of time, so the tracker reported a
