@@ -2483,6 +2483,16 @@ surfaces:
   # `manifest-integrity` leg (`tools/ci_selection.py --integrity`), and the tests
   # themselves would then run on NO surface at all.
   - test_12483_12487_spool_integrity.py
+  # #14342 D1 (#14350): the drain claim + capacity-refusal guard. Same two
+  # reasons as `test_12483_12487_spool_integrity.py` one block up — its CLI
+  # surface (`session drain`, `session capture`) lives in `tortoise/__main__.py`,
+  # an EXACT `api` SOURCE_PATTERN, so an api-only diff would otherwise run no
+  # guard for the one-drainer-per-spool protocol this file pins. The `core` row
+  # below is the mechanism half (`tortoise/drain_claim.py` and
+  # `tortoise/capture_spool.py` match no named surface). ⛔ Both rows are
+  # required: an unregistered test file also reds the `manifest-integrity` leg
+  # (`tools/ci_selection.py --integrity`).
+  - test_14350_drain_convergence.py
   # its SessionStart hook live in `tortoise/__main__.py`, an EXACT `api`
   # SOURCE_PATTERNS match. A match REPLACES the `core` fallback in `select()`, so
   # a `__main__.py`-only diff selected `api` and NOT this guard — the #1349/#2938
@@ -6928,6 +6938,13 @@ surfaces:
   # would run no guard for the retained-unreadable accounting it pins. Dual
   # registration mirrors `test_capture_spool.py` one block up.
   - test_12483_12487_spool_integrity.py
+  # #14342 D1 (#14350): the drain claim + capacity-refusal guard's MECHANISM
+  # half. `tortoise/drain_claim.py` is a NEW product file that matches no named
+  # `SOURCE_PATTERNS` entry (so it falls through to `core`), and the capacity
+  # rule it pins lives in `tortoise/capture_spool.py`, same fallback. Without
+  # this row a change to either module would run no guard for the protocol.
+  # Dual registration mirrors the `api` row above and `test_capture_spool.py`.
+  - test_14350_drain_convergence.py
   # #6388: the session-events SEAL policy (`tools/seal_session_events.py` —
   # compress, never discard, per the #3870 ruling). `tools/` is a flat
   # NON_PYTHON_PREFIXES entry, so a change to that tool selects NO surface on
