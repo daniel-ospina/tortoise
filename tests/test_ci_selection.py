@@ -9287,6 +9287,63 @@ def test_runner_routing_is_positional_and_the_last_shard_is_always_on_the_hosted
         assert SHARD_RUNNER_HOSTED == ["ubuntu-latest"], SHARD_RUNNER_HOSTED
 
 
+def test_the_fast_split_is_off_by_default_so_the_pool_stays_fallback_only(monkeypatch):
+    """#6897/#10186: with no opt-in, EVERY row is main's `ubuntu-latest`.
+
+    ⛔ RESTORED IN REVIEW (P1). The B7 cut took this arm and left
+    `resolve_shard_routing` — the single reader of the recorded `fallback-only`
+    decision — referenced by NOTHING under `tests/` (`git grep -n
+    'resolve_shard_routing' -- tests/` was empty). Making the resolver return
+    `pool-split` unconditionally was therefore a one-line edit that reddened ZERO
+    of the surviving arms: `runner` stays a JSON array of a valid class and only
+    its VALUE moves. The arm above pins the hosted LABEL; the MODE is a different
+    gate, and this is the only pin on it.
+
+    This is the assertion the earlier cut of this branch failed: it routed odd
+    shards to `[self-hosted, self-hosted-x64]` unconditionally, which moved 4 of
+    the then-9 gated shards onto a class the recorded `fallback-only` decision
+    says is not primary. It also fails SAFE on junk: an unset variable, an
+    emptied one, a fork with no `vars`, or a typo must all land on main's
+    behaviour rather than discovering the split when a leg dies.
+    """
+    from tools.ci_selection import (
+        SHARD_ROUTING_ENV,
+        SHARD_ROUTING_HOSTED_ONLY,
+        SHARD_ROUTING_POOL_SPLIT,
+        SHARD_RUNNER_HOSTED,
+        fast_matrix_include,
+        load_manifest,
+        push_legs,
+        resolve_shard_routing,
+    )
+    monkeypatch.delenv(SHARD_ROUTING_ENV, raising=False)
+    shards = push_legs(load_manifest())["shards"]
+    inc = fast_matrix_include(shards)["include"]
+    assert inc, "the real config emits no shards — nothing to route"
+    assert {e["runner"] for e in inc} == {json.dumps(SHARD_RUNNER_HOSTED)}, (
+        "the default must be hosted-only — the pool is fallback-only by recorded "
+        f"decision (#6897): {sorted(e['runner'] for e in inc)}")
+    # …and it must be the DEFAULT, not an accident of an unset environment: the
+    # mode resolver is the single decision point, and every non-opt-in value
+    # resolves to hosted-only, `hosted-only` itself included (the documented safe
+    # setting must stay legal).
+    for value in (None, "", "   ", SHARD_ROUTING_HOSTED_ONLY, "hosted-only ",
+                  "HOSTED-ONLY", "true", "1", "pool", "split", "pool-splits",
+                  "pool_split"):
+        assert resolve_shard_routing(value) == SHARD_ROUTING_HOSTED_ONLY, value
+    assert resolve_shard_routing(SHARD_ROUTING_POOL_SPLIT) == SHARD_ROUTING_POOL_SPLIT
+    assert resolve_shard_routing(" POOL-SPLIT ") == SHARD_ROUTING_POOL_SPLIT
+    # the environment is the operator lever, so it must reach the matrix — and
+    # only for the exact opt-in.
+    for value in ("", SHARD_ROUTING_HOSTED_ONLY, "nonsense"):
+        monkeypatch.setenv(SHARD_ROUTING_ENV, value)
+        got = {e["runner"] for e in fast_matrix_include(shards)["include"]}
+        assert got == {json.dumps(SHARD_RUNNER_HOSTED)}, (value, sorted(got))
+    monkeypatch.setenv(SHARD_ROUTING_ENV, SHARD_ROUTING_POOL_SPLIT)
+    got = {e["runner"] for e in fast_matrix_include(shards)["include"]}
+    assert len(got) == 2, f"the opt-in must actually split: {sorted(got)}"
+
+
 #: The comma-joined label expression the emitters must carry — the ONE value
 #: `_label_set` can parse out of an env var (a raw label list or a bare
 #: `…labels` reference is not it, and would make the seam silently inert).
