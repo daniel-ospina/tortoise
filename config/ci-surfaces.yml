@@ -66,7 +66,14 @@ version: 1
 #
 #     the verb packs one shard at 838.1 s (a) and ten at 838.0 s (b – k),
 #     `ceil(838.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's),
-#     and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`.
+#     and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`.
+#
+# ⛔ BOTH FIGURES ON THAT LAST LINE ARE RE-READ BY HAND WHENEVER THE SECONDS MOVE, because the guard
+# does NOT grade them: `_emission_block_claims` grades the partition and the `ceil(...)` MULTIPLIER
+# (`WATCHDOG_HEADROOM`), not the printed ratio. Measured at this head — the headroom prints `2.0`
+# (1680 / 838.0 = 2.0048) and printed `2.01` at the previous fold's 837.9 s (1680 / 837.9 = 2.0050),
+# so carrying it one fold is exactly how a graded sentence comes to quote a number no run emitted.
+# That is this block's documented residual: an ungraded figure inside a graded sentence.
 #
 # ⛔ ONE CLAUSE, NOT A LEDGER. This paragraph was re-emitted at every fold and had accumulated SEVEN
 # stacked restatements of the same sentence; a fold that splices two sides of it is read by the

@@ -22712,11 +22712,16 @@ def test_no_record_calls_an_arm_CUT_while_that_arm_is_live():
         assert got == {"test_c_arm": True}, (
             f"a {tag} block must bound its verdict: {got!r}")
 
-    # ⛔ AND THE WINDOW MUST REACH A VERDICT THAT IS WRITTEN FAR FROM ITS ARM. Measured:
-    # `tools/ci_selection.py`'s shard-scaling record names the arm 207 characters after
-    # "cut by", so at `_CUT_CLAIM_WINDOW = 200` the scan read it as NO CLAIM at all — and a
-    # false "CUT" written the same way would have shipped green. Pinned at 207, i.e. past
-    # the old bound, so a re-narrowing reds here.
+    # ⛔ AND A VERDICT IS A VERDICT WHEREVER IT SITS IN A LONG PARAGRAPH. The bound is the
+    # CLAUSE (`_claim_clause_bounds`), not a character distance, so a 207-character run of
+    # `x` before the arm changes nothing — and the arm is named IMMEDIATELY before its
+    # verdict here, so nothing in this fixture depends on how far apart the two are.
+    # ⛔ This fixture used to explain itself by a `_CUT_CLAIM_WINDOW = 200` that no longer
+    # exists (`a9e9d5bc8ed4` deleted it: a length was tried, first 200 then 400, and the
+    # rule is now ATTRIBUTION — "there is no window to tune", see `:22114`). The
+    # assertion is kept and the rationale is restated against the mechanism that actually
+    # bounds it; a pin whose stated reason names an instrument that is gone is the class
+    # this file's own CUT scan exists to catch.
     far = ("x" * 207) + " `test_live` — cut by `#14439`.\n"
     got = _cut_claims_in(far, {"test_live"})
     assert [c for _o, _n, c in got] == [True], (

@@ -1813,9 +1813,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # independently while this branch was open (this branch's `28a56f3d9254`), and the
     # fold AUTO-merged the two declarations into a DUPLICATE MAPPING KEY at two
     # different lines. Python silently resolves a duplicate key to the LAST one, and
-    # `--integrity` cannot see it (it reds duplicate ENTRIES within a surface, not
-    # duplicate mapping keys) — so the branch's row would have been shadowed with
-    # nothing red. Resolved by keeping `main`'s row: its patterns are `^…$`-ANCHORED
+    # ⛔ `--integrity` DOES grade duplicate mapping keys — `duplicate_mapping_key_issues()`
+    # is composed into it FIRST (`tools/ci_selection.py:8348`), added for #5373 and
+    # documented as the check to re-run after every merge, rebase or replayed commit —
+    # but that walk reads the MANIFEST (`config/ci-surfaces.yml`), not a dict literal in
+    # a test module. So THIS land still went uncaught: the branch's row would have been
+    # shadowed with nothing red. Resolved by keeping `main`'s row: its patterns are `^…$`-ANCHORED
     # (strictly stronger scoping than this branch's unanchored ones) and this site map
     # is the fuller record.
     # ⛔ THE ARMS MUST STAY VALUE-SCOPED, NOT `setenv`-SHAPED (#14318): a
