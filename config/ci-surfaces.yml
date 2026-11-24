@@ -74,9 +74,9 @@ version: 1
 # `f379299c64d` (`#14472`, this head's own merge base, after the `#14419` B7 cut took the
 # durations-map arithmetic bulk out of `tests/test_ci_selection.py` and re-packed the pool) plus
 # this PR's own `core` registrations, each at the flat 2.0 s `DEFAULT_FAST_WEIGHT` — the verb packs
-# three shards at 837.9 s (a, c, k) and eight at 837.8 s (b, d, e, f, g, h, i, j), so
-# `ceil(837.9/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
-# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two agree
+# one shard at 838.1 s (a) and ten at 838.0 s (b, c, d, e, f, g, h, i, j, k), so
+# `ceil(838.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) — and
+# the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two agree
 # by construction rather than by a hand re-read.
 # ⛔ THIS SENTENCE IS A MERGE MAGNET, and that is why the partition is stated ONCE, in ONE form.
 # Three lanes have now re-derived it on the same tree and reached the SAME reading, and each fold
@@ -141,20 +141,23 @@ version: 1
 # 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
 # `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
 # re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
-# and re-measures the graded extent on the resolved tree, 1915 → 1921, rather than accepting the
+# and re-measures the graded extent on the resolved tree, 1915 → 1921 at that fold and **1977** at
+# this one (the resolved run is the UNION of the two sides' `#:` blocks, never one side's figure),
+# rather than accepting the
 # cut or carrying either side's figure — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
-# `DEFAULT_FAST_WEIGHT`) the verb packs five shards at 837.7 s (a, c, d, e, k) and six at
-# 837.6 s (b, f, g, h, i, j), so
-# `ceil(837.7/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
-# agree by construction rather than by a hand re-read. ⛔ The split is 0.1 s WIDE and the NAME SETS
-# differ, which is the point of quoting them: a carried figure and a re-derived one differ in the
+# `DEFAULT_FAST_WEIGHT`) the verb's emission is the ONE stated at the top of this block — re-emitted
+# there on THIS tree rather than restated here. ⛔ A partition WAS carried at this spot by an earlier
+# fold of the same paragraph (five at 837.7 s / six at 837.6 s) and it is DELETED rather than
+# re-pointed, on the rule the paragraph above states: two spellings of one emission is exactly the
+# `<est stated twice>` / `<ceil stated N times>` shape the guard reds on, and a reader of the prose
+# cannot see it. ⛔ The split is 0.1 s WIDE and the NAME SETS differ, which is the point of quoting
+# them: a carried figure and a re-derived one differ in the
 # SET, not in the minute, and the minute has stood at 28 m across every reading of this pool from
-# 835.5 s to 837.7 s while the seconds moved under it. So NO arithmetic on the minute can catch a
-# carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED below
-# instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
+# 835.5 s to 838.1 s while the seconds moved under it. So NO arithmetic on the minute can catch a
+# carried figure — only the `est_seconds` partition can, which is why the sentence is GRADED at the
+# top of this block instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a fast file is registered —
 # the packer is greedy, so one file re-packs every bin — and this very fold demonstrates it:
 # `tests/test_spool_drain_rehearsal.py` (#14429) landed on `main` and moved this partition off the
 # nine/two split this branch last derived (837.3/837.2) with the minute unmoved, and #14423's
