@@ -73,13 +73,18 @@ version: 1
 # `ceil(838.2/60 x 2.0)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.0`, so the two
 # agree by construction rather than by a hand re-read.
-# `da4b76a5851c` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
+# `8c373f59a1` — #14439's TEST-CUT fold, whose B7/B4/B8 cuts trim the ARITHMETIC over the
 # durations map (the map ITSELF is untouched across that commit: 1493 rows, 15145.5 s, 0 added,
-# 0 removed), the #7949 capstone prose, and the privatise residue counts — it RETIRES
-# `tests/test_sdk_privatise_sweep.py`'s residue-extent guard suite — and because THIS PR
-# re-cuts that file's pin, its fold KEEPS the branch's copy of it (whose guards grade the re-cut)
-# and re-measures the graded extent on the resolved tree, 1915 → 1921, rather than accepting the
-# cut or carrying either side's figure — folded over the #14371, #14186, #14434,
+# 0 removed, against its parent `e6b3cf2908`), the #7949 capstone prose, and the privatise residue
+# counts — at THAT head B8 dropped `tests/test_sdk_privatise_sweep.py`'s residue-extent guard arm.
+# ⛔ THIS PR neither carries nor re-cuts that file: `git diff origin/main HEAD --
+# tests/test_sdk_privatise_sweep.py` is EMPTY at this head (the file is byte-identical to `main`'s,
+# and every commit `--full-history` lists for it in `origin/main..HEAD` is a MERGE of `main`), so
+# the arm at this head is `main`'s (restored there after the cut) and the extent it publishes is
+# graded by the arm itself — re-derive it there, never carry it here. An earlier revision of this
+# paragraph credited `da4b76a5851c` (a #13526 quota-report commit, not this fold) and claimed "this
+# PR re-cuts that file's pin … 1915 → 1921"; both halves were false at this head, so the figures
+# are dropped rather than re-pointed — folded over the #14371, #14186, #14434,
 # #13998, #14350, #14423, #14429 and #14446 `core` rows that are all in the map, plus #14407's
 # own dual registration of `tests/test_14407_alert_delivery.py`, every one of them at the flat 2.0 s
 # `DEFAULT_FAST_WEIGHT`) — ⛔ THE PARTITION IS STATED ONCE, ABOVE, AND NOT RESTATED HERE. This
@@ -205,7 +210,7 @@ version: 1
 #
 # The 1.25x balance band is enforced by `--integrity`'s `workflow_halves_issues()`, which recomputes
 # the ratio from the committed map (the `test_real_workflow_halves_are_consistent` arm that used to
-# sit beside it went with the durations-map arithmetic cut (#14419). The old "single-file floor" argument is
+# sit beside it went with the durations-map arithmetic cut (#14419)). The old "single-file floor" argument is
 # RETIRED: it rested on `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
 # file — so extra shards do keep reducing max(shard). The lane-parity contract above cannot hold a
 # MINIMUM either way: it requires a SUPERSET of main's labels, so it forbids a SHRINK and is what
