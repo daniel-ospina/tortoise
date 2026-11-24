@@ -7250,11 +7250,11 @@ _EPIC_CITE_SOURCES = {
     # moved ONCE MORE since: `#12695` (`3893603b07`) took the pair to `:1023`/`:1015` at
     # `origin/main` `5843fdf234` and re-derived no cite, so `main` was red for this row
     # until that number was re-measured in the tree this head merges — and the `#12295`
-    # de-conflict re-derived the row to the same pair. Measured in THIS merged tree
-    # (`grep -n 'export function postCapture(\|export function postInstallProbe('
-    # tortoise/pi-hooks/tortoise-capture.ts` -> `:1030`/`:1022`). That is this source key's case in one
-    # line: the pin is what turned an invisible re-stale into a red; a name is pinned,
-    # its line is re-opened.
+    # de-conflict re-derived the row to the same pair; it has since moved again, `#13039`'s
+    # `7520c6dafd` to `:1030`/`:1022` and `#14428` (`fb3b326fdb`) BY CONTENT to `:1100`/`:1092`
+    # — what the row below pins (`grep -n 'export function postCapture(\|export function
+    # postInstallProbe(' tortoise/pi-hooks/tortoise-capture.ts`). That is this source key's case
+    # in one line: the pin turned an invisible re-stale into a red — re-open it, not prose.
     "pi_hooks": _REPO / "tortoise/pi-hooks/tortoise-capture.ts",
     # ⛔ `03-test-design.md:82` cites the 402 quota guard and its refusal payload by
     # NUMBER, and that row was in NO pin: #12369 re-pointed a CORRECT
@@ -7452,11 +7452,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # contain it — so that pair arrived ALREADY stale at its own landing commit,
         # and `main` was red for this row at `6916a6cd89`. `#12695` (`3893603b07`, the
         # Pi leg's unrecorded-outcome stamp) then added 16 lines above both `def`s
-        # (`:1007` -> `:1023`), and `#13039`'s `7520c6dafd` added 7 more (`-> :1030`), neither
-        # re-deriving a cite, so the pair is **`:1030`/`:1022`** here — measured at this head
-        # (`grep -nF 'export function postCapture(' …`) and re-measured at the head this
-        # de-conflict merges at (`0449273b`), which still reads `:1023`/`:1015`; repaired
-        # at this head rather than carried, because a red on `main` blocks every head.
+        # (`:1007` -> `:1023`), and `#13039`'s `7520c6dafd` added 7 more — `:1030`/`:1022` is
+        # THAT commit's pair, not this head's. ⛔ MEASURED HERE, the same `grep -nF 'export
+        # function postCapture(' …` reads `:1100`/`:1092`, which is what the tuple below pins
+        # (`#14428`, `fb3b326fdb`, re-derived BY CONTENT); `#12295`'s de-conflict base read
+        # `:1023`/`:1015`. The ROW is the pin, not this sentence: a red on `main` blocks every head.
         # ⛔ THAT REPAIR IS PAIR-SCOPED: it re-points the `pi_hooks` pair only, and the
         # rows above it are pins on files under `tortoise/` (`sdk.py`, `search_engine.py`,
         # `pack_registry.py`), which this branch does not touch — `git diff --stat`
@@ -7470,12 +7470,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `6916a6cd89` `:957` is a comment and that list is at `:1009`. Re-open the
         # line; the row is held by CONTENT, so a wrong pair reds rather than
         # silently resolving.
-        # RE-DERIVED by CONTENT on the merged tree (the de-conflict of `main` into
-        # `#12295`): `grep -n 'export function postCapture(\|export function postInstallProbe('
-        # tortoise/pi-hooks/tortoise-capture.ts` -> 1030 / 1022, still 8 apart at `main`. The
-        # `:1007`/`:999` pair above is this pin's own head-bound record of `6916a6cd89`
-        # and is RED here, measured: main's tortoise-capture.ts carries +23 lines above
-        # both `def`s that neither of that row's two sides moved.
+        # RE-DERIVED by CONTENT at this head (`grep -n 'export function postCapture(\|export
+        # function postInstallProbe(' tortoise/pi-hooks/tortoise-capture.ts`): `:1100`/`:1092` is
+        # what the tuple below pins — re-derived BY CONTENT in `#14428`, the ROW, not this prose.
+        # The `:1007`/`:999` pair above is this pin's own head-bound record of `6916a6cd89`
+        # and is RED here, measured: main's tortoise-capture.ts carries +93 lines above
+        # both `def`s that neither of that row's two sides moved (`+23` was `1007`->`1030`).
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("1100", "export function postCapture("),
             ("1092", "export function postInstallProbe("),
