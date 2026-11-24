@@ -58,10 +58,9 @@ version: 1
 # budget) and with the peer lane's round-8/9 fixes, so the packing includes this PR's two
 # `core`-registered rows (`tests/test_14371_offline_embed_json.py`,
 # `tests/test_14186_embedder_seam_batching.py`, both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`) —
-# the same verb packs nine shards at 837.3 s (a, b, c, d, e, g, h, j, k) and two at 837.2 s
-# (f, i), so `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST
-# shard's) — and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`,
-# so the two agree by construction rather than by a hand re-read. ⛔ **THIS SENTENCE IS A MERGE
+# the partition is stated ONCE, in the re-derived sentence further down — ⛔ an earlier cut of this
+# paragraph carried its OWN copy of it, and two copies of one partition is exactly the defect the
+# sentence below describes. ⛔ **THIS SENTENCE IS A MERGE
 # MAGNET, and that is why it is stated ONCE, in ONE form.** Two lanes independently re-derived it
 # on the same merged tree and reached the SAME reading; git spliced both spellings in, so the
 # block stated the same partition TWICE and the guard read it as `<est 837.3 stated twice>` — a
@@ -83,13 +82,13 @@ version: 1
 # graded, not only the seconds. Re-run `--emit-push-matrix` on the MERGED tree; never carry the
 # last revision's minute, seconds, or split.
 # MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
-# `b2d1e9086a`, plus this PR's two `core`-registered rows — `tests/test_14371_offline_embed_json.py`
+# `989765162f`, plus this PR's two `core`-registered rows — `tests/test_14371_offline_embed_json.py`
 # and `tests/test_14186_embedder_seam_batching.py` — both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
-# the verb packs eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k), so
-# `ceil(837.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# the verb packs seven shards at 837.5 s (a, c, d, e, i, j, k) and four at 837.4 s (b, f, g, h), so
+# `ceil(837.5/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
-# reading of this pool from 835.5 s to 837.1 s while the SECONDS moved under it, so NO arithmetic
+# reading of this pool from 835.5 s to 837.5 s while the SECONDS moved under it, so NO arithmetic
 # on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
 # sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a
 # fast file is registered — the packer is greedy, so a seventh file re-packs every bin — which is
