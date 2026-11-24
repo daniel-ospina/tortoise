@@ -1911,9 +1911,15 @@ SWEEP_NAMES = 66
 #: OWN tree (`--repin` there), i.e. `main` is RED against the 11898 it ships, and the tree this PR
 #: ships reproduces that pair bit-for-bit (same count AND same digest) — the cross-check that this
 #: branch contributes **0** rows, since its only residue-bearing change is prose and a module
-#: (`tortoise/expansion_merge.py`) that opens no session. So the `+3` against the pin belongs to
-#: `main`'s `#14394` (the capability witness's budget), and the pair below repairs `main`'s red as
-#: well as ours. `--check` exits 0 on this tree; the pair is the output of `--repin` on it.
+#: (`tortoise/expansion_merge.py`) that opens no session. ⛔ **THE MOVER IS `main`'s `b2d1e9086a92`
+#: (`#14434`), NOT `#14394`** — the first cut of this block named `#14394` (the tip being merged) and
+#: that was an INFERENCE FROM THE MERGE POINT, so it is corrected here by measurement, per this
+#: file's own rule: `--repin` in a detached worktree reads **11898** at `0fbfbb5b210` and at
+#: `67774cdec666`, **11901** at `b2d1e9086a92`, and **11901** again — unchanged — at its children
+#: `bbe54363ad65` (`#14220`) and `43182ac09a7d` (`#14394`). The sorted row sets of the two trees name
+#: all three rows: `projection.g.query` 24 → 26 (+2) and `env.update` 101 → 102 (+1), so
+#: 2 + 1 = 3 = 11901 − 11898 and nothing was absorbed silently. The pair below repairs `main`'s red
+#: as well as ours. `--check` exits 0 on this tree; the pair is the output of `--repin` on it.
 SWEEP_RESIDUE = (11901, "953c70c05b55923b")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

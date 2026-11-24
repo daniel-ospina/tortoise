@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1804 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1810 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -284,7 +284,7 @@ def _residue_block() -> str:
     (1741 + the 24 the re-cut declares) rather than carrying the fold's reading forward,
     — and THIS fold of `origin/main` `43182ac09a7d` (`#14394`) KEPT both sides' blocks once more: this
     branch's blob read 1770 on its own tree, `main`'s read 1765, and the RESOLVED run is the figure
-    above, 1804 (1770 + `main`'s 24-line re-cut block + this fold's own 10 `#:` lines), re-derived by
+    above, 1810 (1770 + `main`'s 24-line re-cut block + this fold's own 16 `#:` lines), re-derived by
     this walk rather than inherited from either side — which is what the graded figure exists to force:
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
