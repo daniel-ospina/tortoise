@@ -54,18 +54,13 @@ version: 1
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.)
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
 # MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
-# `953c299c9b1f`, plus this PR's own `core` registrations — `tests/test_14371_offline_embed_json.py`
+# `f635f9e00075`, plus this PR's own `core` registrations — `tests/test_14371_offline_embed_json.py`
 # and `tests/test_14186_embedder_seam_batching.py` — all at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
 # the verb packs nine shards at 837.3 s (a–e, g, h, j, k) and two at 837.2 s (f, i), so
 # `ceil(837.3/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
-# `b2d1e9086a`, plus this PR's two `core`-registered rows — `tests/test_14371_offline_embed_json.py`
-# and `tests/test_14186_embedder_seam_batching.py` — both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
-# the verb packs eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k), so
-# `ceil(837.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
 # reading of this pool from 835.5 s to 837.3 s while the SECONDS moved under it, so NO arithmetic
-# reading of this pool from 835.5 s to 837.1 s while the SECONDS moved under it, so NO arithmetic
 # on the minute can catch a carried figure — only the `est_seconds` partition can, which is why the
 # sentence is GRADED below instead of trusted. ⛔ BOTH the seconds and the shard NAMES move when a
 # fast file is registered — the packer is greedy, so ONE more file can re-pack every bin, which is

@@ -1968,7 +1968,18 @@ SWEEP_NAMES = 66
 #: exits 0 on it BEFORE and AFTER the merge (same count AND same digest), so neither side moved a row.
 #: The merge conflict here was the prose, not the number, and its resolution kept `main`'s `#14350`
 #: drift block whole beside this branch's folds rather than picking a side.
-SWEEP_RESIDUE = (11901, "953c70c05b55923b")
+#: ⛔ A SIXTH FOLD (`origin/main` `f635f9e00075`, `#14446`) KEPT BOTH SIDES' BLOCKS and DID move the
+#: pin — `+1` row and a new digest — and the mover is MEASURED, never inferred from the merge tip:
+#: `--repin` in a detached worktree reads **11901** at `fb3b326fdbad` and **11902** at
+#: `f635f9e00075`, so `#14446` is the commit that moved it and the tip being merged is not. The row
+#: arithmetic closes rather than being asserted: that commit's ONLY changed file
+#: (`tests/test_7879_record_chain.py`, +354/−37) adds three `reached.update(` lines and retires two
+#: `projection.g.query(` rows, and 3 − 2 = 1 = 11902 − 11901. None of the five is a product call
+#: site — the additions are `set.update` on a test's local import collector, the retirements are a
+#: test double's count and delete — which is why they are DECLARED here rather than re-spelled to
+#: hold the count still. This branch contributes **0** rows: its only residue-bearing change is prose
+#: and a module (`tortoise/expansion_merge.py`) that opens no session. `--check` exits 0 on the pair.
+SWEEP_RESIDUE = (11902, "3a694c6f3ff4e36f")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

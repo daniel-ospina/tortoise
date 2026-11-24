@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1858 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1869 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -293,6 +293,10 @@ def _residue_block() -> str:
     fold's own 5 `#:` lines recording it), and `SWEEP_RESIDUE`'s pair is **unchanged** by the merge,
     which is the measurement that says so: `--check` exits 0 on `(11901, "953c70c05b55923b")` before
     and after, so this fold moved no row.
+    — and the SIXTH FOLD (`origin/main` `f635f9e00075`, `#14446`) kept both sides and DID move the
+    pin: this branch's blob read **1858** on its own tree, `main`'s still read **1808**, and the
+    RESOLVED run is the figure above, **1869** (1858 + this fold's own 11 `#:` lines, which record
+    the `+1` row that commit added and name it) — re-derived by this walk, never inherited.
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
