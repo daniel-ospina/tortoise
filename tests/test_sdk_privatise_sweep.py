@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2022 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2025 lines at this head, measured through THIS function's own
     walk — ⛔ RE-WALKED on this PR's merge tree (`origin/main` `e6b3cf2908` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch read 1897
     and `main` 1833, so the figure is re-derived here rather than carried from either side — and
@@ -315,8 +315,8 @@ def _residue_block() -> str:
     `tools/sdk_privatise.py`, so the figure above is RE-MEASURED by this walk on this tree at 1976
     rather than adjusted by arithmetic from 1930; the fold's two `OWN_PINS` entries and its
     `seen.update` row live in files this block does not walk, so they add no `#:` line here,
-    — and the `origin/main` `6a02515d14` fold (`#14522`'s reference-walk re-cut and `#14459`/`#4625`'s
-    own re-pin; BOTH touch `tools/sdk_privatise.py`) KEPT both sides' blocks again and added this
+    — and the `origin/main` `6a02515d14` fold (`#14459`/`#4625`'s own re-pin, the ONE commit of that
+    fold touching `tools/sdk_privatise.py`) KEPT both sides' blocks again and added this
     fold's own re-derivation note, so the figure above is RE-MEASURED by this walk on the RESOLVED
     file rather than adjusted by arithmetic from either side's reading — the pair did NOT move on
     that fold, which was measured with `--repin` on the resolved tree and on `main`'s own tree rather

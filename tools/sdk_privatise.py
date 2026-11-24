@@ -2117,9 +2117,11 @@ SWEEP_NAMES = 66
 #: arithmetic; a pin that FALLS cannot hide a new untyped reference, which is the direction this arm
 #: exists to catch.
 #: ── FOLD OF `origin/main` `6a02515d14` (`#14522` + `#14459`/`#4625`) — RE-DERIVED ON THE MERGED TREE ─
-#: `main` moved two commits under this branch and BOTH touch THIS file (`#14522`'s reference-walk
-#: re-cut and `#14459`/`#4625`'s own re-pin), so this integration conflicted here and in
-#: `tests/test_sdk_privatise_sweep.py`. Both sides' prose blocks are KEPT, as every fold before this
+#: `main` moved two commits under this branch and ONE of them touches this file: `#14459`/`#4625`'s
+#: own re-pin (`git log 2cccf90f4dd4..6a02515d14ad5 -- tools/sdk_privatise.py` names it alone;
+#: `#14522`'s re-cut changes `tests/test_13722_stamp_chain_off_loop.py` and nothing here), and it
+#: rewrote both files this branch touches, so the fold conflicted in both. Both sides' prose blocks
+#: are KEPT, as every fold before this
 #: one did, and the pair below is `--repin`'s own output on the RESOLVED tree —
 #: **(11910, "3216395d35345904")**, which is `main`'s own committed pair, UNCHANGED by the fold. That
 #: is checked against the repository rather than asserted: `--check` exits 0 on `origin/main`
@@ -2129,8 +2131,9 @@ SWEEP_NAMES = 66
 #: `recorded.update(keep)` row existed only on this branch; `#14480` has since merged, so that row is
 #: `main`'s, `#4625`'s two retired `_JSONB_CACHE.update({...})` rows are `main`'s, and neither side
 #: of THIS fold moved anything — which is why the resolved pair is exactly `main`'s. THIS BRANCH'S
-#: OWN DIFF CONTRIBUTES NO UNTYPED RECEIVER AT ALL (it is prose plus one pin), so a re-derivation
-#: here that returned anything but `main`'s own pair would mean a peer's row had arrived unannounced.
+#: OWN DIFF CONTRIBUTES NO UNTYPED RECEIVER AT ALL (it is `#:` prose plus the test map that grades
+#: it), so a re-derivation here that returned anything but `main`'s own pair would mean a peer's row
+#: had arrived unannounced.
 #: `typed references still pointing at a public name: 0` on the resolved tree; `--check` exits 0 on it.
 SWEEP_RESIDUE = (11910, "3216395d35345904")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
