@@ -7051,7 +7051,9 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 #     # never ran cannot appear in an artifact), so this is the LOCAL wall of …
 #
 # which reddened `test_no_durations_row_keeps_half_a_parenthesis` on the required
-# legs (run 41395489623, job 125131177056).
+# legs (run 41395489623, job 125131177056) while that pin existed — it went with
+# the durations-map arithmetic cut, and the join it guarded is now pinned by
+# `test_a_cut_on_a_wrapped_note_does_not_orphan_a_parenthesis` below.
 _WRAPPED_NOTE_MANIFEST = """\
 surfaces:
   core:
