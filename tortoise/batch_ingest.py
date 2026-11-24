@@ -638,6 +638,15 @@ class ItemOutcome:
     content_key: str = ""
 
 
+#: The batch id a caller supplied (or a concurrent writer minted first) is already
+#: taken. It subclasses ``ValueError`` so every existing caller that catches the
+#: documented refusal keeps working, and it is its OWN type because ``submit``'s
+#: compensating rollback must NOT run for it: that rollback discards the batch id,
+#: and here that id belongs to a batch this call did not create.
+class _BatchIdConflict(ValueError):
+    """The batch id is already taken; nothing this call wrote should be removed."""
+
+
 # ── storage: durable rows in the tenant graph ──────────────────────────────
 class BatchStore(Protocol):
     """The durable record (§2.0: the record is truth — a batch must be
@@ -1942,10 +1951,27 @@ class BatchCoordinator:
         """
         bid = batch_id or new_batch_id()
         stamp = self._now()
+        # ⛔ A PRE-EXISTING ID IS CHECKED HERE, ABOVE THE `try` — never inside it.
+        # The compensating rollback below discards `bid`, and for a caller-supplied
+        # id that is the id of a batch that ALREADY EXISTS: letting the refusal
+        # enter that rollback deleted the batch it was refusing to overwrite (row,
+        # every item row, and every staged document — `discard` removes all three,
+        # and `_discard_staged` unlinks the bytes). A refusal must leave the tree
+        # exactly as it found it, so the check sits before anything is staged or
+        # written, and the exception type below is exempted from the rollback.
+        if batch_id is not None and self._store.get_batch(org_id, bid) is not None:
+            raise ValueError(f"batch id {bid!r} already exists for this org")
         try:
             return self._submit_rows(org_id, bid, stamp, refs, names=names,
                                      contents=contents, stage_base=stage_base,
                                      corpus_name=corpus_name, estimate=estimate)
+        except _BatchIdConflict:
+            # The id was minted or taken by a CONCURRENT writer between the check
+            # above and the insert. Nothing written here is ours to remove: the
+            # batch row belongs to the winner, and the item rows share `bid` with
+            # it. Discarding would delete the winner's batch, so this path does
+            # the only safe thing — it refuses and leaves the winner alone.
+            raise
         except Exception:
             # ⛔ COMPENSATE, or the 503 is a lie (#14219 review round 2,
             # BLOCKING 2). A graph write that times out mid-loop, or a disk error
@@ -2016,7 +2042,7 @@ class BatchCoordinator:
         # would be re-drained and charged again. The existence check has to come
         # BEFORE the item write, because that write is what does the damage.
         if self._store.get_batch(org_id, bid) is not None:
-            raise ValueError(f"batch id {bid!r} already exists for this org")
+            raise _BatchIdConflict(f"batch id {bid!r} already exists for this org")
         self._store.put_items(org_id, items)
         batch = Batch(batch_id=bid, org_id=org_id, state=BatchState.ACCEPTED,
                       created_at=stamp, updated_at=stamp,
@@ -2024,9 +2050,12 @@ class BatchCoordinator:
                       estimate=dict(estimate or {}))
         if not self._store.put_batch_if_absent(batch):
             # Lost the create to a concurrent writer with the same minted id (only
-            # possible for a caller-supplied one). Do not pretend it is ours.
-            self._store.discard(org_id, bid)
-            raise ValueError(f"batch id {bid!r} was created concurrently")
+            # possible for a caller-supplied one). Do not pretend it is ours — and
+            # do NOT discard: `discard(org_id, bid)` removes the batch row AND its
+            # item rows, and `bid` belongs to the WRITER THAT WON. Deleting the
+            # winner's batch to tidy up after the loser is the same destruction the
+            # pre-existing-id check above exists to prevent, one race window later.
+            raise _BatchIdConflict(f"batch id {bid!r} was created concurrently")
         return batch, items
 
     # -- reads -----------------------------------------------------------

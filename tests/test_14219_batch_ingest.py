@@ -2982,6 +2982,77 @@ def test_acceptance_writes_the_whole_item_set_in_one_statement():
     assert len(unwinds) == 1, f"{len(unwinds)} item statements, expected exactly 1"
 
 
+def test_a_taken_id_is_refused_and_destroys_nothing_it_did_not_create(tmp_path):
+    """⛔ THE REFUSAL MUST NOT DELETE THE BATCH IT IS PROTECTING (#14415 round 18, P1).
+
+    The pre-existing-id check landed INSIDE `_submit_rows`, i.e. inside `submit`'s
+    own `try`, so its `ValueError` reached the compensating rollback — which calls
+    `store.discard(org_id, bid)` and `_discard_staged(stage_base, bid)`. `bid` is
+    the id of the batch that ALREADY EXISTS, so the refusal deleted the accepted
+    batch outright: its row, every item row, and every staged document. That is
+    strictly worse than the overwrite the guard replaced, because a reset is
+    resumable and a deletion is not.
+
+    Pinned on every half, because the old code satisfied none of them: the refusal
+    must raise, the existing batch must survive unchanged, and the refused attempt
+    must not have overwritten the existing batch's staged bytes on its way to being
+    refused (staging ran before the check, into the same per-batch directory).
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md", "/b.md"],
+                                contents=["first text", "second text"],
+                                batch_id="batch_fixed", stage_base=str(tmp_path))
+    staged_dir = tmp_path / "_batches" / "batch_fixed"
+    assert sorted(p.name for p in staged_dir.iterdir()) == [
+        "batch_fixed-00000.md", "batch_fixed-00001.md"]
+
+    with pytest.raises(ValueError, match="already exists"):
+        coord.submit(ORG, ["/c.md"], contents=["third text"],
+                     batch_id="batch_fixed", stage_base=str(tmp_path))
+
+    after, after_items = coord.status(ORG, "batch_fixed")
+    assert after.state is batch.state, "the refusal changed the existing batch's state"
+    assert [i.item_id for i in after_items] == [i.item_id for i in items], (
+        "the refusal removed or replaced the existing batch's item rows")
+    assert sorted(p.name for p in staged_dir.iterdir()) == [
+        "batch_fixed-00000.md", "batch_fixed-00001.md"], (
+        "the refusal deleted, added or overwrote the existing batch's staged documents")
+    assert (staged_dir / "batch_fixed-00000.md").read_text() == "first text", (
+        "the refused attempt staged its bytes over the existing batch's document")
+
+
+def test_losing_the_create_to_a_concurrent_writer_does_not_discard_the_winner(tmp_path):
+    """The same destruction, one race window later (#14415 round 18, P1).
+
+    When `put_batch_if_absent` loses to a concurrent writer, `bid` belongs to the
+    WRITER THAT WON. Tidy-up must not `discard(org_id, bid)` — that removes the
+    winner's batch row and its item rows. The loser refuses and leaves the winner
+    alone, which is pinned here by asserting no discard was ever issued.
+    """
+    class _LoserStore(InMemoryBatchStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.discarded: list[str] = []
+
+        def put_batch_if_absent(self, batch) -> bool:
+            return False
+
+        def discard(self, org_id, batch_id):
+            self.discarded.append(batch_id)
+            return super().discard(org_id, batch_id)
+
+    store = _LoserStore()
+    coord = BatchCoordinator(store)
+    with pytest.raises(ValueError, match="created concurrently"):
+        coord.submit(ORG, ["/a.md"], contents=["text"],
+                     batch_id="batch_race", stage_base=str(tmp_path))
+
+    assert store.discarded == [], (
+        "the losing writer discarded a batch id that belongs to the winner: "
+        f"{store.discarded}")
+
+
 def test_the_item_cas_writes_and_both_reads_project_every_wire_field():
     """⛔ A DROPPED COLUMN IS SILENT ON A REAL ENGINE (#14415 review round 17, P2).
 
