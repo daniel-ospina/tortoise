@@ -1924,8 +1924,15 @@ def test_a_status_poll_cannot_erase_a_cancellation(store, monkeypatch):
     """
     coord = bi.BatchCoordinator(store)
     batch, items = coord.submit(ORG_ID, ["/a.md", "/b.md"])
+    # ⛔ A DEAD CLAIM, because the `resuming` write now requires the scan to have
+    # MOVED a row (round 13, LOW): a batch whose items are merely `queued` is
+    # reported, never relabelled, so an interleaving fired at the batch-row write
+    # needs a real requeue first. Item 2 stays `queued`, so `cancel()` still has
+    # something to stop and lands its own write.
     coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
-    coord.advance(ORG_ID, items[0], bi.BatchItemState.INDEXED, tokens_in=5)
+    dead = store.get_item(ORG_ID, batch.batch_id, items[0].item_id)
+    dead.updated_at = "2000-01-01T00:00:00+00:00"
+    store.put_item(ORG_ID, dead)
 
     attempted: list[str] = []
     real_cas = store.put_batch_if_state

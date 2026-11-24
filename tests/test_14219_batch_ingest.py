@@ -1843,7 +1843,12 @@ def test_a_cancel_landing_during_the_resume_scan_is_not_erased():
     """
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
-    batch, items = coord.submit(ORG, ["/a.md"])
+    batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
+    # ⛔ A CLAIMED item, because the `resuming` write only happens for a scan that
+    # actually MOVED a row (`moved`) — a batch of `queued` items that never ran is
+    # reported, not relabelled (round 13, LOW). So the interleaving under test is
+    # "the scan requeues a dead claim while the customer cancels".
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
     stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
     stale.updated_at = _ancient_stamp()  # a genuinely dead claim
     store.put_item(ORG, stale)

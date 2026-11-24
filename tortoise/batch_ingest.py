@@ -2678,7 +2678,17 @@ class BatchCoordinator:
             # in progress, until the peer's own `settle()` repaired it — hours for
             # a 500-item batch. Return it (a later pass must revisit it) without
             # touching its state.
-            if moved or any(i.state is BatchItemState.QUEUED for i in items):
+            # ⛔ `moved` ALONE (#14415 review round 13, LOW). The `or any(QUEUED)`
+            # arm relabelled a batch that had NEVER RUN: a freshly accepted batch
+            # (every item `queued`, `attempts=0`, nothing claimed) was written
+            # `resuming` by the first scan, which is the status surface telling
+            # the customer work is being RECOVERED when work has simply not
+            # started — measured on the wire: `POST` → `accepted`, then the first
+            # `GET` → `resuming`. `RESUMING`'s whole job is "you can tell whether
+            # work was lost"; it must not be minted by a scan that resumed
+            # nothing. The batch is still REPORTED below (so a later pass visits
+            # it), and its `pending` count already says there is work.
+            if moved:
                 # ⛔ THE RESUME WRITE IS A COMPARE-AND-SET TOO (#14415 review
                 # round 5, P1). This is the THIRD unconditional writer of the
                 # batch row, and it is the one a status poll reaches: `batch` was
