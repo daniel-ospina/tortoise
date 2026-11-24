@@ -88,6 +88,7 @@ import {
   pruneSpool,
   acquireDrainClaim,
   capacityRefusal,
+  drainClaimPathFor,
   DRAIN_CLAIM_VERSION,
   claimIsStale,
   quarantineEntry,
@@ -7810,34 +7811,78 @@ test("#14350: a displaced claim is RESTORED, never disposed of", async () => {
   assert.equal(existsSync(ours.quarantine), false);
 });
 
+test("#14350: reclaim re-arms OUR lapsed lease and refuses a peer's", async () => {
+  // `renew` refuses an EXPIRED record (a holder that overran must not overwrite the
+  // successor that took over), and the pass's one unbounded step — the whole-spool
+  // scan — runs inside the lease, so a scan longer than the TTL expired the holder's
+  // OWN claim: every later pass then attempted nothing, forever, blaming a peer that
+  // does not exist (#14423 merge-gate review, runtime finding; mirrored from Python).
+  // `reclaim` decides on OWNERSHIP: the record on disk must still carry our token, and
+  // the re-arm is the same compare-and-swap `renew` uses.
+  // MUTATION THAT REDS THIS: drop the token check in `reclaim` (a peer's claim is then
+  // re-armed under it), or return false unconditionally (the lapsed holder stalls).
+  const spool = tmpSpool();
+  const mine = acquireDrainClaim(spool, { leg: "pi", nowMs: 1000, ttlMs: 60 });
+  assert.ok(mine);
+  assert.equal(mine.renew(1100), false, "renew refuses an expired lease");
+  assert.equal(mine.reclaim(1100), true, "…but our OWN lapsed lease is re-armable");
+  const armed = readDrainClaim(spool);
+  assert.equal(armed?.token, mine.token);
+  assert.equal(armed?.expires_at, 1100 + 60, "re-armed from NOW, in ms");
+  // A peer's record is never re-armed.
+  const peer = acquireDrainClaim(spool, { leg: "python", nowMs: 2000, ttlMs: 60 });
+  assert.ok(peer, "the re-armed lease expired, so a peer may take over");
+  assert.equal(mine.reclaim(2001), false, "a peer's claim must never be re-armed");
+  assert.equal(readDrainClaim(spool)?.token, peer.token);
+  peer.release();
+});
+
+test("#14350: a symlink at the claim path is removed AS A LINK, never followed", async () => {
+  // `clearUnusableClaimPath` unlinks whatever is at the claim path when it is not a
+  // regular file. Removing the LINK is the whole point: following it would delete a
+  // file OUTSIDE the spool. The Python twin pins this
+  // (`test_a_DANGLING_SYMLINK_at_the_claim_path_is_cleared_not_followed`); this leg had
+  // no such case, so the divergence was invisible (#14423 cycle-7 review, P2):
+  // measured, pointing the unlink at `realpathSync(path)` left the suite 249/249 green.
+  // MUTATION THAT REDS THIS: resolve the path before unlinking.
+  const parent = mkdtempSync(join(tmpdir(), `tortoise-capture-symlink-${process.pid}-`));
+  const spool = join(parent, "spool");
+  mkdirSync(spool, { recursive: true });
+  const outside = join(parent, "outside.txt");
+  writeFileSync(outside, "must not be touched");
+  symlinkSync(outside, drainClaimPathFor(spool));
+  const claim = acquireDrainClaim(spool, { leg: "pi", nowMs: 1000, ttlMs: 60 });
+  assert.ok(claim, "a symlink is corruption, not a holder");
+  assert.equal(readFileSync(outside, "utf8"), "must not be touched", "the TARGET was followed");
+  claim.release();
+});
+
 test("#14350: a NOT-OURS release takes NO destructive step — asserted on the CALL", async () => {
   // The Python leg's `release` reads the token BEFORE moving anything, so a not-ours
   // release does nothing at all; the Pi leg did not mirror that until `9bc74585`
-  // (#14423 cycle-6 review, P2), and the first version of THIS test could not tell
-  // the two orders apart: rename + `linkSync` restore preserves the inode, the mtime
-  // and the content, so the pre-fix body left the suite 247/247 green (measured by
-  // reverting it). What discriminates is whether the takedown was CALLED — the same
-  // fact the Python twin asserts by monkeypatching `_takedown`.
-  // MUTATION THAT REDS THIS: takedown first, compare after.
+  // (#14423 cycle-6 review, P2). What discriminates the two orders is whether the
+  // takedown was CALLED: rename + `linkSync` restore preserves the inode, the mtime
+  // and the content, so a byte-level assertion cannot tell them apart (measured — the
+  // first two versions of this test were green under the pre-fix body).
+  // ⛔ THE SEAM MUST BE ON THE HANDLE WHOSE `release()` IS GRADED. An earlier cut gave
+  // it to a second handle that never acquired anything, so `calls` stayed empty under
+  // ANY `release()` body and the test was vacuous a third time (#14423 cycle-7 review).
   const spool = tmpSpool();
-  const slow = acquireDrainClaim(spool, { leg: "python", nowMs: 1000, ttlMs: 60 });
-  assert.ok(slow);
-  const successor = acquireDrainClaim(spool, { leg: "pi", nowMs: 1100, ttlMs: 60 });
-  assert.ok(successor);
-  // A fresh handle on the same spool, with the takedown instrumented.
   const calls: string[] = [];
-  const counting = acquireDrainClaim(spool, {
-    leg: "pi", nowMs: 1100, ttlMs: 60,
+  const slow = acquireDrainClaim(spool, {
+    leg: "python", nowMs: 1000, ttlMs: 60,
     takedown: (path, token) => {
       calls.push(token);
       return takedownClaim(path, token);
     },
   });
-  assert.equal(counting, undefined, "the successor holds it, so there is nothing to acquire");
+  assert.ok(slow);
+  const successor = acquireDrainClaim(spool, { leg: "pi", nowMs: 1100, ttlMs: 60 });
+  assert.ok(successor);
   assert.equal(slow.release(), false, "the token is no longer ours");
   assert.deepEqual(calls, [], "a not-ours release must not even MOVE the claim");
   assert.equal(readDrainClaim(spool)?.token, successor.token);
-  // …and the same instrumented handle DOES take it when it owns the claim.
+  // …and the same instrumented handle DOES take the claim when it owns one.
   const owner = acquireDrainClaim(spool, {
     leg: "pi", nowMs: 1200, ttlMs: 60,
     takedown: (path, token) => {
@@ -7848,6 +7893,7 @@ test("#14350: a NOT-OURS release takes NO destructive step — asserted on the C
   assert.ok(owner, "the lease expired, so the peer may take over");
   assert.equal(owner.release(), true);
   assert.deepEqual(calls, [owner.token], "an ours release still takes the claim");
+  // MUTATION THAT REDS THIS: takedown first, compare after (the pre-`9bc74585` body).
 });
 
 test("#14350: an unmakeable root is UNAVAILABLE, not a lost RACE", async () => {

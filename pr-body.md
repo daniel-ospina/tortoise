@@ -95,9 +95,9 @@ The last rows matter as much as the first: on today's main the free server is **
 ## Tests
 
 ```text
-# 51 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
+# 53 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-51 passed
+53 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
@@ -105,12 +105,12 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-740 passed
+742 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-308 pass / 0 fail
+310 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -232,11 +232,19 @@ false claims in this record, which is the half that matters as much as the code.
 ⚠️ The Pi-leg byte changes are another re-cut of generation 33's digest — see the
 note beside `_PINNED_PI_SEAM_INSTALL_CONTRACT`.
 
+**A further fold** of the peer lane brought two more of its fixes: a lease that lapsed
+DURING our own scan is re-armed rather than reported as a takeover (the pass was
+stopping itself over its own clock), and the required aggregate's `needs:` citations were
+re-cut after `main` moved them. Both kept as-is; the census pins and Appendix A are
+re-cut on this merged tree (1 327 rows, **0 rows drifted**, because the fold changed no
+statement site), and `SWEEP_RESIDUE` stays `(11901, "953c70c0…")` — measured on a
+detached `origin/main` worktree too, so it is `main`'s drift and not this branch's.
+
 ## Residuals, stated
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `43f8f29d…`, re-cut at every byte change: for the export-only test seam, for
+  (capture half `74607547…`, re-cut at every byte change: for the export-only test seam, for
   the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
   changes, and for the MERGE of the two — a merge is a byte set neither side
   hashed, so the digest is always derived from the merged tree; the read half moved

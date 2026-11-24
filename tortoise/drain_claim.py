@@ -498,6 +498,65 @@ class DrainClaim:
             return True
         return self.renew(now)
 
+    def reclaim(self, now_s: float | None = None) -> bool:
+        """Re-arm a lease that lapsed while WE were still the holder.
+
+        ⛔ THIS EXISTS BECAUSE :meth:`renew` CANNOT DO IT, AND THE DIFFERENCE IS A
+        PERMANENT STALL. ``renew`` refuses an already-expired record on purpose (a
+        holder that overran its lease must not overwrite the successor that
+        legitimately took over). But ONE step of a pass is unbounded and runs
+        BETWEEN the acquisition and the first refresh: the whole-spool scan
+        (``list_spool_metas`` / ``listSpoolEntries``). A scan longer than the TTL
+        therefore expires OUR OWN lease, every later refresh refuses, the pass
+        attempts nothing, and the next opportunity repeats it — measured at the
+        production TTL: two passes, ``attempted: 0``, ``lost_claim: True``, zero
+        POSTs, forever, with a message that blames a peer that does not exist
+        (#14423 merge-gate review, runtime finding). The scan is unbounded on a
+        high-latency ``$HOME`` and the #14342 incident started at 908 entries.
+
+        The distinction that makes this safe is OWNERSHIP, not the clock: the record
+        on disk still carries OUR token, so the lease was ours and lapsed by our own
+        work rather than being taken. The re-arm is the SAME compare-and-swap
+        ``renew`` uses — takedown-aside, byte compare, ``os.link`` install — so a
+        peer that took over in the meantime wins (its record is restored, we return
+        ``False``), and the caller stops exactly as before.
+
+        ``True`` means the lease is ours again; ``False`` means it is not (a peer
+        holds it, or the spool cannot be written).
+        """
+        now = self.clock() if now_s is None else now_s
+        raw = _read_raw(self.path)
+        if raw is None:
+            return False
+        try:
+            current = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(current, dict) or current.get("token") != self.token:
+            return False  # a peer's record: their claim stands
+        moved = _takedown(self.path, self.token)
+        if moved is None:
+            return False  # a peer moved it first
+        quarantine, data = moved
+        if data != raw:
+            _dispose_quarantine(quarantine, data, self.path, raw)
+            return False
+        try:
+            _write_claim_linked(self.path, self.record(now))
+        except FileExistsError:
+            _dispose_quarantine(quarantine, data, self.path, raw)
+            return False
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.link(quarantine, self.path)
+            with contextlib.suppress(OSError):
+                os.unlink(quarantine)
+            return _claim_still_ours(self.path, self.token)
+        _dispose_quarantine(quarantine, data, self.path, raw)
+        self._issued_at = self._issued_at or now
+        self._renewed_at = now
+        return True
+
     def release(self) -> bool:
         """Give the claim up. ``False`` means we no longer held it.
 

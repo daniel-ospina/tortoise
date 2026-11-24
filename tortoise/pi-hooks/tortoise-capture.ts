@@ -4708,10 +4708,17 @@ async function flushSpoolPass(
     // claim over after a refresh was missed — stop, rather than become the
     // second drainer this mechanism exists to prevent.
     if (claim && !claim.renewIfDue()) {
-      summary.lostClaim = true;
-      summary.stopped ??= "claim";
-      summary.remaining += 1;
-      continue;
+      // ⛔ `renew` refuses an EXPIRED record, and the scan above is unbounded and runs
+      // inside the lease — so a scan longer than the TTL expired our OWN claim and
+      // this pass would attempt nothing, forever. `reclaim` re-arms it with the same
+      // compare-and-swap and only while the record is OURS; a real takeover still
+      // stops us (#14423 merge-gate review, mirrored from the Python leg).
+      if (!claim.reclaim()) {
+        summary.lostClaim = true;
+        summary.stopped ??= "claim";
+        summary.remaining += 1;
+        continue;
+      }
     }
     if (summary.attempted >= maxAttempts) {
       summary.stopped ??= "attempts";
@@ -5301,6 +5308,14 @@ export interface DrainClaim {
   renew(nowMs?: number): boolean;
   /** Refresh only when a third of the TTL has gone (the per-entry call). */
   renewIfDue(nowMs?: number): boolean;
+  /** Re-arm a lease that lapsed while WE were still the holder (mirror of the
+   *  Python `DrainClaim.reclaim`). `renew` refuses an EXPIRED record on purpose, and
+   *  the pass's one unbounded step — the whole-spool scan — runs inside the lease, so
+   *  a scan longer than the TTL expired our OWN claim and every later pass attempted
+   *  nothing, forever (#14423 merge-gate review). Ownership, not the clock, decides:
+   *  the record on disk must still carry OUR token, and the re-arm is the same
+   *  compare-and-swap `renew` uses, so a real takeover still wins. */
+  reclaim(nowMs?: number): boolean;
   /** Give the claim up. `false` means we no longer held it. */
   release(): boolean;
 }
@@ -5382,9 +5397,15 @@ export function disposeQuarantine(
  *
  * A symlink is removed WITHOUT following it, so this cannot reach outside the
  * spool. A non-empty directory is left alone (`ENOTEMPTY`): deleting unknown
- * content is the worse error, and the caller's answer is to run unclaimed and SAY
- * so. Mirrors `drain_claim._clear_unusable_claim_path`, which discriminates on
- * `S_ISDIR` and `unlink`s EVERYTHING else.
+ * content is the worse error, and the caller's answer is to report the spool HELD
+ * with no holder named — `flushSpool`'s `existsSync` arm, not `claimUnavailable` —
+ * and retry on the next pass, so the corruption is surfaced once per pass rather
+ * than silently drained beside. (An earlier version of this comment said "run
+ * unclaimed and say so", which is the arm for a root that cannot hold a claim at
+ * all — the opposite direction; corrected in the #14423 cycle-7 review, and the
+ * Python twin `drain_claim._clear_unusable_claim_path` has the same polarity.)
+ * Mirrors that function, which discriminates on `S_ISDIR` and `unlink`s EVERYTHING
+ * else.
  *
  * ⛔ THE DISCRIMINATOR IS `isDirectory()`, NOT `isFile()` — the previous cut sent
  * every non-file, non-symlink object to `rmdirSync`, and for a FIFO, a socket or a
@@ -5658,6 +5679,60 @@ export function acquireDrainClaim(
         const at = nowMsArg ?? Date.now();
         if (at - renewedAt < ttlMs / 3) return true;
         return this.renew(at);
+      },
+      reclaim(nowMsArg?: number): boolean {
+        const at = nowMsArg ?? Date.now();
+        let rawNow: string;
+        try {
+          if (!lstatSync(path).isFile()) return false;
+          rawNow = readFileSync(path, "utf8");
+        } catch {
+          return false;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(rawNow);
+        } catch {
+          return false;
+        }
+        if (!parsed || typeof parsed !== "object"
+            || (parsed as Record<string, unknown>).token !== token) {
+          return false;  // a peer's record: their claim stands
+        }
+        // The same CAS `renew` uses: move aside, compare the bytes we judged,
+        // install with `link` so a peer that claimed in the window is never clobbered.
+        const moved = takedownClaim(path, token);
+        if (!moved) return false;
+        if (moved.raw !== rawNow) {
+          disposeQuarantine(moved.quarantine, moved.raw, path, rawNow);
+          return false;
+        }
+        const fresh: DrainClaimRecord = {
+          ...record,
+          started_at: record.started_at,
+          expires_at: at + ttlMs,
+        };
+        try {
+          // ⛔ The quarantined bytes are the CAS evidence and the RESTORE source: they
+          // are never rewritten. The fresh record goes to a scratch name and is
+          // installed with `linkSync` (create-if-absent), so a peer that claimed in the
+          // window keeps its claim.
+          const tmpPath = join(dir, `${DRAIN_CLAIM_FILE}.tmp-${process.pid}-${token}`);
+          writeFileSync(tmpPath, `${JSON.stringify(fresh)}\n`, { mode: 0o600 });
+          try {
+            linkSync(tmpPath, path);
+          } finally {
+            try { unlinkSync(tmpPath); } catch { /* best effort */ }
+          }
+        } catch {
+          // Put back the record we moved aside: never lose a lease to a failed refresh.
+          try { linkSync(moved.quarantine, path); } catch { /* a fourth holder has it */ }
+          try { unlinkSync(moved.quarantine); } catch { /* best effort */ }
+          return false;
+        }
+        try { unlinkSync(moved.quarantine); } catch { /* best effort */ }
+        renewedAt = at;
+        return true;
       },
       release(): boolean {
         // ⛔ A NOT-OURS RELEASE TOUCHES NOTHING — it reads and compares BEFORE it
