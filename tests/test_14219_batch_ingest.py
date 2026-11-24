@@ -337,6 +337,59 @@ def test_a_completed_batch_is_not_reported_as_pending():
         "finished work for ever")
 
 
+def test_a_batch_that_never_ran_is_not_relabelled_resuming():
+    """#14415 review round 13: `RESUMING` is minted only by a scan that RESUMED something.
+
+    The scan used to write the batch row whenever it found any non-terminal item,
+    so the FIRST sweep over a freshly accepted batch (every item `queued`,
+    `attempts=0`, nothing claimed) relabelled it `resuming`: measured on the wire,
+    `POST` answered `accepted` and the first `GET` answered `resuming`. `RESUMING`'s
+    whole job is "you can tell whether work was lost"; minting it over work that has
+    simply not started is a status lie on a customer-visible surface.
+
+    ⛔ BOTH DIRECTIONS, because either arm alone is satisfiable by a wrong fix:
+      * "never relabel anything" is refuted by the dead-claim half below;
+      * "never report it at all" is refuted by the batch still being RETURNED by
+        the scan, which is what makes a later pass visit it.
+
+    Measured as unpinned before this test: reinstating the pre-fix
+    `if moved or any(not i.terminal for i in items):` left all 87 tests in this
+    file green (#14415 review round 14, MEDIUM).
+    """
+    store = InMemoryBatchStore()
+    batch, items = BatchCoordinator(store).submit(ORG, ["/a.md", "/b.md"])
+    assert all(i.state is BatchItemState.QUEUED for i in items), (
+        "the fixture must be a batch nothing has claimed — work that has not "
+        "started, not work to recover")
+
+    # NOTHING moved, and the batch is still REPORTED: "never report it" is not
+    # the fix, it would strand the batch.
+    resumed = BatchCoordinator(store).recover(ORG, stale_after_s=0)
+    assert resumed == [batch.batch_id], (
+        f"the scan stopped reporting a batch with queued work: {resumed}")
+    fresh, after = BatchCoordinator(store).status(ORG, batch.batch_id)
+    assert fresh.state is BatchState.ACCEPTED, (
+        "the first sweep relabelled a batch that never ran as `resuming` — the "
+        f"customer is told work is being RECOVERED when it has not started: {fresh.state}")
+    assert all(i.state is BatchItemState.QUEUED for i in after)
+
+    # …and the SAME batch with a genuinely dead claim DOES say `resuming`, so the
+    # rule above cannot be satisfied by never relabelling anything.
+    dead = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    assert dead is not None
+    dead.state = BatchItemState.EXTRACTING
+    dead.updated_at = "2020-01-01T00:00:00+00:00"
+    store.put_item(ORG, dead)
+    assert BatchCoordinator(store).recover(ORG, stale_after_s=0) == [batch.batch_id]
+    recovered, after = BatchCoordinator(store).status(ORG, batch.batch_id)
+    assert recovered.state is BatchState.RESUMING, (
+        "a batch whose dead claim WAS requeued must say `resuming` — otherwise "
+        f"the customer cannot tell work was recovered: {recovered.state}")
+    by_ref = {i.ref: i for i in after}
+    assert by_ref["/a.md"].state is BatchItemState.QUEUED
+    assert by_ref["/b.md"].state is BatchItemState.QUEUED
+
+
 # ── cancel (brief item 6) ──────────────────────────────────────────────────
 def test_cancel_stops_new_work_and_keeps_completed_work():
     """ACCEPTANCE: cancel stops new work and keeps completed work.
@@ -2562,7 +2615,7 @@ def test_a_failed_post_runner_read_still_bills_the_spend():
     except RuntimeError:
         raise AssertionError(
             "a read failure after the runner spent escaped run_item — the spend "
-            "is then on neither the row nor the ledger")
+            "is then on neither the row nor the ledger") from None
     finally:
         store.get_item = real_get  # type: ignore[method-assign]
 
