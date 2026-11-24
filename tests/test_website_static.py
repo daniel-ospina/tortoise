@@ -11892,6 +11892,56 @@ class TestProductTeamsCopy:
             "the scroll position")
 
 
+def _border_px_of(body: str, where: str) -> float:
+    """The px width in a `border:` shorthand — the compensation relation's operand."""
+    value = _effective_decl(body, "border") or ""
+    widths = [m for m in (_BORDER_WIDTH_PX.fullmatch(t)
+                          for t in _css_tokens(value)) if m]
+    assert widths, (
+        f"`{where}` declares `border: {value}`, whose width cannot be read as "
+        "px — the popular card's compensation relation needs it, so an "
+        "unreadable border is a FAIL, not a skip")
+    return float(widths[0].group(1))
+
+
+def _popular_border_extra_px(css: str) -> float:
+    """How much MORE of the bottom content box the popular card's border eats."""
+    popular = [body for body, inside_media
+               in _css_rules_with_scope(css, ".pricing-card.popular")
+               if not inside_media]
+    assert popular, "`.pricing-card.popular` declares no rule"
+    base_card = [body for body, inside_media
+                 in _css_rules_with_scope(css, ".pricing-card")
+                 if not inside_media][-1]
+    return (_border_px_of(popular[-1], ".pricing-card.popular")
+            - _border_px_of(base_card, ".pricing-card"))
+
+
+def _expected_popular_block_end_pad(css: str) -> str:
+    """The popular card's bottom inset as a RELATION, never a remembered constant.
+
+    ⛔ #14406 review round 12: this value was pinned as the literal string
+    `calc(1.75rem - 1px)` in FOUR sibling rows of
+    `TestCssDesktopReachAndSpecificity`, so the relation-preserving edit
+    (`padding: 2rem` together with `calc(2rem - 1px)`) — geometrically identical,
+    because the popular inset is the base inset less the extra border pixel —
+    red the FILE and the messages claimed "the page is already wrong". Round 12
+    fixed the one row it was looking at; the reviewer then measured the same
+    false RED three more times. One helper, so there is no fifth copy to pin.
+    """
+    base_card = [body for body, inside_media
+                 in _css_rules_with_scope(css, ".pricing-card")
+                 if not inside_media][-1]
+    base_pad = _css_block_end(
+        "padding", _effective_decl(base_card, "padding") or "")
+    extra_px = _popular_border_extra_px(css)
+    assert extra_px > 0, (
+        "the popular card's bottom border is not WIDER than its siblings', so "
+        f"the compensation this helper derives is stale (measured {extra_px:g}px, "
+        "expected a positive difference)")
+    return f"calc({base_pad} - {extra_px:g}px)"
+
+
 class TestProductTeamsPricingCardCtaBaseline:
     """#13645 item 6 — the four pricing CTAs share ONE baseline.
 
@@ -12283,37 +12333,31 @@ class TestProductTeamsPricingCardCtaBaseline:
         # Both are "a mystery number left behind by an edit above it", which is
         # the failure the pin was written to prevent. Read the two numbers the
         # `1px` is the DIFFERENCE OF, and require the winner to be their relation.
-        def _border_px(body: str, where: str) -> float:
-            value = _effective_decl(body, "border") or ""
-            widths = [_BORDER_WIDTH_PX.fullmatch(t)
-                      for t in _css_tokens(value)]
-            widths = [m for m in widths if m]
-            assert widths, (
-                f"`{where}` declares `border: {value}`, whose bottom width "
-                "cannot be read as px — the compensation relation below needs "
-                "it, so an unreadable border is a FAIL, not a skip")
-            return float(widths[0].group(1))
-
+        # The relation lives in `_expected_popular_block_end_pad` (module level)
+        # because FOUR sibling rows need the same value and each had its own copy
+        # of the literal (#14406 review round 12).
         base_card = [body for body, inside_media
                      in _css_rules_with_scope(css, ".pricing-card")
                      if not inside_media][-1]
         base_pad = _css_block_end(
             "padding", _effective_decl(base_card, "padding") or "")
-        extra_px = _border_px(popular[-1], ".pricing-card.popular") \
-            - _border_px(base_card, ".pricing-card")
+        extra_px = _popular_border_extra_px(css)
         assert extra_px > 0, (
             "the popular card's bottom border is not WIDER than its siblings', "
             f"so the 1px compensation this row exists for is stale (measured "
             f"{extra_px:g}px, expected a positive difference)")
-        expected_pad = f"calc({base_pad} - {extra_px:g}px)"
+        popular_border_px = _border_px_of(popular[-1], ".pricing-card.popular")
+        base_border_px = _border_px_of(base_card, ".pricing-card")
+        expected_pad = _expected_popular_block_end_pad(css)
 
         assert winner == expected_pad, (
             f"the declaration that WINS the popular card's bottom inset is "
             f"`{prop}: {winner}` ({prelude!r}), not the compensation that makes "
-            f"the four y values EQUAL. Its 2px border eats {extra_px:g}px more of "
-            f"the content box at the bottom than its siblings' 1px, so its inset "
-            f"must be the base card's block-end padding ({base_pad!r}) less that "
-            f"difference: `{expected_pad}`. Measured at 1440x900, a mismatch "
+            f"the four y values EQUAL. Its {popular_border_px:g}px border eats "
+            f"{extra_px:g}px more of the content box at the bottom than its "
+            f"siblings' {base_border_px:g}px, so its inset must be the base "
+            f"card's block-end padding ({base_pad!r}) less that difference: "
+            f"`{expected_pad}`. Measured at 1440x900, a mismatch "
             "moves this CTA off the shared baseline (744.78 vs 745.78 is ONE "
             "pixel — #13645 item 6). The losing declarations, weakest first: "
             f"{cascade[:-1]!r}")
@@ -12584,7 +12628,8 @@ class TestCssDesktopReachAndSpecificity:
         pinned `calc(1.75rem - 1px)` as the winner in both.
         """
         baseline = _css_block_end_cascade(_product_teams_html(), ".pricing-card")
-        assert baseline and baseline[-1][2] == "calc(1.75rem - 1px)", (
+        assert baseline and baseline[-1][2] == _expected_popular_block_end_pad(
+            _product_teams_html()), (
             f"the unmutated page's winning block-end inset reads {baseline[-1:]!r}, "
             "so the rows below cannot distinguish a caught mutant from a page "
             "that is already wrong")
@@ -12940,7 +12985,8 @@ class TestCssDesktopReachAndSpecificity:
         # ships under a GREEN popular-card row.
         assert _css_block_end_cascade(
             self._page_with("p { padding-bottom: 1.75rem }"),
-            ".pricing-card")[-1][2] == "calc(1.75rem - 1px)", (
+            ".pricing-card")[-1][2] == _expected_popular_block_end_pad(
+            self._page_with("p { padding-bottom: 1.75rem }")), (
             "a `p` rule does not select the card, so it must not become the "
             "cascade winner (and the page's own `p` rules must stay harmless)")
         assert _css_block_end_cascade(
@@ -13079,7 +13125,8 @@ class TestCssDesktopReachAndSpecificity:
         not reach.
         """
         baseline = _css_block_end_cascade(_product_teams_html(), ".pricing-card")
-        assert baseline[-1][2] == "calc(1.75rem - 1px)", (
+        assert baseline[-1][2] == _expected_popular_block_end_pad(
+            _product_teams_html()), (
             f"the unmutated page's winning block-end inset is {baseline[-1:]!r}, "
             "so these rows could not tell a caught mutant from a page that is "
             "already wrong")
@@ -13107,7 +13154,7 @@ class TestCssDesktopReachAndSpecificity:
         unrelated = self._page_with(
             "#pricing-section\n  .pricing-grid { padding-bottom: 1.75rem }")
         assert _css_block_end_cascade(unrelated, ".pricing-card")[-1][2] == (
-            "calc(1.75rem - 1px)"), (
+            _expected_popular_block_end_pad(unrelated)), (
             "`#pricing-section\n  .pricing-grid` does not select the pricing "
             "card, so it must not become the cascade winner — dropping the "
             "newline skip must widen the reader's ENUMERATION, not its "
