@@ -268,7 +268,7 @@ The drift arm admitted a shape the class docstring then called a *"mirror residu
 RECORDS sharing an instant land here and are absorbed — with `_identity_evidence` never consulted, even
 where it would have answered `disagrees`"* (`record_projection.py:6829-6846` at the measurement point),
 pinned as admitted by
-`tests/test_9318_journal_collision.py::test_a_same_capture_instant_pair_is_ADMITTED_not_detected`
+`tests/test_9318_journal_collision.py::test_a_same_capture_instant_pair_is_REFUSED_when_the_identities_disagree`
 (⛔ **that leg was RENAMED and INVERTED on `#9318`** — it is now
 `test_a_same_capture_instant_pair_is_REFUSED_when_the_identities_disagree`, and neither the
 mirror-residual wording nor the "never consulted" claim survives in the class; see the note below).

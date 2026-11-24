@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """#13083 — what each STORED SHAPE costs the graph, per property family, on a fixed corpus.
 
-This is the measuring half of the capability audit. The census doc
-(`docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`) states which readers touch
-each shape; this instrument states what a shape is WORTH in bytes, so a
+This is the measuring half of the capability audit. The census document that
+stated which readers touch each shape was deleted on 2026-11-23 (`#11081`, audit
+row B2 — its line-pinned cites were a merge-conflict magnet); this instrument is
+the half that remains, and it states what a shape is WORTH in bytes, so a
 `record_only` verdict carries a number instead of an adjective.
 
 WHAT IT MEASURES

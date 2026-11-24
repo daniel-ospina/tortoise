@@ -1961,7 +1961,18 @@ SWEEP_NAMES = 66
 #: `11909 − 8 = 11901` is the CROSS-CHECK of that reading against `main`'s own pin, never the
 #: source. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11909, "55c8de942f8d2747")
+#: ⛔ MERGED `origin/main` `f635f9e000` (× `fb3b326f`) INTO THIS BRANCH AND RE-CUT AGAIN ON THE
+#: RESOLVED TREE — both sides' blocks above are KEPT, this file's standing ground rule, and this is
+#: the fold that finally DID move the pair: `--repin` prints **(11910, "93429504f32ddc7c")**, +1 row
+#: over the `11909` the two folds above measured. The +1 is `main`'s, measured rather than
+#: inferred from the fold shape: NOTHING on this branch's side changed between the two readings
+#: (`git diff` over the branch's own files is empty across it), so the row arrived with `#14428`
+#: (the capability-census deletion) / `#14446` (`test_7879_record_chain.py`) and not from this
+#: branch. ⛔ ROW-LEVEL ATTRIBUTION OF THE +1 IS NOT CLAIMED, on the same ground the block above
+#: already gives for its own `+3`: the committed pin stores a COUNT and a DIGEST, never the row set.
+#: `--check` exits 0 on the new pair with
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11910, "93429504f32ddc7c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
