@@ -4181,6 +4181,58 @@ class _FirstClassElement(HTMLParser):
         self._record(tag, attrs)
 
 
+def _subject_element(markup: str, compound: str,
+                     ) -> tuple[str, dict[str, str]] | None:
+    """The page element a class-carrying COMPOUND selects — or None.
+
+    ⛔ THE COMPOUND MAY CARRY SEVERAL CLASSES, and passing the raw suffix made
+    the element branch DEAD for exactly the operand that needs it (#14406 review
+    round 21). `_element_carrying_class(css, compound[1:])` for
+    `.pricing-card.popular` asked for a class literally named
+    `pricing-card.popular`, found none, and returned None — so
+    `_border_end_width_cascade` saw element-reached rules for the BASE card but
+    not for the POPULAR one. Measured on the tracked page: appending
+    `.pricing-grid .pricing-card { border-bottom-width: 1px }` (or the
+    `#pricing-section` form) moved the browser's extra from 0 to -1px while the
+    reader still computed 1.0, and the relation row stayed GREEN over a 1px
+    split — the #13645 item 6 signature. The MOST SPECIFIC class (the last one)
+    is what identifies the subject.
+    """
+    if not compound.startswith("."):
+        return None
+    classes = [name for name in compound.lstrip(".").split(".") if name]
+    if not classes:
+        return None
+    return _element_carrying_class(markup, classes[-1])
+
+
+def _compound_selects_every_subject(rightmost: str, compound: str) -> bool:
+    """Does this class-only RIGHTMOST rule select EVERY element of `compound`?
+
+    ⛔ `_css_rightmost_selects` compares the class TEXT, so `.pricing-card`
+    does not match the compound `.pricing-card.popular` — and
+    `_css_compound_matches_element` refuses class-named compounds by design (it
+    owns the ELEMENT question). Between the two, a rule that reaches the popular
+    card through its BASE class was invisible to the popular operand of a
+    relation whose base operand saw it (#14406 review round 21).
+
+    `rightmost`'s classes being a SUBSET of `compound`'s is the exact
+    criterion: `.pricing-card` selects every `.pricing-card.popular` element,
+    while `.pricing-card.popular` does not select a plain `.pricing-card`. Both
+    are class-only compounds, so no tag, id or attribute question arises, and
+    the caller keeps the specificity ordering — a base rule cannot out-rank the
+    popular card's own rule, so a correct page is unaffected (verified: the
+    clean page still reads base 1.0 / popular 2.0 / extra 1.0).
+    """
+    if not (rightmost.startswith(".") and compound.startswith(".")):
+        return False
+    if "[" in rightmost or "#" in rightmost or ":" in rightmost:
+        return False
+    rule = {name for name in rightmost.lstrip(".").split(".") if name}
+    subject = {name for name in compound.lstrip(".").split(".") if name}
+    return bool(rule) and rule <= subject
+
+
 def _element_carrying_class(markup: str, cls: str,
                             ) -> tuple[str, dict[str, str]] | None:
     """The first element carrying `cls`, as `(tag, attributes)` — or None.
@@ -4470,8 +4522,7 @@ def _css_reaching_decls(css: str, prop: str, compound: str,
       `@layer` / `@supports` / inheritance, which no reader here models.
     """
     out: list[tuple[str, str]] = []
-    element = (_element_carrying_class(css, compound[1:])
-               if compound.startswith(".") else None)
+    element = _subject_element(css, compound)
     owner = PINNED_OWNER_SELECTOR.get(compound)
     floor = _css_specificity(owner) if owner else None
     for prelude, body, _condition in _css_desktop_rules(css):
@@ -4897,8 +4948,7 @@ def _css_block_end_cascade(css: str, compound: str,
       correct page.
     """
     ranked: list[tuple[tuple, str, str, str]] = []
-    element = (_element_carrying_class(css, compound[1:])
-               if compound.startswith(".") else None)
+    element = _subject_element(css, compound)
     for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
         for part in (p.strip() for p in prelude.split(",")):
             # `_css_desktop_rules` cuts the document `<head>` off the FIRST
@@ -12380,8 +12430,7 @@ def _border_end_width_cascade(css: str, compound: str,
     """
     ranked: list[tuple[tuple, float]] = []
     styles: list[tuple[tuple, str]] = []
-    element = (_element_carrying_class(css, compound[1:])
-               if compound.startswith(".") else None)
+    element = _subject_element(css, compound)
     for rule_index, (prelude, body, _condition) in enumerate(_css_desktop_rules(css)):
         for part in (p.strip() for p in prelude.split(",")):
             if "<" in part:
@@ -12390,7 +12439,8 @@ def _border_end_width_cascade(css: str, compound: str,
             if not _css_rightmost_selects(rightmost, compound) and not (
                     rightmost.startswith("*")) and not (
                     element is not None
-                    and _css_compound_matches_element(rightmost, element)):
+                    and _css_compound_matches_element(rightmost, element)) and not (
+                    _compound_selects_every_subject(rightmost, compound)):
                 continue
             if skip_popular and ".popular" in part:
                 continue
