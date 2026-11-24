@@ -2041,28 +2041,32 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # core pool is the lowest-cost leg it can run in. Pinned by
              # tests/test_ci_selection.py::test_batch_review_tool_change_selects_core_not_tier1.
              "tools/batch_review.py",
-             # #10465 review P1: tools/dod_5090_probe.py owns
-             # tests/test_dod_5090_probe.py (registered `core` + `eval`), but
-             # `tools/` is a flat NON_PYTHON_PREFIXES entry and NO SOURCE_PATTERNS
-             # row matches the instrument — so a probe-only change filtered to
-             # `changed == []`, took the docs-only early return and ran 70
-             # unrelated files. Measured before this entry:
-             # `select(["tools/dod_5090_probe.py"])` -> surfaces=[], full=False,
-             # 70 files, test_dod_5090_probe.py ABSENT. That matters more than the
-             # usual silent drop: the instrument's whole deliverable is a count a
-             # reader QUOTES into an epic body, so the diff that hard-wires
-             # `count_embed_predicates` to 1 (turning the falsifier into
-             # machinery) would merge with every pin that catches it green-by-
-             # omission. Same #1349/#3332/#3616/#4309 class as the entries
-             # around it. Pinned by
-             # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
-             "tools/dod_5090_probe.py",
-             # #13108/#13121 review F4: tools/dense_leg_probe_13108.py owns
+             # ⛔ RETIRED — the entry this note replaces is
+             # `"tools/dod_5090_probe.py"` (NOT the live entry below it:
+             # `tools/dense_leg_probe_13108.py` still has its own pin), and the
+             # retirement is a COST, not a cleanup, so it is
+             # not recorded as one. This entry was LOAD-BEARING while the probe's
+             # test file held a `core` row: with that row in place,
+             # `select(["tools/dod_5090_probe.py"])` -> ['core'], 960 files,
+             # `test_dod_5090_probe.py` PRESENT (re-derived by restoring the row to
+             # measure the counterfactual). ⛔ An earlier draft of this note quoted
+             # two POST-cut readings — 959 files with the entry, 106 without, the
+             # file ABSENT in both — and concluded the entry was inert. Both were
+             # taken after the row was gone, so neither measured what the entry did
+             # when it existed, and the note was false. With the `core` row removed
+             # the entry can only add `core`, which no longer holds the file: a
+             # probe-only diff now selects NO surface, so the census's
+             # read-only/injection arms do not run on the tool that holds their bug.
+             # That is the disclosed price of taking a document/status-word
+             # scorecard off nearly every PR (AGENTS.md §Product Over Process);
+             # re-adding BOTH rows is the way back if the trade is judged wrong.
+             # #13108/#13121 review F4: the LIVE entry below is
+             # `tools/dense_leg_probe_13108.py`, which owns
              # tests/test_dense_leg_probe_13108.py (registered `core`), and the
              # same flat `tools/` swallow applies: a probe-only change filters to
              # `changed == []`, takes the docs-only early return and runs tier-1
              # smoke, where that file is NOT registered. That matters here for the
-             # reason it matters for the entry directly above — this instrument's
+             # reason it mattered for the retired entry above — this instrument's
              # deliverable is the latency/mechanism table `#13108` reopens
              # `STORAGE-ARCHITECTURE.md` §14.3 V3 on, so a diff that hard-wires
              # `over_budget` or drops `percentile`'s `None`-for-empty would merge

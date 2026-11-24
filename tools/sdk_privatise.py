@@ -2219,7 +2219,24 @@ SWEEP_NAMES = 66
 #: pin and no arithmetic crosses them. `main` ships (11910, "3216395d35345904") and its OWN tree
 #: derived (11912, "73827c80583e139f") two folds ago; the pair below is `--repin`'s own output on the
 #: tree that SHIPS, and `--check` exits 0 on it.
-SWEEP_RESIDUE = (11910, "3216395d35345904")
+#:
+#: ⛔ RE-PINNED DOWN 11910 -> 11903 ON THE `#14544` CUT, AND THE 7 IS ATTRIBUTED ROW BY ROW. That
+#: PR deletes 270 cases from `tests/test_dod_5090_probe.py`, and `--repin` on THIS tree prints
+#: **(11903, "1fb861e2c8163aec")**. Measured with this module's own `edits_for`, not reasoned from
+#: the diff: the pre-cut file carried **8** residue rows (`graph.query` x3, `declared.update`,
+#: `se._BREAKERS.update`, `db.list_graphs`, `degraded.update`, `graph.delete`) and the surviving
+#: 677-line file keeps **1** (`se._BREAKERS.update`), so 8 - 1 = 7 is exactly the movement — and no
+#: other file in that PR touches a `.query`/`.update`/`.delete` receiver.
+#: ⚠️ A FALLING PIN CANNOT HIDE A NEW UNTYPED REFERENCE, the direction this arm catches, so the fall
+#: is the pin's HARMLESS direction and the row set is otherwise identical. It is re-pinned rather
+#: than left red because that PR moves the very tree this pin grades, and `surface-guard` is a
+#: code-measuring check on the PR's EVALUATED tree that the land rail refuses to merge red,
+#: required or not (`scripts/admin-merge.sh`, "the PR's evaluated-tree surface BLOCKS").
+#: ⛔ A SEVENTH FOLD KEEPS BOTH SIDES' BLOCKS AGAIN (`origin/main` `af40c97ca31`, this merge) and
+#: re-derives the pair with `--repin` on THIS resolved tree: neither block above is inherited as the
+#: pin and no arithmetic crosses them. The pair below is `--repin`'s own output on the tree that
+#: SHIPS; `--check` exits 0 on it.
+SWEEP_RESIDUE = (11903, '1fb861e2c8163aec')
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

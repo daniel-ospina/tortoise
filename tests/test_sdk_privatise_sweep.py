@@ -253,12 +253,11 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2109 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on this merge tree (`origin/main` `533e256f2c89` merged into the branch,
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2126 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED on this merge tree (`origin/main` `af40c97ca31` merged into the branch,
     which KEPT both sides' prose blocks as every fold before it did: the pre-merge branch and
     `main` each published their OWN tree's reading, so the figure is re-derived here rather
     than carried from either side — and GRADED, see
-    `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
@@ -396,6 +395,19 @@ def _residue_block() -> str:
     what the delta between them accounts for, and the pair did NOT move with them: `--repin` on this
     resolved tree prints `(11910, "3216395d35345904")`, byte-identical to the pair `main` commits,
     because this branch contributes no row.
+    — and THIS PR'S OWN TEST CUT THEN MOVED THE PAIR DOWN, 11910 -> `11903`, on a tree that is
+    neither of the fold's parents: `tests/test_dod_5090_probe.py` loses 270 cases, and that file's
+    own residue rows go 8 -> 1 (`edits_for` on each side, not differenced from the two pins), so
+    the movement is `-7` and the figure above is RE-MEASURED at 2032 rather than carried from the
+    fold's reading. The re-pin note that records it is `#:` prose INSIDE this run, which is why
+    the extent moved with the pair here instead of only with a merge,
+    — and the TENTH FOLD (`origin/main` `af40c97ca31`, this merge) kept BOTH sides' blocks once
+    more, as every fold before it did, and re-walked the run rather than carrying either side's
+    reading: the figure above is THIS function's own walk of the resolved file, and neither of the
+    numerals the two kept blocks above publish is it — each is its own tree's measurement, which is
+    what the graded figure exists to force. This fold's `#:` lines in `tools/sdk_privatise.py` are
+    what the delta between them accounts for, and the pair did NOT move with them: `--repin` on this
+    resolved tree prints the pair `main` commits, because this branch contributes no row.
     AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
