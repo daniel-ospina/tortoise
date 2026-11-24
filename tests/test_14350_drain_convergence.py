@@ -54,6 +54,7 @@ from tortoise.capture_spool import (
     _age_key,  # noqa: F401  — the ordering the monotonicity argument rests on
     capacity_refusal,
     capture_health_line,
+    capture_status_path,
     count_pending_captures,
     flush_spool,
     read_capture_status,
@@ -1494,17 +1495,45 @@ def test_the_HEALTH_LINE_is_BYTE_IDENTICAL_on_both_legs(tmp_path):
     ok = {"version": 1, "state": "ok", "updated_at": stamp}
     blocked = {"version": 1, "state": "blocked", "reason": "402 quota",
                "status": 402, "updated_at": stamp}
-    # (label, recorded status.json, spool entries, api key, max_entries, unlistable)
+    # ⛔ THE REASON IS NOT ALWAYS A STRING, and the two legs disagreed about what to
+    # render: this one gates on `isinstance(reason, str) and reason`, the Pi leg tested
+    # truthiness and stringified whatever JSON held — so ONE hand-edited or
+    # foreign-written `status.json` rendered `…, NO drain exclusion` on Python and
+    # `…, NO drain exclusion (5)` / `([object Object])` on the Pi leg, against this
+    # PR's own "byte-identical words on both legs for every verdict" (#14480 review,
+    # P3). Both directions are rows, not prose.
+    nonstring = {**ok, "claim_unavailable": True, "claim_unavailable_reason": 5}
+    nullreason = {**ok, "claim_unavailable": True, "claim_unavailable_reason": None}
+    # (label, recorded status.json, spool entries, api key, max_entries, unlistable,
+    #  unreadable claim at the claim path)
     rows = [
-        ("ok", ok, 0, "present", None, False),
-        ("ok+claim", {**ok, **claim}, 0, "present", None, False),
-        ("blocked-healed+claim", {**blocked, **claim}, 0, "present", None, False),
-        ("blocked+backlog+claim", {**blocked, **claim}, 1, "present", None, False),
-        ("saturated+claim", {**ok, **claim}, 1, "present", 1, False),
-        ("saturated-keyless+claim", {**ok, **claim}, 1, "", 1, False),
-        ("inactive+claim", {**ok, **claim}, 1, "", None, False),
-        ("draining+claim", {**ok, **claim}, 1, "present", None, False),
-        ("unreadable+claim", {**ok, **claim}, 0, "present", None, True),
+        ("ok", ok, 0, "present", None, False, False),
+        ("ok+claim", {**ok, **claim}, 0, "present", None, False, False),
+        ("blocked-healed+claim", {**blocked, **claim}, 0, "present", None, False, False),
+        ("blocked+backlog+claim", {**blocked, **claim}, 1, "present", None, False, False),
+        ("saturated+claim", {**ok, **claim}, 1, "present", 1, False, False),
+        ("saturated-keyless+claim", {**ok, **claim}, 1, "", 1, False, False),
+        ("inactive+claim", {**ok, **claim}, 1, "", None, False, False),
+        ("draining+claim", {**ok, **claim}, 1, "present", None, False, False),
+        ("unreadable+claim", {**ok, **claim}, 0, "present", None, True, False),
+        ("claim+NON-STRING reason", nonstring, 1, "present", None, False, False),
+        ("claim+NULL reason", nullreason, 1, "present", None, False, False),
+        # ⛔ THE SELF-HEAL WRITES TOO, and it carried a DIFFERENT key set per leg: the
+        # Python twin keeps every claim-axis key the record HOLDS (`{k: v …}`), the Pi
+        # leg copied only the TRUTHY ones — so `claim_unavailable: false` and a JSON
+        # `null` reason vanished on one leg and survived on the other, in the ONE file
+        # the two legs share (#14480 review, P3 — third instance of the class). The row
+        # is `queued == 0`, which is what makes the self-heal fire at all.
+        ("claim FALSE + NULL reason, healed",
+         {**blocked, "claim_unavailable": False, "claim_unavailable_reason": None},
+         0, "present", None, False, False),
+        # ⛔ AND THE OTHER CLAIM-AXIS TERM (review P2): a regular `drain.claim` this
+        # process cannot read is the ONE arm that blocks the drain permanently, and it
+        # used to be invisible — `capture: DRAINING (1 queued)` over a spool that can
+        # never move. The row is here as well as in its own Python test because the
+        # SENTENCE is the contract: a divergence leaves two operators with two
+        # different diagnoses of one box.
+        ("unreadable CLAIM file", {**ok, **claim}, 1, "present", None, False, True),
     ]
     big = 1 << 40
     driver = tmp_path / "health-parity.mjs"
@@ -1522,7 +1551,8 @@ def test_the_HEALTH_LINE_is_BYTE_IDENTICAL_on_both_legs(tmp_path):
         encoding="utf-8",
     )
     jobs = []
-    for i, (_label, record, sessions, api_key, max_entries, unlistable) in enumerate(rows):
+    for i, (_label, record, sessions, api_key, max_entries, unlistable,
+            unreadable_claim) in enumerate(rows):
         for leg in ("pi", "py"):
             root = tmp_path / f"{leg}{i}"
             if sessions:
@@ -1533,6 +1563,12 @@ def test_the_HEALTH_LINE_is_BYTE_IDENTICAL_on_both_legs(tmp_path):
             else:
                 root.mkdir(parents=True, exist_ok=True)
             write_capture_status(root, record)
+            if unreadable_claim:
+                # A REGULAR file at the claim path that this process cannot read: the
+                # one arm that stops every pass. Skipped as a whole below when the box
+                # cannot express it (root ignores mode bits).
+                (root / "drain.claim").write_text("{}")
+                os.chmod(root / "drain.claim", 0o000)
         jobs.append({"dir": str(tmp_path / f"pi{i}"), "apiKey": api_key,
                      "maxEntries": max_entries, "big": big})
     proc = subprocess.run(
@@ -1543,21 +1579,42 @@ def test_the_HEALTH_LINE_is_BYTE_IDENTICAL_on_both_legs(tmp_path):
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     pi_lines = json.loads(proc.stdout.strip().splitlines()[-1])
     py_lines = []
-    for i, (_label, _record, _sessions, api_key, max_entries, _unlistable) in enumerate(rows):
+    for i, (_label, _record, _sessions, api_key, max_entries,
+            _unlistable, _unreadable_claim) in enumerate(rows):
         bounds = (Bounds(max_entries=max_entries, max_total_bytes=big, max_entry_bytes=big)
                   if max_entries else DEFAULT_BOUNDS)
         py_lines.append(capture_health_line(
             tmp_path / f"py{i}", api_key=api_key, bounds=bounds).line)
-    # The UNREADABLE verdict names the entries directory it could not list, and the
-    # two legs necessarily run on two different ones — normalise ONLY the spool
-    # root, so every other byte of every row is still compared exactly.
+
     def _norm(lines: list[str]) -> list[str]:
+        # The UNREADABLE verdict names the entries directory it could not list, and the
+        # two legs necessarily run on two different ones — normalise ONLY the spool
+        # root, so every other byte of every row is still compared exactly.
         return [ln.replace(str(tmp_path / "pi"), "<root>").replace(
             str(tmp_path / "py"), "<root>") for ln in lines]
 
     assert _norm(pi_lines) == _norm(py_lines), (
         "the two legs describe the SAME spool with different words:\n  pi: "
-        + repr(pi_lines) + "\n  py: " + repr(py_lines))
+        + repr(_norm(pi_lines)) + "\n  py: " + repr(_norm(py_lines)))
+    # ⛔ AND THE ROWS REALLY REACH THEIR TERMS — a parity assertion over two legs that
+    # both render NOTHING is the vacuous shape this whole file exists to remove.
+    labels = [row[0] for row in rows]
+    rendered = dict(zip(labels, _norm(py_lines), strict=True))
+    assert rendered["claim+NON-STRING reason"].endswith(", NO drain exclusion"), (
+        "a non-string reason is NO reason on both legs: "
+        + rendered["claim+NON-STRING reason"])
+    assert rendered["claim+NULL reason"].endswith(", NO drain exclusion")
+    if os.getuid() == 0:
+        # A root box cannot EXPRESS the arm (mode bits are ignored), so the row grades
+        # the other direction: neither leg may claim a stall it cannot see.
+        assert "drain claim UNREADABLE" not in rendered["unreadable CLAIM file"], (
+            rendered["unreadable CLAIM file"])
+    else:
+        assert rendered["unreadable CLAIM file"].endswith(
+            ", NO drain exclusion (/x/drain.claim exists and is not a claim record)"
+            ", drain claim UNREADABLE (a regular file exists but could not be read)"), (
+            "the permanent-block arm must be on the SAME line, after the durable fact: "
+            + rendered["unreadable CLAIM file"])
     # ⛔ AND EVERY ROW ACTUALLY REACHED A VERDICT WITH THE FACT ON IT: a matrix of
     # rows that all collapse to `ok` is a parity test for one branch (the shape the
     # predecessor had). The expected head-word per row is derived from the row, so a
@@ -1565,14 +1622,34 @@ def test_the_HEALTH_LINE_is_BYTE_IDENTICAL_on_both_legs(tmp_path):
     # agreeing on the wrong sentence.
     expected = [("OK", False), ("OK", True), ("OK", True), ("BLOCKED", True),
                 ("SATURATED", True), ("SATURATED", True), ("INACTIVE", True),
-                ("DRAINING", True), ("UNREADABLE", True)]
-    for (label, _r, _s, _k, _m, _u), (verb, fact), line in zip(
+                ("DRAINING", True), ("UNREADABLE", True),
+                ("DRAINING", True), ("DRAINING", True), ("OK", False),
+                ("DRAINING", True)]
+    for (label, _r, _s, _k, _m, _u, _uc), (verb, fact), line in zip(
             rows, expected, py_lines, strict=True):
         assert line.startswith(f"capture: {verb}"), (
             f"row {label!r} took a different branch than the matrix intends: {line!r}")
         assert line.count("NO drain exclusion") == (1 if fact else 0), (
             f"row {label!r} must carry the durable claim fact exactly "
             f"{1 if fact else 0}x: {line!r}")
+
+    # ⛔ AND THE RECORD THE SELF-HEAL WROTE, not only the line it rendered: the two
+    # legs share `<spool>/status.json`, so a heal that keeps a different KEY SET per
+    # leg makes the box's record depend on which leg last printed a health line. The
+    # healed row holds a FALSY `claim_unavailable` and a JSON `null` reason, i.e. the
+    # values a truthiness copy drops.
+    healed = labels.index("claim FALSE + NULL reason, healed")
+    written = {}
+    for leg in ("pi", "py"):
+        record = read_capture_status(tmp_path / f"{leg}{healed}")
+        assert record is not None, f"the {leg} leg did not self-heal the record"
+        written[leg] = {k: v for k, v in record.items() if k != "updated_at"}
+    assert written["pi"] == written["py"], (
+        "the two legs self-healed ONE status.json into different records:\n  pi: "
+        + repr(written["pi"]) + "\n  py: " + repr(written["py"]))
+    assert "claim_unavailable_reason" in written["pi"], (
+        "key-existence, not truthiness: a JSON null reason is KEPT by the self-heal "
+        "on both legs, not dropped: " + repr(written["pi"]))
 
 
 def test_every_VERDICT_carries_the_durable_claim_fact(tmp_path):
@@ -2145,6 +2222,121 @@ def test_an_UNREADABLE_regular_claim_still_reads_as_CONTENTION(tmp_path):
     assert path.exists(), "a regular claim file must NEVER be deleted unread"
 
 
+def test_an_UNREADABLE_claim_file_is_NAMED_on_the_operator_line(tmp_path):
+    """⛔ THE ARM THAT BLOCKS PERMANENTLY NOW HAS THE SURFACE ITS RESIDUAL CLAIMED.
+
+    A regular `drain.claim` this process cannot read is HONOURED, never taken over
+    (the doctrine is "an unprovable read is ALIVE"), so EVERY pass answers
+    `held_by_claim` with no holder identity, attempts nothing, and the spool stops
+    moving. The residual justified that with "it blocks the drain until a human
+    looks" — and nothing told the human: `status.json` held no fact for this arm and
+    the line read `capture: DRAINING (1 queued)`, which describes a WORKING drain.
+    Reachable without an attacker: `sudo tortoise session drain` leaves a root-owned
+    mode-`600` claim that a user-level pass can never read (#14480 review, P2).
+
+    ⛔ IT IS A LIVE PROBE, NOT A RECORDED FACT, and that is the point: the term
+    disappears the moment the mode is fixed, with no clearing arm to get wrong and no
+    way for a long-dead lock to keep the warning alive. Both halves are asserted.
+
+    MUTATION THAT REDS THIS: return `False` unconditionally from
+    `drain_claim.claim_path_unreadable` (the pre-fix state — nothing surfaces it).
+    """
+    if os.getuid() == 0:
+        pytest.skip("root ignores mode bits")
+    root = _spool(tmp_path, sessions=1)
+    path = drain_claim.claim_path(root)
+    path.write_text(json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "live-holder", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(),
+        "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    }))
+    assert drain_claim.claim_path_unreadable(root) is False, (
+        "a READABLE claim file is not a stall")
+    os.chmod(path, 0o000)
+    try:
+        assert drain_claim.claim_path_unreadable(root) is True
+        line = capture_health_line(root, api_key="present").line
+        assert ", drain claim UNREADABLE (a regular file exists but could not be read)" in line, (
+            "the one arm that blocks the drain permanently was invisible on the line "
+            "the operator reads: " + line)
+        # The pass really does stop — the surface describes a real stall, it does not
+        # decorate a working drain.
+        summary = flush_spool(root, lambda _p: PostOutcome(ok=True, status=200, body={}),
+                             now=1000.0)
+        assert summary.held_by_claim is True and summary.filed == 0
+    finally:
+        os.chmod(path, 0o600)
+    # ⛔ SELF-CLEARING BY CONSTRUCTION: a probe cannot outlive the condition.
+    assert drain_claim.claim_path_unreadable(root) is False
+    assert "drain claim UNREADABLE" not in capture_health_line(
+        root, api_key="present").line
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
+def test_a_FIFO_at_the_STATUS_path_does_not_HANG_inside_the_CLAIMED_section(tmp_path):
+    """⛔ THE READ THAT THIS PR MOVED ONTO THE DRAIN PATH, gated the way the claim
+    read has been since cycle 5.
+
+    `read_capture_status` is called by `_record_capture_status` at the tail of
+    `_flush_claimed` — i.e. **while the one-drainer claim is HELD** — and the claim is
+    released in `flush_spool`'s `finally`, AFTER that returns. So a FIFO (or socket)
+    at `<spool>/status.json` blocked `open(2)` forever *inside the claimed section*:
+    the box stopped filing, the drain process never returned, and the spool sat
+    claimed until the lease was judged stale. `capture_health_line` reads the same
+    path, so `tortoise session health` hung instead of reporting the box (#14480
+    review, P1 — measured on the reviewer's export as
+    `read_capture_status BLOCKED >4s`). `contextlib.suppress(Exception)` at the call
+    site cannot help: a block is not an exception.
+
+    MUTATION THAT REDS THIS: drop the `S_ISREG` gate from `read_capture_status` — the
+    probe thread never returns, so the first assertion REDS (the reader is joined with
+    a bound, so a regression asserts instead of hanging the suite).
+    """
+    root = _spool(tmp_path, sessions=1)
+    os.mkfifo(capture_status_path(root))
+
+    outcome: list[object] = []
+
+    def _probe() -> None:
+        outcome.append(read_capture_status(root))
+        # …and the HEALTH LINE reads the same path on every `session_start`.
+        outcome.append(capture_health_line(root, api_key="present").line)
+
+    reader = threading.Thread(target=_probe, daemon=True)
+    reader.start()
+    reader.join(10.0)
+    assert not reader.is_alive(), (
+        "read_capture_status/capture_health_line BLOCKED on a FIFO at status.json — "
+        "they are what the claimed pass calls")
+    assert outcome[0] is None, f"a FIFO holds no record, got {outcome[0]!r}"
+    assert "capture:" in str(outcome[1])
+
+    # ⛔ THE HALF THAT MATTERS: the whole DRAIN PASS, which reads this path with the
+    # claim held. It must return (and therefore release), and the box must recover —
+    # `_atomic_write` replaces the FIFO with a real record on the way through.
+    ran: list[object] = []
+
+    def _drive() -> None:
+        ran.append(flush_spool(
+            root, lambda _p: PostOutcome(ok=True, status=200, body={}), now=1000.0))
+
+    driver = threading.Thread(target=_drive, daemon=True)
+    driver.start()
+    driver.join(30.0)
+    assert not driver.is_alive(), (
+        "a drain pass HUNG on a FIFO at status.json with the claim held")
+    assert ran and ran[0].filed == 1, f"the pass did not run: {ran!r}"
+    assert isinstance(read_capture_status(root), dict), (
+        "the pass must have recorded its status, replacing the obstructing object")
+    # The claim was RELEASED by the pass that held it — read it back, do not assume.
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None, (
+        "the claim was left HELD: the pass never reached its release, so every later "
+        "pass would report contention until the lease aged out")
+    claim.release()
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
 def test_renew_does_not_HANG_on_a_FIFO_at_the_claim_path(tmp_path):
     """A live holder's REFRESH must not block either — the half the previous test
@@ -2289,6 +2481,60 @@ def test_a_HEALTHY_pass_CLEARS_the_recorded_claim_fact(tmp_path):
     assert not recorded.get("claim_unavailable"), (
         "a pass that HELD the claim must clear the fact: " + repr(recorded))
     assert "NO drain exclusion" not in capture_health_line(root, api_key="present").line
+
+
+def test_a_NULL_reason_is_carried_by_NEITHER_leg(tmp_path):
+    """⛔ A JSON `null` REASON IS "NO REASON" ON BOTH LEGS — the carry-forward half
+    of the cycle-18 P3 (#14480 review, `:6320`).
+
+    The two legs write ONE shared `status.json`, so the record they produce for the
+    same prior and the same pass must be the same record. The Python leg copies the
+    prior reason only when it `is not None`; the Pi leg tested `!== undefined`, so a
+    `null` reason was CARRIED there and DROPPED here — the same hand-edited/foreign
+    shape that made the rendered suffix disagree. Only reachable with a foreign
+    record today, which is exactly why it needs a row rather than an argument.
+
+    MUTATION THAT REDS THIS: put `!== undefined` back in `applyClaimPolicy`'s
+    carry-forward arm (the Pi leg then writes `claim_unavailable_reason: null` where
+    Python writes no key at all).
+    """
+    from tortoise.capture_spool import FlushSummary, _record_capture_status
+
+    prior = {
+        "version": 1, "state": "ok",
+        "claim_unavailable": True, "claim_unavailable_reason": None,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    py_root = tmp_path / "py"
+    py_root.mkdir(parents=True)
+    write_capture_status(py_root, dict(prior))
+    # A TARGETED pass that EARNED an `ok` record: it never asked for the claim, so it
+    # must carry the fact forward rather than clear it — the arm under test.
+    _record_capture_status(py_root, FlushSummary(attempted=3), held_claim=False)
+    py_record = read_capture_status(py_root)
+    assert py_record is not None and py_record.get("claim_unavailable") is True
+    assert "claim_unavailable_reason" not in py_record, (
+        "a JSON null reason is NO reason on this leg: " + repr(py_record))
+
+    earned = json.dumps({"version": 1, "state": "ok",
+                         "updated_at": "2026-01-02T00:00:00+00:00"})
+    script = (
+        f'import {{ applyClaimPolicy }} from {json_dumps(_TS_LEG.as_posix())};\n'
+        'const prior = JSON.parse(process.env.PRIOR);\n'
+        'const earned = JSON.parse(process.env.EARNED);\n'
+        'const out = applyClaimPolicy(earned, prior, {});\n'
+        'process.stdout.write(JSON.stringify(out));\n'
+    )
+    out = subprocess.run([_NODE, "--experimental-strip-types", "-e", script],
+                         capture_output=True, text=True, timeout=120, cwd=str(REPO),
+                         env={**os.environ, "PRIOR": json.dumps(prior),
+                              "EARNED": earned})
+    assert out.returncode == 0, out.stderr[-2000:]
+    pi_record = json.loads(out.stdout)
+    assert pi_record.get("claim_unavailable") is True, pi_record
+    assert "claim_unavailable_reason" not in pi_record, (
+        "the Pi leg carried a JSON null reason that Python drops — ONE record, two "
+        "shapes: " + repr(pi_record))
 
 
 def test_a_TARGETED_pass_cannot_erase_the_durable_claim_fact(tmp_path):

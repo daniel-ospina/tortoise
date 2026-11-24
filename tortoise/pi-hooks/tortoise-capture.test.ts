@@ -7986,6 +7986,33 @@ test("#14350: a FIFO at the claim path is cleared, not a permanent block", async
   claim.release();
 });
 
+test("#14350: a FIFO at status.json does not HANG the health line or the claimed pass", () => {
+  // ⛔ THE READ THIS PR MOVED ONTO THE DRAIN PATH, gated the way the claim read has
+  // been since cycle 5. `recordOutcome` calls `readCaptureStatus` while the one-drainer
+  // claim is HELD (`flushSpool` releases in its `finally`, AFTER the pass returns), so
+  // a FIFO at `<spool>/status.json` blocked `open(2)` forever INSIDE the claimed
+  // section — the spool stayed claimed until its lease was judged stale — and
+  // `captureHealthLine` read the same path, so the health line hung instead of
+  // reporting the box (#14480 review, P1; the Python twin is
+  // `test_a_FIFO_at_the_STATUS_path_does_not_HANG_inside_the_CLAIMED_section`).
+  //
+  // MUTATION THAT REDS THIS: drop the `lstatSync(...).isFile()` gate from
+  // `readCaptureStatus` — THIS LINE HANGS, which is the red (`node --test` times the
+  // case out), the same way the pre-existing FIFO-at-the-claim-path row beside it
+  // reads.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  const spool = tmpSpool();
+  const statusPath = join(spool, SPOOL_STATUS_FILE);
+  try {
+    execFileSync("mkfifo", [statusPath], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  assert.equal(readCaptureStatus(spool), undefined, "a FIFO holds no record");
+  assert.match(captureHealthLine(spool, { apiKey: "present" }).line, /^capture: /,
+    "the health line must render, not block, over a FIFO at status.json");
+});
+
 test("#14350: a slow holder's release leaves a SUCCESSOR's claim alone", async () => {
   // The restore path: the takedown moves whatever is at the path aside and compares
   // in quarantine, so a release by a holder whose lease expired — after a successor

@@ -3639,9 +3639,26 @@ def read_capture_status(root: Path) -> dict | None:
     a crash — health checks must be able to answer "no record" rather than
     failing on a torn file. A record we cannot UNDERSTAND is not a marker
     either; :func:`capture_health_line` re-validates every field it trusts.
+
+    ⛔ ``lstat`` FIRST, AND ONLY A REGULAR FILE IS READ. This read sits on the
+    DRAIN path — ``_record_capture_status`` calls it at the tail of
+    ``_flush_claimed``, i.e. while the one-drainer claim is HELD — so a FIFO (or
+    a socket) at ``status.json`` used to block ``open(2)`` FOREVER *inside the
+    claimed section*. ``claim.release()`` runs in ``flush_spool``'s ``finally``
+    after ``_flush_claimed`` returns, so the spool stayed CLAIMED until the lease
+    was judged stale, and ``capture_health_line`` blocked on the same path —
+    ``tortoise session health`` hung instead of reporting the box. The
+    ``contextlib.suppress(Exception)`` at the call site cannot help: a block is
+    not an exception. It is the same object class ``drain_claim._read_raw``
+    already gates on the CLAIM file (cycle-5 P1), applied to the status file this
+    diff is what put on the drain path (#14480 review, P1 — measured: a FIFO here
+    never returned).
     """
+    path = capture_status_path(root)
     try:
-        record = json.loads(capture_status_path(root).read_text(encoding="utf-8"))
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
         return None
     return record if isinstance(record, dict) else None
@@ -3953,10 +3970,18 @@ def capture_health_line(
         _spool_health_line(root, api_key=api_key, bounds=bounds), root)
 
 
-def _with_claim_term(health: CaptureHealth, recorded: dict | None) -> CaptureHealth:
-    """Append the durable claim fact to WHICHEVER verdict was chosen.
+#: The operator-line term for the one claim arm that blocks PERMANENTLY. One
+#: constant, because the two legs render the same sentence about the same spool
+#: (`withClaimTerm`'s `UNREADABLE_CLAIM_TEXT` on the Pi leg) and the cross-leg
+#: parity test compares the FULL line byte for byte.
+_UNREADABLE_CLAIM_TEXT = "a regular file exists but could not be read"
 
-    ⛔ IT IS ONE TERM ON EVERY LINE, NOT A SIXTH PRECEDENCE STATE (#14480 review,
+
+def _with_claim_term(health: CaptureHealth, recorded: dict | None,
+                     root: Path) -> CaptureHealth:
+    """Append the claim-axis facts to WHICHEVER verdict was chosen.
+
+    ⛔ IT IS A TERM ON EVERY LINE, NOT A SIXTH PRECEDENCE STATE (#14480 review,
     F1). The claim axis is a fact about the SPOOL ROOT — it stays true whatever the
     queue is doing — so a `SATURATED` box whose claim path is broken must read
     BOTH, exactly as a quota-blocked one must. Applying it only to the final
@@ -3964,14 +3989,47 @@ def _with_claim_term(health: CaptureHealth, recorded: dict | None) -> CaptureHea
     durable fact was introduced for (a capacity 429 with a backlog: `state: blocked`
     AND a broken claim path) is one of those early returns — so the fact was
     invisible for the whole duration of the block, which for quota may be forever.
-    The PIPELINE is still the only place it is decided: this function adds a term,
+    The PIPELINE is still the only place it is decided: this function adds terms,
     it does not reorder `UNREADABLE > BLOCKED > SATURATED > INACTIVE > DRAINING`.
+
+    ⛔ TWO TERMS, TWO DIFFERENT KINDS OF FACT, and they must not be merged:
+
+    * ``NO drain exclusion`` — DURABLE and about a PAST pass: a pass ran without the
+      one-drainer claim, and the reason reaches no one unless it is recorded
+      (the firing hook discards stderr).
+    * ``drain claim UNREADABLE`` — LIVE and about the PRESENT state: a regular claim
+      file exists that this process cannot read, so every pass honours a holder it
+      cannot name, attempts nothing, and the spool stops moving until a human
+      looks. That residual had no surface AT ALL — the box read
+      ``capture: DRAINING (n queued)``, which describes a working drain (#14480
+      review, P2). It is probed, never recorded: see
+      :func:`drain_claim.claim_path_unreadable` for why durability would be the
+      WRONG answer here (it can go stale, and the probe cannot).
+
+    Order is fixed so the rendered line is byte-identical on both legs.
     """
+    # Imported HERE, like every other `drain_claim` use in this module (`flush_spool`
+    # imports it inside the function for the same reason): the health surface is not
+    # on the capture path, so a module-level import would make every capture pay for
+    # it. The module is already in `sys.modules` by the time a health line runs.
+    from tortoise import drain_claim
+
+    terms: list[str] = []
     if recorded is not None and recorded.get("claim_unavailable"):
         reason = recorded.get("claim_unavailable_reason")
+        # ⛔ A NON-STRING REASON RENDERS NO REASON ON *BOTH* LEGS. The shared
+        # `status.json` can be hand-edited or written by a foreign producer, and the
+        # Pi leg's truthiness test against this leg's `isinstance(…, str)` rendered
+        # `…, NO drain exclusion (5)` / `([object Object])` there and
+        # `…, NO drain exclusion` here — two different sentences about ONE spool
+        # (#14480 review, P3).
         suffix = f" ({reason})" if isinstance(reason, str) and reason else ""
-        return health._replace(line=f"{health.line}, NO drain exclusion{suffix}")
-    return health
+        terms.append(f"NO drain exclusion{suffix}")
+    if drain_claim.claim_path_unreadable(root):
+        terms.append(f"drain claim UNREADABLE ({_UNREADABLE_CLAIM_TEXT})")
+    if not terms:
+        return health
+    return health._replace(line=f"{health.line}, {', '.join(terms)}")
 
 
 def _spool_health_line(
@@ -4017,7 +4075,7 @@ def _spool_health_line(
             CaptureHealth(
                 "unreadable", 0, None,
                 f"capture: UNREADABLE (cannot list {_entries_dir(root)})"),
-            recorded)
+            recorded, root)
     queued, scan_metas, unreadable_bytes, unreadable_count = scan
     # #12379: the unrecorded-outcome ids are taken from THIS scan's metas (see
     # `CaptureHealth.unrecorded`) — the caller prints them, the pinned line never
@@ -4062,7 +4120,7 @@ def _spool_health_line(
             "blocked", queued, blocked_status,
             f"capture: BLOCKED ({queued} queued, {blocked_status} "
             f"{_refusal_label(recorded.get('reason'))})",
-            unrecorded), recorded)
+            unrecorded), recorded, root)
     if saturated:
         # `queued` is the PENDING count, so a ceiling filled by terminal entries
         # reads `SATURATED (0 queued, …)` — true on both counts: nothing will be
@@ -4075,11 +4133,11 @@ def _spool_health_line(
                 "saturated", queued, None,
                 "capture: SATURATED (no TORTOISE_API_KEY, "
                 f"{queued} queued, refusing new captures)",
-                unrecorded), recorded)
+                unrecorded), recorded, root)
         return _with_claim_term(CaptureHealth(
             "saturated", queued, None,
             f"capture: SATURATED ({queued} queued, refusing new captures)",
-            unrecorded), recorded)
+            unrecorded), recorded, root)
     if api_key == "":
         # The count is NOT dropped here: a keyless box is exactly the box whose
         # spool grows forever (nothing can file it), so the backlog stays on the
@@ -4087,7 +4145,7 @@ def _spool_health_line(
         return _with_claim_term(CaptureHealth(
             "inactive", queued, None,
             f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)",
-            unrecorded), recorded)
+            unrecorded), recorded, root)
     verdict = (
         CaptureHealth("draining", queued, None, f"capture: DRAINING ({queued} queued)", unrecorded)
         if queued > 0
@@ -4098,7 +4156,7 @@ def _spool_health_line(
     # parity test — a divergence here is invisible to everyone except a human who
     # ran the other leg. It goes through `_with_claim_term` like every earlier
     # verdict: the term is an ADDED FACT, not a precedence state.
-    return _with_claim_term(verdict, recorded)
+    return _with_claim_term(verdict, recorded, root)
 
 
 def _with_store_sync_terms(base: CaptureHealth, root: Path) -> CaptureHealth:
