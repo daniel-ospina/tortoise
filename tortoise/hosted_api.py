@@ -17480,6 +17480,36 @@ async def create_batch(body: BatchRequest,
                                "seconds.",
                 }) from None
 
+    # ⛔ AN ITEM THAT NAMES A URL IS REFUSED **HERE**, NOT LATER (#14415 review
+    # round 5, P2). The model's docstring used to promise a fetch, then (round 4)
+    # promised a refusal — and neither existed: `ref` was copied verbatim into
+    # `submit`, so `https://…` became a relative path under the org root, was
+    # ACCEPTED with 201, and died inside the indexer with a storage message. A
+    # refusal the customer can act on has to be an HTTP answer at acceptance.
+    # (This API never fetches a caller-named URL: that is an SSRF surface, and an
+    # egress allow-list is not a substitute for not fetching.)
+    #
+    # ⛔ AND IT RUNS BEFORE THE ESTIMATE AND THE ACKNOWLEDGEMENT GATE (#14415
+    # review round 6, P3). Behind the gate, a body whose items are ALL URLs was
+    # refused 402 and told to "re-send with acknowledge_overage=true to confirm
+    # the expected spend" — collecting an acknowledgement for work that cannot
+    # run, with an estimate for a batch that is structurally invalid; the
+    # re-send then 422s. A request that cannot be accepted is refused for THAT
+    # reason first.
+    bad_refs = [it.ref for it in body.items
+                if _URL_SHAPED.match(str(it.ref or ""))]
+    if bad_refs:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": "BATCH_REF_URL_NOT_SUPPORTED",
+                "message": "a batch item must name a document under this team's "
+                           "storage (a path), or carry its text. This API does "
+                           "not fetch URLs — nothing was accepted and nothing "
+                           "was charged.",
+                "refs": bad_refs[:10],
+            })
+
     est = _batch_ingest.estimate_batch(len(body.items),
                                        included_tokens=included_tokens,
                                        tokens_already_used=used_tokens)
@@ -17517,9 +17547,19 @@ async def create_batch(body: BatchRequest,
                 "priced against your plan yet — so the figure to confirm is "
                 "the expected spend on this work, not a measured amount.")
         elif est.overage_tokens > 0:
+            # ⛔ The MONEY arm's own low end (#14415 recut review, P2). The overage is
+            # priced at $1.00/1M, so any overage below ~5,000 tokens rounds to
+            # `$0.00`: printing an exact zero beside a REAL token overage is the same
+            # unactionable figure the sibling arms remove, one branch over, and
+            # `about 1 tokens` is how a generated sentence tells a customer it was
+            # never read. State the bound rather than a false zero, and agree with
+            # the count.
+            unit = "token" if est.overage_tokens == 1 else "tokens"
+            money = ("under $0.01" if round(est.overage_usd, 2) == 0.0
+                     else f"about ${est.overage_usd:,.2f}")
             overage_copy = (
-                f" Expected overage: about {est.overage_tokens:,} tokens "
-                f"(about ${est.overage_usd:,.2f}).")
+                f" Expected overage: about {est.overage_tokens:,} {unit} "
+                f"({money}).")
         else:
             overage_copy = (
                 " This batch is large enough to be confirmed before it runs; "
@@ -17539,28 +17579,6 @@ async def create_batch(body: BatchRequest,
                            + "." + overage_copy + " Re-send with "
                              "acknowledge_overage=true to confirm.",
                 "estimate": est_dict,
-            })
-
-    # ⛔ AN ITEM THAT NAMES A URL IS REFUSED **HERE**, NOT LATER (#14415 review
-    # round 5, P2). The model's docstring used to promise a fetch, then (round 4)
-    # promised a refusal — and neither existed: `ref` was copied verbatim into
-    # `submit`, so `https://…` became a relative path under the org root, was
-    # ACCEPTED with 201, and died inside the indexer with a storage message. A
-    # refusal the customer can act on has to be an HTTP answer at acceptance.
-    # (This API never fetches a caller-named URL: that is an SSRF surface, and an
-    # egress allow-list is not a substitute for not fetching.)
-    bad_refs = [it.ref for it in body.items
-                if _URL_SHAPED.match(str(it.ref or ""))]
-    if bad_refs:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error_code": "BATCH_REF_URL_NOT_SUPPORTED",
-                "message": "a batch item must name a document under this team's "
-                           "storage (a path), or carry its text. This API does "
-                           "not fetch URLs — nothing was accepted and nothing "
-                           "was charged.",
-                "refs": bad_refs[:10],
             })
 
     refs = [it.ref for it in body.items]
@@ -17602,7 +17620,21 @@ async def create_batch(body: BatchRequest,
     # Work starts AFTER the rows exist, on the batch's own pool. A deferral
     # (ceiling or off-peak window) leaves the items `queued`: durable, visible,
     # and picked up by the next tick — never lost.
-    _submit_or_defer(org, batch.batch_id)
+    # ⛔ THE HAND-OFF IS NOT PART OF "NOTHING WAS ACCEPTED" (#14415 review round
+    # 6, P2). The rows above are durable and `submit()` has returned, so a raise
+    # from here (starting the retry thread under thread pressure, say) would
+    # answer 500 for a batch that WAS accepted — and the customer's retry ingests
+    # every item twice, which is exactly what `submit()`'s rollback exists to
+    # prevent and cannot help with here. A refused or missing hand-off is already
+    # recoverable: the items stay `queued` and the recovery scan and the retry
+    # tick both select them.
+    try:
+        _submit_or_defer(org, batch.batch_id)
+    except Exception:
+        _logger.exception(
+            "batch %s was accepted but its drain could not be handed off (team "
+            "%s); the items are queued and the recovery scan will pick them up",
+            batch.batch_id, org_id)
 
     return _batch_ingest.acceptance_receipt(
         batch, items, status_url=f"/v1/batches/{batch.batch_id}")
@@ -53590,7 +53622,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 205 tracked files (754 distinct
+# ABSOLUTE line number from 205 tracked files (755 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

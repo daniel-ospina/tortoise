@@ -67,8 +67,9 @@ version: 1
 # NAMES (not only the seconds) are stated here and graded.
 # ⛔ The MINUTE has stood at 28 m across every reading of this pool while the SECONDS moved under
 # it, so NO arithmetic on the minute can catch a carried figure — only the `est_seconds` partition
-# can, which is why the sentence is GRADED below instead of trusted. That map is the union of both parents'
-# registrations plus `tests/test_13998_capacity_notice.py`, landed on `main` with #14038
+# can, which is why the sentence is GRADED below instead of trusted. The registration map behind those
+# rows is the union of both parents' registrations plus `tests/test_13998_capacity_notice.py`, landed on
+# `main` with #14038
 # (`--emit-push-matrix` lists it in shard c) at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it
 # matters only because it sits one main fold from rounding again. Re-run `--emit-push-matrix`;
 # never carry the last revision's minute.
