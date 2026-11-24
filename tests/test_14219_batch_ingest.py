@@ -3007,7 +3007,8 @@ def test_the_item_cas_writes_and_both_reads_project_every_wire_field():
                 return _Created((params or {}).get("token"))
 
             class _Res:
-                result_set: list = []
+                def __init__(self):
+                    self.result_set: list = []
 
             return _Res()
 
