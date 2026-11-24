@@ -282,12 +282,19 @@ _ENDING_BASE = (
 #:   ⛔ AND THE RESIDUAL IS THE ONE-RECORD LOOKUP ITSELF, stated rather than
 #:   discovered: once the scope is derived the read DROPS the query text (it was
 #:   APPLIED as the selector, not as a filter), and the ended read is a
-#:   FAMILY-WIDE enumeration — the newest 50 by ``endedAt``. So the named
-#:   record's ``status`` is served when that row is on the page, and nothing in
-#:   the reply separates "your record has not ended" from "your record is not on
-#:   this page". The route is still the right one (#14033 asks for it): the
-#:   answer is a state population, and the alternative is ``0 rows`` from a read
-#:   that excludes terminal statuses.
+#:   FAMILY-WIDE enumeration — the newest ``limit`` rows by ``endedAt``, where
+#:   ``limit`` is the CALLER's page: ``tortoise_search``'s default is **10**
+#:   (``tortoise/mcp_server.py:5634-5635``; the read's own door,
+#:   ``sdk.py:_tortoise_fts_query``, defaults the same at ``:45907``) and the SDK
+#:   always asks the enumerator for ``limit + 1`` (``tortoise/sdk.py:47017``) so a
+#:   truncated page is PROVEN rather than guessed. (50 is ``enumerate_ended``'s
+#:   own default, ``tortoise/ended.py:295-296`` — the SDK never uses it.) So the named
+#:   record's ``status`` is served only when that row is on the page, and nothing
+#:   in the reply separates "your record has not ended" from "your record is not
+#:   on this page": a truncation marker says the population is wider, never that
+#:   the named record is in it. The route is still the right one (#14033 asks for
+#:   it): the answer is a state population, and the alternative is ``0 rows`` from
+#:   a read that excludes terminal statuses.
 #: * ``list_what`` — "list what we retired": an imperative whose `what we <verb>`
 #:   CLAUSE asks for the SET. Tail-anchored, so `list what we retired last
 #:   quarter` is refused rather than served with the narrowing dropped.
