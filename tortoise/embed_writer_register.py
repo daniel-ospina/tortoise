@@ -33,9 +33,11 @@ rule exists to close.
   DIFFERENT tests and no single one covers all of them: the `module::symbol` half by
   `tests/test_embed_writer_register.py::test_every_declaration_cites_a_seam_and_an_owning_issue`,
   the class AGREEMENT half by `::test_the_instrument_and_the_product_declare_the_same_writers`
-  (which reads no `CENSUS_EVIDENCE` at all), and the `CENSUS_EVIDENCE` needles by
-  `tests/test_dod_5090_probe.py::test_every_census_citation_re_derives_at_this_head` (via
-  `probe.census_evidence_violations()`). A FOURTH half is `stores` (`#11492`), re-derived by
+  (which reads no `CENSUS_EVIDENCE` at all). ⛔ THE `CENSUS_EVIDENCE` NEEDLE HALF IS NOW
+  UNGUARDED: `tests/test_dod_5090_probe.py::test_every_census_citation_re_derives_at_this_head`
+  (via `probe.census_evidence_violations()`) was deleted with the #14544 B-arm cut (PR #14544
+  review F2), so a needle that has left the symbol it is cited for reds nothing today; it is
+  named here rather than implied to be covered. A FOURTH half is `stores` (`#11492`), re-derived by
   `::test_every_declared_label_re_derives_at_this_head` against its own `LABEL_EVIDENCE` needles.
   ⚠️ Census evidence and this register are **not** one population:
   `tortoise.session_indexer::main` is the one entry with no census row (it is the instrument's ONE

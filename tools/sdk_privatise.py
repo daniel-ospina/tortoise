@@ -2129,7 +2129,23 @@ SWEEP_NAMES = 66
 #: rows `#4625` retires (measured `git grep -c '_JSONB_CACHE.update'` → **2** on that tree, **0** on
 #: `origin/main`), which is exactly the pair the block above already accounts for. Adopting main's
 #: deletion is what makes this tree read main's count; nothing fell unaccounted in either direction.
-SWEEP_RESIDUE = (11920, "932d96bdb7151f75")
+#:
+#: ⛔ RE-PINNED DOWN 11910 -> 11903 ON THE `#14544` CUT, AND THE 7 IS ATTRIBUTED ROW BY ROW. That
+#: PR deletes 270 cases from `tests/test_dod_5090_probe.py`, and `--repin` on THIS tree prints
+#: **(11903, "1fb861e2c8163aec")**. Measured with this module's own `edits_for`, not reasoned from
+#: the diff: the pre-cut file carried **8** residue rows (`graph.query` x3, `declared.update`,
+#: `se._BREAKERS.update`, `db.list_graphs`, `degraded.update`, `graph.delete`) and the surviving
+#: 677-line file keeps **1** (`se._BREAKERS.update`), so 8 - 1 = 7 is exactly the movement — and no
+#: other file in that PR touches a `.query`/`.update`/`.delete` receiver.
+#: ⚠️ A FALLING PIN CANNOT HIDE A NEW UNTYPED REFERENCE, the direction this arm catches, so the fall
+#: is the pin's HARMLESS direction and the row set is otherwise identical. It is re-pinned rather
+#: than left red because that PR moves the very tree this pin grades, and `surface-guard` is a
+#: code-measuring check on the PR's EVALUATED tree that the land rail refuses to merge red,
+#: required or not (`scripts/admin-merge.sh`, "the PR's evaluated-tree surface BLOCKS").
+#: ⛔ RE-PINNED AGAIN ON THE `#14415` RE-CUT: the batch ingest surface adds 10 untyped
+#: residues, so `--repin` on THIS tree prints `(11913, '4953069e1b2ae57c')`; the paragraph
+#: above records `main`'s 11903 from the `#14544` cut, which does not see those files.
+SWEEP_RESIDUE = (11913, "4953069e1b2ae57c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

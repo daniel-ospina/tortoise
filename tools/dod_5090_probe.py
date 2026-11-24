@@ -216,8 +216,10 @@ import sys
 #: two nested same-quote f-strings in `score_rule_bullet` are built as plain
 #: locals: PEP 701 (`f"…{d['at']}…"` inside a `"`-delimited f-string,
 #: https://peps.python.org/pep-0701/ — *Python-Version: 3.12*, "quote reuse")
-#: cannot be tokenized before 3.12, and `tests/test_dod_5090_probe.py::
-#: test_the_tool_parses_under_the_floor` pins that.
+#: cannot be tokenized before 3.12. ⛔ NO TEST PINS THE GUARD BELOW any more: the
+#: #14544 B-arm cut deleted `test_the_tool_parses_under_the_floor`, which was the arm
+#: that read this file back (review F2). The guard below is the check — a regression
+#: to 3.12-only syntax now surfaces as this file failing to import, not as a red pin.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/dod_5090_probe.py requires Python >= 3.12 (got "
@@ -245,9 +247,10 @@ if str(REPO_ROOT) not in sys.path:
 VERDICTS = ("MET", "PARTIAL", "NOT MET")
 
 #: `#5090`'s four bullets, verbatim from the epic body. Held here so the table
-#: cannot silently score a re-worded bullet: the pin
-#: `tests/test_dod_5090_probe.py::test_the_four_bullets_are_scored_verbatim`
-#: reads them back and the epic body is the source of truth.
+#: cannot silently score a re-worded bullet. ⛔ The arm that read them back
+#: (`tests/test_dod_5090_probe.py::test_the_four_bullets_are_scored_verbatim`) went
+#: with the #14544 B-arm cut (review F2), so nothing compares these strings to the
+#: epic body now: the epic body is the source of truth and this tuple is a COPY of it.
 BULLETS: tuple[str, ...] = (
     "A stated, enforced rule for what earns an embedding.",
     "No vector is stored without a path to query it.",
@@ -7059,8 +7062,9 @@ def score_rule_bullet() -> Row:
             # container's environment, so `#12022` routes it to `outside_runtime`
             # (a deployed process never reads it) instead of counting it as a hit. ⛔ THE
             # `ENV …=1` / `ENV …=0` SHAPE IS NO LONGER ONE OF THEM EITHER: last-wins makes
-            # the walk read the file OFF, which
-            # `test_the_LAST_assignment_in_a_file_decides_its_arming` pins — an earlier
+            # the walk read the file OFF, and an arm
+            # (`test_the_LAST_assignment_in_a_file_decides_its_arming`) pinned it until the
+            # #14544 B-arm cut deleted that arm with the file's B cases (review F2) — an earlier
             # revision of this comment still claimed it read ON, the "a sentence wider
             # than the measurement under it" class this probe exists to police (fresh
             # review of PR #12474, P3, measured). The one remaining shape is
@@ -8032,7 +8036,9 @@ def score_path_bullet() -> Row:
     # resolve it. (An earlier draft read this as "a complete measurement" and
     # flipped the row to MET, breaking bullet 2's own falsifier; reverted.)
     # ⛔ The census population is the `unresolved_write` set — the SAME set
-    # `test_every_unresolved_writer_carries_a_census_class` walks — and NOT
+    # `test_every_unresolved_writer_carries_a_census_class` walked. That arm was cut with
+    # the #14544 B cases (review F2), so the set-equality below is stated and not graded: a
+    # writer classed here but absent from `WRITER_CENSUS` reds no test. It is NOT
     # `unknown`, which also carries the `duplicate` identities. A duplicate is
     # a DIFFERENT defect (two definitions collided, so the later one's label
     # overwrote the earlier one) and has no key it could EVER have in
