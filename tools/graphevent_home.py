@@ -37,7 +37,7 @@ and a partial read produces **no verdict** rather than a verdict over the part i
 managed to read.
 
 ⛔ THE VERDICT IS NOT A LICENCE TO RE-POINT. Even at ``covered`` this verb cannot
-see the two refusals `#13083` §6.3 established from the code, which are properties
+see the two refusals `#13083` established from the code, which are properties
 of the PRODUCER and not of any tenant's data: `_emit_event` skips the journal
 entirely when a payload-only emit carries no `point`/`id`/`turns`
 (`sdk.py:16225-16226`), and the hard-delete lane deliberately writes `PointRetracted` to the store and
@@ -336,7 +336,8 @@ READERS: tuple[dict[str, Any], ...] = (
         "needs": "aggregate (min) computed inside an RMW on :GraphEventMeta",
         "class": "maintenance",
         "why": "the purge floor; note the RMW itself is on the SIBLING label and is "
-               "not this shape's reader (§2.7 of the audit draws that line).",
+               "not this shape's reader — a statement whose pattern names only a SIBLING "
+               "label is that label's reader, not this shape's.",
     },
     {
         "file": "tortoise/webhook_delivery.py",
@@ -374,8 +375,8 @@ READERS: tuple[dict[str, Any], ...] = (
                "EXPORT-SIDE READER IS IN THIS CENSUS: the paged dump's node statement is "
                "`_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`, consumed by `dump_graph` "
                "at `:647`), and the export endpoint's own whole-graph scan is "
-               "`hosted_api.py:33404` (`_export_graph_snapshot`; the `"
-               "\"GraphEvent\" in labels` branch is `:33420` and the append `:33428` — a "
+               "`hosted_api.py:34426` (`_export_graph_snapshot`; the `"
+               "\"GraphEvent\" in labels` branch is `:34456` and the append `:34464` — a "
                "SERVING reader under this census's own class rule, so the `serving: 1` "
                "count in this file excludes it). No row carries either (#14204). ⚠️ This "
                "statement occurs FOUR times in `hosted_backup.py` — `:1333`, `:1534`, the "
@@ -738,7 +739,7 @@ def superset(graph_rows: list[dict[str, Any]],
     """The verdict: is the RECORD's row multiset a superset of the graph's?
 
     Per event type, because the two stores' vocabularies are allowed to differ
-    (`#13083` §6.3: `PointRetracted` on the graph side is `EntityMutated` in the
+    (`#13083`: `PointRetracted` on the graph side is `EntityMutated` in the
     journal) and a type-level absence is the failure a subscriber cannot see.
 
     ⚠️ An EMPTY side returns ``no_verdict``, not ``covered`` — and that is BOTH
@@ -806,7 +807,7 @@ def superset(graph_rows: list[dict[str, Any]],
         "record_only_types": record_only_types,
         "per_type": per_type,
         "caveat": (
-            "EVEN AT `covered` THE PRODUCERS DISAGREE (#13083 §6.3): a "
+            "EVEN AT `covered` THE PRODUCERS DISAGREE (#13083): a "
             "payload-only emit writes no journal record at all (`sdk.py` "
             "`_emit_event`), and the hard-delete lane writes `PointRetracted` to "
             "the store and `EntityMutated` to the journal. A tenant-level "
@@ -819,7 +820,8 @@ def superset(graph_rows: list[dict[str, Any]],
 #: these is NOT a `record_only` candidate, whichever class it was filed under.
 #:
 #: ⛔ The ADJACENCY arm is the one that matters most and is the easiest to miss.
-#: `#13083` §2 / `CAPABILITY-PLACEMENT-AUDIT.md` define "adjacency" and the EP walk
+#: The `#13083` census (its document was deleted on 2026-11-23, `#11081` audit row B2 — the
+#: passage is in git history) defined "adjacency" and the EP walk
 #: by **fixed-length** patterns — `(new:Point {id:$n})-[r]->(t)`, `NOT (n)--()`,
 #: `MATCH (a)-[r:IMPL|NAND]-(b)` — so a variable-length-only detector (`-[*`) sees
 #: neither, and a one-hop reader filed as `maintenance` would pass. Measured at
@@ -936,7 +938,7 @@ GRAPH_CAPABILITY_CYPHER = (
     "call db.idx.vector", "db.idx.vector",
 )
 
-#: The audit's own vocabulary (`#13083` §2) — a graph engine's four capabilities
+#: The audit's own vocabulary (the `#13083` census) — a graph engine's four capabilities
 #: plus EP state — for a row whose author describes the need in words instead.
 GRAPH_CAPABILITY_WORDS = (
     "traversal", "adjacency", "fulltext", "vector", "ep walk",

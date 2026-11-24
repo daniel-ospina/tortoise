@@ -56,6 +56,10 @@ version: 1
 # MERGES INTO, never carried from the branch that first wrote it. On this tree (`main` at
 # `953c299c9b`, and #14406 adds no test file, so the pool is `main`'s own) the verb packs all
 # eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k), so
+# MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
+# `b2d1e9086a`, plus this PR's two `core`-registered rows — `tests/test_14371_offline_embed_json.py`
+# and `tests/test_14186_embedder_seam_batching.py` — both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
+# the verb packs eleven shards at 837.1 s (a, b, c, d, e, f, g, h, i, j, k), so
 # `ceil(837.1/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
 # and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
 # agree by construction rather than by a hand re-read. ⛔ The MINUTE has stood at 28 m across every
@@ -12279,8 +12283,8 @@ tier1:
 # JSON/markdown reads plus the in-memory corpus.
 - test_text_gate_13099.py
 # #12184: the shifted-evidence-cite pin (`core` above). Every document it guards is
-# under `docs/` — `CAPABILITY-PLACEMENT-AUDIT.md`, `SUBSTRATE-REBUILD-MAP.md`, the
-# #12298 M3 recall brief and the #13083 census README — and `docs/` is in
+# under `docs/` — `SUBSTRATE-REBUILD-MAP.md`, the #12298 M3 recall brief, the #13083
+# census README, `ENTITY-VERDICT-BANDS.md`, `00_index.md`, the #4997 plan — and `docs/` is in
 # NON_PYTHON_PREFIXES while none of them matches a SOURCE_PATTERNS entry, so a
 # docs-only diff takes the early return and selects NO surface: measured at this
 # head, `--changed-files docs/architecture/SUBSTRATE-REBUILD-MAP.md` ->

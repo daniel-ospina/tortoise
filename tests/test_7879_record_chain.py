@@ -77,15 +77,17 @@ HOW TO RUN IT (the arming the CI job uses):
     TEST_RECORD_DB_URI=postgresql://…  uv run --extra postgres \\
         pytest tests/test_7879_record_chain.py -q
 
-Unset ⇒ 7 of the 8 legs SKIP by name; the DB-free import-graph leg
-(`test_the_runner_cannot_reach_the_cache`) RUNS either way, so an unarmed run
-measures **1 passed, 7 skipped** and is evidence about that one leg and about
-nothing else. The `test-record-postgres` leg gate
+Unset ⇒ 7 of the 8 legs SKIP by name; the DB-free import-graph legs
+(`test_the_runner_cannot_reach_the_cache` and the four `test_the_guard_*`
+probes that falsify its predicate) RUN either way, so an unarmed run measures
+**5 passed, 7 skipped** and is evidence about those five legs and about nothing
+else. The `test-record-postgres` leg gate
 (`.github/scripts/record-postgres-leg-gate.py`, #9551) fails a job whose record
 legs skip, which is what makes the ARMED run real rather than absent.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -132,6 +134,190 @@ MECHANISM_GRAPH_SCAN = MECHANISM_SCAN_FALLBACK
 MECHANISM_KEY = VECTOR_MECHANISM_KEY
 
 DIM = 384
+
+#: The CACHE'S FRONT END + every module in the package that CONSTRUCTS a graph
+#: client. ⛔ MEASURED, NOT LISTED FROM MEMORY: the six client-constructing names
+#: below are what this scan returns at `3c45c8ae875` —
+#:
+#:     python - <<'EOF'
+#:     import ast, pathlib
+#:     SYMS = {"FalkorDB", "Graph", "Redis", "RedisMixin", "StrictRedis"}
+#:     for p in sorted(pathlib.Path("tortoise").glob("*.py")):
+#:         t = p.read_text(); s = ast.parse(t); n = set()
+#:         for x in ast.walk(s):
+#:             if isinstance(x, ast.ImportFrom) and x.module: n |= {a.name for a in x.names}
+#:             elif isinstance(x, ast.Import): n |= {a.name.rsplit(".", 1)[-1] for a in x.names}
+#:         if n & SYMS: print("tortoise." + p.stem)
+#:     EOF
+#:
+#: — and it is here rather than computed at test time because the scan costs
+#: **2.5 s** (it reads all 283 modules of the package) against this file's `2.0`
+#: fast-shard weight. The COMMAND is the pin: re-run it and the list must match.
+#:
+#: ⛔ WHY AN EXPLICIT LIST IS ACCEPTABLE HERE AND WAS NOT BEFORE. An earlier cut
+#: listed five names and called itself exhaustive; measured, it missed every one
+#: of the five driver importers below, so `from tortoise.backup import …` in the
+#: runner passed green while opening exactly the handle this leg refuses. The
+#: difference is not the shape — it is that this list is now the scan's OUTPUT and
+#: the scan is quoted, so the next reader can re-derive it instead of trusting it.
+#: The residual that remains, stated rather than implied: a module that reaches a
+#: driver INDIRECTLY (through a shim this scan would not see) is not covered. The
+#: leg is a guard against the CHANGE, not a proof about the package.
+CACHE_DOORS = (
+    # the two folds and the three write doors — the cache's front end by design
+    "tortoise.projection",
+    "tortoise.cache_projection",
+    "tortoise.sdk",
+    "tortoise.api",
+    "tortoise.mining",
+    # the scan's output: every module that CONSTRUCTS a graph client
+    "tortoise.__init__",
+    "tortoise.__main__",
+    "tortoise.backup",
+    "tortoise.cypher_guard",
+    "tortoise.embedded_lifecycle",
+    "tortoise.session_indexer",
+)
+
+#: `tortoise/__init__.py`'s PEP 562 `__getattr__` exports — the two attributes a
+#: bare `from tortoise import …` can bind that ARE a way into the cache:
+#: `FalkorDB` is the guarded graph-client CONSTRUCTOR (`tortoise/__init__.py:59`)
+#: and `Tortoise` is the SDK entry point (`_build_guarded_falkordb` / the SDK
+#: class). ⛔ THIS IS WHY `tortoise.__init__` ABOVE IS NOT ENOUGH ON ITS OWN:
+#: that entry is the SCAN's file-stem spelling (`"tortoise." + p.stem`), while
+#: `from tortoise import FalkorDB` yields `tortoise` + `tortoise.FalkorDB` per
+#: `ast.ImportFrom` semantics (its `module` is the PACKAGE, and the bound name
+#: lives in `names`). Measured before this entry existed: that spelling — the
+#: one `tortoise/projection/__init__.py` itself uses — was green here.
+PACKAGE_ROOT_HANDLES = ("tortoise.FalkorDB", "tortoise.Tortoise")
+
+#: The DRIVER CLIENTS, by the name a binding would carry. `falkordb` and
+#: `redislite` are whole-package roots (importing either imports a client
+#: factory); `redis` is NOT — `redis.exceptions` is a diagnostic import, which is
+#: why `tortoise/retry.py` (`redis._parsers.base`) is correctly NOT a door above
+#: even though it imports the package.
+DRIVER_ROOTS = ("falkordb", "redislite")
+DRIVER_CLASSES = ("redis.Redis", "redis.asyncio", "redis.client")
+
+#: Package ROOTS whose mere BINDING is a handle — the `import X` spelling, which
+#: no `from X import Y` door above can catch because it names no attribute:
+#: `import tortoise` makes `tortoise.FalkorDB` one attribute away (PEP 562), and
+#: `import redis` makes `redis.Redis(host=…, port=<graph>)` the Fold's way in.
+#: ⛔ KEYED ON THE BINDING, NOT ON THE MODULE BEING IMPORTED — that distinction
+#: is the whole entry. `from redis import exceptions` also IMPORTS `redis` (it
+#: appears in the collector's set) but binds only `exceptions`, so it stays
+#: allowed; `import redis.exceptions` BINDS `redis`, so it does not. The same
+#: line separates `from tortoise import journal_segments` (the runner's own
+#: legitimate import, binds only `journal_segments`) from `import tortoise`.
+BOUND_ROOT_HANDLES = ("tortoise", "redis")
+
+#: A `from X import *` binds X's PUBLIC NAMES into this file, so for a DRIVER
+#: root it is the same handle as `import X` — `redis.__all__` carries `Redis`
+#: (measured), so `from redis import *` puts `redis.Redis(host=…, port=<graph>)`
+#: in the runner's namespace. It was GREEN until this entry existed: a star alias
+#: is neither an `ast.Import` node (so no bound root) nor a name any door matches
+#: (`_imported_modules` records it as `redis.*`).
+#:
+#: ⛔ NOT the tortoise root, deliberately — refusing `from tortoise import *`
+#: would be a false block on an import that grants no handle: `FalkorDB` and
+#: `Tortoise` are PEP 562 lazy attributes, so the star binds NEITHER (measured:
+#: the package declares no `__all__`, `FalkorDB` is popped from its globals, and
+#: `dir()` does not run `__getattr__`).
+STAR_BINDING_ROOTS = (*DRIVER_ROOTS, "redis")
+
+
+def _imported_modules(path: Path) -> set[str]:
+    """Every module name ``path`` imports, INCLUDING the ``from X import Y`` form.
+
+    ⛔ BOTH SPELLINGS MUST BE COLLECTED (measured): `from tortoise import
+    projection` records the module `tortoise`, so a collector that only looked at
+    `node.module` would see nothing to refuse while the handle is right there in
+    the binding (`projection.FalkorProjection`). `tools/record_runner.py` already
+    uses that spelling for a sibling (`from tortoise import journal_segments`), so
+    it is the file's native idiom rather than a hypothetical. An ``ImportFrom``
+    therefore yields BOTH ``module`` and ``module.alias`` per imported name, and a
+    relative import yields the alias alone (there is no absolute parent to trust).
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    reached: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            reached.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or not node.module:
+                reached.update(alias.name for alias in node.names)
+                continue
+            reached.add(node.module)
+            reached.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return reached
+
+
+def _bound_root_packages(path: Path) -> set[str]:
+    """Package roots ``path`` BINDS with a bare ``import X[.Y]`` statement.
+
+    ⛔ THIS IS A DIFFERENT QUESTION FROM `_imported_modules`, and collapsing the
+    two is what made the package-root door inert. `from redis import exceptions`
+    IMPORTS `redis` (so it lands in the set above) but binds only `exceptions`;
+    `import redis` BINDS `redis`, through which `redis.Redis(host=…, port=…)` is
+    one attribute away. Only the second is a handle, and only an `ast.Import`
+    node can produce it — so this reads `Import` nodes and nothing else.
+
+    `import X.Y` binds `X` (Python binds the root), which is why the entry is the
+    root and not the dotted name.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+
+def _star_import_roots(path: Path) -> set[str]:
+    """Roots bound by a ``from X import *`` — a star binds X's public names.
+
+    Kept apart from `_bound_root_packages` because the two spellings do NOT bind
+    the same thing for every root — see `STAR_BINDING_ROOTS`: for `redis` a star
+    binds the client, for the `tortoise` ROOT it binds no handle at all.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.module.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+        and any(alias.name == "*" for alias in node.names)
+    }
+
+
+def _reaches_cache(name: str) -> bool:
+    """Does the import NAME (a module or a bound attribute spelling) reach it?"""
+    return (
+        name.split(".")[0] in DRIVER_ROOTS
+        or any(name.startswith(cls) for cls in DRIVER_CLASSES)
+        or name in PACKAGE_ROOT_HANDLES
+        or any(name == door or name.startswith(door + ".") for door in CACHE_DOORS)
+    )
+
+
+def _cache_reaching_imports(path: Path) -> list[str]:
+    """Every import in ``path`` that gives it the cache, SORTED.
+
+    ⛔ ONE PREDICATE, TWO ENTRY POINTS — the leg below grades
+    `tools/record_runner.py` with it, and the synthetic probes further down grade
+    THE PREDICATE ITSELF, one import spelling at a time. Without the second
+    caller every branch of this function is unexercised: the runner's imports are
+    all module-form and reach no door, so deleting a whole branch (the `from X
+    import Y` alias collection, any added door, the root-binding rule, the star
+    binding) left every row green — the "an assertion whose value cannot vary"
+    failure, measured.
+    """
+    hits = {name for name in _imported_modules(path) if _reaches_cache(name)}
+    hits |= {root for root in _bound_root_packages(path)
+             if root in BOUND_ROOT_HANDLES}
+    hits |= {root for root in _star_import_roots(path)
+             if root in STAR_BINDING_ROOTS}
+    return sorted(hits)
 
 
 # ── plumbing ───────────────────────────────────────────────────────────────
@@ -449,17 +635,36 @@ def test_the_record_still_answers_with_the_graphs_copy_deleted(schema, armed, te
 
     projection = sdk._get_proj()
 
-    def _graph_points() -> int:
-        result = projection.g.query("MATCH (n:Point) RETURN count(n) AS c", {})
-        rows = getattr(result, "result_set", result)
-        return int(rows[0][0]) if rows else 0
+    # ⛔ THE COUNT IS A TYPED, PRIVATE MEASUREMENT, NOT RAW CYPHER. Two reasons, and
+    # the second is not stylistic: `_label_vector_count` is the ONE aggregate that
+    # answers "how many nodes of this label can the cache serve densely" (#13610),
+    # so it is exactly this leg's premise; and `surface-guard`'s privatisation
+    # sweep counts every untyped `.query` receiver as residue it must re-pin, so a
+    # test adding raw Cypher for a question the package already answers in a typed
+    # method is a cost the gate pays. (The gate is red on `origin/main` already —
+    # it was 11901 observed against a 11896 pin before this file existed — so the
+    # point is not to turn someone else's red green, it is to not add to it.)
+    def _graph_vectors() -> int | None:
+        return projection._label_vector_count("point")
 
-    assert _graph_points() == 1, "the premise: the graph holds the point before the delete"
-    projection.g.query("MATCH (n:Point) DETACH DELETE n", {})
-    assert _graph_points() == 0, (
-        "the graph still holds the point after DETACH DELETE — the rest of this "
-        "test would then be proving the graph answered, which is the opposite "
-        "of its subject")
+    assert _graph_vectors() == 1, (
+        "the premise: the cache holds one vector-bearing :Point before the delete, "
+        f"measured {_graph_vectors()!r}")
+    # ⛔ AND THE DELETE IS TYPED TOO — `_delete_entity_by_id` is the projection's
+    # own hard-delete of ONE canonical entity by id (the replay counterpart of the
+    # SDK's live `_delete_entity`, #3299). It touches the cache and nothing else,
+    # which is what this leg needs: the record row must survive the cache losing
+    # its copy. Reaching for `MATCH (n:Point) DETACH DELETE n` would delete the
+    # WHOLE label — a blunter instrument than the subject — and would add another
+    # untyped `.query` receiver to the privatisation sweep's residue count.
+    deleted = projection._delete_entity_by_id(point_id, "Point")
+    assert deleted == 1, (
+        f"the cache delete removed {deleted!r} node(s), not 1 — the premise of "
+        "this leg is that exactly this point's cache copy went away")
+    assert _graph_vectors() == 0, (
+        "the cache still holds a vector-bearing :Point after DETACH DELETE "
+        f"({_graph_vectors()!r}) — the rest of this test would then be proving the "
+        "cache answered, which is the opposite of its subject")
 
     assert _count(schema, "point", tenant)[0] == 1, (
         "the record lost the row when the graph's copy went — this is the "
@@ -628,7 +833,13 @@ def test_the_runner_folds_and_a_second_run_is_a_no_op(schema, unarmed, tenant):
         f"events — nothing was written: {report}")
     assert report["no_op"] is False, f"a folding run claimed to be a no-op: {report}"
 
-    points = _count(schema, "point", tenant)
+    # ⛔ `ids_only=True` IS LOAD-BEARING, not decoration. `_count` builds
+    # `SELECT count(*), count(*)` without it, so `points[1]` would BE `points[0]`
+    # and the assertion below could not fail — while its message claims the
+    # vector is missing. A fold that wrote the row with `embedding = NULL` was
+    # green against that shape (measured: `count(*) = 1`, `count(embedding_vec)
+    # = 0` over one NULL-embedding row on this schema).
+    points = _count(schema, "point", tenant, ids_only=True)
     objects = _count(schema, "object", tenant)
     assert points[0] == 1, f"the folded point is not in the record: {points}"
     assert points[1] == 1, (
@@ -675,31 +886,137 @@ def test_the_runner_cannot_reach_the_cache():
     Deliberately no DSN and no tenant: the subject is a file's import graph, so
     this leg RUNS in the fast matrix instead of skipping there.
     """
-    import ast
+    reached = _imported_modules(REPO_ROOT / "tools" / "record_runner.py")
 
-    tree = ast.parse((REPO_ROOT / "tools" / "record_runner.py").read_text(encoding="utf-8"))
-
-    #: Every module whose import would give the runner a way into the cache.
-    #: PREFIX-matched: a submodule of any of these (`tortoise.projection.edges`)
-    #: is the same door.
-    FORBIDDEN = (
-        "falkordb", "redislite", "redis", "FalkorDB", "redislite.client",
-        "tortoise.projection", "tortoise.cache_projection", "tortoise.sdk",
-        "tortoise.api", "tortoise.mining",
-    )
-    reached: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            reached.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            reached.append(node.module)
-    hits = sorted({name for name in reached
-                   for bad in FORBIDDEN
-                   if name == bad or name.startswith(bad + ".")})
+    hits = _cache_reaching_imports(REPO_ROOT / "tools" / "record_runner.py")
     assert hits == [], (
         f"`tools/record_runner.py` imports {hits} — the runner must not be able "
         "to reach the cache at all (#10175 forbids pruning or deleting it, and "
         "#5333 governs customer memories). A fold that can open a graph handle "
         "is a data-loss surface, not a regression. Imports seen: "
         f"{sorted(reached)}")
+    # POSITIVE CONTROL — the leg is graded against a file that was really read.
+    for expected in ("tortoise.record_projection", "tortoise.record_writer"):
+        assert expected in reached, (
+            f"the runner does not import `{expected}`, so this leg read nothing "
+            f"it expected and would be vacuous: {sorted(reached)}")
 
+
+# ── 8b. the guard's OWN falsifiers ──────────────────────────────────────────
+
+#: ⛔ THESE EXIST BECAUSE THE LEG ABOVE CANNOT FAIL ON THE SPELLINGS THAT MATTER.
+#: `tools/record_runner.py` is one fixed file whose imports are all module-form
+#: and reach no door, so every branch of the predicate is UNEXERCISED by it: a
+#: reviewer measured the `from X import Y` alias collection deleted, the six
+#: added `CACHE_DOORS` deleted, and a bare `import redis` / `from tortoise import
+#: FalkorDB` appended to the runner — all four stayed GREEN. Each probe below is a
+#: synthetic source in `tmp_path`, DB-free and microseconds, whose every row goes
+#: red if the branch it names is reverted.
+#:
+#: ⛔ `tmp_path` SOURCES, NEVER THE REAL RUNNER: the leg's subject is a repo file
+#: and must not be mutated by a test run, and `ast` only needs the TEXT — these
+#: modules are parsed, never imported.
+def _probe(tmp_path, source: str) -> Path:
+    probe = tmp_path / "probe.py"
+    probe.write_text(source, encoding="utf-8")
+    return probe
+
+
+def test_the_guard_refuses_the_bare_root_bindings(tmp_path):
+    """⛔ P1-1, P1-2 — the two spellings that were GREEN on the pre-fix predicate.
+
+    `import redis` was refused by the code this leg replaced (its `FORBIDDEN`
+    listed the bare `redis` root and matched by prefix) and became green when the
+    predicate was rewritten around `DRIVER_ROOTS`, which deliberately omits
+    `redis`. `from tortoise import FalkorDB` was green in both cuts. Both open
+    exactly the handle `#10175`/`#5333` forbid, from a file whose subject is that
+    the door was too narrow.
+    """
+    probe = _probe(tmp_path, (
+        "import redis\n"
+        "import redis.exceptions\n"
+        "from tortoise import FalkorDB\n"
+        "from tortoise import Tortoise\n"
+        "import tortoise\n"
+    ))
+    assert _cache_reaching_imports(probe) == [
+        "redis", "tortoise", "tortoise.FalkorDB", "tortoise.Tortoise",
+    ], (
+        "a bare driver/package-root binding is a way INTO the cache — `import "
+        "redis` gives `redis.Redis(host=…, port=<graph>)` and `import tortoise` "
+        "gives `tortoise.FalkorDB` one attribute away. Measured: "
+        f"{_cache_reaching_imports(probe)} — every one of these was GREEN before "
+        "the root-binding rule.")
+
+
+def test_the_guard_refuses_the_from_import_doors(tmp_path):
+    """The `from X import Y` spelling (item 2's alias collection) — every door.
+
+    Each name below is reachable ONLY through the `module.alias` branch of
+    `_imported_modules`: `from tortoise import projection` records `tortoise`,
+    which matches no door by itself. Deleting that branch reddens every row.
+    """
+    probe = _probe(tmp_path, (
+        "from tortoise import projection\n"
+        "from tortoise import cache_projection\n"
+        "from tortoise.backup import something\n"
+        "from redis import Redis\n"
+        "import falkordb\n"
+        "import redislite\n"
+    ))
+    assert _cache_reaching_imports(probe) == [
+        "falkordb",
+        "redis.Redis",
+        "redislite",
+        "tortoise.backup",
+        "tortoise.backup.something",
+        "tortoise.cache_projection",
+        "tortoise.projection",
+    ], f"these are all doors: {_cache_reaching_imports(probe)}"
+
+
+def test_the_guard_allows_the_folds_own_imports(tmp_path):
+    """The ALLOW side — without it the two probes above are satisfied by a
+    predicate that refuses everything, which would be a different bug.
+
+    Every line here is a spelling the runner actually uses or a diagnostic import
+    the door list deliberately permits, and each is the *minimal pair* of a
+    refused one above: same package, different attribute (`from tortoise import
+    journal_segments` vs `FalkorDB`), or same package, different binding (`from
+    redis import exceptions` vs `import redis`).
+    """
+    probe = _probe(tmp_path, (
+        "from tortoise import journal_segments\n"
+        "from tortoise.log import EventLog\n"
+        "from tortoise.record_projection import replay\n"
+        "from tortoise.record_writer import record_dsn\n"
+        "from redis import exceptions\n"
+    ))
+    assert _cache_reaching_imports(probe) == [], (
+        "these imports grant no handle — `from tortoise import …` binds only the "
+        "named submodule, and `from redis import exceptions` binds only "
+        "`exceptions` (so no `redis` root is bound) — refusing them would block "
+        f"the runner itself: {_cache_reaching_imports(probe)}")
+
+
+def test_the_guard_refuses_a_star_import_from_a_driver_root(tmp_path):
+    """`from redis import *` BINDS `Redis` — measured, and GREEN until this row.
+
+    The star spelling is the one binding NEITHER collector above sees: it is not
+    an `ast.Import` node (so no bound root), and `_imported_modules` records it as
+    `redis.*`, which matches no door. `redis.__all__` carries `Redis`, so the
+    statement puts `redis.Redis(host=…, port=<graph>)` in the runner's namespace —
+    the same handle `import redis` gives, which the row above refuses.
+
+    ⛔ THE ALLOW ROW IS THE OTHER HALF, and it is why `STAR_BINDING_ROOTS` is not
+    the package root: `from tortoise import *` binds NEITHER `FalkorDB` nor
+    `Tortoise` (PEP 562 lazy attributes, absent from `dir()`, and the package
+    declares no `__all__`; measured), so refusing it would be a false block on an
+    import that cannot reach a client.
+    """
+    assert _cache_reaching_imports(
+        _probe(tmp_path, "from redis import *\n")) == ["redis"]
+    assert _cache_reaching_imports(
+        _probe(tmp_path, "from falkordb import *\n")) == ["falkordb", "falkordb.*"]
+    assert _cache_reaching_imports(
+        _probe(tmp_path, "from tortoise import *\n")) == []
