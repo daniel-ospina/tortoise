@@ -172,7 +172,19 @@ def test_every_stamp_call_runs_off_the_loop() -> None:
         f"{_HANDLER} no longer calls {_STAMP_DOOR} — if the stamp chain moved, "
         "this pin must move with it rather than be deleted (#13722)")
 
-    owners = {_enclosing_functions(handler, call)[-2] for call in calls}
+    owners = set()
+    for call in calls:
+        chain = _enclosing_functions(handler, call)
+        # ⛔ A clean failure, not an `IndexError` (review residual 2): a stamp call
+        # reachable directly in the handler's own body leaves no enclosing function
+        # to submit, so `chain[-2]` used to raise before any assertion could name the
+        # reason. Still RED either way; this only makes the message the useful one.
+        assert len(chain) >= 2, (
+            f"{_STAMP_DOOR} is called directly in {_HANDLER}'s own body, so there is "
+            f"no enclosing function to submit to {_OFF_LOOP}({_OFF_LOOP_POOL}, …) — "
+            "the chain would run on the event loop, which is the #13722 wedge. Move "
+            "it into a sync `def` and submit that.")
+        owners.add(chain[-2])
     submissions = _off_loop_submissions(handler)
     submitted = {(pool, fn) for _line, pool, fn, _aw in submissions}
     awaited = {(pool, fn) for _line, pool, fn, aw in submissions if aw}

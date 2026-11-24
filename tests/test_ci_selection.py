@@ -9750,6 +9750,21 @@ def test_the_record_chain_suite_is_in_the_entry_rule_set_7879():
         "distinguish that state from the one it guards")
 
 
+def _durations_row_comment(name: str) -> str:
+    """The comment on `name`'s `durations:` row, or `""` when the row carries none.
+
+    Read from the manifest TEXT rather than from the loaded map because the provenance a
+    measured row states lives in its comment (`ci-timing junit-census+top-15 … (run …);
+    was X`), which `load_manifest()` drops. `""` for an absent row is deliberate: the
+    callers assert presence separately, so this helper never has to invent a verdict for
+    a row that does not exist.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    m = re.search(
+        rf"^  {re.escape(name)}:\s*[0-9.]+\s*(#.*)$", text, re.MULTILINE)
+    return m.group(1) if m else ""
+
+
 def test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722():
     """#13722 review finding: a file a PR ADDS takes the flat default, not a local weight.
 
@@ -9771,6 +9786,17 @@ def test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722():
     The VALUE arm is the one that reds on the pre-fix map: `0.2 != 2.0`. The other two
     arms are the `#13123`/`#14362`/`#7879` shape, so the file cannot fall out of this
     tuple (and out of the guard's sight) silently either.
+
+    ⛔ THE VALUE ARM EXPIRES WITH ITS OWN PREMISE, and the escape is the row's own
+    provenance, not a widening of the assertion. "A file a PR ADDS takes the flat
+    default" is true only UNTIL the `durations` refresher has swept it: the moment a
+    push-to-main junit reading exists, the MEASURED figure is the correct one and the
+    flat default is the stale one. A pin that demanded `2.0` unconditionally would then
+    red on a correct refresh — and the cheapest way to green it is to put an unmeasured
+    `2.0` back into a shard-layout input, i.e. the very defect this pin exists for. So
+    a non-default figure is accepted when the row states an adopted-sweep tail
+    (`ci-timing junit-census…`), which is exactly how every measured row in the map
+    records where its reading came from, and nothing else is.
     """
     from tools.ci_selection import DEFAULT_FAST_WEIGHT, load_manifest
     name = "test_13722_stamp_chain_off_loop.py"
@@ -9782,12 +9808,15 @@ def test_the_stamp_chain_suite_is_rowed_at_the_flat_default_13722():
     assert name in real, (
         f"#13722 put {name} in a fast surface but ships no `durations:` row, so it "
         "packs at the flat default with nothing recording what the weight covers")
-    assert real[name] == DEFAULT_FAST_WEIGHT, (
+    assert real[name] == DEFAULT_FAST_WEIGHT or re.search(
+        r"ci-timing\s+junit", _durations_row_comment(name)), (
         f"{name} carries {real[name]!r} s, not the flat `DEFAULT_FAST_WEIGHT` "
         f"({DEFAULT_FAST_WEIGHT!r} s) — a file a PR ADDS cannot carry a junit reading "
-        "yet (#3400/#4348), so any other figure is a hand-picked shard-layout input, "
-        "and the packer re-packs every bin around it (moving the graded `fast_shards` "
-        "partition this map states)")
+        "yet (#3400/#4348), so any other figure without an adopted-sweep tail is a "
+        "hand-picked shard-layout input, and the packer re-packs every bin around it "
+        "(moving the graded `fast_shards` partition this map states). The two escapes "
+        f"are the flat default and a `ci-timing junit-census…` tail; the row says: "
+        f"{_durations_row_comment(name)[:160]!r}")
     holed = {k: v for k, v in real.items() if k != name}
     assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
         "dropping THIS row from the live map must name exactly this file as rowless; "
