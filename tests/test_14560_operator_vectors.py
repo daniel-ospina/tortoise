@@ -116,14 +116,18 @@ def _graph_vector_counts(sdk) -> tuple[int, int]:
     """``(whole :Point label, operator-kind subset)``, both vector-bearing.
 
     Read through the guarded handle's ``ro_query`` rather than its ``query``: the
-    statement is a READ, and ``ro_query`` says so at the call site (``#14548``'s ratchet counts
-    every new untyped ``.query(`` receiver as growth — the shape it exists to stop).
+    statement is a READ, and ``ro_query`` says so at the call site. Both spellings were proposed by
+    the two lanes that had to repair `#14548`'s residue RATCHET here, and this one wins because the
+    census stays INDEPENDENT — `_label_vector_count` is the production door these very tests grade,
+    so counting with it would make the population claim and the thing it measures the same call.
+    ⛔ Never by naming an untyped handle ``sdk_g``: that satisfies the sweep's spelling heuristic and
+    then REWRITES ``sdk_g.query(`` into the SDK's private name, which is wrong for a FalkorDB handle.
     """
     proj = sdk._get_proj()
     whole = proj.g.ro_query("MATCH (n:Point) WHERE n.embedding IS NOT NULL "
-                          "RETURN count(n)").result_set[0][0]
+                            "RETURN count(n)").result_set[0][0]
     kinded = proj.g.ro_query(f"MATCH (n:Point) WHERE n.embedding IS NOT NULL "
-                           f"AND {_OPERATOR_KIND} RETURN count(n)").result_set[0][0]
+                             f"AND {_OPERATOR_KIND} RETURN count(n)").result_set[0][0]
     return int(whole), int(kinded)
 
 

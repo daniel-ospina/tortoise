@@ -256,8 +256,12 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (2294 lines at this head, measured through THIS function's own
-    walk — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (2326 lines at this head, measured through THIS function's own
+    walk — ⛔ RE-WALKED AGAIN on THIS fold, which both merged `main` `e216ca91b07` into the `#14560`
+    branch AND folded the peer lane's own record in, so it united every side's block: `main`'s run
+    read `2294`, this branch's `2227`, and the peer's fold restored yet another — the numerals are
+    kept as the records they are, and the figure above is RE-MEASURED by THIS walk on the RESOLVED
+    file rather than adjusted by arithmetic on any side's reading — ⛔ RE-WALKED on THIS fold of `origin/main` `2cccf90f4dd4`: both sides' prose blocks are
     kept (this PR's fold note and `main`'s `recorded.update(keep)` note), so the figure is
     RE-MEASURED by this walk on the RESOLVED file at 2047 rather than inherited from either side —
     the pre-merge branch `7ce74ac` walked 2006, `main` `6a02515` walked 1954 and their merge-base
@@ -276,7 +280,7 @@ def _residue_block() -> str:
     the pre-merge branch's. Both are real readings of real trees, one fold or one head behind the
     ones above — 1989 is this branch's own walk at `c6e06d4b`, 2006 at `7ce74ac` — so that cut's
     defect was STALENESS PLUS MIS-ATTRIBUTION, never a fabricated number: it published the
-    penultimate branch reading as the resolved one. Only that figure is graded
+    penultimate branch reading as the resolved one. Only the figure ABOVE is graded
     (`test_the_extent_figure_is_the_walks_own_count` reads the `ITS EXTENT IS THE ENTIRE RUN (N
     lines` phrase), which is exactly why the three UNGRADED numerals around it were free to rot —
     the class this PR records in `MEMORY.md`. ⛔ Earlier readings, kept because every fold's record stays (1921 at
