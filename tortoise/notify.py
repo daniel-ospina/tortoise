@@ -27,11 +27,13 @@ different decisions and had drifted apart:
 
 * :data:`ABUSE_INCIDENT_KINDS` — a STATE CHANGE. The message belongs to the
   incident lifecycle, so the store's create-once path files the issue AND emits
-  the episode's first push, and the message names the issue. While the episode
-  stays OPEN it re-alarms at most once per
+  the episode's first push, and the message names the issue. While the delivery
+  window HOLDS it re-alarms at most once per
   :data:`_INCIDENT_DELIVERY_WINDOW_S`, naming the same issue when the incident
   carries one (a placeholder or a post-close tombstone has no number, and the
-  message says so instead); the engine closes the incident and re-arms delivery
+  message says so instead); a release that is not an episode end (a failed close,
+  a cooldown back-off, a failed send) re-arms it, so the bound is the WINDOW's
+  and not the open episode's. The engine closes the incident and re-arms delivery
   at episode end.
 * :data:`ABUSE_ACTIVITY_KINDS` — a MEASUREMENT (#10156's ACTIVITY register). It
   files nothing **by design**, and every message says so; delivery is a bounded
