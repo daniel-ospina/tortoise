@@ -337,6 +337,59 @@ def test_a_completed_batch_is_not_reported_as_pending():
         "finished work for ever")
 
 
+def test_a_batch_that_never_ran_is_not_relabelled_resuming():
+    """#14415 review round 13: `RESUMING` is minted only by a scan that RESUMED something.
+
+    The scan used to write the batch row whenever it found any non-terminal item,
+    so the FIRST sweep over a freshly accepted batch (every item `queued`,
+    `attempts=0`, nothing claimed) relabelled it `resuming`: measured on the wire,
+    `POST` answered `accepted` and the first `GET` answered `resuming`. `RESUMING`'s
+    whole job is "you can tell whether work was lost"; minting it over work that has
+    simply not started is a status lie on a customer-visible surface.
+
+    ⛔ BOTH DIRECTIONS, because either arm alone is satisfiable by a wrong fix:
+      * "never relabel anything" is refuted by the dead-claim half below;
+      * "never report it at all" is refuted by the batch still being RETURNED by
+        the scan, which is what makes a later pass visit it.
+
+    Measured as unpinned before this test: reinstating the pre-fix
+    `if moved or any(not i.terminal for i in items):` left all 87 tests in this
+    file green (#14415 review round 14, MEDIUM).
+    """
+    store = InMemoryBatchStore()
+    batch, items = BatchCoordinator(store).submit(ORG, ["/a.md", "/b.md"])
+    assert all(i.state is BatchItemState.QUEUED for i in items), (
+        "the fixture must be a batch nothing has claimed — work that has not "
+        "started, not work to recover")
+
+    # NOTHING moved, and the batch is still REPORTED: "never report it" is not
+    # the fix, it would strand the batch.
+    resumed = BatchCoordinator(store).recover(ORG, stale_after_s=0)
+    assert resumed == [batch.batch_id], (
+        f"the scan stopped reporting a batch with queued work: {resumed}")
+    fresh, after = BatchCoordinator(store).status(ORG, batch.batch_id)
+    assert fresh.state is BatchState.ACCEPTED, (
+        "the first sweep relabelled a batch that never ran as `resuming` — the "
+        f"customer is told work is being RECOVERED when it has not started: {fresh.state}")
+    assert all(i.state is BatchItemState.QUEUED for i in after)
+
+    # …and the SAME batch with a genuinely dead claim DOES say `resuming`, so the
+    # rule above cannot be satisfied by never relabelling anything.
+    dead = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    assert dead is not None
+    dead.state = BatchItemState.EXTRACTING
+    dead.updated_at = "2020-01-01T00:00:00+00:00"
+    store.put_item(ORG, dead)
+    assert BatchCoordinator(store).recover(ORG, stale_after_s=0) == [batch.batch_id]
+    recovered, after = BatchCoordinator(store).status(ORG, batch.batch_id)
+    assert recovered.state is BatchState.RESUMING, (
+        "a batch whose dead claim WAS requeued must say `resuming` — otherwise "
+        f"the customer cannot tell work was recovered: {recovered.state}")
+    by_ref = {i.ref: i for i in after}
+    assert by_ref["/a.md"].state is BatchItemState.QUEUED
+    assert by_ref["/b.md"].state is BatchItemState.QUEUED
+
+
 # ── cancel (brief item 6) ──────────────────────────────────────────────────
 def test_cancel_stops_new_work_and_keeps_completed_work():
     """ACCEPTANCE: cancel stops new work and keeps completed work.
@@ -516,10 +569,13 @@ def test_a_state_cas_never_rewrites_the_estimate_the_ack_wrote():
             store.put_batch(batch)
         return rows
 
-    store.put_batch_if_state = counting_cas  # type: ignore[method-assign]
     store.get_batch = stale_get  # type: ignore[method-assign]
     store.items = items_then_ack  # type: ignore[method-assign]
-    coord.recover(ORG)
+    store.put_batch_if_state = counting_cas  # type: ignore[method-assign]
+    try:
+        coord.recover(ORG)
+    finally:
+        store.put_batch_if_state = real_cas  # type: ignore[method-assign]
 
     assert state["gets"] >= 2 and state["items"] >= 2, (
         f"the injected window did not fire — proves nothing: {state}")
@@ -567,17 +623,19 @@ def test_a_restart_settles_what_a_cancelled_batch_left_in_flight():
     # is for a PEER's claim, which a status poll cannot prove dead — see
     # `abandon_dead_claims`.)
     assert BatchCoordinator(store).recover(ORG, stale_after_s=0) == []
-    # ⛔ The claim is aged FIRST: the reclaim window applies to every caller
-    # (#14415 review round 10), so a 0 s claim is deliberately left alone and a
-    # later scan settles it. This test is about the row not stranding, which is
-    # what the stale claim proves.
-    stale = store.get_item(ORG, batch.batch_id, items[0].item_id)
-    stale.updated_at = _ancient_stamp()
-    store.put_item(ORG, stale)
-    assert BatchCoordinator(store).recover(ORG) == []
-    after = {i.ref: i for i in coord.status(ORG, batch.batch_id)[1]}
-    assert after["/a.md"].state is BatchItemState.CANCELLED
-    assert after["/a.md"].tokens_in == 0
+    # ⛔ ASSERT THE SETTLEMENT THIS CALL IS SUPPOSED TO MAKE (#14415 review
+    # round 11, P3). This used to assert only `== []` and then age a row the call
+    # had already settled — so it held whether or not that call did anything, and
+    # its own comment ("a 0 s claim is deliberately left alone") described the
+    # opposite of its own statement order. `stale_after_s=0` is the explicit
+    # "the holder is gone" case (this process died), so the row must ALREADY be
+    # settled here; a mutation making `recover()` ignore the argument left the old
+    # version green.
+    after_zero = {i.ref: i for i in coord.status(ORG, batch.batch_id)[1]}
+    assert after_zero["/a.md"].state is BatchItemState.CANCELLED, (
+        "the zero window is the boot case — nothing is running, so the claim is "
+        f"void and must settle now: {after_zero['/a.md'].state}")
+    assert after_zero["/a.md"].tokens_in == 0
     assert store.pending_batches(ORG) == []
 
 
@@ -2516,3 +2574,178 @@ def test_a_cancel_cannot_erase_a_settlement_that_landed_first(monkeypatch):
         f"the cancel invented a cancellation stamp over a finished batch: {row.cancelled_at}")
     assert out_batch.state is BatchState.PARTIAL, (
         "the returned row must be the truth, not this call's intent")
+
+
+def test_a_failed_post_runner_read_still_bills_the_spend():
+    """⛔ ROUND-10 REVIEW P1: the post-runner READ was outside every `try`.
+
+    It runs AFTER the runner has spent. One graph read failure there (this module's
+    own measured 1,505 ms probe / the 10 s statement timeout) raised out of
+    `run_item`; `_drain_batch` only logged it, no charge record was set, so
+    `record_item_spend` was never called and `_bill` was never reached — and the
+    row stayed `extracting`, so the claim went stale and a reclaim ran the runner
+    AGAIN. The arms beside this read promise exactly the opposite: a bookkeeping
+    failure is not a lost spend.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+
+    real_get = store.get_item
+    ran = {"done": False}
+
+    def failing_get(org_id, batch_id, item_id):
+        # ⛔ ONLY the read AFTER the runner is made to fail. Failing an earlier one
+        # exercises a different path entirely — measured: with the read failure
+        # armed from the start, `run_item` returned at its liveness guard over a
+        # fresh claim and the runner never ran, so the assertion held over code
+        # that had not executed.
+        if ran["done"]:
+            raise RuntimeError("graph probe timeout")
+        return real_get(org_id, batch_id, item_id)
+
+    def runner(item):
+        ran["done"] = True
+        return ItemOutcome(BatchItemState.INDEXED, tokens_in=900)
+
+    # The row `run_item` is HANDED, so the claim read is the first failing one
+    # only after the runner has run.
+    handed = real_get(ORG, batch.batch_id, items[0].item_id)
+    store.get_item = failing_get  # type: ignore[method-assign]
+    try:
+        out = coord.run_item(ORG, handed, runner)
+    except RuntimeError:
+        raise AssertionError(
+            "a read failure after the runner spent escaped run_item — the spend "
+            "is then on neither the row nor the ledger") from None
+    finally:
+        store.get_item = real_get  # type: ignore[method-assign]
+
+    assert (out.charge_in, out.charge_out) == (900, 0), (
+        "the spend of a completed runner call was dropped because a read failed: "
+        f"{(out.charge_in, out.charge_out)}")
+
+
+def test_a_cancel_that_stopped_nothing_returns_the_rows_it_read():
+    """⛔ ROUND-10 REVIEW P1: the `not stopped` arm returned the PRE-write snapshot.
+
+    `items` was read before the set-based cancel, so a row the snapshot saw as
+    `queued` was reported `queued` after a drain had settled it `indexed` with
+    60 000 tokens: measured `status: completed`, `complete: true`,
+    `tokens_spent: 0`, `items[0].status: "queued"`, `counts.pending: 1` — payload
+    and route copy both asserting nothing was charged over a charged document.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+    # The snapshot `cancel()` takes sees `queued`; the row is settled before its
+    # set-based write runs, so the write matches nothing and `stopped` is False.
+    real_bulk = store.cancel_queued_items
+
+    def settle_then_stop(org_id, batch_id, **kwargs):
+        coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+        coord.advance(ORG, items[0], BatchItemState.INDEXED, tokens_in=60_000)
+        return real_bulk(org_id, batch_id, **kwargs)
+
+    store.cancel_queued_items = settle_then_stop  # type: ignore[method-assign]
+    try:
+        cancelled_batch, returned = coord.cancel(ORG, batch.batch_id,
+                                                reason="customer")
+    finally:
+        store.cancel_queued_items = real_bulk  # type: ignore[method-assign]
+
+    assert cancelled_batch.state is BatchState.COMPLETED
+    assert [i.state for i in returned] == [BatchItemState.INDEXED], (
+        "the returned rows are the PRE-write snapshot — a `queued` item reported "
+        f"beside a settled, charged one: {[i.state for i in returned]}")
+    assert sum(i.tokens_in for i in returned) > 0, (
+        "the summary the route renders must carry the spend it reports beside "
+        "`complete: true`")
+
+
+def test_a_cancel_over_finished_work_reports_the_rows_it_re_read():
+    """⛔ ROUND-11 REVIEW P2: the two early arms returned their SNAPSHOT too.
+
+    `_bill` writes tokens with `add_item_tokens`, which changes NO compared field,
+    so a peer's accumulation can land on a row this call already read as terminal.
+    The arms that return without writing returned the snapshot, and `status_body()`
+    then summed it: `tokens_spent: 0` beside a ledger that was charged.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG, items[0], BatchItemState.INDEXED, tokens_in=100)
+
+    real_items = store.items
+    fired = {"done": False}
+
+    def items_then_bill(org_id, batch_id):
+        rows = real_items(org_id, batch_id)
+        if not fired["done"]:
+            fired["done"] = True
+            # A peer's `_bill` lands after this call read its snapshot.
+            store.add_item_tokens(org_id, batch_id, items[0].item_id,
+                                  tokens_in=59_900, updated_at="t")
+        return rows
+
+    store.items = items_then_bill  # type: ignore[method-assign]
+    try:
+        _b, returned = coord.cancel(ORG, batch.batch_id, reason="customer")
+    finally:
+        store.items = real_items  # type: ignore[method-assign]
+
+    assert fired["done"], "the interleaving never fired — the test proves nothing"
+    assert sum(i.tokens_in for i in returned) == 60_000, (
+        "the cancel's payload is its PRE-write snapshot: the sum reports "
+        f"{sum(i.tokens_in for i in returned)} over a ledger charged 60 000")
+
+
+def test_an_orphan_adoption_cannot_blank_an_acceptance_that_landed_first(monkeypatch):
+    """⛔ ROUND-11 REVIEW P2: the adoption wrote the batch row unconditionally.
+
+    `_resume_batch` adopts orphan ITEM rows and wrote the batch row with a plain
+    `put_batch` — a `MERGE … SET` of state, created_at, updated_at, estimate_json,
+    cancelled_at, cancel_reason and corpus_name. An acceptance landing in that
+    window had its estimate and corpus BLANKED (owner §4's arithmetic gone from the
+    record) and the row relabelled `resuming` over work that never stopped. The
+    create is now `MERGE … ON CREATE SET`, which cannot touch an existing row.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    estimate = {"items": 1, "estimated_tokens": 64_799}
+
+    # An ORPHAN item row: an acceptance that wrote items and died before its row.
+    store.put_item(ORG, BatchItem(batch_id="batch_orphan",
+                                  item_id="batch_orphan-00000", ref="/d/a.md",
+                                  state=BatchItemState.QUEUED,
+                                  updated_at=_ancient_stamp()))
+
+    real_absent = store.put_batch_if_absent
+    fired = {"done": False}
+
+    def acceptance_lands_first(batch):
+        if not fired["done"]:
+            fired["done"] = True
+            store.put_batch(Batch(batch_id=batch.batch_id, org_id=ORG,
+                                  state=BatchState.ACCEPTED,
+                                  created_at="2026-01-01T00:00:01+00:00",
+                                  updated_at="2026-01-01T00:00:01+00:00",
+                                  estimate=dict(estimate),
+                                  corpus_name="handbook"))
+            return False   # the row now exists; the create lost
+        return real_absent(batch)
+
+    store.put_batch_if_absent = acceptance_lands_first  # type: ignore[method-assign]
+    try:
+        coord.recover(ORG)
+    finally:
+        store.put_batch_if_absent = real_absent  # type: ignore[method-assign]
+
+    assert fired["done"], "the interleaving never fired — the test proves nothing"
+    row = store.get_batch(ORG, "batch_orphan")
+    assert row is not None
+    assert row.estimate == estimate, (
+        f"the adoption blanked the ACK's estimate: {row.estimate!r}")
+    assert row.corpus_name == "handbook", (
+        f"the adoption blanked the corpus name: {row.corpus_name!r}")
