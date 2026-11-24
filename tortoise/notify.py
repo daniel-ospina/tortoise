@@ -100,7 +100,10 @@ _BILLING_SEND_FAILED_KIND = KIND_BILLING_SEND_FAILED
 #: INCIDENT, not of the detection. Each one files (or reuses) a durable,
 #: assignable incident, and its messages come from the store's create-once path:
 #: ONE opening push for the episode, at most ONE re-alarm per
-#: ``_INCIDENT_DELIVERY_WINDOW_S`` while it stays open — the reminder names the
+#: ``_INCIDENT_DELIVERY_WINDOW_S`` **while the delivery window holds** — a release
+#: that is not an episode end (a failed close, a cooldown back-off, a failed send)
+#: re-arms it, so a flapping rule can page once per crossing — and the reminder
+#: names the
 #: issue when the sentinel carries one, says `an open incident with no issue
 #: number on record` when it does not, and says the number `could not be read
 #: just now` when the read itself raised — and one ✅ close at episode end,
@@ -197,10 +200,10 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #: crossings = 6 messages), and ``ALERT_RECOVERY_STREAK=1`` does the same.
 #: ``abuse_suspended`` is in neither arm: ``_episode_delivery_kinds()`` excludes it
 #: by policy, so NO EPISODE END re-arms its window. It is still re-armed by the
-#: kind-agnostic per-outcome releases (a LIFTED suppression, a deferred filing),
-#: so a second suspension of the same subject inside 24h is folded UNLESS one of
-#: those releases fires in between, and then it IS delivered (the lifted-
-#: suppression arm: two messages inside one window, no episode end).
+#: kind-agnostic per-outcome releases (a LIFTED suppression, a deferred filing, a
+#: failed send), so a second suspension of the same subject inside 24h is folded
+#: UNLESS one of those releases fires in between, and then it IS delivered (the
+#: lifted-suppression arm: two messages inside one window, no episode end).
 #:
 #: INCIDENT kinds: the normal path is the store's create-once lifecycle — the
 #: episode's first message is the store's own push, and this window is the
@@ -888,8 +891,11 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
     ``DEDUP`` means the human was already told for this incident and the issue is
     live: repeats inside the delivery window are folded (the store records them
     on the ISSUE, agent-visible, bounded to one a day by #12243), and at most one
-    RE-ALARM per window is sent while the episode stays open so a persistent
-    breach cannot go silent. ``SUPPRESSED`` means an operator paused the kind in
+    RE-ALARM per window is sent while those folds hold so a persistent
+    breach cannot go silent. The window is the LEDGER's, not the episode's: a
+    release that is not an episode end (a failed close, a cooldown back-off, a
+    failed send) re-arms it, so a rule that flaps can page once per crossing.
+    ``SUPPRESSED`` means an operator paused the kind in
     ``ops/suppression.json`` — an explicit decision, which is honoured.
 
     When no incident can be established at all the message is delivered ANYWAY,
@@ -1015,8 +1021,11 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         kind, org_id, details,
                         attribution=(f"Still open — {ref}. One reminder per "
                                      f"{int(_INCIDENT_DELIVERY_WINDOW_S // 3600)}h "
-                                     "while the episode stays open; repeats "
-                                     "inside that window are folded"
+                                     "while the delivery window holds; a close "
+                                     "that FAILS or is backing off (a cooldown) "
+                                     "re-arms it, so a rule that flaps can page "
+                                     "once per crossing. Repeats inside a held "
+                                     "window are folded"
                                      # ⛔ ONLY the arm that NAMES an issue may
                                      # point at its comment trail (round 5, P2):
                                      # the two number-less arms say in the same
@@ -1153,7 +1162,8 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
         ", RE-ARMED by a confirmed episode end ON THE NO-INCIDENT-CHANNEL PATH"
         " (with a store, the release is gated on its `SKIPPED_WINDOW` while that"
         " gate applies, so the 24h limit normally holds there — a release that is"
-        " not the episode end, a LIFTED suppression or a deferred filing, re-arms"
+        " not the episode end, a LIFTED suppression, a deferred filing or a"
+        " FAILED SEND, re-arms"
         " it regardless) — a rule"
         " that FLAPS therefore pages once per episode in that shape, one message"
         " per crossing, which is the pre-#14407 rate (this path's gain is"
@@ -1164,8 +1174,8 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
         " records an operator decision), so no episode end ever re-arms it; it"
         " is bounded by that window like every other outcome, and is re-armed"
         " only by the generic per-outcome releases (a LIFTED suppression, a"
-        " deferred filing), so a repeat about the same subject inside the"
-        " window is normally folded")
+        " deferred filing, a FAILED SEND), so a repeat about the same subject"
+        " inside the window is normally folded")
     logger.warning(
         "abuse notify: delivered %s (%s) with NO attributable incident — %s. "
         "The message says so; the class is bounded to one such message per %dh "

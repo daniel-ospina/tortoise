@@ -275,6 +275,77 @@ def test_a_reminder_over_a_number_less_sentinel_says_which_state_it_is(monkeypat
     notify.reset_abuse_delivery_for_tests()
 
 
+def test_a_reminder_scopes_its_bound_to_a_HELD_window_not_to_the_open_episode(
+        monkeypatch):
+    """The reminder must not promise 24 h across a release it cannot see (#14487 F1).
+
+    The `DEDUP` reminder said, unconditionally, *"One reminder per 24h while the
+    episode stays open; repeats inside that window are folded"*. That holds only
+    while the delivery LEDGER is still armed — and this PR's own docstring records
+    how it stops being: a resolve leg that RAISES or answers `CloseCooldown`
+    leaves `skipped_window` false, so `resolve_abuse_episode` pops the ledger at
+    EVERY episode end (*"measured: 6 crossings = 6 messages"*).
+
+    The incident stays OPEN across those crossings (the resolve failed), so each
+    crossing is a `DEDUP` detection with `deliver=True` — this reminder. A human
+    therefore receives the flat-24h sentence once per crossing, i.e. the message
+    falsifies its own rate in a shape the same PR measures. Stating a shape-flat
+    bound the diff itself disproves is the over-claiming class this PR removes.
+
+    Pinned as a pair so a revert reddens: the flat clause must be ABSENT and the
+    scoped one PRESENT. Neither had any pin before — the bound clause lived in an
+    f-string the new tests only ever matched the pointer half of.
+    """
+    import tortoise.notify as notify
+    from tortoise.alert_store import OpenOutcome
+
+    class _OpenIncidentStore:
+        """A live incident whose every CLOSE attempt raises (#5143: stays OPEN)."""
+
+        def open_incident_state(self, kind, subject="", detail=None, writer=None):
+            return OpenOutcome.DEDUP
+
+        def incident_record(self, kind, subject=""):
+            return {"issue_number": 7}
+
+        def resolve_incident_state(self, kind, subject="", **kw):
+            raise RuntimeError("close failed (#5143)")
+
+    sent: list[str] = []
+    monkeypatch.setattr(notify, "_abuse_alert_store",
+                        lambda: (_OpenIncidentStore(), ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    def _detect() -> None:
+        notify.notify_abuse("abuse_flag", {"org_id": "org-a"},
+                            {"rule": "point_create", "count": 600,
+                             "threshold": 500, "window_s": 3600})
+
+    _detect()
+    assert len(sent) == 1, sent          # the open incident's reminder
+    assert notify.resolve_abuse_episode("org-a", "point_create") is False
+    _detect()
+    # TWO reminders with no clock advance at all — the release is what re-arms it.
+    assert len(sent) == 2, (
+        "the raise shape did not re-arm the ledger, so this test is no longer "
+        f"exercising the shape F1 names: {sent!r}")
+
+    for reminder in sent:
+        assert "while the delivery window holds" in reminder, (
+            "the reminder states a flat 24h bound that a release which is not an "
+            f"episode end falsifies: {reminder!r}")
+        assert "while the episode stays open" not in reminder, (
+            "the bound is scoped to the EPISODE here, but it is the LEDGER that "
+            f"holds it — a failed close breaks it inside one episode: {reminder!r}")
+        assert "issue #7" in reminder, reminder
+    notify.reset_abuse_delivery_for_tests()
+
+
 # ── 2. the bound is the EPISODE, never a mute ────────────────────────────────
 def test_a_pre_14407_rule_less_incident_is_adopted_not_duplicated(delivered):
     """Subjects became rule-scoped here, so an existing ``{org}`` incident must
@@ -1532,6 +1603,14 @@ def test_the_unattributed_bound_states_a_re_arm_only_for_a_kind_that_has_one(
         f"{log!r}")
     assert "per-outcome releases" in log, (
         f"the suspension shape must name what CAN re-arm it: {log!r}")
+    # F2 (#14487): the list was an "only" that omitted a site 19 lines below it —
+    # a send that does not land releases the window for EVERY kind (`:1031`, the
+    # DEDUP arm, and `:1187`, the unattributed tail). Named here so deleting it
+    # reddens: an operator reading "only a lifted suppression or a deferred
+    # filing" would not look at a failed send, which is the shape a chat outage
+    # produces.
+    assert "FAILED SEND" in log, (
+        f"the 'only' list must name the failed-send release it omitted: {log!r}")
 
     _emit("abuse_flag")
     log = captured["abuse_flag"]
