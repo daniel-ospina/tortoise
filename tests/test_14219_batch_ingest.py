@@ -537,12 +537,14 @@ def test_orphan_adoption_never_wipes_the_estimate_the_ack_carried():
     assert after.estimate == before.estimate, (
         "the adoption overwrote the ACK's estimate with an empty one — owner §4 "
         f"requires it on the record: {before.estimate!r} -> {after.estimate!r}")
-    # ⛔ NOT asserted: `state is not RESUMING`. A genuine recovery of an accepted
-    # batch that still has `queued` items SHOULD report `resuming` — that is the
-    # feature, not the defect. What the adoption must never do is rewrite the
-    # fields the ACK put on the record from an orphan-shaped (empty) Batch. The
-    # measurement that isolates it is the estimate, the corpus name and the
-    # creation stamp.
+    # ⛔ NOT asserted: `state is not RESUMING` — the note above says why (round 13:
+    # `_resume_batch` relabels only when `moved`). What the adoption must never do
+    # is rewrite the fields the ACK put on the record from an orphan-shaped
+    # (empty) Batch. The measurement that isolates it is the estimate, the corpus
+    # name and the creation stamp. This block used to claim the opposite ("a
+    # genuine recovery ... SHOULD report `resuming` — that is the feature"), which
+    # contradicted round 13 and the note above it; it is deleted rather than kept
+    # as a trap beside the accurate version.
     assert after.corpus_name == before.corpus_name, (
         f"the adoption overwrote corpus_name: {before.corpus_name!r} -> "
         f"{after.corpus_name!r}")
@@ -2252,7 +2254,10 @@ def test_the_graph_store_speaks_real_cypher():
     # per-test wipe scope, so a FIXED name is DETACHed by every concurrent session
     # and a fixed "test-prefixed" name passes the prefix check vacuously; the
     # journal is what makes the session-end sweep GRAPH.DELETE it, so the leak is
-    # closed rather than renamed. Same shape as `tests/test_search_engine.py:595`.
+    # closed rather than renamed. Same shape as the journaled raw-client block in
+    # `tests/test_search_engine.py` (`_journal_append(gname)` before
+    # `client.select_graph(gname)`) — cite the SYMBOL, not a line: a line pointer
+    # re-stales on every rebase (#7795 P2-2).
     graph_name = f"tortoise_test_batch_store_probe_{os.urandom(4).hex()}"
     from tests._embedded import _journal_append
     _journal_append(graph_name)
