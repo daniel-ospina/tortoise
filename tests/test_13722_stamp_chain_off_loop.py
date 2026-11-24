@@ -225,9 +225,11 @@ def _enclosing_functions(tree: ast.Module, target: ast.AST) -> list[str]:
 def _stamp_calls(tree: ast.Module) -> list[ast.Call]:
     """Every `_stamp_capture_provenance(...)` call in the WHOLE module.
 
-    ⛔ THE CALL SHAPE IS RESOLVED THE SAME WAY EVERY OTHER ARM RESOLVES IT. This
-    walk matched `ast.Name` only, while `_off_loop_submissions` accepts an
-    ATTRIBUTE (through `_callable_name`) — so a second run of the stamp door spelled
+    ⛔ THE CALL SHAPE IS RESOLVED THE SAME WAY EVERY OTHER ARM RESOLVES IT — all of
+    them through `_callable_name`, which `_off_loop_submissions` now asks too (it
+    used to hand-roll the same two shapes, and this docstring's first cut said it
+    already asked). This walk matched `ast.Name` only, while an ATTRIBUTE is
+    accepted elsewhere — so a second run of the stamp door spelled
     `hosted_api._stamp_capture_provenance(…)`, or `module._stamp_capture_provenance`
     after a rename-the-import, fell out of the graded population and this pin stayed
     GREEN with that call's record writes back on the event loop (measured on a
@@ -296,11 +298,13 @@ def _off_loop_submissions(
         fn = None
         awaited_here = False
         if len(args) > 1:
-            fn = (
-                args[1].id
-                if isinstance(args[1], ast.Name)
-                else getattr(args[1], "attr", None)
-            )
+            # ⛔ THE CALLABLE SPELLING IS ASKED, NOT RE-SPELLED. This expression used
+            # to hand-roll `Name`/`Attribute` here while `_callable_name` spelled the
+            # same two shapes for the other arms — so a shape added to one side and
+            # not the other would have made a legal attribute submission read as
+            # `fn=None`, i.e. "never submits to `_run_off_loop`", a false RED on a
+            # correct tree. One predicate, asked by every arm.
+            fn = _callable_name(args[1])
             awaited_here = id(node) in awaited
         out.append((node.lineno, pool, fn, awaited_here))
     return out
@@ -329,8 +333,8 @@ def _refers_to(node: ast.AST, name: str) -> bool:
     """Does `node` NAME the callable `name` — as a bare name OR as an attribute?
 
     ⛔ THIS EXISTS SO THE TWO ARMS CANNOT DISAGREE (measured FAIL-OPEN).
-    `_off_loop_submissions` resolves its callable argument through `getattr(arg,
-    "attr", None)`, so it accepts an ATTRIBUTE shape — `await
+    `_off_loop_submissions` resolves its callable argument through
+    `_callable_name`, so it accepts an ATTRIBUTE shape — `await
     _run_off_loop(_CAPTURE_EXECUTOR, holder._stamp_chain)` — as a submission, while
     the reference walk below matched `ast.Name` only. The two then disagreed: a
     mutant that moves the chain into a class method, calls `holder._stamp_chain()`
