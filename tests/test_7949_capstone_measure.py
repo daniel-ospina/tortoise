@@ -7510,8 +7510,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # rot, while a typed pair here did: `:19481`/`:22036` named a COMMENT and a BLANK line
         # (#13489 review F2). (Prose here had `:18854`/`:21409`, `#12947`'s head.)
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("20342", ("exact", '@app.post("/v1/sessions")')),
-            ("23629", '@app.post("/v1/sessions/install-probe")'),
+            ("21498", ("exact", '@app.post("/v1/sessions")')),
+            ("24785", '@app.post("/v1/sessions/install-probe")'),
         ), "hosted_api"),
         # ⛔ The four repairs `#12587` round 2 made, each given the reader it lacked.
         # Every one was measured UNPINNED first (revert -> 776 passed), which is the
@@ -7521,7 +7521,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # LINE as the cite (`_pin_row_failures` scopes to one line, not a paragraph),
         # so it is the clause after the number, not the heading above it.
         ("00-plan.md", 'returns `"v2"` **unless**', (
-            ("20479", "def _capture_lane() -> str:"),
+            ("21635", "def _capture_lane() -> str:"),
         ), "hosted_api"),
         ("00-plan.md", "**default-ON**: `TORTOISE_S4_DELTA`", (
             ("1174", 'env_flag("TORTOISE_S4_DELTA", True)'),
@@ -7618,8 +7618,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
         ("03-test-design.md", "the A-corpus capture", (
-            ("21101", "if count + est > max_points:"),
-            ("21126", "quota_refusal_payload(QuotaExceededError("),
+            ("22257", "if count + est > max_points:"),
+            ("22282", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
         # re-states `hosted_api.py:20546` now, and its own `hosted_api.py:19589` (`19558` before that) is that SAME guard at an older head — so it is
@@ -7629,7 +7629,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-head number is pinned: the `:18205` beside it is a STAMP read at
         # `a577d0e25c` and does NOT resolve here, so pinning it would red a true record.
         ("03-test-design.md", "`:82`'s `hosted_api.py:", (
-            ("21101", "if count + est > max_points:"),
+            ("22257", "if count + est > max_points:"),
         ), "hosted_api"),
         # ⛔ `05-verify.md` D5's own "Measured at" sentence (#12462 review). The row whose
         # SUBJECT is that line numbers rot carried NINE this-head cites and no reader at
@@ -7637,8 +7637,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # is unique in the file. The first cut pinned only three of the nine, and review measured the
         # residual by mutating the rest — the rest of the file GREEN — so they are pinned too.
         ("05-verify.md", "Measured at `9d790287af`", (
-            ("20994", "``body.harness`` only ever introduces a harness on a session the server"),
-            ("21101", "if count + est > max_points:"),
+            ("22150", "``body.harness`` only ever introduces a harness on a session the server"),
+            ("22257", "if count + est > max_points:"),
         ), "hosted_api"),
         ("05-verify.md", "Measured at `9d790287af`", (
             ("12209", "_registry_cache = PackRegistry(packs_dir)"),
@@ -7766,7 +7766,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ABOVE it, and a phrase that binds the wrong line is the failure `_pin_row_failures`
         # reports rather than hides).
         ("00-plan.md", "returns `\"v2\"`", (
-            ("20479", "def _capture_lane() -> str:"),
+            ("21635", "def _capture_lane() -> str:"),
         ), "hosted_api"),
         # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3, P2): re-pointed to
         # `:14465-14542` and unread, so both endpoints could move silently. Only the START
@@ -7828,8 +7828,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15449`, measured at THAT head), and
         # the END was the blank line before `return OrgInfoResponse(` (`:15526`, call at `:15527`).
         # ⛔ THAT IS HISTORY, NOT THIS HEAD'S: this branch inserts 114 lines into `hosted_api.py`
-        # above `point_count`, so the span is `:16063-16140` at this head — START `:16063`, END
-        # the blank line before `return OrgInfoResponse(` at `:16140` (the call `:16141`) — measured by
+        # above `point_count`, so the span is `:16091-16168` at this head — START `:16091`, END
+        # the blank line before `return OrgInfoResponse(` at `:16168` (the call `:16169`) — measured by
         # the same two `grep -n` commands against this working tree, never by adding `+112` to the pair
         # above. The three offsets (+29 `nodes_used` -> `:16092`, +39 `max_nodes` -> `:16102`, +77 END)
         # hold EXACTLY from this START too, which is how the numbers below were re-derived rather than
@@ -7863,7 +7863,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:15219` (inside it), and `:15257` is
         # the blank line immediately before `return OrgInfoResponse(` at `:15258`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
-            ("16063", "point_count = await asyncio.to_thread("),
+            ("16091", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
         # ⛔ `:1186` IS NOT PINNED BY A ROW *ALONE*, and the reason is measured rather than
         # stylistic: it is stated TWICE on ONE doc line ("is STAMP-bound (`:1186` is the
@@ -8132,7 +8132,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # `hosted_api.py:15328-15405` at `09f5c99afd`, `hosted_api.py:15346-15423` at #13844,
     # `hosted_api.py:15940-16017` on `origin/main` (HISTORY: `15449-15526` was an earlier
     # base's — read via `git show origin/main:…/04-plan.md | grep -o 'hosted_api.py:[0-9]*-[0-9]*'`),
-    # and `hosted_api.py:16063-16140` at this head. Both pairs were re-derived by CONTENT. The
+    # and `hosted_api.py:16091-16168` at this head. Both pairs were re-derived by CONTENT. The
     # END of that range is a BLANK line — so the row above can only anchor the start, and a
     # range that drifts by a line still "contains" the number the doc names (the reason this
     # file pins ranges at both endpoints where it can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN
@@ -18504,13 +18504,13 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ AND THE I7 RANGE **IS** A RE-POINT OF THIS DIFF, which is the opposite of what the
     # `#14269`-era cut of this block said and is MEASURED here: `main`'s copy carries its own
     # (stale) pair, while THIS branch's repair re-points it into `hosted_api.py`
-    # above `point_count`, so the merged copy carries `hosted_api.py:16063-16140`
-    # (`grep -n 'point_count = await asyncio.to_thread('` -> `:16063` in this tree, `:15826`
-    # on an earlier base; the END is the blank line before `return OrgInfoResponse(` at `:16140`,
+    # above `point_count`, so the merged copy carries `hosted_api.py:16091-16168`
+    # (`grep -n 'point_count = await asyncio.to_thread('` -> `:16091` in this tree, `:15826`
+    # on an earlier base; the END is the blank line before `return OrgInfoResponse(` at `:16168`,
     # the call `:16141`). ⛔ The cut before this one moved the number onto the blank line
     # (`:16029`) and deleted the qualifying ", the call `:16029`", which made the parenthetical
     # contradict the range it sits in and the graded sentence in `05-verify.md` (#14386 review
-    # round 8, F3 — measured: `sed -n '16140p;16141p'` is the blank line, then the call).
+    # round 8, F3 — measured: `sed -n '16168p;16169p'` is the blank line, then the call).
     # The arm below grades the claim against BOTH copies in both directions, so this sentence
     # and the range it names have to move together.
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
@@ -18580,7 +18580,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # and every older head are absent by CONSTRUCTION (`git rev-parse --is-shallow-repository`),
     # so absence there is the clone's shape and never read as a pass.
     _MEMBER_DOC = ("docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md")
-    _I7_TARGET = "hosted_api.py:16063-16140"
+    _I7_TARGET = "hosted_api.py:16091-16168"
     _member = re.search(
         r"IS in this diff at the head this was read at \(`(?P<head>[0-9a-f]{40})`\), "
         r"by its PAIR", text)
