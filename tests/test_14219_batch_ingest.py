@@ -2615,7 +2615,7 @@ def test_a_failed_post_runner_read_still_bills_the_spend():
     except RuntimeError:
         raise AssertionError(
             "a read failure after the runner spent escaped run_item — the spend "
-            "is then on neither the row nor the ledger")
+            "is then on neither the row nor the ledger") from None
     finally:
         store.get_item = real_get  # type: ignore[method-assign]
 
